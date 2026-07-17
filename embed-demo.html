@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>主系统 - 表单设计器（嵌入演示）</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      background: #f0f2f5;
+      color: #1f2329;
+    }
+
+    /* 模拟主系统顶部导航栏 */
+    .topbar {
+      background: #fff;
+      height: 56px;
+      border-bottom: 1px solid #e5e6eb;
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      gap: 16px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+    .topbar-logo {
+      width: 32px; height: 32px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #00b42c, #00d680);
+      color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; font-weight: 700;
+    }
+    .topbar-title { font-size: 16px; font-weight: 600; }
+    .topbar-user {
+      margin-left: auto;
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 12px;
+      background: #f7f8fa;
+      border-radius: 20px;
+      font-size: 13px; color: #4e5969;
+    }
+    .topbar-avatar {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: #3370ff;
+      color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px;
+    }
+
+    /* 主内容区 */
+    .main {
+      display: flex;
+      height: calc(100vh - 56px);
+    }
+
+    /* 左侧菜单 */
+    .sidebar {
+      width: 200px;
+      background: #fff;
+      border-right: 1px solid #e5e6eb;
+      padding: 16px 0;
+      flex-shrink: 0;
+    }
+    .menu-item {
+      padding: 10px 24px;
+      font-size: 14px;
+      color: #4e5969;
+      cursor: pointer;
+      display: flex; align-items: center; gap: 8px;
+      transition: all 0.2s;
+    }
+    .menu-item:hover { background: #f7f8fa; }
+    .menu-item.active {
+      background: #eaf0ff;
+      color: #3370ff;
+      font-weight: 500;
+      border-right: 3px solid #3370ff;
+    }
+    .menu-icon { font-size: 16px; }
+
+    /* 右侧表单设计器模拟区 */
+    .content {
+      flex: 1;
+      padding: 24px;
+      overflow-y: auto;
+    }
+    .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .page-title { font-size: 20px; font-weight: 600; }
+    .page-actions { display: flex; gap: 8px; }
+    .btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid #e5e6eb;
+      background: #fff;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .btn:hover { border-color: #3370ff; color: #3370ff; }
+    .btn-primary {
+      background: #3370ff;
+      border-color: #3370ff;
+      color: #fff;
+    }
+    .btn-primary:hover { background: #2860e6; color: #fff; }
+
+    /* 表单设计器卡片 */
+    .designer-card {
+      background: #fff;
+      border-radius: 12px;
+      border: 1px solid #e5e6eb;
+      padding: 24px;
+      min-height: 400px;
+    }
+    .designer-empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #c9cdd4;
+    }
+    .designer-empty-icon { font-size: 48px; margin-bottom: 12px; }
+
+    /* 接收到的配置展示 */
+    .config-preview {
+      margin-top: 16px;
+    }
+    .config-form-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f2329;
+      margin-bottom: 4px;
+    }
+    .config-form-code {
+      font-size: 12px;
+      color: #86909c;
+      font-family: 'SF Mono', monospace;
+      margin-bottom: 16px;
+    }
+    .field-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .field-table th {
+      background: #f7f8fa;
+      padding: 10px 12px;
+      text-align: left;
+      font-weight: 500;
+      color: #86909c;
+      border-bottom: 1px solid #e5e6eb;
+    }
+    .field-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #f0f1f3;
+    }
+    .field-type-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+
+    /* JSON 展示 */
+    .json-display {
+      margin-top: 16px;
+      background: #1e1e1e;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.6;
+      color: #d4d4d4;
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* 日志面板 */
+    .log-panel {
+      margin-top: 16px;
+      background: #fff;
+      border: 1px solid #e5e6eb;
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-size: 12px;
+      font-family: 'SF Mono', monospace;
+      color: #86909c;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .log-entry { padding: 2px 0; }
+    .log-entry .log-time { color: #c9cdd4; margin-right: 8px; }
+    .log-entry .log-type {
+      display: inline-block;
+      padding: 0 4px;
+      border-radius: 3px;
+      font-size: 10px;
+      margin-right: 6px;
+    }
+    .log-type-info { background: #eaf0ff; color: #3370ff; }
+    .log-type-success { background: #e8ffea; color: #00b42c; }
+    .log-type-apply { background: #fff3e8; color: #ff7d00; }
+  </style>
+</head>
+<body>
+
+<!-- 模拟主系统导航栏 -->
+<div class="topbar">
+  <div class="topbar-logo">N</div>
+  <span class="topbar-title">njmind 低代码平台</span>
+  <div class="topbar-user">
+    <div class="topbar-avatar">张</div>
+    <span>张三 (zhangsan)</span>
+  </div>
+</div>
+
+<div class="main">
+  <!-- 左侧菜单 -->
+  <div class="sidebar">
+    <div class="menu-item"><span class="menu-icon">🏠</span> 工作台</div>
+    <div class="menu-item active"><span class="menu-icon">📋</span> 表单管理</div>
+    <div class="menu-item"><span class="menu-icon">🔄</span> 流程管理</div>
+    <div class="menu-item"><span class="menu-icon">📊</span> 列表管理</div>
+    <div class="menu-item"><span class="menu-icon">⚙️</span> 系统设置</div>
+  </div>
+
+  <!-- 主内容区：模拟表单设计器 -->
+  <div class="content">
+    <div class="page-header">
+      <div class="page-title">表单设计器</div>
+      <div class="page-actions">
+        <button class="btn" onclick="clearConfig()">清空</button>
+        <button class="btn btn-primary" onclick="applyToDesigner()">写入设计器</button>
+      </div>
+    </div>
+
+    <div class="designer-card">
+      <div id="empty-state" class="designer-empty">
+        <div class="designer-empty-icon">📋</div>
+        <p>暂无表单配置</p>
+        <p style="font-size: 13px; margin-top: 4px;">
+          点击右下角 <strong>💬</strong> 按钮，通过自然语言生成表单配置
+        </p>
+      </div>
+
+      <div id="config-preview" class="config-preview" style="display: none;">
+        <div class="config-form-name" id="form-name"></div>
+        <div class="config-form-code" id="form-code"></div>
+        <table class="field-table">
+          <thead>
+            <tr>
+              <th width="40">#</th>
+              <th>字段名称</th>
+              <th>字段标识</th>
+              <th>类型</th>
+            </tr>
+          </thead>
+          <tbody id="field-tbody"></tbody>
+        </table>
+
+        <details style="margin-top: 16px;">
+          <summary style="cursor: pointer; font-size: 13px; color: #3370ff;">
+            查看完整 JSON
+          </summary>
+          <div class="json-display" id="json-display"></div>
+        </details>
+      </div>
+    </div>
+
+    <!-- 通信日志 -->
+    <div class="log-panel" id="log-panel">
+      <div class="log-entry" style="color: #c9cdd4;">
+        <span class="log-time">--:--:--</span>
+        postMessage 通信日志（iframe ↔ 主系统）
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 嵌入 SDK ============ -->
+<script>
+  // ★★★ 修改为你实际部署的地址 ★★★
+  const MODELER_BASE_URL = 'http://localhost:13080'
+  const USER_ID = 'zhangsan'
+
+  // 动态加载 embed.js
+  const script = document.createElement('script')
+  script.src = MODELER_BASE_URL + '/embed.js'
+  script.onload = () => {
+    log('SDK 加载完成，初始化嵌入窗口', 'info')
+
+    // 初始化
+    const modeler = new LLMFormModeler({
+      baseUrl: MODELER_BASE_URL,
+      userId: USER_ID,
+      position: 'bottom-right',
+
+      // 配置生成成功（每次 LLM 生成后触发）
+      onConfigGenerated: (config) => {
+        log('收到配置: ' + (config.formName || '未命名'), 'info')
+        renderConfig(config)
+      },
+
+      // 用户点击"应用配置"按钮
+      onConfigApply: (config) => {
+        log('用户点击应用配置: ' + (config.formName || ''), 'apply')
+        renderConfig(config)
+        highlightDesigner()
+      },
+
+      onClose: () => {
+        log('聊天窗口已关闭', 'info')
+      }
+    })
+  }
+  document.head.appendChild(script)
+</script>
+
+<!-- ============ 页面交互逻辑 ============ -->
+<script>
+  let currentConfig = null
+
+  const TYPE_NAMES = {
+    0: ['TEXT', '#eaf0ff', '#3370ff'],
+    1: ['NUMBER', '#fff7e8', '#ff7d00'],
+    2: ['DATE', '#e8ffea', '#00b42c'],
+    3: ['FILE', '#f0e8ff', '#722ed1'],
+    4: ['SELECT', '#ffe8ea', '#f54a45'],
+    5: ['MULTI', '#e8ffff', '#0fc6c2'],
+    6: ['DEPT', '#f7f8fa', '#4e5969'],
+    7: ['USER', '#eaf0ff', '#3370ff'],
+    8: ['AUTO', '#f7f8fa', '#86909c'],
+    12: ['SEG', '#fff3e8', '#ff7d00'],
+  }
+
+  function renderConfig(config) {
+    if (!config) return
+    currentConfig = config
+
+    document.getElementById('empty-state').style.display = 'none'
+    const preview = document.getElementById('config-preview')
+    preview.style.display = 'block'
+
+    document.getElementById('form-name').textContent = config.formName || '未命名表单'
+    document.getElementById('form-code').textContent = 'formCode: ' + (config.formCode || '')
+
+    const fields = config.formFieldConfigVos || []
+    const tbody = document.getElementById('field-tbody')
+    tbody.innerHTML = fields.map((f, i) => {
+      const [name, bg, color] = TYPE_NAMES[f.formFieldType] || ['?', '#f7f8fa', '#86909c']
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${f.fieldTitleText || ''}</td>
+        <td style="font-family: monospace; color: #86909c;">${f.fieldTitleKey || ''}</td>
+        <td><span class="field-type-tag" style="background:${bg};color:${color};">${name}</span></td>
+      </tr>`
+    }).join('')
+
+    document.getElementById('json-display').textContent =
+      JSON.stringify(config, null, 2)
+  }
+
+  function clearConfig() {
+    currentConfig = null
+    document.getElementById('empty-state').style.display = 'block'
+    document.getElementById('config-preview').style.display = 'none'
+    log('已清空', 'info')
+  }
+
+  function applyToDesigner() {
+    if (!currentConfig) {
+      alert('请先通过对话生成配置')
+      return
+    }
+    log('配置已写入设计器: ' + currentConfig.formName, 'success')
+    highlightDesigner()
+  }
+
+  function highlightDesigner() {
+    const card = document.querySelector('.designer-card')
+    card.style.borderColor = '#3370ff'
+    card.style.boxShadow = '0 0 0 3px rgba(51,112,255,0.1)'
+    setTimeout(() => {
+      card.style.borderColor = '#e5e6eb'
+      card.style.boxShadow = 'none'
+    }, 1500)
+  }
+
+  function log(msg, type = 'info') {
+    const now = new Date()
+    const time = now.toTimeString().slice(0, 8)
+    const panel = document.getElementById('log-panel')
+    const entry = document.createElement('div')
+    entry.className = 'log-entry'
+    entry.innerHTML = `<span class="log-time">${time}</span><span class="log-type log-type-${type}">${type.toUpperCase()}</span>${msg}`
+    panel.appendChild(entry)
+    panel.scrollTop = panel.scrollHeight
+  }
+</script>
+
+</body>
+</html>
