@@ -1,0 +1,46 @@
+# njmind-form pack 静态配置
+# 所有 njmind 专属的 URL 路径、字段类型映射集中于此。
+# 换部署环境或上游 API 升级,只改此文件,不改代码。
+
+# 上游 REST 端点路径表(相对 base_url)
+paths:
+  templates_list: /api/mcp/templates/list-templates
+  template: /api/mcp/templates/{name}
+  schemas_list: /api/mcp/schemas/list-schemas
+  schema: /api/mcp/schemas/{name}
+  guide: /api/mcp/guides/guide.json
+  validate: /api/mcp/forms/validate
+  create: /api/mcp/forms/create
+  update: /api/mcp/forms/{code}/update
+  get_form: /api/mcp/forms/{code}
+
+# 字段类型 code → 模板文件名 stem(原 nodes.py TYPE_TO_TEMPLATE)
+# 取模板时拼接为 f"{stem}_field"
+type_to_template:
+  0: text
+  1: number
+  2: date
+  3: file_upload
+  4: select
+  5: multiple_select
+  6: department
+  7: user
+  8: auto_number
+  9: child_form
+  12: segment
+  16: rich_text
+
+# 字段类型 code → 类型名(原 nodes.py TYPE_NAMES)
+type_names:
+  0: TEXT
+  1: NUMBER
+  2: DATE
+  3: FILE_UPLOAD
+  4: SELECT
+  5: MULTIPLE_SELECT
+  6: DEPARTMENT
+  7: USER
+  8: AUTO_NUMBER
+  9: CHILD_FORM
+  12: SEGMENT
+  16: RICH_TEXT
