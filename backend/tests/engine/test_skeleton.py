@@ -23,10 +23,8 @@ class TestEngineSkeleton:
     def test_engine_has_no_domain_words(self):
         """架构试金石:engine/ 目录下 .py 文件不应有领域词汇。
 
-        注:stream.py 作为 SSE 桥接层,需要读取制品的 formFieldConfigVos
-        来产出 SSE payload。这是"输出格式"而非"领域逻辑"--阶段 4 会通过
-        tool.format_result() 钩子化,把这段读制品的代码移到 pack 内。
-        本阶段暂时排除 stream.py 的检查。
+        阶段 3 修复:stream.py 已通过 tool.format_result() 钩子化,
+        不再直接读 formFieldConfigVos/formCode/formName。
         """
         engine_dir = Path(__file__).resolve().parent.parent.parent / "src" / "engine"
         result = subprocess.run(
@@ -35,11 +33,6 @@ class TestEngineSkeleton:
              str(engine_dir)],
             capture_output=True, text=True,
         )
-        # 过滤掉 stream.py(阶段 4 钩子化移除)
-        lines = [
-            line for line in result.stdout.splitlines()
-            if line and "stream.py" not in line
-        ]
-        assert not lines, (
-            f"engine/ 含领域词汇(除 stream.py):\n{chr(10).join(lines)}"
+        assert result.stdout == "", (
+            f"engine/ 含领域词汇:\n{result.stdout}"
         )

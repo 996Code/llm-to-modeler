@@ -108,6 +108,12 @@ class Tool(ABC):
         """给对话列表用:从制品生成标题。默认空。"""
         return ""
 
+    def format_result(self, artifact: dict) -> dict:
+        """给 SSE 用:从制品提取前端需要的字段(如字段数、名称等)。
+        Engine 调用此方法,避免直接读制品内部结构(架构试金石)。
+        默认返回空 dict,pack 按需覆写。"""
+        return {}
+
 
 class CompositeTool(Tool):
     """复合工具基类:内部有多步 pipeline。对标 CC 的 Skill——

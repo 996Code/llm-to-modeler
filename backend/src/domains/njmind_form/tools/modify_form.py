@@ -66,7 +66,10 @@ class ModifyFormTool(CompositeTool):
         return ToolResult(
             artifact=artifact,
             summary=summary,
-            extra={"validation_errors": state.get("validation_errors", [])},
+            extra={
+                "validation_errors": state.get("validation_errors", []),
+                "formatted": self.format_result(artifact) if artifact else {},
+            },
         )
 
     def summarize_artifact(self, artifact: dict) -> str:
@@ -80,6 +83,20 @@ class ModifyFormTool(CompositeTool):
         if len(fields) > 10:
             field_summary += f" ... 共 {len(fields)} 个字段"
         return f"当前表单: {form_name} ({form_code}), 字段: {field_summary}"
+
+    def title_for(self, artifact: dict) -> str:
+        """给对话列表用。"""
+        return artifact.get("formName", "新对话")
+
+    def format_result(self, artifact: dict) -> dict:
+        """给 SSE 用:从制品提取前端需要的字段(钩子化)。"""
+        fields = artifact.get("formFieldConfigVos", [])
+        return {
+            "fieldCount": len(fields),
+            "formName": artifact.get("formName", ""),
+            "formCode": artifact.get("formCode", ""),
+            "title": artifact.get("formName", "新对话"),
+        }
 
     # ── Steps ──────────────────────────────────────────────────
 

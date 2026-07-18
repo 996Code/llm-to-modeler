@@ -55,11 +55,10 @@ class ChatTool(Tool):
         # ctx.prompt_loader 由 Dispatcher 注入(阶段 3 Task 5)
         if hasattr(ctx, "prompt_loader") and ctx.prompt_loader:
             return ctx.prompt_loader.render("njmind_form", "chat")
-        # 兜底:内联 prompt
+        # 兜底:通用 prompt(无领域词,避免 Engine 上下文泄漏)
         return (
-            "你是低代码平台的表单配置助手。\n"
-            "当用户的消息与表单创建/修改无关时（如打招呼、闲聊、问你是谁），"
-            "用友好自然的中文回复。保持简洁，不要长篇大论。"
+            "你是一个友好的助手。\n"
+            "用自然简洁的中文回应用户。"
         )
 
     def _build_user_message(self, user_input: str, compressed_history: str) -> str:

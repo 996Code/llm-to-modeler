@@ -89,20 +89,23 @@ async def stream_dispatcher(
                                    user_input, result.reply)
 
             elif result.artifact:
-                # 配置制品
+                # 配置制品 - 通过 tool.format_result() 钩子化提取前端字段
+                # Engine 不直接读制品内部结构(架构试金石)
                 config = result.artifact
-                field_count = len(config.get("formFieldConfigVos", []))
+                # pack 通过 ToolResult.extra["formatted"] 传递格式化结果
+                # Engine 只做透传,不解析制品字段名
+                formatted = result.extra.get("formatted", {})
                 is_valid = len(result.extra.get("validation_errors", [])) == 0
 
-                await sm.emit_result({
+                # SSE payload:通用字段 + pack 的 formatted 透传
+                sse_payload = {
                     "config": config,
                     "valid": is_valid,
-                    "fieldCount": field_count,
-                    "formName": config.get("formName", ""),
-                    "formCode": config.get("formCode", ""),
                     "validationErrors": result.extra.get("validation_errors", []),
                     "summary": result.summary,
-                })
+                }
+                sse_payload.update(formatted)  # 透传 pack 提供的字段(fieldCount 等)
+                await sm.emit_result(sse_payload)
 
                 # 保存到对话历史
                 if conversation_store and conversation_id and user_id:
@@ -124,7 +127,8 @@ async def stream_dispatcher(
                                 conversation_id, config
                             )
                         else:
-                            title = config.get("formName", "新对话")
+                            # 标题从 pack 的 formatted 透传获取
+                            title = formatted.get("title", "新对话")
                             conversation_store.update_conversation_config(
                                 conversation_id, config, title=title
                             )

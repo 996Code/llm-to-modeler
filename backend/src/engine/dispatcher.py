@@ -30,11 +30,13 @@ class ToolDispatcher:
         llm_client: Any,
         conversation_store: Any = None,
         prompt_loader: Any = None,
+        asset_client: Any = None,
     ):
         self._registry = registry
         self._llm_client = llm_client
         self._conversation_store = conversation_store
         self._prompt_loader = prompt_loader
+        self._asset_client = asset_client  # 注入或延迟创建
         self._max_clarify_rounds = 3
 
     def run(
@@ -157,10 +159,9 @@ class ToolDispatcher:
             parsed = self._llm_client.chat_json(messages)
             tool_names = parsed.get("tools", [])
             if not tool_names:
-                # 兼容旧格式 intent
-                intent = parsed.get("intent", "create")
-                tool_names = {"create": "create_form", "modify": "modify_form",
-                              "general": "chat"}.get(intent, "chat")
+                # LLM 未返回 tools -> 兜底 chat
+                logger.warning(f"LLM returned no tools, fallback to chat. Parsed: {parsed}")
+                return self._registry.get("chat")
 
             # 取第一个可用工具
             for name in tool_names:
@@ -183,17 +184,21 @@ class ToolDispatcher:
             return self._registry.get("chat")
 
     def _build_ctx(self, state: dict, emit: Callable) -> ToolContext:
-        """构建 ToolContext,注入所有依赖。"""
-        # 延迟 import 避免循环
-        from src.services.upstream_client import UpstreamClient
-        from adapters.http_asset_client import HttpAssetClient
+        """构建 ToolContext,注入所有依赖。
 
-        upstream = UpstreamClient()
-        asset_client = HttpAssetClient(upstream=upstream)
+        asset_client 复用(避免每次 run 都 new UpstreamClient 导致连接泄漏)。
+        首次调用时延迟创建,后续复用。
+        """
+        if self._asset_client is None:
+            # 延迟创建一次,后续复用
+            from src.services.upstream_client import UpstreamClient
+            from adapters.http_asset_client import HttpAssetClient
+            upstream = UpstreamClient()
+            self._asset_client = HttpAssetClient(upstream=upstream)
 
         ctx = ToolContext(
             llm_client=self._llm_client,
-            asset_client=asset_client,
+            asset_client=self._asset_client,
             conversation=self._conversation_store,
             emit=emit,
             forward_headers=state.get("forward_headers", {}),

@@ -103,7 +103,7 @@ class TestChatToolExecute:
         assert system_msg["content"] == "模板渲染的 system prompt"
 
     def test_chat_falls_back_to_inline_prompt(self):
-        """无 prompt_loader 时用内联兜底 prompt。"""
+        """无 prompt_loader 时用内联兜底 prompt(通用,无领域词)。"""
         llm = MagicMock()
         llm.chat.return_value = "回复"
 
@@ -114,4 +114,4 @@ class TestChatToolExecute:
         call_args = llm.chat.call_args
         messages = call_args[0][0]
         system_msg = next(m for m in messages if m["role"] == "system")
-        assert "表单配置助手" in system_msg["content"]
+        assert "友好的助手" in system_msg["content"]
