@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
+import json
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 
@@ -41,6 +42,10 @@ class PromptLoader:
             loader=FileSystemLoader(str(self._packs_root)),
             undefined=StrictUndefined,
             autoescape=False,  # prompt 是 trusted,不转义
+        )
+        # 添加自定义 tojson 过滤器，保持中文可读
+        self._jinja_env.filters['tojson'] = lambda obj, indent=None: json.dumps(
+            obj, indent=indent, ensure_ascii=False
         )
         self._frontmatter_cache: dict[tuple, tuple[dict, str]] = {}
 

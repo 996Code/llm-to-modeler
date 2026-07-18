@@ -1,0 +1,16 @@
+{# 字段类型对照表(原 prompt_builder.FIELD_TYPE_TABLE)
+   被 parse.j2 / generate.j2 / modify.j2 通过 include 复用。 #}
+| 代码 | 类型 | 适用场景 |
+|------|------|---------|
+| 0 | TEXT | 姓名、手机号、邮箱、地址、编号、身份证 |
+| 1 | NUMBER | 金额、数量、年龄、百分比、时长 |
+| 2 | DATE | 日期、时间 |
+| 3 | FILE_UPLOAD | 附件、文件、图片 |
+| 4 | SELECT | 下拉单选（需提供选项） |
+| 5 | MULTIPLE_SELECT | 多选、标签 |
+| 6 | DEPARTMENT | 部门选择 |
+| 7 | USER | 人员、审批人、负责人 |
+| 8 | AUTO_NUMBER | 自动编号、流水号 |
+| 9 | CHILD_FORM | 子表单、明细表 |
+| 12 | SEGMENT | 分组、分隔 |
+| 16 | RICH_TEXT | 富文本、长内容 |
