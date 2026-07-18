@@ -115,7 +115,7 @@
 |------|--------|------|
 | 6 步 CREATE 管线 | `CreateFormTool.execute()` 内部 | 管线活在工具内部 |
 | 3 步 MODIFY 管线 | `ModifyFormTool.execute()` 内部 | 同上 |
-| `classify_intent_node` | `ToolDispatcher._select_tool()` | LLM 从注册表选工具 |
+| `classify_intent_node` | `ToolDispatcher._select_tools()` | LLM 从注册表选 1..N 个工具 |
 | `general_reply_node` | `ChatTool.execute()` | 闲聊也是工具 |
 | `upstream_client.py` | `njmind_form/adapters/upstream.py` | 收口进 pack |
 | `prompt_builder.py` | `njmind_form/prompts/*.j2` | 文案进 pack |
@@ -156,16 +156,38 @@ class ToolResult(BaseModel):
     """
     artifact: Optional[dict] = None     # 不透明制品(Engine 不读内部)
     reply: Optional[str] = None         # 给用户的文本回复
-    needs_clarification: bool = False
-    clarification_questions: list[str] = []
+    # ── 追问(C.2-A:Clarification 建模为内置 AskTool,而非异常短路)──
+    # 工具执行中若发现信息不足,产出 ask 而非抛异常。Engine 把 ask 转成 SSE,
+    # 用户回答后 Engine 带着答案重跑同一工具(answers 进 state["clarify_answers"])。
+    # 比异常短路更强:追问的问答都进对话历史,下一轮 LLM 选择也能感知。
+    ask: Optional["AskSpec"] = None     # 非空 = 需要追问用户
     summary: str = ""                   # 用于对话历史与压缩(标准化、无运行时噪声)
     extra: dict = {}                    # 领域自由扩展(不进对话历史)
     error_for_llm: Optional[str] = None # 失败时给下一轮 LLM 的标准化错误文本(对标 CC 的错误回流)
 
+class AskSpec(BaseModel):
+    """追问规格(C.2-A)。对标 CC 的 AskUserQuestionTool。
+    Engine 把它转成 SSE result 事件(type=ask),前端展示追问 UI。
+    用户回答后,Engine 把 answers 写进 state["clarify_answers"],重跑工具。"""
+    questions: list["AskQuestion"]      # 1-4 个问题(前端限制)
+
+class AskQuestion(BaseModel):
+    question: str                       # 完整问题文本
+    header: str                         # 短标签(≤12 字符,前端显示为 chip)
+    options: list["AskOption"]          # 2-4 个选项(前端会自动加"其他")
+    multi_select: bool = False          # 是否允许多选
+
+class AskOption(BaseModel):
+    label: str                          # 选项显示文本(1-5 字)
+    description: str                    # 选项说明
+
+# 前向引用解析(Pydantic v2 需要 model_rebuild)
+AskSpec.model_rebuild()
+
 class ClarificationRaised(Exception):
-    """工具中途需要追问时抛出,Engine 转成 SSE result 事件。
-    设计说明:对标 Claude Code 把"向人类提问"建模为 AskUserQuestionTool。
-    当前用异常短路更简单;未来若要追问可被 LLM 再次选择,可改为内置 AskTool。"""
+    """[已废弃,保留向后兼容] 工具中途需要追问时抛出。
+    v4 起(C.2-A)统一改用 ToolResult.ask。新代码不应再抛此异常。
+    保留定义是为了让迁移期间未改造的工具仍能工作(Engine 兼容捕获)。"""
     def __init__(self, questions: list[str]):
         self.questions = questions
 
@@ -183,6 +205,11 @@ class Tool(ABC):
     # ── 安全声明(Fail-Closed,借鉴 CC Tool.ts:757)──
     is_destructive: bool = True   # 默认破坏性,需 pack 显式声明 False 才认为安全
     is_read_only: bool = False    # 默认非只读
+    # ── 并发安全声明(C.2-B:Tool 并行执行,借鉴 CC isConcurrencySafe)──
+    # Fail-Closed:默认不可并发(保守)。Engine 的 partition_tool_calls 按此分批:
+    # 连续的 concurrency_safe=True 工具并发执行,遇到 False 则串行。
+    # 只读 + 幂等的工具(如 fetch_guide、list_assets)应声明 True 以提速。
+    is_concurrency_safe: bool = False  # 默认串行,pack 显式声明才并发
 
     @abstractmethod
     def input_schema(self) -> dict:
@@ -221,7 +248,7 @@ class CompositeTool(Tool):
     "封装一个工作流 + 声明触发条件"。CC 区分 Tool/Skill/Command,
     我们用 SimpleTool / CompositeTool 二分表达同样的分层。
     CompositeTool.when 字段可升级为结构化 trigger(关键词/状态谓词)
-    以提升 _select_tool 的准确率。
+    以提升 _select_tools 的准确率。
     """
     steps: list[str] = []
 
@@ -313,26 +340,55 @@ class ToolRegistry:
 
 ## 五、Engine 核心
 
-### 5.1 ToolDispatcher:单步选择
+### 5.1 ToolDispatcher:单轮多工具选择(v4)
 
 ```python
 # engine/dispatcher.py
 class ToolDispatcher:
-    """单步工具选择与执行。"""
+    """单轮多工具选择与执行(v4)。
+    一次 LLM 调用选 1..N 个工具,按并发安全性分批执行。不循环。
+    """
 
-    def run(self, user_input: str, conv_id: str, ctx_extra: dict):
+    def run(self, user_input: str, conv_id: str, ctx_extra: dict, answers: dict = None):
         # 1. 加载对话状态(append-only 读取,见 5.2)
         state = self._load_state(conv_id)
         state["user_input"] = user_input
 
+        # 1b. C.2-A:追问恢复——如果 state 里有 pending_ask 且本次请求带了 answers,
+        #     直接重跑上次挂起的工具,不再走选工具流程
+        if state.get("pending_ask") and answers is not None:
+            yield from self._resume_ask(state, conv_id, ctx_extra, answers)
+            return
+
         # 2. 压缩检查(机制归 Engine,状态补偿内容归 tool)
         state = self._maybe_compress(state)
 
-        # 3. LLM 选工具(单步,从 registry 选)
-        tool = self._select_tool(user_input, state)
+        # 3. LLM 选工具(单步选择,但可返回 1..N 个工具——C.2-B 支持并行)
+        #    LLM 只返回工具名列表(参数从 state 抽取,不让 LLM 填)。
+        tools = self._select_tools(user_input, state)
+        if not tools:
+            tools = [self._fallback_tool()]  # 兜底:走 ChatTool
 
-        # 4. 执行拦截层(借鉴 CC 六段 pipeline 的前段)
-        #    schema 校验已由 input_schema 表达;这里做语义校验
+        # 4. 分批调度(C.2-B:借鉴 CC partitionToolCalls)
+        #    连续的 is_concurrency_safe=True 工具并发,遇到 False 则串行。
+        #    单工具时退化为普通执行。
+        for batch in self._partition_tool_calls(tools):
+            if len(batch) == 1:
+                yield from self._run_single(batch[0], state, conv_id, ctx_extra)
+            else:
+                yield from self._run_concurrent(batch, state, conv_id, ctx_extra)
+
+    def _run_single(self, tool, state, conv_id, ctx_extra):
+        """执行单个工具,含追问重跑(C.2-A)。
+
+        追问的 SSE 语义:SSE 是单向推送,不能在同一个连接里等用户回答。
+        所以追问作为本次响应的结束;用户答案通过【新的 /api/chat 请求】送回,
+        Engine 在新请求 load_state 时检测到 state["pending_ask"],直接重跑同一工具。
+        """
+        # 追问重跑上限:防止工具反复追问死循环(默认 3 轮)
+        clarify_round = state.get("clarify_round", 0)
+
+        # 4a. 执行拦截层(借鉴 CC 六段 pipeline 前段):语义校验先于 execute
         err = tool.validate_input(state)
         if err is not None:
             result = ToolResult(error_for_llm=err, summary=f"输入校验失败: {err}")
@@ -340,39 +396,84 @@ class ToolDispatcher:
             self._save_state(conv_id, state, result)
             return
 
-        # 5. 执行工具(工具内部自己处理 retry / clarify / pipeline)
+        # 4b. 执行工具
         try:
             result = tool.execute(state, self._build_ctx(state, ctx_extra))
         except ClarificationRaised as e:
-            yield from self._emit_clarification(e.questions)
-            self._save_state(conv_id, state, None)
-            return
+            # 向后兼容:旧式异常 → 转成 ToolResult.ask
+            result = ToolResult(ask=AskSpec(questions=[
+                AskQuestion(question=q, header="追问", options=[]) for q in e.questions]))
         except Exception as e:
-            # 失败回流(借鉴 CC 的错误回流):异常包装成 error_for_llm,
-            # 让下一轮 LLM 选择能感知"上次工具失败了、为什么"
+            # 失败回流(借鉴 CC 错误回流):异常包装成 error_for_llm
             result = ToolResult(error_for_llm=str(e), summary=f"工具执行失败: {e}")
 
-        # 6. 按 ToolResult 状态发 SSE
-        if result.needs_clarification:
-            yield from self._emit_clarification(result.clarification_questions)
+        # 4c. 按 ToolResult 状态分流
+        if result.ask is not None:
+            clarify_round += 1
+            if clarify_round > self._max_clarify_rounds:
+                yield from self._emit_error("追问轮数超限,请重新描述需求")
+                self._clear_pending_ask(state)
+                return
+            # C.2-A:保存追问现场到 state,emit ask 后结束本次响应
+            state["pending_ask"] = {
+                "tool": tool.name,
+                "ask": result.ask.model_dump(),
+                "round": clarify_round,
+            }
+            self._save_state(conv_id, state, result=None)
+            yield from self._emit_ask(result.ask)
         else:
+            self._clear_pending_ask(state)
             yield from self._emit_result(tool, result)
+            self._save_state(conv_id, state, result)
 
-        # 7. 保存对话状态(artifact 进 state,summary 进历史,append-only)
-        self._save_state(conv_id, state, result)
+    def _resume_ask(self, state, conv_id, ctx_extra, answers):
+        """当 load_state 检测到 pending_ask 时,ToolDispatcher.run 直接走这里。
+        answers 是用户对上次追问的回答,写进 state["clarify_answers"]后重跑工具。"""
+        tool = self.registry.get(state["pending_ask"]["tool"])
+        state["clarify_answers"] = answers
+        yield from self._run_single(tool, state, conv_id, ctx_extra)
 
-        # 8. follow-up 预留(当前单步,工具可声明需要继续)
-        # if tool.requires_follow_up(result): → 下一轮循环(未来 Agent Loop 入口)
-
-    def _select_tool(self, user_input, state) -> Tool:
-        """调一次 LLM,从 registry 选一个工具。
-        Prompt = 工具清单 + 对话历史 + 用户输入。
-        LLM 只返回工具名(因为工具参数在 execute 内部从 state 抽取,
-        不需要 LLM 填参数——这是"单步选择"与 Function Calling 的区别)。
+    def _run_concurrent(self, tools, state, conv_id, ctx_extra):
+        """并发执行一批 concurrency_safe 工具(C.2-B)。
+        各工具的 emit 用工具名前缀区分(stage 事件带 tool 字段)。
+        context 修改延迟到批次全部完成后统一应用(借鉴 CC 延迟 contextModifier)。
         """
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tools)) as pool:
+            futures = {pool.submit(self._exec_silent, t, state, ctx_extra): t for t in tools}
+            for fut in concurrent.futures.as_completed(futures):
+                tool = futures[fut]
+                result = fut.result()
+                yield from self._emit_result(tool, result)
+        # 批次完成后统一 save(借鉴 CC 批量 apply,避免并发写覆盖)
+        self._save_state(conv_id, state, None)
+
+    def _select_tools(self, user_input, state) -> list[Tool]:
+        """调一次 LLM,从 registry 选 1..N 个工具。
+        Prompt = 工具清单 + 对话历史 + 用户输入。
+        LLM 返回工具名列表(可单个可多个,如"加字段A 和 删字段B"→ 2 个 modify)。
+        参数从 state 抽取,不让 LLM 填(这是"单步选择"与 Function Calling 的区别)。"""
         tools_desc = self.registry.describe_for_llm(state)
         # 具体实现细节见后续实现计划文档。
         ...
+
+    def _partition_tool_calls(self, tools) -> list[list[Tool]]:
+        """借鉴 CC toolOrchestration.ts 的 partitionToolCalls:
+        连续的 is_concurrency_safe=True 工具归一批并发,False 的单独成批串行。
+        例:[A(safe), B(safe), C(unsafe), D(safe)] → [[A,B], [C], [D]]
+        """
+        batches, current = [], []
+        for tool in tools:
+            if tool.is_concurrency_safe:
+                current.append(tool)
+            else:
+                if current:
+                    batches.append(current); current = []
+                batches.append([tool])
+        if current:
+            batches.append(current)
+        return batches
 
     def _maybe_compress(self, state):
         if self._conversation.should_compress(state):
@@ -380,7 +481,7 @@ class ToolDispatcher:
         return state
 ```
 
-**关键**:`_select_tool` 内部只问一次 LLM,返回单个 Tool 实例。**不进入多步 loop**。
+**关键**:`_select_tools` 内部只问一次 LLM,返回 1..N 个 Tool 实例(单轮多工具,不进入多步 loop)。
 
 **retry / clarify / pipeline 都在工具内部,Engine 不感知**:
 - retry:工具的 `_step_*` 方法自己决定要不要重跑(见 6.2 的 `_step_validate`)
@@ -396,14 +497,17 @@ class ToolDispatcher:
 class ConversationManager:
     # ── 存储:append-only 事件流(对标 CC sessionStorage.ts 的 JSONL 模型)──
     def append(self, conv_id, kind: str, payload: dict):
-        """只追加,不覆盖。kind ∈ {user, assistant, tool_result, compacted, checkpoint}。
+        """只追加,不覆盖。kind ∈ {user, assistant, tool_result, compacted,
+        compact_trace, checkpoint, ask}。
         崩溃恢复只需重放尾部,压缩也不删旧行而是写一条 compacted 条目。"""
 
     def load(self, conv_id) -> dict:
         """读取并重建状态。按 kind 分流:
         - user/assistant/tool_result 按序重建 messages
         - compacted 标记压缩点,其后为 keep-recent,其前为已压缩
+        - compact_trace 压缩轨迹(审计用,不进 messages)
         - checkpoint 用于持久化 artifact 快照、active_tool 等
+        - ask 持久化 pending_ask 现场(C.2-A 追问恢复)
         """
 
     def save(self, conv_id, state, result):
@@ -415,16 +519,33 @@ class ConversationManager:
         """列表页只读 SessionMeta(title/summary/updated_at),
         不 JOIN messages(对标 CC lite reader 只读头尾 64KB)。"""
 
-    # ── 压缩:三级保护(对标 CC autoCompact.ts + compact.ts)──
+    # ── 压缩:三级保护 + sidechain 隔离(对标 CC compact.ts + autoCompact.ts)──
     def should_compress(self, state) -> bool:
         """token > 有效窗口的 70%。有效窗口 = 总窗口 - 预留 Summary Token。"""
 
     def compress(self, state, tool: Tool) -> str:
-        """调 tool.summarize_artifact() 拿状态补偿 → 调 LLM 摘要旧历史 →
-        保留最近 N 轮。失败时:
+        """C.2-D:压缩在 forked sidechain 执行,不阻塞主对话流(对标 CC Forked Agent)。
+
+        sidechain 的含义:
+        1. 压缩是重操作(调 LLM 摘要旧历史),放独立线程执行
+        2. 主对话流不等待压缩完成——先返回 keep-recent 历史,压缩结果异步写回
+        3. 压缩失败/超时由三级保护兜底,不影响用户当前请求
+        4. 压缩过程独立日志记录,便于审计
+
+        三级保护(对标 CC):
         1) 熔断器:连续 3 次失败 → 120s 内不再尝试
         2) PTL 防御:摘要本身超限 → 剥掉 20% 旧分组重试(最多 N 次)
+        3) 降级:全失败 → 简单截断(有损但不锁死)
+
+        sidechain 存储压缩轨迹(对标 CC 的 sidechain transcript):
+        - compacted 事件进 append-only 历史(已有)
+        - 新增 compact_trace 条目:记录压缩前 token 数、压缩后 token 数、
+          摘要内容、是否触发降级。用于调优阈值和审计。
         """
+        # 1. 取状态补偿(调 tool.summarize_artifact)
+        # 2. 在 forked context 调 LLM 摘要(独立超时、独立重试)
+        # 3. 写 compacted + compact_trace 条目
+        ...
 
     # ── 动态上下文注入(对标 CC 的 session_guidance/scratchpad dynamic section)──
     def dynamic_context(self, state) -> dict:
@@ -437,7 +558,12 @@ class ConversationManager:
 - pack 提供:`tool.summarize_artifact(artifact)` 返回状态补偿文本
 - 压缩 prompt 模板由 pack 的 prompts 提供(因为要提"表单"还是"报表")
 
-**与现有 SQLite 的关系**:当前 `conversation_store.py` 用 conversations + messages 两表 + 覆盖式 save。迁移时 messages 表加 `kind` 列(支持 compacted/checkpoint),`save` 改成 `append` 序列;列表查询改走单独的 SessionMeta 视图。详见阶段 4。
+**与现有 SQLite 的关系(老数据不迁移)**:当前 `conversation_store.py` 用 conversations + messages 两表 + 覆盖式 save。v4 存储改造**直接重建新表**——开发期无生产数据需要保护,不做数据迁移:
+- 新建 `events` 表(append-only,含 kind 列)、`session_meta` 表(列表查询)
+- 删除旧的 conversations/messages 表(或重命名为 `_legacy_` 留档备查)
+- 旧表数据不导入;新会话从空表开始
+
+这样做的好处:不用写迁移脚本、不用考虑 schema 兼容、不用灰度切换。详见阶段 4。
 
 ### 5.3 StreamBridge
 
@@ -450,6 +576,62 @@ class StreamManager:
 ```
 
 完全复用现有 `sse.py` 的实现,只改一处:result 事件的 payload 通过 `tool.format_result(state)` 拿,不再硬读 `formFieldConfigVos`。
+
+### 5.4 PromptLoader:C.2-C section 缓存 + C.2-E override/append
+
+prompt 的加载、缓存、多来源合并归 Engine,模板内容归 pack。
+
+```python
+# engine/prompt_loader.py
+class PromptLoader:
+    """Prompt section 装配器(对标 CC systemPrompt.ts + systemPromptSections.ts)。
+
+    两项增强(v4):
+    - C.2-C:section 级缓存(以 pack+name 为 key,可标记 cacheable=False 强制重算)
+    - C.2-E:区分 override(替换默认)/ append(挂尾)/ custom(替换 pack 默认)
+    """
+
+    def render(self, pack_name: str, name: str, **vars) -> str:
+        """渲染单个 prompt 模板。pack 用 Jinja2,带 section 级缓存。
+        缓存 key = (pack_name, name, vars 的可哈希部分)。
+        模板文件可声明 frontmatter cacheable: false 强制每次重算(如含时间戳)。"""
+        cache_key = self._cache_key(pack_name, name, vars)
+        if cached := self._cache.get(cache_key):
+            return cached
+        template = self._load_template(pack_name, name)  # 从 pack 的 prompts/ 读
+        rendered = self._jinja_env.from_string(template).render(**vars)
+        if self._is_cacheable(pack_name, name):
+            self._cache[cache_key] = rendered
+        return rendered
+
+    def assemble(self, pack_name: str, name: str, sections: list[str],
+                 dynamic: dict, overrides: PromptOverrides = None) -> str:
+        """组装完整 prompt(C.2-E 优先级,对标 CC buildEffectiveSystemPrompt):
+            0. override → 完全替换(最高优先级,通常不用)
+            1. 静态主干 = {% include %} 拼接 sections
+            2. 动态段(dynamic dict)作为独立 section 追加,与静态解耦
+            3. append → 挂到最末(无论前面来源)
+        """
+        if overrides and overrides.override:
+            return overrides.override
+        parts = [self.render(pack_name, f"_sections/{s}", **dynamic) for s in sections]
+        parts.append(self.render(pack_name, name, **dynamic))  # 主模板
+        if overrides and overrides.append:
+            parts.append(overrides.append)
+        return "\n\n".join(p for p in parts if p.strip())
+
+@dataclass
+class PromptOverrides:
+    """多来源 prompt 合并(C.2-E)。当前只有 pack 一种来源,但留口子。
+    未来:embed 宿主可传 override 覆盖 pack 的身份定位;append 追加企业规则。"""
+    override: Optional[str] = None   # 完全替换(慎用)
+    append: Optional[str] = None     # 追加到末尾
+```
+
+**设计说明**:
+- **缓存粒度是 section,不是整份 prompt**。静态片段(intro/field_types/output_rules/safety)一旦渲染就缓存,动态段(当前 artifact、压缩历史)每次重算。这避免了对"整份 prompt"缓存的失效难题。
+- **override vs append 的语义区分**(借鉴 CC):override 是"完全替换",append 是"挂尾"。当前只有 pack 一种来源,但 embed 宿主未来可能注入"你是 XX 公司的助手"这类 override,或"遵循 XX 合规规则"这类 append。
+- **注入防护不变**:pack 渲染的领域 prompt 视为 trusted;override/append 内容来自外部,渲染时**不走 Jinja2**(纯文本拼接),避免宿主侧的模板注入。
 
 ## 六、njmind_form Tool Pack
 
@@ -589,40 +771,45 @@ class ChatTool(Tool):
 
 **交付**:上游路径全部进配置,AssetClient 抽象可用,Unicode 隐写注入面已封堵。
 
-### 阶段 2:抽 Prompt
+### 阶段 2:抽 Prompt + C.2-C section 缓存 + C.2-E override/append
 
 1. 把 `prompt_builder.py` 的 4 套 prompt 拆成 `njmind_form/prompts/*.j2`
 2. **按 CC 的 section 模式组织**(附录 C.1 #4):静态片段放 `prompts/_sections/`(intro/field_types/output_rules/safety),工具 prompt 用 Jinja2 `{% include %}` 引用,动态内容(当前 artifact、压缩历史)作为独立 context 注入而非塞进模板变量
-3. 加载器:pack 提供 `_render(name, **vars)` 和 `_render_sections(names)`,支持段级缓存(可标记 `cacheable=False` 强制重算)
-4. **注入防护**(附录 C.1):pack 渲染的领域 prompt 视为 trusted;AssetClient 返回的模板/数据作为 user-role 或独立 section 注入,**绝不进 Jinja2 变量渲染**
-5. 删除 `prompt_builder.py`(逻辑搬进工具的 `_step_*` 方法)
+3. **实现 PromptLoader(§5.4,C.2-C)**:`engine/prompt_loader.py`,section 级缓存(以 pack+name 为 key,frontmatter 可声明 `cacheable: false` 强制重算)
+4. **override/append 优先级(§5.4,C.2-E)**:`assemble()` 按 override→静态主干→动态段→append 顺序拼装;`PromptOverrides` 数据类承载外部来源(当前为空,留口子)
+5. **注入防护**(附录 C.1):pack 渲染的领域 prompt 视为 trusted;AssetClient 返回的模板/数据作为 user-role 或独立 section 注入,**绝不进 Jinja2 变量渲染**;override/append 不走 Jinja2(纯文本拼接)
+6. 删除 `prompt_builder.py`(逻辑搬进工具的 `_step_*` 方法)
 
-**交付**:prompt 全部进 pack,`prompt_builder.py` 消失,section 装配可用。
+**交付**:prompt 全部进 pack,`prompt_builder.py` 消失,section 装配 + 缓存 + override/append 可用。
 
-### 阶段 3:把管线搬进工具 + 落库确认
+### 阶段 3:把管线搬进工具 + 落库确认 + C.2-A 追问 + C.2-B 并行
 
 1. 实现 `CreateFormTool` / `ModifyFormTool` / `ChatTool`,内部 `execute` 调用当前 `nodes.py` 的节点函数(先不重写,只是搬位置)
 2. 把 `nodes.py` 的 `TYPE_TO_TEMPLATE`/`TYPE_NAMES` 挪到 `config.yaml`
 3. `graph.py` 的拓扑挪到 `CompositeTool.steps` + `run_pipeline`
-4. 实现 `ToolDispatcher._select_tool`,替换 `classify_intent_node`
-5. 加入执行拦截层(附录 C.1 #2):`validate_input` 在 `execute` 前调用,失败走 `error_for_llm` 回流;persist 类工具的 validate_input 必须显式实现(附录 D.5)
-6. **落库前确认(附录 D.1 #5)**:persist 步骤前 emit `confirm` SSE 事件,用户确认才继续;ToolContext 支持 `dry_run` 跳过 persist 返回预览
-7. 切换 `/api/chat` 走 `ToolDispatcher` 而非旧 graph
+4. **实现 ToolDispatcher(§5.1)**:`_select_tools`(LLM 可返回 1..N 工具)+ `_partition_tool_calls`(按 is_concurrency_safe 分批)+ `_run_single`/`_run_concurrent`
+5. **C.2-A 追问机制**:ToolResult.ask + AskSpec/AskQuestion/AskOption;dispatcher 检测 pending_ask 走 `_resume_ask`;`/api/chat` 新增 `answers` 参数接收用户回答;append-only 存 ask 条目
+6. **C.2-B 并行执行**:只读工具(fetch_guide/list_assets)声明 `is_concurrency_safe=True`;`_run_concurrent` 用 ThreadPoolExecutor,context 修改延迟到批次完成
+7. 加入执行拦截层(附录 C.1 #2):`validate_input` 在 `execute` 前调用,失败走 `error_for_llm` 回流;persist 类工具的 validate_input 必须显式实现(附录 D.5)
+8. **落库前确认(附录 D.1 #5)**:persist 步骤前 emit `confirm` SSE 事件,用户确认才继续;ToolContext 支持 `dry_run` 跳过 persist 返回预览
+9. 切换 `/api/chat` 走 `ToolDispatcher` 而非旧 graph
 
 **交付**:三意图变成三工具,Engine 通过 ToolDispatcher 调度,njmind 知识全部在 pack 内,落库操作有确认环节。
 
-### 阶段 4:存储改造 + 日志安全 + 清理 + 验证
+### 阶段 4:存储改造 + 日志安全 + 压缩 sidechain + 清理 + 验证
 
-1. **存储改 append-only**(附录 C.1 #5):`conversation_store.py` 的 messages 表加 `kind` 列(user/assistant/tool_result/compacted/checkpoint),`save` 改成 `append` 序列;新增 `SessionMeta` 视图供列表查询
+1. **存储重建 append-only(附录 C.1 #5,老数据不迁移)**:新建 `events` 表(kind ∈ user/assistant/tool_result/compacted/compact_trace/checkpoint/ask)+ `session_meta` 表(列表查询)。旧的 conversations/messages 表重命名为 `_legacy_` 留档,不导入数据。新会话从空表开始
 2. **日志 redact filter(附录 D.1 #2)**:实现 `engine/logging_filter.py`(RedactFilter,正则 redact Bearer/sk-/cookie),Engine 启动时挂载
 3. 删除 `graph.py`、`nodes.py`(已迁完)
-4. 压缩器升级(附录 C.1 #7/#8/#9 + D.1 #3):加 Summary Token 预留、PTL 防御、`dynamic_context` 状态重启补偿、**压缩后工具能力复灌**(重建 tool schema 注入)
-5. 压缩器内容钩子化:Engine 调 `tool.summarize_artifact()`
-6. SSE result payload 钩子化:Engine 调 `tool.format_result()`
-7. 验证架构试金石:`grep -rE "form|formCode|template" engine/` 应无结果
-8. 端到端回归:三个意图 + 压缩(含 PTL 防御 + 能力复灌)+ header 透传(日志不泄漏)+ 落库确认 + SSE + 会话恢复
+4. **C.2-D 压缩 sidechain 隔离**:压缩在 forked 线程执行(独立超时、独立重试),主对话流不等压缩完成;失败由三级保护兜底(熔断器/PTL/降级)
+5. 压缩器升级(附录 C.1 #7/#8/#9 + D.1 #3):加 Summary Token 预留、PTL 防御、`dynamic_context` 状态重启补偿、**压缩后工具能力复灌**(重建 tool schema 注入)
+6. **压缩轨迹记录(C.2-D)**:每次压缩写 `compact_trace` 条目(压缩前 token 数、压缩后 token 数、摘要内容、是否触发降级),供调优阈值和审计
+7. 压缩器内容钩子化:Engine 调 `tool.summarize_artifact()`
+8. SSE result payload 钩子化:Engine 调 `tool.format_result()`
+9. 验证架构试金石:`grep -rE "form|formCode|template" engine/` 应无结果
+10. 端到端回归:三意图 + 追问(C.2-A 重跑)+ 并发(C.2-B)+ 压缩(sidechain + PTL + 能力复灌)+ header 透传(日志不泄漏)+ 落库确认 + SSE + 会话恢复
 
-**交付**:Engine 零领域知识,存储工业级,安全防护完整,迁移完成。
+**交付**:Engine 零领域知识,存储工业级,压缩隔离运行,安全防护完整,迁移完成。
 
 ### 各阶段验收
 
@@ -655,22 +842,36 @@ class ChatTool(Tool):
 - pack 提供内容:`tool.summarize_artifact(artifact)` 返回状态补偿
 - 压缩 prompt 模板由 pack 提供(因为要提"表单"还是"报表")
 
-### 8.3 SSE 结果:通用协议 + 领域 payload
+### 8.3 SSE 结果:通用协议 + 领域 payload + 接口约束
 
+**接口约束(v4 明确)**:后端 SSE/请求体可重构,前端配套同步改(前后端都是我们控制,一个版本内同步发)。不写适配层技术债。
+
+**请求侧**:`POST /api/chat` 请求体新增 `answers` 字段(可选,C.2-A 追问恢复时携带):
+```json
+{ "message": "创建请假表", "conversation_id": "xxx",
+  "answers": { "请假单需要哪些字段": ["申请人","请假类型","..."] } }  // 可选
+```
+
+**响应侧**:SSE 事件统一为 4 种(stage / result / error / done),其中 result 的 data schema:
 ```typescript
-// SSE result 事件(通用 schema)
 {
   event: "result",
   data: {
-    type: "config" | "clarification" | "reply",   // 通用三态
+    type: "config" | "ask" | "reply" | "error",   // 通用四态(C.2-A:clarification→ask)
     tool: "create_form",                          // 哪个工具产出
-    payload: { ... },                             // pack 自定义(不透明)
-    summary: "已生成「请假申请表」"                // pack 提供
+    payload: { ... },                             // pack 自定义(不透明,Engine 不读)
+    summary: "已生成「请假申请表」"                // pack 提供,进对话历史
   }
 }
 ```
 
-前端按 `type` 路由展示:`config` 渲染配置卡片,`clarification` 渲染追问,`reply` 渲染文本。
+各 type 的 payload 约定:
+- `config`:pack 自定义的制品(如 formConfig JSON),前端按 pack 知识渲染
+- `ask`:追问规格(AskSpec,见 §4.1),前端渲染追问 UI,用户回答后带 `answers` 发新请求
+- `reply`:普通文本回复(闲聊/解释),`payload = { text: "..." }`
+- `error`:`payload = { message, retryable }`,前端提示并允许重试
+
+前端按 `type` 路由展示。后端 SSE 事件类型(stage/result/error/done)不变,只是 result 的 data 字段从旧的零散结构统一成 `{type, tool, payload, summary}`。
 
 ## 九、风险与对策
 
@@ -680,22 +881,24 @@ class ChatTool(Tool):
 | **上游内容 Unicode 隐写注入**(附录 D.1 #1) | 高 | HttpAssetClient 返回前调 `sanitize_obj`(NFKC + 删零宽/方向反转字符) |
 | **日志泄漏 Authorization/cookie**(附录 D.1 #2) | 高 | Engine 启动挂 RedactFilter,正则 redact Bearer/sk-/cookie 模式 |
 | ToolDispatcher 的 LLM 选工具准确率 | 中 | 单步选择 + when 字段约束 + 兜底(选错时 `validate_input` 或 execute 失败,走 `error_for_llm` 回流让下轮自纠,对标 CC) |
-| 复合工具内部 retry/clarify 逻辑复杂 | 中 | `CompositeTool.run_pipeline` 提供 step 编排,ClarificationRaised 异常短路 |
+| 复合工具内部 retry 逻辑复杂 | 中 | `CompositeTool.run_pipeline` 提供 step 编排;retry 完全在工具内(§6.2 _step_validate 递归重跑);clarify 走 ToolResult.ask + dispatcher 重跑(§5.1) |
+| 追问重跑死循环(C.2-A) | 中 | `_max_clarify_rounds` 上限(默认 3 轮);超限 emit error 并清除 pending_ask |
 | pack 内 prompt 的 Jinja2 变量命名不统一 | 中 | 阶段 2 制定变量命名规范(user_input/history/artifact/guide 统一) |
 | **压缩后工具能力声明丢失**(附录 D.1 #3) | 中 | 压缩后 `buildPostCompactMessages` 等价物:重建 tool schema 注入下一轮 |
 | **落库操作无确认,误改上游数据**(附录 D.1 #5) | 中 | persist 前 emit `confirm` SSE,用户确认才继续;可选 dry_run 预览 |
-| append-only 改造数据迁移风险 | 中 | 新增 `kind` 列默认值填充旧行;保留旧 `save` 方法做灰度,验证后切换;SQLite 事务保证原子 |
+| 老数据不迁移,现有会话丢失 | 低 | 开发期无生产数据,旧表重命名为 `_legacy_` 留档备查;新表从零开始,无迁移风险 |
+| 前后端接口同步改的协调成本 | 中 | 后端重构 SSE/请求体,前端配套同步改;约束在"一个版本内同步发",避免长期双轨 |
 | 压缩 PTL 防御误伤 | 低 | 剥洋葱有损,加日志告警;`MAX_PTL_RETRIES` 上限 3 次,超限停止并保留原始未压缩版本 |
 | 注入风险:上游返回的模板含恶意内容 | 低 | 注入防护原则(附录 C.1 #4):上游数据绝不进 Jinja2 变量渲染,只作为 user-role 独立 section |
 | 抽象过度:未来接的新领域不是"制品生成"型 | 低 | 先不为这个优化;Tool ABC 足够通用,SimpleTool 已覆盖非制品场景 |
 
 ## 十、不在本期范围
 
-- 多步 Agent Loop(未来按需)
-- MCP 客户端能力(未来按需,需上游支持)
-- 多 pack 共存的路由(目前只一个 pack)
-- Tool 并行执行(目前单步选择)
+- 多步 Agent Loop(LLM 主动连续调用多个工具;当前是单步选择,虽支持返回多工具一次执行,但不支持"看完结果再决定下一步")
+- MCP 客户端能力(需上游支持,目前上游是 REST)
+- 多 pack 共存的路由(目前只一个 pack;ToolRegistry 已支持注册多个,但无跨 pack 选择策略)
 - 动态工具发现(目前 pack 启动时静态注册)
+- Tool 并行的跨工具状态依赖(当前并发批次内工具相互独立;若工具间有数据依赖,需声明 ordering)
 
 ## 十一、验收清单
 
@@ -713,7 +916,13 @@ class ChatTool(Tool):
 - [ ] **落库有确认环节**:create/modify 在 persist 前 emit confirm,用户确认才落库;dry_run 模式可预览(附录 D.1 #5)
 - [ ] 工具失败回流:`error_for_llm` 能让下一轮 LLM 感知上次失败
 - [ ] SSE、header 透传、对话存储全部工作
-- [ ] `/api/chat` 接口对外不变(前端无感)
+- [ ] **接口约束达成(v4)**:后端 SSE/请求体重构为 `{type, tool, payload, summary}`,前端配套同步改,一个版本内发齐
+- [ ] **C.2-A 追问机制**:工具产出 ask → 前端渲染追问 UI → 用户回答带 answers 重发 → dispatcher 检测 pending_ask 重跑工具;追问上限 3 轮
+- [ ] **C.2-B 并行执行**:多个 is_concurrency_safe 工具并发执行;不安全的串行;并发批次 context 修改延迟 apply
+- [ ] **C.2-C section 缓存**:静态 section 渲染后缓存,动态段每次重算;`cacheable: false` 的强制重算生效
+- [ ] **C.2-D 压缩 sidechain**:压缩在 forked 线程执行,主对话流不阻塞;`compact_trace` 条目记录压缩轨迹
+- [ ] **C.2-E override/append**:assemble 按 override→静态→动态→append 顺序拼装;override 不走 Jinja2
+- [ ] **老数据不迁移**:旧表重命名 `_legacy_`,新表从零开始,无迁移脚本
 - [ ] 现有测试全部通过(或等价改造后通过)
 
 ---
@@ -728,7 +937,7 @@ class ChatTool(Tool):
 | 管线 | 固定拓扑活在复合工具内 | 全声明式 | 复用 njmind 经验,避免重写拓扑 |
 | State | 不透明 artifact 容器 | 泛型 State 子类 | Engine 零领域知识 |
 | Prompt | pack 内 Jinja2 模板 | Python 字符串 / 全局目录 | 可维护、可 hot-reload |
-| 调度 | 单步工具选择 | 多步 Agent Loop / 意图路由 | 单步可控,与现状平滑对应 |
+| 调度 | 单轮多工具选择(v4 升级自单步) | 多步 Agent Loop / 意图路由 | 单轮可控,支持并行但不循环,成本可控 |
 | 工具协议 | 自建轻量 Tool ABC | MCP-First | 上游是 REST 不是 MCP,绑 MCP 不可行 |
 | 迁移 | 绞杀者模式 | 大爆炸重写 | 生产系统不能停机 |
 | Tool 安全默认 | Fail-Closed | 默认安全 | 借鉴 CC,默认破坏性,pack 显式声明才安全 |
@@ -736,6 +945,12 @@ class ChatTool(Tool):
 | 存储模型 | append-only 事件流 | 覆盖式快照 | 借鉴 CC,崩溃只需重放尾部,压缩不丢原始 |
 | 压缩保护 | 三级(阈值+熔断+PTL) | 单一阈值 | 借鉴 CC,应对各种边界(附录 C.1 #7/#8/#10) |
 | Prompt 组织 | section 装配 | 单文件模板 | 借鉴 CC,段级缓存、注入隔离更清晰 |
+| 追问建模 | 内置 AskTool(ToolResult.ask) | 异常短路 | v4 升级(C.2-A):追问答案进历史,支持多轮重跑 |
+| 并发模型 | isConcurrencySafe + 分批 | 全串行 | v4 升级(C.2-B):Fail-Closed 默认串行,只读工具显式声明并发 |
+| 压缩执行 | forked sidechain | 主链同步 | v4 升级(C.2-D):不阻塞主对话流,独立超时/重试/轨迹 |
+| Prompt 来源 | override/append 优先级 | 单一 pack 来源 | v4 升级(C.2-E):留口子给 embed 宿主注入 |
+| 老数据 | 不迁移,新表重建 | 数据迁移脚本 | 开发期无生产数据,避免迁移风险 |
+| 接口策略 | 后端重构 + 前端同步改 | 适配层逐字段不变 | 前后端都是我们控制,一个版本内同步发,避免适配层技术债 |
 
 ## 附录 B:与 chat-bi 项目的对照
 
@@ -771,28 +986,31 @@ chat-bi 是参考过的多轮对话项目。本项目与它的差异:
 | 11 | **requires_follow_up 钩子**(默认 False,为多步留口) | Tool 接口 | 4.1 `Tool.requires_follow_up` | 当前单步,不焊死协议 |
 | 12 | **CompositeTool ≈ CC 的 Skill**(工作流+触发条件封装) | `main.tsx:158` | 4.1 CompositeTool 注释 | 概念对标,避免重新发明 |
 
-### C.2 延后考虑(记录但本期不做)
+### C.2 本期纳入(v4 从"延后"升级)
 
-| # | CC 设计 | 为什么延后 |
-|---|--------|-----------|
-| A | **Clarification 建模为内置 AskTool**(而非异常短路) | 当前 `ClarificationRaised` 异常更简单;等真有"追问可被 LLM 再选"的需求再改 |
-| B | **Tool 并行执行 + isConcurrencySafe** | 当前单步选择无并发;未来引入 Agent Loop 时再加 |
-| C | **Prompt section 级缓存**(以 pack+name 为 key) | 先用 Jinja2 简单实现;性能瓶颈出现再加缓存层 |
-| D | **Forked Agent 压缩 sidechain 独立存储** | 当前压缩在主链内完成;若压缩逻辑变复杂再隔离 |
-| E | **customSystemPrompt 替换 vs appendSystemPrompt 挂尾** | 当前只有 pack 一种来源;多来源混入时再区分 |
+> v3 时这 5 项标记为"延后考虑"。v4 评审决定**全部纳入本期**,拆成独立任务在迁移阶段 2-4 落地。理由:5 项分别属于 prompt / dispatcher / 压缩 三个不交叉的子系统,可并行推进,且都是 CC 验证过的成熟设计,不照搬复杂度但借鉴工程细节。
+
+| # | CC 设计 | 落到本文档 | 本期做法 |
+|---|--------|-----------|---------|
+| A | **Clarification 建模为内置 AskTool**(而非异常短路) | §4.1 `ToolResult.ask` + `AskSpec`/`AskQuestion`/`AskOption`;§5.1 `_run_single`/`_resume_ask`;§8.3 SSE `type=ask` | 工具产出 ask → SSE 推前端 → 用户带 answers 重发 → dispatcher 检测 pending_ask 重跑工具。`ClarificationRaised` 异常保留作向后兼容(迁移期未改造工具仍可用) |
+| B | **Tool 并行执行 + isConcurrencySafe** | §4.1 `Tool.is_concurrency_safe`(Fail-Closed 默认 False);§5.1 `_select_tools`/`_partition_tool_calls`/`_run_concurrent` | LLM 可返回 1..N 工具;连续 safe 的并发(ThreadPoolExecutor),unsafe 串行;context 修改延迟到批次完 apply(借鉴 CC 延迟 contextModifier) |
+| C | **Prompt section 级缓存**(以 pack+name 为 key) | §5.4 `PromptLoader.render`,cache key=(pack, name, vars 可哈希部分) | 静态 section 渲染后缓存;frontmatter `cacheable: false` 强制重算(如含时间戳的段) |
+| D | **Forked Agent 压缩 sidechain 独立存储** | §5.2 `compress` 在 forked 线程执行;`compact_trace` 条目记录轨迹 | 压缩不阻塞主对话流;独立超时/重试;失败三级保护兜底;轨迹供调优和审计 |
+| E | **customSystemPrompt 替换 vs appendSystemPrompt 挂尾** | §5.4 `PromptOverrides` + `assemble` 优先级(override→静态→动态→append) | 当前 pack 唯一来源,但留口子给 embed 宿主注入 override(身份)/append(合规规则);override 不走 Jinja2 防注入 |
 
 ### C.3 关键认知(影响整体设计)
 
 **1. Transcript 是唯一真理**
 
-CC 把一切运行状态(工具结果、计划、技能、用户输入)都化为文本回灌给模型。这印证了我们"单步选择"路线正确——我们甚至不让 LLM 填参数(参数从 state 抽取),比 CC 更保守,但同样遵守"状态文本化"。
+CC 把一切运行状态(工具结果、计划、技能、用户输入)都化为文本回灌给模型。这印证了我们"单轮选择"路线正确——我们甚至不让 LLM 填参数(参数从 state 抽取),比 CC 更保守,但同样遵守"状态文本化"。
 
-**2. 我们的简化是合理的**
+**2. 我们的"单步"已升级为"单轮多工具并行"(v4)**
 
-CC 是多步 Function Calling(`query.ts:351` 的 while 循环),我们刻意单步。理由:
-- 我们的领域(表单生成)是"一次调用一个工具"的语义,不需要 LLM 自由组合
-- 单步更可控、SSE 流式更简单、成本更低
-- `requires_follow_up` 钩子为未来留了口子,不在协议上焊死
+CC 是多步 Function Calling(`query.ts:351` 的 while 循环,看完结果再决定下一步)。v3 时我们刻意单步单工具。v4(C.2-B)升级为:**单轮选择 1..N 个工具一次执行,但不做"看完结果再选下一批"的 Agent Loop**。理由:
+- 我们的领域(表单生成)多数是"一次调用一个工具"的语义,不需要 LLM 自由组合多步
+- 但"加字段A 和 删字段B"这类需求天然有多个独立操作,并行执行更自然
+- 单轮选择比多步 loop 更可控、SSE 流式更简单、成本更低
+- `requires_follow_up` 钩子为未来 Agent Loop 留了口子,不在协议上焊死
 
 **3. Tool / Skill / Command 三分的启示**
 
@@ -801,7 +1019,7 @@ CC 区分三个概念:Tool(原子能力)、Skill(按触发条件编排工作流)
 - `CompositeTool`(含 CreateFormTool/ModifyFormTool)= CC 的 Skill
 - Command 暂不需要(没有用户直接调用的场景)
 
-未来 `CompositeTool.when` 可升级为结构化 trigger(关键词/状态谓词),提升 `_select_tool` 准确率。
+未来 `CompositeTool.when` 可升级为结构化 trigger(关键词/状态谓词),提升 `_select_tools` 准确率。
 
 ### C.4 我们与 CC 的根本差异
 
@@ -809,12 +1027,14 @@ CC 区分三个概念:Tool(原子能力)、Skill(按触发条件编排工作流)
 |------|-------------|------|
 | 定位 | 通用编程助手 | 领域工具助手(调上层系统能力) |
 | 上游能力 | 本地文件系统 + 任意 Shell 命令 | 远程 REST API(njmind modeler) |
-| 主循环 | 多步 Agent Loop | 单步工具选择 |
+| 主循环 | 多步 Agent Loop(看完结果再选下一步) | 单轮多工具选择(可选 1..N 个一次执行,不循环) |
 | 工具来源 | 内建 + 用户目录 + MCP | Tool Pack(目前一个) |
 | 安全模型 | 需要权限系统(本地命令危险) | 信任上游 + header 透传 |
-| 持久化 | JSONL 文件 | SQLite(可改 append-only 模式) |
+| 持久化 | JSONL 文件 | SQLite + append-only 事件流(C.1 #5,老数据不迁移) |
+| 追问 | AskUserQuestionTool(同步交互) | ToolResult.ask + 异步重跑(C.2-A,SSE 单向约束) |
+| 压缩 | Forked Agent 独立进程 | forked 线程 sidechain(C.2-D) |
 
-CC 的设计是"最大灵活性的通用框架",我们的是"领域收敛的工具助手"。借鉴它的**工程细节**(Fail-Closed、append-only、压缩三级保护、错误回流),但**不照搬它的复杂度**(多步 loop、权限系统、MCP 生态)。
+CC 的设计是"最大灵活性的通用框架",我们的是"领域收敛的工具助手"。借鉴它的**工程细节**(Fail-Closed、append-only、压缩三级保护、错误回流、追问工具化、并发分批、prompt section 装配),但**不照搬它的复杂度**(多步 loop、本地权限系统、MCP 生态、Forked Agent 独立进程)。
 
 ## 附录 D:多视角重读发现(v3 补充)
 
@@ -934,7 +1154,7 @@ def _step_persist(self, state, ctx):
 重读也**验证了**我们已有设计的正确性:
 
 1. **ToolResult 三层设计(artifact/summary/extra)得到强力背书**——这正是 CC task-notification 的 Python 表达。子 agent 长输出只写 sidechain,主 agent 只收 summary + result。
-2. **单步选择的简化是合理的**——CC 的负面关键词分析揭示它刻意不在热路径用 LLM 做分类(用廉价正则)。我们连分类都不做(单步选工具),更彻底。
+2. **单轮选择的简化是合理的**——CC 的负面关键词分析揭示它刻意不在热路径用 LLM 做分类(用廉价正则)。我们连分类都不做(单轮选工具),更彻底。v4 升级为单轮多工具并行后,这个原则依然成立(不做多步循环)。
 3. **CompositeTool ≈ CC subagent**——上下文隔离、结果标准化回流、嵌套禁止,这些原则我们已部分体现,可进一步固化。
 4. **append-only + PTL 防御**——CC 的 compact 失败保护与我们的设计完全同向,这一遍补了"压缩后能力复灌"这个遗漏点。
 
