@@ -1,6 +1,6 @@
 # 工具助手架构改造设计
 
-**状态**:草案待评审
+**状态**:草案待评审(v2 — 融入 Claude Code 设计借鉴,见附录 C)
 **日期**:2026-07-18
 **作者**:架构梳理
 
@@ -148,19 +148,31 @@ class ToolResult(BaseModel):
     reply: Optional[str] = None         # 给用户的文本回复
     needs_clarification: bool = False
     clarification_questions: list[str] = []
-    summary: str = ""                   # 用于对话历史与压缩
-    extra: dict = {}                    # 领域自由扩展
+    summary: str = ""                   # 用于对话历史与压缩(标准化、无运行时噪声)
+    extra: dict = {}                    # 领域自由扩展(不进对话历史)
+    error_for_llm: Optional[str] = None # 失败时给下一轮 LLM 的标准化错误文本(对标 CC 的错误回流)
 
 class ClarificationRaised(Exception):
-    """工具中途需要追问时抛出,Engine 转成 SSE result 事件。"""
+    """工具中途需要追问时抛出,Engine 转成 SSE result 事件。
+    设计说明:对标 Claude Code 把"向人类提问"建模为 AskUserQuestionTool。
+    当前用异常短路更简单;未来若要追问可被 LLM 再次选择,可改为内置 AskTool。"""
     def __init__(self, questions: list[str]):
         self.questions = questions
 
 class Tool(ABC):
-    """工具基类。"""
+    """工具基类。对标 Claude Code 的 Tool 协议(src/Tool.ts)。
+
+    设计原则(借鉴 CC):
+    - Fail-Closed 默认值:安全相关属性默认保守,避免误用
+    - 安全声明与执行分离:check_permissions / validate_input 先于 execute
+    """
     name: str                     # 工具名,LLM 选择时看到
     description: str              # 工具说明,LLM 选择时看到
     when: str                     # 简短描述"何时用"(填进选择 prompt)
+
+    # ── 安全声明(Fail-Closed,借鉴 CC Tool.ts:757)──
+    is_destructive: bool = True   # 默认破坏性,需 pack 显式声明 False 才认为安全
+    is_read_only: bool = False    # 默认非只读
 
     @abstractmethod
     def input_schema(self) -> dict:
@@ -169,6 +181,19 @@ class Tool(ABC):
     @abstractmethod
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行工具。可中途 emit progress,可抛 ClarificationRaised。"""
+
+    # ── 执行前钩子(借鉴 CC 六段 pipeline 的前半部分)──
+    def validate_input(self, state: dict) -> Optional[str]:
+        """语义校验(比 JSON Schema 更严格)。返回错误文本或 None。
+        默认 None=通过。Engine 在 execute 前调用,失败则跳过 execute、
+        把错误写进 ToolResult.error_for_llm 回流给下一轮选择。"""
+        return None
+
+    # ── 多步预留(借鉴 CC requires_follow_up,当前单步,不焊死)──
+    def requires_follow_up(self, result: ToolResult) -> bool:
+        """工具执行后是否需要 Engine 再做一轮选择。默认 False。
+        未来引入 Agent Loop 时,工具可声明"我做完但还需要继续判断"。"""
+        return False
 
     # ── 可选 hooks(默认实现,pack 按需覆写)──
     def summarize_artifact(self, artifact: dict) -> str:
@@ -181,7 +206,13 @@ class Tool(ABC):
 
 class CompositeTool(Tool):
     """复合工具基类:内部有多步 pipeline 的工具。
-    提供 step 注册 + progress 自动 emit 的便利。"""
+
+    概念对标(借鉴 CC):这等价于 Claude Code 的 Skill——
+    "封装一个工作流 + 声明触发条件"。CC 区分 Tool/Skill/Command,
+    我们用 SimpleTool / CompositeTool 二分表达同样的分层。
+    CompositeTool.when 字段可升级为结构化 trigger(关键词/状态谓词)
+    以提升 _select_tool 的准确率。
+    """
     steps: list[str] = []
 
     def run_pipeline(self, state, ctx):
@@ -274,32 +305,48 @@ class ToolDispatcher:
     """单步工具选择与执行。"""
 
     def run(self, user_input: str, conv_id: str, ctx_extra: dict):
-        # 1. 加载对话状态
+        # 1. 加载对话状态(append-only 读取,见 5.2)
         state = self._load_state(conv_id)
         state["user_input"] = user_input
 
         # 2. 压缩检查(机制归 Engine,状态补偿内容归 tool)
         state = self._maybe_compress(state)
 
-        # 3. LLM 选工具(单步)
+        # 3. LLM 选工具(单步,从 registry 选)
         tool = self._select_tool(user_input, state)
 
-        # 4. 执行工具(工具内部自己处理 retry / clarify / pipeline)
+        # 4. 执行拦截层(借鉴 CC 六段 pipeline 的前段)
+        #    schema 校验已由 input_schema 表达;这里做语义校验
+        err = tool.validate_input(state)
+        if err is not None:
+            result = ToolResult(error_for_llm=err, summary=f"输入校验失败: {err}")
+            yield from self._emit_result(tool, result)
+            self._save_state(conv_id, state, result)
+            return
+
+        # 5. 执行工具(工具内部自己处理 retry / clarify / pipeline)
         try:
             result = tool.execute(state, self._build_ctx(state, ctx_extra))
         except ClarificationRaised as e:
             yield from self._emit_clarification(e.questions)
             self._save_state(conv_id, state, None)
             return
+        except Exception as e:
+            # 失败回流(借鉴 CC 的错误回流):异常包装成 error_for_llm,
+            # 让下一轮 LLM 选择能感知"上次工具失败了、为什么"
+            result = ToolResult(error_for_llm=str(e), summary=f"工具执行失败: {e}")
 
-        # 5. 按 ToolResult 三态发 SSE
+        # 6. 按 ToolResult 状态发 SSE
         if result.needs_clarification:
             yield from self._emit_clarification(result.clarification_questions)
         else:
             yield from self._emit_result(tool, result)
 
-        # 6. 保存对话状态(artifact 进 state,summary 进历史)
+        # 7. 保存对话状态(artifact 进 state,summary 进历史,append-only)
         self._save_state(conv_id, state, result)
+
+        # 8. follow-up 预留(当前单步,工具可声明需要继续)
+        # if tool.requires_follow_up(result): → 下一轮循环(未来 Agent Loop 入口)
 
     def _select_tool(self, user_input, state) -> Tool:
         """调一次 LLM,从 registry 选一个工具。
@@ -326,24 +373,55 @@ class ToolDispatcher:
 
 ### 5.2 ConversationManager
 
-封装多轮 / 压缩 / 存储:
+封装多轮 / 压缩 / 存储。**借鉴 Claude Code**(附录 C):
 
 ```python
 # engine/conversation.py
 class ConversationManager:
-    def load(self, conv_id) -> dict: ...
-    def save(self, conv_id, state, result): ...
-    def should_compress(self, state) -> bool: ...
+    # ── 存储:append-only 事件流(对标 CC sessionStorage.ts 的 JSONL 模型)──
+    def append(self, conv_id, kind: str, payload: dict):
+        """只追加,不覆盖。kind ∈ {user, assistant, tool_result, compacted, checkpoint}。
+        崩溃恢复只需重放尾部,压缩也不删旧行而是写一条 compacted 条目。"""
+
+    def load(self, conv_id) -> dict:
+        """读取并重建状态。按 kind 分流:
+        - user/assistant/tool_result 按序重建 messages
+        - compacted 标记压缩点,其后为 keep-recent,其前为已压缩
+        - checkpoint 用于持久化 artifact 快照、active_tool 等
+        """
+
+    def save(self, conv_id, state, result):
+        """append 用户输入 + 工具产出(summary 标准化后)。
+        ToolResult.summary 入历史,ToolResult.extra 不入(借鉴 CC normalizeMessagesForAPI 的噪声剔除)。
+        artifact 写 checkpoint 条目(不进 messages,避免膨胀)。"""
+
+    def list_meta(self) -> list[SessionMeta]:
+        """列表页只读 SessionMeta(title/summary/updated_at),
+        不 JOIN messages(对标 CC lite reader 只读头尾 64KB)。"""
+
+    # ── 压缩:三级保护(对标 CC autoCompact.ts + compact.ts)──
+    def should_compress(self, state) -> bool:
+        """token > 有效窗口的 70%。有效窗口 = 总窗口 - 预留 Summary Token。"""
+
     def compress(self, state, tool: Tool) -> str:
-        """调 tool.summarize_artifact() 拿状态补偿,
-           调 LLM 把旧历史压成摘要,
-           keep-recent 最近 N 轮。"""
+        """调 tool.summarize_artifact() 拿状态补偿 → 调 LLM 摘要旧历史 →
+        保留最近 N 轮。失败时:
+        1) 熔断器:连续 3 次失败 → 120s 内不再尝试
+        2) PTL 防御:摘要本身超限 → 剥掉 20% 旧分组重试(最多 N 次)
+        """
+
+    # ── 动态上下文注入(对标 CC 的 session_guidance/scratchpad dynamic section)──
+    def dynamic_context(self, state) -> dict:
+        """返回当前会话的动态态(当前 artifact 摘要、压缩历史等),
+        供 prompt 装配时作为独立 section 注入,与静态 prompt 解耦。"""
 ```
 
 **机制归 Engine,内容归 pack**:
-- Engine 拥有:阈值判断、keep-recent、熔断器、调 LLM 摘要
+- Engine 拥有:append-only 存储、阈值判断、keep-recent、熔断器、PTL 防御、调 LLM 摘要、动态上下文注入
 - pack 提供:`tool.summarize_artifact(artifact)` 返回状态补偿文本
 - 压缩 prompt 模板由 pack 的 prompts 提供(因为要提"表单"还是"报表")
+
+**与现有 SQLite 的关系**:当前 `conversation_store.py` 用 conversations + messages 两表 + 覆盖式 save。迁移时 messages 表加 `kind` 列(支持 compacted/checkpoint),`save` 改成 `append` 序列;列表查询改走单独的 SessionMeta 视图。详见阶段 4。
 
 ### 5.3 StreamBridge
 
@@ -371,11 +449,15 @@ domains/njmind_form/
 │   ├── modify_form.py         # ModifyFormTool(CompositeTool)
 │   └── chat.py                # ChatTool(Tool)
 ├── prompts/
-│   ├── select.j2              # 工具选择 prompt(可选,有默认)
-│   ├── parse.j2               # 字段解析
+│   ├── _sections/             # 可复用 prompt 片段(对标 CC systemPromptSections)
+│   │   ├── intro.j2           #   角色定位("你是 njmind 表单助手")
+│   │   ├── field_types.j2     #   FIELD_TYPE_TABLE
+│   │   ├── output_rules.j2    #   JSON 输出格式约定
+│   │   └── safety.j2          #   注入防护提示
+│   ├── select.j2              # 工具选择 prompt(可选,Engine 有默认)
+│   ├── parse.j2               # 字段解析(引用 _sections)
 │   ├── generate.j2            # 配置组装
 │   ├── modify.j2              # 配置修改
-│   ├── validate.j2            # 校验后处理
 │   ├── chat.j2                # 闲聊
 │   └── compact.j2             # 压缩
 ├── adapters/
@@ -492,10 +574,12 @@ class ChatTool(Tool):
 ### 阶段 2:抽 Prompt
 
 1. 把 `prompt_builder.py` 的 4 套 prompt 拆成 `njmind_form/prompts/*.j2`
-2. 加载器:pack 提供 `_render(name, **vars)`,用 Jinja2 渲染
-3. 删除 `prompt_builder.py`(逻辑搬进工具的 `_step_*` 方法)
+2. **按 CC 的 section 模式组织**(附录 C.1 #4):静态片段放 `prompts/_sections/`(intro/field_types/output_rules/safety),工具 prompt 用 Jinja2 `{% include %}` 引用,动态内容(当前 artifact、压缩历史)作为独立 context 注入而非塞进模板变量
+3. 加载器:pack 提供 `_render(name, **vars)` 和 `_render_sections(names)`,支持段级缓存(可标记 `cacheable=False` 强制重算)
+4. **注入防护**(附录 C.1):pack 渲染的领域 prompt 视为 trusted;AssetClient 返回的模板/数据作为 user-role 或独立 section 注入,**绝不进 Jinja2 变量渲染**
+5. 删除 `prompt_builder.py`(逻辑搬进工具的 `_step_*` 方法)
 
-**交付**:prompt 全部进 pack,`prompt_builder.py` 消失。
+**交付**:prompt 全部进 pack,`prompt_builder.py` 消失,section 装配可用。
 
 ### 阶段 3:把管线搬进工具
 
@@ -503,19 +587,22 @@ class ChatTool(Tool):
 2. 把 `nodes.py` 的 `TYPE_TO_TEMPLATE`/`TYPE_NAMES` 挪到 `config.yaml`
 3. `graph.py` 的拓扑挪到 `CompositeTool.steps` + `run_pipeline`
 4. 实现 `ToolDispatcher._select_tool`,替换 `classify_intent_node`
-5. 切换 `/api/chat` 走 `ToolDispatcher` 而非旧 graph
+5. 加入执行拦截层(附录 C.1 #2):`validate_input` 在 `execute` 前调用,失败走 `error_for_llm` 回流
+6. 切换 `/api/chat` 走 `ToolDispatcher` 而非旧 graph
 
 **交付**:三意图变成三工具,Engine 通过 ToolDispatcher 调度,njmind 知识全部在 pack 内。
 
-### 阶段 4:清理与验证
+### 阶段 4:存储改造 + 清理 + 验证
 
-1. 删除 `graph.py`、`nodes.py`(已迁完)
-2. 压缩器内容钩子化:Engine 调 `tool.summarize_artifact()`
-3. SSE result payload 钩子化:Engine 调 `tool.format_result()`
-4. 验证架构试金石:`grep -rE "form|formCode|template" engine/` 应无结果
-5. 端到端回归:三个意图 + 压缩 + header 透传 + SSE
+1. **存储改 append-only**(附录 C.1 #5):`conversation_store.py` 的 messages 表加 `kind` 列(user/assistant/tool_result/compacted/checkpoint),`save` 改成 `append` 序列;新增 `SessionMeta` 视图供列表查询
+2. 删除 `graph.py`、`nodes.py`(已迁完)
+3. 压缩器升级(附录 C.1 #7/#8/#9):加 Summary Token 预留、PTL 防御、`dynamic_context` 状态重启补偿
+4. 压缩器内容钩子化:Engine 调 `tool.summarize_artifact()`
+5. SSE result payload 钩子化:Engine 调 `tool.format_result()`
+6. 验证架构试金石:`grep -rE "form|formCode|template" engine/` 应无结果
+7. 端到端回归:三个意图 + 压缩(含 PTL 防御)+ header 透传 + SSE + 会话恢复
 
-**交付**:Engine 零领域知识,迁移完成。
+**交付**:Engine 零领域知识,存储工业级,迁移完成。
 
 ### 各阶段验收
 
@@ -570,9 +657,12 @@ class ChatTool(Tool):
 | 风险 | 等级 | 对策 |
 |------|------|------|
 | 迁移期间双套代码混乱 | 高 | 绞杀者模式:每阶段旧代码先委托、后删除,从不同时存在两套实现 |
-| ToolDispatcher 的 LLM 选工具准确率 | 中 | 单步选择 + when 字段约束 + 兜底(选错时 tool.execute 抛错,Engine 转交用户) |
+| ToolDispatcher 的 LLM 选工具准确率 | 中 | 单步选择 + when 字段约束 + 兜底(选错时 `validate_input` 或 execute 失败,走 `error_for_llm` 回流让下轮自纠,对标 CC) |
 | 复合工具内部 retry/clarify 逻辑复杂 | 中 | `CompositeTool.run_pipeline` 提供 step 编排,ClarificationRaised 异常短路 |
 | pack 内 prompt 的 Jinja2 变量命名不统一 | 中 | 阶段 2 制定变量命名规范(user_input/history/artifact/guide 统一) |
+| **append-only 改造数据迁移风险** | 中 | 新增 `kind` 列默认值填充旧行;保留旧 `save` 方法做灰度,验证后切换;SQLite 事务保证原子 |
+| **压缩 PTL 防御误伤** | 低 | 剥洋葱有损,加日志告警;`MAX_PTL_RETRIES` 上限 3 次,超限停止并保留原始未压缩版本 |
+| **注入风险:上游返回的模板含恶意内容** | 低 | 注入防护原则(附录 C.1 #4):上游数据绝不进 Jinja2 变量渲染,只作为 user-role 独立 section |
 | 抽象过度:未来接的新领域不是"制品生成"型 | 低 | 先不为这个优化;Tool ABC 足够通用,SimpleTool 已覆盖非制品场景 |
 
 ## 十、不在本期范围
@@ -591,7 +681,11 @@ class ChatTool(Tool):
 - [ ] `domains/njmind_form/` 包含全部 njmind 业务知识
 - [ ] 写一个 `DummyTool` + `DummyPack` 能跑通端到端(证明 Engine 不绑 njmind)
 - [ ] 三个意图(create/modify/general)行为与改造前一致
-- [ ] 压缩、SSE、header 透传、对话存储全部工作
+- [ ] 压缩三级保护可用:70% 阈值触发 + 熔断器 + PTL 防御(附录 C.1 #7/#8/#10)
+- [ ] 压缩状态重启补偿生效:`tool.summarize_artifact` 内容注入下一轮,压缩后 LLM 不丢"在做什么"
+- [ ] append-only 存储验证:写 100 轮后崩溃重启,状态完整恢复
+- [ ] 工具失败回流:`error_for_llm` 能让下一轮 LLM 感知上次失败
+- [ ] SSE、header 透传、对话存储全部工作
 - [ ] `/api/chat` 接口对外不变(前端无感)
 - [ ] 现有测试全部通过(或等价改造后通过)
 
@@ -610,6 +704,11 @@ class ChatTool(Tool):
 | 调度 | 单步工具选择 | 多步 Agent Loop / 意图路由 | 单步可控,与现状平滑对应 |
 | 工具协议 | 自建轻量 Tool ABC | MCP-First | 上游是 REST 不是 MCP,绑 MCP 不可行 |
 | 迁移 | 绞杀者模式 | 大爆炸重写 | 生产系统不能停机 |
+| Tool 安全默认 | Fail-Closed | 默认安全 | 借鉴 CC,默认破坏性,pack 显式声明才安全 |
+| 工具执行 | 加 validate_input 拦截层 | 直调 execute | 借鉴 CC 六段 pipeline,留 hook/审计位 |
+| 存储模型 | append-only 事件流 | 覆盖式快照 | 借鉴 CC,崩溃只需重放尾部,压缩不丢原始 |
+| 压缩保护 | 三级(阈值+熔断+PTL) | 单一阈值 | 借鉴 CC,应对各种边界(附录 C.1 #7/#8/#10) |
+| Prompt 组织 | section 装配 | 单文件模板 | 借鉴 CC,段级缓存、注入隔离更清晰 |
 
 ## 附录 B:与 chat-bi 项目的对照
 
@@ -623,3 +722,70 @@ chat-bi 是参考过的多轮对话项目。本项目与它的差异:
 | 工具化 | 否(只有 SQL 一种制品) | 是(多种工具并存) |
 
 本项目的"复合工具"抽象是 chat-bi 没有的,因为 chat-bi 只有单一制品类型。
+
+## 附录 C:Claude Code 设计借鉴
+
+研读了 [claude-code-analysis](https://github.com/996Code/claude-code-analysis) 的架构总览、工具调用、Prompt 管理、会话存储、压缩、技能六个章节后,把可借鉴的设计点记录于此。每个点标注:CC 做法 → 落到本文档的位置 → 当前是否采纳。
+
+### C.1 已采纳(融入正文)
+
+| # | CC 设计 | 源码引用 | 落到本文档 | 价值 |
+|---|--------|---------|-----------|------|
+| 1 | **Tool 协议 Fail-Closed 默认值** | `src/Tool.ts:757` | 4.1 `Tool.is_destructive=True` | 防误用,默认破坏性需显式声明安全 |
+| 2 | **执行前六段 pipeline**(schema→validateInput→PreHooks→permission→call→PostHooks) | `services/tools/toolExecution.ts` | 5.1 `ToolDispatcher.run` 第 4 步 `validate_input` 拦截 | 把"校验"与"执行"分开,留 hook/审计位 |
+| 3 | **ToolResult 错误回流**(失败也化为文本回灌 LLM) | `query.ts` normalize | 4.1 `ToolResult.error_for_llm` + 5.1 except 分支 | 让下一轮选择能感知"上次失败了、为什么" |
+| 4 | **Prompt section 装配**(静态主干 + DYNAMIC_BOUNDARY + 动态段) | `constants/systemPromptSections.ts:483` | 6.1 `prompts/_sections/` 子目录 | 段间装配比整块模板更灵活、可缓存 |
+| 5 | **append-only 事件流存储**(只 insert 不覆盖,compacted 也追加) | `sessionStorage.ts:634,686` | 5.2 `ConversationManager.append/load/save` | 崩溃只需重放尾部,压缩不丢原始数据 |
+| 6 | **SessionMeta 轻量表**(列表只读头尾不 JOIN messages) | `sessionStoragePortable.ts:17` | 5.2 `list_meta()` | 列表页性能 |
+| 7 | **压缩预留 Summary Token**(20K) | `services/compact/autoCompact.ts:33` | 5.2 `should_compress` 有效窗口 | 压缩本身有预算,不会自己撑爆 |
+| 8 | **压缩 PTL 防御**(摘要本身超限时剥洋葱重试) | `services/compact/compact.ts:462` | 5.2 `compress` 失败处理 | 最后的救命稻草,有损但不锁死 |
+| 9 | **压缩状态重启补偿**(重新注入正在做的 plan/skill/文件) | `services/compact/compact.ts:517` | 5.2 `dynamic_context` + pack `summarize_artifact` | 压缩后不丢"在做什么" |
+| 10 | **熔断器**(连续失败停止) | `autoCompact.ts` MAX_CONSECUTIVE | 5.2 `compress` 熔断 | 已有,继续保留 |
+| 11 | **requires_follow_up 钩子**(默认 False,为多步留口) | Tool 接口 | 4.1 `Tool.requires_follow_up` | 当前单步,不焊死协议 |
+| 12 | **CompositeTool ≈ CC 的 Skill**(工作流+触发条件封装) | `main.tsx:158` | 4.1 CompositeTool 注释 | 概念对标,避免重新发明 |
+
+### C.2 延后考虑(记录但本期不做)
+
+| # | CC 设计 | 为什么延后 |
+|---|--------|-----------|
+| A | **Clarification 建模为内置 AskTool**(而非异常短路) | 当前 `ClarificationRaised` 异常更简单;等真有"追问可被 LLM 再选"的需求再改 |
+| B | **Tool 并行执行 + isConcurrencySafe** | 当前单步选择无并发;未来引入 Agent Loop 时再加 |
+| C | **Prompt section 级缓存**(以 pack+name 为 key) | 先用 Jinja2 简单实现;性能瓶颈出现再加缓存层 |
+| D | **Forked Agent 压缩 sidechain 独立存储** | 当前压缩在主链内完成;若压缩逻辑变复杂再隔离 |
+| E | **customSystemPrompt 替换 vs appendSystemPrompt 挂尾** | 当前只有 pack 一种来源;多来源混入时再区分 |
+
+### C.3 关键认知(影响整体设计)
+
+**1. Transcript 是唯一真理**
+
+CC 把一切运行状态(工具结果、计划、技能、用户输入)都化为文本回灌给模型。这印证了我们"单步选择"路线正确——我们甚至不让 LLM 填参数(参数从 state 抽取),比 CC 更保守,但同样遵守"状态文本化"。
+
+**2. 我们的简化是合理的**
+
+CC 是多步 Function Calling(`query.ts:351` 的 while 循环),我们刻意单步。理由:
+- 我们的领域(表单生成)是"一次调用一个工具"的语义,不需要 LLM 自由组合
+- 单步更可控、SSE 流式更简单、成本更低
+- `requires_follow_up` 钩子为未来留了口子,不在协议上焊死
+
+**3. Tool / Skill / Command 三分的启示**
+
+CC 区分三个概念:Tool(原子能力)、Skill(按触发条件编排工作流)、Command(用户直接 `/` 调用)。我们用 `Tool` + `CompositeTool` 二分表达同样的分层:
+- `Tool`(含 ChatTool)= CC 的 Tool
+- `CompositeTool`(含 CreateFormTool/ModifyFormTool)= CC 的 Skill
+- Command 暂不需要(没有用户直接调用的场景)
+
+未来 `CompositeTool.when` 可升级为结构化 trigger(关键词/状态谓词),提升 `_select_tool` 准确率。
+
+### C.4 我们与 CC 的根本差异
+
+| 维度 | Claude Code | 我们 |
+|------|-------------|------|
+| 定位 | 通用编程助手 | 领域工具助手(调上层系统能力) |
+| 上游能力 | 本地文件系统 + 任意 Shell 命令 | 远程 REST API(njmind modeler) |
+| 主循环 | 多步 Agent Loop | 单步工具选择 |
+| 工具来源 | 内建 + 用户目录 + MCP | Tool Pack(目前一个) |
+| 安全模型 | 需要权限系统(本地命令危险) | 信任上游 + header 透传 |
+| 持久化 | JSONL 文件 | SQLite(可改 append-only 模式) |
+
+CC 的设计是"最大灵活性的通用框架",我们的是"领域收敛的工具助手"。借鉴它的**工程细节**(Fail-Closed、append-only、压缩三级保护、错误回流),但**不照搬它的复杂度**(多步 loop、权限系统、MCP 生态)。
+
