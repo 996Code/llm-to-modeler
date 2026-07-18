@@ -1,6 +1,6 @@
 # 工具助手架构改造设计
 
-**状态**:草案待评审(v2 — 融入 Claude Code 设计借鉴,见附录 C)
+**状态**:草案待评审(v3 — 两轮多视角重读 claude-code-analysis,见附录 C/D)
 **日期**:2026-07-18
 **作者**:架构梳理
 
@@ -143,7 +143,17 @@ class ToolContext(BaseModel):
     forward_headers: dict        # 转发到上游的请求头
 
 class ToolResult(BaseModel):
-    """工具执行结果。"""
+    """工具执行结果。
+
+    三层设计(对标 CC task-notification,附录 D.1 #4):
+    - artifact: 不透明制品,Engine 从不读内部结构,只做传递/存储/让 pack 格式化
+    - summary: 标准化摘要,进 ConversationManager 历史,是压缩器处理的唯一对象
+    - extra: 领域自由扩展,不进历史(运行时噪声)
+
+    固化规则:CompositeTool 中间 step 产出(parse_fields、fetched_templates 等)
+    只活在 state 内,绝不进 ConversationManager——只有最终 summary 入历史。
+    这保证压缩器处理的永远是标准化 summary,不是工具内部噪声。
+    """
     artifact: Optional[dict] = None     # 不透明制品(Engine 不读内部)
     reply: Optional[str] = None         # 给用户的文本回复
     needs_clarification: bool = False
@@ -237,7 +247,13 @@ class CompositeTool(Tool):
 from abc import ABC, abstractmethod
 
 class AssetClient(ABC):
-    """资产来源的抽象。pack 用它取模板/schema/guide,不关心是 HTTP 还是本地。"""
+    """资产来源的抽象。pack 用它取模板/schema/guide,不关心是 HTTP 还是本地。
+
+    安全约定(附录 D.2):所有 get_* 方法返回的内容在进入 prompt 前
+    必须经过 Unicode 清洗(sdk.sanitize.sanitize_obj),防止上游数据
+    携带零宽字符/方向反转字符等隐写指令。HttpAssetClient 实现应在
+    返回前自动调用 sanitize_obj。
+    """
 
     @abstractmethod
     def get_template(self, name: str) -> dict: ...
@@ -562,14 +578,16 @@ class ChatTool(Tool):
 
 **交付**:目录结构 + ABC,无行为变化。
 
-### 阶段 1:抽 AssetClient
+### 阶段 1:抽 AssetClient + 安全清洗
 
 1. 把 `upstream_client.py` 的路径表挪到 `njmind_form/config.yaml`
 2. 实现 `HttpAssetClient`,委托给现有 `UpstreamClient`
-3. 让 pack 提供 `HttpAssetClient` 实例,Engine 通过 `ToolContext.asset_client` 注入
-4. 删除 `upstream_client.py` 里的路径常量
+3. **安全清洗(附录 D.1 #1)**:实现 `sdk/sanitize.py`(`sanitize_text` + `sanitize_obj`),HttpAssetClient 每个 get_* 方法返回前调 `sanitize_obj`,清除零宽字符/方向反转字符/PUA
+4. **连接复用(附录 D.5)**:HttpAssetClient 加连接 memoize + 超时控制
+5. 让 pack 提供 `HttpAssetClient` 实例,Engine 通过 `ToolContext.asset_client` 注入
+6. 删除 `upstream_client.py` 里的路径常量
 
-**交付**:上游路径全部进配置,AssetClient 抽象可用。
+**交付**:上游路径全部进配置,AssetClient 抽象可用,Unicode 隐写注入面已封堵。
 
 ### 阶段 2:抽 Prompt
 
@@ -581,28 +599,30 @@ class ChatTool(Tool):
 
 **交付**:prompt 全部进 pack,`prompt_builder.py` 消失,section 装配可用。
 
-### 阶段 3:把管线搬进工具
+### 阶段 3:把管线搬进工具 + 落库确认
 
 1. 实现 `CreateFormTool` / `ModifyFormTool` / `ChatTool`,内部 `execute` 调用当前 `nodes.py` 的节点函数(先不重写,只是搬位置)
 2. 把 `nodes.py` 的 `TYPE_TO_TEMPLATE`/`TYPE_NAMES` 挪到 `config.yaml`
 3. `graph.py` 的拓扑挪到 `CompositeTool.steps` + `run_pipeline`
 4. 实现 `ToolDispatcher._select_tool`,替换 `classify_intent_node`
-5. 加入执行拦截层(附录 C.1 #2):`validate_input` 在 `execute` 前调用,失败走 `error_for_llm` 回流
-6. 切换 `/api/chat` 走 `ToolDispatcher` 而非旧 graph
+5. 加入执行拦截层(附录 C.1 #2):`validate_input` 在 `execute` 前调用,失败走 `error_for_llm` 回流;persist 类工具的 validate_input 必须显式实现(附录 D.5)
+6. **落库前确认(附录 D.1 #5)**:persist 步骤前 emit `confirm` SSE 事件,用户确认才继续;ToolContext 支持 `dry_run` 跳过 persist 返回预览
+7. 切换 `/api/chat` 走 `ToolDispatcher` 而非旧 graph
 
-**交付**:三意图变成三工具,Engine 通过 ToolDispatcher 调度,njmind 知识全部在 pack 内。
+**交付**:三意图变成三工具,Engine 通过 ToolDispatcher 调度,njmind 知识全部在 pack 内,落库操作有确认环节。
 
-### 阶段 4:存储改造 + 清理 + 验证
+### 阶段 4:存储改造 + 日志安全 + 清理 + 验证
 
 1. **存储改 append-only**(附录 C.1 #5):`conversation_store.py` 的 messages 表加 `kind` 列(user/assistant/tool_result/compacted/checkpoint),`save` 改成 `append` 序列;新增 `SessionMeta` 视图供列表查询
-2. 删除 `graph.py`、`nodes.py`(已迁完)
-3. 压缩器升级(附录 C.1 #7/#8/#9):加 Summary Token 预留、PTL 防御、`dynamic_context` 状态重启补偿
-4. 压缩器内容钩子化:Engine 调 `tool.summarize_artifact()`
-5. SSE result payload 钩子化:Engine 调 `tool.format_result()`
-6. 验证架构试金石:`grep -rE "form|formCode|template" engine/` 应无结果
-7. 端到端回归:三个意图 + 压缩(含 PTL 防御)+ header 透传 + SSE + 会话恢复
+2. **日志 redact filter(附录 D.1 #2)**:实现 `engine/logging_filter.py`(RedactFilter,正则 redact Bearer/sk-/cookie),Engine 启动时挂载
+3. 删除 `graph.py`、`nodes.py`(已迁完)
+4. 压缩器升级(附录 C.1 #7/#8/#9 + D.1 #3):加 Summary Token 预留、PTL 防御、`dynamic_context` 状态重启补偿、**压缩后工具能力复灌**(重建 tool schema 注入)
+5. 压缩器内容钩子化:Engine 调 `tool.summarize_artifact()`
+6. SSE result payload 钩子化:Engine 调 `tool.format_result()`
+7. 验证架构试金石:`grep -rE "form|formCode|template" engine/` 应无结果
+8. 端到端回归:三个意图 + 压缩(含 PTL 防御 + 能力复灌)+ header 透传(日志不泄漏)+ 落库确认 + SSE + 会话恢复
 
-**交付**:Engine 零领域知识,存储工业级,迁移完成。
+**交付**:Engine 零领域知识,存储工业级,安全防护完整,迁移完成。
 
 ### 各阶段验收
 
@@ -657,12 +677,16 @@ class ChatTool(Tool):
 | 风险 | 等级 | 对策 |
 |------|------|------|
 | 迁移期间双套代码混乱 | 高 | 绞杀者模式:每阶段旧代码先委托、后删除,从不同时存在两套实现 |
+| **上游内容 Unicode 隐写注入**(附录 D.1 #1) | 高 | HttpAssetClient 返回前调 `sanitize_obj`(NFKC + 删零宽/方向反转字符) |
+| **日志泄漏 Authorization/cookie**(附录 D.1 #2) | 高 | Engine 启动挂 RedactFilter,正则 redact Bearer/sk-/cookie 模式 |
 | ToolDispatcher 的 LLM 选工具准确率 | 中 | 单步选择 + when 字段约束 + 兜底(选错时 `validate_input` 或 execute 失败,走 `error_for_llm` 回流让下轮自纠,对标 CC) |
 | 复合工具内部 retry/clarify 逻辑复杂 | 中 | `CompositeTool.run_pipeline` 提供 step 编排,ClarificationRaised 异常短路 |
 | pack 内 prompt 的 Jinja2 变量命名不统一 | 中 | 阶段 2 制定变量命名规范(user_input/history/artifact/guide 统一) |
-| **append-only 改造数据迁移风险** | 中 | 新增 `kind` 列默认值填充旧行;保留旧 `save` 方法做灰度,验证后切换;SQLite 事务保证原子 |
-| **压缩 PTL 防御误伤** | 低 | 剥洋葱有损,加日志告警;`MAX_PTL_RETRIES` 上限 3 次,超限停止并保留原始未压缩版本 |
-| **注入风险:上游返回的模板含恶意内容** | 低 | 注入防护原则(附录 C.1 #4):上游数据绝不进 Jinja2 变量渲染,只作为 user-role 独立 section |
+| **压缩后工具能力声明丢失**(附录 D.1 #3) | 中 | 压缩后 `buildPostCompactMessages` 等价物:重建 tool schema 注入下一轮 |
+| **落库操作无确认,误改上游数据**(附录 D.1 #5) | 中 | persist 前 emit `confirm` SSE,用户确认才继续;可选 dry_run 预览 |
+| append-only 改造数据迁移风险 | 中 | 新增 `kind` 列默认值填充旧行;保留旧 `save` 方法做灰度,验证后切换;SQLite 事务保证原子 |
+| 压缩 PTL 防御误伤 | 低 | 剥洋葱有损,加日志告警;`MAX_PTL_RETRIES` 上限 3 次,超限停止并保留原始未压缩版本 |
+| 注入风险:上游返回的模板含恶意内容 | 低 | 注入防护原则(附录 C.1 #4):上游数据绝不进 Jinja2 变量渲染,只作为 user-role 独立 section |
 | 抽象过度:未来接的新领域不是"制品生成"型 | 低 | 先不为这个优化;Tool ABC 足够通用,SimpleTool 已覆盖非制品场景 |
 
 ## 十、不在本期范围
@@ -682,8 +706,11 @@ class ChatTool(Tool):
 - [ ] 写一个 `DummyTool` + `DummyPack` 能跑通端到端(证明 Engine 不绑 njmind)
 - [ ] 三个意图(create/modify/general)行为与改造前一致
 - [ ] 压缩三级保护可用:70% 阈值触发 + 熔断器 + PTL 防御(附录 C.1 #7/#8/#10)
-- [ ] 压缩状态重启补偿生效:`tool.summarize_artifact` 内容注入下一轮,压缩后 LLM 不丢"在做什么"
+- [ ] 压缩状态重启补偿生效:`tool.summarize_artifact` 内容注入下一轮 + 工具能力复灌,压缩后 LLM 不丢"在做什么"和"有什么工具"
 - [ ] append-only 存储验证:写 100 轮后崩溃重启,状态完整恢复
+- [ ] **Unicode 清洗生效**:上游返回含零宽字符的模板,经 sanitize_obj 后干净(附录 D.1 #1)
+- [ ] **日志不泄漏凭证**:打印 forward_headers 时 Authorization/cookie 显示为 ***(附录 D.1 #2)
+- [ ] **落库有确认环节**:create/modify 在 persist 前 emit confirm,用户确认才落库;dry_run 模式可预览(附录 D.1 #5)
 - [ ] 工具失败回流:`error_for_llm` 能让下一轮 LLM 感知上次失败
 - [ ] SSE、header 透传、对话存储全部工作
 - [ ] `/api/chat` 接口对外不变(前端无感)
@@ -788,4 +815,148 @@ CC 区分三个概念:Tool(原子能力)、Skill(按触发条件编排工作流)
 | 持久化 | JSONL 文件 | SQLite(可改 append-only 模式) |
 
 CC 的设计是"最大灵活性的通用框架",我们的是"领域收敛的工具助手"。借鉴它的**工程细节**(Fail-Closed、append-only、压缩三级保护、错误回流),但**不照搬它的复杂度**(多步 loop、权限系统、MCP 生态)。
+
+## 附录 D:多视角重读发现(v3 补充)
+
+第二遍换了 5 个视角(安全/健壮性/编排/记忆/隔离)重读 claude-code-analysis 的另外 10 个章节(02-security / 03-privacy / 04d-mcp / 04e-sandbox / 04h-multi-agent / 04-agent-memory / 05-differentiators / 06-extra-findings / 06b-negative-keyword)。这一遍挖出的是**藏在工程细节里的小巧思**,和附录 C 的"大设计"互补。
+
+### D.1 必须补的(真实缺口,已在正文强化)
+
+| # | 发现 | 视角 | CC 源码 | 落到本文档 |
+|---|------|------|---------|-----------|
+| 1 | **Unicode 隐写清洗**——上游返回内容若含零宽字符(`\u200B-F`)、方向反转字符(`\u202A-E`)、BOM、PUA,可注入隐藏指令。CC 的 `partiallySanitizeUnicode` 循环 10 次 NFKC + 递归处理 JSON | 安全 | `utils/sanitization.ts` | D.2 / 4.2 AssetClient |
+| 2 | **日志层凭证 redact**——我们透传 Authorization/cookie,但任何 `logger.info` 或 traceback 都可能泄漏。CC 有 `SECRET_RULES` 扫描 30+ 规则 + `AnalyticsMetadata_I_VERIFIED_...` 类型签名约束 | 安全 | `teamMemorySync/secretScanner.ts`、`services/analytics/index.ts` | D.3 / 5.3 StreamBridge |
+| 3 | **压缩后能力复灌**——压缩历史后,工具能力声明(tool schema)要重新注入,否则 LLM 忘记自己有什么工具。CC 的 `buildPostCompactMessages` 重建 tool schema + 文件附件 | 健壮性 | `compact/compact.ts:517` | 5.2 ConversationManager.compress |
+| 4 | **工具内部 step 产出绝不进历史**——CompositeTool 中间 step(parse_fields、fetched_templates)只活在 state,只有最终 summary 入 ConversationManager。这是 task-notification 模式的核心,也是对 ToolResult 三层设计的强力背书 | 编排 | `04h L332-339` task-notification | 4.1 ToolResult 注释 + 5.2 save |
+| 5 | **落库前确认环节**——create_form/modify_form 真正改上游数据库,应在 validate 通过后、persist 前 emit `confirm` SSE 事件,用户确认才继续。这是 CC permission prompt 的等价物,比 dry-run 更轻 | 隔离 | `04e bashPermissions.ts:530` | D.4 / 6.2 CreateFormTool |
+
+### D.2 安全增强:Unicode 清洗 + 注入隔离(补 4.2 节)
+
+AssetClient 返回的所有上游内容(模板、schema、guide、validate 结果)在进入 prompt 前**必须经过清洗**:
+
+```python
+# sdk/sanitize.py(新增)
+MAX_UNICODE_ITERATIONS = 10
+
+def sanitize_text(text: str) -> str:
+    """清洗 Unicode 隐写(对标 CC partiallySanitizeUnicode)。
+    循环 NFKC 归一化 + 删除零宽/方向反转/BOM/PUA 字符。"""
+    for _ in range(MAX_UNICODE_ITERATIONS):
+        prev = text
+        text = unicodedata.normalize("NFKC", text)
+        text = text.translate(_INVISIBLE_CHARS)  # 零宽、方向反转、BOM、PUA
+        if text == prev:
+            break
+    return text
+
+def sanitize_obj(obj):
+    """递归清洗 dict/list/str(对标 CC recursivelySanitizeUnicode)。"""
+    ...
+```
+
+**接入点**:HttpAssetClient 的每个 get_* 方法在返回前调 `sanitize_obj`。pack 渲染 prompt 时,上游数据只作为 user-role 独立 section 注入,**绝不进 Jinja2 变量渲染**(附录 C.1 已述)。
+
+### D.3 安全增强:日志 redact filter(补 5.3 节)
+
+Engine 启动时挂一个 logging filter,自动 redact 敏感模式:
+
+```python
+# engine/logging_filter.py(新增)
+_SECRET_PATTERNS = [
+    (re.compile(r"(Bearer\s+)[^\s]+"), r"\1***"),
+    (re.compile(r"(sk-)[a-zA-Z0-9]{20,}"), r"\1***"),
+    # cookie 整体 redact
+    (re.compile(r"(cookie:\s*)[^\s]+", re.I), r"\1***"),
+]
+
+class RedactFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        for pat, repl in _SECRET_PATTERNS:
+            msg = pat.sub(repl, msg)
+        record.msg = msg
+        return True
+```
+
+**接入点**:Engine 初始化时 `logging.getLogger().addFilter(RedactFilter())`。这覆盖所有 `logger.info(f"... headers={forward_headers}")` 这类无意泄漏。
+
+### D.4 隔离增强:落库前确认(补 6.2/6.3 节)
+
+CompositeTool 的 `_step_validate` 通过后、`_step_persist` 前,插入确认环节:
+
+```python
+# CompositeTool 新增(补 4.1 节)
+class PersistConfirmed(Exception):
+    """落库前等待用户确认。Engine 转 confirm SSE,用户确认后重入。"""
+
+# CreateFormTool._step_persist
+def _step_persist(self, state, ctx):
+    if not state.get("_confirmed"):
+        ctx.emit("confirm", {
+            "action": "create",
+            "artifact_preview": state["artifact"],
+            "message": "即将创建表单,请确认"
+        })
+        raise PersistConfirmed()
+    ctx.asset_client.persist_artifact(state["artifact"], "create")
+```
+
+**Engine 侧**:收到 PersistConfirmed 后 emit confirm 事件,前端展示 artifact 预览 + 确认按钮;用户确认后带 `_confirmed=True` 重入同个工具(走会话状态标记,非新选择)。
+
+**dry-run 可选**:ToolContext 加 `dry_run: bool`,True 时 pipeline 跑到 validate 为止跳过 persist,artifact 直接返回前端预览。对 modify_form 特别有用(看 diff)。
+
+### D.5 健壮性增强(零散补丁)
+
+| 增强点 | CC 做法 | 落地位置 |
+|--------|---------|---------|
+| 迭代硬上限 | `MAX_ITERATIONS=10`、`MAX_INCLUDE_DEPTH=5` | JSON 解析器、CompositeTool.steps 上限(防 DoS) |
+| 并发原子提交 | `queuedContextModifiers` 收集后批次 apply | ConversationManager.append 批量化 |
+| HttpAssetClient 连接复用 | `connectToServer` memoize + 15min auth cache | 阶段 1 抽 AssetClient 时实现 |
+| Tool 资源预算声明 | Tool 接口可声明 max_llm_calls / max_steps | SDK 协议层(未来按需) |
+| persist 类 validate_input 非空 | 显式 deny 优先于 auto-allow | create_form/modify_form 的 validate_input 必须实现 |
+
+### D.6 明确不做的(诚实评估,防过度设计)
+
+这一遍也确认了一些**不该做**的,记录以防未来误引入:
+
+| 不做的事 | CC 做的原因 | 我们不做的原因 |
+|---------|------------|---------------|
+| 跨会话记忆(Auto/Agent/Team Memory) | CC 是长期协作同一代码库,用户偏好/项目知识收益高 | 我们是制品型工具,一次性任务;错误记忆持续污染成本 > 收益 |
+| OS 级沙箱(文件系统/网络隔离) | CC 让 LLM 执行任意本地 Shell 命令 | 我们不执行本地代码、不碰文件系统,只调远程 REST |
+| MCP 传输层/认证联邦 | CC 接入任意 MCP server,需协议对等联邦 | 上游是单一确定 REST,不是多 server 动态发现 |
+| 信号进控制流(负面关键词路由) | CC 刻意避免——`matchesNegativeKeyword` 只 logEvent,不改 prompt/不切模型 | 埋点保持纯观测,不喂回工具选择逻辑 |
+| Session Memory 独立层 | CC 作为 compact 的 SummaryMessage 缓存 | 我们已有 compact,Session Memory 是升级项非必需 |
+
+**判断原则**:CC 的很多机制是"通用编程助手"的产物(长期协作、本地执行、多 server 联邦)。我们是"领域工具助手"(一次性制品生成、远程 API、单一上游),借鉴**工程细节**但**不照搬场景复杂度**。
+
+### D.7 对已有设计的验证(这一遍的额外收获)
+
+重读也**验证了**我们已有设计的正确性:
+
+1. **ToolResult 三层设计(artifact/summary/extra)得到强力背书**——这正是 CC task-notification 的 Python 表达。子 agent 长输出只写 sidechain,主 agent 只收 summary + result。
+2. **单步选择的简化是合理的**——CC 的负面关键词分析揭示它刻意不在热路径用 LLM 做分类(用廉价正则)。我们连分类都不做(单步选工具),更彻底。
+3. **CompositeTool ≈ CC subagent**——上下文隔离、结果标准化回流、嵌套禁止,这些原则我们已部分体现,可进一步固化。
+4. **append-only + PTL 防御**——CC 的 compact 失败保护与我们的设计完全同向,这一遍补了"压缩后能力复灌"这个遗漏点。
+
+### D.8 阅读覆盖度
+
+| 章节 | 行数 | 第一遍 | 第二遍 |
+|------|------|--------|--------|
+| 01-architecture-overview | 531 | ✓ 架构 | — |
+| 02-security-analysis | 586 | — | ✓ 安全 |
+| 03-privacy-avoidance | 157 | — | ✓ 安全 |
+| 04-agent-memory | 878 | — | ✓ 记忆 |
+| 04b-tool-call-implementation | 393 | ✓ 工具调用 | — |
+| 04c-skills-implementation | 261 | ✓ 技能 | — |
+| 04d-mcp-implementation | 297 | — | ✓ 编排 |
+| 04e-sandbox-implementation | 826 | — | ✓ 隔离 |
+| 04f-context-management | 195 | ✓ 压缩 | — |
+| 04g-prompt-management | 789 | ✓ Prompt | — |
+| 04h-multi-agent | 922 | — | ✓ 编排 |
+| 04i-session-storage-resume | 757 | ✓ 存储 | — |
+| 05-differentiators | 306 | — | ✓ 健壮性 |
+| 06-extra-findings | 318 | — | ✓ 健壮性 |
+| 06b-negative-keyword | 474 | — | ✓ 健壮性 |
+
+两遍合计覆盖 15 个章节、约 7900 行。剩余章节(07 代码索引、08 竞品对比、09 总结、10 文件树、11 彩蛋)为参考性内容,不影响架构决策。
 
