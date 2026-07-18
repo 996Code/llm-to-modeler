@@ -99,16 +99,41 @@ def _load_history(request: Request, conv_id: Optional[str]) -> List[Dict[str, st
 
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
-    """Unified chat entry — backend classifies intent automatically.
+    """Unified chat entry - backend classifies intent automatically.
 
-    Loads conversation history + current_config from store, lets the
-    workflow decide create/modify/general. Frontend just sends message.
+    阶段 3:如果 app.state.dispatcher 存在(USE_NEW_ARCHITECTURE=1),
+    走新架构 ToolDispatcher;否则走旧 LangGraph。
     """
-    workflow = request.app.state.workflow
-    history = _load_history(request, req.conversation_id)
+    dispatcher = getattr(request.app.state, "dispatcher", None)
     current_config = _load_current_config(request, req.conversation_id)
+    history = _load_history(request, req.conversation_id)
     fwd = _extract_forward_headers(request)
 
+    if dispatcher is not None:
+        # 新架构:ToolDispatcher
+        from engine.stream import stream_dispatcher
+
+        async def stream():
+            async for event in stream_dispatcher(
+                dispatcher=dispatcher,
+                user_input=req.message,
+                conversation_id=req.conversation_id,
+                user_id=request.headers.get("X-User-Id", ""),
+                conversation_store=request.app.state.conversation_store,
+                conversation_history=history,
+                current_config=current_config,
+                forward_headers=fwd,
+            ):
+                yield event
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # 旧架构:LangGraph
+    workflow = request.app.state.workflow
     async def stream():
         async for event in stream_workflow(
             workflow=workflow,

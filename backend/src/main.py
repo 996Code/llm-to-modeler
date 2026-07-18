@@ -52,6 +52,30 @@ async def lifespan(app: FastAPI):
     workflow = FormConfigWorkflow(upstream, llm_client)
     app.state.workflow = workflow
 
+    # 新架构:ToolDispatcher(阶段 3)
+    # 通过环境变量 USE_NEW_ARCHITECTURE=1 切换到新架构
+    use_new_arch = os.getenv("USE_NEW_ARCHITECTURE", "0") == "1"
+    if use_new_arch:
+        try:
+            from domains.njmind_form.pack import create_registry, create_prompt_loader
+            from engine.dispatcher import ToolDispatcher
+
+            registry = create_registry()
+            prompt_loader = create_prompt_loader()
+            dispatcher = ToolDispatcher(
+                registry=registry,
+                llm_client=llm_client,
+                conversation_store=None,  # 阶段 4 接 ConversationManager
+                prompt_loader=prompt_loader,
+            )
+            app.state.dispatcher = dispatcher
+            logger.info("New architecture (ToolDispatcher) enabled")
+        except Exception as e:
+            logger.warning(f"Failed to init ToolDispatcher, fallback to old graph: {e}")
+            app.state.dispatcher = None
+    else:
+        app.state.dispatcher = None
+
     # Conversation store (SQLite)
     import os
     db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
