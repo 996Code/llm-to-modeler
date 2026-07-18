@@ -64,12 +64,65 @@ class ClarificationRaised(Exception):
         self.questions = questions
 
 
-# 以下在本 Task 暂不实现(下个 Task),先占位避免 import 错
 class Tool(ABC):
-    """工具基类。下个 Task 实现。"""
-    pass
+    """工具基类。对标 Claude Code 的 Tool 协议(src/Tool.ts)。
+
+    设计原则(借鉴 CC):
+    - Fail-Closed 默认值:安全相关属性默认保守,避免误用
+    - 安全声明与执行分离:check_permissions / validate_input 先于 execute
+    """
+    name: str                     # 工具名,LLM 选择时看到
+    description: str              # 工具说明
+    when: str                     # "何时用"短描述(填进选择 prompt)
+
+    # ── 安全声明(Fail-Closed,借鉴 CC Tool.ts:757)──
+    is_destructive: bool = True   # 默认破坏性,需 pack 显式声明 False 才认为安全
+    is_read_only: bool = False
+    # ── 并发安全声明(C.2-B:借鉴 CC isConcurrencySafe)──
+    is_concurrency_safe: bool = False
+
+    @abstractmethod
+    def input_schema(self) -> dict:
+        """JSON Schema,描述这个工具需要的参数(从 state 抽取)。"""
+
+    @abstractmethod
+    def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
+        """执行工具。可中途 emit progress,可抛 ClarificationRaised(兼容)。"""
+
+    def validate_input(self, state: dict) -> Optional[str]:
+        """语义校验(比 JSON Schema 更严格)。返回错误文本或 None。
+        默认 None=通过。Engine 在 execute 前调用,失败则跳过 execute、
+        把错误写进 ToolResult.error_for_llm 回流给下一轮选择。"""
+        return None
+
+    def requires_follow_up(self, result: ToolResult) -> bool:
+        """工具执行后是否需要 Engine 再做一轮选择。默认 False。
+        未来引入 Agent Loop 时,工具可声明"我做完但还需要继续判断"。"""
+        return False
+
+    def summarize_artifact(self, artifact: dict) -> str:
+        """给压缩器用:从制品提取状态补偿文本。默认空。"""
+        return ""
+
+    def title_for(self, artifact: dict) -> str:
+        """给对话列表用:从制品生成标题。默认空。"""
+        return ""
 
 
 class CompositeTool(Tool):
-    """复合工具基类。下个 Task 实现。"""
-    pass
+    """复合工具基类:内部有多步 pipeline。对标 CC 的 Skill——
+    "封装一个工作流 + 声明触发条件"。
+
+    run_pipeline 顺序执行 steps:
+    - 每个 step 对应 _step_<name>(state, ctx) 方法
+    - step 内可抛 ClarificationRaised → 立即上抛,Engine 转成 SSE
+    - step 内可重跑前序 step 实现 retry(如 validate 失败重跑 generate)
+    - 每个 step 自动 emit 一个 stage 事件
+    """
+    steps: list[str] = []
+
+    def run_pipeline(self, state: dict, ctx: ToolContext) -> None:
+        for step_name in self.steps:
+            ctx.emit("stage", step_name)
+            method = getattr(self, f"_step_{step_name}")
+            method(state, ctx)
