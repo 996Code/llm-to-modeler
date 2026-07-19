@@ -33,6 +33,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 挂载 RedactFilter 到 root logger(日志凭证脱敏)
+from engine.logging_filter import install_redact_filter
+install_redact_filter()  # 挂到 root logger,所有子 logger 继承
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
