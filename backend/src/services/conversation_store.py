@@ -1,26 +1,40 @@
+"""ConversationStore - SQLite 持久化(append-only 事件流)。
+
+阶段 4 重建:
+- 旧 conversations/messages 表 RENAME 为 _legacy_ 留档(不迁移数据)
+- 新建 events 表(append-only,含 kind 列)
+- 新建 session_meta 表(列表查询,不 JOIN events)
+
+events.kind 取值:
+- user: 用户输入
+- assistant: 助手回复
+- tool_result: 工具产出(summary 标准化后)
+- compacted: 压缩点标记
+- compact_trace: 压缩轨迹(审计用)
+- checkpoint: artifact 快照
+- ask: pending_ask 现场
+
+保留旧 API(create_conversation/list_conversations/get_conversation/add_message 等)
+以兼容现有 api/conversations.py 和 api/config.py,但内部改用 events 表。
 """
-Conversation Store — SQLite persistence for chat history.
-
-Tables:
-  conversations (id, user_id, title, current_config, created_at, updated_at)
-  messages (id, conversation_id, role, content, config_snapshot, created_at)
-
-No login — user_id is passed from upstream system via headers.
-"""
-
 import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
+def _now() -> str:
+    """获取当前 UTC 时间 ISO 字符串(使用 timezone-aware)。"""
+    return datetime.now(timezone.utc).isoformat()
+
+
 class ConversationStore:
-    """SQLite-backed conversation and message storage."""
+    """SQLite-backed conversation storage (append-only event stream)."""
 
     def __init__(self, db_path: str = "data/conversations.db"):
         self.db_path = Path(db_path)
@@ -35,30 +49,57 @@ class ConversationStore:
         return conn
 
     def _init_db(self):
+        """初始化数据库:迁移旧表 + 创建新表。"""
         with self._get_conn() as conn:
+            # 1. 检测旧表,RENAME 为 _legacy_ 留档(不导入数据)
+            self._migrate_legacy_tables(conn)
+
+            # 2. 创建新表(append-only 事件流)
             conn.executescript("""
-                CREATE TABLE IF NOT EXISTS conversations (
+                CREATE TABLE IF NOT EXISTS events (
                     id TEXT PRIMARY KEY,
+                    conv_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_conv ON events(conv_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_events_kind ON events(conv_id, kind);
+
+                CREATE TABLE IF NOT EXISTS session_meta (
+                    conv_id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
                     title TEXT DEFAULT '',
+                    summary TEXT DEFAULT '',
                     current_config TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS messages (
-                    id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    config_snapshot TEXT,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, updated_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_meta_user ON session_meta(user_id, updated_at DESC);
             """)
 
-    # ── Conversations ──────────────────────────────────────────
+    def _migrate_legacy_tables(self, conn: sqlite3.Connection):
+        """旧表 RENAME 为 _legacy_ 留档,不导入数据。"""
+        # 检查旧 conversations 表是否存在
+        try:
+            conn.execute("SELECT 1 FROM conversations LIMIT 1")
+            has_legacy_conv = True
+        except sqlite3.OperationalError:
+            has_legacy_conv = False
+
+        if has_legacy_conv:
+            logger.info("Migrating legacy tables: RENAME to _legacy_* (no data import)")
+            try:
+                conn.execute("ALTER TABLE messages RENAME TO _legacy_messages")
+            except sqlite3.OperationalError:
+                pass  # 已迁移
+            try:
+                conn.execute("ALTER TABLE conversations RENAME TO _legacy_conversations")
+            except sqlite3.OperationalError:
+                pass
+            logger.info("Legacy tables renamed: _legacy_conversations, _legacy_messages")
+
+    # ── Conversations(session_meta 表) ─────────────────────────
 
     def create_conversation(
         self,
@@ -67,30 +108,32 @@ class ConversationStore:
     ) -> Dict[str, Any]:
         """Create a new conversation."""
         conv_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = _now()
         with self._get_conn() as conn:
             conn.execute(
-                "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO session_meta (conv_id, user_id, title, summary, created_at, updated_at) VALUES (?, ?, ?, '', ?, ?)",
                 (conv_id, user_id, title, now, now),
             )
+            # 同时写一条 events(kind=checkpoint)记录会话创建
+            self._append_event(conn, conv_id, "checkpoint", {"action": "created"})
         return {"id": conv_id, "userId": user_id, "title": title, "createdAt": now}
 
     def list_conversations(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """List conversations for a user, newest first."""
+        """List conversations for a user, newest first. 只查 session_meta。"""
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                "SELECT * FROM session_meta WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()
 
         result = []
         for r in rows:
             item = dict(r)
-            item["currentConfig"] = json.loads(item.pop("current_config")) if item.get("current_config") else None
+            current_config = json.loads(item["current_config"]) if item.get("current_config") else None
             result.append({
-                "id": item["id"],
+                "id": item["conv_id"],
                 "title": item["title"] or "新对话",
-                "currentConfig": item.get("currentConfig"),
+                "currentConfig": current_config,
                 "createdAt": item["created_at"],
                 "updatedAt": item["updated_at"],
             })
@@ -99,48 +142,52 @@ class ConversationStore:
     def get_conversation(self, conv_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """Get a conversation with all messages. Validates user ownership."""
         with self._get_conn() as conn:
-            conv = conn.execute(
-                "SELECT * FROM conversations WHERE id = ? AND user_id = ?",
+            meta = conn.execute(
+                "SELECT * FROM session_meta WHERE conv_id = ? AND user_id = ?",
                 (conv_id, user_id),
             ).fetchone()
-
-            if not conv:
+            if not meta:
                 return None
 
-            msg_rows = conn.execute(
-                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+            # 从 events 表重建 messages(user/assistant/tool_result)
+            event_rows = conn.execute(
+                """SELECT * FROM events WHERE conv_id = ? AND kind IN ('user', 'assistant', 'tool_result')
+                   ORDER BY created_at ASC""",
                 (conv_id,),
             ).fetchall()
 
-        conv = dict(conv)
+        meta = dict(meta)
+        current_config = json.loads(meta["current_config"]) if meta.get("current_config") else None
         messages = []
-        for m in msg_rows:
-            m = dict(m)
+        for r in event_rows:
+            r = dict(r)
+            payload = json.loads(r["payload"])
             messages.append({
-                "id": m["id"],
-                "role": m["role"],
-                "content": m["content"],
-                "configSnapshot": json.loads(m["config_snapshot"]) if m.get("config_snapshot") else None,
-                "createdAt": m["created_at"],
+                "id": r["id"],
+                "role": payload.get("role", r["kind"]),
+                "content": payload.get("content", ""),
+                "configSnapshot": payload.get("config_snapshot"),
+                "createdAt": r["created_at"],
             })
 
         return {
-            "id": conv["id"],
-            "title": conv["title"] or "新对话",
-            "currentConfig": json.loads(conv["current_config"]) if conv.get("current_config") else None,
+            "id": meta["conv_id"],
+            "title": meta["title"] or "新对话",
+            "currentConfig": current_config,
             "messages": messages,
-            "createdAt": conv["created_at"],
-            "updatedAt": conv["updated_at"],
+            "createdAt": meta["created_at"],
+            "updatedAt": meta["updated_at"],
         }
 
     def delete_conversation(self, conv_id: str, user_id: str) -> bool:
         """Delete a conversation. Validates user ownership."""
         with self._get_conn() as conn:
             cursor = conn.execute(
-                "DELETE FROM conversations WHERE id = ? AND user_id = ?",
+                "DELETE FROM session_meta WHERE conv_id = ? AND user_id = ?",
                 (conv_id, user_id),
             )
-            conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conv_id,))
+            # events 也删除(级联)
+            conn.execute("DELETE FROM events WHERE conv_id = ?", (conv_id,))
             return cursor.rowcount > 0
 
     def update_conversation_config(
@@ -150,30 +197,30 @@ class ConversationStore:
         title: Optional[str] = None,
     ):
         """Update conversation's current config and optionally title."""
-        now = datetime.utcnow().isoformat()
+        now = _now()
         config_json = json.dumps(config, ensure_ascii=False)
         with self._get_conn() as conn:
             if title:
                 conn.execute(
-                    "UPDATE conversations SET current_config = ?, title = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE session_meta SET current_config = ?, title = ?, updated_at = ? WHERE conv_id = ?",
                     (config_json, title, now, conv_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE conversations SET current_config = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE session_meta SET current_config = ?, updated_at = ? WHERE conv_id = ?",
                     (config_json, now, conv_id),
                 )
 
     def touch_conversation(self, conv_id: str):
         """Update the conversation's updated_at timestamp."""
-        now = datetime.utcnow().isoformat()
+        now = _now()
         with self._get_conn() as conn:
             conn.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                "UPDATE session_meta SET updated_at = ? WHERE conv_id = ?",
                 (now, conv_id),
             )
 
-    # ── Messages ───────────────────────────────────────────────
+    # ── Messages(events 表,append-only) ───────────────────────
 
     def add_message(
         self,
@@ -182,19 +229,23 @@ class ConversationStore:
         content: str,
         config_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Add a message to a conversation."""
+        """Add a message to a conversation. 只 INSERT,不 UPDATE(append-only)。"""
         msg_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
-        config_json = json.dumps(config_snapshot, ensure_ascii=False) if config_snapshot else None
+        now = _now()
+
+        # kind 映射:role -> event kind
+        kind = "user" if role == "user" else "assistant"
+        payload = {
+            "role": role,
+            "content": content,
+            "config_snapshot": config_snapshot,
+        }
 
         with self._get_conn() as conn:
+            self._append_event(conn, conv_id, kind, payload, msg_id, now)
+            # 更新 session_meta 的 updated_at
             conn.execute(
-                """INSERT INTO messages (id, conversation_id, role, content, config_snapshot, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (msg_id, conv_id, role, content, config_json, now),
-            )
-            conn.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                "UPDATE session_meta SET updated_at = ? WHERE conv_id = ?",
                 (now, conv_id),
             )
 
@@ -207,21 +258,122 @@ class ConversationStore:
         }
 
     def get_messages(self, conv_id: str) -> List[Dict[str, Any]]:
-        """Get all messages for a conversation."""
+        """Get all messages for a conversation. 从 events 表重建。"""
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC",
+                """SELECT * FROM events WHERE conv_id = ? AND kind IN ('user', 'assistant')
+                   ORDER BY created_at ASC""",
                 (conv_id,),
             ).fetchall()
 
         result = []
         for r in rows:
             r = dict(r)
+            payload = json.loads(r["payload"])
             result.append({
                 "id": r["id"],
-                "role": r["role"],
-                "content": r["content"],
-                "configSnapshot": json.loads(r["config_snapshot"]) if r.get("config_snapshot") else None,
+                "role": payload.get("role", r["kind"]),
+                "content": payload.get("content", ""),
+                "configSnapshot": payload.get("config_snapshot"),
                 "createdAt": r["created_at"],
             })
         return result
+
+    # ── Append-only 事件流 API(新) ─────────────────────────────
+
+    def _append_event(
+        self,
+        conn: sqlite3.Connection,
+        conv_id: str,
+        kind: str,
+        payload: Dict[str, Any],
+        event_id: Optional[str] = None,
+        created_at: Optional[str] = None,
+    ) -> str:
+        """内部方法:追加一条事件(只 INSERT)。"""
+        event_id = event_id or str(uuid.uuid4())
+        created_at = created_at or _now()
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        conn.execute(
+            "INSERT INTO events (id, conv_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+            (event_id, conv_id, kind, payload_json, created_at),
+        )
+        return event_id
+
+    def append_event(
+        self,
+        conv_id: str,
+        kind: str,
+        payload: Dict[str, Any],
+    ) -> str:
+        """公开方法:追加一条事件(append-only)。
+
+        kind ∈ {user, assistant, tool_result, compacted, compact_trace, checkpoint, ask}
+        """
+        with self._get_conn() as conn:
+            event_id = self._append_event(conn, conv_id, kind, payload)
+            conn.execute(
+                "UPDATE session_meta SET updated_at = ? WHERE conv_id = ?",
+                (_now(), conv_id),
+            )
+        return event_id
+
+    def load_events(
+        self,
+        conv_id: str,
+        kinds: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """加载事件(按 kind 过滤,按时间排序)。"""
+        with self._get_conn() as conn:
+            if kinds:
+                placeholders = ",".join("?" * len(kinds))
+                rows = conn.execute(
+                    f"SELECT * FROM events WHERE conv_id = ? AND kind IN ({placeholders}) ORDER BY created_at ASC",
+                    (conv_id, *kinds),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM events WHERE conv_id = ? ORDER BY created_at ASC",
+                    (conv_id,),
+                ).fetchall()
+
+        result = []
+        for r in rows:
+            r = dict(r)
+            result.append({
+                "id": r["id"],
+                "conv_id": r["conv_id"],
+                "kind": r["kind"],
+                "payload": json.loads(r["payload"]),
+                "created_at": r["created_at"],
+            })
+        return result
+
+    def load_pending_ask(self, conv_id: str) -> Optional[Dict[str, Any]]:
+        """加载 pending_ask(最近一条 kind=ask 事件)。"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM events WHERE conv_id = ? AND kind = 'ask' ORDER BY created_at DESC LIMIT 1",
+                (conv_id,),
+            ).fetchone()
+        if not row:
+            return None
+        r = dict(row)
+        return {
+            "id": r["id"],
+            "payload": json.loads(r["payload"]),
+            "created_at": r["created_at"],
+        }
+
+    def clear_pending_ask(self, conv_id: str) -> None:
+        """清除 pending_ask(删除 kind=ask 事件)。
+
+        注:append-only 原则上不删除,但 pending_ask 是临时状态,
+        清除后写一条 kind=checkpoint 标记"追问已解决"。
+        """
+        with self._get_conn() as conn:
+            conn.execute(
+                "DELETE FROM events WHERE conv_id = ? AND kind = 'ask'",
+                (conv_id,),
+            )
+            self._append_event(conn, conv_id, "checkpoint", {"action": "ask_resolved"})
