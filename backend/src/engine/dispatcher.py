@@ -34,7 +34,8 @@ class ToolDispatcher:
     ):
         self._registry = registry
         self._llm_client = llm_client
-        self._conversation_store = conversation_store
+        self._conversation_store = conversation_store  # 兼容旧字段名
+        self._conversation = conversation_store  # ConversationManager(新 API)
         self._prompt_loader = prompt_loader
         self._asset_client = asset_client  # 注入或延迟创建
         self._max_clarify_rounds = 3
@@ -65,6 +66,12 @@ class ToolDispatcher:
         """
         if emit is None:
             emit = lambda *a, **k: None  # noqa
+
+        # 0. 追问恢复:如果有 pending_ask 且本次带了 answers,重跑工具
+        if self._conversation and answers and conv_id:
+            pending = self._conversation.load_pending_ask(conv_id)
+            if pending:
+                return self._resume_ask(pending, answers, conv_id, emit)
 
         # 1. 构建 state
         state = {
@@ -115,6 +122,93 @@ class ToolDispatcher:
             return ToolResult(
                 error_for_llm=str(e),
                 summary=f"工具执行失败: {e}",
+            )
+
+        # 6. 追问持久化:工具产出 ask -> 存 pending_ask
+        if result.ask is not None and self._conversation and conv_id:
+            self._conversation.save_pending_ask(
+                conv_id=conv_id,
+                tool_name=tool.name,
+                ask_spec=result.ask.model_dump(),
+                round_num=1,
+            )
+
+        return result
+
+    def _resume_ask(
+        self,
+        pending: dict,
+        answers: dict,
+        conv_id: str,
+        emit: Callable,
+    ) -> ToolResult:
+        """追问恢复:带着 answers 重跑工具。
+
+        Args:
+            pending: load_pending_ask 返回的 dict(payload 含 tool/ask/round)
+            answers: 用户的回答
+            conv_id: 会话 ID
+            emit: SSE emit 回调
+        """
+        payload = pending.get("payload", pending)  # 兼容两种格式
+        tool_name = payload.get("tool", "")
+        round_num = payload.get("round", 1) + 1
+
+        # 追问重跑上限
+        if round_num > self._max_clarify_rounds:
+            logger.warning(f"Clarify round exceeded max ({self._max_clarify_rounds})")
+            if self._conversation:
+                self._conversation.clear_pending_ask(conv_id)
+            return ToolResult(
+                error_for_llm="追问轮数超限,请重新描述需求",
+                summary="追问超限",
+            )
+
+        tool = self._registry.get(tool_name)
+        if tool is None:
+            logger.warning(f"Resume ask: tool '{tool_name}' not found")
+            if self._conversation:
+                self._conversation.clear_pending_ask(conv_id)
+            return ToolResult(
+                error_for_llm=f"工具 {tool_name} 不存在",
+                summary="追问恢复失败",
+            )
+
+        # 构建 state(含 answers)
+        state = {
+            "user_input": "",  # 重跑时不重新选工具
+            "clarify_answers": answers,
+            "conversation_id": conv_id,
+        }
+        ctx = self._build_ctx(state, emit)
+
+        # 清除旧 pending_ask,执行工具
+        if self._conversation:
+            self._conversation.clear_pending_ask(conv_id)
+
+        try:
+            result = tool.execute(state, ctx)
+        except ClarificationRaised as e:
+            result = ToolResult(
+                ask=AskSpec(questions=[
+                    AskQuestion(question=q, header="追问", options=[])
+                    for q in e.questions
+                ])
+            )
+        except Exception as e:
+            logger.exception(f"Resume ask tool {tool_name} failed")
+            return ToolResult(
+                error_for_llm=str(e),
+                summary=f"追问重跑失败: {e}",
+            )
+
+        # 如果仍然 ask,更新 pending_ask(round 递增)
+        if result.ask is not None and self._conversation:
+            self._conversation.save_pending_ask(
+                conv_id=conv_id,
+                tool_name=tool_name,
+                ask_spec=result.ask.model_dump(),
+                round_num=round_num,
             )
 
         return result
