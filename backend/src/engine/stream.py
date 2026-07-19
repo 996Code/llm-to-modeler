@@ -1,7 +1,6 @@
 """SSE 桥接 - 把 ToolDispatcher 的执行桥接到 SSE 流。
 
-新增 stream_dispatcher:走新架构(ToolDispatcher)的 SSE 流。
-保留 stream_workflow:旧架构(LangGraph)的 SSE 流(阶段 4 删除)。
+stream_dispatcher:走 ToolDispatcher 的 SSE 流(新架构)。
 """
 import asyncio
 import logging

@@ -21,13 +21,13 @@ from mcp.server.fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 
-def create_mcp_server(upstream, workflow):
+def create_mcp_server(upstream, dispatcher=None):
     """
     Create MCP server with tools and resources.
 
     Args:
         upstream: UpstreamClient instance
-        workflow: FormConfigWorkflow instance
+        dispatcher: ToolDispatcher instance(新架构,替代旧 workflow)
     """
     mcp = FastMCP("llm-form-modeler")
 
@@ -45,16 +45,19 @@ def create_mcp_server(upstream, workflow):
         Returns:
             Generated FormConfig JSON string.
         """
-        result = workflow.run(user_input=description)
-        config = result.current_config
-        if not config:
-            return json.dumps({"error": "Failed to generate config"}, ensure_ascii=False)
+        if not dispatcher:
+            return json.dumps({"error": "Dispatcher not configured"}, ensure_ascii=False)
 
-        return json.dumps({
-            "config": config,
-            "valid": len(result.validation_errors) == 0,
-            "errors": result.validation_errors,
-        }, ensure_ascii=False, indent=2)
+        result = dispatcher.run(user_input=description, conv_id="mcp")
+        if result.artifact:
+            return json.dumps({
+                "config": result.artifact,
+                "valid": len(result.extra.get("validation_errors", [])) == 0,
+                "errors": result.extra.get("validation_errors", []),
+            }, ensure_ascii=False, indent=2)
+        elif result.error_for_llm:
+            return json.dumps({"error": result.error_for_llm}, ensure_ascii=False)
+        return json.dumps({"error": "No config generated"}, ensure_ascii=False)
 
     @mcp.tool()
     def validate_form(config: str, mode: str = "CREATE") -> str:

@@ -1,9 +1,10 @@
 """
 Config API Router
 
-POST /api/config/generate  → SSE stream (natural language → FormConfig, CREATE pipeline)
-POST /api/config/modify    → SSE stream (modify existing config, MODIFY pipeline)
-POST /api/config/validate  → sync (validate via upstream)
+POST /api/config/chat     -> SSE stream (统一入口,ToolDispatcher 选工具)
+POST /api/config/generate -> [DEPRECATED] 转发到 /chat
+POST /api/config/modify   -> [DEPRECATED] 转发到 /chat
+POST /api/config/validate -> sync (validate via upstream)
 """
 
 import logging
@@ -12,8 +13,6 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-
-from src.api.sse import stream_workflow
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/config", tags=["config"])
@@ -99,50 +98,26 @@ def _load_history(request: Request, conv_id: Optional[str]) -> List[Dict[str, st
 
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
-    """Unified chat entry - backend classifies intent automatically.
+    """Unified chat entry - ToolDispatcher 选工具 + 执行。
 
-    阶段 3:如果 app.state.dispatcher 存在(USE_NEW_ARCHITECTURE=1),
-    走新架构 ToolDispatcher;否则走旧 LangGraph。
+    阶段 4:旧 LangGraph 已删除,统一走 ToolDispatcher。
     """
-    dispatcher = getattr(request.app.state, "dispatcher", None)
+    dispatcher = request.app.state.dispatcher
     current_config = _load_current_config(request, req.conversation_id)
     history = _load_history(request, req.conversation_id)
     fwd = _extract_forward_headers(request)
 
-    if dispatcher is not None:
-        # 新架构:ToolDispatcher
-        from engine.stream import stream_dispatcher
+    from engine.stream import stream_dispatcher
 
-        async def stream():
-            async for event in stream_dispatcher(
-                dispatcher=dispatcher,
-                user_input=req.message,
-                conversation_id=req.conversation_id,
-                user_id=request.headers.get("X-User-Id", ""),
-                conversation_store=request.app.state.conversation_store,
-                conversation_history=history,
-                current_config=current_config,
-                forward_headers=fwd,
-            ):
-                yield event
-
-        return StreamingResponse(
-            stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-
-    # 旧架构:LangGraph
-    workflow = request.app.state.workflow
     async def stream():
-        async for event in stream_workflow(
-            workflow=workflow,
+        async for event in stream_dispatcher(
+            dispatcher=dispatcher,
             user_input=req.message,
-            current_config=current_config,
             conversation_id=req.conversation_id,
-            user_id=request.headers.get("X-User-Id"),
+            user_id=request.headers.get("X-User-Id", ""),
             conversation_store=request.app.state.conversation_store,
             conversation_history=history,
+            current_config=current_config,
             forward_headers=fwd,
         ):
             yield event
@@ -156,20 +131,23 @@ async def chat(req: ChatRequest, request: Request):
 
 @router.post("/generate")
 async def generate(req: GenerateRequest, request: Request):
-    """Generate FormConfig from natural language (SSE stream)."""
-    workflow = request.app.state.workflow
+    """[DEPRECATED] 使用 /api/chat 替代。保留向后兼容,内部转发到 chat。"""
+    # 转发到 chat 逻辑
+    dispatcher = request.app.state.dispatcher
     history = _load_history(request, req.conversation_id)
     fwd = _extract_forward_headers(request)
 
+    from engine.stream import stream_dispatcher
+
     async def stream():
-        async for event in stream_workflow(
-            workflow=workflow,
+        async for event in stream_dispatcher(
+            dispatcher=dispatcher,
             user_input=req.description,
-            current_config=None,
             conversation_id=req.conversation_id,
-            user_id=request.headers.get("X-User-Id"),
+            user_id=request.headers.get("X-User-Id", ""),
             conversation_store=request.app.state.conversation_store,
             conversation_history=history,
+            current_config=None,
             forward_headers=fwd,
         ):
             yield event
@@ -183,20 +161,22 @@ async def generate(req: GenerateRequest, request: Request):
 
 @router.post("/modify")
 async def modify(req: ModifyRequest, request: Request):
-    """Modify existing FormConfig via natural language (SSE stream)."""
-    workflow = request.app.state.workflow
+    """[DEPRECATED] 使用 /api/chat 替代。保留向后兼容,内部转发到 chat。"""
+    dispatcher = request.app.state.dispatcher
     history = _load_history(request, req.conversation_id)
     fwd = _extract_forward_headers(request)
 
+    from engine.stream import stream_dispatcher
+
     async def stream():
-        async for event in stream_workflow(
-            workflow=workflow,
+        async for event in stream_dispatcher(
+            dispatcher=dispatcher,
             user_input=req.instruction,
-            current_config=req.current_config,
             conversation_id=req.conversation_id,
-            user_id=request.headers.get("X-User-Id"),
+            user_id=request.headers.get("X-User-Id", ""),
             conversation_store=request.app.state.conversation_store,
             conversation_history=history,
+            current_config=req.current_config,
             forward_headers=fwd,
         ):
             yield event

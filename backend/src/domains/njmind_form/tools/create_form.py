@@ -252,19 +252,11 @@ class CreateFormTool(CompositeTool):
     # ── 辅助方法 ───────────────────────────────────────────────
 
     def _render_prompt(self, ctx: ToolContext, name: str, **vars) -> str:
-        """通过 ctx.prompt_loader 渲染模板,兜底用 PromptBuilder。"""
+        """通过 ctx.prompt_loader 渲染模板。"""
         if hasattr(ctx, "prompt_loader") and ctx.prompt_loader:
             return ctx.prompt_loader.render("njmind_form", name, **vars)
-        # 兜底:用旧 PromptBuilder(阶段 3 过渡期)
-        from src.llm.prompt_builder import PromptBuilder
-        pb = PromptBuilder()
-        if name == "parse":
-            return pb.build_parse_prompt(guide=vars.get("guide"))
-        elif name == "generate":
-            return pb.build_generate_prompt(
-                form_template=vars.get("form_template") or {},
-                field_templates=vars.get("field_templates") or {},
-            )
+        # 无 prompt_loader 时返回空(正常路径不应走到这)
+        logger.warning(f"No prompt_loader, returning empty for {name}")
         return ""
 
     def _build_parse_user_message(self, user_input: str, compressed_history: str) -> str:

@@ -185,14 +185,8 @@ class ModifyFormTool(CompositeTool):
     # ── 辅助方法 ───────────────────────────────────────────────
 
     def _render_prompt(self, ctx: ToolContext, name: str, **vars) -> str:
-        """通过 ctx.prompt_loader 渲染模板,兜底用 PromptBuilder。"""
+        """通过 ctx.prompt_loader 渲染模板。"""
         if hasattr(ctx, "prompt_loader") and ctx.prompt_loader:
             return ctx.prompt_loader.render("njmind_form", name, **vars)
-        from src.llm.prompt_builder import PromptBuilder
-        pb = PromptBuilder()
-        if name == "modify":
-            return pb.build_modify_prompt(
-                config=vars.get("config") or {},
-                guide=vars.get("guide"),
-            )
+        logger.warning(f"No prompt_loader, returning empty for {name}")
         return ""

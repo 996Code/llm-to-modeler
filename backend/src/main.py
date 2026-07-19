@@ -22,7 +22,6 @@ from src.api.config import router as config_router
 from src.api.conversations import router as conversations_router
 from src.api.health import router as health_router
 from src.api.skills import router as skills_router
-from src.graph.graph import FormConfigWorkflow
 from src.llm.client import LLMClient
 from src.services.conversation_store import ConversationStore
 from src.services.upstream_client import UpstreamClient
@@ -40,7 +39,7 @@ install_redact_filter()  # 挂到 root logger,所有子 logger 继承
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting LLM Form Modeler...")
+    logger.info("Starting LLM Form Modeler (new architecture)...")
 
     upstream = UpstreamClient()
     app.state.upstream = upstream
@@ -48,50 +47,41 @@ async def lifespan(app: FastAPI):
     if upstream.health_check():
         logger.info("Upstream njmind-modeler reachable")
     else:
-        logger.warning("Upstream njmind-modeler NOT reachable — generation will fail")
+        logger.warning("Upstream njmind-modeler NOT reachable - generation will fail")
 
     llm_client = LLMClient()
     app.state.llm_client = llm_client
 
-    workflow = FormConfigWorkflow(upstream, llm_client)
-    app.state.workflow = workflow
-
-    # 新架构:ToolDispatcher(阶段 3)
-    # 通过环境变量 USE_NEW_ARCHITECTURE=1 切换到新架构
-    use_new_arch = os.getenv("USE_NEW_ARCHITECTURE", "0") == "1"
-    if use_new_arch:
-        try:
-            from domains.njmind_form.pack import create_registry, create_prompt_loader
-            from engine.dispatcher import ToolDispatcher
-
-            registry = create_registry()
-            prompt_loader = create_prompt_loader()
-            dispatcher = ToolDispatcher(
-                registry=registry,
-                llm_client=llm_client,
-                conversation_store=None,  # 阶段 4 接 ConversationManager
-                prompt_loader=prompt_loader,
-            )
-            app.state.dispatcher = dispatcher
-            logger.info("New architecture (ToolDispatcher) enabled")
-        except Exception as e:
-            logger.warning(f"Failed to init ToolDispatcher, fallback to old graph: {e}")
-            app.state.dispatcher = None
-    else:
-        app.state.dispatcher = None
-
-    # Conversation store (SQLite)
-    import os
+    # Conversation store (SQLite, append-only 事件流)
     db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
     conv_store = ConversationStore(db_path)
     app.state.conversation_store = conv_store
 
-    # MCP Server
-    from src.mcp_server import create_mcp_server
-    mcp_server = create_mcp_server(upstream, workflow)
-    app.state.mcp = mcp_server
+    # 新架构:ToolDispatcher
+    from domains.njmind_form.pack import create_registry, create_prompt_loader
+    from engine.dispatcher import ToolDispatcher
+    from engine.conversation import ConversationManager
+    from adapters.http_asset_client import HttpAssetClient
 
-    # Mount MCP SSE endpoint
+    registry = create_registry()
+    prompt_loader = create_prompt_loader()
+    conversation_manager = ConversationManager(store=conv_store)
+    asset_client = HttpAssetClient(upstream=upstream)
+
+    dispatcher = ToolDispatcher(
+        registry=registry,
+        llm_client=llm_client,
+        conversation_store=conversation_manager,
+        prompt_loader=prompt_loader,
+        asset_client=asset_client,
+    )
+    app.state.dispatcher = dispatcher
+    logger.info("New architecture (ToolDispatcher) initialized")
+
+    # MCP Server(使用新架构 dispatcher)
+    from src.mcp_server import create_mcp_server
+    mcp_server = create_mcp_server(upstream, dispatcher)
+    app.state.mcp = mcp_server
     app.mount("/mcp", mcp_server.streamable_http_app())
 
     logger.info("LLM Form Modeler started")
@@ -104,7 +94,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LLM Form Modeler",
     description="Natural language to form config generator (bridge to njmind-modeler)",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
