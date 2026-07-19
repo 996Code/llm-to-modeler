@@ -208,7 +208,15 @@ class ToolDispatcher:
         return ctx
 
     def _build_compressed_history(self, history: list) -> str:
-        """把对话历史格式化为文本(简单版,阶段 4 接压缩器)。"""
+        """把对话历史格式化为文本。
+
+        TODO(阶段 4): 接压缩器,实现:
+        1. token 估算(estimate_tokens)
+        2. 70% 阈值触发压缩
+        3. LLM 摘要旧历史
+        4. 状态补偿(summarize_artifact)
+        当前简单截断最近 6 条,每条 200 字符。
+        """
         if not history:
             return ""
         parts = []
