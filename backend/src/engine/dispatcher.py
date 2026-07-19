@@ -83,7 +83,7 @@ class ToolDispatcher:
         }
 
         # 2. 选工具(单步,LLM 返回工具名)
-        emit("stage", "classify_intent", message="正在理解您的意图...")
+        emit("stage", "classify_intent", "正在理解您的意图...")
         tool = self._select_tool(user_input, state)
         if tool is None:
             # 兜底:走 chat

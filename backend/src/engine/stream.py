@@ -30,8 +30,14 @@ async def stream_dispatcher(
     sm = StreamManager(loop)
 
     # 线程安全的 emit 回调
-    def emit(event_type: str, message: str = "", **extra):
-        sm.stage(event_type, message, **extra)
+    def emit(*args, **kwargs):
+        """emit(event_type, message='', **extra) 或 emit(event_type, **extra)"""
+        if len(args) >= 2:
+            sm.stage(args[0], args[1], **kwargs)
+        elif len(args) == 1:
+            sm.stage(args[0], "", **kwargs)
+        else:
+            sm.stage(kwargs.get("event_type", ""), kwargs.get("message", ""), **{k: v for k, v in kwargs.items() if k not in ("event_type", "message")})
 
     def _run_dispatcher():
         """在线程池执行 dispatcher.run。"""

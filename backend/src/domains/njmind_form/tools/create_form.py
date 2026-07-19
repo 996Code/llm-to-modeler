@@ -244,7 +244,7 @@ class CreateFormTool(CompositeTool):
 
         if state["retry_count"] < MAX_RETRIES:
             ctx.emit("stage", "validate_retry",
-                     message=f"校验失败,第 {state['retry_count']} 次重试")
+                     f"校验失败,第 {state['retry_count']} 次重试")
             self._step_generate(state, ctx)  # 重跑前序 step
             return self._step_validate(state, ctx)  # 递归再校验
         # 超过 max_retries -> 错误留在 state,execute 返回时带 extra

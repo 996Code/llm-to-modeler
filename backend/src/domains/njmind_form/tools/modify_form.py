@@ -178,7 +178,7 @@ class ModifyFormTool(CompositeTool):
 
         if state["retry_count"] < MAX_RETRIES:
             ctx.emit("stage", "validate_retry",
-                     message=f"校验失败,第 {state['retry_count']} 次重试")
+                     f"校验失败,第 {state['retry_count']} 次重试")
             self._step_modify(state, ctx)
             return self._step_validate(state, ctx)
 
