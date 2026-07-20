@@ -102,11 +102,17 @@ class ModifyFormTool(CompositeTool):
 
     def _step_fetch_guide(self, state: dict, ctx: ToolContext) -> None:
         """获取配置指南。"""
+        ctx.emit("stage", "fetch_guide", "正在从上游获取配置指南...")
         state["guide"] = ctx.asset_client.get_guide()
 
     def _step_modify(self, state: dict, ctx: ToolContext) -> None:
         """LLM 基于指令修改现有 FormConfig。"""
         is_retry = bool(state.get("validation_errors"))
+        
+        if is_retry:
+            ctx.emit("stage", "modify_retry", f"校验失败，正在修复并重新修改（第 {state.get('retry_count', 0)} 次重试）...")
+        else:
+            ctx.emit("stage", "modify", "AI 正在根据指令修改现有配置...")
 
         # 基础配置:retry 用 artifact,首次用 source_artifact
         base_config = state.get("artifact") if is_retry else state.get("source_artifact")
@@ -156,31 +162,47 @@ class ModifyFormTool(CompositeTool):
             {"role": "user", "content": "\n".join(user_parts)},
         ]
 
-        config = ctx.llm_client.chat_json(messages)
+        config = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
         state["artifact"] = config
         state["validation_errors"] = []
 
     def _step_validate(self, state: dict, ctx: ToolContext) -> None:
         """提交上游校验。失败时工具内部 retry(重跑 modify)。"""
+        ctx.emit("stage", "validate", "正在提交到上游平台进行校验...")
         artifact = state.get("artifact")
         if not artifact:
             state["validation_errors"] = [{"message": "No configuration to validate"}]
+            ctx.emit("stage", "validate_fail", "校验失败：无配置可校验")
             return
 
         result = ctx.asset_client.validate_artifact(artifact, mode="update")
 
-        if result.get("valid"):
+        # 区分 errors 和 warnings
+        errors = result.get("errors", [])
+        warnings = result.get("warnings", [])
+
+        # 只有 errors 非空才算校验失败，warnings 不算
+        if result.get("valid") or not errors:
             state["validation_errors"] = []
+            if warnings:
+                ctx.emit("stage", "validate_pass", f"校验通过 ✓（{len(warnings)} 个警告）")
+            else:
+                ctx.emit("stage", "validate_pass", "校验通过 ✓")
             return
 
         state["retry_count"] = state.get("retry_count", 0) + 1
-        state["validation_errors"] = result.get("errors", [])
+        state["validation_errors"] = errors
 
         if state["retry_count"] < MAX_RETRIES:
+            error_msgs = [e.get("message", str(e)) for e in state["validation_errors"][:3]]
             ctx.emit("stage", "validate_retry",
-                     f"校验失败,第 {state['retry_count']} 次重试")
+                     f"校验失败：{'；'.join(error_msgs)}，正在重试（第 {state['retry_count']} 次）...")
             self._step_modify(state, ctx)
             return self._step_validate(state, ctx)
+        else:
+            error_msgs = [e.get("message", str(e)) for e in state["validation_errors"][:3]]
+            ctx.emit("stage", "validate_fail",
+                     f"校验失败（已达最大重试次数）：{'；'.join(error_msgs)}")
 
     # ── 辅助方法 ───────────────────────────────────────────────
 

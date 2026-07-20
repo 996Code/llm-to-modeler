@@ -46,9 +46,12 @@ async def list_conversations(
     request: Request,
     x_user_id: Optional[str] = Header(None),
 ):
-    """List conversations for the current user."""
+    """List conversations for the current user. admin sees all."""
     store = request.app.state.conversation_store
     user_id = _get_user_id(request, x_user_id)
+    # admin 可查看所有用户的对话
+    if user_id == "admin":
+        return store.list_all_conversations()
     return store.list_conversations(user_id)
 
 
@@ -58,10 +61,14 @@ async def get_conversation(
     request: Request,
     x_user_id: Optional[str] = Header(None),
 ):
-    """Get conversation detail with all messages."""
+    """Get conversation detail with all messages. admin can access any."""
     store = request.app.state.conversation_store
     user_id = _get_user_id(request, x_user_id)
-    conv = store.get_conversation(conv_id, user_id)
+    # admin 可访问任何对话
+    if user_id == "admin":
+        conv = store.get_conversation_any_user(conv_id)
+    else:
+        conv = store.get_conversation(conv_id, user_id)
     if not conv:
         raise HTTPException(404, "Conversation not found")
     return conv

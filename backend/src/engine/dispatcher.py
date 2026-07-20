@@ -287,7 +287,7 @@ class ToolDispatcher:
             # 延迟创建一次,后续复用
             from src.services.upstream_client import UpstreamClient
             from adapters.http_asset_client import HttpAssetClient
-            upstream = UpstreamClient()
+            upstream = UpstreamClient(conversation_store=self._conversation_store)
             self._asset_client = HttpAssetClient(upstream=upstream)
 
         ctx = ToolContext(
@@ -296,6 +296,7 @@ class ToolDispatcher:
             conversation=self._conversation_store,
             emit=emit,
             forward_headers=state.get("forward_headers", {}),
+            conv_id=state.get("conversation_id"),
         )
         # 额外挂 prompt_loader
         object.__setattr__(ctx, "prompt_loader", self._prompt_loader)

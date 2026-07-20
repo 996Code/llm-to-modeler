@@ -5,16 +5,19 @@ Synchronous OpenAI-compatible client. All methods are SYNC so they can
 be called directly inside synchronous LangGraph nodes.
 
 Handles Qwen3 reasoning models: when content is empty (finish_reason=length),
-falls back to reasoning_content. Uses high max_tokens (16384) to give the
+falls back to reasoning_content. Uses high max_tokens (200000) to give the
 reasoning process enough room.
 
 Supports local LM Studio / OpenAI / any OpenAI-compatible API via base_url.
+
+LLM 调用日志自动持久化到 call_logs 表。
 """
 
 import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -29,25 +32,26 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     model: str = "qwen/qwen3.6-35b-a3b"
     temperature: float = 0.1
-    max_tokens: int = 16384  # Reasoning models need room for thinking + output
+    max_tokens: int = 200000  # Max limit for this LLM service
     timeout: int = 300       # Local models can be slow
 
 
 class LLMClient:
     """Synchronous OpenAI-compatible LLM client."""
 
-    def __init__(self, config: Optional[LLMConfig] = None):
+    def __init__(self, config: Optional[LLMConfig] = None, conversation_store=None):
         if config is None:
             config = LLMConfig(
                 base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1"),
                 api_key=os.getenv("LLM_API_KEY", ""),
                 model=os.getenv("LLM_MODEL", "qwen/qwen3.6-35b-a3b"),
                 temperature=float(os.getenv("LLM_TEMPERATURE", "0.1")),
-                max_tokens=int(os.getenv("LLM_MAX_TOKENS", "16384")),
+                max_tokens=int(os.getenv("LLM_MAX_TOKENS", "200000")),
                 timeout=int(os.getenv("LLM_TIMEOUT", "300")),
             )
 
         self.config = config
+        self._conversation_store = conversation_store
 
         if not config.api_key:
             logger.warning(
@@ -65,17 +69,54 @@ class LLMClient:
             f"max_tokens={config.max_tokens}"
         )
 
+    def _log_call(
+        self,
+        endpoint: str,
+        request_data: Optional[Dict] = None,
+        response_data: Optional[Dict] = None,
+        status_code: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        error_message: Optional[str] = None,
+        conv_id: Optional[str] = None,
+    ):
+        """持久化 LLM 调用日志到数据库。"""
+        if not self._conversation_store:
+            return
+        try:
+            self._conversation_store.save_call_log(
+                call_type="llm",
+                endpoint=endpoint,
+                request_data=request_data,
+                response_data=response_data,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                error_message=error_message,
+                conv_id=conv_id,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save LLM call log: {e}")
+
     def chat(
         self,
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        conv_id: Optional[str] = None,
     ) -> str:
         """
         Send a chat completion request (sync).
 
         Handles Qwen3 reasoning models that put output in reasoning_content.
         """
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/chat/completions"
+        request_data = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature if temperature is None else temperature,
+            "max_tokens": self.config.max_tokens if max_tokens is None else max_tokens,
+        }
+
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
@@ -100,9 +141,37 @@ class LLMClient:
                     )
                     content = rc
 
-            return content or ""
+            result = content or ""
+
+            # 记录成功日志
+            duration_ms = int((time.time() - start_time) * 1000)
+            response_data = {
+                "content": result[:500],  # 截断避免过大
+                "finish_reason": choice.finish_reason,
+                "usage": response.usage.model_dump() if response.usage else None,
+            }
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"messages_count": len(messages), **{k: v for k, v in request_data.items() if k != "messages"}},
+                response_data=response_data,
+                status_code=200,
+                duration_ms=duration_ms,
+                conv_id=conv_id,
+            )
+
+            return result
 
         except Exception as e:
+            # 记录失败日志
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"messages_count": len(messages), **{k: v for k, v in request_data.items() if k != "messages"}},
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+                conv_id=conv_id,
+            )
             logger.error(f"LLM chat failed: {e}")
             raise
 
@@ -110,6 +179,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
+        conv_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a chat request and parse the response as JSON.
@@ -134,6 +204,16 @@ class LLMClient:
         })
 
         # Try json_object mode first
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/chat/completions"
+        request_data = {
+            "model": self.config.model,
+            "messages": guided_messages,
+            "temperature": temp,
+            "max_tokens": self.config.max_tokens,
+            "response_format": "json_object",
+        }
+
         try:
             response = self.client.chat.completions.create(
                 model=self.config.model,
@@ -142,13 +222,31 @@ class LLMClient:
                 max_tokens=self.config.max_tokens,
                 response_format={"type": "json_object"},
             )
-            return self._extract_json(response)
+            result = self._extract_json(response)
+
+            # 记录成功日志
+            duration_ms = int((time.time() - start_time) * 1000)
+            response_data = {
+                "content": str(result)[:500],
+                "finish_reason": response.choices[0].finish_reason,
+                "usage": response.usage.model_dump() if response.usage else None,
+            }
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"messages_count": len(guided_messages), **{k: v for k, v in request_data.items() if k != "messages"}},
+                response_data=response_data,
+                status_code=200,
+                duration_ms=duration_ms,
+                conv_id=conv_id,
+            )
+
+            return result
         except Exception:
             pass
 
         # Fall back to plain text + extraction
         logger.info("json_object mode not supported, using plain text")
-        raw = self.chat(guided_messages, temperature=temp)
+        raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id)
         return self._parse_json_from_text(raw)
 
     # ── JSON extraction helpers ────────────────────────────────

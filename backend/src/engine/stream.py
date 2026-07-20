@@ -31,9 +31,17 @@ async def stream_dispatcher(
 
     # 线程安全的 emit 回调
     def emit(*args, **kwargs):
-        """emit(event_type, message='', **extra) 或 emit(event_type, **extra)"""
-        if len(args) >= 2:
-            sm.stage(args[0], args[1], **kwargs)
+        """emit(event_type, stage_name, message='', **extra)
+        
+        约定: emit("stage", "classify_intent", "正在理解...") 
+        → SSE: {"stage": "classify_intent", "message": "正在理解..."}
+        """
+        if len(args) >= 3:
+            # emit("stage", stage_name, message, **extra)
+            sm.stage(args[1], args[2], **kwargs)
+        elif len(args) == 2:
+            # emit("stage", stage_name)
+            sm.stage(args[1], "", **kwargs)
         elif len(args) == 1:
             sm.stage(args[0], "", **kwargs)
         else:

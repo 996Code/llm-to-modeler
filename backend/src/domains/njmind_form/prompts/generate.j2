@@ -13,7 +13,8 @@
 5. SELECT 类型需要添加 optionSettings
 6. 保留模板中的所有系统字段（isShowFieldAdd、isShowFieldDetail、isEditField 等）
 7. fieldConditionDisplays 必须为 []
-8. 只输出完整 JSON
+8. **每个字段必须显式设置 isRequiredField 属性**：根据字段语义判断是否必填（如"申请人"、"姓名"等通常必填，设为 true；"备注"、"描述"等可选，设为 false）
+9. 只输出完整 JSON
 
 ## 表单模板
 ```json

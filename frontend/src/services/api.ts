@@ -8,14 +8,19 @@ const api = axios.create({
 })
 
 // Set user ID header from URL or localStorage
+// 独立页面默认 admin，嵌入页面从 URL 参数或 localStorage 获取
 function getUserId(): string {
   const params = new URLSearchParams(window.location.search)
-  return params.get('userId') || localStorage.getItem('userId') || 'anonymous'
+  const isEmbedded = params.get('embed') === 'true' || window.parent !== window
+  if (isEmbedded) {
+    return params.get('userId') || localStorage.getItem('userId') || 'anonymous'
+  }
+  return params.get('userId') || localStorage.getItem('userId') || 'admin'
 }
 
 api.interceptors.request.use((config) => {
   config.headers['X-User-Id'] = getUserId()
-  // 透传父系统的 headers（如 Authorization、X-Tenant-Id）
+  // 透传父系统的 headers（如 Authorization、X-Tenant-Id 等）
   const forwarded = getForwardedHeaders()
   for (const [key, val] of Object.entries(forwarded)) {
     config.headers[key] = val

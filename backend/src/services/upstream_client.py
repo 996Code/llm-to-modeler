@@ -69,7 +69,7 @@ class UpstreamClient:
     upstream. This project does NOT store or generate these locally.
     """
 
-    def __init__(self, config: Optional[UpstreamConfig] = None):
+    def __init__(self, config: Optional[UpstreamConfig] = None, conversation_store=None):
         import os
 
         if config is None:
@@ -85,8 +85,36 @@ class UpstreamClient:
             timeout=config.timeout,
         )
         self._cache: Dict[str, tuple] = {}  # key → (data, timestamp)
+        self._conversation_store = conversation_store
 
         logger.info(f"UpstreamClient initialized: {config.base_url}")
+
+    def _log_call(
+        self,
+        endpoint: str,
+        request_data: Optional[Dict] = None,
+        response_data: Optional[Dict] = None,
+        status_code: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        error_message: Optional[str] = None,
+        conv_id: Optional[str] = None,
+    ):
+        """持久化上游调用日志到数据库。"""
+        if not self._conversation_store:
+            return
+        try:
+            self._conversation_store.save_call_log(
+                call_type="upstream",
+                endpoint=endpoint,
+                request_data=request_data,
+                response_data=response_data,
+                status_code=status_code,
+                duration_ms=duration_ms,
+                error_message=error_message,
+                conv_id=conv_id,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to save upstream call log: {e}")
 
     def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """Merge forwarded headers (from embed/parent system) with any extra."""
@@ -115,11 +143,29 @@ class UpstreamClient:
 
     def list_templates(self) -> List[str]:
         """Get list of template filenames from upstream."""
+        import time
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/api/mcp/templates/list-templates"
         try:
             resp = self._client.get("/api/mcp/templates/list-templates", headers=self._headers())
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                response_data={"templateCount": len(result)},
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
+            return result
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Failed to list templates: {e}")
             return []
 
@@ -131,7 +177,10 @@ class UpstreamClient:
             name: Template filename (e.g., "simple_form", "simple_form.json")
                   — auto-appends .json if missing.
         """
+        import time
+        start_time = time.time()
         filename = name if name.endswith(".json") else f"{name}.json"
+        endpoint = f"{self.config.base_url}/api/mcp/templates/{filename}"
         cache_key = f"template:{filename}"
         cached = self._get_cached(cache_key)
         if cached is not None:
@@ -142,8 +191,22 @@ class UpstreamClient:
             resp.raise_for_status()
             template = resp.json()
             self._set_cached(cache_key, template)
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                response_data={"templateName": filename},
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
             return template
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Failed to get template '{filename}': {e}")
             return None
 
@@ -151,11 +214,29 @@ class UpstreamClient:
 
     def list_schemas(self) -> List[str]:
         """Get list of schema filenames from upstream."""
+        import time
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/api/mcp/schemas/list-schemas"
         try:
             resp = self._client.get("/api/mcp/schemas/list-schemas", headers=self._headers())
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                response_data={"schemaCount": len(result)},
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
+            return result
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Failed to list schemas: {e}")
             return []
 
@@ -166,7 +247,10 @@ class UpstreamClient:
         Args:
             name: Schema filename (e.g., "form-config", "form-config.schema.json")
         """
+        import time
+        start_time = time.time()
         filename = name if name.endswith(".json") else f"{name}.schema.json"
+        endpoint = f"{self.config.base_url}/api/mcp/schemas/{filename}"
         cache_key = f"schema:{filename}"
         cached = self._get_cached(cache_key)
         if cached is not None:
@@ -177,8 +261,22 @@ class UpstreamClient:
             resp.raise_for_status()
             schema = resp.json()
             self._set_cached(cache_key, schema)
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                response_data={"schemaName": filename},
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
             return schema
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Failed to get schema '{filename}': {e}")
             return None
 
@@ -186,6 +284,9 @@ class UpstreamClient:
 
     def get_guide(self) -> Optional[Dict[str, Any]]:
         """Get guide.json from upstream."""
+        import time
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/api/mcp/guides/guide.json"
         cache_key = "guide"
         cached = self._get_cached(cache_key)
         if cached is not None:
@@ -196,8 +297,22 @@ class UpstreamClient:
             resp.raise_for_status()
             guide = resp.json()
             self._set_cached(cache_key, guide)
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                response_data={"guideLoaded": True},
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
             return guide
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Failed to get guide: {e}")
             return None
 
@@ -221,6 +336,9 @@ class UpstreamClient:
         Returns:
             Normalized validation result dict.
         """
+        import time
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/api/mcp/forms/validate?mode={mode}"
         try:
             resp = self._client.post(
                 "/api/mcp/forms/validate",
@@ -241,13 +359,34 @@ class UpstreamClient:
                 for e in raw_errors
             ]
 
-            return {
+            result = {
                 "valid": is_valid,
                 "errors": normalized_errors,
                 "warnings": raw.get("warnings", []),
             }
 
+            # 记录成功日志
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"formName": form_config.get("formName"), "fieldCount": len(form_config.get("formFieldConfigVos", []))},
+                response_data={"valid": is_valid, "errorCount": len(normalized_errors), "warningCount": len(raw.get("warnings", []))},
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
+
+            return result
+
         except Exception as e:
+            # 记录失败日志
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"formName": form_config.get("formName")},
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Upstream validation failed: {e}")
             return {
                 "valid": False,
@@ -259,21 +398,59 @@ class UpstreamClient:
 
     def get_form(self, form_code: str) -> Optional[Dict[str, Any]]:
         """Get an existing form configuration by formCode."""
+        import time
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/api/mcp/forms/{form_code}"
         try:
             resp = self._client.get(f"/api/mcp/forms/{form_code}", headers=self._headers())
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                response_data={"formCode": form_code},
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
+            return result
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Failed to get form '{form_code}': {e}")
             return None
 
     def create_form(self, form_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Create a new form via upstream API (bare JSON body)."""
+        import time
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/api/mcp/forms/create"
         try:
             resp = self._client.post("/api/mcp/forms/create", json=form_config, headers=self._headers())
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"formName": form_config.get("formName"), "fieldCount": len(form_config.get("formFieldConfigVos", []))},
+                response_data=result,
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
+            return result
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"formName": form_config.get("formName")},
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Failed to create form: {e}")
             return None
 
@@ -283,6 +460,9 @@ class UpstreamClient:
         form_config: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """Update an existing form via upstream API (bare JSON body)."""
+        import time
+        start_time = time.time()
+        endpoint = f"{self.config.base_url}/api/mcp/forms/{form_code}/update"
         try:
             resp = self._client.post(
                 f"/api/mcp/forms/{form_code}/update",
@@ -290,8 +470,25 @@ class UpstreamClient:
                 headers=self._headers(),
             )
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"formCode": form_code, "fieldCount": len(form_config.get("formFieldConfigVos", []))},
+                response_data=result,
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
+            return result
         except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=endpoint,
+                request_data={"formCode": form_code},
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
             logger.error(f"Failed to update form '{form_code}': {e}")
             return None
 

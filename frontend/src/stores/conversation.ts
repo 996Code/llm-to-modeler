@@ -78,6 +78,10 @@ export const useConversationStore = defineStore('conversation', () => {
       const conv = await api.createConversation()
       convId = conv.id
       currentConversation.value = conv
+      // 嵌入模式：保存会话 ID 到 localStorage，下次打开时恢复
+      if (isEmbedded.value) {
+        localStorage.setItem('embedded_conv_id', convId)
+      }
       await loadConversations()
     }
 

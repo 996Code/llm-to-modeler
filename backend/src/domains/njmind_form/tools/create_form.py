@@ -99,14 +99,19 @@ class CreateFormTool(CompositeTool):
 
     def _step_fetch_guide(self, state: dict, ctx: ToolContext) -> None:
         """获取配置指南。"""
+        ctx.emit("stage", "fetch_guide", "正在从上游获取配置指南...")
         state["guide"] = ctx.asset_client.get_guide()
 
     def _step_list_assets(self, state: dict, ctx: ToolContext) -> None:
         """列出可用模板和 Schema 文件名。"""
-        state["template_names"] = ctx.asset_client.list_templates()
+        ctx.emit("stage", "list_assets", "正在获取可用模板和 Schema 列表...")
+        templates = ctx.asset_client.list_templates()
+        state["template_names"] = templates
+        ctx.emit("stage", "list_assets_done", f"发现 {len(templates)} 个可用模板")
 
     def _step_parse_fields(self, state: dict, ctx: ToolContext) -> None:
         """LLM 解析自然语言 -> 结构化字段列表。"""
+        ctx.emit("stage", "parse_fields", "AI 正在解析您的自然语言需求...")
         user_input = state.get("user_input", "")
         compressed_history = state.get("compressed_history", "")
         guide = state.get("guide") or {}
@@ -120,7 +125,7 @@ class CreateFormTool(CompositeTool):
             {"role": "user", "content": user_msg},
         ]
 
-        parsed = ctx.llm_client.chat_json(messages)
+        parsed = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
 
         # 检查是否需要追问
         if parsed.get("needsClarification"):
@@ -144,9 +149,11 @@ class CreateFormTool(CompositeTool):
                 options=f.get("options"),
             ))
         state["parsed_fields"] = parsed_fields
+        ctx.emit("stage", "parse_fields_done", f"已解析出 {len(parsed_fields)} 个字段：{state['form_name']}")
 
     def _step_fetch_templates(self, state: dict, ctx: ToolContext) -> None:
         """获取表单模板 + 按字段类型获取字段模板。"""
+        ctx.emit("stage", "fetch_templates", "正在匹配字段模板...")
         # 表单模板
         state["form_template"] = ctx.asset_client.get_template("simple_form")
 
@@ -163,10 +170,16 @@ class CreateFormTool(CompositeTool):
                 type_name = _TYPE_NAMES.get(type_code, "TEXT")
                 field_templates[type_name] = tmpl
         state["field_templates"] = field_templates
+        ctx.emit("stage", "fetch_templates_done", f"已加载 {len(field_templates)} 种字段类型模板")
 
     def _step_generate(self, state: dict, ctx: ToolContext) -> None:
         """LLM 基于模板组装完整 FormConfig。"""
         is_retry = bool(state.get("validation_errors"))
+        
+        if is_retry:
+            ctx.emit("stage", "generate_retry", f"校验失败，正在修复并重新生成（第 {state.get('retry_count', 0)} 次重试）...")
+        else:
+            ctx.emit("stage", "generate", "AI 正在基于模板组装完整表单配置...")
 
         # 渲染 prompt
         system_prompt = self._render_prompt(
@@ -221,32 +234,53 @@ class CreateFormTool(CompositeTool):
             {"role": "user", "content": "\n".join(user_parts)},
         ]
 
-        config = ctx.llm_client.chat_json(messages)
+        config = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
         state["artifact"] = config
         state["validation_errors"] = []  # 重置
 
     def _step_validate(self, state: dict, ctx: ToolContext) -> None:
         """提交上游校验。失败时工具内部 retry(重跑 generate)。"""
+        ctx.emit("stage", "validate", "正在提交到上游平台进行校验...")
         artifact = state.get("artifact")
         if not artifact:
             state["validation_errors"] = [{"message": "No configuration to validate"}]
+            ctx.emit("stage", "validate_fail", "校验失败：无配置可校验")
             return
 
         result = ctx.asset_client.validate_artifact(artifact, mode="create")
 
-        if result.get("valid"):
+        # 区分 errors 和 warnings
+        errors = result.get("errors", [])
+        warnings = result.get("warnings", [])
+
+        # 只有 errors 非空才算校验失败，warnings 不算
+        if result.get("valid") or not errors:
             state["validation_errors"] = []
+            if warnings:
+                ctx.emit("stage", "validate_pass", f"校验通过 ✓（{len(warnings)} 个警告）")
+            else:
+                ctx.emit("stage", "validate_pass", "校验通过 ✓")
             return
 
-        # 校验失败 -> 工具内部 retry
+        # 校验失败（有 errors）-> 工具内部 retry
         state["retry_count"] = state.get("retry_count", 0) + 1
-        state["validation_errors"] = result.get("errors", [])
+        state["validation_errors"] = errors
+
+        # 详细日志：打印完整校验结果
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Validation failed (retry {state['retry_count']}): {result}")
 
         if state["retry_count"] < MAX_RETRIES:
+            error_msgs = [e.get("message", str(e)) for e in state["validation_errors"][:3]]
             ctx.emit("stage", "validate_retry",
-                     f"校验失败,第 {state['retry_count']} 次重试")
+                     f"校验失败：{'；'.join(error_msgs)}，正在重试（第 {state['retry_count']} 次）...")
             self._step_generate(state, ctx)  # 重跑前序 step
             return self._step_validate(state, ctx)  # 递归再校验
+        else:
+            error_msgs = [e.get("message", str(e)) for e in state["validation_errors"][:3]]
+            ctx.emit("stage", "validate_fail",
+                     f"校验失败（已达最大重试次数）：{'；'.join(error_msgs)}")
         # 超过 max_retries -> 错误留在 state,execute 返回时带 extra
 
     # ── 辅助方法 ───────────────────────────────────────────────

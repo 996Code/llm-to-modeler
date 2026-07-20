@@ -41,7 +41,12 @@ install_redact_filter()  # 挂到 root logger,所有子 logger 继承
 async def lifespan(app: FastAPI):
     logger.info("Starting LLM Form Modeler (new architecture)...")
 
-    upstream = UpstreamClient()
+    # Conversation store (SQLite, append-only 事件流)
+    db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
+    conv_store = ConversationStore(db_path)
+    app.state.conversation_store = conv_store
+
+    upstream = UpstreamClient(conversation_store=conv_store)
     app.state.upstream = upstream
 
     if upstream.health_check():
@@ -49,13 +54,8 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Upstream njmind-modeler NOT reachable - generation will fail")
 
-    llm_client = LLMClient()
+    llm_client = LLMClient(conversation_store=conv_store)
     app.state.llm_client = llm_client
-
-    # Conversation store (SQLite, append-only 事件流)
-    db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
-    conv_store = ConversationStore(db_path)
-    app.state.conversation_store = conv_store
 
     # 新架构:ToolDispatcher
     from domains.njmind_form.pack import create_registry, create_prompt_loader

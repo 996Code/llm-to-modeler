@@ -76,6 +76,21 @@ class ConversationStore:
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_meta_user ON session_meta(user_id, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS call_logs (
+                    id TEXT PRIMARY KEY,
+                    conv_id TEXT,
+                    call_type TEXT NOT NULL,  -- 'llm' or 'upstream'
+                    endpoint TEXT NOT NULL,
+                    request_data TEXT,
+                    response_data TEXT,
+                    status_code INTEGER,
+                    duration_ms INTEGER,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_call_logs_conv ON call_logs(conv_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_call_logs_type ON call_logs(call_type, created_at);
             """)
 
     def _migrate_legacy_tables(self, conn: sqlite3.Connection):
@@ -139,13 +154,49 @@ class ConversationStore:
             })
         return result
 
+    def list_all_conversations(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """List all conversations for admin, newest first. 包含 user_id 字段。"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM session_meta ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+        result = []
+        for r in rows:
+            item = dict(r)
+            current_config = json.loads(item["current_config"]) if item.get("current_config") else None
+            result.append({
+                "id": item["conv_id"],
+                "userId": item["user_id"],
+                "title": item["title"] or "新对话",
+                "currentConfig": current_config,
+                "createdAt": item["created_at"],
+                "updatedAt": item["updated_at"],
+            })
+        return result
+
     def get_conversation(self, conv_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """Get a conversation with all messages. Validates user ownership."""
+        return self._get_conversation(conv_id, user_id)
+
+    def get_conversation_any_user(self, conv_id: str) -> Optional[Dict[str, Any]]:
+        """Get a conversation with all messages. No user check (for admin)."""
+        return self._get_conversation(conv_id, None)
+
+    def _get_conversation(self, conv_id: str, user_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Internal: get conversation with optional user check."""
         with self._get_conn() as conn:
-            meta = conn.execute(
-                "SELECT * FROM session_meta WHERE conv_id = ? AND user_id = ?",
-                (conv_id, user_id),
-            ).fetchone()
+            if user_id:
+                meta = conn.execute(
+                    "SELECT * FROM session_meta WHERE conv_id = ? AND user_id = ?",
+                    (conv_id, user_id),
+                ).fetchone()
+            else:
+                meta = conn.execute(
+                    "SELECT * FROM session_meta WHERE conv_id = ?",
+                    (conv_id,),
+                ).fetchone()
             if not meta:
                 return None
 
@@ -277,6 +328,84 @@ class ConversationStore:
                 "configSnapshot": payload.get("config_snapshot"),
                 "createdAt": r["created_at"],
             })
+        return result
+
+    # ── Call Logs (LLM/Upstream 调用日志) ─────────────────────
+
+    def save_call_log(
+        self,
+        call_type: str,  # 'llm' or 'upstream'
+        endpoint: str,
+        request_data: Optional[Dict] = None,
+        response_data: Optional[Dict] = None,
+        status_code: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        error_message: Optional[str] = None,
+        conv_id: Optional[str] = None,
+    ) -> str:
+        """保存一次 LLM 或上游服务调用日志。"""
+        log_id = str(uuid.uuid4())
+        now = _now()
+
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO call_logs 
+                   (id, conv_id, call_type, endpoint, request_data, response_data, 
+                    status_code, duration_ms, error_message, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    log_id,
+                    conv_id,
+                    call_type,
+                    endpoint,
+                    json.dumps(request_data, ensure_ascii=False) if request_data else None,
+                    json.dumps(response_data, ensure_ascii=False) if response_data else None,
+                    status_code,
+                    duration_ms,
+                    error_message,
+                    now,
+                ),
+            )
+
+        return log_id
+
+    def get_call_logs(
+        self, 
+        conv_id: Optional[str] = None,
+        call_type: Optional[str] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """查询调用日志。"""
+        with self._get_conn() as conn:
+            if conv_id and call_type:
+                rows = conn.execute(
+                    "SELECT * FROM call_logs WHERE conv_id = ? AND call_type = ? ORDER BY created_at DESC LIMIT ?",
+                    (conv_id, call_type, limit),
+                ).fetchall()
+            elif conv_id:
+                rows = conn.execute(
+                    "SELECT * FROM call_logs WHERE conv_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (conv_id, limit),
+                ).fetchall()
+            elif call_type:
+                rows = conn.execute(
+                    "SELECT * FROM call_logs WHERE call_type = ? ORDER BY created_at DESC LIMIT ?",
+                    (call_type, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM call_logs ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+
+        result = []
+        for r in rows:
+            item = dict(r)
+            if item.get("request_data"):
+                item["request_data"] = json.loads(item["request_data"])
+            if item.get("response_data"):
+                item["response_data"] = json.loads(item["response_data"])
+            result.append(item)
         return result
 
     # ── Append-only 事件流 API(新) ─────────────────────────────

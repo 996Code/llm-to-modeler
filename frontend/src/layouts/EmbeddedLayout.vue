@@ -10,9 +10,11 @@
           <span class="subtitle">自然语言 → 低码表单配置</span>
         </div>
       </div>
-      <a-button type="text" size="small" class="close-btn" @click="closeWindow">
-        <CloseOutlined />
-      </a-button>
+      <div class="header-actions">
+        <a-button type="text" size="small" class="close-btn" @click="closeWindow">
+          <CloseOutlined />
+        </a-button>
+      </div>
     </div>
     <ChatPanel :embedded="true" />
   </div>
@@ -28,10 +30,9 @@ import ChatPanel from '../components/chat/ChatPanel.vue'
 const store = useConversationStore()
 const { closeWindow } = useEmbedBridge()
 
-onMounted(() => {
-  if (!store.currentConversation) {
-    store.startNewConversation()
-  }
+onMounted(async () => {
+  // 嵌入模式：每次刷新都创建新会话
+  await store.startNewConversation()
 })
 </script>
 
@@ -64,6 +65,7 @@ onMounted(() => {
 .header-text { display: flex; flex-direction: column; line-height: 1.3; }
 .title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
 .subtitle { font-size: 11px; color: var(--text-secondary); }
+.header-actions { display: flex; gap: 4px; }
 .close-btn { color: var(--text-secondary); }
 .close-btn:hover { color: var(--text-primary); background: var(--bg-hover) !important; }
 </style>

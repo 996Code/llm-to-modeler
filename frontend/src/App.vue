@@ -21,6 +21,7 @@ onMounted(() => {
       }
     })
   } else {
+    // 独立页面加载历史对话
     store.loadConversations()
   }
 })

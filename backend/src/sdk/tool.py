@@ -19,6 +19,7 @@ class ToolContext(BaseModel):
     conversation: Any            # ConversationStore
     emit: Callable[..., None]    # emit(event_type, message, **extra)
     forward_headers: dict = Field(default_factory=dict)
+    conv_id: Optional[str] = None  # 会话 ID，用于日志记录
 
 
 class AskOption(BaseModel):
@@ -123,12 +124,11 @@ class CompositeTool(Tool):
     - 每个 step 对应 _step_<name>(state, ctx) 方法
     - step 内可抛 ClarificationRaised → 立即上抛,Engine 转成 SSE
     - step 内可重跑前序 step 实现 retry(如 validate 失败重跑 generate)
-    - 每个 step 自动 emit 一个 stage 事件
+    - 每个 step 自行 emit stage 事件(含详细描述)
     """
     steps: list[str] = []
 
     def run_pipeline(self, state: dict, ctx: ToolContext) -> None:
         for step_name in self.steps:
-            ctx.emit("stage", step_name)
             method = getattr(self, f"_step_{step_name}")
             method(state, ctx)

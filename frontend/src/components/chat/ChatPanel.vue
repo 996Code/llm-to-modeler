@@ -83,7 +83,7 @@
                 </div>
               </div>
               <div class="config-card-actions">
-                <a-button size="small" type="link" @click.stop="selectConfig(msg.configSnapshot)">
+                <a-button size="small" type="link" @click.stop="showJsonViewer(msg.configSnapshot)">
                   <EyeOutlined /> 查看 JSON
                 </a-button>
                 <a-button v-if="embedded" size="small" type="primary" @click.stop="applyConfig(msg.configSnapshot)">
@@ -126,6 +126,17 @@
       :streaming="store.streaming"
       :pending-clarification="store.pendingClarification"
     />
+
+    <!-- JSON 查看器 Modal -->
+    <Modal
+      v-model:open="jsonViewerVisible"
+      title="表单配置 JSON"
+      :footer="null"
+      width="80%"
+      style="top: 20px"
+    >
+      <pre style="max-height: 70vh; overflow: auto; background: #f5f5f5; padding: 16px; border-radius: 4px; font-size: 12px; line-height: 1.5;">{{ jsonViewerContent }}</pre>
+    </Modal>
   </div>
 </template>
 
@@ -136,6 +147,7 @@ import {
   CheckCircleOutlined, EyeOutlined, QuestionCircleOutlined,
   SolutionOutlined, TeamOutlined, ContactsOutlined,
 } from '@ant-design/icons-vue'
+import { Modal } from 'ant-design-vue'
 import { useConversationStore } from '../../stores/conversation'
 import type { FormConfig } from '../../types'
 import ChatInput from './ChatInput.vue'
@@ -144,6 +156,15 @@ defineProps<{ embedded?: boolean }>()
 
 const store = useConversationStore()
 const msgListRef = ref<HTMLElement>()
+
+// JSON 查看器状态
+const jsonViewerVisible = ref(false)
+const jsonViewerContent = ref('')
+
+function showJsonViewer(config: FormConfig) {
+  jsonViewerContent.value = JSON.stringify(config, null, 2)
+  jsonViewerVisible.value = true
+}
 
 const examples = [
   {
@@ -241,7 +262,9 @@ function selectConfig(config: FormConfig) {
 }
 
 function applyConfig(config: FormConfig) {
-  window.parent.postMessage({ type: 'MODELER_CONFIG_APPLY', payload: { config } }, '*')
+  // 深拷贝为纯 JSON，避免 Vue 响应式代理对象导致 DataCloneError
+  const plainConfig = JSON.parse(JSON.stringify(config))
+  window.parent.postMessage({ type: 'MODELER_CONFIG_APPLY', payload: { config: plainConfig } }, '*')
 }
 
 watch(() => store.messages.length, () => {
