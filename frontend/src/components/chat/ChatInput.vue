@@ -1,6 +1,11 @@
 <template>
   <div class="chat-input-wrap">
     <div class="chat-input" :class="{ disabled: streaming }">
+      <!-- 图片预览 -->
+      <div v-if="imagePreview" class="image-preview">
+        <img :src="imagePreview" alt="preview" />
+        <button class="image-remove" @click="removeImage" :disabled="streaming">×</button>
+      </div>
       <a-textarea
         v-model:value="text"
         :placeholder="placeholderText"
@@ -14,9 +19,24 @@
       <div class="input-actions">
         <span v-if="streaming" class="input-hint">生成中...</span>
         <button
+          class="attach-btn"
+          :disabled="streaming"
+          @click="triggerFileInput"
+          title="上传图片"
+        >
+          <PaperClipOutlined />
+        </button>
+        <input
+          ref="fileInputRef"
+          type="file"
+          accept="image/*"
+          class="file-input-hidden"
+          @change="onFileSelected"
+        />
+        <button
           class="send-btn"
-          :class="{ active: text.trim() && !streaming }"
-          :disabled="!text.trim() || streaming"
+          :class="{ active: canSend }"
+          :disabled="!canSend"
           @click="send"
         >
           <LoadingOutlined v-if="streaming" class="loading-icon" />
@@ -32,16 +52,25 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { SendOutlined, LoadingOutlined } from '@ant-design/icons-vue'
+import { SendOutlined, LoadingOutlined, PaperClipOutlined } from '@ant-design/icons-vue'
 
 const props = defineProps<{
   streaming: boolean
   pendingClarification?: boolean
 }>()
 
-const emit = defineEmits<{ send: [text: string] }>()
+const emit = defineEmits<{
+  send: [text: string, imageBase64?: string]
+}>()
 const text = ref('')
 const textareaRef = ref<any>(null)
+const fileInputRef = ref<HTMLInputElement | null>(null)
+const imageBase64 = ref<string | null>(null)
+const imagePreview = ref<string | null>(null)
+
+const canSend = computed(() => {
+  return (text.value.trim() || imageBase64.value) && !props.streaming
+})
 
 const placeholderText = computed(() => {
   if (props.pendingClarification) {
@@ -59,10 +88,50 @@ watch(() => props.pendingClarification, (val) => {
   }
 })
 
+function triggerFileInput() {
+  fileInputRef.value?.click()
+}
+
+function onFileSelected(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+
+  // 验证文件类型
+  if (!file.type.startsWith('image/')) {
+    return
+  }
+
+  // 限制文件大小 (10MB)
+  if (file.size > 10 * 1024 * 1024) {
+    return
+  }
+
+  const reader = new FileReader()
+  reader.onload = (ev) => {
+    const dataUrl = ev.target?.result as string
+    // 提取 base64 部分 (去掉 data:image/xxx;base64, 前缀)
+    imageBase64.value = dataUrl.split(',')[1]
+    imagePreview.value = dataUrl
+  }
+  reader.readAsDataURL(file)
+
+  // 清空 input 以允许重复选择同一文件
+  input.value = ''
+}
+
+function removeImage() {
+  imageBase64.value = null
+  imagePreview.value = null
+}
+
 function send() {
-  if (!text.value.trim() || props.streaming) return
-  emit('send', text.value.trim())
+  if (!canSend.value) return
+  const img = imageBase64.value || undefined
+  emit('send', text.value.trim(), img)
   text.value = ''
+  imageBase64.value = null
+  imagePreview.value = null
 }
 
 function onEnter(e: KeyboardEvent) {
@@ -95,6 +164,46 @@ function onEnter(e: KeyboardEvent) {
   box-shadow: var(--shadow-input);
 }
 .chat-input.disabled { opacity: 0.8; }
+
+/* 图片预览 */
+.image-preview {
+  position: relative;
+  margin: 4px 0 0 0;
+  flex-shrink: 0;
+}
+.image-preview img {
+  max-width: 120px;
+  max-height: 80px;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+  border: 1px solid var(--border-color-light);
+}
+.image-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition: background 0.2s;
+}
+.image-remove:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+.image-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .input-box {
   flex: 1;
   border: none !important;
@@ -117,6 +226,31 @@ function onEnter(e: KeyboardEvent) {
 .input-hint {
   font-size: 12px;
   color: var(--text-secondary);
+}
+.attach-btn {
+  width: 34px; height: 34px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.attach-btn:hover {
+  color: var(--color-primary);
+  background: var(--color-primary-bg);
+}
+.attach-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.file-input-hidden {
+  display: none;
 }
 .send-btn {
   width: 34px; height: 34px;

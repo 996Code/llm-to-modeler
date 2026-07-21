@@ -62,6 +62,8 @@ Thumbs.db
 # Build
 frontend/dist/
 frontend/.vite/
+frontend/src/**/*.js
+frontend/src/**/*.js.map
 
 # Testing
 .coverage

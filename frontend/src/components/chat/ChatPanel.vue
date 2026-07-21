@@ -307,9 +307,9 @@ function quickFill(text: string) {
   store.sendMessage(text)
 }
 
-function handleSend(text: string) {
-  // 统一入口：后端自动识别意图（create/modify/general）
-  store.sendMessage(text)
+function handleSend(text: string, imageBase64?: string) {
+  // 统一入口：后端自动识别意图（create/modify/general/image）
+  store.sendMessage(text, imageBase64)
 }
 
 function selectConfig(config: FormConfig) {

@@ -43,11 +43,11 @@ def test_new_engine_imports():
     """新 Engine 模块可 import。"""
     from engine.dispatcher import ToolDispatcher
     from engine.conversation import ConversationManager
-    from engine.stream import stream_dispatcher
+    from engine.stream import stream_graph
     from engine.prompt_loader import PromptLoader
     from engine.compression import CompressionSidechain
     from engine.logging_filter import RedactFilter
-    assert all([ToolDispatcher, ConversationManager, stream_dispatcher,
+    assert all([ToolDispatcher, ConversationManager, stream_graph,
                 PromptLoader, CompressionSidechain, RedactFilter])
 
 
@@ -63,5 +63,9 @@ def test_new_pack_imports():
     from domains.njmind_form.tools.create_form import CreateFormTool
     from domains.njmind_form.tools.modify_form import ModifyFormTool
     from domains.njmind_form.tools.chat import ChatTool
+    from domains.njmind_form.tools.get_form import GetFormTool
+    from domains.njmind_form.tools.clone_form import CloneFormTool
+    from domains.njmind_form.tools.image_form import ImageFormTool
     assert all([create_registry, create_prompt_loader,
-                CreateFormTool, ModifyFormTool, ChatTool])
+                CreateFormTool, ModifyFormTool, ChatTool,
+                GetFormTool, CloneFormTool, ImageFormTool])

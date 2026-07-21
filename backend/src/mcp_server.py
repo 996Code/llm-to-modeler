@@ -14,6 +14,7 @@ Resources:
 
 import json
 import logging
+import uuid
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -21,13 +22,13 @@ from mcp.server.fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 
-def create_mcp_server(upstream, dispatcher=None):
+def create_mcp_server(upstream, graph=None):
     """
     Create MCP server with tools and resources.
 
     Args:
         upstream: UpstreamClient instance
-        dispatcher: ToolDispatcher instance(新架构,替代旧 workflow)
+        graph: Compiled LangGraph StateGraph instance
     """
     mcp = FastMCP("llm-form-modeler")
 
@@ -45,18 +46,45 @@ def create_mcp_server(upstream, dispatcher=None):
         Returns:
             Generated FormConfig JSON string.
         """
-        if not dispatcher:
-            return json.dumps({"error": "Dispatcher not configured"}, ensure_ascii=False)
+        if not graph:
+            return json.dumps({"error": "Graph not configured"}, ensure_ascii=False)
 
-        result = dispatcher.run(user_input=description, conv_id="mcp")
-        if result.artifact:
+        thread_id = str(uuid.uuid4())
+        input_data = {
+            "user_input": description,
+            "conversation_history": [],
+            "compressed_history": "",
+            "conversation_id": f"mcp_{thread_id}",
+            "forward_headers": {},
+            "current_config": None,
+            "tool_name": "",
+            "intent_reason": "",
+            "tool_state": {},
+            "tool_result": None,
+            "pending_questions": [],
+            "clarify_answers": {},
+            "sse_events": [],
+        }
+        config = {"configurable": {"thread_id": f"mcp_{thread_id}"}}
+
+        try:
+            result_state = graph.invoke(input_data, config)
+        except Exception as e:
+            logger.exception("Graph invocation failed")
+            return json.dumps({"error": f"Graph invocation failed: {e}"}, ensure_ascii=False)
+
+        tool_result = result_state.get("tool_result")
+        if tool_result is None:
+            return json.dumps({"error": "No config generated"}, ensure_ascii=False)
+
+        if tool_result.artifact:
             return json.dumps({
-                "config": result.artifact,
-                "valid": len(result.extra.get("validation_errors", [])) == 0,
-                "errors": result.extra.get("validation_errors", []),
+                "config": tool_result.artifact,
+                "valid": len(tool_result.extra.get("validation_errors", [])) == 0,
+                "errors": tool_result.extra.get("validation_errors", []),
             }, ensure_ascii=False, indent=2)
-        elif result.error_for_llm:
-            return json.dumps({"error": result.error_for_llm}, ensure_ascii=False)
+        elif tool_result.error_for_llm:
+            return json.dumps({"error": tool_result.error_for_llm}, ensure_ascii=False)
         return json.dumps({"error": "No config generated"}, ensure_ascii=False)
 
     @mcp.tool()

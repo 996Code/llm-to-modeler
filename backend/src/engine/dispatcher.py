@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from sdk.tool import Tool, ToolResult, ToolContext, AskSpec, AskQuestion, AskOption, ClarificationRaised
 from sdk.registry import ToolRegistry
+from engine.compression import build_compressed_history
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ class ToolDispatcher:
         # 1. 构建 state
         state = {
             "user_input": user_input,
-            "compressed_history": self._build_compressed_history(conversation_history),
+            "compressed_history": build_compressed_history(conversation_history),
             "source_artifact": current_config,  # modify 用
             "conversation_id": conv_id,
             "forward_headers": forward_headers or {},
@@ -340,22 +341,3 @@ class ToolDispatcher:
         # 额外挂 prompt_loader
         object.__setattr__(ctx, "prompt_loader", self._prompt_loader)
         return ctx
-
-    def _build_compressed_history(self, history: list) -> str:
-        """把对话历史格式化为文本。
-
-        TODO(阶段 4): 接压缩器,实现:
-        1. token 估算(estimate_tokens)
-        2. 70% 阈值触发压缩
-        3. LLM 摘要旧历史
-        4. 状态补偿(summarize_artifact)
-        当前简单截断最近 6 条,每条 200 字符。
-        """
-        if not history:
-            return ""
-        parts = []
-        for msg in history[-6:]:  # 最近 3 轮(6 条)
-            role = "用户" if msg.get("role") == "user" else "助手"
-            content = msg.get("content", "")[:200]
-            parts.append(f"{role}: {content}")
-        return "\n".join(parts)

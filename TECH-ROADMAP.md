@@ -2,7 +2,7 @@
 
 > 自然语言 → 低码配置生成引擎
 >
-> 版本：v0.4 | 日期：2026-07-16
+> 版本：v0.5 | 日期：2026-07-21
 
 ---
 
@@ -151,7 +151,7 @@
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**就两层：前端 Vue + 后端 Python，完事。**
+**三层六边形架构：Engine(零领域知识) → SDK(协议) → Domain Pack(插件)**
 
 ---
 
@@ -319,9 +319,58 @@ dev = [
 
 ---
 
-## 4. 核心引擎：LangGraph 工作流
+## 4. 核心引擎：LangGraph StateGraph
 
-### 4.1 主工作流（Create Skill 为例）
+### 4.1 新架构（三层六边形）
+
+```
+Engine 层 (零领域知识,不含任何 form 相关代码)
+──────────────────────────────────────────────
+
+  LangGraph StateGraph:
+  ┌──────────────────────────────────────────────────────────┐
+  │                                                          │
+  │  START → classify_intent (LLM 选工具,动态从 registry)    │
+  │             │                                            │
+  │             ├─ "create_form"  → execute_tool → END      │
+  │             ├─ "modify_form"  → execute_tool → END      │
+  │             ├─ "get_form"     → execute_tool → END      │
+  │             ├─ "clone_form"   → execute_tool → END      │
+  │             ├─ "image_form"   → execute_tool → END      │
+  │             ├─ "chat"         → execute_tool → END      │
+  │             └─ fallback       → execute_tool → END      │
+  │                                                          │
+  │  execute_tool 内部:                                      │
+  │    1. 从 registry 取 Tool 实例                           │
+  │    2. 构建 ToolContext (llm_client + asset_client + ...) │
+  │    3. tool.execute(state, ctx)                           │
+  │    4. 如果 ToolResult.ask → interrupt() 挂起             │
+  │    5. 用户回答 → Command(resume=answers) → 重跑同一工具  │
+  │                                                          │
+  │  Checkpoint: InMemorySaver, thread_id = conversation_id  │
+  └──────────────────────────────────────────────────────────┘
+
+SDK 层 (协议定义)
+──────────────────────────────────────────────
+
+  Tool          — 原子工具基类 (name/description/when/safety)
+  CompositeTool — 多步管线工具 (steps + run_pipeline)
+  ToolResult    — 三态: artifact / ask / error_for_llm
+  AskSpec       — 追问协议 (questions + options)
+  ToolContext    — 依赖注入 (llm/asset/emit/conversation/registry)
+  ToolRegistry  — 注册表 (register/all/get/describe_for_llm)
+
+Domain Pack 层 (插件化,零耦合)
+──────────────────────────────────────────────
+
+  njmind_form/pack.py:
+    create_registry()      → 注册 6 个工具
+    create_prompt_loader() → 加载 Jinja2 prompt 模板
+
+  触摸石: grep -rE "form|formCode|template|field" engine/ → 必须为空
+```
+
+### 4.2 六个工具的工作流差异
 
 ```
                          ┌──────────────┐
@@ -433,177 +482,153 @@ dev = [
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                     Skill 工作流对比                                  │
+│                     工具工作流对比                                    │
 ├──────────┬──────────┬──────────┬──────────┬──────────┬──────────────┤
-│  步骤     │ create   │ update   │ get      │ clone    │ image        │
+│  步骤     │ create   │ modify   │ get      │ clone    │ image        │
 ├──────────┼──────────┼──────────┼──────────┼──────────┼──────────────┤
-│ 意图分类  │ ✅ 5种   │ ✅ 5种   │ ✅ 查询  │ ✅ 3种   │ ✅ 3种       │
-│ 图片分析  │ ❌       │ ❌       │ ❌       │ ❌       │ ✅           │
+│ LLM提取  │ -        │ -        │ formCode │ 源code+  │ -            │
+│          │          │          │          │ 新名称   │              │
+│ 图片分析  │ ❌       │ ❌       │ ❌       │ ❌       │ ✅ 多模态    │
 │ 读源表单  │ ❌       │ ✅       │ ✅       │ ✅       │ ❌           │
-│ 读指南    │ ✅       │ ❌       │ 可选     │ ❌       │ ✅           │
-│ 读Schema  │ ✅ 每字段│ ✅ 受影响 │ ❌       │ ✅ 新增  │ ✅           │
-│ 读模板    │ ✅ 每字段│ ✅ 新增  │ ❌       │ ✅ 新增  │ ✅           │
+│ 读指南    │ ✅       │ ✅       │ ❌       │ ❌       │ ✅           │
+│ 读模板    │ ✅       │ ✅       │ ❌       │ ❌       │ ✅           │
 │ LLM生成   │ ✅ 全新  │ ✅ 增量  │ ❌       │ ✅ 拷贝+ │ ✅ 图片→配置 │
 │           │          │          │          │   修改   │              │
 │ 校验模式  │ CREATE   │ UPDATE   │ -        │ CREATE   │ CREATE       │
-│ 用户确认  │ ✅       │ ✅       │ -        │ ✅       │ ✅(迭代)     │
-│ 提交API   │ create   │ update   │ -        │ create   │ create       │
+│ 追问支持  │ ✅       │ ❌       │ ❌       │ ❌       │ ❌           │
+│ 提交API   │ create   │ update   │ -        │ create   │ (仅生成)     │
 ├──────────┴──────────┴──────────┴──────────┴──────────┴──────────────┤
-│  共同点：所有 Skill 共享 RULES.md 规则                               │
-│  关联：clone = create + update 规则组合；image → 确认后走 create 流程 │
+│  共同点：所有工具共享 ToolResult 三态(artifact/ask/error)            │
+│  安全声明：is_destructive / is_read_only / is_concurrency_safe      │
+│  插件化：新 pack 只需实现 pack.py 的 create_registry()              │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.3 LangGraph State 结构
+### 4.3 LangGraph GraphState 结构
 
 ```python
-class AgentState(BaseModel):
+class GraphState(TypedDict):
     """LangGraph 工作流状态"""
 
-    # ── Skill 上下文（动态注入）──
-    skill_name: str              # "create" | "update" | "get" | "clone" | "image"
-    skill_content: str           # SKILL.md 全文
-    rules_content: str           # RULES.md 全文
+    # ── 输入 ──
+    user_input: str              # 用户消息
+    conversation_history: list   # 对话历史 [{role, content}]
+    compressed_history: str      # 压缩后的对话文本
+    conversation_id: str         # 会话 ID (= checkpoint thread_id)
+    forward_headers: dict        # 嵌入模式透传的请求头
+    current_config: dict | None  # 已有配置(modify 用)
 
-    # ── 对话上下文 ──
-    conversation_history: list   # 多轮对话消息列表
-    user_input: str              # 当前用户输入
+    # ── 意图识别 ──
+    tool_name: str               # 选中的工具名
+    intent_reason: str           # 选择理由
 
-    # ── 配置数据 ──
-    current_config: dict | None  # 当前生成的 FormConfig JSON
-    source_config: dict | None   # 源表单（update/clone 用）
+    # ── 工具执行 ──
+    tool_state: dict             # 工具内部 state(透传,含 image_base64 等)
+    tool_result: ToolResult | None  # 工具执行结果
 
-    # ── Skill 资源（从文件缓存加载）──
-    guide: dict | None           # guide.json 内容
-    schemas: dict                # {filename: schema_json}
-    templates: dict              # {filename: template_json}
+    # ── 追问(LangGraph interrupt) ──
+    pending_questions: list      # interrupt value
+    clarify_answers: dict        # resume value
 
-    # ── 校验状态 ──
-    validation_errors: list      # 校验错误列表
-    retry_count: int = 0         # 当前重试次数
-    max_retries: int = 3         # 最大重试次数
-
-    # ── 流程控制 ──
-    intent: str | None           # 分类后的意图
-    needs_confirmation: bool     # 是否需要用户确认
-    is_complete: bool = False    # 流程是否完成
+    # ── SSE 事件队列 ──
+    sse_events: list             # 节点产出的事件列表
 ```
 
-### 4.4 Prompt 组装策略
+### 4.4 Prompt 策略
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                System Prompt 组装（4 层）                     │
+│                Prompt 策略(工具自治)                          │
 │                                                              │
+│  Engine 层(零领域知识):                                      │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  第 1 层: RULES.md (共享规则, ~3K tokens)             │   │
-│  │  ─────────────────────────────────                    │   │
-│  │  • 字段类型提取优先级链                                │   │
-│  │  • 语义推导速查表（"金额"→NUMBER, "手机"→TEXT...）    │   │
-│  │  • 歧义消解表                                         │   │
-│  │  • 24 栅格规则                                        │   │
-│  │  • 13 条常见陷阱禁令                                  │   │
-│  │  • 强制工作流纪律                                     │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                          +                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  第 2 层: SKILL.md (当前 Skill 专属, ~2K tokens)      │   │
-│  │  ─────────────────────────────────────                │   │
-│  │  • 工作流步骤定义                                     │   │
-│  │  • 意图分类规则                                       │   │
-│  │  • 数据格式要求                                       │   │
-│  │  • 校验协议                                           │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                          +                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  第 3 层: 动态数据 (本次请求相关, ~5K-10K tokens)     │   │
-│  │  ────────────────────────────────                     │   │
-│  │  • guide.json 的 keywordIndex + commonPatterns        │   │
-│  │  • 相关字段的 JSON Schema                             │   │
-│  │  • 相关字段的模板 JSON                                │   │
-│  │  • (update/clone) 现有表单配置                        │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                          +                                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  第 4 层: 输出约束                                    │   │
-│  │  ────────────────                                     │   │
-│  │  • JSON Schema (Structured Output 约束)               │   │
-│  │  • 禁止编造 UUID、不留 placeholder                    │   │
+│  │  classify_intent:                                    │   │
+│  │    从 registry.all() 动态生成工具清单                 │   │
+│  │    "可选工具:\n- create_form: ... \n- modify_form: ..."│   │
+│  │    LLM 返回 {"tools": ["tool_name"], "reason": "..."} │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                              │
-│  总计 ≈ 10K-15K tokens                                      │
+│  Domain Pack 层(工具内部):                                    │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  每个 Tool/CompositeTool 自行管理 prompt:             │   │
+│  │  - Jinja2 模板 (domains/njmind_form/prompts/)        │   │
+│  │  - ctx.prompt_loader.render("njmind_form", name, ...)│   │
+│  │  - 或内联 system_prompt (简单工具如 get_form)        │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  优势:新 pack 只需实现 Tool,Engine 零改动                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 5. Skill 消费机制
+## 5. 插件自动发现机制
 
-### 5.1 Skill 文件来源与同步
-
-```
-    njmind-modeler 项目                    llm-to-modler 项目
-    ──────────────────                    ──────────────────
-
-    Maven 编译 (process-classes)           Python 运行时
-    ┌──────────────────────┐              ┌──────────────────────┐
-    │ CompileTimeGenerator │              │   Skill Consumer     │
-    │                      │              │   (watchdog)         │
-    │  1. 生成 Schema      │              │                      │
-    │  2. 生成 Template    │   文件同步    │  skills/             │
-    │  3. 生成 Guide       │─────────────→│  ├── _shared/        │
-    │  4. 生成 Skill       │              │  │   └── RULES.md    │
-    │  5. syncSkillFiles() │              │  ├── .../SKILL.md    │
-    └──────────────────────┘              │  ├── mcp-schemas/    │
-                                          │  ├── mcp-templates/  │
-                                          │  └── mcp-guides/     │
-                                          │                      │
-                                          │  watchdog 监听变化    │
-                                          │  → 自动热更新缓存     │
-                                          └──────────────────────┘
-
-    同步方式（三选一）：
-    ┌────────────────────────────────────────────────────────────┐
-    │  方式 1: 本地文件挂载 (开发环境)                            │
-    │  njmind-modeler 编译输出 → 软链接到 llm-to-modler/skills/  │
-    │                                                            │
-    │  方式 2: Docker Volume (生产环境)                           │
-    │  njmind-modeler 容器输出 → Volume → llm-to-modler 挂载     │
-    │                                                            │
-    │  方式 3: HTTP 拉取 (远程部署)                               │
-    │  njmind-modeler 暴露 REST API → 定时拉取或 Webhook 通知    │
-    └────────────────────────────────────────────────────────────┘
-```
-
-### 5.2 Skill 文件 → 系统角色映射
+### 5.1 Pack 加载流程
 
 ```
-    Skill 文件                          系统中的角色
-    ──────────                          ────────────
+    启动时自动加载
+    ──────────────────────────────────────────────────
 
-    _shared/RULES.md          ──→  System Prompt 第 1 层（共享约束）
-    ├── 字段类型提取规则             注入到每个 LLM 调用
-    ├── 语义推导速查表
-    ├── 13 条禁令
-    └── 校验协议
+    main.py
+       │
+       ▼
+    domains/__init__.py: load_all_packs()
+       │
+       ├─ 扫描 domains/*/pack.py
+       │
+       ├─ 调用每个 pack.py 的 create_registry() + create_prompt_loader()
+       │
+       ├─ 合并所有 registry → 统一 registry
+       │
+       └─ 传入 build_graph(registry=registry, ...)
 
-    njmind-form-field-*/    ──→  System Prompt 第 2 层（Skill 专属）
-    └── SKILL.md                   按意图动态加载
-        ├── 工作流步骤
-        └── 提交规则
+    新增 pack 只需:
+    ┌──────────────────────────────────────────────────────────┐
+    │  1. 创建 domains/my_pack/ 目录                           │
+    │  2. 实现 pack.py:                                        │
+    │     def create_registry() -> ToolRegistry:               │
+    │         registry = ToolRegistry()                        │
+    │         registry.register(MyTool())                      │
+    │         return registry                                  │
+    │     def create_prompt_loader() -> PromptLoader:          │
+    │         ...                                              │
+    │  3. 实现 tools/my_tool.py:                               │
+    │     class MyTool(Tool):                                  │
+    │         name = "my_tool"                                 │
+    │         description = "..."                              │
+    │         when = "..."                                     │
+    │  4. Engine 零改动,自动被 LLM 意图识别                    │
+    └──────────────────────────────────────────────────────────┘
+```
 
-    mcp-schemas/*.json      ──→  LLM 输出约束 + jsonschema 校验
-    ├── form-config.schema.json
-    └── {type}_field.schema.json
+### 5.2 资源获取方式
 
-    mcp-templates/*.json    ──→  LLM Prompt 中的模板参考
-    ├── simple_form.json           "基于此模板修改"
-    └── {type}_field.json
+```
+    旧架构(Skill Consumer + 文件监听)      新架构(Upstream HTTP API)
+    ──────────────────────────────────     ────────────────────────────
 
-    mcp-guides/guide.json   ──→  字段类型匹配 + 配置模式
-    ├── keywordIndex{}             "金额" → NUMBER
-    ├── commonPatterns[]           12 种常用配置模式
-    └── pitfalls[]                 20+ 常见错误
+    skills/                                UpstreamClient
+    ├── _shared/RULES.md                   ├── get_guide()     → HTTP
+    ├── mcp-schemas/*.json                 ├── get_template()  → HTTP
+    ├── mcp-templates/*.json               ├── list_templates()→ HTTP
+    └── mcp-guides/guide.json              └── validate_form() → HTTP
+                                           HttpAssetClient (SDK 抽象层)
+                                           ├── get_guide()
+                                           ├── get_template()
+                                           ├── validate_artifact()
+                                           ├── persist_artifact()
+                                           ├── get_form()          ← 新增
+                                           └── list_templates()
+
+    优势:
+    ┌──────────────────────────────────────────────────────────┐
+    │  ✅ 无需 watchdog / 文件同步                              │
+    │  ✅ 无需 skills/ 目录挂载                                │
+    │  ✅ 上游更新即时生效(无缓存时)                            │
+    │  ✅ 适合 Docker / 远程部署                                │
+    │  ✅ AssetClient 抽象层,pack 不感知 HTTP 细节              │
+    └──────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -736,9 +761,12 @@ class AgentState(BaseModel):
 │  模块         │ 方法   │ 路径                                    │
 ├──────────────┼────────┼─────────────────────────────────────────┤
 │              │        │                                         │
-│  配置生成     │ POST   │ /api/config/generate                    │
-│  (核心)       │        │ body: {description, conversationId}     │
+│  统一入口     │ POST   │ /api/config/chat                      │
+│  (核心)       │        │ body: {message, conversationId,        │
+│              │        │        answers?, image_base64?}          │
 │              │        │ response: SSE stream                    │
+│              │        │                                         │
+│              │        │ 支持:正常消息 / 追问恢复 / 图片上传     │
 │              │        │                                         │
 │              │ POST   │ /api/config/modify                      │
 │              │        │ body: {currentConfig, instruction}      │
@@ -855,15 +883,15 @@ Response (SSE):
 │       ▼                                                          │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  MCP Server (Python mcp SDK)                              │   │
+│  │  使用 LangGraph StateGraph (非旧 ToolDispatcher)          │   │
 │  │                                                           │   │
 │  │  ┌─── Tools ──────────────────────────────────────────┐  │   │
 │  │  │                                                     │  │   │
-│  │  │  get_form_config    → 自然语言 → 表单配置           │  │   │
+│  │  │  get_form_config    → graph.invoke → ToolResult     │  │   │
 │  │  │  validate_form      → 校验配置 JSON                 │  │   │
 │  │  │  list_templates     → 列出可用模板                  │  │   │
 │  │  │  get_template       → 获取指定模板                  │  │   │
-│  │  │  get_schema         → 获取 JSON Schema              │  │   │
-│  │  │  list_field_types   → 列出字段类型                  │  │   │
+│  │  │  get_guide          → 获取配置指南                  │  │   │
 │  │  │                                                     │  │   │
 │  │  └─────────────────────────────────────────────────────┘  │   │
 │  │                                                           │   │
@@ -1768,107 +1796,92 @@ llm-to-modler/
 ├── backend/                             # Python 后端
 │   ├── pyproject.toml
 │   ├── Dockerfile
-│   ├── .env.example
 │   │
 │   └── src/
 │       ├── main.py                      # FastAPI 入口
-│       ├── config.py                    # 配置管理 (环境变量)
 │       │
 │       ├── api/                         # 路由层
-│       │   ├── config.py                # /api/config/* (generate/modify/validate)
-│       │   ├── skills.py                # /api/skills/* (field-types/templates/schemas)
+│       │   ├── config.py                # /api/config/chat (统一 SSE 入口)
 │       │   ├── conversations.py         # /api/conversations/*
+│       │   ├── skills.py                # /api/skills/*
 │       │   ├── health.py                # /health
-│       │   └── mcp.py                   # /mcp (MCP Server)
+│       │   └── sse.py                   # StreamManager / SSEEvent
 │       │
-│       ├── services/                    # 业务服务层
-│       │   ├── skill_consumer.py        # Skill 文件加载 + watchdog 监听 + 内存缓存
-│       │   ├── schema_validator.py      # jsonschema 校验
-│       │   └── conversation.py          # 会话管理
+│       ├── engine/                      # Engine 层 (零领域知识)
+│       │   ├── graph.py                 # StateGraph 构建 + compile
+│       │   ├── graph_state.py           # GraphState TypedDict
+│       │   ├── nodes.py                 # classify_intent / execute_tool / handle_result
+│       │   ├── stream.py                # graph.stream → SSE 桥接
+│       │   ├── compression.py           # 压缩 sidechain + build_compressed_history
+│       │   ├── conversation.py          # ConversationManager
+│       │   ├── prompt_loader.py         # Jinja2 模板加载
+│       │   ├── logging_filter.py        # 日志凭证脱敏
+│       │   └── dispatcher.py            # [遗留] ToolDispatcher (MCP 兼容)
 │       │
-│       ├── graph/                       # LangGraph 工作流
-│       │   ├── state.py                 # AgentState 定义
-│       │   ├── graph.py                 # StateGraph 构建 + 条件边
-│       │   └── nodes/                   # 工作流节点
-│       │       ├── load_skill.py        # 加载 Skill 文件
-│       │       ├── classify_intent.py   # 意图分类 (LLM)
-│       │       ├── prepare_data.py      # 获取 Schema/Template
-│       │       ├── generate_config.py   # 配置生成 (LLM)
-│       │       ├── validate_config.py   # Schema 校验
-│       │       ├── user_confirm.py      # 用户确认
-│       │       └── submit.py            # 提交
+│       ├── sdk/                         # SDK 层 (协议定义)
+│       │   ├── tool.py                  # Tool / CompositeTool / ToolResult / AskSpec
+│       │   ├── registry.py              # ToolRegistry
+│       │   ├── asset_client.py          # AssetClient 抽象
+│       │   └── sanitize.py              # 文本脱敏
+│       │
+│       ├── domains/                     # Domain Pack 层 (插件化)
+│       │   ├── __init__.py              # load_all_packs()
+│       │   └── njmind_form/             # 表单配置 pack
+│       │       ├── pack.py              # create_registry() + create_prompt_loader()
+│       │       ├── models.py            # ParsedField 等数据模型
+│       │       ├── prompts/             # Jinja2 模板
+│       │       └── tools/
+│       │           ├── create_form.py   # 6步管线
+│       │           ├── modify_form.py   # 3步管线
+│       │           ├── get_form.py      # 查询
+│       │           ├── clone_form.py    # 复制
+│       │           ├── image_form.py    # 图片识别
+│       │           ├── chat.py          # 闲聊
+│       │           └── _config_loader.py
+│       │
+│       ├── adapters/                    # 适配器层
+│       │   └── http_asset_client.py     # HttpAssetClient (UpstreamClient 包装)
 │       │
 │       ├── llm/                         # LLM 调用
-│       │   ├── client.py                # OpenAI 客户端封装
-│       │   └── prompt_builder.py        # Prompt 组装 (4 层)
+│       │   └── client.py                # OpenAI 客户端(支持多模态)
 │       │
-│       └── mcp/                         # MCP 协议
-│           ├── server.py                # MCP Server
-│           ├── tools.py                 # MCP Tools 实现
-│           └── resources.py             # MCP Resources 实现
+│       ├── services/                    # 基础服务
+│       │   ├── upstream_client.py       # 上游 HTTP 客户端
+│       │   └── conversation_store.py    # SQLite 对话存储
+│       │
+│       └── mcp_server.py                # MCP Server (使用 LangGraph)
 │
 ├── frontend/                            # Vue 前端
 │   ├── package.json
-│   ├── tsconfig.json
 │   ├── vite.config.ts
-│   ├── Dockerfile
 │   │
 │   └── src/
 │       ├── App.vue
 │       ├── main.ts
-│       ├── embed.ts                     # embed SDK 入口 (独立打包为 embed.js)
+│       ├── embed.ts                     # embed SDK 入口
 │       │
 │       ├── layouts/                     # 布局
 │       │   ├── StandaloneLayout.vue     # 独立模式 (全页面三栏)
 │       │   └── EmbeddedLayout.vue       # 嵌入模式 (IM 聊天窗口)
 │       │
 │       ├── components/
-│       │   ├── chat/                    # 对话组件 (两种模式共享)
-│       │   │   ├── ChatPanel.vue
-│       │   │   ├── ChatInput.vue
-│       │   │   ├── MessageList.vue
-│       │   │   ├── UserMessage.vue
-│       │   │   ├── AssistantMessage.vue
-│       │   │   ├── ConfigSummaryCard.vue
-│       │   │   └── StreamingProgress.vue
+│       │   ├── chat/
+│       │   │   ├── ChatPanel.vue        # 对话面板(含配置/数据卡片)
+│       │   │   └── ChatInput.vue        # 输入框+图片上传+发送
 │       │   └── json/
-│       │       ├── JsonPanel.vue        # 独立模式: 常驻面板
-│       │       └── JsonDrawer.vue       # 嵌入模式: 抽屉弹窗
-│       │
-│       ├── embed/                       # 嵌入模式专属
-│       │   ├── bridge.ts                # postMessage 通信桥
-│       │   ├── FloatingButton.vue
-│       │   └── types.ts                 # SDK 类型定义
-│       │
-│       ├── composables/
-│       │   ├── useSSE.ts
-│       │   ├── useConversation.ts
-│       │   ├── useConfig.ts
-│       │   └── useEmbedBridge.ts        # 嵌入模式通信 hook
+│       │       └── JsonPanel.vue        # JSON 展示面板
 │       │
 │       ├── services/
-│       │   ├── config.api.ts
-│       │   ├── conversation.api.ts
-│       │   └── sse.client.ts
+│       │   └── api.ts                   # 统一 chat() + SSE
 │       │
-│       └── stores/
-│           ├── conversation.store.ts
-│           └── config.store.ts
+│       ├── stores/
+│       │   └── conversation.ts          # Pinia store
+│       │
+│       └── composables/
+│           └── forwardHeaders.ts        # Header 透传
 │
-├── skills/                              # Skill 文件目录 (运行时)
-│   ├── _shared/RULES.md                 # ← 从 njmind-modeler 同步
-│   ├── njmind-form-field-create/SKILL.md
-│   ├── njmind-form-field-update/SKILL.md
-│   ├── njmind-form-field-get/SKILL.md
-│   ├── njmind-form-field-clone/SKILL.md
-│   ├── njmind-form-field-image/SKILL.md
-│   ├── mcp-schemas/
-│   ├── mcp-templates/
-│   └── mcp-guides/
-│
-├── docker-compose.yml
-├── docker-compose.dev.yml
-├── .env.example
+├── .env                                 # 环境变量
+├── .env.example                         # 环境变量模板
 ├── TECH-ROADMAP.md                      # ← 本文档
 └── README.md
 ```
@@ -1941,34 +1954,35 @@ Week 6: 集成 + 部署
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  M1: 核心引擎 MVP (Week 3 末)                                   │
+│  M1: 核心引擎 MVP ✅ 已完成                                     │
 │  ─────────────────────────────                                   │
-│  ☐ Skill 文件加载并缓存成功                                     │
-│  ☐ 文件修改后 2 秒内热更新                                      │
-│  ☐ LangGraph 工作流可运行（create skill）                       │
-│  ☐ 自然语言 → FormConfig JSON 生成成功                          │
-│  ☐ JSON Schema 校验通过                                         │
-│  ☐ SSE 流式输出正常                                             │
-│  ☐ 校验失败自动重试（≤3 次）                                    │
+│  ✅ LangGraph StateGraph 工作流可运行                            │
+│  ✅ 自然语言 → FormConfig JSON 生成成功                          │
+│  ✅ 上游校验 + 自动重试（≤3 次）                                 │
+│  ✅ SSE 流式输出正常                                             │
 │                                                                  │
-│  M2: API + MCP 可用 (Week 4 末)                                 │
+│  M2: API + MCP 可用 ✅ 已完成                                   │
 │  ─────────────────────────────                                   │
-│  ☐ REST API 全部端点可用                                        │
-│  ☐ MCP Server 可被 AI 工具调用                                  │
-│  ☐ 5 个 Skill 工作流全部实现                                    │
-│  ☐ 多轮对话上下文保持                                           │
+│  ✅ REST API 统一入口 (/api/config/chat)                        │
+│  ✅ MCP Server 使用 LangGraph (非旧 dispatcher)                  │
+│  ✅ 6 个工具全部实现 (create/modify/get/clone/image/chat)       │
+│  ✅ 追问 interrupt/resume 机制                                   │
+│  ✅ 多轮对话上下文保持                                           │
 │                                                                  │
-│  M3: 前端可用 (Week 5 末)                                       │
+│  M3: 前端可用 ✅ 已完成                                         │
 │  ─────────────────────────                                       │
-│  ☐ 对话窗口可输入并展示结果                                     │
-│  ☐ JSON 面板实时展示配置                                        │
-│  ☐ 导出/复制功能正常                                            │
-│  ☐ 响应式布局（桌面+移动）                                      │
+│  ✅ 对话窗口可输入并展示结果                                     │
+│  ✅ JSON 面板实时展示配置                                        │
+│  ✅ 图片上传支持 (ImageFormTool)                                 │
+│  ✅ Pipeline 进度条 + 追问卡片                                   │
+│  ✅ 独立模式 + 嵌入模式                                         │
 │                                                                  │
-│  M4: 部署完成 (Week 6 末)                                       │
+│  M4: 部署完成 ✅ 已完成                                         │
 │  ─────────────────────────                                       │
-│  ☐ docker-compose up 一键启动                                   │
-│  ☐ 端到端流程验证通过                                           │
-│  ☐ 文档齐全                                                     │
+│  ✅ Docker Compose 一键启动                                      │
+│  ✅ 端到端流程验证通过                                           │
+│  ✅ 文档齐全 (README + TECH-ROADMAP)                            │
+│  ✅ 三层六边形架构: Engine → SDK → Domain Pack                   │
+│  ✅ 插件自动发现: 新 pack 零改动 Engine                          │
 └─────────────────────────────────────────────────────────────────┘
 ```

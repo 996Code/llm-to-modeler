@@ -17,6 +17,7 @@ from langgraph.types import Command
 
 from api.sse import SSEEvent, StreamManager
 from sdk.tool import ToolResult
+from engine.compression import build_compressed_history
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ async def stream_graph(
     conversation_id: str,
     user_id: str,
     answers: dict = None,
+    image_base64: str = None,
     conversation_store=None,
     conversation_history: list = None,
     current_config: dict = None,
@@ -45,6 +47,7 @@ async def stream_graph(
         conversation_id: 会话 ID(用作 checkpoint thread_id)
         user_id: 用户 ID
         answers: 追问回答(非空时走 Command(resume=answers) 路径)
+        image_base64: 图片 base64 编码(用于 ImageFormTool)
         conversation_store: ConversationStore 实例
         conversation_history: 对话历史
         current_config: 当前已有配置
@@ -60,13 +63,13 @@ async def stream_graph(
         input_data = {
             "user_input": user_input,
             "conversation_history": conversation_history or [],
-            "compressed_history": _build_compressed_history(conversation_history),
+            "compressed_history": build_compressed_history(conversation_history),
             "conversation_id": conversation_id,
             "forward_headers": forward_headers or {},
             "current_config": current_config,
             "tool_name": "",
             "intent_reason": "",
-            "tool_state": {},
+            "tool_state": {"image_base64": image_base64} if image_base64 else {},
             "tool_result": None,
             "pending_questions": [],
             "clarify_answers": {},
@@ -187,18 +190,6 @@ async def stream_graph(
 
 
 # ── 辅助函数 ──────────────────────────────────────────────
-
-
-def _build_compressed_history(history: list) -> str:
-    """把对话历史格式化为文本(简单截断版,后续接压缩器)。"""
-    if not history:
-        return ""
-    parts = []
-    for msg in history[-6:]:
-        role = "用户" if msg.get("role") == "user" else "助手"
-        content = msg.get("content", "")[:200]
-        parts.append(f"{role}: {content}")
-    return "\n".join(parts)
 
 
 def _save_conversation(store, conv_id, user_id, user_input, assistant_content):

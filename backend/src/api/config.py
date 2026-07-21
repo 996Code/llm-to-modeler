@@ -33,10 +33,12 @@ class ChatRequest(BaseModel):
 
     answers: 追问回答(非空时走 LangGraph Command(resume=answers) 路径,
              从断点继续执行而非当作新消息)。
+    image_base64: 图片 base64 编码(用于 ImageFormTool 图片识别)。
     """
     message: str = Field(..., description="User message")
     conversation_id: Optional[str] = None
     answers: Optional[Dict[str, Any]] = None
+    image_base64: Optional[str] = None
 
 
 class ValidateRequest(BaseModel):
@@ -122,6 +124,7 @@ async def chat(req: ChatRequest, request: Request):
             conversation_id=req.conversation_id,
             user_id=request.headers.get("X-User-Id", ""),
             answers=req.answers,  # ← 追问回答
+            image_base64=req.image_base64,  # ← 图片 base64
             conversation_store=request.app.state.conversation_store,
             conversation_history=history,
             current_config=current_config,

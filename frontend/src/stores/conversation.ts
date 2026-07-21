@@ -78,11 +78,11 @@ export const useConversationStore = defineStore('conversation', () => {
   }
 
   /**
-   * 统一发送消息——后端自动识别意图（create/modify/general）。
+   * 统一发送消息——后端自动识别意图（create/modify/general/image）。
    * 前端不再区分 generate/modify，统一调 /api/chat。
    */
-  async function sendMessage(text: string) {
-    if (!text.trim() || streaming.value) return
+  async function sendMessage(text: string, imageBase64?: string) {
+    if ((!text.trim() && !imageBase64) || streaming.value) return
 
     // Auto-create conversation if none selected
     let convId = currentConversation.value?.id
@@ -185,7 +185,7 @@ export const useConversationStore = defineStore('conversation', () => {
           stageMessage.value = ''
           currentStage.value = ''
         },
-      }, clarifyAnswers)
+      }, clarifyAnswers, imageBase64)
     } catch (e: any) {
       messages.value.push({ role: 'assistant', content: `请求失败: ${e.message}` })
     } finally {

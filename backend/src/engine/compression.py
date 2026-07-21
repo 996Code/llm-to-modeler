@@ -63,6 +63,23 @@ def estimate_messages_tokens(messages: List[Dict[str, str]]) -> int:
     return total
 
 
+def build_compressed_history(history: list, max_messages: int = 6, max_chars: int = 200) -> str:
+    """把对话历史格式化为文本(简单截断版,后续接压缩器)。
+
+    共享实现:stream.py 和 dispatcher.py 都调用此函数,避免逻辑重复。
+    当前策略:保留最近 max_messages 条,每条截断 max_chars 字符。
+    后续由 CompressionSidechain 实现智能压缩(LLM 摘要)。
+    """
+    if not history:
+        return ""
+    parts = []
+    for msg in history[-max_messages:]:
+        role = "用户" if msg.get("role") == "user" else "助手"
+        content = msg.get("content", "")[:max_chars]
+        parts.append(f"{role}: {content}")
+    return "\n".join(parts)
+
+
 def get_effective_context_window(model_limit: int = MODEL_CONTEXT_WINDOW) -> int:
     """有效窗口 = 总窗口 - 预留 Summary Token。"""
     return model_limit - MAX_OUTPUT_TOKENS_FOR_SUMMARY

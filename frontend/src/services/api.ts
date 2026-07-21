@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { Conversation, FormConfig, SSEResult } from '../types'
+import type { Conversation, SSEResult } from '../types'
 import { getForwardedHeaders } from '../composables/forwardHeaders'
 
 const api = axios.create({
@@ -60,54 +60,23 @@ export interface SSECallbacks {
 }
 
 /**
- * Generate form config via SSE stream.
- * Uses fetch + ReadableStream (not EventSource, because we need POST).
- */
-/**
  * Unified chat entry — backend classifies intent automatically.
- * Replaces both generateConfig and modifyConfig.
+ * Supports image upload for ImageFormTool via image_base64 field.
  */
 export async function chat(
   message: string,
   conversationId: string | null,
   callbacks: SSECallbacks,
   answers?: Record<string, any>,  // 追问回答(LangGraph Command(resume=answers))
+  imageBase64?: string,           // 图片 base64(用于 ImageFormTool)
 ): Promise<void> {
   await streamSSE(
     '/api/config/chat',
     {
       message,
       conversation_id: conversationId,
-      answers,  // 追问时透传用户回答
-    },
-    callbacks,
-  )
-}
-
-export async function generateConfig(
-  description: string,
-  conversationId: string | null,
-  callbacks: SSECallbacks,
-): Promise<void> {
-  await streamSSE(
-    '/api/config/generate',
-    { description, conversation_id: conversationId },
-    callbacks,
-  )
-}
-
-export async function modifyConfig(
-  currentConfig: FormConfig,
-  instruction: string,
-  conversationId: string | null,
-  callbacks: SSECallbacks,
-): Promise<void> {
-  await streamSSE(
-    '/api/config/modify',
-    {
-      current_config: currentConfig,
-      instruction,
-      conversation_id: conversationId,
+      answers,          // 追问时透传用户回答
+      image_base64: imageBase64,  // 图片识别时透传 base64
     },
     callbacks,
   )
@@ -193,7 +162,7 @@ function parseSSEEvent(raw: string): { type: string; data: any } | null {
 // ── Validate ───────────────────────────────────────────────
 
 export async function validateConfig(
-  config: FormConfig,
+  config: Record<string, any>,
 ): Promise<{ valid: boolean; errors: any[]; warnings: string[] }> {
   const { data } = await api.post('/config/validate', { config })
   return data

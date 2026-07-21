@@ -85,18 +85,9 @@ async def lifespan(app: FastAPI):
     app.state.graph = graph
     logger.info("LangGraph StateGraph architecture initialized")
 
-    # MCP Server(使用新架构 graph)
+    # MCP Server(使用 LangGraph StateGraph)
     from src.mcp_server import create_mcp_server
-    # MCP 暂时不改,保留 dispatcher 兼容(后续迁移)
-    from engine.dispatcher import ToolDispatcher
-    dispatcher = ToolDispatcher(
-        registry=registry,
-        llm_client=llm_client,
-        conversation_store=conversation_manager,
-        prompt_loader=prompt_loader,
-        asset_client=asset_client,
-    )
-    mcp_server = create_mcp_server(upstream, dispatcher)
+    mcp_server = create_mcp_server(upstream, graph=graph)
     app.state.mcp = mcp_server
     app.mount("/mcp", mcp_server.streamable_http_app())
 
