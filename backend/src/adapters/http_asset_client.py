@@ -83,6 +83,11 @@ class HttpAssetClient(AssetClient):
             raise ValueError(f"unknown mode: {mode}")
         return self._clean(result) or {}
 
+    def get_form(self, form_code: str) -> Optional[dict]:
+        """根据 formCode 查询已有表单配置(委托 UpstreamClient)。"""
+        result = self._upstream.get_form(form_code)
+        return self._clean(result) if result else None
+
     # ── 通用数据操作(插件化扩展) ──
 
     def submit_data(self, path: str, data: dict, headers: dict = None) -> dict:

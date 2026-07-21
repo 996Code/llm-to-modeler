@@ -37,6 +37,22 @@ class AssetClient(ABC):
     def get_guide(self) -> dict:
         """取 guide.json。"""
 
+    def get_form(self, form_code: str) -> Optional[dict]:
+        """根据 formCode 查询已有表单配置。
+
+        Args:
+            form_code: 表单唯一标识
+
+        Returns:
+            表单配置 dict,不存在时返回 None
+
+        默认实现抛 NotImplementedError,子类按需覆写。
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 get_form; "
+            "如需查询表单请覆写此方法或使用 HttpAssetClient"
+        )
+
     @abstractmethod
     def validate_artifact(self, artifact: dict, mode: str) -> dict:
         """校验制品。mode ∈ {"create", "update"}。
