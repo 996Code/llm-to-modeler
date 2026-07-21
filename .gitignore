@@ -72,3 +72,6 @@ htmlcov/
 # Temporary files
 *.tmp
 *.bak
+
+# ZCode
+.zcode/
