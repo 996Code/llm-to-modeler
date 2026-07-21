@@ -98,7 +98,7 @@ class LLMClient:
 
     def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         conv_id: Optional[str] = None,
@@ -177,7 +177,7 @@ class LLMClient:
 
     def chat_json(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         temperature: Optional[float] = None,
         conv_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -188,22 +188,30 @@ class LLMClient:
         1. Try json_object response_format
         2. Fall back to plain text + manual JSON extraction
 
+        Supports multimodal messages (image_url content).
+
         Returns:
             Parsed JSON dict.
         """
         temp = self.config.temperature if temperature is None else temperature
 
+        # Detect multimodal content (skip json_object mode if images present)
+        has_images = any(
+            isinstance(m.get("content"), list) for m in messages
+        )
+
         # Add explicit JSON instruction
         guided_messages = list(messages)
-        guided_messages.append({
-            "role": "system",
-            "content": (
-                "重要：你必须只输出有效的 JSON，不要输出任何其他内容。"
-                "不要输出思考过程、解释或 markdown 代码块。直接输出 JSON。"
-            ),
-        })
+        if not has_images:
+            guided_messages.append({
+                "role": "system",
+                "content": (
+                    "重要：你必须只输出有效的 JSON，不要输出任何其他内容。"
+                    "不要输出思考过程、解释或 markdown 代码块。直接输出 JSON。"
+                ),
+            })
 
-        # Try json_object mode first
+        # Try json_object mode first (only for text-only messages)
         start_time = time.time()
         endpoint = f"{self.config.base_url}/chat/completions"
         request_data = {
@@ -211,17 +219,20 @@ class LLMClient:
             "messages": guided_messages,
             "temperature": temp,
             "max_tokens": self.config.max_tokens,
-            "response_format": "json_object",
+            "response_format": "json_object" if not has_images else None,
         }
 
         try:
-            response = self.client.chat.completions.create(
-                model=self.config.model,
-                messages=guided_messages,
-                temperature=temp,
-                max_tokens=self.config.max_tokens,
-                response_format={"type": "json_object"},
-            )
+            create_kwargs = {
+                "model": self.config.model,
+                "messages": guided_messages,
+                "temperature": temp,
+                "max_tokens": self.config.max_tokens,
+            }
+            if not has_images:
+                create_kwargs["response_format"] = {"type": "json_object"}
+
+            response = self.client.chat.completions.create(**create_kwargs)
             result = self._extract_json(response)
 
             # 记录成功日志
