@@ -11,7 +11,18 @@ from pydantic import BaseModel, Field, ConfigDict
 
 
 class ToolContext(BaseModel):
-    """工具执行时拿到的依赖(由 Engine 注入)。"""
+    """工具执行时拿到的依赖(由 Engine 注入)。
+
+    属性说明:
+    - llm_client: LLM 调用(chat / chat_json)
+    - asset_client: 上游资产/数据操作抽象
+    - conversation: ConversationStore
+    - emit: SSE 事件回调
+    - forward_headers: 嵌入模式透传的请求头
+    - conv_id: 会话 ID
+    - registry: 工具注册表(只读),供工具查询其他工具的能力描述
+      例如 ChatTool 用它动态生成"我能做什么"的能力列表
+    """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     llm_client: Any              # LLMClient(chat / chat_json)
@@ -20,6 +31,7 @@ class ToolContext(BaseModel):
     emit: Callable[..., None]    # emit(event_type, message, **extra)
     forward_headers: dict = Field(default_factory=dict)
     conv_id: Optional[str] = None  # 会话 ID，用于日志记录
+    registry: Any = None           # ToolRegistry(只读),供工具查询能力
 
 
 class AskOption(BaseModel):
@@ -140,6 +152,11 @@ class CompositeTool(Tool):
     pipeline_steps: list[dict] = []
 
     def run_pipeline(self, state: dict, ctx: ToolContext) -> None:
+        """顺序执行 steps,支持中途中断(追问/错误)。
+
+        step 可通过设置 state["_need_clarify"]=True 中断后续步骤,
+        execute 方法检查此标记后返回 ToolResult.ask 而非继续执行。
+        """
         # 发送 pipeline 定义给前端
         if self.pipeline_steps:
             ctx.emit("pipeline_definition", {
@@ -148,5 +165,8 @@ class CompositeTool(Tool):
             })
         
         for step_name in self.steps:
+            # 检查前序 step 是否请求中断
+            if state.get("_need_clarify"):
+                break
             method = getattr(self, f"_step_{step_name}")
             method(state, ctx)

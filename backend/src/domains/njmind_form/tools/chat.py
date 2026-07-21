@@ -90,18 +90,23 @@ class ChatTool(Tool):
         """从 registry 动态构建能力描述列表。
 
         读取所有非 chat 工具的 when 描述,生成 "- xxx" 列表。
-        这样新插件注册后,ChatTool 自动能介绍它的能力。
+        这样新插件注册后,ChatTool 自动能介绍它的能力,无需写死。
         """
-        # 通过 asset_client 间接获取 registry 不太合理,
-        # 但 ToolContext 没有直接暴露 registry。
-        # 更好的做法:在 ToolContext 上挂 registry 引用。
-        # 当前临时方案:从 prompt_loader 的 pack 名推断,或直接硬编码通用描述。
-        # TODO: ToolContext 增加 registry 引用,实现真正的动态能力生成
-        return (
-            "- 通过自然语言描述创建或修改低代码表单\n"
-            "- 提交请假申请、查询审批状态\n"
-            "- 其他业务操作（根据系统配置可能有所不同）"
-        )
+        registry = getattr(ctx, 'registry', None)
+        if registry is None:
+            # registry 不可用时,返回通用兜底描述
+            return "- 通过自然语言描述完成各种业务操作"
+
+        lines = []
+        for tool in registry.all():
+            # 跳过 chat 自身(不需要介绍"我能闲聊")
+            if tool.name == "chat":
+                continue
+            when_desc = getattr(tool, 'when', '') or getattr(tool, 'description', '')
+            if when_desc:
+                lines.append(f"- {when_desc}")
+
+        return "\n".join(lines) if lines else "- 通过自然语言描述完成各种业务操作"
 
     def _build_user_message(self, user_input: str, compressed_history: str) -> str:
         parts = []

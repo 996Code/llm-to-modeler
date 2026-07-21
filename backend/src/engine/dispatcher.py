@@ -335,6 +335,7 @@ class ToolDispatcher:
             emit=emit,
             forward_headers=state.get("forward_headers", {}),
             conv_id=state.get("conversation_id"),
+            registry=self._registry,  # 只读引用,供工具查询其他工具能力
         )
         # 额外挂 prompt_loader
         object.__setattr__(ctx, "prompt_loader", self._prompt_loader)

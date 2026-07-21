@@ -5,6 +5,11 @@
   2. validate_rules — 校验请假规则（通过 AssetClient 调上游 API）
   3. submit      — 提交请假申请（通过 AssetClient 调上游 API）
 
+多轮追问:
+  parse_info 检测关键字段(请假类型、日期)是否缺失,
+  缺失时返回 ToolResult.ask 而非填默认值,确保用户确认后再提交。
+  这是破坏性操作(is_destructive=True)的安全设计。
+
 artifact_type="data" — 不是表单配置，是数据结果。
 前端渲染 data-card，不显示"应用配置"按钮。
 
@@ -17,13 +22,18 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-from sdk.tool import CompositeTool, ToolResult, ToolContext
+from sdk.tool import CompositeTool, ToolResult, ToolContext, AskSpec, AskQuestion, AskOption
 
 logger = logging.getLogger(__name__)
 
 
 class SubmitLeaveTool(CompositeTool):
-    """提交请假申请到审批系统。"""
+    """提交请假申请到审批系统。
+
+    安全设计:
+    - is_destructive=True: 提交是不可逆操作
+    - 信息不足时追问,不自动填默认值提交
+    """
 
     name = "submit_leave"
     description = "提交请假申请到审批系统"
@@ -51,10 +61,18 @@ class SubmitLeaveTool(CompositeTool):
         }
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
-        """执行 3 步管线。"""
+        """执行管线。parse_info 可能设置 _need_clarify 标记,
+        此时跳过后续步骤,直接返回追问。"""
         self.run_pipeline(state, ctx)
 
-        # 从 state 中取结果
+        # ── 追问分支:信息不足,需要用户补充 ──
+        if state.get("_need_clarify"):
+            return ToolResult(
+                ask=state["_clarify_spec"],
+                summary=state.get("_clarify_summary", "需要补充请假信息"),
+            )
+
+        # ── 正常完成:返回数据结果 ──
         leave_data = state.get("leave_data", {})
         summary = state.get("summary", "请假申请已提交")
 
@@ -76,11 +94,23 @@ class SubmitLeaveTool(CompositeTool):
     # ── Steps ──────────────────────────────────────────────
 
     def _step_parse_info(self, state: dict, ctx: ToolContext) -> None:
-        """LLM 解析用户消息，提取请假信息。"""
+        """LLM 解析用户消息，提取请假信息。
+
+        关键字段缺失时设置 _need_clarify 标记,execute 会跳过后续步骤返回追问。
+        不再为缺失字段填默认值——破坏性操作必须用户确认。
+        """
         ctx.emit("stage", "parse_info", "AI 正在解析您的请假需求...")
 
         user_input = state.get("user_input", "")
         compressed_history = state.get("compressed_history", "")
+
+        # 如果是追问恢复,用户回答已经在 state 里,合并到 user_input
+        clarify_answers = state.get("clarify_answers", {})
+        if clarify_answers:
+            parts = [user_input]
+            for k, v in clarify_answers.items():
+                parts.append(f"{k}: {v}")
+            user_input = "; ".join(p for p in parts if p)
 
         messages = [
             {"role": "system", "content": _PARSE_INFO_PROMPT},
@@ -91,25 +121,46 @@ class SubmitLeaveTool(CompositeTool):
             parsed = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
         except Exception as e:
             logger.warning(f"parse_info LLM failed: {e}")
-            parsed = {
-                "applicant": "当前用户",
-                "leaveType": "事假",
-                "startDate": "2026-07-22",
-                "endDate": "2026-07-22",
-                "reason": user_input,
-            }
+            parsed = {}
 
-        # 确保必要字段存在
-        defaults = {
-            "applicant": "当前用户",
-            "leaveType": "事假",
-            "startDate": "",
-            "endDate": "",
-            "reason": "",
-        }
-        for k, v in defaults.items():
-            parsed.setdefault(k, v)
+        # 确保必要字段存在(缺失的留空,不填默认值)
+        for key in ("applicant", "leaveType", "startDate", "endDate", "reason"):
+            parsed.setdefault(key, "")
 
+        # ── 检测关键字段缺失,触发追问 ──
+        missing_questions = []
+
+        if not parsed.get("leaveType"):
+            missing_questions.append(AskQuestion(
+                question="请问是什么类型的假？",
+                header="请假类型",
+                options=[
+                    AskOption(label="年假", description="使用年假额度"),
+                    AskOption(label="事假", description="因个人事务请假"),
+                    AskOption(label="病假", description="因身体不适请假"),
+                    AskOption(label="调休", description="使用调休额度"),
+                ],
+            ))
+
+        if not parsed.get("startDate") or not parsed.get("endDate"):
+            missing_questions.append(AskQuestion(
+                question="请假的起止日期是？",
+                header="请假日期",
+                options=[
+                    AskOption(label="今天", description="从今天开始"),
+                    AskOption(label="明天", description="从明天开始"),
+                ],
+            ))
+
+        if missing_questions:
+            # 设置追问标记,execute 会跳过后续步骤
+            state["_need_clarify"] = True
+            state["_clarify_spec"] = AskSpec(questions=missing_questions)
+            state["_clarify_summary"] = "需要补充请假信息才能提交"
+            ctx.emit("stage", "parse_info_incomplete", "信息不足，需要补充...")
+            return  # 中断 pipeline,不再执行后续步骤
+
+        # 信息完整,存入 state 继续
         state["leave_data"] = parsed
         ctx.emit("stage", "parse_info_done",
                  f"已解析: {parsed.get('applicant', '')} 申请 "
@@ -214,12 +265,15 @@ class SubmitLeaveTool(CompositeTool):
 _PARSE_INFO_PROMPT = """你是请假信息提取器。从用户消息中提取请假申请信息,只返回 JSON。
 
 需要提取的字段:
-- applicant: 申请人姓名(如未提及,填"当前用户")
-- leaveType: 请假类型(事假/病假/年假/调休/婚假/产假/丧假/其他)
-- startDate: 开始日期(YYYY-MM-DD格式,如未提及根据当前日期推断)
-- endDate: 结束日期(YYYY-MM-DD格式,如"3天"则计算结束日期)
-- reason: 请假原因(如未提及,填"")
+- applicant: 申请人姓名(如未提及,填空字符串"")
+- leaveType: 请假类型(事假/病假/年假/调休/婚假/产假/丧假/其他,如未提及填空字符串"")
+- startDate: 开始日期(YYYY-MM-DD格式,如未提及填空字符串"")
+- endDate: 结束日期(YYYY-MM-DD格式,如未提及填空字符串"")
+- reason: 请假原因(如未提及,填空字符串"")
 
-输出格式: {"applicant": "...", "leaveType": "...", "startDate": "...", "endDate": "...", "reason": "..."}
+重要:如果用户没有提及某个字段,不要猜测或填默认值,留空字符串""即可。
+系统会根据缺失字段追问用户。
+
+输出格式: {"applicant": "", "leaveType": "", "startDate": "", "endDate": "", "reason": ""}
 
 只输出 JSON,不要解释。"""
