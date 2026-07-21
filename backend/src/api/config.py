@@ -1,12 +1,11 @@
 """
 Config API Router
 
-POST /api/config/chat     -> SSE stream (统一入口,ToolDispatcher 选工具)
+POST /api/config/chat     -> SSE stream (LangGraph StateGraph 统一入口)
 POST /api/config/generate -> [DEPRECATED] 转发到 /chat
 POST /api/config/modify   -> [DEPRECATED] 转发到 /chat
 POST /api/config/validate -> sync (validate via upstream)
 """
-
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -30,9 +29,14 @@ class ModifyRequest(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    """Unified chat entry — intent is classified by the backend."""
+    """Unified chat entry — intent is classified by the backend.
+
+    answers: 追问回答(非空时走 LangGraph Command(resume=answers) 路径,
+             从断点继续执行而非当作新消息)。
+    """
     message: str = Field(..., description="User message")
     conversation_id: Optional[str] = None
+    answers: Optional[Dict[str, Any]] = None
 
 
 class ValidateRequest(BaseModel):
@@ -98,23 +102,26 @@ def _load_history(request: Request, conv_id: Optional[str]) -> List[Dict[str, st
 
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
-    """Unified chat entry - ToolDispatcher 选工具 + 执行。
+    """Unified chat entry - LangGraph StateGraph 编排。
 
-    阶段 4:旧 LangGraph 已删除,统一走 ToolDispatcher。
+    支持:
+    - 正常消息: input = {user_input, ...}
+    - 追问恢复: input = Command(resume=answers), 从断点继续
     """
-    dispatcher = request.app.state.dispatcher
+    graph = request.app.state.graph
     current_config = _load_current_config(request, req.conversation_id)
     history = _load_history(request, req.conversation_id)
     fwd = _extract_forward_headers(request)
 
-    from engine.stream import stream_dispatcher
+    from engine.stream import stream_graph
 
     async def stream():
-        async for event in stream_dispatcher(
-            dispatcher=dispatcher,
+        async for event in stream_graph(
+            graph=graph,
             user_input=req.message,
             conversation_id=req.conversation_id,
             user_id=request.headers.get("X-User-Id", ""),
+            answers=req.answers,  # ← 追问回答
             conversation_store=request.app.state.conversation_store,
             conversation_history=history,
             current_config=current_config,
@@ -132,16 +139,15 @@ async def chat(req: ChatRequest, request: Request):
 @router.post("/generate")
 async def generate(req: GenerateRequest, request: Request):
     """[DEPRECATED] 使用 /api/chat 替代。保留向后兼容,内部转发到 chat。"""
-    # 转发到 chat 逻辑
-    dispatcher = request.app.state.dispatcher
+    graph = request.app.state.graph
     history = _load_history(request, req.conversation_id)
     fwd = _extract_forward_headers(request)
 
-    from engine.stream import stream_dispatcher
+    from engine.stream import stream_graph
 
     async def stream():
-        async for event in stream_dispatcher(
-            dispatcher=dispatcher,
+        async for event in stream_graph(
+            graph=graph,
             user_input=req.description,
             conversation_id=req.conversation_id,
             user_id=request.headers.get("X-User-Id", ""),
@@ -162,15 +168,15 @@ async def generate(req: GenerateRequest, request: Request):
 @router.post("/modify")
 async def modify(req: ModifyRequest, request: Request):
     """[DEPRECATED] 使用 /api/chat 替代。保留向后兼容,内部转发到 chat。"""
-    dispatcher = request.app.state.dispatcher
+    graph = request.app.state.graph
     history = _load_history(request, req.conversation_id)
     fwd = _extract_forward_headers(request)
 
-    from engine.stream import stream_dispatcher
+    from engine.stream import stream_graph
 
     async def stream():
-        async for event in stream_dispatcher(
-            dispatcher=dispatcher,
+        async for event in stream_graph(
+            graph=graph,
             user_input=req.instruction,
             conversation_id=req.conversation_id,
             user_id=request.headers.get("X-User-Id", ""),

@@ -6,7 +6,7 @@
           <div class="brand-logo">
             <FormOutlined />
           </div>
-          <span class="brand-name">表单配置助手</span>
+          <span class="brand-name">智能助手</span>
         </div>
         <a-button type="primary" class="new-btn" @click="store.startNewConversation">
           <template #icon><PlusOutlined /></template>

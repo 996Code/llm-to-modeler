@@ -1,345 +1,398 @@
 # LLM Form Modeler
 
-自然语言 → 低码配置生成引擎。通过对话生成符合 njmind 低码平台规范的表单配置 JSON。
+**LLM 驱动的多插件智能助手引擎** — 通过 LangGraph StateGraph 编排意图识别、工具执行与追问恢复，支持自然语言驱动多种业务能力（表单配置、请假申请、审批查询等），Engine 层零领域知识。
 
 ## 技术栈
 
 | 层 | 技术 |
 |----|------|
-| 前端 | Vue 3 + TypeScript + Vite + Ant Design Vue |
-| 后端 | Python 3.12 + FastAPI + LangGraph |
+| 前端 | Vue 3 + TypeScript + Vite + Ant Design Vue + Pinia |
+| 后端 | Python 3.12 + FastAPI + LangGraph StateGraph |
 | LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型） |
-| 存储 | SQLite（对话历史） |
-| 上游 | njmind-modeler（模板 / Schema / 校验） |
+| 存储 | SQLite（对话历史 + LangGraph Checkpoint） |
+| 上游 | AssetClient 抽象（HTTP 适配，环境变量配置） |
 
 ---
 
-## 一、整体架构
+## 一、核心架构：三层六边形
 
 ```
-                    ┌─────────────────────────────────────────────┐
-                    │              主系统 / 浏览器                   │
-                    │                                             │
-                    │   独立模式              嵌入模式(IM 聊天窗)    │
-                    │   三栏布局              iframe + postMessage  │
-                    └────────────────┬────────────────────────────┘
-                                     │ HTTP / SSE
-                                     ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                     Python 后端 (FastAPI :18080)                      │
-│                                                                      │
-│  ┌──────────┐  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐  │
-│  │ REST API │  │ SSE 流式     │  │ 对话历史     │  │ MCP Server  │  │
-│  │ /api/... │  │ 实时进度推送  │  │ SQLite       │  │ /mcp        │  │
-│  └────┬─────┘  └──────┬───────┘  └──────────────┘  └─────────────┘  │
-│       │               │                                              │
-│       └───────┬───────┘                                              │
-│               ▼                                                      │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │                   LangGraph 工作流引擎                          │  │
-│  │                                                                │  │
-│  │   CREATE 管线 (6步)              MODIFY 管线 (3步)              │  │
-│  │   ┌─────────────────┐            ┌─────────────────┐           │  │
-│  │   │ fetch_guide     │            │ fetch_guide     │           │  │
-│  │   │ list_assets     │            │ modify (LLM)    │           │  │
-│  │   │ parse_fields ★  │            │ validate        │           │  │
-│  │   │ fetch_templates │            └─────────────────┘           │  │
-│  │   │ generate (LLM)  │                                          │  │
-│  │   │ validate        │            ★ 可能触发追问                 │  │
-│  │   └─────────────────┘            (需求不清晰时中断)              │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│               │               │                                      │
-│       ┌───────┴───────┐       └──────────────┐                       │
-│       ▼               ▼                      ▼                       │
-│  ┌─────────┐   ┌───────────┐   ┌───────────────────────┐            │
-│  │ 上游客户端│   │ LLM Client │   │ 上下文压缩器          │            │
-│  │ httpx    │   │ OpenAI SDK │   │ 历史压缩 + 熔断器     │            │
-│  └────┬────┘   └─────┬─────┘   └───────────────────────┘            │
-└───────┼──────────────┼──────────────────────────────────────────────┘
-        │              │
-        │ HTTP         │ HTTP (OpenAI 兼容)
-        ▼              ▼
-┌────────────────┐  ┌─────────────────────┐
-│ njmind-modeler │  │ LLM 推理服务         │
-│ :80            │  │ (LM Studio / 云端)   │
-│                │  │                     │
-│ /api/mcp/      │  │ POST /v1/chat/      │
-│  templates     │  │  completions        │
-│  schemas       │  │                     │
-│  guides        │  │ Qwen3 / GPT / ...   │
-│  forms/validate│  │                     │
-│  forms/create  │  └─────────────────────┘
-└────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                         前端 (Vue 3)                                │
+│                                                                     │
+│   独立模式 (三栏布局)          嵌入模式 (IM 聊天窗 + SDK)            │
+│   StandaloneLayout             EmbeddedLayout + embed.js            │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │ HTTP / SSE
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Python 后端 (FastAPI :18080)                      │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  API 层 (api/)                                               │   │
+│  │  /api/config/chat  /api/conversations  /mcp  /health         │   │
+│  └──────────────────────────┬───────────────────────────────────┘   │
+│                              │                                       │
+│  ┌──────────────────────────▼───────────────────────────────────┐   │
+│  │  ★ Engine 层 (engine/) — 零领域知识                          │   │
+│  │                                                              │   │
+│  │  ┌────────────────────────────────────────────────────────┐  │   │
+│  │  │  LangGraph StateGraph                                  │  │   │
+│  │  │                                                        │  │   │
+│  │  │  classify_intent ──→ route_by_tool ──→ execute_tool    │  │   │
+│  │  │        │                                  │            │  │   │
+│  │  │        │                            interrupt?         │  │   │
+│  │  │        │                           ↙        ↘          │  │   │
+│  │  │        │                     挂起追问    正常完成       │  │   │
+│  │  │        │                        │           │          │  │   │
+│  │  │        │                   Command(resume)  │          │  │   │
+│  │  │        │                        │           ▼          │  │   │
+│  │  │        │                        └──→ execute_tool      │  │   │
+│  │  │        │                             (重跑工具)         │  │   │
+│  │  │        │                                  │            │  │   │
+│  │  │        │                                  ▼            │  │   │
+│  │  │        └──────────────────────→ handle_result ──→ END  │  │   │
+│  │  │                                                        │  │   │
+│  │  │  Checkpoint: InMemorySaver (thread_id = conv_id)       │  │   │
+│  │  └────────────────────────────────────────────────────────┘  │   │
+│  │                                                              │   │
+│  │  辅助模块:                                                   │   │
+│  │  ├── stream.py      graph.stream → SSE 桥接 (实时 chunk)    │   │
+│  │  ├── conversation.py 多轮对话管理 (append-only 事件流)      │   │
+│  │  ├── compression.py  上下文压缩 (70% 阈值 + 熔断器)         │   │
+│  │  ├── prompt_loader.py Jinja2 模板加载 (缓存 + 覆写/追加)    │   │
+│  │  └── logging_filter.py 日志脱敏过滤器                       │   │
+│  └──────────────────────────┬───────────────────────────────────┘   │
+│                              │                                       │
+│  ┌──────────────────────────▼───────────────────────────────────┐   │
+│  │  ★ SDK 层 (sdk/) — 协议定义                                  │   │
+│  │                                                              │   │
+│  │  ├── tool.py        Tool / CompositeTool / ToolResult        │   │
+│  │  │                  ToolContext / AskSpec / AskQuestion       │   │
+│  │  ├── registry.py    ToolRegistry (自动发现 + 注册)           │   │
+│  │  ├── asset_client.py AssetClient ABC (submit/query)          │   │
+│  │  └── sanitize.py    Unicode 隐写清洗                         │   │
+│  └──────────────────────────┬───────────────────────────────────┘   │
+│                              │                                       │
+│  ┌──────────────────────────▼───────────────────────────────────┐   │
+│  │  ★ Domain Packs (domains/) — 领域知识全部在此                │   │
+│  │                                                              │   │
+│  │  ┌─────────────────────┐  ┌──────────────────────────────┐  │   │
+│  │  │ njmind_form         │  │ leave_application            │  │   │
+│  │  │                     │  │                              │  │   │
+│  │  │ tools/              │  │ tools/                       │  │   │
+│  │  │  create_form (6步)  │  │  submit_leave (3步)          │  │   │
+│  │  │  modify_form (3步)  │  │  query_status (1步)          │  │   │
+│  │  │  chat (兜底)        │  │                              │  │   │
+│  │  │                     │  │ prompts/ (无, 纯逻辑)        │  │   │
+│  │  │ prompts/            │  └──────────────────────────────┘  │   │
+│  │  │  chat.j2  parse.j2  │                                    │   │
+│  │  │  generate.j2  ...   │  ┌──────────────────────────────┐  │   │
+│  │  │                     │  │ 新插件只需:                   │  │   │
+│  │  │ config.yaml         │  │ 1. 创建 domains/xxx/ 目录     │  │   │
+│  │  └─────────────────────┘  │ 2. 实现 pack.py              │  │   │
+│  │                           │ 3. 定义 Tool 子类             │  │   │
+│  │                           │ → 自动发现, 零配置上线        │  │   │
+│  │                           └──────────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                              │                                       │
+│  ┌──────────────────────────▼───────────────────────────────────┐   │
+│  │  Adapters (adapters/)                                        │   │
+│  │  HttpAssetClient — HTTP 上游适配 (ASSET_BASE_URL 环境变量)   │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+         │                    │
+         ▼                    ▼
+┌────────────────┐   ┌─────────────────────┐
+│ 上游业务 API   │   │ LLM 推理服务         │
+│ (ASSET_BASE_URL│   │ (OpenAI 兼容接口)    │
+│  提交/查询数据)│   │ Qwen3 / GPT / ...    │
+└────────────────┘   └─────────────────────┘
+```
+
+### 架构试金石
+
+```bash
+# Engine 层不能包含任何领域知识
+grep -rE "form|formCode|template|field|leave|请假" backend/src/engine/
+# → 必须返回空
 ```
 
 ---
 
-## 二、核心链路：CREATE 管线（6 步）
+## 二、LangGraph StateGraph 核心流程
 
-用户描述表单需求 → 经过 6 个节点 → 输出完整配置 JSON。
+### 2.1 图结构
+
+```python
+START → classify_intent (LLM 选工具, 从 registry 动态生成 prompt)
+  │
+  ├─ route_by_tool ──→ execute_tool (执行工具, 支持 interrupt)
+  │                         │
+  │                    ToolResult.ask?
+  │                    ├─ 是 → interrupt() 挂起 → SSE needsClarification
+  │                    │       前端发 answers → Command(resume=answers)
+  │                    │       → execute_tool 重跑 (带 clarify_answers)
+  │                    └─ 否 → handle_result → END
+  │
+  └─ route_after_result ──→ rerun (追问恢复后重跑) / done (结束)
+```
+
+### 2.2 追问恢复机制 (LangGraph 原生 interrupt)
 
 ```
-用户输入："创建一个请假申请表，包含申请人、请假类型、开始日期、结束日期"
+用户: "我要请假"
   │
   ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ Step 1: fetch_guide                                                 │
-│ GET /api/mcp/guides/guide.json → 获取字段类型对照表 + 关键词索引      │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ Step 2: list_assets                                                 │
-│ GET /api/mcp/templates/list-templates → 19 个模板文件名              │
-│ GET /api/mcp/schemas/list-schemas   → Schema 文件名（禁止猜测文件名）│
-└──────────────────────────┬──────────────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ Step 3: parse_fields ★ (第一次 LLM 调用)                             │
-│                                                                     │
-│ 用户消息注入：[对话历史] + [当前需求]                                 │
-│ 系统消息：字段类型表 + 关键词映射 + 清晰度判断规则                     │
-│                                                                     │
-│ LLM 判断需求是否清晰：                                                │
-│  ├─ 模糊 → needsClarification=true → 返回追问问题 → 中断管线 ──→ 前端│
-│  └─ 清晰 → 解析出 formName + fields[]                                │
-│                                                                     │
-│ 输出示例：                                                           │
-│   formName: "请假申请表"                                             │
-│   fields: [                                                          │
-│     {fieldTitleText:"申请人", fieldType:7 (USER)},                   │
-│     {fieldTitleText:"请假类型", fieldType:4 (SELECT)},               │
-│     {fieldTitleText:"开始日期", fieldType:2 (DATE)},                 │
-│     {fieldTitleText:"结束日期", fieldType:2 (DATE)},                 │
-│   ]                                                                  │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ Step 4: fetch_templates                                             │
-│ 根据 fieldType 获取对应模板：                                         │
-│   simple_form.json (表单骨架)                                        │
-│   user_field.json   (USER 类型模板)                                  │
-│   select_field.json (SELECT 类型模板)                                │
-│   date_field.json   (DATE 类型模板)                                  │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ Step 5: generate (第二次 LLM 调用)                                   │
-│                                                                     │
-│ 系统消息：组装规则 + 表单模板 + 字段模板                              │
-│ 用户消息：[对话历史] + [解析后的字段信息]                              │
-│                                                                     │
-│ LLM 组装完整 FormConfig JSON（deep copy 模板 + 替换字段）             │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ Step 6: validate                                                    │
-│ POST /api/mcp/forms/validate?mode=CREATE                             │
-│                                                                     │
-│ ┌─ pass=true  → 输出最终配置 → END                                   │
-│ └─ pass=false → 错误信息反馈给 LLM → 回到 Step 5 重试（最多 3 次）   │
-└──────────────────────────┬──────────────────────────────────────────┘
-                           ▼
-                    最终 FormConfig JSON
-```
-
-### MODIFY 管线（3 步）
-
-已有配置 → 自然语言修改指令 → 修改后配置。
-
-```
-用户输入："添加一个请假原因字段"
-当前配置：请假申请表 (4 字段)
+classify_intent → 选中 submit_leave
   │
   ▼
-┌──────────────┐     ┌───────────────────┐     ┌──────────────┐
-│ fetch_guide  │ ──► │ modify (LLM)      │ ──► │ validate    │
-│              │     │ [历史]+[指令]+     │     │ pass→END    │
-│              │     │ [当前配置]→修改    │     │ fail→retry  │
-└──────────────┘     └───────────────────┘     └──────────────┘
-                                                    │
-                                                    ▼
-                                        修改后配置 (5 字段)
+execute_tool → SubmitLeaveTool.execute()
+  │
+  ├─ _step_parse_info: LLM 提取信息 → leaveType="" startDate=""
+  │  → 关键字段缺失 → 设置 _need_clarify 标记
+  │
+  ├─ ToolResult(ask=AskSpec(...))
+  │
+  └─ interrupt({questions, summary}) → 图挂起
+     │
+     ▼
+  SSE → 前端渲染追问卡片
+     │
+     用户回答: {leaveType: "年假", startDate: "2026-07-22", endDate: "2026-07-23"}
+     │
+     ▼
+  Command(resume=answers) → 图从断点恢复
+     │
+     ├─ interrupt() 返回 answers
+     ├─ 注入 tool_state["clarify_answers"]
+     ├─ 清除 _need_clarify / _clarify_spec 标记
+     └─ 重跑 execute_tool
+           │
+           ├─ _step_parse_info: LLM 提取 → 信息完整 ✓
+           ├─ _step_validate_rules: 调上游 API 校验 ✓
+           ├─ _step_submit: 调上游 API 提交 ✓
+           └─ ToolResult(artifact=leave_data) → handle_result → END
+```
+
+### 2.3 GraphState 定义
+
+```python
+class GraphState(TypedDict, total=False):
+    # 输入
+    user_input: str
+    conversation_history: list[dict]
+    compressed_history: str
+    conversation_id: str
+    forward_headers: dict          # 嵌入模式透传的请求头
+    current_config: dict | None    # 已有配置 (modify 用)
+
+    # 意图识别
+    tool_name: str                 # 选中的工具名
+    intent_reason: str
+
+    # 工具执行
+    tool_state: dict               # 工具内部 state (透传, Engine 不读)
+    tool_result: dict | None       # 工具执行结果
+
+    # 追问 (LangGraph interrupt)
+    pending_questions: list[dict]
+    clarify_answers: dict          # resume 值
+
+    # SSE 事件收集
+    sse_events: list[dict]
 ```
 
 ---
 
-## 三、多轮对话与上下文压缩
+## 三、插件系统
+
+### 3.1 自动发现机制
 
 ```
-                    对话历史 (SQLite)
-                    ┌──────────────────────────────┐
-                    │ 用户: 创建请假表              │
-                    │ 助手: 已生成，4 个字段        │
-                    │ 用户: 加一个原因字段          │
-                    │ 助手: 已修改，5 个字段        │
-                    │ 用户: 把类型改成下拉          │
-                    │ 助手: 已修改，5 个字段        │
-                    │ ... (越来越长)               │
-                    └──────────────┬───────────────┘
-                                   │
-                                   ▼
-                    ┌──────────────────────────────┐
-                    │  上下文压缩器                 │
-                    │                              │
-                    │  估算 token 总量              │
-                    │  超过模型上限 70%?            │
-                    │  ├─ 否 → 直接格式化           │
-                    │  └─ 是 → 压缩：              │
-                    │       ┌──────────────────┐   │
-                    │       │ 旧轮次 → LLM摘要  │   │
-                    │       │ 保留最近 3 轮     │   │
-                    │       │ 状态补偿：当前配置│   │
-                    │       └──────────────────┘   │
-                    │       熔断器：连续3次失败停止 │
-                    └──────────────┬───────────────┘
-                                   │
-                                   ▼
-                    ┌──────────────────────────────┐
-                    │  注入到 LLM 的 user message   │
-                    │                              │
-                    │  【历史摘要】                 │
-                    │  用户创建了请假表，修改过字段  │
-                    │                              │
-                    │  【最近对话】                 │
-                    │  用户: 把类型改成下拉         │
-                    │  助手: 已修改，5 个字段       │
-                    │                              │
-                    │  【当前状态】                 │
-                    │  当前表单: 请假申请表 (5字段) │
-                    └──────────────────────────────┘
+domains/
+├── njmind_form/          ← 表单配置插件
+│   ├── pack.py           ← create_registry() 注册工具
+│   ├── tools/
+│   │   ├── create_form.py   (CompositeTool, 6步管线)
+│   │   ├── modify_form.py   (CompositeTool, 3步管线)
+│   │   └── chat.py          (Tool, 兜底闲聊)
+│   └── prompts/
+│       ├── chat.j2
+│       ├── parse.j2
+│       ├── generate.j2
+│       └── ...
+│
+├── leave_application/    ← 请假申请插件 (Demo)
+│   ├── pack.py
+│   └── tools/
+│       ├── submit_leave.py  (CompositeTool, 3步管线)
+│       └── query_status.py  (Tool, 查询)
+│
+└── (新插件只需创建目录 + pack.py + tools/)
 ```
+
+### 3.2 Tool 协议
+
+```python
+class Tool(ABC):
+    name: str                    # 工具名 (LLM 选择时看到)
+    description: str             # 工具说明
+    when: str                    # "何时用" 描述
+
+    # 安全声明 (Fail-Closed 默认值)
+    is_destructive: bool = True
+    is_read_only: bool = False
+    is_concurrency_safe: bool = False
+    requires_existing_artifact: bool = False
+
+    def execute(self, state: dict, ctx: ToolContext) -> ToolResult
+
+class CompositeTool(Tool):
+    steps: list[str] = []        # 管线步骤名
+    pipeline_steps: list[dict]   # 前端展示用
+
+    def run_pipeline(self, state, ctx):
+        for step in self.steps:
+            if state.get("_need_clarify"): break
+            getattr(self, f"_step_{step}")(state, ctx)
+```
+
+### 3.3 ToolResult 三态
+
+```python
+class ToolResult:
+    artifact: dict | None        # 制品 (config/data)
+    artifact_type: str           # "config" | "data"
+    reply: str | None            # 闲聊回复
+    ask: AskSpec | None          # 追问 (非空 → interrupt)
+    summary: str                 # 摘要 (进对话历史)
+    error_for_llm: str | None    # 错误 (回流给 LLM)
+    extra: dict                  # 扩展数据
+```
+
+### 3.4 动态能力上报
+
+ChatTool（兜底工具）通过 `ctx.registry` 动态查询所有已注册工具的能力描述，生成系统 prompt：
+
+```python
+def _build_capabilities(self, ctx):
+    caps = []
+    for tool in ctx.registry.all():
+        if tool.name != self.name:
+            caps.append(f"- {tool.name}: {tool.when}")
+    return "\n".join(caps)
+```
+
+**新增插件后，ChatTool 的能力描述自动更新，无需修改 Engine 或 ChatTool 代码。**
 
 ---
 
-## 四、SSE 实时进度推送
+## 四、当前插件能力
 
+### 4.1 njmind_form — 表单配置
+
+| 工具 | 类型 | 管线 | 说明 |
+|------|------|------|------|
+| create_form | CompositeTool | 6步 | 自然语言 → 完整表单配置 |
+| modify_form | CompositeTool | 3步 | 自然语言修改已有配置 |
+| chat | Tool | - | 兜底闲聊 + 动态能力描述 |
+
+**CREATE 管线 (6步)：**
 ```
-后端节点执行                          前端接收
-┌─────────────┐
-│ fetch_guide │──progress("fetch_guide","正在获取指南...")──┐
-└──────┬──────┘                                              │
-       ▼                                                     ▼
-┌─────────────┐                                     ┌──────────────┐
-│ parse_fields│──progress("parse_fields","解析...")─►│ SSE 事件流   │
-└──────┬──────┘                                     │              │
-       ▼                                            │ event: stage │
-┌─────────────┐                                     │ event: stage │
-│  generate   │──progress("generate","生成...")────►│ event: stage │
-└──────┬──────┘                                     │ ...          │
-       ▼                                            │ event: result│
-┌─────────────┐                                     │ event: done  │
-│  validate   │──progress("validate_pass","通过✓")─►└──────────────┘
-└──────┬──────┘                                            │
-       ▼                                                   ▼
-   最终结果                                           前端实时渲染
-                                                   6 步进度条动画
+fetch_guide → list_assets → parse_fields(LLM) → fetch_templates → generate(LLM) → validate
 ```
+
+**MODIFY 管线 (3步)：**
+```
+fetch_guide → modify(LLM) → validate
+```
+
+### 4.2 leave_application — 请假申请 (Demo 插件)
+
+| 工具 | 类型 | 管线 | 说明 |
+|------|------|------|------|
+| submit_leave | CompositeTool | 3步 | 提交请假申请 (支持追问) |
+| query_status | Tool | - | 查询审批状态 |
+
+**SUBMIT 管线 (3步)：**
+```
+parse_info(LLM) → validate_rules(API) → submit(API)
+```
+
+**关键设计：破坏性操作(is_destructive=True)信息不足时追问，不填默认值。**
 
 ---
 
-## 五、嵌入主系统
+## 五、SSE 实时进度
 
-### 方式 A：iframe 直接嵌入
+```
+后端 (graph.stream)                    前端
+┌──────────────┐
+│ classify_    │──stage("正在理解您的意图...")──→  🔄 正在理解...
+│ intent       │                                      │
+└──────┬───────┘                                      ▼
+       ▼                                        ┌──────────┐
+┌──────────────┐                                 │ 进度条   │
+│ execute_tool │──pipeline_definition──→         │ 动画     │
+│              │  [{step: "解析请假信息"}, ...]   │          │
+│  _step_      │──stage("解析中...")──→          │ ✓ 解析   │
+│  parse_info  │                                  │ ○ 校验   │
+│              │──stage("校验中...")──→          │ ○ 提交   │
+│  _step_      │                                  └──────────┘
+│  validate    │──stage("校验通过 ✓")──→
+│              │
+│  _step_      │──result({artifactType, data})──→  📋 数据卡片
+│  submit      │                                    或
+│              │──done()──→                       📝 配置 JSON
+└──────────────┘
+```
 
-在主系统页面中直接嵌入 iframe：
+**实现要点：**
+- `graph.stream()` 是同步 API，在线程池中执行
+- 每个 chunk 通过 `loop.call_soon_threadsafe()` 实时推 SSE（不等全部完成）
+- interrupt 时检查 `graph.get_state()` 获取中断数据
+
+---
+
+## 六、嵌入主系统
+
+### 方式 A：SDK 嵌入（推荐）
 
 ```html
-<iframe
-  src="http://你的部署地址:13080/?embed=true&userId=用户ID"
-  style="width: 400px; height: 600px; border: none;"
-  allow="clipboard-write"
-></iframe>
-```
-
-**URL 参数：**
-
-| 参数 | 必填 | 说明 |
-|------|------|------|
-| `embed=true` | 是 | 启用嵌入模式（隐藏侧边栏，IM 聊天窗口风格） |
-| `userId` | 否 | 用户 ID（用于隔离对话历史），也可通过 Header 传递 |
-
-**URL 示例：**
-```
-http://192.168.99.22:13080/?embed=true&userId=zhangsan
-```
-
-### 方式 B：SDK 嵌入（推荐）
-
-引入 `embed.js`，一行代码创建浮动聊天气泡：
-
-```html
-<script src="http://你的部署地址:13080/embed.js"></script>
+<script src="http://你的部署:13080/embed.js"></script>
 <script>
-  const modeler = new LLMFormModeler({
+  const assistant = new LLMFormModeler({
     baseUrl: 'http://192.168.99.22:13080',
-    userId: 'zhangsan',           // 从主系统登录态获取
-    position: 'bottom-right',      // 浮动按钮位置
-    onConfigGenerated: (config) => {
-      // 配置生成成功回调
-      console.log('生成的配置:', config)
-    },
-    onConfigApply: (config) => {
-      // 用户点击"应用配置"回调
-      // 在这里把 config 发送给主系统的表单设计器
-      console.log('用户要应用配置:', config)
-    },
-    onClose: () => {
-      console.log('用户关闭了聊天窗口')
-    }
+    userId: 'zhangsan',
+    position: 'bottom-right',
+    onConfigGenerated: (config) => { /* ... */ },
+    onConfigApply: (config) => { /* 写入主系统设计器 */ },
   })
 </script>
 ```
 
-### postMessage 通信协议
+### 方式 B：iframe 嵌入
 
-```
-主系统 (parent)                         iframe (modeler)
-      │                                        │
-      │                                        │
-      │  ◄── MODELER_READY ────────────────────│  iframe 加载完成
-      │                                        │
-      │  ── MODELER_INIT ─────────────────►    │  主系统传入上下文
-      │     {userId, formCode}                 │  （可选）
-      │                                        │
-      │                                        │
-      │  ◄── MODELER_CONFIG_GENERATED ─────────│  配置生成完成
-      │     {config: {...}}                    │  （实时通知）
-      │                                        │
-      │  ◄── MODELER_CONFIG_APPLY ─────────────│  用户点击"应用配置"
-      │     {config: {...}}                    │  （主系统接收并写入）
-      │                                        │
-      │  ◄── MODELER_CLOSE ────────────────────│  用户关闭窗口
-      │                                        │
+```html
+<iframe
+  src="http://你的部署:13080/?embed=true&userId=用户ID"
+  style="width: 400px; height: 600px; border: none;"
+></iframe>
 ```
 
-### 嵌入效果
+### 请求头透传
+
+嵌入模式下，主系统的请求头会自动透传到后端（用于上游 API 鉴权等）：
 
 ```
-主系统页面
-┌────────────────────────────────────────────────────────────┐
-│  ┌──────────────────────────────────────────┐              │
-│  │  低码表单设计器（主系统的内容）            │              │
-│  │                                          │   ┌──────┐   │
-│  │                                          │   │ 💬   │   │ ← 浮动按钮
-│  │                                          │   └──────┘   │
-│  └──────────────────────────────────────────┘              │
-│                                              点击后展开 ↓    │
-│                                    ┌───────────────────┐    │
-│                                    │ 表单配置助手    ✕ │    │
-│                                    ├───────────────────┤    │
-│                                    │ 用户: 创建请假表  │    │
-│                                    │ 助手: 已生成 ✓    │    │
-│                                    │    4 个字段       │    │
-│                                    │ [应用配置]        │    │
-│                                    ├───────────────────┤    │
-│                                    │ [输入框...] [发送]│    │
-│                                    └───────────────────┘    │
-└────────────────────────────────────────────────────────────┘
+主系统 → 前端 (iframe/SDK) → 后端 → AssetClient → 上游 API
+         (X-User-Id, X-Tenant-Id, Authorization 等全部透传)
 ```
 
 ---
 
-## 六、快速开始
+## 七、快速开始
 
 ### 环境要求
 
@@ -351,10 +404,10 @@ http://192.168.99.22:13080/?embed=true&userId=zhangsan
 编辑 `.env`：
 
 ```env
-# 上游 njmind-modeler（模板/Schema/校验的来源）
-UPSTREAM_BASE_URL=http://192.168.99.22/njmind-modeler
+# 上游业务 API (AssetClient 的 base_url)
+ASSET_BASE_URL=http://192.168.99.22:19999
 
-# LLM 推理服务（OpenAI 兼容接口）
+# LLM 推理服务 (OpenAI 兼容接口)
 LLM_BASE_URL=http://127.0.0.1:1234/v1
 LLM_API_KEY=local-dev-key
 LLM_MODEL=qwen/qwen3.6-35b-a3b
@@ -385,36 +438,146 @@ npm install && npm run dev
 |------|------|
 | http://localhost:13080/ | 独立模式（三栏布局） |
 | http://localhost:13080/?embed=true | 嵌入模式（IM 聊天窗口） |
+| http://localhost:13080/embed-demo.html | 嵌入演示页（模拟主系统） |
 | http://localhost:13080/embed.js | 嵌入 SDK |
 | http://localhost:18080/docs | API 文档（Swagger） |
 | http://localhost:18080/health | 健康检查 |
 
 ---
 
-## 七、API 一览
+## 八、API 一览
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/config/generate` | SSE 流式生成表单配置（CREATE 管线） |
-| POST | `/api/config/modify` | SSE 流式修改表单配置（MODIFY 管线） |
-| POST | `/api/config/validate` | 同步校验配置（代理上游） |
-| GET | `/api/skills/templates` | 获取模板列表（代理上游） |
-| GET | `/api/skills/guide` | 获取配置指南（代理上游） |
-| POST | `/api/conversations` | 创建对话 |
+| POST | `/api/config/chat` | **统一对话入口** (SSE 流式, 走 LangGraph) |
 | GET | `/api/conversations` | 对话列表（按 userId） |
 | GET | `/api/conversations/:id` | 对话详情（含消息历史） |
+| POST | `/api/conversations` | 创建对话 |
 | DELETE | `/api/conversations/:id` | 删除对话 |
+| GET | `/api/skills/templates` | 获取模板列表（代理上游） |
+| GET | `/api/skills/guide` | 获取配置指南（代理上游） |
+| POST | `/mcp` | MCP 协议（JSON-RPC 2.0） |
 | GET | `/health` | 健康检查 |
 
-**用户身份传递**：所有请求通过 Header `X-User-Id` 传递用户 ID（无登录系统，由主系统透传）。
+**ChatRequest 格式：**
+
+```json
+{
+  "message": "用户消息",
+  "conversation_id": "conv_xxx",
+  "answers": {"leaveType": "年假", "startDate": "2026-07-22"}
+}
+```
+
+- `answers` 非空时走 `Command(resume=answers)` 追问恢复路径
+- 请求头自动透传到上游（嵌入模式）
 
 ---
 
-## 八、Docker 部署
+## 九、目录结构
 
-```bash
-docker-compose up -d
 ```
+llm-to-modler/
+├── backend/
+│   └── src/
+│       ├── main.py                # FastAPI 入口, 构建 Graph
+│       ├── mcp_server.py          # MCP 协议服务
+│       │
+│       ├── engine/                # ★ Engine 层 (零领域知识)
+│       │   ├── graph.py           # StateGraph 构建 + compile
+│       │   ├── graph_state.py     # GraphState TypedDict
+│       │   ├── nodes.py           # 节点函数 (classify/execute/handle)
+│       │   ├── stream.py          # graph.stream → SSE 桥接
+│       │   ├── conversation.py    # 多轮对话管理
+│       │   ├── compression.py     # 上下文压缩
+│       │   ├── prompt_loader.py   # Jinja2 模板加载
+│       │   ├── dispatcher.py      # 旧调度器 (MCP 兼容, 待删)
+│       │   └── logging_filter.py  # 日志脱敏
+│       │
+│       ├── sdk/                   # ★ SDK 层 (协议定义)
+│       │   ├── tool.py            # Tool/CompositeTool/ToolResult/AskSpec
+│       │   ├── registry.py        # ToolRegistry (自动发现)
+│       │   ├── asset_client.py    # AssetClient ABC
+│       │   └── sanitize.py        # Unicode 隐写清洗
+│       │
+│       ├── domains/               # ★ Domain Packs (领域知识全部在此)
+│       │   ├── njmind_form/       # 表单配置插件
+│       │   │   ├── pack.py
+│       │   │   ├── tools/         # create_form, modify_form, chat
+│       │   │   └── prompts/       # Jinja2 模板
+│       │   └── leave_application/ # 请假申请插件 (Demo)
+│       │       ├── pack.py
+│       │       └── tools/         # submit_leave, query_status
+│       │
+│       ├── adapters/              # 适配器
+│       │   └── http_asset_client.py  # HTTP 上游实现
+│       │
+│       ├── api/                   # 路由层
+│       │   ├── config.py          # /api/config/chat
+│       │   ├── conversations.py   # /api/conversations
+│       │   ├── skills.py          # /api/skills
+│       │   ├── health.py          # /health
+│       │   └── sse.py             # SSE 工具类
+│       │
+│       ├── llm/
+│       │   └── client.py          # LLM 客户端 (OpenAI 兼容)
+│       │
+│       └── services/
+│           ├── conversation_store.py  # SQLite 存储
+│           └── upstream_client.py     # 上游客户端
+│
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── chat/              # 聊天组件 (ChatPanel/MessageBubble/ClarificationCard)
+│   │   │   └── json/              # JSON 查看器
+│   │   ├── layouts/               # 独立/嵌入布局
+│   │   ├── stores/                # Pinia 状态管理
+│   │   ├── services/              # API 调用 + SSE
+│   │   └── types.ts               # TypeScript 类型
+│   └── public/
+│       └── embed-demo.html        # 嵌入演示页
+│
+├── embed-demo.html                # 根目录嵌入演示
+├── README.md                      # 本文档
+└── TECH-ROADMAP.md                # 技术路径文档
+```
+
+---
+
+## 十、设计亮点
+
+### 1. Engine 零领域知识
+
+Engine 层不知道"表单"、"请假"等任何业务概念。所有领域知识封装在 `domains/` 下的插件包中。新增业务能力 = 新增一个插件目录。
+
+### 2. LangGraph 原生 interrupt/resume
+
+追问流程不使用自研状态机，而是利用 LangGraph 的 `interrupt()` + `Command(resume=...)` 原生机制。Checkpoint 自动持久化状态，断点恢复零额外代码。
+
+### 3. 动态能力上报
+
+ChatTool 通过 `ctx.registry.all()` 动态查询所有已注册工具的能力描述。新增插件后，ChatTool 的"我能做什么"自动更新，无需修改任何代码。
+
+### 4. 破坏性操作安全设计
+
+`is_destructive=True` 的工具（如提交请假申请）在信息不足时**必须追问**，不填默认值。通过 `ToolResult.ask` + `AskSpec` 声明式定义追问问题，Engine 统一处理 interrupt。
+
+### 5. SSE 实时流式
+
+`graph.stream()` 的每个 chunk 通过 `call_soon_threadsafe` 实时推送到前端，不等全部执行完成。前端实时展示每一步进度动画。
+
+### 6. 请求头全链路透传
+
+嵌入模式下，主系统的 HTTP 请求头（X-User-Id、Authorization 等）通过 `forward_headers` 全链路透传到上游 API，实现零侵入的身份传递。
+
+### 7. Fail-Closed 安全默认
+
+所有工具属性默认保守值：`is_destructive=True`、`is_read_only=False`、`is_concurrency_safe=False`。插件必须显式声明安全属性，避免误用。
+
+---
+
+## 十一、Docker 部署
 
 ```yaml
 # docker-compose.yml
@@ -431,4 +594,8 @@ services:
       - "13080:80"
     depends_on:
       - backend
+```
+
+```bash
+docker-compose up -d
 ```

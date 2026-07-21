@@ -6,8 +6,8 @@
           <FormOutlined />
         </div>
         <div class="header-text">
-          <span class="title">表单配置助手</span>
-          <span class="subtitle">自然语言 → 低码表单配置</span>
+          <span class="title">智能助手</span>
+          <span class="subtitle">自然语言驱动，多场景智能服务</span>
         </div>
       </div>
       <div class="header-actions">

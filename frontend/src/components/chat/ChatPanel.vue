@@ -7,8 +7,8 @@
         <div class="welcome-logo">
           <FormOutlined />
         </div>
-        <h1 class="welcome-title">表单配置助手</h1>
-        <p class="welcome-subtitle">描述你想要的表单，我来生成完整的低码配置</p>
+        <h1 class="welcome-title">智能助手</h1>
+        <p class="welcome-subtitle">用自然语言描述你的需求，我来帮你完成</p>
         <div class="examples">
           <div
             v-for="ex in examples"
@@ -152,7 +152,7 @@
     <!-- JSON 查看器 Modal -->
     <Modal
       v-model:open="jsonViewerVisible"
-      title="表单配置 JSON"
+      title="配置 JSON"
       :footer="null"
       width="80%"
       style="top: 20px"

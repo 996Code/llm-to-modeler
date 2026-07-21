@@ -32,7 +32,7 @@
           <FileTextOutlined />
         </div>
         <p class="empty-title">暂无配置</p>
-        <p class="empty-desc">生成的表单配置将显示在这里</p>
+        <p class="empty-desc">生成的配置将显示在这里</p>
       </div>
       <pre v-else class="json-view" v-html="highlightedJson"></pre>
     </div>

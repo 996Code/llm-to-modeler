@@ -71,10 +71,15 @@ export async function chat(
   message: string,
   conversationId: string | null,
   callbacks: SSECallbacks,
+  answers?: Record<string, any>,  // 追问回答(LangGraph Command(resume=answers))
 ): Promise<void> {
   await streamSSE(
     '/api/config/chat',
-    { message, conversation_id: conversationId },
+    {
+      message,
+      conversation_id: conversationId,
+      answers,  // 追问时透传用户回答
+    },
     callbacks,
   )
 }

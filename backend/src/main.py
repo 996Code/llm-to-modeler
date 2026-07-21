@@ -1,5 +1,10 @@
 """
 FastAPI Main Application.
+
+LangGraph StateGraph 架构:
+- engine/graph.py: StateGraph 构建 + compile
+- engine/nodes.py: classify_intent / execute_tool / handle_result
+- engine/stream.py: graph.stream → SSE 桥接
 """
 
 import logging
@@ -39,7 +44,7 @@ install_redact_filter()  # 挂到 root logger,所有子 logger 继承
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting LLM Form Modeler (new architecture)...")
+    logger.info("Starting LLM Form Modeler (LangGraph architecture)...")
 
     # Conversation store (SQLite, append-only 事件流)
     db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
@@ -57,12 +62,10 @@ async def lifespan(app: FastAPI):
     llm_client = LLMClient(conversation_store=conv_store)
     app.state.llm_client = llm_client
 
-    # 新架构:ToolDispatcher
-    # 自动发现和加载所有工具包(domains/ 下每个 pack 目录)
-    # prompt_loader 可能为 None(纯数据类插件不需要自定义 prompt),
-    # 此时 dispatcher 使用内置的动态 intent prompt 生成
+    # 新架构:LangGraph StateGraph
+    # 自动发现和加载所有工具包
     from domains import load_all_packs
-    from engine.dispatcher import ToolDispatcher
+    from engine.graph import build_graph
     from engine.conversation import ConversationManager
     from adapters.http_asset_client import HttpAssetClient
 
@@ -71,18 +74,28 @@ async def lifespan(app: FastAPI):
     asset_client = HttpAssetClient(upstream=upstream)
     # asset_client 的数据操作 base_url 从环境变量 ASSET_BASE_URL 读取,默认 mock API
 
+    # 构建 LangGraph StateGraph(替代旧 ToolDispatcher)
+    graph = build_graph(
+        registry=registry,
+        llm_client=llm_client,
+        asset_client=asset_client,
+        conversation=conversation_manager,
+        prompt_loader=prompt_loader,
+    )
+    app.state.graph = graph
+    logger.info("LangGraph StateGraph architecture initialized")
+
+    # MCP Server(使用新架构 graph)
+    from src.mcp_server import create_mcp_server
+    # MCP 暂时不改,保留 dispatcher 兼容(后续迁移)
+    from engine.dispatcher import ToolDispatcher
     dispatcher = ToolDispatcher(
         registry=registry,
         llm_client=llm_client,
         conversation_store=conversation_manager,
-        prompt_loader=prompt_loader,  # None 时 dispatcher 内部动态生成 prompt
+        prompt_loader=prompt_loader,
         asset_client=asset_client,
     )
-    app.state.dispatcher = dispatcher
-    logger.info("New architecture (ToolDispatcher) initialized")
-
-    # MCP Server(使用新架构 dispatcher)
-    from src.mcp_server import create_mcp_server
     mcp_server = create_mcp_server(upstream, dispatcher)
     app.state.mcp = mcp_server
     app.mount("/mcp", mcp_server.streamable_http_app())
@@ -97,7 +110,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LLM Form Modeler",
     description="Natural language to form config generator (bridge to njmind-modeler)",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 

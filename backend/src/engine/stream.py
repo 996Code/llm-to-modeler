@@ -1,10 +1,19 @@
-"""SSE 桥接 - 把 ToolDispatcher 的执行桥接到 SSE 流。
+"""SSE 桥接 - 把 LangGraph StateGraph 的执行桥接到 SSE 流。
 
-stream_dispatcher:走 ToolDispatcher 的 SSE 流(新架构)。
+stream_graph:走 LangGraph StateGraph 的 SSE 流(新架构)。
+
+替代旧 stream_dispatcher,改为消费 LangGraph 的事件流:
+- graph.stream(input, config) 产出节点更新(同步)
+- 在线程池中逐 chunk 处理,实时推 SSE 事件(不等全部完成)
+- 解析 sse_events 列表 → 发 SSE stage/pipeline_definition/result 事件
+- 处理 GraphInterrupt 事件 → 发 SSE needsClarification
+- 追问恢复:传入 Command(resume=answers) 继续执行
 """
 import asyncio
 import logging
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
+
+from langgraph.types import Command
 
 from api.sse import SSEEvent, StreamManager
 from sdk.tool import ToolResult
@@ -12,178 +21,159 @@ from sdk.tool import ToolResult
 logger = logging.getLogger(__name__)
 
 
-async def stream_dispatcher(
-    dispatcher,
+async def stream_graph(
+    graph,
     user_input: str,
     conversation_id: str,
     user_id: str,
+    answers: dict = None,
     conversation_store=None,
     conversation_history: list = None,
     current_config: dict = None,
     forward_headers: dict = None,
 ) -> AsyncGenerator[str, None]:
-    """走 ToolDispatcher 的 SSE 流(新架构)。
+    """走 LangGraph StateGraph 的 SSE 流。
 
-    在线程池执行 dispatcher.run,emit 回调线程安全桥接到 SSE。
+    核心设计:
+    - graph.stream 是同步 API,在线程池中执行
+    - 每个 chunk 产出后立即通过 StreamManager 推 SSE 事件(实时进度)
+    - interrupt 时 graph.stream 自动停止,检查 graph.get_state() 获取 interrupt 数据
+
+    Args:
+        graph: CompiledStateGraph 实例
+        user_input: 用户消息
+        conversation_id: 会话 ID(用作 checkpoint thread_id)
+        user_id: 用户 ID
+        answers: 追问回答(非空时走 Command(resume=answers) 路径)
+        conversation_store: ConversationStore 实例
+        conversation_history: 对话历史
+        current_config: 当前已有配置
+        forward_headers: 嵌入模式透传的请求头
     """
     loop = asyncio.get_running_loop()
     sm = StreamManager(loop)
 
-    # 线程安全的 emit 回调
-    def emit(*args, **kwargs):
-        """emit(event_type, stage_name, message='', **extra)
-        
-        约定: 
-        - emit("stage", "classify_intent", "正在理解...") 
-          → SSE: {"stage": "classify_intent", "message": "正在理解..."}
-        - emit("pipeline_definition", {"tool": "create_form", "steps": [...]})
-          → SSE: {"tool": "create_form", "steps": [...]}
-        """
-        if len(args) >= 3:
-            # emit("stage", stage_name, message, **extra)
-            sm.stage(args[1], args[2], **kwargs)
-        elif len(args) == 2:
-            event_type = args[0]
-            if event_type == "pipeline_definition":
-                # emit("pipeline_definition", data)
-                sm.pipeline_definition(args[1].get("tool", ""), args[1].get("steps", []))
-            else:
-                # emit("stage", stage_name)
-                sm.stage(args[1], "", **kwargs)
-        elif len(args) == 1:
-            sm.stage(args[0], "", **kwargs)
-        else:
-            sm.stage(kwargs.get("event_type", ""), kwargs.get("message", ""), **{k: v for k, v in kwargs.items() if k not in ("event_type", "message")})
+    # 构建 input
+    if answers:
+        input_data = Command(resume=answers)
+    else:
+        input_data = {
+            "user_input": user_input,
+            "conversation_history": conversation_history or [],
+            "compressed_history": _build_compressed_history(conversation_history),
+            "conversation_id": conversation_id,
+            "forward_headers": forward_headers or {},
+            "current_config": current_config,
+            "tool_name": "",
+            "intent_reason": "",
+            "tool_state": {},
+            "tool_result": None,
+            "pending_questions": [],
+            "clarify_answers": {},
+            "sse_events": [],
+        }
 
-    def _run_dispatcher():
-        """在线程池执行 dispatcher.run。"""
-        from src.services.upstream_client import set_forward_headers
-        set_forward_headers(forward_headers)
-        try:
-            return dispatcher.run(
-                user_input=user_input,
-                conv_id=conversation_id,
-                forward_headers=forward_headers,
-                current_config=current_config,
-                conversation_history=conversation_history,
-                emit=emit,
-            )
-        finally:
-            set_forward_headers(None)
+    # Checkpoint config:用 conversation_id 做 thread_id
+    config = {"configurable": {"thread_id": conversation_id or "default"}}
+
+    # 用于在线程和异步之间传递结果
+    result_holder = {"last_result": None, "had_interrupt": False}
 
     async def execute():
         try:
-            result = await loop.run_in_executor(None, _run_dispatcher)
+            # ── 在线程池中执行 graph.stream,逐 chunk 实时推 SSE ──
+            def _process_chunk(chunk):
+                """在线程池中处理单个 chunk,通过 call_soon_threadsafe 推 SSE。"""
+                # 错误
+                if "__error__" in chunk:
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(sm.emit_error(chunk["__error__"]))
+                    )
+                    return
 
-            # 按 ToolResult 三态分流
-            if result.ask is not None:
-                # 追问
-                questions_text = "我需要确认一些信息：\n" + "\n".join(
-                    f"{i+1}. {q.question}" for i, q in enumerate(result.ask.questions)
+                # chunk 格式: {node_name: state_update}
+                for node_name, state_update in chunk.items():
+                    if not isinstance(state_update, dict):
+                        continue
+
+                    # 1. 处理 sse_events(节点产出的事件)
+                    sse_events = state_update.get("sse_events", [])
+                    for event in sse_events:
+                        event_type = event.get("type", "")
+
+                        if event_type == "stage":
+                            sm.stage(
+                                event.get("stage", ""),
+                                event.get("message", ""),
+                            )
+
+                        elif event_type == "pipeline_definition":
+                            data = event.get("data", {})
+                            sm.pipeline_definition(
+                                data.get("tool", ""),
+                                data.get("steps", []),
+                            )
+
+                        elif event_type == "result":
+                            result_data = event.get("data", {})
+                            result_holder["last_result"] = result_data
+                            loop.call_soon_threadsafe(
+                                lambda rd=result_data: asyncio.ensure_future(sm.emit_result(rd))
+                            )
+
+                        elif event_type == "error":
+                            loop.call_soon_threadsafe(
+                                lambda: asyncio.ensure_future(
+                                    sm.emit_error(event.get("data", {}).get("error", "未知错误"))
+                                )
+                            )
+
+            def _run_graph():
+                """在线程池中执行 graph.stream,逐 chunk 处理。"""
+                try:
+                    for chunk in graph.stream(input_data, config):
+                        _process_chunk(chunk)
+                except Exception as e:
+                    logger.exception(f"Graph execution failed: {e}")
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.ensure_future(sm.emit_error(str(e)))
+                    )
+
+            await loop.run_in_executor(None, _run_graph)
+
+            # ── 检查是否有 interrupt 未处理 ──
+            try:
+                state_snapshot = graph.get_state(config)
+                if state_snapshot and state_snapshot.tasks:
+                    for task in state_snapshot.tasks:
+                        if task.interrupts:
+                            result_holder["had_interrupt"] = True
+                            for intr in task.interrupts:
+                                intr_value = intr.value if hasattr(intr, 'value') else intr
+                                if isinstance(intr_value, dict):
+                                    await sm.emit_result({
+                                        "needsClarification": True,
+                                        "questions": intr_value.get("questions", []),
+                                        "summary": intr_value.get("summary", "需要补充信息"),
+                                    })
+                                    _save_conversation(
+                                        conversation_store, conversation_id, user_id,
+                                        user_input, intr_value.get("summary", "需要补充信息"),
+                                    )
+            except Exception as e:
+                logger.warning(f"Failed to check graph state for interrupts: {e}")
+
+            # 保存正常结果的对话
+            if result_holder["last_result"] and not result_holder["had_interrupt"]:
+                _save_result_conversation(
+                    conversation_store, conversation_id, user_id,
+                    user_input, result_holder["last_result"], current_config,
                 )
-                await sm.emit_result({
-                    "needsClarification": True,
-                    "questions": [q.model_dump() for q in result.ask.questions],
-                    "summary": questions_text,
-                })
-                _save_conversation(conversation_store, conversation_id, user_id,
-                                   user_input, questions_text)
-
-            elif result.error_for_llm:
-                # 错误回流
-                await sm.emit_result({
-                    "error": True,
-                    "message": result.error_for_llm,
-                    "summary": result.summary,
-                })
-                _save_conversation(conversation_store, conversation_id, user_id,
-                                   user_input, result.summary)
-
-            elif result.reply:
-                # 闲聊回复
-                await sm.emit_result({
-                    "intent": "general",
-                    "reply": result.reply,
-                    "summary": result.summary,
-                })
-                _save_conversation(conversation_store, conversation_id, user_id,
-                                   user_input, result.reply)
-
-            elif result.artifact:
-                # 制品结果 — 根据 artifact_type 区分配置和数据
-                artifact_type = getattr(result, 'artifact_type', 'config')
-                config = result.artifact
-                formatted = result.extra.get("formatted", {})
-                is_valid = len(result.extra.get("validation_errors", [])) == 0
-
-                if artifact_type == "data":
-                    # ── 数据结果(非配置) ──
-                    # 不存 config_snapshot,前端显示数据摘要卡片
-                    sse_payload = {
-                        "artifactType": "data",
-                        "data": config,
-                        "summary": result.summary,
-                    }
-                    sse_payload.update(formatted)  # 透传 pack 提供的字段
-                    await sm.emit_result(sse_payload)
-
-                    # 只存消息,不存 config
-                    _save_conversation(conversation_store, conversation_id, user_id,
-                                       user_input, result.summary)
-
-                else:
-                    # ── 配置结果(默认,向后兼容) ──
-                    # SSE payload:通用字段 + pack 的 formatted 透传
-                    # 归一化 validationErrors:统一为 [{message: str}] 格式
-                    # (pack 可能返回 [str] 或 [{message: str}],前端类型要求后者)
-                    raw_errors = result.extra.get("validation_errors", [])
-                    normalized_errors = [
-                        {"message": e} if isinstance(e, str) else e
-                        for e in raw_errors
-                    ]
-                    sse_payload = {
-                        "config": config,
-                        "valid": is_valid,
-                        "validationErrors": normalized_errors,
-                        "summary": result.summary,
-                    }
-                    sse_payload.update(formatted)  # 透传 pack 提供的字段(fieldCount 等)
-                    await sm.emit_result(sse_payload)
-
-                    # 保存到对话历史
-                    if conversation_store and conversation_id and user_id:
-                        try:
-                            conversation_store.add_message(
-                                conv_id=conversation_id,
-                                role="user",
-                                content=user_input,
-                            )
-                            conversation_store.add_message(
-                                conv_id=conversation_id,
-                                role="assistant",
-                                content=result.summary,
-                                config_snapshot=config,
-                            )
-                            # 更新对话配置
-                            if current_config:
-                                conversation_store.update_conversation_config(
-                                    conversation_id, config
-                                )
-                            else:
-                                # 标题从 pack 的 formatted 透传获取
-                                title = formatted.get("title", "新对话")
-                                conversation_store.update_conversation_config(
-                                    conversation_id, config, title=title
-                                )
-                        except Exception as e:
-                            logger.warning(f"Failed to save conversation: {e}")
-            else:
-                await sm.emit_error("未能生成结果")
 
             await sm.emit_done()
 
         except Exception as e:
-            logger.exception("Dispatcher execution failed")
+            logger.exception("Graph stream execution failed")
             await sm.emit_error(str(e), type=type(e).__name__)
             await sm.emit_done()
 
@@ -196,6 +186,21 @@ async def stream_dispatcher(
     await task
 
 
+# ── 辅助函数 ──────────────────────────────────────────────
+
+
+def _build_compressed_history(history: list) -> str:
+    """把对话历史格式化为文本(简单截断版,后续接压缩器)。"""
+    if not history:
+        return ""
+    parts = []
+    for msg in history[-6:]:
+        role = "用户" if msg.get("role") == "user" else "助手"
+        content = msg.get("content", "")[:200]
+        parts.append(f"{role}: {content}")
+    return "\n".join(parts)
+
+
 def _save_conversation(store, conv_id, user_id, user_input, assistant_content):
     """保存对话到 store(简单版,异常不崩)。"""
     if not store or not conv_id or not user_id:
@@ -205,3 +210,29 @@ def _save_conversation(store, conv_id, user_id, user_input, assistant_content):
         store.add_message(conv_id=conv_id, role="assistant", content=assistant_content)
     except Exception as e:
         logger.warning(f"Failed to save conversation: {e}")
+
+
+def _save_result_conversation(store, conv_id, user_id, user_input, result_data, current_config):
+    """保存工具结果到对话历史。"""
+    if not store or not conv_id or not user_id:
+        return
+    try:
+        summary = result_data.get("summary", "")
+
+        store.add_message(conv_id=conv_id, role="user", content=user_input)
+        store.add_message(conv_id=conv_id, role="assistant", content=summary)
+
+        # 配置结果:存 config_snapshot + 更新对话配置
+        config = result_data.get("config")
+        if config:
+            store.add_message(
+                conv_id=conv_id, role="assistant",
+                content=summary, config_snapshot=config,
+            )
+            if current_config:
+                store.update_conversation_config(conv_id, config)
+            else:
+                title = result_data.get("formName", result_data.get("title", "新对话"))
+                store.update_conversation_config(conv_id, config, title=title)
+    except Exception as e:
+        logger.warning(f"Failed to save result conversation: {e}")

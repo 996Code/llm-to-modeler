@@ -43,13 +43,13 @@ class TestChatToolExecute:
     def test_chat_returns_reply(self):
         """正常闲聊:LLM 返回文本,ToolResult.reply 带文本。"""
         llm = MagicMock()
-        llm.chat.return_value = "你好!我是表单助手,可以帮你创建或修改表单。"
+        llm.chat.return_value = "你好!我是低代码平台的智能助手,可以帮你处理各种业务需求。"
 
         tool = ChatTool()
         ctx = _make_ctx(llm_client=llm)
         result = tool.execute({"user_input": "你好"}, ctx)
 
-        assert result.reply == "你好!我是表单助手,可以帮你创建或修改表单。"
+        assert result.reply == "你好!我是低代码平台的智能助手,可以帮你处理各种业务需求。"
         assert result.summary  # 非空摘要进历史
         assert result.artifact is None  # 闲聊不产出制品
 

@@ -105,6 +105,10 @@ export const useConversationStore = defineStore('conversation', () => {
     pipelineSteps.value = []  // 重置，等待后端 pipeline_definition 事件
 
     try {
+      // 追问恢复:如果当前有 pendingClarification,把用户消息作为 answers 传给后端
+      // 后端走 LangGraph Command(resume=answers) 从断点继续
+      const clarifyAnswers = pendingClarification.value ? { text: text } : undefined
+
       await api.chat(text, convId || null, {
         onStage: (stage, msg) => {
           stageMessage.value = msg
@@ -181,7 +185,7 @@ export const useConversationStore = defineStore('conversation', () => {
           stageMessage.value = ''
           currentStage.value = ''
         },
-      })
+      }, clarifyAnswers)
     } catch (e: any) {
       messages.value.push({ role: 'assistant', content: `请求失败: ${e.message}` })
     } finally {

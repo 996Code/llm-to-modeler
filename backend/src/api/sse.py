@@ -1,15 +1,10 @@
 """
 SSE Streaming Module
 
-Streams ToolDispatcher execution progress via Server-Sent Events.
+SSE 事件类型和 StreamManager。
 
-Key design: the dispatcher runs in a thread pool (run_in_executor), but
-the SSE queue is an asyncio.Queue (event loop thread). We bridge the
-two using loop.call_soon_threadsafe() so tools running in the worker
-thread can push progress events safely.
-
-Note: The old stream_workflow() function (LangGraph-based) has been removed.
-All SSE streaming now goes through engine/stream.py::stream_dispatcher().
+所有 SSE 流通过 engine/stream.py::stream_graph() 消费
+(LangGraph StateGraph 架构,支持 interrupt/restore 追问)。
 """
 
 import asyncio
