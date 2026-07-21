@@ -53,6 +53,7 @@ export async function deleteConversation(id: string): Promise<void> {
 
 export interface SSECallbacks {
   onStage?: (stage: string, message: string) => void
+  onPipelineDefinition?: (tool: string, steps: any[]) => void
   onResult?: (result: SSEResult) => void
   onError?: (error: string) => void
   onDone?: () => void
@@ -151,6 +152,9 @@ async function streamSSE(
       switch (event.type) {
         case 'stage':
           callbacks.onStage?.(event.data.stage, event.data.message)
+          break
+        case 'pipeline_definition':
+          callbacks.onPipelineDefinition?.(event.data.tool, event.data.steps)
           break
         case 'result':
           callbacks.onResult?.(event.data)

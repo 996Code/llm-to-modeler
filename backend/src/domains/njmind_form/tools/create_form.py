@@ -28,13 +28,26 @@ class CreateFormTool(CompositeTool):
     description = "根据自然语言需求生成 njmind 表单配置"
     when = "用户想新建表单时,如'创建一个请假表'、'新建客户信息表'"
 
-    # 写操作:不可并发
+    # ── 安全声明 ──
     is_destructive = True
     is_read_only = False
     is_concurrency_safe = False
+    
+    # ── 插件化元数据 ──
+    requires_existing_artifact = False  # create 不需要已有配置
 
     steps = ["fetch_guide", "list_assets", "parse_fields",
              "fetch_templates", "generate", "validate"]
+    
+    # Pipeline 步骤定义(用于前端动态渲染)
+    pipeline_steps = [
+        {"key": "fetch_guide", "label": "获取指南"},
+        {"key": "list_assets", "label": "加载模板"},
+        {"key": "parse_fields", "label": "解析字段"},
+        {"key": "fetch_templates", "label": "匹配模板"},
+        {"key": "generate", "label": "生成配置"},
+        {"key": "validate", "label": "校验结果"},
+    ]
 
     def input_schema(self) -> dict:
         return {

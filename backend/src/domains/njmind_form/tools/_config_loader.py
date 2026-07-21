@@ -3,12 +3,12 @@
 供 CreateFormTool / ModifyFormTool 使用。
 """
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import yaml
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
-_CACHE: Tuple[Dict[int, str], Dict[int, str]] | None = None
+_CACHE: Optional[Tuple[Dict[int, str], Dict[int, str]]] = None
 
 
 def load_type_mappings() -> Tuple[Dict[int, str], Dict[int, str]]:

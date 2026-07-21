@@ -51,7 +51,7 @@
               </div>
               <ul class="clarification-questions">
                 <li v-for="(q, idx) in msg.clarificationQuestions" :key="idx">
-                  {{ q }}
+                  {{ typeof q === 'string' ? q : q.question }}
                 </li>
               </ul>
               <div class="clarification-hint">
@@ -59,7 +59,7 @@
               </div>
             </div>
             
-            <!-- Config card -->
+            <!-- Config card (artifact_type=config: 表单配置) -->
             <div
               v-if="msg.configSnapshot"
               class="config-card"
@@ -67,19 +67,15 @@
             >
               <div class="config-card-header">
                 <TableOutlined class="card-icon" />
-                <span class="card-title">{{ msg.configSnapshot.formName || '表单配置' }}</span>
+                <span class="card-title">{{ msg.formattedData?.formName || msg.formattedData?.title || '配置结果' }}</span>
                 <a-tag color="success" class="card-tag">
                   <CheckCircleOutlined /> 已校验
                 </a-tag>
               </div>
               <div class="config-card-body">
-                <div class="card-stat">
-                  <span class="stat-num">{{ msg.configSnapshot.formFieldConfigVos?.length || 0 }}</span>
+                <div v-if="msg.formattedData?.fieldCount !== undefined" class="card-stat">
+                  <span class="stat-num">{{ msg.formattedData.fieldCount }}</span>
                   <span class="stat-label">个字段</span>
-                </div>
-                <div class="card-stat">
-                  <span class="stat-num">{{ msg.configSnapshot.formColumnsNumber }}</span>
-                  <span class="stat-label">列布局</span>
                 </div>
               </div>
               <div class="config-card-actions">
@@ -88,6 +84,32 @@
                 </a-button>
                 <a-button v-if="embedded" size="small" type="primary" @click.stop="applyConfig(msg.configSnapshot)">
                   <CheckOutlined /> 应用配置
+                </a-button>
+              </div>
+            </div>
+
+            <!-- Data card (artifact_type=data: 非配置类结果) -->
+            <!-- v-else-if 确保与 config-card 互斥:一条消息不会同时渲染两种卡片 -->
+            <div
+              v-else-if="msg.dataResult"
+              class="data-card"
+            >
+              <div class="data-card-header">
+                <CheckCircleOutlined class="card-icon data-icon" />
+                <span class="card-title">{{ msg.formattedData?.title || msg.formattedData?.formName || '操作结果' }}</span>
+                <a-tag color="processing" class="card-tag">
+                  已完成
+                </a-tag>
+              </div>
+              <div class="data-card-body">
+                <div v-for="(value, key) in getDataDisplayFields(msg.dataResult)" :key="key" class="data-field">
+                  <span class="data-field-label">{{ key }}</span>
+                  <span class="data-field-value">{{ value }}</span>
+                </div>
+              </div>
+              <div class="data-card-actions">
+                <a-button size="small" type="link" @click.stop="showJsonViewer(msg.dataResult)">
+                  <EyeOutlined /> 查看详情
                 </a-button>
               </div>
             </div>
@@ -161,9 +183,53 @@ const msgListRef = ref<HTMLElement>()
 const jsonViewerVisible = ref(false)
 const jsonViewerContent = ref('')
 
-function showJsonViewer(config: FormConfig) {
-  jsonViewerContent.value = JSON.stringify(config, null, 2)
+function showJsonViewer(data: FormConfig | Record<string, any>) {
+  jsonViewerContent.value = JSON.stringify(data, null, 2)
   jsonViewerVisible.value = true
+}
+
+/** 字段 key → 中文标签映射(常用业务字段) */
+const FIELD_LABEL_MAP: Record<string, string> = {
+  applicant: '申请人',
+  leaveType: '请假类型',
+  startDate: '开始日期',
+  endDate: '结束日期',
+  reason: '原因',
+  status: '状态',
+  approvalId: '审批编号',
+  name: '姓名',
+  department: '部门',
+  phone: '手机号',
+  email: '邮箱',
+  address: '地址',
+  type: '类型',
+  title: '标题',
+  description: '描述',
+  amount: '金额',
+  date: '日期',
+  category: '分类',
+  remark: '备注',
+  id: '编号',
+}
+
+function getDataDisplayFields(data: Record<string, any>): Record<string, string> {
+  /** 从数据结果中提取可显示的字段（最多 6 个，跳过复杂嵌套对象和内部字段）
+   *  - 使用 FIELD_LABEL_MAP 将 key 映射为中文标签
+   *  - 跳过 status/approvalId 等内部字段（pack 在 fieldCount 中已排除）
+   */
+  const HIDDEN_FIELDS = new Set(['status', 'approvalId'])
+  const result: Record<string, string> = {}
+  let count = 0
+  for (const [key, value] of Object.entries(data)) {
+    if (count >= 6) break
+    if (HIDDEN_FIELDS.has(key)) continue        // 跳过内部字段
+    if (typeof value === 'object' && value !== null) continue  // 跳过嵌套对象
+    if (value === '' || value === null || value === undefined) continue
+    const label = FIELD_LABEL_MAP[key] || key   // 有映射用中文,没有就保留原 key
+    result[label] = String(value)
+    count++
+  }
+  return result
 }
 
 const examples = [
@@ -194,38 +260,24 @@ const examples = [
 ]
 
 // Pipeline step tracking
-// CREATE pipeline: 7 steps (classify_intent → fetch_guide → list_assets → parse_fields → fetch_templates → generate → validate)
-// MODIFY pipeline: 4 steps (classify_intent → fetch_guide → modify → validate)
-const CREATE_STAGES = [
-  { key: 'classify_intent', label: '理解意图' },
-  { key: 'fetch_guide', label: '获取指南' },
-  { key: 'list_assets', label: '加载模板' },
-  { key: 'parse_fields', label: '解析字段' },
-  { key: 'fetch_templates', label: '匹配模板' },
-  { key: 'generate', label: '生成配置' },
-  { key: 'validate', label: '校验结果' },
-]
-const MODIFY_STAGES = [
-  { key: 'classify_intent', label: '理解意图' },
-  { key: 'fetch_guide', label: '获取指南' },
-  { key: 'modify', label: '修改配置' },
-  { key: 'validate', label: '校验结果' },
-]
-
 // Backend emits "completion" variants of a stage by appending a suffix:
 //   list_assets_done / parse_fields_done / fetch_templates_done / generate_done
 //   validate_pass / validate_fail
 // The bare stage name (e.g. "generate", "generate_retry") means "in progress".
 const COMPLETE_SUFFIX = /(_done|_pass|_fail)$/
 
-// Which pipeline are we in? Modify = had a config before this message.
-const isModifyMode = computed(() => store.streamingModify)
-
-const activeStages = computed(() => isModifyMode.value ? MODIFY_STAGES : CREATE_STAGES)
+// 动态 pipeline 步骤（从 store 获取，后端发送）
+const activeStages = computed(() => store.pipelineSteps)
 
 const pipelineSteps = computed(() => {
   const currentStage = store.currentStage
   const stages = activeStages.value
+  
+  // 如果没有 pipeline 定义，返回空数组
+  if (!stages || stages.length === 0) {
+    return []
+  }
+  
   const result = stages.map((s, i) => {
     let status: 'pending' | 'active' | 'done' = 'pending'
     if (currentStage) {
@@ -241,8 +293,11 @@ const pipelineSteps = computed(() => {
     }
     return { ...s, index: i + 1, status }
   })
-  // If streaming done with config, all steps done
-  if (!store.streaming && store.stageMessage === '' && store.currentConfig) {
+  // If streaming done with a result (config or data), all steps done
+  // currentConfig 用于 config 结果; _hasDataResult 用于 data 结果
+  const _hasDataResult = !store.streaming && store.stageMessage === '' &&
+    store.messages.length > 0 && store.messages[store.messages.length - 1]?.dataResult
+  if ((!store.streaming && store.stageMessage === '' && store.currentConfig) || _hasDataResult) {
     return result.map(s => ({ ...s, status: 'done' }))
   }
   return result
@@ -416,6 +471,56 @@ watch(() => store.stageMessage, () => {
   border-radius: var(--radius-lg);
   border-top-left-radius: var(--radius-sm);
   border: 1px solid var(--border-color-lighter);
+}
+
+/* ===== Data card (非配置类结果) ===== */
+.data-card {
+  margin-top: 10px;
+  border: 1px solid var(--border-color-light);
+  border-radius: var(--radius-lg);
+  background: var(--bg-container);
+  overflow: hidden;
+  transition: all 0.2s;
+}
+.data-card:hover {
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-md);
+}
+.data-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color-lighter);
+  background: linear-gradient(to right, #f0f7ff, transparent);
+}
+.data-icon { color: var(--color-primary) !important; }
+.data-card-body {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.data-field {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.data-field-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 80px;
+  flex-shrink: 0;
+}
+.data-field-value {
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.data-card-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 12px;
 }
 
 /* ===== Config card ===== */

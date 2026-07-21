@@ -33,15 +33,23 @@ async def stream_dispatcher(
     def emit(*args, **kwargs):
         """emit(event_type, stage_name, message='', **extra)
         
-        约定: emit("stage", "classify_intent", "正在理解...") 
-        → SSE: {"stage": "classify_intent", "message": "正在理解..."}
+        约定: 
+        - emit("stage", "classify_intent", "正在理解...") 
+          → SSE: {"stage": "classify_intent", "message": "正在理解..."}
+        - emit("pipeline_definition", {"tool": "create_form", "steps": [...]})
+          → SSE: {"tool": "create_form", "steps": [...]}
         """
         if len(args) >= 3:
             # emit("stage", stage_name, message, **extra)
             sm.stage(args[1], args[2], **kwargs)
         elif len(args) == 2:
-            # emit("stage", stage_name)
-            sm.stage(args[1], "", **kwargs)
+            event_type = args[0]
+            if event_type == "pipeline_definition":
+                # emit("pipeline_definition", data)
+                sm.pipeline_definition(args[1].get("tool", ""), args[1].get("steps", []))
+            else:
+                # emit("stage", stage_name)
+                sm.stage(args[1], "", **kwargs)
         elif len(args) == 1:
             sm.stage(args[0], "", **kwargs)
         else:
@@ -102,51 +110,73 @@ async def stream_dispatcher(
                                    user_input, result.reply)
 
             elif result.artifact:
-                # 配置制品 - 通过 tool.format_result() 钩子化提取前端字段
-                # Engine 不直接读制品内部结构(架构试金石)
+                # 制品结果 — 根据 artifact_type 区分配置和数据
+                artifact_type = getattr(result, 'artifact_type', 'config')
                 config = result.artifact
-                # pack 通过 ToolResult.extra["formatted"] 传递格式化结果
-                # Engine 只做透传,不解析制品字段名
                 formatted = result.extra.get("formatted", {})
                 is_valid = len(result.extra.get("validation_errors", [])) == 0
 
-                # SSE payload:通用字段 + pack 的 formatted 透传
-                sse_payload = {
-                    "config": config,
-                    "valid": is_valid,
-                    "validationErrors": result.extra.get("validation_errors", []),
-                    "summary": result.summary,
-                }
-                sse_payload.update(formatted)  # 透传 pack 提供的字段(fieldCount 等)
-                await sm.emit_result(sse_payload)
+                if artifact_type == "data":
+                    # ── 数据结果(非配置) ──
+                    # 不存 config_snapshot,前端显示数据摘要卡片
+                    sse_payload = {
+                        "artifactType": "data",
+                        "data": config,
+                        "summary": result.summary,
+                    }
+                    sse_payload.update(formatted)  # 透传 pack 提供的字段
+                    await sm.emit_result(sse_payload)
 
-                # 保存到对话历史
-                if conversation_store and conversation_id and user_id:
-                    try:
-                        conversation_store.add_message(
-                            conv_id=conversation_id,
-                            role="user",
-                            content=user_input,
-                        )
-                        conversation_store.add_message(
-                            conv_id=conversation_id,
-                            role="assistant",
-                            content=result.summary,
-                            config_snapshot=config,
-                        )
-                        # 更新对话配置
-                        if current_config:
-                            conversation_store.update_conversation_config(
-                                conversation_id, config
+                    # 只存消息,不存 config
+                    _save_conversation(conversation_store, conversation_id, user_id,
+                                       user_input, result.summary)
+
+                else:
+                    # ── 配置结果(默认,向后兼容) ──
+                    # SSE payload:通用字段 + pack 的 formatted 透传
+                    # 归一化 validationErrors:统一为 [{message: str}] 格式
+                    # (pack 可能返回 [str] 或 [{message: str}],前端类型要求后者)
+                    raw_errors = result.extra.get("validation_errors", [])
+                    normalized_errors = [
+                        {"message": e} if isinstance(e, str) else e
+                        for e in raw_errors
+                    ]
+                    sse_payload = {
+                        "config": config,
+                        "valid": is_valid,
+                        "validationErrors": normalized_errors,
+                        "summary": result.summary,
+                    }
+                    sse_payload.update(formatted)  # 透传 pack 提供的字段(fieldCount 等)
+                    await sm.emit_result(sse_payload)
+
+                    # 保存到对话历史
+                    if conversation_store and conversation_id and user_id:
+                        try:
+                            conversation_store.add_message(
+                                conv_id=conversation_id,
+                                role="user",
+                                content=user_input,
                             )
-                        else:
-                            # 标题从 pack 的 formatted 透传获取
-                            title = formatted.get("title", "新对话")
-                            conversation_store.update_conversation_config(
-                                conversation_id, config, title=title
+                            conversation_store.add_message(
+                                conv_id=conversation_id,
+                                role="assistant",
+                                content=result.summary,
+                                config_snapshot=config,
                             )
-                    except Exception as e:
-                        logger.warning(f"Failed to save conversation: {e}")
+                            # 更新对话配置
+                            if current_config:
+                                conversation_store.update_conversation_config(
+                                    conversation_id, config
+                                )
+                            else:
+                                # 标题从 pack 的 formatted 透传获取
+                                title = formatted.get("title", "新对话")
+                                conversation_store.update_conversation_config(
+                                    conversation_id, config, title=title
+                                )
+                        except Exception as e:
+                            logger.warning(f"Failed to save conversation: {e}")
             else:
                 await sm.emit_error("未能生成结果")
 

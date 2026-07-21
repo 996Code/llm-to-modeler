@@ -7,7 +7,7 @@
 """
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from sdk.tool import CompositeTool, ToolResult, ToolContext, ClarificationRaised
 from domains.njmind_form.tools._config_loader import load_type_mappings
@@ -26,11 +26,22 @@ class ModifyFormTool(CompositeTool):
     description = "修改已有表单配置(加/删/改字段)"
     when = "用户想修改已有表单,如'加一个手机号字段'、'删除xxx'、'把xxx改成必填'"
 
+    # ── 安全声明 ──
     is_destructive = True
     is_read_only = False
     is_concurrency_safe = False
+    
+    # ── 插件化元数据 ──
+    requires_existing_artifact = True  # modify 必须有已有配置
 
     steps = ["fetch_guide", "modify", "validate"]
+    
+    # Pipeline 步骤定义(用于前端动态渲染)
+    pipeline_steps = [
+        {"key": "fetch_guide", "label": "获取指南"},
+        {"key": "modify", "label": "修改配置"},
+        {"key": "validate", "label": "校验结果"},
+    ]
 
     def input_schema(self) -> dict:
         return {
@@ -42,7 +53,7 @@ class ModifyFormTool(CompositeTool):
             "required": ["user_input", "source_artifact"],
         }
 
-    def validate_input(self, state: dict) -> str | None:
+    def validate_input(self, state: dict) -> Optional[str]:
         """语义校验:modify 必须有 source_artifact。"""
         if not state.get("source_artifact"):
             return "修改表单需要已有配置(source_artifact),但当前没有"

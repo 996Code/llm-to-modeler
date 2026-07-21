@@ -86,11 +86,11 @@ class ToolDispatcher:
         emit("stage", "classify_intent", "正在理解您的意图...")
         tool = self._select_tool(user_input, state)
         if tool is None:
-            # 兜底:走 chat
-            tool = self._registry.get("chat")
+            # 兜底:走 fallback 工具
+            tool = self._get_fallback_tool()
             if tool is None:
                 return ToolResult(
-                    error_for_llm="无法选择工具且无兜底 chat 工具",
+                    error_for_llm="无法选择工具且无兜底工具",
                     summary="工具选择失败",
                 )
 
@@ -221,21 +221,15 @@ class ToolDispatcher:
         """
         has_existing_config = state.get("source_artifact") is not None
 
-        # 渲染 intent prompt
-        if self._prompt_loader:
-            system_prompt = self._prompt_loader.render(
-                "njmind_form", "intent",
-                has_existing_config=has_existing_config,
-            )
-        else:
-            system_prompt = self._fallback_intent_prompt(has_existing_config)
+        # 动态构建意图识别 prompt
+        system_prompt = self._build_intent_prompt(has_existing_config)
 
         # 构建 user message
         parts = []
         if state.get("compressed_history"):
             parts.extend(["## 对话历史", state["compressed_history"], ""])
         parts.extend([
-            f"## 是否有已有表单配置：{'是' if has_existing_config else '否'}",
+            f"## 是否有已有配置：{'是' if has_existing_config else '否'}",
             "",
             "## 用户消息",
             user_input,
@@ -255,27 +249,71 @@ class ToolDispatcher:
             if not tool_names:
                 # LLM 未返回 tools -> 兜底 chat
                 logger.warning(f"LLM returned no tools, fallback to chat. Parsed: {parsed}")
-                return self._registry.get("chat")
+                return self._get_fallback_tool()
 
             # 取第一个可用工具
             for name in tool_names:
                 tool = self._registry.get(name)
                 if tool:
-                    # 安全兜底:无 source_artifact 时不选 modify
-                    if name == "modify_form" and not has_existing_config:
-                        logger.info("Safety: modify_form selected but no existing config, fallback to create_form")
-                        fallback = self._registry.get("create_form")
-                        if fallback:
-                            return fallback
-                        # create_form 也没有 -> 兜底 chat
-                        return self._registry.get("chat")
+                    # 安全检查:需要已有配置的工具,如果没有配置则跳过
+                    if getattr(tool, 'requires_existing_artifact', False) and not has_existing_config:
+                        logger.info(f"Safety: {name} requires existing config but none found, skipping")
+                        continue
                     return tool
 
-            # 工具名无效 -> 兜底 chat
-            return self._registry.get("chat")
+            # 所有工具都不适用 -> 兜底
+            return self._get_fallback_tool()
         except Exception as e:
             logger.warning(f"Tool selection LLM failed: {e}, fallback to chat")
-            return self._registry.get("chat")
+            return self._get_fallback_tool()
+
+    def _build_intent_prompt(self, has_existing_config: bool) -> str:
+        """动态构建意图识别 prompt,基于注册的工具列表。
+        
+        不再依赖 Jinja2 模板(模板会硬编码工具名,不利于插件化)。
+        直接从 registry 动态生成工具描述,确保新插件自动被识别。
+        """
+        # 动态生成工具描述
+        tools_desc = []
+        for tool in self._registry.all():
+            requires_artifact = getattr(tool, 'requires_existing_artifact', False)
+            condition = " (仅当 has_existing_config=true)" if requires_artifact else ""
+            tools_desc.append(f"- {tool.name}: {tool.when}{condition}")
+        
+        tools_list = "\n".join(tools_desc)
+        
+        return (
+            "你是意图识别器。根据用户消息选择最合适的工具,只返回 JSON。\n\n"
+            f"可选工具:\n{tools_list}\n\n"
+            f"当前 has_existing_config={has_existing_config}\n"
+            '输出格式: {"tools": ["tool_name"], "reason": "简短理由"}'
+        )
+
+    def _get_fallback_tool(self) -> Optional[Tool]:
+        """获取兜底工具。
+        
+        优先级：
+        1. 名为 'chat' 的工具（兼容现有 pack）
+        2. is_read_only=True 且 is_destructive=False 的安全工具
+        3. 第一个不需要已有配置的工具
+        """
+        # 1. 尝试找 chat 工具
+        chat_tool = self._registry.get("chat")
+        if chat_tool:
+            return chat_tool
+        
+        # 2. 找安全的只读工具
+        for tool in self._registry.all():
+            if getattr(tool, 'is_read_only', False) and not getattr(tool, 'is_destructive', True):
+                return tool
+        
+        # 3. 返回第一个不需要已有配置的工具
+        for tool in self._registry.all():
+            if not getattr(tool, 'requires_existing_artifact', False):
+                return tool
+        
+        # 实在没有就返回 None
+        return None
 
     def _build_ctx(self, state: dict, emit: Callable) -> ToolContext:
         """构建 ToolContext,注入所有依赖。
@@ -320,15 +358,3 @@ class ToolDispatcher:
             content = msg.get("content", "")[:200]
             parts.append(f"{role}: {content}")
         return "\n".join(parts)
-
-    def _fallback_intent_prompt(self, has_existing_config: bool) -> str:
-        """无 prompt_loader 时的兜底 intent prompt。"""
-        return (
-            "你是低代码平台的意图识别器。判断用户消息的意图，只返回 JSON。\n\n"
-            "可选工具:\n"
-            "- create_form: 用户想新建表单时\n"
-            f"- modify_form: 用户想修改已有表单(仅当 has_existing_config=true)\n"
-            "- chat: 闲聊、打招呼、与表单无关的问题\n\n"
-            f"当前 has_existing_config={has_existing_config}\n"
-            '输出格式: {"tools": ["create_form"], "reason": "简短理由"}'
-        )

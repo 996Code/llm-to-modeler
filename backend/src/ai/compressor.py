@@ -81,7 +81,7 @@ class CompactResult:
     error: Optional[str] = None  # 压缩失败时的错误
 
 
-_COMPACT_PROMPT = """你是对话压缩器。将下面的对话历史压缩成一句话摘要, 保留关键信息 (创建了什么表单、修改了哪些字段、配置结果)。
+_COMPACT_PROMPT = """你是对话压缩器。将下面的对话历史压缩成一句话摘要, 保留关键信息 (用户做了什么、修改了哪些内容、最终结果)。
 
 对话历史:
 {history}
@@ -94,6 +94,7 @@ def compact_history_sync(
     llm_client,
     keep_recent: int = 3,
     current_config: Optional[Dict[str, Any]] = None,
+    summarize_artifact_fn: Optional[callable] = None,
 ) -> CompactResult:
     """同步版压缩对话历史: 旧轮次 → 摘要, 保留最近 N 轮。
 
@@ -104,6 +105,9 @@ def compact_history_sync(
         llm_client: LLMClient 实例 (同步)
         keep_recent: 保留最近几轮 (默认 3)
         current_config: 当前配置 (用于状态补偿)
+        summarize_artifact_fn: 工具的 summarize_artifact 钩子(可选),
+            签名: (artifact: dict) -> str。
+            不传则使用通用兜底逻辑。
 
     Returns:
         CompactResult — summary + recent_messages + state_compensation
@@ -132,8 +136,10 @@ def compact_history_sync(
         summary = summary.strip()
         logger.info(f"对话压缩成功: {len(old_messages)} 条 → 摘要 {len(summary)} 字")
 
-        # 状态补偿: 从 current_config 提取关键信息
-        state_compensation = _build_state_compensation(current_config)
+        # 状态补偿: 优先使用工具钩子,否则兜底
+        state_compensation = _build_state_compensation(
+            current_config, summarize_artifact_fn
+        )
 
         return CompactResult(
             summary=summary,
@@ -145,36 +151,50 @@ def compact_history_sync(
         # 降级: 无摘要, 只保留 recent (信息损失但可用)
         return CompactResult(
             recent_messages=recent_messages,
-            state_compensation=_build_state_compensation(current_config),
+            state_compensation=_build_state_compensation(
+                current_config, summarize_artifact_fn
+            ),
             error=str(e),
         )
 
 
-def _build_state_compensation(config: Optional[Dict[str, Any]]) -> str:
+def _build_state_compensation(
+    config: Optional[Dict[str, Any]],
+    summarize_artifact_fn: Optional[callable] = None,
+) -> str:
     """从当前配置构建状态补偿文本。
 
-    防止压缩后 LLM 忘记当前在做什么表单。
+    防止压缩后 LLM 忘记当前在做什么。
+    
+    优先使用工具的 summarize_artifact 钩子(插件化),
+    不传则使用通用兜底逻辑(不读制品内部特定字段)。
     """
     if not config:
         return ""
 
+    # 优先使用工具钩子
+    if summarize_artifact_fn:
+        try:
+            result = summarize_artifact_fn(config)
+            if result:
+                return result
+        except Exception as e:
+            logger.warning(f"summarize_artifact 钩子失败, 降级兜底: {e}")
+
+    # 兜底: 通用 JSON 摘要(不读特定字段名)
+    # 只提取顶层键名 + 数组长度,避免硬编码 domain 字段
     parts = []
-    form_name = config.get("formName", "")
-    form_code = config.get("formCode", "")
-    if form_name:
-        parts.append(f"当前表单: {form_name} ({form_code})")
-
-    fields = config.get("formFieldConfigVos", [])
-    if fields:
-        field_summary = ", ".join(
-            f"{f.get('fieldTitleText', '')} ({f.get('fieldTitleKey', '')})"
-            for f in fields[:10]  # 最多 10 个字段
-        )
-        if len(fields) > 10:
-            field_summary += f" ... 共 {len(fields)} 个字段"
-        parts.append(f"字段列表: {field_summary}")
-
-    return "\n".join(parts)
+    for key, value in config.items():
+        if isinstance(value, list):
+            parts.append(f"{key}: {len(value)} 项")
+        elif isinstance(value, str) and value:
+            parts.append(f"{key}: {value}")
+        elif isinstance(value, (int, float)) and value:
+            parts.append(f"{key}: {value}")
+    
+    if parts:
+        return "当前配置: " + ", ".join(parts[:8])  # 最多 8 个字段
+    return ""
 
 
 def format_history_for_prompt(

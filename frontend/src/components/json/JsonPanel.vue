@@ -5,7 +5,7 @@
         <CodeOutlined class="header-icon" />
         <span class="title">配置 JSON</span>
         <a-tag v-if="config" color="processing" class="field-count">
-          {{ config.formFieldConfigVos?.length || 0 }} 字段
+          {{ store.currentConfigFieldCount || 0 }} 字段
         </a-tag>
       </div>
       <div class="actions">
@@ -84,7 +84,7 @@ function download() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `${config.value.formCode || 'form-config'}-${Date.now()}.json`
+  a.download = `${store.currentConfigName || 'config'}-${Date.now()}.json`
   a.click()
   URL.revokeObjectURL(url)
 }

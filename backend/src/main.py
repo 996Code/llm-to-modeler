@@ -58,21 +58,24 @@ async def lifespan(app: FastAPI):
     app.state.llm_client = llm_client
 
     # 新架构:ToolDispatcher
-    from domains.njmind_form.pack import create_registry, create_prompt_loader
+    # 自动发现和加载所有工具包(domains/ 下每个 pack 目录)
+    # prompt_loader 可能为 None(纯数据类插件不需要自定义 prompt),
+    # 此时 dispatcher 使用内置的动态 intent prompt 生成
+    from domains import load_all_packs
     from engine.dispatcher import ToolDispatcher
     from engine.conversation import ConversationManager
     from adapters.http_asset_client import HttpAssetClient
 
-    registry = create_registry()
-    prompt_loader = create_prompt_loader()
+    registry, prompt_loader = load_all_packs()
     conversation_manager = ConversationManager(store=conv_store)
     asset_client = HttpAssetClient(upstream=upstream)
+    # asset_client 的数据操作 base_url 从环境变量 ASSET_BASE_URL 读取,默认 mock API
 
     dispatcher = ToolDispatcher(
         registry=registry,
         llm_client=llm_client,
         conversation_store=conversation_manager,
-        prompt_loader=prompt_loader,
+        prompt_loader=prompt_loader,  # None 时 dispatcher 内部动态生成 prompt
         asset_client=asset_client,
     )
     app.state.dispatcher = dispatcher

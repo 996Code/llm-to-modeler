@@ -45,12 +45,16 @@ class AskSpec(BaseModel):
 class ToolResult(BaseModel):
     """工具执行结果。三层设计:
     - artifact: 不透明制品,Engine 不读内部结构
+    - artifact_type: 制品类型,决定 SSE 桥接和前端渲染方式
+      - "config": 表单配置(存 config_snapshot,显示应用按钮)
+      - "data": 数据结果(只存消息,不存 config,显示摘要卡片)
     - summary: 标准化摘要,进 ConversationManager 历史
     - extra: 领域自由扩展,不进历史
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     artifact: Optional[dict] = None
+    artifact_type: str = "config"    # "config" | "data" — 向后兼容,默认 config
     reply: Optional[str] = None
     ask: Optional[AskSpec] = None     # 非空 = 需要追问(C.2-A)
     summary: str = ""
@@ -81,6 +85,9 @@ class Tool(ABC):
     is_read_only: bool = False
     # ── 并发安全声明(C.2-B:借鉴 CC isConcurrencySafe)──
     is_concurrency_safe: bool = False
+    
+    # ── 插件化元数据 ──
+    requires_existing_artifact: bool = False  # 是否需要已有配置(modify 类工具)
 
     @abstractmethod
     def input_schema(self) -> dict:
@@ -127,8 +134,19 @@ class CompositeTool(Tool):
     - 每个 step 自行 emit stage 事件(含详细描述)
     """
     steps: list[str] = []
+    
+    # ── 插件化:Pipeline 步骤定义(用于前端动态渲染) ──
+    # 格式: [{"key": "step_name", "label": "步骤描述"}, ...]
+    pipeline_steps: list[dict] = []
 
     def run_pipeline(self, state: dict, ctx: ToolContext) -> None:
+        # 发送 pipeline 定义给前端
+        if self.pipeline_steps:
+            ctx.emit("pipeline_definition", {
+                "tool": self.name,
+                "steps": self.pipeline_steps
+            })
+        
         for step_name in self.steps:
             method = getattr(self, f"_step_{step_name}")
             method(state, ctx)
