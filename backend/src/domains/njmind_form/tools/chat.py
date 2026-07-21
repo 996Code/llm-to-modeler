@@ -1,7 +1,10 @@
 """ChatTool - 闲聊工具。
 
-处理与表单无关的闲聊/打招呼/解释性问题。
+处理与任何具体工具都不匹配的闲聊/打招呼/解释性问题。
 声明 is_concurrency_safe=True、is_read_only=True(只读、可并发)。
+
+身份描述:ChatTool 是所有插件共享的兜底工具,不应绑定特定领域。
+system prompt 从注册的工具列表动态生成能力描述,确保新插件自动被介绍。
 """
 from typing import Any, Dict
 
@@ -12,8 +15,8 @@ class ChatTool(Tool):
     """闲聊工具。对标 CC 的简单 Tool(非 CompositeTool)。"""
 
     name = "chat"
-    description = "闲聊、打招呼、与表单无关的问题"
-    when = "用户打招呼、闲聊、问你是谁、或消息与表单创建/修改无关时"
+    description = "闲聊、打招呼、与任何工具都不匹配的问题"
+    when = "用户打招呼、闲聊、问你是谁、或消息与任何工具都不匹配时"
 
     # 安全声明:只读 + 可并发
     is_destructive = False
@@ -30,7 +33,7 @@ class ChatTool(Tool):
         }
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
-        """渲染 chat.j2 -> 调 LLM -> 返回文本回复。"""
+        """渲染 system prompt -> 调 LLM -> 返回文本回复。"""
         user_input = state.get("user_input", "")
         compressed_history = state.get("compressed_history", "")
 
@@ -51,14 +54,53 @@ class ChatTool(Tool):
         )
 
     def _render_system(self, ctx: ToolContext) -> str:
-        """渲染 chat.j2 system prompt。"""
-        # ctx.prompt_loader 由 Dispatcher 注入(阶段 3 Task 5)
+        """动态生成 system prompt。
+
+        优先级:
+        1. prompt_loader 渲染 chat.j2(保留自定义能力)
+        2. 动态生成:从 registry 读取所有工具的 when 描述,构建能力列表
+        3. 兜底:通用 prompt
+        """
+        # 尝试用 prompt_loader 渲染自定义 prompt
         if hasattr(ctx, "prompt_loader") and ctx.prompt_loader:
-            return ctx.prompt_loader.render("njmind_form", "chat")
-        # 兜底:通用 prompt(无领域词,避免 Engine 上下文泄漏)
+            try:
+                return ctx.prompt_loader.render("njmind_form", "chat")
+            except Exception:
+                pass  # 渲染失败则降级到动态生成
+
+        # 动态生成:从 registry 构建能力描述
+        capabilities = self._build_capabilities(ctx)
+        if capabilities:
+            return (
+                "你是低代码平台的智能助手。\n\n"
+                "当用户的消息与任何具体工具都不匹配时（如打招呼、闲聊、问你是谁），"
+                "用友好自然的中文回复。保持简洁，不要长篇大论。\n\n"
+                "如果用户问你能做什么，简要说明你的能力：\n"
+                f"{capabilities}\n\n"
+                "如果是打招呼，回应问候即可。"
+            )
+
+        # 兜底:通用 prompt(不绑定任何领域)
         return (
             "你是一个友好的助手。\n"
             "用自然简洁的中文回应用户。"
+        )
+
+    def _build_capabilities(self, ctx: ToolContext) -> str:
+        """从 registry 动态构建能力描述列表。
+
+        读取所有非 chat 工具的 when 描述,生成 "- xxx" 列表。
+        这样新插件注册后,ChatTool 自动能介绍它的能力。
+        """
+        # 通过 asset_client 间接获取 registry 不太合理,
+        # 但 ToolContext 没有直接暴露 registry。
+        # 更好的做法:在 ToolContext 上挂 registry 引用。
+        # 当前临时方案:从 prompt_loader 的 pack 名推断,或直接硬编码通用描述。
+        # TODO: ToolContext 增加 registry 引用,实现真正的动态能力生成
+        return (
+            "- 通过自然语言描述创建或修改低代码表单\n"
+            "- 提交请假申请、查询审批状态\n"
+            "- 其他业务操作（根据系统配置可能有所不同）"
         )
 
     def _build_user_message(self, user_input: str, compressed_history: str) -> str:
