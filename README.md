@@ -77,23 +77,31 @@
 │  ┌──────────────────────────▼───────────────────────────────────┐   │
 │  │  ★ Domain Packs (domains/) — 领域知识全部在此                │   │
 │  │                                                              │   │
-│  │  ┌─────────────────────┐  ┌──────────────────────────────┐  │   │
-│  │  │ njmind_form         │  │ leave_application            │  │   │
-│  │  │                     │  │                              │  │   │
-│  │  │ tools/              │  │ tools/                       │  │   │
-│  │  │  create_form (6步)  │  │  submit_leave (3步)          │  │   │
-│  │  │  modify_form (3步)  │  │  query_status (1步)          │  │   │
-│  │  │  chat (兜底)        │  │                              │  │   │
-│  │  │                     │  │ prompts/ (无, 纯逻辑)        │  │   │
-│  │  │ prompts/            │  └──────────────────────────────┘  │   │
+│  │  ┌─────────────────────┐                                    │   │
+│  │  │ njmind_form         │                                    │   │
+│  │  │                     │                                    │   │
+│  │  │ tools/              │                                    │   │
+│  │  │  create_form (6步)  │                                    │   │
+│  │  │  modify_form (3步)  │                                    │   │
+│  │  │  get_form (1步)     │                                    │   │
+│  │  │  clone_form (3步)   │                                    │   │
+│  │  │  image_form (3步)   │                                    │   │
+│  │  │  chat (兜底)        │                                    │   │
+│  │  │                     │                                    │   │
+│  │  │ prompts/            │                                    │   │
 │  │  │  chat.j2  parse.j2  │                                    │   │
-│  │  │  generate.j2  ...   │  ┌──────────────────────────────┐  │   │
-│  │  │                     │  │ 新插件只需:                   │  │   │
-│  │  │ config.yaml         │  │ 1. 创建 domains/xxx/ 目录     │  │   │
-│  │  └─────────────────────┘  │ 2. 实现 pack.py              │  │   │
-│  │                           │ 3. 定义 Tool 子类             │  │   │
-│  │                           │ → 自动发现, 零配置上线        │  │   │
-│  │                           └──────────────────────────────┘  │   │
+│  │  │  generate.j2  ...   │                                    │   │
+│  │  │                     │                                    │   │
+│  │  │ config.yaml         │                                    │   │
+│  │  └─────────────────────┘                                    │   │
+│  │                                                              │   │
+│  │  ┌──────────────────────────────┐                            │   │
+│  │  │ 新插件只需:                   │                            │   │
+│  │  │ 1. 创建 domains/xxx/ 目录     │                            │   │
+│  │  │ 2. 实现 pack.py              │                            │   │
+│  │  │ 3. 定义 Tool 子类             │                            │   │
+│  │  │ → 自动发现, 零配置上线        │                            │   │
+│  │  └──────────────────────────────┘                            │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 │                              │                                       │
 │  ┌──────────────────────────▼───────────────────────────────────┐   │
@@ -141,16 +149,16 @@ START → classify_intent (LLM 选工具, 从 registry 动态生成 prompt)
 ### 2.2 追问恢复机制 (LangGraph 原生 interrupt)
 
 ```
-用户: "我要请假"
+用户: "帮我创建一个请假申请表"
   │
   ▼
-classify_intent → 选中 submit_leave
+classify_intent → 选中 create_form
   │
   ▼
-execute_tool → SubmitLeaveTool.execute()
+execute_tool → CreateFormTool.execute()
   │
-  ├─ _step_parse_info: LLM 提取信息 → leaveType="" startDate=""
-  │  → 关键字段缺失 → 设置 _need_clarify 标记
+  ├─ _step_parse_fields: LLM 提取字段 → 部分字段不明确
+  │  → 关键信息缺失 → 设置 _need_clarify 标记
   │
   ├─ ToolResult(ask=AskSpec(...))
   │
@@ -159,7 +167,7 @@ execute_tool → SubmitLeaveTool.execute()
      ▼
   SSE → 前端渲染追问卡片
      │
-     用户回答: {leaveType: "年假", startDate: "2026-07-22", endDate: "2026-07-23"}
+     用户回答: {请假类型: "年假/事假/病假", 日期范围: "开始-结束"}
      │
      ▼
   Command(resume=answers) → 图从断点恢复
@@ -169,10 +177,11 @@ execute_tool → SubmitLeaveTool.execute()
      ├─ 清除 _need_clarify / _clarify_spec 标记
      └─ 重跑 execute_tool
            │
-           ├─ _step_parse_info: LLM 提取 → 信息完整 ✓
-           ├─ _step_validate_rules: 调上游 API 校验 ✓
-           ├─ _step_submit: 调上游 API 提交 ✓
-           └─ ToolResult(artifact=leave_data) → handle_result → END
+           ├─ _step_parse_fields: LLM 提取 → 字段完整 ✓
+           ├─ _step_fetch_templates: 获取字段模板 ✓
+           ├─ _step_generate: LLM 生成完整配置 ✓
+           ├─ _step_validate: 上游 API 校验 ✓
+           └─ ToolResult(artifact=form_config) → handle_result → END
 ```
 
 ### 2.3 GraphState 定义
@@ -213,21 +222,19 @@ class GraphState(TypedDict, total=False):
 domains/
 ├── njmind_form/          ← 表单配置插件
 │   ├── pack.py           ← create_registry() 注册工具
+│   ├── models.py         ← ParsedField 等数据模型
 │   ├── tools/
 │   │   ├── create_form.py   (CompositeTool, 6步管线)
 │   │   ├── modify_form.py   (CompositeTool, 3步管线)
+│   │   ├── get_form.py      (Tool, 查询已有表单)
+│   │   ├── clone_form.py    (Tool, 复制表单)
+│   │   ├── image_form.py    (Tool, 图片识别→表单)
 │   │   └── chat.py          (Tool, 兜底闲聊)
 │   └── prompts/
 │       ├── chat.j2
 │       ├── parse.j2
 │       ├── generate.j2
 │       └── ...
-│
-├── leave_application/    ← 请假申请插件 (Demo)
-│   ├── pack.py
-│   └── tools/
-│       ├── submit_leave.py  (CompositeTool, 3步管线)
-│       └── query_status.py  (Tool, 查询)
 │
 └── (新插件只需创建目录 + pack.py + tools/)
 ```
@@ -296,6 +303,9 @@ def _build_capabilities(self, ctx):
 |------|------|------|------|
 | create_form | CompositeTool | 6步 | 自然语言 → 完整表单配置 |
 | modify_form | CompositeTool | 3步 | 自然语言修改已有配置 |
+| get_form | Tool | - | 根据 formCode 查询已有表单 |
+| clone_form | Tool | - | 复制已有表单并修改标识 |
+| image_form | Tool | - | 图片识别 → 表单配置 (多模态) |
 | chat | Tool | - | 兜底闲聊 + 动态能力描述 |
 
 **CREATE 管线 (6步)：**
@@ -309,6 +319,8 @@ fetch_guide → modify(LLM) → validate
 ```
 
 ### 4.2 leave_application — 请假申请 (Demo 插件)
+
+> 注：此为架构演示插件，当前未在 pack.py 中注册。
 
 | 工具 | 类型 | 管线 | 说明 |
 |------|------|------|------|
@@ -335,14 +347,16 @@ parse_info(LLM) → validate_rules(API) → submit(API)
        ▼                                        ┌──────────┐
 ┌──────────────┐                                 │ 进度条   │
 │ execute_tool │──pipeline_definition──→         │ 动画     │
-│              │  [{step: "解析请假信息"}, ...]   │          │
+│              │  [{step: "解析字段"}, ...]       │          │
 │  _step_      │──stage("解析中...")──→          │ ✓ 解析   │
-│  parse_info  │                                  │ ○ 校验   │
-│              │──stage("校验中...")──→          │ ○ 提交   │
+│  parse_fields│                                  │ ○ 生成   │
+│              │──stage("生成中...")──→          │ ○ 校验   │
 │  _step_      │                                  └──────────┘
-│  validate    │──stage("校验通过 ✓")──→
+│  generate    │──stage("校验中...")──→
 │              │
-│  _step_      │──result({artifactType, data})──→  📋 数据卡片
+│  _step_      │──stage("校验通过 ✓")──→
+│  validate    │
+│              │──result({artifactType, data})──→  📋 数据卡片
 │  submit      │                                    或
 │              │──done()──→                       📝 配置 JSON
 └──────────────┘
@@ -465,11 +479,13 @@ npm install && npm run dev
 {
   "message": "用户消息",
   "conversation_id": "conv_xxx",
-  "answers": {"leaveType": "年假", "startDate": "2026-07-22"}
+  "answers": {"leaveType": "年假", "startDate": "2026-07-22"},
+  "image_base64": "data:image/png;base64,..."
 }
 ```
 
 - `answers` 非空时走 `Command(resume=answers)` 追问恢复路径
+- `image_base64` 非空时传入 `tool_state` 供 ImageFormTool 使用
 - 请求头自动透传到上游（嵌入模式）
 
 ---
@@ -481,7 +497,7 @@ llm-to-modler/
 ├── backend/
 │   └── src/
 │       ├── main.py                # FastAPI 入口, 构建 Graph
-│       ├── mcp_server.py          # MCP 协议服务
+│       ├── mcp_server.py          # MCP 协议服务 (使用 LangGraph)
 │       │
 │       ├── engine/                # ★ Engine 层 (零领域知识)
 │       │   ├── graph.py           # StateGraph 构建 + compile
@@ -489,9 +505,9 @@ llm-to-modler/
 │       │   ├── nodes.py           # 节点函数 (classify/execute/handle)
 │       │   ├── stream.py          # graph.stream → SSE 桥接
 │       │   ├── conversation.py    # 多轮对话管理
-│       │   ├── compression.py     # 上下文压缩
+│       │   ├── compression.py     # 上下文压缩 + build_compressed_history
 │       │   ├── prompt_loader.py   # Jinja2 模板加载
-│       │   ├── dispatcher.py      # 旧调度器 (MCP 兼容, 待删)
+│       │   ├── dispatcher.py      # 旧调度器 (遗留, MCP 兼容)
 │       │   └── logging_filter.py  # 日志脱敏
 │       │
 │       ├── sdk/                   # ★ SDK 层 (协议定义)
@@ -503,11 +519,9 @@ llm-to-modler/
 │       ├── domains/               # ★ Domain Packs (领域知识全部在此)
 │       │   ├── njmind_form/       # 表单配置插件
 │       │   │   ├── pack.py
-│       │   │   ├── tools/         # create_form, modify_form, chat
+│       │   │   ├── models.py      # ParsedField 等数据模型
+│       │   │   ├── tools/         # create/modify/get/clone/image/chat
 │       │   │   └── prompts/       # Jinja2 模板
-│       │   └── leave_application/ # 请假申请插件 (Demo)
-│       │       ├── pack.py
-│       │       └── tools/         # submit_leave, query_status
 │       │
 │       ├── adapters/              # 适配器
 │       │   └── http_asset_client.py  # HTTP 上游实现
@@ -520,7 +534,7 @@ llm-to-modler/
 │       │   └── sse.py             # SSE 工具类
 │       │
 │       ├── llm/
-│       │   └── client.py          # LLM 客户端 (OpenAI 兼容)
+│       │   └── client.py          # LLM 客户端 (OpenAI 兼容, 支持多模态)
 │       │
 │       └── services/
 │           ├── conversation_store.py  # SQLite 存储
@@ -529,16 +543,16 @@ llm-to-modler/
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── chat/              # 聊天组件 (ChatPanel/MessageBubble/ClarificationCard)
+│   │   │   ├── chat/              # 聊天组件 (ChatPanel/ChatInput/ClarificationCard)
 │   │   │   └── json/              # JSON 查看器
 │   │   ├── layouts/               # 独立/嵌入布局
 │   │   ├── stores/                # Pinia 状态管理
 │   │   ├── services/              # API 调用 + SSE
-│   │   └── types.ts               # TypeScript 类型
+│   │   └── composables/           # Header 透传等
 │   └── public/
 │       └── embed-demo.html        # 嵌入演示页
 │
-├── embed-demo.html                # 根目录嵌入演示
+├── .env                           # 环境变量
 ├── README.md                      # 本文档
 └── TECH-ROADMAP.md                # 技术路径文档
 ```

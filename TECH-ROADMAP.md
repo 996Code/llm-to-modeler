@@ -2,7 +2,7 @@
 
 > 自然语言 → 低码配置生成引擎
 >
-> 版本：v0.5 | 日期：2026-07-21
+> 版本：v0.6 | 日期：2026-07-22
 
 ---
 
@@ -45,14 +45,13 @@
 **上下游关系**：
 
 ```
-    上游（规则源）                   本项目                    下游（消费方）
+    上游（业务 API）                 本项目                    下游（消费方）
     ┌──────────────┐            ┌──────────────┐          ┌──────────────────┐
-    │ njmind-modeler│            │ llm-to-modler│          │ AI 工具           │
-    │              │  Skill文件  │              │  MCP     │ (Claude/OpenCode)│
-    │ 编译时生成    │───────────→│  Vue + Python │←────────│                  │
-    │ Schema/模板/ │            │              │          │ Web 前端          │
-    │ Skill 文件   │            │              │  HTTP    │ (对话+JSON导出)   │
-    └──────────────┘            └──────────────┘─────────→│                  │
+    │ njmind 低码  │  HTTP API  │ llm-to-modler│  MCP     │ AI 工具           │
+    │ 平台         │←──────────│  Vue + Python │←────────│ (Claude/OpenCode)│
+    │ 表单CRUD/    │  AssetClient│              │          │                  │
+    │ 校验/模板    │            │              │  HTTP    │ Web 前端          │
+    └──────────────┘            └──────────────┘─────────→│ (对话+JSON导出)   │
                                                           │ 低码平台          │
                                                           │ (表单渲染/运行时) │
                                                           └──────────────────┘
@@ -85,29 +84,26 @@
 │  │                  业务服务层                                  │  │
 │  │                                                            │  │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐   │  │
-│  │  │ Skill        │  │ Schema       │  │ Conversation   │   │  │
-│  │  │ Consumer     │  │ Validator    │  │ Manager        │   │  │
+│  │  │ Asset        │  │ Tool         │  │ Conversation   │   │  │
+│  │  │ Client       │  │ Registry     │  │ Manager        │   │  │
 │  │  │              │  │              │  │                │   │  │
-│  │  │ 文件监听     │  │ jsonschema   │  │ 多轮对话       │   │  │
-│  │  │ 内存缓存     │  │ 校验         │  │ 上下文管理     │   │  │
-│  │  │ 热更新       │  │              │  │                │   │  │
+│  │  │ HTTP 上游    │  │ 自动发现     │  │ 多轮对话       │   │  │
+│  │  │ API 适配     │  │ 插件注册     │  │ 上下文管理     │   │  │
+│  │  │              │  │              │  │                │   │  │
 │  │  └──────────────┘  └──────────────┘  └────────────────┘   │  │
 │  └──────────────────────────┬─────────────────────────────────┘  │
 │                              │                                    │
 │  ┌──────────────────────────▼─────────────────────────────────┐  │
 │  │                LangGraph 工作流引擎                          │  │
 │  │                                                            │  │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │  │
-│  │  │ 加载Skill │→│ 意图分类  │→│ 数据准备  │→│ 配置生成  │  │  │
-│  │  └──────────┘  └──────────┘  └──────────┘  └────┬─────┘  │  │
-│  │                                                  │         │  │
-│  │                                        ┌─────────▼──────┐  │  │
-│  │                                        │ Schema 校验    │  │  │
-│  │                                        └────┬──────┬────┘  │  │
-│  │                                          通过▼   失败▼     │  │
-│  │                                        ┌─────┐ ┌────────┐  │  │
-│  │                                        │ 输出 │ │重试(≤3)│  │  │
-│  │                                        └─────┘ └────────┘  │  │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │  │
+│  │  │ classify_    │→│ execute_     │→│ handle_      │    │  │
+│  │  │ intent       │  │ tool         │  │ result       │    │  │
+│  │  │ (LLM选工具)  │  │ (含interrupt)│  │ (保存+推送)  │    │  │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘    │  │
+│  │                                                            │  │
+│  │  Checkpoint: InMemorySaver (thread_id = conversation_id)  │  │
+│  │  interrupt → SSE needsClarification → Command(resume)     │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                    │
 │  ┌──────────────────────────▼─────────────────────────────────┐  │
@@ -118,21 +114,20 @@
 │  └────────────────────────────────────────────────────────────┘  │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
-               │ 文件读取
+               │ HTTP API (AssetClient)
                │
 ┌──────────────▼───────────────────────────────────────────────────┐
-│              外部 Skill 文件目录 (由 njmind-modeler 生成)          │
+│              上游业务 API (njmind 低码平台)                        │
 │                                                                  │
-│  skills/                                                         │
-│  ├── _shared/RULES.md          ← 共享规则                       │
-│  ├── njmind-form-field-create/SKILL.md                           │
-│  ├── njmind-form-field-update/SKILL.md                           │
-│  ├── njmind-form-field-get/SKILL.md                              │
-│  ├── njmind-form-field-clone/SKILL.md                            │
-│  ├── njmind-form-field-image/SKILL.md                            │
-│  ├── mcp-schemas/*.json        ← 18 个 JSON Schema              │
-│  ├── mcp-templates/*.json      ← 20 个模板                      │
-│  └── mcp-guides/guide.json     ← 字段类型+关键词索引             │
+│  ASSET_BASE_URL (环境变量配置)                                    │
+│  ├── /form/page/list           ← 表单列表                       │
+│  ├── /form/page/detail         ← 表单详情 (get_form)            │
+│  ├── /form/page/create         ← 创建表单 (create/clone)        │
+│  ├── /form/page/update         ← 更新表单 (modify)              │
+│  ├── /form/field/template/list ← 字段模板列表                   │
+│  ├── /form/field/template/detail← 字段模板详情                  │
+│  ├── /form/config/guide        ← 配置指南                       │
+│  └── /form/config/validate     ← 配置校验                       │
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
@@ -179,7 +174,6 @@
 │              │  + mcp (Python MCP SDK, 协议服务)                │
 │              │  + Pydantic 2 (数据模型)                         │
 │              │  + jsonschema (Schema 校验)                      │
-│              │  + watchdog (文件监听)                            │
 │              │  + sse-starlette (SSE 流式输出)                  │
 │              │  + uvicorn (ASGI 服务器)                         │
 │              │                                                  │
@@ -214,9 +208,6 @@ dependencies = [
     # 数据校验
     "pydantic>=2.0",
     "jsonschema>=4.20",
-
-    # 文件监听
-    "watchdog>=5.0",
 
     # MCP 协议
     "mcp>=1.0",
@@ -367,6 +358,30 @@ Domain Pack 层 (插件化,零耦合)
     create_registry()      → 注册 6 个工具
     create_prompt_loader() → 加载 Jinja2 prompt 模板
 
+  6 个工具:
+  ┌──────────────────────────────────────────────────────────┐
+  │  create_form  (CompositeTool, 6步管线)                   │
+  │    fetch_guide → list_assets → parse_fields(LLM)         │
+  │    → fetch_templates → generate(LLM) → validate          │
+  │                                                          │
+  │  modify_form  (CompositeTool, 3步管线)                   │
+  │    fetch_guide → modify(LLM) → validate                  │
+  │    requires_existing_artifact=True (需已有配置)           │
+  │                                                          │
+  │  get_form     (Tool, 单步)                               │
+  │    根据 formCode 查询已有表单, is_read_only=True          │
+  │                                                          │
+  │  clone_form   (Tool, 单步)                               │
+  │    复制已有表单并修改标识, is_destructive=True             │
+  │                                                          │
+  │  image_form   (Tool, 单步)                               │
+  │    图片识别 → 表单配置 (多模态 LLM), is_read_only=True    │
+  │    支持 image_url 和 image_base64 两种输入               │
+  │                                                          │
+  │  chat         (Tool, 兜底)                               │
+  │    闲聊 + 动态能力描述, is_read_only=True                 │
+  └──────────────────────────────────────────────────────────┘
+
   触摸石: grep -rE "form|formCode|template|field" engine/ → 必须为空
 ```
 
@@ -379,106 +394,52 @@ Domain Pack 层 (插件化,零耦合)
                          └──────┬───────┘
                                 │
                     ╔═══════════▼═══════════╗
-                    ║  Node 1: load_skill   ║
+                    ║  Node 1:              ║
+                    ║  classify_intent      ║
                     ║                       ║
-                    ║  读取 SKILL.md        ║
-                    ║  读取 RULES.md        ║
-                    ║  注入 State           ║
+                    ║  LLM 从 registry      ║
+                    ║  动态生成工具清单      ║
+                    ║  → 返回 tool_name     ║
                     ╚═══════════╤═══════════╝
                                 │
                     ╔═══════════▼═══════════╗
-                    ║  Node 2: intent       ║
+                    ║  Node 2:              ║
+                    ║  execute_tool         ║
                     ║                       ║
-                    ║  LLM 分类意图:        ║
-                    ║  ├─ 完整表单创建      ║
-                    ║  ├─ 字段列表生成      ║
-                    ║  ├─ 单字段创建        ║
-                    ║  ├─ 属性配置          ║
-                    ║  └─ 咨询问答          ║
-                    ╚═══════════╤═══════════╝
-                                │
-                    ╔═══════════▼═══════════╗
-                    ║  Node 3: prepare      ║
+                    ║  从 registry 取 Tool  ║
+                    ║  构建 ToolContext     ║
+                    ║  tool.execute()       ║
                     ║                       ║
-                    ║  从 Skill 缓存获取:   ║
-                    ║  ├─ guide.json        ║
-                    ║  ├─ 字段 Schema       ║
-                    ║  └─ 字段模板          ║
-                    ║                       ║
-                    ║  从 keywordIndex      ║
-                    ║  匹配字段类型         ║
-                    ╚═══════════╤═══════════╝
-                                │
-                    ╔═══════════▼═══════════╗
-                    ║  Node 4: generate     ║
-                    ║                       ║
-                    ║  LLM 生成配置:        ║
+                    ║  CompositeTool 内部:  ║
                     ║  ┌─────────────────┐  ║
-                    ║  │ System Prompt:  │  ║
-                    ║  │ + SKILL.md 规则 │  ║
-                    ║  │ + RULES.md 约束 │  ║
-                    ║  │ + guide.json    │  ║
-                    ║  │ + Schema 定义   │  ║
-                    ║  │ + 模板 JSON     │  ║
+                    ║  │ run_pipeline()   │  ║
+                    ║  │ _step_fetch_guide│  ║
+                    ║  │ _step_parse(LLM) │  ║
+                    ║  │ _step_fetch_tmpl │  ║
+                    ║  │ _step_generate   │  ║
+                    ║  │ _step_validate   │  ║
                     ║  └─────────────────┘  ║
                     ║                       ║
-                    ║  输出: Structured     ║
-                    ║  JSON (Schema 约束)   ║
+                    ║  ToolResult.ask?      ║
+                    ║  ├─ 是 → interrupt() ║
+                    ║  │   SSE: needsClar-  ║
+                    ║  │   ification        ║
+                    ║  │   用户回答 →       ║
+                    ║  │   Command(resume)  ║
+                    ║  │   → 重跑工具       ║
+                    ║  └─ 否 → 继续        ║
                     ╚═══════════╤═══════════╝
                                 │
                     ╔═══════════▼═══════════╗
-                    ║  Node 5: validate     ║
+                    ║  Node 3:              ║
+                    ║  handle_result        ║
                     ║                       ║
-                    ║  jsonschema 校验      ║
-                    ║  5 维度:              ║
-                    ║  ├─ 表单级 (F1-F9)    ║
-                    ║  ├─ 标识符 (V3-V6)    ║
-                    ║  ├─ 类型 (T1-T4)      ║
-                    ║  ├─ 类型特有 (D1-D16) ║
-                    ║  └─ 通用 (C1-C8)      ║
-                    ╚═══════════╤═══════════╝
-                                │
-                    ┌───────────┴───────────┐
-                    │                       │
-               通过 ▼                  失败 ▼
-                    │                       │
-                    │              ┌────────┴────────┐
-                    │              │ 重试次数 < 3?    │
-                    │              └────────┬────────┘
-                    │                  是 ↙     ↘ 否
-                    │            ┌──────┐    ┌──────────┐
-                    │            │回到  │    │标记"需   │
-                    │            │Node4 │    │手动调整" │
-                    │            │携带  │    │返回      │
-                    │            │错误  │    └──────────┘
-                    │            └──────┘
-                    ▼
-          ╔═══════════════════════╗
-          ║  Node 6: confirm      ║
-          ║                       ║
-          ║  展示配置摘要:        ║
-          ║  ┌─────────────────┐  ║
-          ║  │ 表单名: 请假申请 │  ║
-          ║  │ 字段数: 5       │  ║
-          ║  │ 布局: 4列       │  ║
-          ║  └─────────────────┘  ║
-          ║                       ║
-          ║  等待用户确认         ║
-          ╚═══════════╤═══════════╝
-                      │
-               ┌──────┴──────┐
-               │             │
-          确认 ▼         修改 ▼
-               │             │
-               ▼             └──→ 回到 Node 4
-          ╔═══════════════════════╗    (携带修改指令)
-          ║  Node 7: submit       ║
-          ║                       ║
-          ║  返回最终 JSON        ║
-          ╚═══════════════════════╝
+                    ║  保存对话历史          ║
+                    ║  SSE: result + done   ║
+                    ╚═══════════════════════╝
 ```
 
-### 4.2 五个 Skill 的工作流差异
+### 4.2 六个工具的工作流差异
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -643,46 +604,40 @@ class GraphState(TypedDict):
  │ "创建请假表单"   │                     │                      │
  │─────────────────→│                     │                      │
  │                  │ POST /api/config/   │                      │
- │                  │ generate            │                      │
+ │                  │ chat                │                      │
  │                  │────────────────────→│                      │
  │                  │                     │                      │
  │                  │                     │ ┌─ LangGraph 开始 ─┐ │
  │                  │                     │ │                   │ │
- │                  │                     │ │ load_skill        │ │
- │                  │                     │ │ (读取 SKILL.md)   │ │
- │                  │                     │ │                   │ │
  │  event: stage    │  SSE                │ │ classify_intent   │ │
- │  "正在解析..."   │←───────────────────│←│──────────────────→│ │
- │←─────────────────│                     │ │ "完整表单创建"    │ │
+ │  "正在理解..."   │←───────────────────│←│──────────────────→│ │
+ │←─────────────────│                     │ │ "create_form"     │ │
  │                  │                     │ │                   │ │
- │                  │                     │ │ prepare_data      │ │
- │                  │                     │ │ 从缓存取          │ │
- │                  │                     │ │ guide+schema+tmpl │ │
+ │                  │                     │ │ execute_tool      │ │
+ │                  │                     │ │ → CreateFormTool  │ │
  │                  │                     │ │                   │ │
- │  event: stage    │  SSE                │ │ generate_config   │ │
- │  "正在生成..."   │←───────────────────│←│──────────────────→│ │
+ │  event: stage    │  SSE                │ │ _step_fetch_guide │ │
+ │  "获取指南..."   │←───────────────────│←│──────────────────→│ │
+ │←─────────────────│                     │ │                   │ │
+ │  event: stage    │  SSE                │ │ _step_parse_fields│ │
+ │  "解析字段..."   │←───────────────────│←│──────────────────→│ │
  │←─────────────────│                     │ │ 组装 Prompt       │ │
- │                  │                     │ │ + Schema 约束     │ │
+ │                  │                     │ │ + 指南 + 模板     │ │
  │                  │                     │ │←─────────────────│ │
- │                  │                     │ │ 返回 JSON         │ │
+ │                  │                     │ │ 返回字段列表      │ │
  │                  │                     │ │                   │ │
- │                  │                     │ │ validate_config   │ │
- │                  │                     │ │ jsonschema 校验   │ │
+ │  event: stage    │  SSE                │ │ _step_generate    │ │
+ │  "生成配置..."   │←───────────────────│←│──────────────────→│ │
+ │←─────────────────│                     │ │ 生成完整配置      │ │
  │                  │                     │ │                   │ │
- │  event: result   │  SSE                │ │ ✅ 通过           │ │
+ │  event: stage    │  SSE                │ │ _step_validate    │ │
+ │  "校验中..."     │←───────────────────│←│ 上游 API 校验     │ │
+ │←─────────────────│                     │ │ ✅ 通过           │ │
+ │                  │                     │ │                   │ │
+ │  event: result   │  SSE                │ │                   │ │
  │  {config JSON}   │←───────────────────│←│                   │ │
  │←─────────────────│                     │ │                   │ │
  │                  │                     │ └─ LangGraph 结束 ─┘ │
- │                  │                     │                      │
- │  "确认提交？"    │  event: confirm     │                      │
- │←─────────────────│←───────────────────│                      │
- │                  │                     │                      │
- │  "确认"          │                     │                      │
- │─────────────────→│ POST /api/config/   │                      │
- │                  │ submit              │                      │
- │                  │────────────────────→│                      │
- │  ✅ 创建成功     │  {formCode: "xx"}   │                      │
- │←─────────────────│←───────────────────│                      │
  │                  │                     │                      │
 ```
 
@@ -694,17 +649,17 @@ class GraphState(TypedDict):
  │ "把工号改成必填" │                     │
  │─────────────────→│                     │
  │                  │ POST /api/config/   │
- │                  │ modify              │
- │                  │ {currentConfig,     │
- │                  │  instruction}       │
+ │                  │ chat                │
+ │                  │ {message,           │
+ │                  │  conversationId}    │
  │                  │────────────────────→│
  │                  │                     │
- │                  │                     │ 1. intent: 修改字段属性
- │                  │                     │ 2. 定位工号字段
- │                  │                     │ 3. get_schema 确认约束
- │                  │                     │ 4. 修改 isRequiredField=1
- │                  │                     │ 5. validate(UPDATE 模式)
- │                  │                     │ 6. 返回 diff
+ │                  │                     │ 1. classify_intent → "modify_form"
+ │                  │                     │ 2. execute_tool → ModifyFormTool
+ │                  │                     │ 3. _step_fetch_guide → 获取指南
+ │                  │                     │ 4. _step_modify(LLM) → 定位+修改字段
+ │                  │                     │ 5. _step_validate → 上游校验
+ │                  │                     │ 6. ToolResult(artifact=修改后配置)
  │                  │←────────────────────│
  │  "已更新工号字段" │  SSE: result        │
  │←─────────────────│                     │
@@ -719,13 +674,13 @@ class GraphState(TypedDict):
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  event: stage                                                    │
-│  data: {"stage":"loading_skill","message":"加载 Skill 规则..."}  │
+│  data: {"stage":"classify_intent","message":"正在理解您的意图..."}│
 │                                                                  │
 │  event: stage                                                    │
-│  data: {"stage":"parsing","message":"正在解析您的描述..."}        │
+│  data: {"stage":"fetch_guide","message":"获取配置指南..."}       │
 │                                                                  │
 │  event: stage                                                    │
-│  data: {"stage":"preparing","message":"获取字段类型定义..."}      │
+│  data: {"stage":"parse_fields","message":"正在解析字段..."}      │
 │                                                                  │
 │  event: stage                                                    │
 │  data: {"stage":"generating","message":"正在生成表单配置..."}     │
@@ -733,14 +688,11 @@ class GraphState(TypedDict):
 │  event: stage                                                    │
 │  data: {"stage":"validating","message":"正在校验配置..."}         │
 │                                                                  │
-│  event: retry  (仅校验失败时)                                    │
-│  data: {"attempt":1,"max":3,"errors":[...]}                      │
+│  event: stage  (仅校验失败重试时)                                │
+│  data: {"stage":"generating","message":"校验失败,重新生成..."}    │
 │                                                                  │
 │  event: result                                                   │
-│  data: {"config":{...},"valid":true,"summary":"5个字段..."}      │
-│                                                                  │
-│  event: confirm                                                  │
-│  data: {"message":"请确认配置，或告诉我需要修改的地方"}           │
+│  data: {"artifactType":"config","config":{...},"summary":"5个字段..."} │
 │                                                                  │
 │  event: done                                                     │
 │  data: {}                                                        │
@@ -768,9 +720,9 @@ class GraphState(TypedDict):
 │              │        │                                         │
 │              │        │ 支持:正常消息 / 追问恢复 / 图片上传     │
 │              │        │                                         │
-│              │ POST   │ /api/config/modify                      │
-│              │        │ body: {currentConfig, instruction}      │
-│              │        │ response: SSE stream                    │
+│              │ POST   │ /api/config/generate  (已废弃→转发chat) │
+│              │        │                                         │
+│              │ POST   │ /api/config/modify    (已废弃→转发chat) │
 │              │        │                                         │
 │              │ POST   │ /api/config/validate                    │
 │              │        │ body: {config}                          │
@@ -817,14 +769,14 @@ class GraphState(TypedDict):
 ### 7.2 请求/响应示例
 
 ```
-POST /api/config/generate
+POST /api/config/chat
 
 Request:
 ┌──────────────────────────────────────────────────────────┐
 │  {                                                        │
-│    "description": "创建一个请假申请表，包含请假类型、     │
+│    "message": "创建一个请假申请表，包含请假类型、         │
 │     开始日期、结束日期、请假原因",                         │
-│    "conversationId": "conv_abc123"                        │
+│    "conversation_id": "conv_abc123"                       │
 │  }                                                        │
 └──────────────────────────────────────────────────────────┘
 
@@ -904,8 +856,8 @@ Response (SSE):
 │  │  │                                                     │  │   │
 │  │  └─────────────────────────────────────────────────────┘  │   │
 │  │                                                           │   │
-│  │  数据来源: Skill Consumer 内存缓存                         │
-│  │  (与 REST API 共享同一份缓存)                              │
+│  │  数据来源: LangGraph StateGraph + AssetClient HTTP API       │
+│  │  (与 REST API 共享同一上游服务)                              │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  调用示例 (Claude Code):                                         │
@@ -1101,9 +1053,9 @@ Response (SSE):
 │              │        │                                         │
 ├──────────────┼────────┼─────────────────────────────────────────┤
 │              │        │                                         │
-│  生成配置时   │ POST   │ /api/config/generate                    │
+│  生成配置时   │ POST   │ /api/config/chat                       │
 │  自动保存     │        │ Header: X-User-Id: user_123             │
-│              │        │ body: {conversationId, description}     │
+│              │        │ body: {message, conversationId}         │
 │              │        │                                         │
 │              │        │ → 自动保存 user message                 │
 │              │        │ → 自动保存 assistant message            │
@@ -1148,9 +1100,9 @@ Response (SSE):
  │ "创建请假表单"   │                     │                    │
  │─────────────────→│                     │                    │
  │                  │ POST /api/config/   │                    │
- │                  │ generate            │                    │
- │                  │ {conversationId,    │                    │
- │                  │  description}       │                    │
+ │                  │ chat                │                    │
+ │                  │ {message,           │                    │
+ │                  │  conversationId}    │                    │
  │                  │ X-User-Id: user_123 │                    │
  │                  │────────────────────→│                    │
  │                  │                     │ INSERT message     │
@@ -1738,17 +1690,9 @@ App.vue
 │  │  backend (port 8000)                                  │       │
 │  │  ──────────────────                                   │       │
 │  │  Python 3.11 + FastAPI + uvicorn                      │       │
-│  │  (REST API + MCP + LangGraph + Skill Consumer)        │       │
+│  │  (REST API + MCP + LangGraph + AssetClient)           │       │
 │  │                                                       │       │
-│  │  Volume: /app/skills/ (readonly)                      │       │
-│  └──────────────────────────────────────────────────────┘       │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌──────────────────────────────────────────────────────┐       │
-│  │  skills-volume                                        │       │
-│  │  ─────────────────                                    │       │
-│  │  由 njmind-modeler 编译输出，同步方式:                │       │
-│  │  • CI/CD 复制 / Volume 挂载 / init container 拉取    │       │
+│  │  Volume: /app/data/ (SQLite 数据库)                   │       │
 │  └──────────────────────────────────────────────────────┘       │
 │                                                                  │
 │  .env:                                                           │
@@ -1756,7 +1700,7 @@ App.vue
 │  │  LLM_BASE_URL=https://api.openai.com/v1                  │   │
 │  │  LLM_API_KEY=sk-xxx                                      │   │
 │  │  LLM_MODEL=gpt-4o                                        │   │
-│  │  SKILLS_DIR=/app/skills                                  │   │
+│  │  ASSET_BASE_URL=http://upstream-service:19999            │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -1770,19 +1714,13 @@ App.vue
            │
            ▼
     ┌──────────────┐
-    │ 1. skills     │  Volume 就绪
-    │    volume     │
-    └──────┬───────┘
-           │
-           ▼
-    ┌──────────────┐
-    │ 2. backend   │  FastAPI + uvicorn
-    │  (Python)    │  加载 Skill 文件到缓存
+    │ 1. backend   │  FastAPI + uvicorn
+    │  (Python)    │  加载 Domain Packs + 构建 Graph
     └──────┬───────┘
            │ health check OK
            ▼
     ┌──────────────┐
-    │ 3. nginx     │  反代 + 静态资源
+    │ 2. nginx     │  反代 + 静态资源
     └──────────────┘
 ```
 
@@ -1891,61 +1829,59 @@ llm-to-modler/
 ## 12. 开发路线图
 
 ```
-Week 1: 基础搭建
+Week 1: 基础搭建 ✅ 已完成
 ═══════════════════════════════════════════════════════════════
 
   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-  │ 项目初始化    │→│ 共享类型定义  │→│ Skill 文件    │
-  │              │  │              │  │ 准备         │
-  │ backend/     │  │ Pydantic     │  │ 从 modeler   │
-  │ frontend/    │  │ models       │  │ 复制 skills/ │
+  │ 项目初始化    │→│ SDK 协议定义  │→│ AssetClient  │
+  │              │  │              │  │ HTTP 适配    │
+  │ backend/     │  │ Tool/Result  │  │ + Unicode    │
+  │ frontend/    │  │ Registry     │  │   清洗       │
   └──────────────┘  └──────────────┘  └──────────────┘
 
-Week 2-3: 核心引擎
+Week 2-3: 核心引擎 ✅ 已完成
 ═══════════════════════════════════════════════════════════════
 
   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-  │ Skill        │→│ LangGraph    │→│ FastAPI      │
-  │ Consumer     │  │ 工作流       │  │ API + SSE    │
+  │ LangGraph    │→│ Domain Pack  │→│ FastAPI      │
+  │ StateGraph   │  │ 工具实现     │  │ API + SSE    │
   │              │  │              │  │              │
-  │ • watchdog   │  │ • State      │  │ • /generate  │
-  │ • 内存缓存   │  │ • 7 个节点   │  │ • /modify    │
-  │ • 热更新     │  │ • 条件边重试 │  │ • /validate  │
-  │ • jsonschema │  │ • Prompt组装 │  │ • SSE 流     │
+  │ • 3 节点图   │  │ • create(6步)│  │ • /chat      │
+  │ • interrupt  │  │ • modify(3步)│  │ • /validate  │
+  │ • checkpoint │  │ • get/clone  │  │ • SSE 流     │
+  │ • Prompt注入 │  │ • image/chat │  │              │
   └──────────────┘  └──────────────┘  └──────────────┘
 
-Week 4: MCP + 会话
+Week 4: MCP + 会话 ✅ 已完成
 ═══════════════════════════════════════════════════════════════
 
   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-  │ MCP Server   │→│ 会话管理     │→│ 5 个 Skill   │
-  │              │  │              │  │ 全部实现     │
-  │ • tools/*    │  │ • 多轮对话   │  │              │
-  │ • resources  │  │ • 上下文保持 │  │ • create     │
-  │ • JSON-RPC   │  │ • 历史查看   │  │ • update     │
-  └──────────────┘  └──────────────┘  │ • get/clone  │
-                                      │ • image      │
-                                      └──────────────┘
+  │ MCP Server   │→│ 会话管理     │→│ 追问机制     │
+  │              │  │              │  │              │
+  │ • tools/*    │  │ • 多轮对话   │  │ • interrupt  │
+  │ • resources  │  │ • 上下文保持 │  │ • resume     │
+  │ • JSON-RPC   │  │ • 历史查看   │  │ • SSE 推送   │
+  └──────────────┘  └──────────────┘  └──────────────┘
 
-Week 5: 前端
+Week 5: 前端 ✅ 已完成
 ═══════════════════════════════════════════════════════════════
 
   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-  │ 对话窗口     │→│ JSON 展示    │→│ 会话管理     │
-  │              │  │              │  │ + 响应式     │
-  │ • 消息列表   │  │ • Monaco     │  │              │
-  │ • 输入框     │  │ • 只读       │  │ • 新建/切换  │
-  │ • SSE 消费   │  │ • 复制/下载  │  │ • 桌面/移动  │
+  │ 对话窗口     │→│ JSON 展示    │→│ 图片上传     │
+  │              │  │              │  │              │
+  │ • 消息列表   │  │ • Monaco     │  │ • base64     │
+  │ • 输入框     │  │ • 只读       │  │ • 预览+删除  │
+  │ • SSE 消费   │  │ • 复制/下载  │  │ • ImageForm  │
   └──────────────┘  └──────────────┘  └──────────────┘
 
-Week 6: 集成 + 部署
+Week 6: 集成 + 部署 ✅ 已完成
 ═══════════════════════════════════════════════════════════════
 
   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
   │ Docker       │→│ 端到端测试   │→│ 文档         │
   │              │  │              │  │              │
   │ • Dockerfile │  │ • NL→Config  │  │ • README     │
-  │ • compose    │  │ • 多轮对话   │  │ • 配置说明   │
+  │ • compose    │  │ • 多轮对话   │  │ • TECH-ROADMAP│
   │ • nginx      │  │ • MCP 调用   │  │ • API 文档   │
   └──────────────┘  └──────────────┘  └──────────────┘
 ```
