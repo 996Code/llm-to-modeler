@@ -3,16 +3,18 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from engine.dispatcher import ToolDispatcher
+from engine.compression import build_compressed_history
 from sdk.registry import ToolRegistry
 from sdk.tool import Tool, ToolResult, ToolContext, ClarificationRaised
 
 
 class FakeTool(Tool):
     """测试用工具。"""
-    def __init__(self, name, result=None):
+    def __init__(self, name, result=None, requires_existing_artifact=False):
         self.name = name
         self.description = f"{name} 工具"
         self.when = "测试"
+        self.requires_existing_artifact = requires_existing_artifact
         self._result = result or ToolResult(reply="ok", summary="ok")
 
     def input_schema(self): return {"type": "object"}
@@ -32,7 +34,7 @@ class TestSelectTool:
     def test_select_create_form(self):
         registry = _make_registry(
             FakeTool("create_form"),
-            FakeTool("modify_form"),
+            FakeTool("modify_form", requires_existing_artifact=True),
             FakeTool("chat"),
         )
         llm = MagicMock()
@@ -58,7 +60,7 @@ class TestSelectTool:
         """安全兜底:无 source_artifact 选 modify -> 降级 create。"""
         registry = _make_registry(
             FakeTool("create_form"),
-            FakeTool("modify_form"),
+            FakeTool("modify_form", requires_existing_artifact=True),
         )
         llm = MagicMock()
         llm.chat_json.return_value = {"tools": ["modify_form"]}
@@ -70,7 +72,7 @@ class TestSelectTool:
     def test_select_modify_without_config_falls_back_to_chat(self):
         """无 source_artifact + 无 create_form -> 兜底 chat。"""
         registry = _make_registry(
-            FakeTool("modify_form"),
+            FakeTool("modify_form", requires_existing_artifact=True),
             FakeTool("chat"),
         )
         llm = MagicMock()
@@ -84,7 +86,7 @@ class TestSelectTool:
         """有 source_artifact 时选 modify 正常。"""
         registry = _make_registry(
             FakeTool("create_form"),
-            FakeTool("modify_form"),
+            FakeTool("modify_form", requires_existing_artifact=True),
         )
         llm = MagicMock()
         llm.chat_json.return_value = {"tools": ["modify_form"]}
@@ -206,33 +208,27 @@ class TestRunExecution:
 
 
 class TestBuildCompressedHistory:
-    """历史格式化(简单版)。"""
+    """历史格式化 — 已提取到 engine.compression 模块。"""
 
     def test_empty_history(self):
-        registry = _make_registry(FakeTool("chat"))
-        dispatcher = ToolDispatcher(registry, MagicMock())
-        assert dispatcher._build_compressed_history([]) == ""
-        assert dispatcher._build_compressed_history(None) == ""
+        assert build_compressed_history([]) == ""
+        assert build_compressed_history(None) == ""
 
     def test_formats_recent_messages(self):
-        registry = _make_registry(FakeTool("chat"))
-        dispatcher = ToolDispatcher(registry, MagicMock())
         history = [
             {"role": "user", "content": "创建表单"},
             {"role": "assistant", "content": "好的"},
         ]
-        result = dispatcher._build_compressed_history(history)
+        result = build_compressed_history(history)
         assert "用户: 创建表单" in result
         assert "助手: 好的" in result
 
     def test_truncates_to_recent_6(self):
         """只保留最近 6 条(3 轮)。"""
-        registry = _make_registry(FakeTool("chat"))
-        dispatcher = ToolDispatcher(registry, MagicMock())
         history = [
             {"role": "user", "content": f"msg{i}"}
             for i in range(10)
         ]
-        result = dispatcher._build_compressed_history(history)
+        result = build_compressed_history(history)
         assert "msg9" in result  # 最近的
         assert "msg0" not in result  # 太旧的被截断

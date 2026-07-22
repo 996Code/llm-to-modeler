@@ -94,7 +94,7 @@ class TestCompositeTool:
         assert executed == ["alpha", "beta"]
 
     def test_run_pipeline_emits_stage_per_step(self):
-        """每个 step 自动 emit 一个 stage 事件(供 SSE 流式进度)。"""
+        """每个 step 内部自行 emit stage 事件(供 SSE 流式进度)。"""
         emitted = []
 
         class MyComposite(CompositeTool):
@@ -105,12 +105,14 @@ class TestCompositeTool:
 
             def input_schema(self): return {"type": "object"}
             def execute(self, state, ctx): return ToolResult()
-            def _step_x(self, state, ctx): pass
-            def _step_y(self, state, ctx): pass
+            def _step_x(self, state, ctx):
+                ctx.emit("stage", "x", "doing x")
+            def _step_y(self, state, ctx):
+                ctx.emit("stage", "y", "doing y")
 
         ctx = ToolContext(
             llm_client=None, asset_client=None, conversation=None,
-            emit=lambda event_type, message, **kw: emitted.append((event_type, message)),
+            emit=lambda *a, **kw: emitted.append((a[0], a[1])),
         )
         MyComposite().run_pipeline({}, ctx)
         assert emitted == [("stage", "x"), ("stage", "y")]

@@ -156,6 +156,7 @@ class CompositeTool(Tool):
 
         step 可通过设置 state["_need_clarify"]=True 中断后续步骤,
         execute 方法检查此标记后返回 ToolResult.ask 而非继续执行。
+        每个 step 内部自行 emit stage 事件(含详细描述)。
         """
         # 发送 pipeline 定义给前端
         if self.pipeline_steps:

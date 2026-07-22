@@ -5,6 +5,19 @@
 import pytest
 
 
+def _module_available(import_path: str) -> bool:
+    try:
+        parts = import_path.rsplit(".", 1)
+        if len(parts) == 2:
+            mod = __import__(parts[0], fromlist=[parts[1]])
+            getattr(mod, parts[1])
+        else:
+            __import__(import_path)
+        return True
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+
 def test_existing_store_imports():
     """ConversationStore 仍可 import(append-only 重建后)。"""
     from src.services.conversation_store import ConversationStore
@@ -23,6 +36,10 @@ def test_existing_upstream_imports():
     assert UpstreamClient is not None
 
 
+@pytest.mark.skipif(
+    not _module_available("openai"),
+    reason="openai package not installed",
+)
 def test_existing_llm_client_imports():
     """LLMClient 仍可 import。"""
     from src.llm.client import LLMClient
@@ -39,8 +56,12 @@ def test_new_sdk_imports():
                 AssetClient, ToolRegistry, sanitize_text, sanitize_obj])
 
 
+@pytest.mark.skipif(
+    not _module_available("langgraph"),
+    reason="langgraph package not installed",
+)
 def test_new_engine_imports():
-    """新 Engine 模块可 import。"""
+    """新 Engine 模块可 import(含 langgraph 依赖的 stream_graph)。"""
     from engine.dispatcher import ToolDispatcher
     from engine.conversation import ConversationManager
     from engine.stream import stream_graph
@@ -49,6 +70,18 @@ def test_new_engine_imports():
     from engine.logging_filter import RedactFilter
     assert all([ToolDispatcher, ConversationManager, stream_graph,
                 PromptLoader, CompressionSidechain, RedactFilter])
+
+
+def test_new_engine_imports_no_langgraph():
+    """不依赖 langgraph 的 Engine 模块仍可 import。"""
+    from engine.dispatcher import ToolDispatcher
+    from engine.conversation import ConversationManager
+    from engine.prompt_loader import PromptLoader
+    from engine.compression import CompressionSidechain, build_compressed_history
+    from engine.logging_filter import RedactFilter
+    assert all([ToolDispatcher, ConversationManager,
+                PromptLoader, CompressionSidechain, build_compressed_history,
+                RedactFilter])
 
 
 def test_new_adapters_imports():
