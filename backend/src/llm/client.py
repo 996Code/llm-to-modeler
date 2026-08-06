@@ -1,16 +1,23 @@
 """
-LLM Client
+LLM 客户端模块。
 
-Synchronous OpenAI-compatible client. All methods are SYNC so they can
-be called directly inside synchronous LangGraph nodes.
+同步的 OpenAI 兼容客户端。所有方法都是同步的（SYNC），
+因为 LangGraph 节点函数是同步的，直接调用不走 async。
 
-Handles Qwen3 reasoning models: when content is empty (finish_reason=length),
-falls back to reasoning_content. Uses high max_tokens (200000) to give the
-reasoning process enough room.
+核心设计（Java 视角）：
+  - 同步客户端：类比 Java 的 OkHttp 同步调用（client.newCall(request).execute()）
+  - OpenAI 兼容：支持 OpenAI / Qwen / 本地 LM Studio 等所有兼容 OpenAI API 的服务
+  - reasoning_content 回退：Qwen3 推理模型把输出放在 reasoning_content 字段而非 content
 
-Supports local LM Studio / OpenAI / any OpenAI-compatible API via base_url.
+Qwen3 推理模型处理：
+  Qwen3 等推理模型会先"思考"（reasoning），思考内容放在 reasoning_content 字段。
+  当 content 为空且 finish_reason='length'（输出被截断）时，
+  实际输出在 reasoning_content 里，需要回退读取。
 
-LLM 调用日志自动持久化到 call_logs 表。
+LLM 调用日志：
+  每次 LLM 调用自动持久化到 SQLite 的 call_logs 表（call_type='llm'），
+  含请求参数、响应摘要、耗时、状态码，方便调试和监控。
+  类比 Java 的 AOP 日志切面，但是手动埋点。
 """
 
 import json
@@ -27,19 +34,46 @@ logger = logging.getLogger(__name__)
 
 
 class LLMConfig(BaseModel):
-    """LLM configuration."""
+    """LLM 配置（Pydantic 模型，从环境变量加载）。
+
+    类比 Java 的 @ConfigurationProperties，用环境变量注入配置。
+
+    关键配置项：
+        base_url: LLM API 地址（OpenAI/Qwen/本地 LM Studio）
+        model: 模型名（如 qwen3-32b）
+        temperature: 采样温度（0.1 = 偏确定性，意图识别/生成配置用低温度）
+        max_tokens: 最大输出 token 数（200000 给推理模型足够的思考空间）
+        timeout: 请求超时秒数（本地模型可能很慢，300 秒兜底）
+    """
     base_url: str = "http://127.0.0.1:1234/v1"
     api_key: str = ""
     model: str = "qwen/qwen3.6-35b-a3b"
     temperature: float = 0.1
-    max_tokens: int = 200000  # Max limit for this LLM service
-    timeout: int = 300       # Local models can be slow
+    max_tokens: int = 200000  # 推理模型需要大的 token 空间
+    timeout: int = 300       # 本地模型推理慢，超时给足
 
 
 class LLMClient:
-    """Synchronous OpenAI-compatible LLM client."""
+    """同步的 OpenAI 兼容 LLM 客户端。
+
+    所有方法同步（非 async），因为 LangGraph 节点是同步函数。
+    如果在 async 上下文调用，需要用 asyncio.to_thread 包装。
+
+    使用方式：
+        client = LLMClient(config)
+        # 纯文本对话
+        reply = client.chat(messages)
+        # JSON 格式对话（意图识别/字段解析等需要结构化输出的场景）
+        result = client.chat_json(messages)
+    """
 
     def __init__(self, config: Optional[LLMConfig] = None, conversation_store=None):
+        """初始化 LLM 客户端。
+
+        Args:
+            config: LLM 配置，为 None 时从环境变量加载
+            conversation_store: 会话存储，用于持久化 LLM 调用日志
+        """
         if config is None:
             config = LLMConfig(
                 base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1"),
@@ -58,6 +92,7 @@ class LLMClient:
                 "LLM_API_KEY not set — LLM calls will fail until configured."
             )
 
+        # OpenAI SDK 客户端，兼容所有 OpenAI 兼容 API
         self.client = OpenAI(
             base_url=config.base_url,
             api_key=config.api_key or "placeholder-key",
@@ -79,7 +114,12 @@ class LLMClient:
         error_message: Optional[str] = None,
         conv_id: Optional[str] = None,
     ):
-        """持久化 LLM 调用日志到数据库。"""
+        """持久化 LLM 调用日志到数据库 call_logs 表。
+
+        类比 Java 的 AOP 日志切面——每次 LLM 调用自动记录，
+        含请求/响应/耗时/状态码，方便调试和性能监控。
+        日志保存失败不影响主流程（只 warning 不抛异常）。
+        """
         if not self._conversation_store:
             return
         try:
@@ -103,10 +143,26 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         conv_id: Optional[str] = None,
     ) -> str:
-        """
-        Send a chat completion request (sync).
+        """发送对话请求，返回纯文本响应（同步）。
 
-        Handles Qwen3 reasoning models that put output in reasoning_content.
+        核心逻辑：
+        1. 调 OpenAI 兼容 API 的 chat/completions
+        2. 处理 Qwen3 推理模型：content 为空时回退读 reasoning_content
+        3. 自动记录调用日志（请求/响应/耗时）
+
+        Qwen3 reasoning_content 回退机制：
+        推理模型会先思考（reasoning），思考内容放 reasoning_content。
+        当 content 为空（finish_reason='length' 输出被截断）时，
+        实际输出在 reasoning_content，需要回退读取。
+
+        Args:
+            messages: 消息列表 [{role, content}, ...]
+            temperature: 采样温度，None 用配置默认值（0.1）
+            max_tokens: 最大输出 token，None 用配置默认值（200000）
+            conv_id: 会话 ID（用于日志关联）
+
+        Returns:
+            LLM 响应文本
         """
         start_time = time.time()
         endpoint = f"{self.config.base_url}/chat/completions"
@@ -181,17 +237,24 @@ class LLMClient:
         temperature: Optional[float] = None,
         conv_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Send a chat request and parse the response as JSON.
+        """发送对话请求并解析 JSON 响应。
 
-        Strategy for models without structured output support:
-        1. Try json_object response_format
-        2. Fall back to plain text + manual JSON extraction
+        两级降级策略（适配不支持 structured output 的模型）：
+        1. 优先用 json_object response_format 模式（模型原生支持 JSON 输出）
+        2. 失败则降级为纯文本 + 手动 JSON 提取（_parse_json_from_text）
 
-        Supports multimodal messages (image_url content).
+        多模态支持：消息含图片时跳过 json_object 模式（该模式不支持图片），
+        用纯文本模式 + JSON 提取。
+
+        使用场景：意图识别（要工具名）、字段解析（要字段列表）等需要结构化输出的场景。
+
+        Args:
+            messages: 消息列表（支持多模态 content）
+            temperature: 采样温度
+            conv_id: 会话 ID
 
         Returns:
-            Parsed JSON dict.
+            解析后的 JSON 字典
         """
         temp = self.config.temperature if temperature is None else temperature
 
@@ -260,10 +323,14 @@ class LLMClient:
         raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id)
         return self._parse_json_from_text(raw)
 
-    # ── JSON extraction helpers ────────────────────────────────
+    # ── JSON 提取辅助方法 ────────────────────────────────
 
     def _extract_json(self, response) -> Dict[str, Any]:
-        """Extract and parse JSON from an LLM response object."""
+        """从 LLM 响应对象提取并解析 JSON。
+
+        处理 Qwen3 推理模型：content 为空时回退读 reasoning_content。
+        最终都走 _parse_json_from_text 做容错解析。
+        """
         choice = response.choices[0]
         message = choice.message
 
@@ -281,10 +348,14 @@ class LLMClient:
         return self._parse_json_from_text(content)
 
     def _parse_json_from_text(self, text: str) -> Dict[str, Any]:
-        """
-        Extract a JSON object from arbitrary text.
+        """从任意文本中提取 JSON 对象（三级容错）。
 
-        Handles: pure JSON, markdown code blocks, JSON with surrounding prose.
+        LLM 输出的 JSON 可能不干净，三级策略逐级降级：
+        1. 直接 json.loads（最理想：纯 JSON 文本）
+        2. 提取 markdown 代码块 ```json ... ``` 里的内容
+        3. 找第一个 { 到最后一个 } 的子串（处理 JSON 前后有文字的情况）
+
+        三级都失败抛 ValueError。
         """
         text = text.strip()
 

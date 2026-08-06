@@ -1,10 +1,20 @@
 """
-Config API Router
+配置 API 路由模块。
 
-POST /api/config/chat     -> SSE stream (LangGraph StateGraph 统一入口)
-POST /api/config/generate -> [DEPRECATED] 转发到 /chat
-POST /api/config/modify   -> [DEPRECATED] 转发到 /chat
-POST /api/config/validate -> sync (validate via upstream)
+提供统一对话入口和表单配置相关端点。
+
+端点清单：
+  POST /api/config/chat     → SSE 流式（LangGraph StateGraph 统一入口，支持追问恢复）
+  POST /api/config/generate → [已废弃] 转发到 /chat（向后兼容）
+  POST /api/config/modify   → [已废弃] 转发到 /chat（向后兼容）
+  POST /api/config/validate → 同步校验（调上游 API）
+
+核心设计（Java 视角）：
+  - 统一入口：/chat 是唯一的对话端点，意图由后端 LangGraph 分类。
+    类比 Spring MVC 的 DispatcherServlet 统一分发。
+  - 请求头透传：嵌入模式下，宿主系统的认证头透传到上游 njmind-modeler API。
+    类比 Spring 的 SecurityContext 跨系统传递。
+  - SSE 流式：StreamingResponse + text/event-stream，实时推送管线进度。
 """
 import logging
 from typing import Any, Dict, List, Optional
@@ -18,22 +28,35 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 
 
 class GenerateRequest(BaseModel):
+    """[已废弃] 生成表单请求（旧接口，保留向后兼容）。"""
     description: str = Field(..., description="Natural language form description")
     conversation_id: Optional[str] = None
 
 
 class ModifyRequest(BaseModel):
+    """[已废弃] 修改表单请求（旧接口，保留向后兼容）。"""
     current_config: Dict[str, Any] = Field(..., description="Current FormConfig")
     instruction: str = Field(..., description="Modification instruction")
     conversation_id: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
-    """Unified chat entry — intent is classified by the backend.
+    """统一对话请求——意图由后端 LangGraph 自动分类。
 
-    answers: 追问回答(非空时走 LangGraph Command(resume=answers) 路径,
-             从断点继续执行而非当作新消息)。
-    image_base64: 图片 base64 编码(用于 ImageFormTool 图片识别)。
+    追问恢复机制：
+        answers 非空时，走 LangGraph Command(resume=answers) 路径，
+        从上次 interrupt 的断点继续执行（而非当作新消息重新分类意图）。
+        类比 Java 的 wait()/notify()——挂起时 HTTP 响应结束，
+        恢复时是新的 HTTP 请求带 answers。
+
+    图片识别：
+        image_base64 非空时，传给 ImageFormTool 做图片识别（多模态）。
+
+    Attributes:
+        message: 用户消息文本
+        conversation_id: 会话 ID（首次对话可不传，后端自动创建）
+        answers: 追问回答（非空表示追问恢复）
+        image_base64: 图片 base64 编码（用于图片识别表单）
     """
     message: str = Field(..., description="User message")
     conversation_id: Optional[str] = None
@@ -42,12 +65,19 @@ class ChatRequest(BaseModel):
 
 
 class ValidateRequest(BaseModel):
+    """表单校验请求（同步调上游 API）。"""
     config: Dict[str, Any] = Field(..., description="FormConfig to validate")
     mode: Optional[str] = Field(default="CREATE")
 
 
 def _load_current_config(request: Request, conv_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Load current config from conversation store (for unified chat entry)."""
+    """从会话存储加载当前表单配置。
+
+    用于统一对话入口——判断是否有已有配置（影响意图识别，
+    如"修改表单"需要已有配置才能执行）。
+
+    类比 Java 的 Session.getAttribute()，但是从 SQLite 读。
+    """
     if not conv_id:
         return None
     user_id = request.headers.get("X-User-Id") or "anonymous"
@@ -61,29 +91,48 @@ def _load_current_config(request: Request, conv_id: Optional[str]) -> Optional[D
     return None
 
 
-# Headers to forward to upstream njmind-modeler (everything except hop-by-hop
-# and our own internal headers).
+# 需要透传到上游 njmind-modeler 的请求头前缀。
+# 排除 hop-by-hop 头（host/content-length 等）和内部头（X-User-Id 是本项目自己用的）。
+# 类比 Java 的 HeaderPropagationFilter——选择性地把请求头传给下游服务。
 _FORWARD_PREFIXES = ("x-", "authorization", "cookie", "tenant", "accept-language")
 
 
 def _extract_forward_headers(request: Request) -> Dict[str, str]:
-    """Extract headers from the incoming request to forward to upstream modeler.
+    """提取需要透传到上游的请求头。
 
-    Forwards: Authorization, cookies, and all X-* / tenant headers.
+    嵌入模式下，宿主系统的认证信息（Authorization/Cookie/X-*-Tenant）
+    需要透传到上游 njmind-modeler API，实现单点登录。
+
+    排除：
+      - hop-by-hop 头（host/content-length/content-type/connection）
+      - 内部头（X-User-Id 是本项目自己解析的，不透传）
+      - X-Accel-Buffering（Nginx 专用，不透传）
+
+    Returns:
+        需要透传的请求头字典
     """
     forwarded = {}
     for key, value in request.headers.items():
         lower = key.lower()
+        # 排除 hop-by-hop 和内部头
         if lower in ("host", "content-length", "content-type", "connection",
                       "x-user-id", "x-accel-buffering"):
             continue
+        # 只转发匹配前缀的头
         if any(lower.startswith(p) for p in _FORWARD_PREFIXES):
             forwarded[key] = value
     return forwarded
 
 
 def _load_history(request: Request, conv_id: Optional[str]) -> List[Dict[str, str]]:
-    """Load conversation history as [{role, content}] for LLM context."""
+    """加载对话历史作为 LLM 上下文。
+
+    只返回 role + content（不含配置快照等额外数据，LLM 不需要）。
+    类比 Java 的 Conversation.history() 但精简为 LLM 需要的格式。
+
+    Returns:
+        [{role: "user"/"assistant", content: "..."}] 列表
+    """
     if not conv_id:
         return []
     user_id = request.headers.get("X-User-Id") or "anonymous"
@@ -104,11 +153,19 @@ def _load_history(request: Request, conv_id: Optional[str]) -> List[Dict[str, st
 
 @router.post("/chat")
 async def chat(req: ChatRequest, request: Request):
-    """Unified chat entry - LangGraph StateGraph 编排。
+    """统一对话入口——LangGraph StateGraph 编排，SSE 流式返回。
 
-    支持:
-    - 正常消息: input = {user_input, ...}
-    - 追问恢复: input = Command(resume=answers), 从断点继续
+    这是整个系统的唯一对话端点。两种调用模式：
+    1. 正常消息（answers 为空）：input = {user_input, ...}，走完整流程（意图识别→工具执行→结果处理）
+    2. 追问恢复（answers 非空）：input = Command(resume=answers)，从上次 interrupt 的断点继续
+
+    流程：
+      1. 加载当前配置（判断是否有已有制品）
+      2. 加载对话历史（作为 LLM 上下文）
+      3. 提取透传请求头（嵌入模式 SSO）
+      4. 调 stream_graph() 跑 LangGraph + 推送 SSE
+
+    返回 StreamingResponse（text/event-stream），前端用 ReadableStream 逐事件解析。
     """
     graph = request.app.state.graph
     current_config = _load_current_config(request, req.conversation_id)
@@ -123,8 +180,8 @@ async def chat(req: ChatRequest, request: Request):
             user_input=req.message,
             conversation_id=req.conversation_id,
             user_id=request.headers.get("X-User-Id", ""),
-            answers=req.answers,  # ← 追问回答
-            image_base64=req.image_base64,  # ← 图片 base64
+            answers=req.answers,  # ← 追问回答（非空表示追问恢复）
+            image_base64=req.image_base64,  # ← 图片 base64（图片识别）
             conversation_store=request.app.state.conversation_store,
             conversation_history=history,
             current_config=current_config,
@@ -135,6 +192,8 @@ async def chat(req: ChatRequest, request: Request):
     return StreamingResponse(
         stream(),
         media_type="text/event-stream",
+        # Cache-Control: no-cache 防缓存
+        # X-Accel-Buffering: no 禁止 Nginx 缓冲（SSE 要实时推送）
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
@@ -199,7 +258,11 @@ async def modify(req: ModifyRequest, request: Request):
 
 @router.post("/validate")
 async def validate(req: ValidateRequest, request: Request):
-    """Validate FormConfig via upstream API (sync)."""
+    """通过上游 API 同步校验表单配置。
+
+    调上游 njmind-modeler 的校验接口，返回校验结果（含错误列表）。
+    不走 LangGraph，直接同步调用。
+    """
     upstream = request.app.state.upstream
     result = upstream.validate_form(req.config, mode=req.mode or "CREATE")
     return result
