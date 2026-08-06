@@ -79,14 +79,17 @@ def _load_current_config(request: Request, conv_id: Optional[str]) -> Optional[D
     类比 Java 的 Session.getAttribute()，但是从 SQLite 读。
     """
     if not conv_id:
-        return None
+        return None  # 无会话 ID：首次对话，肯定没有已有配置
+    # X-User-Id 头由网关注入，缺省 "anonymous" 做多租户隔离
     user_id = request.headers.get("X-User-Id") or "anonymous"
+    # conversation_store 挂在 app.state 上（类比 ServletContext 的全局属性）
     store = request.app.state.conversation_store
     try:
-        conv = store.get_conversation(conv_id, user_id)
+        conv = store.get_conversation(conv_id, user_id)  # 从 SQLite 读会话
         if conv and conv.get("currentConfig"):
-            return conv["currentConfig"]
+            return conv["currentConfig"]  # 返回已有的表单配置
     except Exception:
+        # 读取异常静默吞掉：不影响主流程，最多当作无已有配置处理（Fail-Closed）
         pass
     return None
 
@@ -112,15 +115,20 @@ def _extract_forward_headers(request: Request) -> Dict[str, str]:
         需要透传的请求头字典
     """
     forwarded = {}
+    # 遍历请求头，按白名单前缀选择性透传
+    # request.headers.items() 返回所有头，类比 Java HttpServletRequest.getHeaderNames()
     for key, value in request.headers.items():
-        lower = key.lower()
+        lower = key.lower()  # HTTP 头不区分大小写，统一转小写比较
         # 排除 hop-by-hop 和内部头
+        # hop-by-hop 头是单跳头（host/connection 等），不该跨服务透传
+        # x-user-id 是本项目内部头（已解析），透传会给上游造成困惑
         if lower in ("host", "content-length", "content-type", "connection",
                       "x-user-id", "x-accel-buffering"):
             continue
         # 只转发匹配前缀的头
+        # any(...) 短路：只要匹配任一前缀就透传，类比 Java stream().anyMatch()
         if any(lower.startswith(p) for p in _FORWARD_PREFIXES):
-            forwarded[key] = value
+            forwarded[key] = value  # 保留原始大小写的 key
     return forwarded
 
 
@@ -134,19 +142,22 @@ def _load_history(request: Request, conv_id: Optional[str]) -> List[Dict[str, st
         [{role: "user"/"assistant", content: "..."}] 列表
     """
     if not conv_id:
-        return []
-    user_id = request.headers.get("X-User-Id") or "anonymous"
+        return []  # 无会话：空历史
+    user_id = request.headers.get("X-User-Id") or "anonymous"  # 多租户隔离
     store = request.app.state.conversation_store
     try:
         conv = store.get_conversation(conv_id, user_id)
         if not conv or not conv.get("messages"):
-            return []
+            return []  # 会话不存在或无消息：空历史
         # Only pass role + content (LLM doesn't need config snapshots in history)
+        # 中文说明：只取 role + content，丢弃配置快照等元数据（LLM 只需要对话文本）
+        # 列表推导：类比 Java stream().map(m -> Map.of("role",...)).collect(toList())
         return [
             {"role": m["role"], "content": m["content"]}
             for m in conv["messages"]
         ]
     except Exception as e:
+        # 历史加载失败：记 warning 但返回空历史（不阻断主流程）
         logger.warning(f"Failed to load history for conv {conv_id}: {e}")
         return []
 
@@ -167,14 +178,18 @@ async def chat(req: ChatRequest, request: Request):
 
     返回 StreamingResponse（text/event-stream），前端用 ReadableStream 逐事件解析。
     """
-    graph = request.app.state.graph
-    current_config = _load_current_config(request, req.conversation_id)
-    history = _load_history(request, req.conversation_id)
-    fwd = _extract_forward_headers(request)
+    graph = request.app.state.graph  # LangGraph 编排器，类比 Spring 的 DispatcherServlet
+    current_config = _load_current_config(request, req.conversation_id)  # 已有配置（影响意图）
+    history = _load_history(request, req.conversation_id)  # 对话历史（LLM 上下文）
+    fwd = _extract_forward_headers(request)  # 透传头（嵌入模式 SSO）
 
+    # 延迟导入 stream_graph：避免模块加载时的循环依赖
+    # 类比 Java 的懒加载，运行时才解析依赖
     from engine.stream import stream_graph
 
     async def stream():
+        # stream_graph 是 async generator，yield 出 SSE 格式的事件字符串
+        # async for：异步迭代，类比 Java 的 Flux/Reactor 流
         async for event in stream_graph(
             graph=graph,
             user_input=req.message,
@@ -187,13 +202,13 @@ async def chat(req: ChatRequest, request: Request):
             current_config=current_config,
             forward_headers=fwd,
         ):
-            yield event
+            yield event  # 把每个事件推给前端（SSE）
 
     return StreamingResponse(
-        stream(),
-        media_type="text/event-stream",
+        stream(),  # 传入 async generator 作为响应体
+        media_type="text/event-stream",  # SSE 的 MIME 类型
         # Cache-Control: no-cache 防缓存
-        # X-Accel-Buffering: no 禁止 Nginx 缓冲（SSE 要实时推送）
+        # X-Accel-Buffering: no 禁止 Nginx 缓冲（SSE 要实时推送，缓冲会导致延迟）
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
@@ -201,13 +216,17 @@ async def chat(req: ChatRequest, request: Request):
 @router.post("/generate")
 async def generate(req: GenerateRequest, request: Request):
     """[DEPRECATED] 使用 /api/chat 替代。保留向后兼容,内部转发到 chat。"""
+    # 已废弃:旧版生成接口,内部转发到统一的 stream_graph
+    # 保留是为兼容未迁移的前端代码(类比 Spring 的 @Deprecated 路由)
     graph = request.app.state.graph
-    history = _load_history(request, req.conversation_id)
-    fwd = _extract_forward_headers(request)
+    history = _load_history(request, req.conversation_id)  # 加载历史上下文
+    fwd = _extract_forward_headers(request)  # 透传鉴权头
 
     from engine.stream import stream_graph
 
     async def stream():
+        # 把 req.description 当 user_input 传给 stream_graph
+        # current_config=None:旧接口无已有配置概念
         async for event in stream_graph(
             graph=graph,
             user_input=req.description,
@@ -230,6 +249,7 @@ async def generate(req: GenerateRequest, request: Request):
 @router.post("/modify")
 async def modify(req: ModifyRequest, request: Request):
     """[DEPRECATED] 使用 /api/chat 替代。保留向后兼容,内部转发到 chat。"""
+    # 已废弃:旧版修改接口,内部转发到统一的 stream_graph
     graph = request.app.state.graph
     history = _load_history(request, req.conversation_id)
     fwd = _extract_forward_headers(request)
@@ -237,6 +257,8 @@ async def modify(req: ModifyRequest, request: Request):
     from engine.stream import stream_graph
 
     async def stream():
+        # 把 req.instruction 当 user_input,current_config 作为修改起点
+        # 这两个参数是 modify 与 generate 的区别:modify 带已有配置
         async for event in stream_graph(
             graph=graph,
             user_input=req.instruction,
@@ -263,6 +285,8 @@ async def validate(req: ValidateRequest, request: Request):
     调上游 njmind-modeler 的校验接口，返回校验结果（含错误列表）。
     不走 LangGraph，直接同步调用。
     """
-    upstream = request.app.state.upstream
+    upstream = request.app.state.upstream  # 上游客户端单例，挂在 app.state
+    # 直接调上游校验，不走 LangGraph（轻量同步调用）
+    # mode 缺省 CREATE：req.mode or "CREATE" 是 Python 的空值兜底，类比 Java 的 Optional.orElse
     result = upstream.validate_form(req.config, mode=req.mode or "CREATE")
-    return result
+    return result  # 直接返回校验结果 dict（FastAPI 自动序列化为 JSON）

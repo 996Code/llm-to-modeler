@@ -60,24 +60,31 @@ class CreateFormTool(CompositeTool):
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行 6 步管线。retry 在 _step_validate 内部处理。"""
+        # 初始化计数器与错误列表(setdefault 幂等,避免重跑时清空已有值)
         state.setdefault("retry_count", 0)
         state.setdefault("validation_errors", [])
 
+        # 跑 6 步管线:fetch_guide → list_assets → parse_fields
+        #          → fetch_templates → generate → validate
         self.run_pipeline(state, ctx)
 
         artifact = state.get("artifact")
         if artifact:
+            # 成功:从制品提取表单名和字段数,拼人类可读摘要
             form_name = artifact.get("formName", "")
             field_count = len(artifact.get("formFieldConfigVos", []))
             summary = f"已生成「{form_name}」,共 {field_count} 个字段"
         else:
+            # 失败:未生成制品(可能重试耗尽)
             summary = "表单生成未完成"
 
         return ToolResult(
             artifact=artifact,
             summary=summary,
             extra={
+                # 校验错误透传给 handle_result,前端据此决定是否禁用保存按钮
                 "validation_errors": state.get("validation_errors", []),
+                # format_result 提取前端要的字段(钩子化,避免 Engine 读制品内部)
                 "formatted": self.format_result(artifact) if artifact else {},
             },
         )
@@ -112,14 +119,18 @@ class CreateFormTool(CompositeTool):
 
     def _step_fetch_guide(self, state: dict, ctx: ToolContext) -> None:
         """获取配置指南。"""
+        # emit 推进度事件给前端(类比 Java 的进度回调)
         ctx.emit("stage", "fetch_guide", "正在从上游获取配置指南...")
+        # 从上游拉配置指南(字段说明、约束规则等),存进 state 供后续步骤用
         state["guide"] = ctx.asset_client.get_guide()
 
     def _step_list_assets(self, state: dict, ctx: ToolContext) -> None:
         """列出可用模板和 Schema 文件名。"""
         ctx.emit("stage", "list_assets", "正在获取可用模板和 Schema 列表...")
+        # 拉可用模板名列表(本阶段只取文件名,内容在 fetch_templates 步骤按需拉)
         templates = ctx.asset_client.list_templates()
         state["template_names"] = templates
+        # 推完成事件:前端据此把"加载模板"标记为已完成
         ctx.emit("stage", "list_assets_done", f"发现 {len(templates)} 个可用模板")
 
     def _step_parse_fields(self, state: dict, ctx: ToolContext) -> None:
@@ -127,39 +138,44 @@ class CreateFormTool(CompositeTool):
         ctx.emit("stage", "parse_fields", "AI 正在解析您的自然语言需求...")
         user_input = state.get("user_input", "")
         compressed_history = state.get("compressed_history", "")
-        guide = state.get("guide") or {}
+        guide = state.get("guide") or {}  # 上一步拉的配置指南
 
-        # 渲染 prompt
+        # 渲染 prompt:通过 prompt_loader 从模板文件加载,注入 guide 变量
         system_prompt = self._render_prompt(ctx, "parse", guide=guide)
         user_msg = self._build_parse_user_message(user_input, compressed_history)
 
+        # 组装 LLM 消息(对标 ChatGPT 的 messages 数组)
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_msg},
         ]
 
+        # 调 LLM(要求返回 JSON),conv_id 用于多轮上下文追踪
         parsed = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
 
-        # 检查是否需要追问
+        # 检查是否需要追问:LLM 判断信息不足时,抛 ClarificationRaised
+        # 该异常会被 execute_tool_node 捕获,转成 interrupt 挂起等用户回答
         if parsed.get("needsClarification"):
             questions = parsed.get("clarificationQuestions", [])
             raise ClarificationRaised(questions)
 
-        # 解析字段
+        # 解析表单元信息:表单名 + 表单编码
         state["form_name"] = parsed.get("formName", "新表单")
         state["form_code"] = parsed.get("formCode", "new_form")
 
+        # 把 LLM 返回的原始字段 dict 转成强类型 ParsedField 列表
         raw_fields = parsed.get("fields", [])
         parsed_fields = []
         for f in raw_fields:
-            type_code = f.get("fieldType", 0)
+            type_code = f.get("fieldType", 0)  # 字段类型编码(数字)
             parsed_fields.append(ParsedField(
-                fieldTitleText=f.get("fieldTitleText", ""),
-                fieldTitleKey=f.get("fieldTitleKey", ""),
+                fieldTitleText=f.get("fieldTitleText", ""),  # 字段中文名
+                fieldTitleKey=f.get("fieldTitleKey", ""),  # 字段 key(英文标识)
                 formFieldType=type_code,
+                # 类型名兜底:LLM 没给就从配置映射表查,再不行默认 TEXT
                 fieldTypeName=f.get("fieldTypeName", _TYPE_NAMES.get(type_code, "TEXT")),
                 description=f.get("description", ""),
-                options=f.get("options"),
+                options=f.get("options"),  # 选项(单选/多选用)
             ))
         state["parsed_fields"] = parsed_fields
         ctx.emit("stage", "parse_fields_done", f"已解析出 {len(parsed_fields)} 个字段：{state['form_name']}")
@@ -167,16 +183,18 @@ class CreateFormTool(CompositeTool):
     def _step_fetch_templates(self, state: dict, ctx: ToolContext) -> None:
         """获取表单模板 + 按字段类型获取字段模板。"""
         ctx.emit("stage", "fetch_templates", "正在匹配字段模板...")
-        # 表单模板
+        # 表单模板:整体表单的骨架(所有表单共用一个 simple_form 模板)
         state["form_template"] = ctx.asset_client.get_template("simple_form")
 
-        # 字段模板(按类型去重)
+        # 字段模板(按类型去重):收集本表单用到的所有字段类型,避免重复拉取
         needed_types = set()
         for f in state.get("parsed_fields", []):
             needed_types.add(f.formFieldType)
 
+        # 按类型拉对应字段模板,用类型名做 key 方便后续模板渲染
         field_templates = {}
         for type_code in needed_types:
+            # 从配置映射表查模板文件名,查不到默认 text
             template_stem = _TYPE_TO_TEMPLATE.get(type_code, "text")
             tmpl = ctx.asset_client.get_template(f"{template_stem}_field")
             if tmpl:
@@ -187,21 +205,24 @@ class CreateFormTool(CompositeTool):
 
     def _step_generate(self, state: dict, ctx: ToolContext) -> None:
         """LLM 基于模板组装完整 FormConfig。"""
+        # 是否重试:validation_errors 非空说明上一轮校验失败,本轮要修复
         is_retry = bool(state.get("validation_errors"))
-        
+
         if is_retry:
+            # 重试模式:告诉前端在修复错误,并显示第几次重试
             ctx.emit("stage", "generate_retry", f"校验失败，正在修复并重新生成（第 {state.get('retry_count', 0)} 次重试）...")
         else:
             ctx.emit("stage", "generate", "AI 正在基于模板组装完整表单配置...")
 
-        # 渲染 prompt
+        # 渲染 prompt:注入表单骨架模板 + 各字段类型模板
+        # LLM 按模板填充,而非自由发挥,保证产出结构稳定
         system_prompt = self._render_prompt(
             ctx, "generate",
             form_template=state.get("form_template") or {},
             field_templates=state.get("field_templates") or {},
         )
 
-        # 构建 user message
+        # 构建 user message:把解析出的字段信息序列化给 LLM
         fields_data = {
             "formName": state.get("form_name", ""),
             "formCode": state.get("form_code", ""),
@@ -211,6 +232,7 @@ class CreateFormTool(CompositeTool):
                     "fieldTitleKey": f.fieldTitleKey,
                     "fieldType": f.formFieldType,
                     "fieldTypeName": f.fieldTypeName,
+                    # 有 options 才加(单选/多选),避免空字段干扰
                     **({"options": f.options} if f.options else {}),
                 }
                 for f in state.get("parsed_fields", [])
@@ -218,10 +240,13 @@ class CreateFormTool(CompositeTool):
         }
 
         user_parts = []
+        # 有历史才追加(多轮场景下帮 LLM 理解上下文)
         if state.get("compressed_history"):
             user_parts.extend(["## 对话历史", state["compressed_history"], ""])
 
         if is_retry and state.get("artifact"):
+            # 重试路径:把校验错误 + 当前配置给 LLM,让它针对性修复
+            # 只取前 5 条错误,避免 prompt 过长
             error_msgs = [
                 e.get("message", str(e))
                 for e in state.get("validation_errors", [])[:5]
@@ -235,6 +260,7 @@ class CreateFormTool(CompositeTool):
                 "请修复后输出完整配置。",
             ])
         else:
+            # 首次生成:给字段信息,让 LLM 按模板组装
             user_parts.extend([
                 "## 字段信息",
                 f"```json\n{json.dumps(fields_data, ensure_ascii=False, indent=2)}\n```",
@@ -247,29 +273,34 @@ class CreateFormTool(CompositeTool):
             {"role": "user", "content": "\n".join(user_parts)},
         ]
 
+        # 调 LLM 生成完整配置,存为 artifact
         config = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
         state["artifact"] = config
-        state["validation_errors"] = []  # 重置
+        state["validation_errors"] = []  # 重置错误:新生成的配置要先校验才算数
 
     def _step_validate(self, state: dict, ctx: ToolContext) -> None:
         """提交上游校验。失败时工具内部 retry(重跑 generate)。"""
         ctx.emit("stage", "validate", "正在提交到上游平台进行校验...")
         artifact = state.get("artifact")
         if not artifact:
+            # 防御:没有配置可校验(generate 失败时可能走到)
             state["validation_errors"] = [{"message": "No configuration to validate"}]
             ctx.emit("stage", "validate_fail", "校验失败：无配置可校验")
             return
 
+        # 提交上游校验:create 模式校验新建表单
         result = ctx.asset_client.validate_artifact(artifact, mode="create")
 
-        # 区分 errors 和 warnings
+        # 区分 errors 和 warnings:errors 阻断,warnings 只提示
         errors = result.get("errors", [])
         warnings = result.get("warnings", [])
 
         # 只有 errors 非空才算校验失败，warnings 不算
+        # valid 标志或无 errors 都算通过
         if result.get("valid") or not errors:
-            state["validation_errors"] = []
+            state["validation_errors"] = []  # 清空错误
             if warnings:
+                # 有警告但无错误:校验通过,但提示前端警告数
                 ctx.emit("stage", "validate_pass", f"校验通过 ✓（{len(warnings)} 个警告）")
             else:
                 ctx.emit("stage", "validate_pass", "校验通过 ✓")
@@ -279,18 +310,20 @@ class CreateFormTool(CompositeTool):
         state["retry_count"] = state.get("retry_count", 0) + 1
         state["validation_errors"] = errors
 
-        # 详细日志：打印完整校验结果
+        # 详细日志：打印完整校验结果(便于排查上游规则)
         import logging
         logger = logging.getLogger(__name__)
         logger.warning(f"Validation failed (retry {state['retry_count']}): {result}")
 
         if state["retry_count"] < MAX_RETRIES:
+            # 未超上限:把错误信息给前端,然后递归重跑 generate + validate
             error_msgs = [e.get("message", str(e)) for e in state["validation_errors"][:3]]
             ctx.emit("stage", "validate_retry",
                      f"校验失败：{'；'.join(error_msgs)}，正在重试（第 {state['retry_count']} 次）...")
-            self._step_generate(state, ctx)  # 重跑前序 step
+            self._step_generate(state, ctx)  # 重跑前序 step(带 validation_errors 走修复路径)
             return self._step_validate(state, ctx)  # 递归再校验
         else:
+            # 超过最大重试次数:不再重试,把错误留在 state
             error_msgs = [e.get("message", str(e)) for e in state["validation_errors"][:3]]
             ctx.emit("stage", "validate_fail",
                      f"校验失败（已达最大重试次数）：{'；'.join(error_msgs)}")
@@ -300,6 +333,7 @@ class CreateFormTool(CompositeTool):
 
     def _render_prompt(self, ctx: ToolContext, name: str, **vars) -> str:
         """通过 ctx.prompt_loader 渲染模板。"""
+        # 有 prompt_loader 才渲染(注入 vars 变量到模板)
         if hasattr(ctx, "prompt_loader") and ctx.prompt_loader:
             return ctx.prompt_loader.render("njmind_form", name, **vars)
         # 无 prompt_loader 时返回空(正常路径不应走到这)
@@ -307,6 +341,7 @@ class CreateFormTool(CompositeTool):
         return ""
 
     def _build_parse_user_message(self, user_input: str, compressed_history: str) -> str:
+        # 拼接 user message:有历史加历史段,再加当前需求
         parts = []
         if compressed_history:
             parts.extend(["## 对话历史", compressed_history, ""])

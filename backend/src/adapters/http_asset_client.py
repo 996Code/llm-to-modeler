@@ -38,20 +38,23 @@ class HttpAssetClient(AssetClient):
     def __init__(self, upstream):
         """upstream: 现有 UpstreamClient 实例。"""
         self._upstream = upstream
-        # 通用数据操作的 base URL,优先读环境变量
+        # 通用数据操作的 base URL,优先读环境变量(嵌入模式可指向宿主 mock API)
         self._data_base_url = os.environ.get("ASSET_BASE_URL", _DEFAULT_BASE_URL)
 
     def _clean(self, data):
         """返回前清洗。"""
+        # sanitize_obj:统一清理返回数据(如去除 null/归一化字段名),类比 Java 的 DTO 转换
         return sanitize_obj(data)
 
     # ── 表单配置类操作(原有) ──
 
     def list_templates(self) -> list[str]:
+        # 委托上游 + 清洗返回(本类只加 sanitize 层,不改业务逻辑)
         return self._clean(self._upstream.list_templates())
 
     def get_template(self, name: str) -> dict:
         data = self._upstream.get_template(name)
+        # 上游可能返回 None(模板不存在),兜底成空 dict 避免下游 KeyError
         return self._clean(data) if data else {}
 
     def get_schema(self, name: str) -> dict:
@@ -64,28 +67,36 @@ class HttpAssetClient(AssetClient):
 
     def validate_artifact(self, artifact: dict, mode: str) -> dict:
         """归一化上游 {pass, errors:[str]} → {valid, errors:[{message}]}。"""
+        # mode 统一大写:上游接口要求大写枚举(CREATE/UPDATE)
         raw = self._upstream.validate_form(artifact, mode=mode.upper())
-        raw = self._clean(raw) or {}
+        raw = self._clean(raw) or {}  # 清洗 + 防 None
         return {
-            "valid": raw.get("pass", False),
+            "valid": raw.get("pass", False),  # 上游用 pass,统一成 valid
+            # errors 统一成 [{message}] 结构:字符串包成对象,对象原样保留
             "errors": [{"message": e} if isinstance(e, str) else e
                        for e in (raw.get("errors") or [])],
             "warnings": raw.get("warnings") or [],
         }
 
     def persist_artifact(self, artifact: dict, mode: str) -> dict:
+        # 按 mode 分流到上游不同接口
+        # 类比 Java 的策略模式 if-else 分发
         if mode == "create":
-            result = self._upstream.create_form(artifact)
+            result = self._upstream.create_form(artifact)  # 新建走 create 接口
         elif mode == "update":
             # 现有 UpstreamClient 无 update_form,阶段 3 完善;先用 create 兜底
+            # 注意：临时用 create 兜底，后续接入真正的 update 接口
             result = self._upstream.create_form(artifact)
         else:
+            # 未知 mode:直接抛(防御性编程)
+            # 抛异常而非静默处理：mode 错误是编程 bug，应尽早暴露
             raise ValueError(f"unknown mode: {mode}")
-        return self._clean(result) or {}
+        return self._clean(result) or {}  # 清洗 + 防 None
 
     def get_form(self, form_code: str) -> Optional[dict]:
         """根据 formCode 查询已有表单配置(委托 UpstreamClient)。"""
         result = self._upstream.get_form(form_code)
+        # 找不到返回 None(区别于空 dict:None 表示不存在,空 dict 表示存在但无数据)
         return self._clean(result) if result else None
 
     # ── 通用数据操作(插件化扩展) ──
@@ -104,21 +115,28 @@ class HttpAssetClient(AssetClient):
             - errors: list[str] (原始错误列表)
             - 其余字段原样透传
         """
-        url = f"{self._data_base_url}{path}"
-        req_headers = {"Content-Type": "application/json"}
+        url = f"{self._data_base_url}{path}"  # 拼完整 URL（base + 路径）
+        req_headers = {"Content-Type": "application/json"}  # 默认 JSON 头（POST 带体）
         if headers:
+            # 合并透传头（如 forward_headers 里的鉴权 token），覆盖默认
+            # 类比 Java 的 HttpHeaders 多源合并
             req_headers.update(headers)
         try:
+            # httpx POST:超时 10 秒(防止上游卡死拖垮整个请求)
+            # timeout=10 是硬限制，超时后抛 ReadTimeout
             resp = httpx.post(url, json=data, headers=req_headers, timeout=10)
-            result = resp.json()
+            result = resp.json()  # 解析响应 JSON
         except Exception as e:
+            # 网络异常/超时/解析失败:降级返回失败结构,不向上抛
+            # Fail-Closed：返回 success=False，调用方能正常处理失败，无需 try-catch
             logger.warning(f"submit_data POST {url} failed: {e}")
             return {"success": False, "errors": [str(e)]}
 
-        result = self._clean(result) or {}
-        # 归一化:上游可能返回 "pass" 或 "success"
+        result = self._clean(result) or {}  # 清洗 + 防 None
+        # 归一化:上游可能返回 "pass" 或 "success",统一成 success
+        # 有些上游用 pass（兼容校验接口风格），有些用 success，这里做字段名统一
         if "success" not in result and "pass" in result:
-            result["success"] = result["pass"]
+            result["success"] = result["pass"]  # pass 值复制到 success
         return result
 
     def query_data(self, path: str, params: dict = None, headers: dict = None) -> dict:
@@ -132,15 +150,20 @@ class HttpAssetClient(AssetClient):
         Returns:
             上游返回的 JSON(dict)
         """
-        url = f"{self._data_base_url}{path}"
+        url = f"{self._data_base_url}{path}"  # 拼完整 URL
         req_headers = {}
         if headers:
+            # 合并透传头(GET 一般不需 Content-Type,因为没有 body)
             req_headers.update(headers)
         try:
+            # httpx GET:参数通过 params 传递(会拼到 query string)
+            # params={} 或 None 都行：params or {} 防止传 None 报错
             resp = httpx.get(url, params=params or {}, headers=req_headers, timeout=10)
-            result = resp.json()
+            result = resp.json()  # 解析响应 JSON
         except Exception as e:
+            # 异常降级:返回失败结构,不向上抛(保证调用方稳定)
+            # Fail-Closed：调用方拿到 success=False 就知道查询失败
             logger.warning(f"query_data GET {url} failed: {e}")
             return {"success": False, "errors": [str(e)]}
 
-        return self._clean(result) or {}
+        return self._clean(result) or {}  # 清洗 + 防 None

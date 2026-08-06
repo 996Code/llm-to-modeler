@@ -365,18 +365,20 @@ class LLMClient:
         choice = response.choices[0]
         message = choice.message
 
-        content = message.content
+        content = message.content  # 正常输出字段
 
         # Reasoning model fallback
+        # 中文说明：Qwen3 推理模型 content 可能为空，回退读 reasoning_content
         if not content:
             rc = getattr(message, "reasoning_content", None)
             if rc:
                 content = rc
 
         if not content:
+            # 两个字段都空：模型完全没输出，无法解析，抛错触发上层降级
             raise ValueError("LLM returned empty content")
 
-        return self._parse_json_from_text(content)
+        return self._parse_json_from_text(content)  # 交给三级容错解析器
 
     def _parse_json_from_text(self, text: str) -> Dict[str, Any]:
         """从任意文本中提取 JSON 对象（三级容错）。
@@ -388,31 +390,39 @@ class LLMClient:
 
         三级都失败抛 ValueError。
         """
-        text = text.strip()
+        text = text.strip()  # 去首尾空白，避免首尾换行影响解析
 
         # Direct parse
+        # 第一级：最理想情况，整段就是合法 JSON，直接 loads
         try:
             return json.loads(text)
         except json.JSONDecodeError:
-            pass
+            pass  # 失败则继续下一级，类比 Java 的 try-catch 链式降级
 
         # Markdown code block
+        # 第二级：模型可能把 JSON 包在 ```json ... ``` 代码块里
+        # re.search + re.DOTALL：让 . 匹配换行，跨多行匹配代码块内容
+        # 分组 (.*?) 非贪婪匹配最内层内容
         code_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
         if code_match:
             try:
-                return json.loads(code_match.group(1).strip())
+                return json.loads(code_match.group(1).strip())  # group(1) 取第一个分组
             except json.JSONDecodeError:
-                pass
+                pass  # 代码块内容仍非法，继续下一级
 
         # First { to last }
-        first = text.find("{")
-        last = text.rfind("}")
+        # 第三级：兜底——取第一个 { 到最后一个 } 的子串
+        # 适用场景：JSON 前后有"好的，结果如下："或后面有解释文字
+        first = text.find("{")  # 首个左花括号位置，找不到返回 -1
+        last = text.rfind("}")  # 最后一个右花括号位置
+        # 双重校验：找到 + 顺序正确（last > first），避免单字符或乱序误判
         if first != -1 and last != -1 and last > first:
             try:
-                return json.loads(text[first:last + 1])
+                return json.loads(text[first:last + 1])  # 切片含 last，故 +1
             except json.JSONDecodeError:
                 pass
 
+        # 三级全失败：彻底无法解析，抛错让上层决定（可能要重试或降级）
         raise ValueError(
             f"Could not extract JSON from LLM response: {text[:200]}..."
         )

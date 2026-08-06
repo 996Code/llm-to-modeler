@@ -47,8 +47,12 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
+    # 统计 CJK 字符数(中文/日文/韩文范围),每个约 1.5 token
+    # \u4e00-\u9fff 是 CJK 统一表意文字的基本区范围，类比 Java Character.UnicodeBlock.CJK
+    # 生成器表达式 sum(1 for c in ...) 比 list 计数更省内存
     cjk_count = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-    other_chars = len(text) - cjk_count
+    other_chars = len(text) - cjk_count  # 非中文字符(英文/标点/空格)
+    # 中文 1.5 token/字 + 英文 4 字符/token，加权近似
     return int(cjk_count * 1.5 + other_chars / 4)
 
 
@@ -57,9 +61,13 @@ def estimate_messages_tokens(messages: List[Dict[str, str]]) -> int:
     total = 0
     for msg in messages:
         content = msg.get("content", "")
+        # content 可能是 str（纯文本）或 list（多模态含图片）
+        # 多模态的图片不在此估算（图片 token 另算），只估文本部分
         if isinstance(content, str):
             total += estimate_tokens(content)
-        total += 4  # role 开销
+        # 每条消息固定约 4 token 的元数据开销（role 标记 + 分隔符）
+        # 类比 OpenAI 官方的 per-message overhead
+        total += 4
     return total
 
 
@@ -71,10 +79,12 @@ def build_compressed_history(history: list, max_messages: int = 6, max_chars: in
     后续由 CompressionSidechain 实现智能压缩(LLM 摘要)。
     """
     if not history:
-        return ""
+        return ""  # 空历史直接返回空串
     parts = []
+    # history[-max_messages:] 切片取最后 N 条，类比 Java list.subList(from, to)
     for msg in history[-max_messages:]:
-        role = "用户" if msg.get("role") == "user" else "助手"
+        role = "用户" if msg.get("role") == "user" else "助手"  # 角色中文化
+        # [:max_chars] 截断超长消息，避免单条撑爆 prompt
         content = msg.get("content", "")[:max_chars]
         parts.append(f"{role}: {content}")
     return "\n".join(parts)
@@ -82,17 +92,20 @@ def build_compressed_history(history: list, max_messages: int = 6, max_chars: in
 
 def get_effective_context_window(model_limit: int = MODEL_CONTEXT_WINDOW) -> int:
     """有效窗口 = 总窗口 - 预留 Summary Token。"""
+    # 预留输出 token：因为输入+输出共享窗口上限，必须给输出留位
+    # 类比 Java：容量为 N 的队列，预留 head room 防溢出
     return model_limit - MAX_OUTPUT_TOKENS_FOR_SUMMARY
 
 
 def should_compress(messages: List[Dict[str, str]], model_limit: int = MODEL_CONTEXT_WINDOW) -> bool:
     """token 超过有效窗口的 70% -> 触发压缩。"""
     if not messages:
-        return False
+        return False  # 无消息不压缩
     current = estimate_messages_tokens(messages)
     effective = get_effective_context_window(model_limit)
+    # 触发线 = 有效窗口 × 70%，提前触发避免逼近上限才压缩（来不及）
     trigger_at = int(effective * COMPRESSION_THRESHOLD)
-    should = current > trigger_at
+    should = current > trigger_at  # 严格大于才触发
     if should:
         logger.info(f"触发压缩: {current} tokens > {trigger_at} ({COMPRESSION_THRESHOLD*100:.0f}%)")
     return should
@@ -113,29 +126,31 @@ class CompressionCircuitBreaker:
         self._lock = threading.Lock()
 
     def record_failure(self) -> None:
-        with self._lock:
+        with self._lock:  # 加锁:多线程(主对话+压缩线程)可能并发调用
             self._failures += 1
             if self._failures >= self._threshold:
-                self._tripped_at = time.monotonic()
+                # 达到连续失败阈值:记录熔断时间点,后续 is_tripped 返回 True
+                self._tripped_at = time.monotonic()  # monotonic 不受系统时钟调整影响
                 logger.error(f"压缩熔断器触发: 连续 {self._failures} 次失败")
 
     def record_success(self) -> None:
         with self._lock:
             if self._failures > 0:
+                # 成功一次即重置计数:熔断器采用"连续失败"语义而非累计失败
                 self._failures = 0
                 self._tripped_at = 0.0
 
     def is_tripped(self) -> bool:
         with self._lock:
             if self._failures < self._threshold:
-                return False
-            # 半开恢复
+                return False  # 未达阈值:正常放行
+            # 半开恢复:熔断后等冷却时间过,自动尝试恢复(类比 Hystrix half-open)
             if self._tripped_at and (time.monotonic() - self._tripped_at) > self._cooldown:
                 self._tripped_at = 0.0
                 self._failures = 0
                 logger.info("压缩熔断器半开恢复")
-                return False
-            return True
+                return False  # 恢复:放行一次,失败会再次累计
+            return True  # 熔断中:跳过压缩
 
 
 class CompressionSidechain:
@@ -178,15 +193,20 @@ class CompressionSidechain:
             keep-recent 消息(立即返回,不等压缩)
         """
         # 1. 立即返回 keep-recent
+        # KEEP_RECENT_TURNS * 2：每轮含 user + assistant 两条消息
         keep_n = KEEP_RECENT_TURNS * 2
+        # 切片取最近 N 条；不足则全返回（类比 Java list.subList）
         recent = messages[-keep_n:] if len(messages) > keep_n else messages
 
         # 2. 熔断器检查
         if self._cb.is_tripped():
+            # 熔断中：跳过压缩，直接返回 recent（降级，保证主流程不卡）
             logger.warning("压缩熔断器已触发,跳过本次压缩")
             return recent
 
         # 3. 提交后台压缩任务
+        # submit 非阻塞：立即返回，压缩在独立线程跑（不阻塞主对话流）
+        # 类比 Java ExecutorService.submit(Runnable)
         self._executor.submit(
             self._do_compress, conv_id, messages, tool, on_complete
         )
@@ -200,31 +220,39 @@ class CompressionSidechain:
         on_complete: Optional[Callable],
     ) -> None:
         """实际压缩逻辑(在后台线程执行)。"""
-        start_time = time.monotonic()
-        tokens_before = estimate_messages_tokens(messages)
+        start_time = time.monotonic()  # 计时起点（monotonic 不受时钟调整影响）
+        tokens_before = estimate_messages_tokens(messages)  # 压缩前 token 数
 
         try:
             # 1. 分割:保留最近 N 轮
+            # old_messages = 除最近 N 轮外的旧历史（这些才需要被压缩成摘要）
             keep_n = KEEP_RECENT_TURNS * 2
             old_messages = messages[:-keep_n] if len(messages) > keep_n else []
 
             if not old_messages:
+                # 没有旧历史可压缩：直接返回（recent 已包含全部）
                 logger.info("历史不足,无需压缩")
                 return
 
             # 2. 状态补偿(调 tool.summarize_artifact)
+            # 把工具的当前制品状态也写进摘要，避免重启后丢失上下文
             state_compensation = ""
             if tool:
-                state_compensation = tool.summarize_artifact({})  # 简化:传空 artifact
+                # 传空 artifact 是简化处理（真实场景应传当前 artifact）
+                state_compensation = tool.summarize_artifact({})
 
             # 3. LLM 摘要旧历史
+            # 把旧历史拼成"用户: xxx\n助手: yyy"的文本，每条截断 200 字符防爆
             history_text = "\n".join(
                 f"{'用户' if m.get('role') == 'user' else '助手'}: {m.get('content', '')[:200]}"
                 for m in old_messages
             )
+            # 带 PTL 防御的压缩：输入超限时自动剥洋葱重试
             summary = self._compress_with_ptl_defense(history_text)
 
             # 4. 写 compacted + compact_trace
+            # compacted：压缩结果（下次对话时作为上下文）
+            # compact_trace：审计轨迹（记录压缩前后 token、是否降级）
             if self._conversation:
                 self._conversation.append(conv_id, "compacted", {
                     "summary": summary,
@@ -234,33 +262,35 @@ class CompressionSidechain:
                 self._conversation.append(conv_id, "compact_trace", {
                     "tokens_before": tokens_before,
                     "tokens_after": estimate_tokens(summary),
-                    "summary": summary[:200],
-                    "degraded": False,
-                    "protection_triggered": None,
+                    "summary": summary[:200],  # 只存前 200 字符，避免审计表膨胀
+                    "degraded": False,  # 正常压缩，非降级
+                    "protection_triggered": None,  # 没触发保护机制
                     "duration_ms": int((time.monotonic() - start_time) * 1000),
                 })
 
-            self._cb.record_success()
+            self._cb.record_success()  # 成功：重置熔断器计数
             logger.info(
                 f"压缩完成: {tokens_before} -> {estimate_tokens(summary)} tokens "
                 f"({len(old_messages)} 条旧历史 -> 摘要)"
             )
 
             if on_complete:
+                # 异步回调通知（可选，类比 Java 的 CompletableFuture.thenAccept）
                 on_complete({"summary": summary, "tokens_after": estimate_tokens(summary)})
 
         except Exception as e:
+            # 任何异常：降级处理，不让压缩失败影响主流程
             logger.warning(f"压缩失败,降级: {e}")
-            self._cb.record_failure()
+            self._cb.record_failure()  # 记录失败，累计可能触发熔断
 
-            # 降级:写 compact_trace 标记失败
+            # 降级:写 compact_trace 标记失败（审计用）
             if self._conversation:
                 self._conversation.append(conv_id, "compact_trace", {
                     "tokens_before": tokens_before,
-                    "tokens_after": tokens_before,  # 未压缩
+                    "tokens_after": tokens_before,  # 未压缩，前后一样
                     "summary": "",
-                    "degraded": True,
-                    "protection_triggered": "fallback_truncate",
+                    "degraded": True,  # 标记为降级
+                    "protection_triggered": "fallback_truncate",  # 触发了降级保护
                     "error": str(e),
                     "duration_ms": int((time.monotonic() - start_time) * 1000),
                 })
@@ -270,6 +300,7 @@ class CompressionSidechain:
 
         PTL = Prompt Too Long:压缩 API 自己的输入超限。
         """
+        # 压缩 prompt：要求 LLM 把历史压缩成一句话，保留关键业务信息
         compact_prompt = (
             "你是对话压缩器。将下面的对话历史压缩成一句话摘要,"
             "保留关键信息(创建了什么表单、修改了哪些字段、配置结果)。\n\n"
@@ -277,27 +308,35 @@ class CompressionSidechain:
             "只返回一句话摘要,不要解释:"
         )
 
+        # PTL 重试循环：最多 MAX_PTL_RETRIES 次
         for attempt in range(MAX_PTL_RETRIES):
             try:
+                # temperature=0.0：摘要要稳定确定性，不要发散（类比 Java 的固定种子随机）
                 summary = self._llm.chat([
                     {"role": "user", "content": compact_prompt}
                 ], temperature=0.0)
-                return summary.strip() if summary else ""
+                return summary.strip() if summary else ""  # 去首尾空白，空则返回空串
             except Exception as e:
+                # 判断是否 PTL（Prompt Too Long）错误
+                # 关键词检测：不同模型/网关返回的错误信息措辞不一，宽松匹配
                 if "too long" in str(e).lower() or "prompt" in str(e).lower():
                     # PTL:剥掉 20% 旧内容重试
+                    # "剥洋葱"策略：每次砍掉最旧的 20% 行，直到输入能装下
                     lines = history_text.split("\n")
-                    cut = int(len(lines) * 0.2)
-                    history_text = "\n".join(lines[cut:])
+                    cut = int(len(lines) * 0.2)  # 砍掉 20% 的行数
+                    history_text = "\n".join(lines[cut:])  # 保留剩余 80%
                     logger.warning(f"PTL 防御:剥掉 {cut} 行,第 {attempt+1} 次重试")
+                    # 重建 prompt（用缩短后的 history_text）
                     compact_prompt = (
                         "你是对话压缩器。将下面的对话历史压缩成一句话摘要。\n\n"
                         f"对话历史:\n{history_text}\n\n"
                         "只返回一句话摘要:"
                     )
                 else:
+                    # 非 PTL 错误（如网络/鉴权）：直接抛出，交由上层降级
                     raise
 
         # PTL 重试耗尽 -> 降级截断
+        # 走到这里说明剥了 MAX_PTL_RETRIES 次洋葱还是超限，放弃 LLM 摘要，暴力截断
         logger.warning(f"PTL 防御重试耗尽({MAX_PTL_RETRIES} 次),降级截断")
-        return history_text[:500]  # 保留前 500 字符
+        return history_text[:500]  # 保留前 500 字符，至少有部分上下文
