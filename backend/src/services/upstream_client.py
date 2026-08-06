@@ -60,8 +60,11 @@ def set_forward_headers(headers: Optional[Dict[str, str]]):
         headers: 要透传的头字典；None 表示清空本线程的头。
     """
     if headers:
+        # dict(headers) 做浅拷贝：避免外部后续修改原 dict 影响本线程已绑定的头
+        # 类比 Java：Collections.unmodifiableMap(new HashMap<>(headers)) 的可变副本隔离
         _forward_headers.value = dict(headers)
     else:
+        # None 表示主动清空，类比 Java ThreadLocal.remove()，防止线程复用时残留上一个请求的头
         _forward_headers.value = None
 
 
@@ -71,6 +74,8 @@ def _get_forward_headers() -> Dict[str, str]:
     Returns:
         透传头字典；本线程未设置过则返回空字典（调用方可安全 merge）。
     """
+    # getattr 三参版：线程从未 set 过时返回 None，再用 `or {}` 兜底空 dict，
+    # 保证调用方总能 merge，类比 Java ThreadLocal.get() 为 null 时返回 emptyMap
     return getattr(_forward_headers, 'value', None) or {}
 
 
@@ -90,9 +95,10 @@ class UpstreamConfig:
         cache_ttl: int = 300,  # 5 minutes
     ):
         # rstrip("/") 去掉末尾斜杠，保证后续 url 拼接不会出现 //
+        # 类比 Java：URI 构造时规范化 base path，避免 "http://host/" + "/api" 产生双斜杠
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-        self.cache_ttl = cache_ttl
+        self.timeout = timeout  # HTTP 连接+读取总超时，类比 OkHttp 的 timeout() 链式配置
+        self.cache_ttl = cache_ttl  # 缓存有效期，类比 Caffeine/Guava Cache 的 expireAfterWrite
 
 
 class UpstreamClient:
@@ -121,9 +127,11 @@ class UpstreamClient:
             conversation_store: 会话存储，用于持久化上游调用日志（调试/监控）。
                                 None 时不记日志（只 warning 不影响主流程）。
         """
-        import os
+        import os  # 延迟导入 os：只在需要读环境变量时导入，类比 Java 的 lazy init
 
         if config is None:
+            # 显式 config 为 None 时走环境变量降级路径，类比 Spring 的 @Value("${...:默认值}")
+            # int() 包裹是因为 getenv 返回 str，类比 Integer.parseInt()
             config = UpstreamConfig(
                 base_url=os.getenv("UPSTREAM_BASE_URL", "http://127.0.0.1:7001"),
                 timeout=int(os.getenv("UPSTREAM_TIMEOUT", "30")),
@@ -189,9 +197,12 @@ class UpstreamClient:
         Returns:
             合并后的头字典；如果都没有则返回 None（httpx 用默认头）。
         """
-        headers = _get_forward_headers()
+        headers = _get_forward_headers()  # 取本线程绑定的透传头（可能为空 dict）
         if extra:
+            # {**a, **b} 是 dict 合并语法，b 的 key 覆盖 a 的同名 key
+            # 类比 Java: new HashMap<>(forward); extraMap.forEach(map::putIfAbsent 反向)
             headers = {**headers, **extra}
+        # 返回 None 时 httpx 用默认头；返回非空 dict 时覆盖默认头
         return headers or None
 
     def close(self):
@@ -208,10 +219,11 @@ class UpstreamClient:
             缓存的数据；未命中或已过期返回 None（不主动清理过期项，惰性淘汰）。
         """
         if key in self._cache:
-            data, ts = self._cache[key]
+            data, ts = self._cache[key]  # tuple 解包，类比 Java 的 Record/Pair 拆值
             # 未超过 cache_ttl 才算命中
             if time.time() - ts < self.config.cache_ttl:
                 return data
+        # 命中但过期 / 未命中：返回 None，且不主动删除过期项（惰性淘汰，简化并发）
         return None
 
     def _set_cached(self, key: str, data: Any):
@@ -228,17 +240,18 @@ class UpstreamClient:
         Returns:
             模板文件名列表；上游不可用或异常时返回 []（Fail-Closed）。
         """
-        import time
-        start_time = time.time()
+        import time  # 局部导入 time：仅计时需要，避免模块级污染
+        start_time = time.time()  # 记录起始时间，用于后续算 duration_ms
         endpoint = f"{self.config.base_url}/api/mcp/templates/list-templates"
         try:
+            # GET 请求，headers 透传本线程的鉴权头
             resp = self._client.get("/api/mcp/templates/list-templates", headers=self._headers())
-            resp.raise_for_status()  # 非 2xx 抛 HTTPStatusError
-            result = resp.json()
-            duration_ms = int((time.time() - start_time) * 1000)
+            resp.raise_for_status()  # 非 2xx 抛 HTTPStatusError，类比 Java RestClient 的响应状态校验
+            result = resp.json()  # 解析 JSON body 为 Python list/dict，类比 Jackson readValue
+            duration_ms = int((time.time() - start_time) * 1000)  # 秒转毫秒，整型便于日志展示
             self._log_call(
                 endpoint=endpoint,
-                response_data={"templateCount": len(result)},
+                response_data={"templateCount": len(result)},  # 只记数量，不记内容（列表可能大）
                 status_code=resp.status_code,
                 duration_ms=duration_ms,
             )
@@ -248,7 +261,7 @@ class UpstreamClient:
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
                 endpoint=endpoint,
-                status_code=500,
+                status_code=500,  # 异常时统一记 500，便于日志检索失败请求
                 duration_ms=duration_ms,
                 error_message=str(e),
             )
@@ -268,18 +281,20 @@ class UpstreamClient:
         import time
         start_time = time.time()
         # 自动补全 .json 后缀，降低调用方心智负担
+        # 三元表达式：类比 Java ternary `name.endsWith(".json") ? name : name + ".json"`
         filename = name if name.endswith(".json") else f"{name}.json"
         endpoint = f"{self.config.base_url}/api/mcp/templates/{filename}"
-        cache_key = f"template:{filename}"
+        cache_key = f"template:{filename}"  # 缓存键加前缀避免与 schema/guide 命名空间冲突
         cached = self._get_cached(cache_key)
         if cached is not None:
+            # 命中缓存直接返回，跳过 HTTP 回源，类比 Spring Cache @Cacheable 命中
             return cached
 
         try:
             resp = self._client.get(f"/api/mcp/templates/{filename}", headers=self._headers())
             resp.raise_for_status()
             template = resp.json()
-            self._set_cached(cache_key, template)  # 命中后缓存
+            self._set_cached(cache_key, template)  # 命中后缓存，下次 ttl 内直接命中
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
                 endpoint=endpoint,
@@ -339,6 +354,7 @@ class UpstreamClient:
         import time
         start_time = time.time()
         # Schema 命名规范是 xxx.schema.json，自动补全
+        # 注意：只要名字已经以 .json 结尾就视为完整文件名，否则补 .schema.json
         filename = name if name.endswith(".json") else f"{name}.schema.json"
         endpoint = f"{self.config.base_url}/api/mcp/schemas/{filename}"
         cache_key = f"schema:{filename}"
@@ -438,28 +454,30 @@ class UpstreamClient:
         try:
             resp = self._client.post(
                 "/api/mcp/forms/validate",
-                params={"mode": mode},
+                params={"mode": mode},  # 查询参数 mode=CREATE/UPDATE，类比 Java RestClient 的 queryParam
                 json=form_config,  # bare JSON body, no wrapper —— 裸 JSON 体，无包装
                 headers=self._headers(),
             )
             resp.raise_for_status()
-            raw = resp.json()
+            raw = resp.json()  # 原始响应，格式可能是 {pass, errors, warnings}
 
             # 归一化上游响应格式
             # upstream: {pass: bool, errors: [str], warnings: [str]}
             # normalized: {valid: bool, errors: [{message}], warnings: [str]}
+            # 缺省 False：若上游漏返回 pass 字段，按"未通过"处理（Fail-Closed）
             is_valid = raw.get("pass", False)  # 缺省 False，Fail-Closed
             raw_errors = raw.get("errors", [])
-            # 字符串错误升级为对象，统一 errors 元素结构
+            # 列表推导式：把每个元素转成 {message: ...} 对象
+            # 类比 Java stream().map(e -> new Error(e))，统一 errors 元素为对象结构便于前端渲染
             normalized_errors = [
-                {"message": e} if isinstance(e, str) else e
+                {"message": e} if isinstance(e, str) else e  # 字符串才包装，已是 dict 则原样保留
                 for e in raw_errors
             ]
 
             result = {
                 "valid": is_valid,
                 "errors": normalized_errors,
-                "warnings": raw.get("warnings", []),
+                "warnings": raw.get("warnings", []),  # warnings 缺省空列表
             }
 
             # 记录成功日志
@@ -476,6 +494,7 @@ class UpstreamClient:
 
         except Exception as e:
             # Fail-Closed：请求异常时返回"未通过"，避免被误判为通过
+            # 这点很关键：若异常返回 None，调用方可能误以为是"通过"，导致脏数据入库
             # 记录失败日志
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
@@ -486,6 +505,7 @@ class UpstreamClient:
                 error_message=str(e),
             )
             logger.error(f"Upstream validation failed: {e}")
+            # 返回明确的"校验失败"结构，errors 里带上异常信息便于排查
             return {
                 "valid": False,
                 "errors": [{"message": f"Upstream validation request failed: {e}"}],
@@ -625,9 +645,12 @@ class UpstreamClient:
         """
         try:
             # timeout=5 覆盖默认 30s，避免健康检查时长时间卡住（尤其启动期）
+            # 类比 Java actuator health 的短超时探活，5 秒判定连通性足够
             resp = self._client.get("/api/mcp/guides/guide.json", timeout=5, headers=self._headers())
+            # 只判 200，不验证 body 内容——这是"连通性"检查而非"业务可用性"检查
             return resp.status_code == 200
         except Exception:
+            # 任何异常（连接拒绝/超时/DNS 失败）都视为不可用，Fail-Closed
             return False
 
     def clear_cache(self):

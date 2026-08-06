@@ -75,6 +75,8 @@ class LLMClient:
             conversation_store: 会话存储，用于持久化 LLM 调用日志
         """
         if config is None:
+            # 从环境变量加载配置，类比 Spring @Value("${LLM_MODEL:默认值}")
+            # float()/int() 转换：因为 getenv 返回 str，类比 Java Integer.parseInt
             config = LLMConfig(
                 base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1"),
                 api_key=os.getenv("LLM_API_KEY", ""),
@@ -84,18 +86,22 @@ class LLMClient:
                 timeout=int(os.getenv("LLM_TIMEOUT", "300")),
             )
 
-        self.config = config
-        self._conversation_store = conversation_store
+        self.config = config  # 保存配置实例，后续方法读 model/temperature 等
+        self._conversation_store = conversation_store  # 可选的日志存储，None 时跳过日志
 
         if not config.api_key:
+            # 没配 api_key 时只 warning 不抛异常：本地模型（LM Studio）常无需 key
+            # 真正调用失败时由 SDK 抛错，这里给开发者一个提前提示
             logger.warning(
                 "LLM_API_KEY not set — LLM calls will fail until configured."
             )
 
         # OpenAI SDK 客户端，兼容所有 OpenAI 兼容 API
+        # 类比 Java 的 OkHttpClient 单例，全程复用底层连接
+        # api_key 为空时给占位字符串：OpenAI SDK 要求非空，本地模型不校验
         self.client = OpenAI(
             base_url=config.base_url,
-            api_key=config.api_key or "placeholder-key",
+            api_key=config.api_key or "placeholder-key",  # 占位 key，本地模型忽略
             timeout=config.timeout,
         )
 
@@ -164,8 +170,10 @@ class LLMClient:
         Returns:
             LLM 响应文本
         """
-        start_time = time.time()
+        start_time = time.time()  # 计时起点，用于算 duration_ms
         endpoint = f"{self.config.base_url}/chat/completions"
+        # 构造请求参数快照（用于日志）：参数为 None 时回落到配置默认值
+        # 类比 Java：Optional.ofNullable(temperature).orElse(config.temperature)
         request_data = {
             "model": self.config.model,
             "messages": messages,
@@ -174,6 +182,7 @@ class LLMClient:
         }
 
         try:
+            # 调用 OpenAI 兼容 API，类比 Java openai-java 的 service.createChatCompletion()
             response = self.client.chat.completions.create(
                 model=self.config.model,
                 messages=messages,
@@ -181,33 +190,42 @@ class LLMClient:
                 max_tokens=self.config.max_tokens if max_tokens is None else max_tokens,
             )
 
+            # choices[0]：取第一个候选回复（n=1 时只有一个），类比 Java response.getChoices().get(0)
             choice = response.choices[0]
-            message = choice.message
+            message = choice.message  # 消息对象，含 content / reasoning_content 等字段
 
-            content = message.content
+            content = message.content  # 正常输出在这里
 
             # Fallback for reasoning models (Qwen3): when content is empty
             # and finish_reason is 'length', the output is in reasoning_content
+            # 中文说明：Qwen3 推理模型把思考过程放 reasoning_content，content 可能为空
             if not content:
+                # getattr 安全取属性：若 message 无 reasoning_content 字段则返回 None
+                # 类比 Java 反射 field.get() + null 判断
                 rc = getattr(message, "reasoning_content", None)
                 if rc:
+                    # 命中回退：content 空 + reasoning_content 有值，
+                    # 通常是 finish_reason='length'（token 用完，思考没收住）
                     logger.warning(
                         f"content empty (finish_reason={choice.finish_reason}), "
                         f"using reasoning_content fallback"
                     )
                     content = rc
 
-            result = content or ""
+            result = content or ""  # 兜底空串，避免 None 传给调用方
 
             # 记录成功日志
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
-                "content": result[:500],  # 截断避免过大
-                "finish_reason": choice.finish_reason,
-                "usage": response.usage.model_dump() if response.usage else None,
+                "content": result[:500],  # 截断避免过大，类比 Java log 的 StringUtils.truncate
+                "finish_reason": choice.finish_reason,  # stop=正常结束, length=截断
+                # model_dump() 是 Pydantic 转 dict，类比 Jackson 序列化对象为 Map
+                "usage": response.usage.model_dump() if response.usage else None,  # token 用量
             }
             self._log_call(
                 endpoint=endpoint,
+                # 日志只记 messages 数量，不记完整内容（含用户隐私 + 太大）
+                # **dict 推导：把 request_data 里非 messages 的字段平铺进来
                 request_data={"messages_count": len(messages), **{k: v for k, v in request_data.items() if k != "messages"}},
                 response_data=response_data,
                 status_code=200,
@@ -229,7 +247,7 @@ class LLMClient:
                 conv_id=conv_id,
             )
             logger.error(f"LLM chat failed: {e}")
-            raise
+            raise  # 重新抛出，让上层决定降级策略（不在此吞异常）
 
     def chat_json(
         self,
@@ -259,13 +277,18 @@ class LLMClient:
         temp = self.config.temperature if temperature is None else temperature
 
         # Detect multimodal content (skip json_object mode if images present)
+        # 中文说明：检测是否有多模态消息（content 是 list 通常意味着含图片）
+        # any() 短路求值，类比 Java stream().anyMatch()
         has_images = any(
             isinstance(m.get("content"), list) for m in messages
         )
 
         # Add explicit JSON instruction
+        # 复制一份 messages 再追加，避免污染调用方传入的 list（类比 Java 防御性拷贝）
         guided_messages = list(messages)
         if not has_images:
+            # 纯文本场景才追加 system 指令：强制模型只输出 JSON
+            # 这条指令对"不守规矩"的模型很关键，否则它可能输出"好的，这是结果：{...}"
             guided_messages.append({
                 "role": "system",
                 "content": (
@@ -282,10 +305,13 @@ class LLMClient:
             "messages": guided_messages,
             "temperature": temp,
             "max_tokens": self.config.max_tokens,
+            # 多模态时 response_format 置 None：OpenAI 的 json_object 模式不支持图片
             "response_format": "json_object" if not has_images else None,
         }
 
         try:
+            # 动态构造 create 参数：多模态时不带 response_format
+            # 类比 Java Builder 模式按条件加参数
             create_kwargs = {
                 "model": self.config.model,
                 "messages": guided_messages,
@@ -293,15 +319,16 @@ class LLMClient:
                 "max_tokens": self.config.max_tokens,
             }
             if not has_images:
+                # response_format={"type": "json_object"} 让模型强制输出合法 JSON
                 create_kwargs["response_format"] = {"type": "json_object"}
 
-            response = self.client.chat.completions.create(**create_kwargs)
-            result = self._extract_json(response)
+            response = self.client.chat.completions.create(**create_kwargs)  # ** 展开字典为关键字参数
+            result = self._extract_json(response)  # 提取并解析 JSON，可能抛异常
 
             # 记录成功日志
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
-                "content": str(result)[:500],
+                "content": str(result)[:500],  # 截断避免日志过大
                 "finish_reason": response.choices[0].finish_reason,
                 "usage": response.usage.model_dump() if response.usage else None,
             }
@@ -316,12 +343,16 @@ class LLMClient:
 
             return result
         except Exception:
+            # 第一级失败（json_object 模式不支持或解析失败）：静默降级
+            # 注意这里 pass 不记日志，因为降级是预期内的正常路径
             pass
 
         # Fall back to plain text + extraction
+        # 中文说明：第二级降级——纯文本模式 + 手动 JSON 提取
+        # 适用于不支持 response_format 的模型（如老版本 Qwen、本地 LM Studio）
         logger.info("json_object mode not supported, using plain text")
-        raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id)
-        return self._parse_json_from_text(raw)
+        raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id)  # 复用 chat 走 Qwen3 回退
+        return self._parse_json_from_text(raw)  # 三级容错解析
 
     # ── JSON 提取辅助方法 ────────────────────────────────
 
