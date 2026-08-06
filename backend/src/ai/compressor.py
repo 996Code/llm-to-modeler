@@ -251,10 +251,10 @@ class CompressionCircuitBreaker:
     """
 
     def __init__(self, threshold: int = 3, cooldown_seconds: int = 120):
-        self._threshold = threshold
-        self._cooldown_seconds = cooldown_seconds
-        self._consecutive_failures = 0
-        self._tripped_at: float = 0.0
+        self._threshold = threshold  # 连续失败多少次触发熔断
+        self._cooldown_seconds = cooldown_seconds  # 熔断后冷却秒数(过后半开试探)
+        self._consecutive_failures = 0  # 当前连续失败计数
+        self._tripped_at: float = 0.0  # 熔断触发时间点(0.0 表示未熔断)
 
     def record_failure(self) -> None:
         self._consecutive_failures += 1

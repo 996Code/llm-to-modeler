@@ -50,12 +50,13 @@ class CreateFormTool(CompositeTool):
     ]
 
     def input_schema(self) -> dict:
+        # JSON Schema 描述输入结构,类比 Java 的 DTO + @Valid 注解
         return {
             "type": "object",
             "properties": {
                 "user_input": {"type": "string", "description": "用户的自然语言需求"}
             },
-            "required": ["user_input"],
+            "required": ["user_input"],  # user_input 必填
         }
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
@@ -91,25 +92,30 @@ class CreateFormTool(CompositeTool):
 
     def summarize_artifact(self, artifact: dict) -> str:
         """给压缩器用:从制品提取状态补偿。"""
-        form_name = artifact.get("formName", "")
-        form_code = artifact.get("formCode", "")
-        fields = artifact.get("formFieldConfigVos", [])
+        # 压缩后 LLM 会忘掉细节,这里把表单关键信息复灌回去
+        form_name = artifact.get("formName", "")  # 表单中文名
+        form_code = artifact.get("formCode", "")  # 表单编码(英文标识)
+        fields = artifact.get("formFieldConfigVos", [])  # 字段列表
+        # 只取前 10 个字段名拼摘要,避免补偿文本过长浪费 token
         field_summary = ", ".join(
             f.get("fieldTitleText", "") for f in fields[:10]
         )
         if len(fields) > 10:
+            # 超过 10 个:用省略号 + 总数提示,类比 Java 的 truncate
             field_summary += f" ... 共 {len(fields)} 个字段"
         return f"当前表单: {form_name} ({form_code}), 字段: {field_summary}"
 
     def title_for(self, artifact: dict) -> str:
         """给对话列表用:从制品生成标题。"""
+        # 用表单名作为对话标题,缺省"新对话"
         return artifact.get("formName", "新对话")
 
     def format_result(self, artifact: dict) -> dict:
         """给 SSE 用:从制品提取前端需要的字段(钩子化,避免 Engine 读制品内部)。"""
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get("formFieldConfigVos", [])  # 字段列表
+        # 只提取前端展示需要的字段(钩子化:Engine 不直接读 njmind 业务字段)
         return {
-            "fieldCount": len(fields),
+            "fieldCount": len(fields),  # 字段总数(前端显示)
             "formName": artifact.get("formName", ""),
             "formCode": artifact.get("formCode", ""),
             "title": artifact.get("formName", "新对话"),  # 给对话列表用

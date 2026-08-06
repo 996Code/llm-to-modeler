@@ -448,6 +448,7 @@ watch(() => store.stageMessage, () => {
   padding: 80px 24px 40px;
   text-align: center;
 }
+/* 欢迎页大 Logo（渐变圆角方块） */
 .welcome-logo {
   width: 64px; height: 64px;
   margin: 0 auto 20px;
@@ -458,23 +459,27 @@ watch(() => store.stageMessage, () => {
   font-size: 30px;
   box-shadow: 0 8px 24px rgba(51, 112, 255, 0.25);
 }
+/* 欢迎页主标题 */
 .welcome-title {
   font-size: 28px;
   font-weight: 600;
   color: var(--text-primary);
   margin-bottom: 10px;
 }
+/* 欢迎页副标题 */
 .welcome-subtitle {
   font-size: 15px;
   color: var(--text-secondary);
   margin-bottom: 40px;
 }
+/* 示例卡片网格：两列等宽布局 */
 .examples {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
   text-align: left;
 }
+/* 单个示例卡片：横向排列图标+文字 */
 .example-card {
   display: flex;
   align-items: flex-start;
