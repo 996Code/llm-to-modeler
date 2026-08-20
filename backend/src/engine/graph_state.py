@@ -98,8 +98,9 @@ class GraphState(TypedDict, total=False):
     conversation_id: str
     # 嵌入(embed)模式下上游透传的请求头,工具可能需要(如多租户 token)
     forward_headers: Dict[str, str]
-    # 当前已有配置(用户已生成的 artifact),modify 类工具读它做增量修改
-    current_config: Optional[Dict[str, Any]]
+    # 对话的上下文参数(宿主下发的当前制品)——pack 路由据此判断画布状态,
+    # 修改类工具读它做增量基线。结构由 pack 各自消化(引擎不解析内部字段)。
+    context_artifact: Optional[Dict[str, Any]]
 
     # ── 意图识别(classify_intent 节点写) ──
     # 选中的工具名;条件边 route_by_tool 据此决定走 execute_tool 还是 END

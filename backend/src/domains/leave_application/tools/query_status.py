@@ -54,10 +54,6 @@ class QueryLeaveStatusTool(Tool):
 
     # ── 安全声明(供引擎做风控决策) ──
     # 这些布尔标记类似 Java 注解 @ReadOnly / @Destructive 的运行时等价物
-    is_destructive = False         # 是否有破坏性(会修改数据)
-    is_read_only = True            # 是否纯只读(查询类工具都是 True)
-    is_concurrency_safe = True     # 是否并发安全(只读天然安全)
-    requires_existing_artifact = False  # 是否需要已有制品(本工具是查询,不需要)
 
     def input_schema(self) -> dict:
         """声明工具的输入 schema(JSON Schema 格式)。

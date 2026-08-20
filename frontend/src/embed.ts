@@ -9,18 +9,20 @@
 //   <script src="https://modeler.example.com/embed.js"></script>
 //   <script>
 //     const modeler = new LLMFormModeler({
- *       baseUrl: 'https://modeler.example.com',
- *       userId: 'user_123',
- *       onConfigGenerated: (config) => { ... },
- *       onConfigApply: (config) => { ... },
- *     })
- *     modeler.open()
- *   </script>
- *
- * 这个文件会被 Vite 单独打包成一个独立的 JS 文件（多入口构建），
- * 不会与主应用打在一起。
- * =============================================================================
- */
+//       baseUrl: 'https://modeler.example.com',
+//       userId: 'user_123',
+//       onConfigGenerated: (config) => { ... },
+//       onConfigApply: (config) => { ... },
+//     })
+//     modeler.open()
+//   </script>
+//
+// 这个文件会被 Vite 单独打包成一个独立的 JS 文件（多入口构建），
+// 不会与主应用打在一起。
+//
+// 嵌入契约 v1 信封协议（READY/INIT/GET_CONTEXT/APPLY/GET_AUTH/CLOSE/RESIZE），
+// 与 mind-designer 适配器同标准，见 src/composables/hostPort.ts。
+// =============================================================================
 
 /**
  * SDK 配置选项（宿主系统构造时传入）。
@@ -33,8 +35,11 @@ export interface EmbedOptions {
   headers?: Record<string, string>                 // 要透传给 iframe 的请求头
   position?: 'bottom-right' | 'bottom-left'        // 浮窗位置（右下/左下）
   theme?: 'light' | 'dark'                         // 主题
-  onConfigGenerated?: (config: any) => void        // 回调：配置已生成
-  onConfigApply?: (config: any) => void            // 回调：用户点了"应用配置"
+  /** 宿主"设计器"当前配置的取数钩子（GET_CONTEXT/APPLY 的 artifact 来源）。
+   *  返回 null 表示当前无配置。与 mind-designer 的 currentVo() 同角色。 */
+  getArtifact?: () => any
+  onConfigGenerated?: (config: any) => void        // 回调：配置已生成（仅诊断用，交互在 iframe 内自足）
+  onConfigApply?: (config: any) => void            // 回调：iframe 内点了"应用"（宿主渲染到自己的设计器）
   onClose?: () => void                             // 回调：浮窗被关闭
 }
 
@@ -104,20 +109,73 @@ export class LLMFormModeler {
   }
 
   /**
-   * 根据展开状态更新浮动按钮外观（私有）。
+   * 根据展开状态更新浮动按钮（私有）。
+   * 打开悬浮窗时隐藏悬浮球（子应用内自带标题栏与关闭按钮，悬浮球再变 ✕ 会
+   * 与窗口边缘重叠）；关闭后恢复显示，可再次打开。
    */
   private updateFloatBtn() {
     if (!this.floatBtn) return
-    // 打开时切换成关闭图标（✕），关闭时恢复聊天气泡（💬）
-    if (this.isOpen) {
-      this.floatBtn.innerHTML = '✕'
-      this.floatBtn.style.background = '#86909c'
-      this.floatBtn.style.boxShadow = '0 4px 12px rgba(134,144,156,0.4)'
-    } else {
-      this.floatBtn.innerHTML = '💬'
-      this.floatBtn.style.background = '#3370ff'
-      this.floatBtn.style.boxShadow = '0 4px 12px rgba(51,112,255,0.4)'
+    this.floatBtn.innerHTML = '💬'
+    this.floatBtn.style.background = '#3370ff'
+    this.floatBtn.style.boxShadow = '0 4px 12px rgba(51,112,255,0.4)'
+    this.floatBtn.style.display = this.isOpen ? 'none' : 'flex'
+  }
+
+  /**
+   * 发送 INIT（幂等：只发一次，READY 重发不重复）。
+   * payload 对齐 mind-designer 的握手标准：capabilities 通告齐全，iframe 内
+   * 子应用的应用按钮/上下文拉取才会启用（capabilities 缺 apply 时子应用退化）。
+   */
+  private _initSent = false
+  private trySendInit() {
+    if (this._initSent || !this.iframe) return
+    this._initSent = true
+    this.postToChild('INIT', {
+      userId: this.options.userId,
+      headers: this.options.headers || {},
+      capabilities: ['context', 'apply', 'auth', 'resize'],
+      // 宿主"设计器"的当前配置（无则为 null，子应用首次对话走 create）
+      artifact: this.currentArtifact(),
+      revision: this.currentRevision(),
+    })
+  }
+
+  /** 宿主→子消息统一出口：嵌入契约信封 {v, src:'host', id?, type, payload}。
+   *  targetOrigin 用 iframe 的精确 origin（防消息泄露给被重定向的窗口）；
+   *  baseUrl 解析失败时退回 '*'（demo 宽松场景） */
+  private postToChild(type: string, payload: Record<string, unknown>, id?: string) {
+    this.iframe?.contentWindow?.postMessage(
+      { v: 1, src: 'host', ...(id !== undefined ? { id } : {}), type, payload },
+      this.iframeOrigin(),
+    )
+  }
+
+  /** iframe 的 origin（从 baseUrl 推导；同源相对地址即宿主自身） */
+  private iframeOrigin(): string {
+    try {
+      return new URL(this.options.baseUrl, window.location.origin).origin
+    } catch {
+      return '*'
     }
+  }
+
+  /** 当前"设计器"配置（宿主注册的取数钩子；无钩子视为无配置） */
+  private currentArtifact(): any {
+    try {
+      return this.options.getArtifact?.() ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /** 简易 revision（变更检测用）：配置 JSON 的指纹。无配置时为 null */
+  private currentRevision(): string | null {
+    const a = this.currentArtifact()
+    if (a == null) return null
+    const s = JSON.stringify(a)
+    let h = 0
+    for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0
+    return `r${s.length}_${Math.abs(h)}`
   }
 
   /**
@@ -126,22 +184,59 @@ export class LLMFormModeler {
    * @param e 消息事件
    */
   private handleMessage(e: MessageEvent) {
-    // 解构出 type 和 payload（e.data 可能为空，给个兜底 {}）
-    const { type, payload } = e.data || {}
+    const { type, payload, src, id } = e.data || {}
+    // 嵌入契约：子→宿消息带 src:'child'（双向身份标识）
+    if (src !== 'child') return
     switch (type) {
-      // iframe 内生成了配置 → 通知宿主
-      case 'MODELER_CONFIG_GENERATED':
-        // 可选链 ?. ：仅当 onConfigGenerated 存在时才调用
-        this.options.onConfigGenerated?.(payload.config)
+      // 子应用就绪 → 发 INIT（握手时序：READY 前 hostPort 监听未挂，早发会丢）
+      case 'READY':
+        this.trySendInit()
         break
-      // 用户在 iframe 内点了"应用配置" → 通知宿主
-      case 'MODELER_CONFIG_APPLY':
-        this.options.onConfigApply?.(payload.config)
+      // 拉最新"设计器"配置（子应用每次发消息前都会拉，作为 AI 的修改基线）
+      case 'GET_CONTEXT':
+        this.postToChild('GET_CONTEXT_RESULT', {
+          artifact: this.currentArtifact(),
+          revision: this.currentRevision(),
+        }, id)
         break
-      // iframe 请求关闭
-      case 'MODELER_CLOSE':
+      // iframe 内点了"应用"：渲染回调交给宿主 + 回执（无回执子应用 30s 超时报链路异常）
+      case 'APPLY': {
+        const artifact = payload?.artifact
+        try {
+          this.options.onConfigApply?.(artifact)
+          this.postToChild('APPLY_RESULT', {
+            ok: true,
+            artifact,
+            revision: this.currentRevision(),
+          }, id)
+        } catch (err) {
+          this.postToChild('APPLY_RESULT', {
+            ok: false, code: 'HOST_ERROR', message: String(err),
+          }, id)
+        }
+        break
+      }
+      // 鉴权查询（token 刷新场景）
+      case 'GET_AUTH':
+        this.postToChild('GET_AUTH_RESULT', {
+          userId: this.options.userId,
+          headers: this.options.headers || {},
+        }, id)
+        break
+      // iframe 请求关闭（新契约消息名）
+      case 'CLOSE':
         this.close()
         break
+      // iframe 请求调整窗口尺寸（如全屏查看 JSON 时撑大，关闭后恢复）
+      case 'RESIZE': {
+        const expanded = payload?.mode === 'expanded'
+        if (this.container) {
+          this.container.style.width = expanded ? 'min(1100px, calc(100vw - 64px))' : '400px'
+          this.container.style.height = expanded ? 'min(820px, calc(100vh - 120px))' : '600px'
+          this.container.style.transition = 'width 0.25s ease, height 0.25s ease'
+        }
+        break
+      }
     }
   }
 
@@ -154,7 +249,7 @@ export class LLMFormModeler {
     this.container.style.cssText = `
       position: fixed;
       ${this.options.position === 'bottom-left' ? 'left' : 'right'}: 24px;
-      bottom: 90px;
+      bottom: 24px;
       width: 400px; height: 600px;
       max-width: calc(100vw - 48px); max-height: calc(100vh - 120px);
       border-radius: 12px;
@@ -177,16 +272,11 @@ export class LLMFormModeler {
     // 授予 iframe 剪贴板写入权限（应用配置时可能需要复制）
     this.iframe.allow = 'clipboard-write'
 
-    // iframe 加载完成后，通过 postMessage 发送 userId + headers
+    // iframe 加载完成后发送 INIT（嵌入契约信封：{v, src:'host', type, payload}）。
+    // 注意：必须等子应用的 READY 再发——onload 时子应用的 hostPort 监听可能
+    // 还没挂上，早发会丢。READY 由 handleMessage 收到后触发 sendInit。
     this.iframe.onload = () => {
-      // contentWindow 是 iframe 内部的 window 对象，向它 postMessage 即可跨窗口通信
-      this.iframe?.contentWindow?.postMessage({
-        type: 'MODELER_INIT',
-        payload: {
-          userId: this.options.userId,
-          headers: this.options.headers || {},
-        },
-      }, '*')
+      this.trySendInit()
     }
 
     this.container.appendChild(this.iframe)
@@ -232,15 +322,20 @@ export class LLMFormModeler {
   }
 
   /**
-   * 设置上下文（如宿主当前正在编辑的表单）。
-   * @param context 包含 formCode / userId 的上下文
+   * 设置上下文（更新 userId 并通知子应用刷新鉴权）。
+   * 走契约的 AUTH_UPDATE 通知（INIT 只在握手时发一次，后续身份变化增量通知）。
    */
-  setContext(context: { formCode?: string; userId?: string }) {
+  setContext(context: { userId?: string }) {
     if (context.userId) this.options.userId = context.userId
     if (this.iframe) {
       this.iframe.contentWindow?.postMessage(
-        { type: 'MODELER_INIT', payload: context },
-        '*',
+        {
+          v: 1,
+          src: 'host',
+          type: 'AUTH_UPDATE',
+          payload: { userId: context.userId || this.options.userId },
+        },
+        this.iframeOrigin(),
       )
     }
   }

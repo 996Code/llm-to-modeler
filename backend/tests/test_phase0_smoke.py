@@ -62,26 +62,28 @@ def test_new_sdk_imports():
 )
 def test_new_engine_imports():
     """新 Engine 模块可 import(含 langgraph 依赖的 stream_graph)。"""
-    from engine.dispatcher import ToolDispatcher
     from engine.conversation import ConversationManager
     from engine.stream import stream_graph
     from engine.prompt_loader import PromptLoader
     from engine.compression import CompressionSidechain
     from engine.logging_filter import RedactFilter
-    assert all([ToolDispatcher, ConversationManager, stream_graph,
-                PromptLoader, CompressionSidechain, RedactFilter])
+    from engine.nodes import classify_intent_node, _route_pack
+    assert all([ConversationManager, stream_graph,
+                PromptLoader, CompressionSidechain, RedactFilter,
+                classify_intent_node, _route_pack])
 
 
 def test_new_engine_imports_no_langgraph():
     """不依赖 langgraph 的 Engine 模块仍可 import。"""
-    from engine.dispatcher import ToolDispatcher
     from engine.conversation import ConversationManager
     from engine.prompt_loader import PromptLoader
     from engine.compression import CompressionSidechain, build_compressed_history
     from engine.logging_filter import RedactFilter
-    assert all([ToolDispatcher, ConversationManager,
+    from engine.nodes import _route_pack
+    from sdk.pack_router import DefaultPackRouter
+    assert all([ConversationManager,
                 PromptLoader, CompressionSidechain, build_compressed_history,
-                RedactFilter])
+                RedactFilter, _route_pack, DefaultPackRouter])
 
 
 def test_new_adapters_imports():

@@ -11,6 +11,7 @@ python-multipart>=0.0.32               # FastAPI form 解析
 
 # ── LLM 编排 ──
 langgraph>=1.2,<1.3                    # 状态图工作流(阶段 3 后仅 pack 内部用)
+langgraph-checkpoint-sqlite>=2.0       # SqliteSaver:checkpoint 落盘(追问现场不随进程重启丢失)
 langchain-openai>=1.3,<1.4             # OpenAI 兼容 LLM client
 openai>=2.45,<2.46                     # OpenAI SDK
 

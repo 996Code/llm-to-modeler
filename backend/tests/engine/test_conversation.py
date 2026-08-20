@@ -126,35 +126,7 @@ class TestSave:
         assert "validation_errors" not in payload
 
 
-class TestPendingAsk:
-    def test_save_pending_ask(self):
-        store = MagicMock()
-        cm = ConversationManager(store=store)
-
-        cm.save_pending_ask("conv1", "create_form", {"questions": []}, 1)
-        store.append_event.assert_called_once_with("conv1", "ask", {
-            "tool": "create_form",
-            "ask": {"questions": []},
-            "round": 1,
-        })
-
-    def test_load_pending_ask(self):
-        store = MagicMock()
-        store.load_pending_ask.return_value = {
-            "payload": {"tool": "create_form", "round": 1},
-        }
-        cm = ConversationManager(store=store)
-
-        result = cm.load_pending_ask("conv1")
-        assert result["payload"]["tool"] == "create_form"
-
-    def test_clear_pending_ask(self):
-        store = MagicMock()
-        cm = ConversationManager(store=store)
-
-        cm.clear_pending_ask("conv1")
-        store.clear_pending_ask.assert_called_once_with("conv1")
-
+# 注：TestPendingAsk 已随旧 ToolDispatcher 退役删除（追问现场由 LangGraph checkpointer 承担）
 
 class TestListMeta:
     def test_list_meta_does_not_join_events(self):

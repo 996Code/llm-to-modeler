@@ -27,6 +27,7 @@ from sdk.registry import ToolRegistry
 # 导入本 pack 的各个工具实现类。每个工具是 Tool 的子类(见 sdk/tool.py)。
 # 这些 import 必须在 pack 顶层,确保动态 import 本模块时类已被加载。
 from domains.njmind_form.tools.create_form import CreateFormTool
+from domains.njmind_form.router import NjmindFormRouter
 from domains.njmind_form.tools.modify_form import ModifyFormTool
 from domains.njmind_form.tools.get_form import GetFormTool
 from domains.njmind_form.tools.clone_form import CloneFormTool
@@ -88,3 +89,15 @@ def create_prompt_loader():
     # 即 packs_root = backend/src/domains
     domains_dir = Path(__file__).resolve().parent.parent
     return PromptLoader(packs_root=domains_dir)
+
+
+def create_router(registry: ToolRegistry = None):
+    """pack 二级路由工厂（可选契约）：领域工具选择的判断规则归 pack。
+
+    引擎一级路由选中本领域后，由它在本 pack 工具集内选出具体工具
+    （create/modify/get/... 的分流依据画布状态与话术，见 router.py）。
+    不提供本工厂的 pack 回退 DefaultPackRouter（中性框架，行为同旧扁平路由）。
+    """
+    if registry is None:
+        registry = create_registry()
+    return NjmindFormRouter(registry)

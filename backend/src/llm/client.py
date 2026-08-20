@@ -222,11 +222,18 @@ class LLMClient:
                 # model_dump() 是 Pydantic 转 dict，类比 Jackson 序列化对象为 Map
                 "usage": response.usage.model_dump() if response.usage else None,  # token 用量
             }
+            # prompt 总字符数（体积指标）：慢调用排查一眼定位是不是大 prompt
+            messages_chars = sum(
+                len(m.get("content") or "") for m in messages
+            )
             self._log_call(
                 endpoint=endpoint,
-                # 日志只记 messages 数量，不记完整内容（含用户隐私 + 太大）
-                # **dict 推导：把 request_data 里非 messages 的字段平铺进来
-                request_data={"messages_count": len(messages), **{k: v for k, v in request_data.items() if k != "messages"}},
+                # 日志只记数量/体积，不记完整内容（含用户隐私 + 太大）
+                request_data={
+                    "messages_count": len(messages),
+                    "messages_chars": messages_chars,
+                    **{k: v for k, v in request_data.items() if k != "messages"},
+                },
                 response_data=response_data,
                 status_code=200,
                 duration_ms=duration_ms,
@@ -240,7 +247,11 @@ class LLMClient:
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
                 endpoint=endpoint,
-                request_data={"messages_count": len(messages), **{k: v for k, v in request_data.items() if k != "messages"}},
+                request_data={
+                    "messages_count": len(messages),
+                    "messages_chars": sum(len(m.get("content") or "") for m in messages),
+                    **{k: v for k, v in request_data.items() if k != "messages"},
+                },
                 status_code=500,
                 duration_ms=duration_ms,
                 error_message=str(e),
@@ -334,7 +345,11 @@ class LLMClient:
             }
             self._log_call(
                 endpoint=endpoint,
-                request_data={"messages_count": len(guided_messages), **{k: v for k, v in request_data.items() if k != "messages"}},
+                request_data={
+                    "messages_count": len(guided_messages),
+                    "messages_chars": sum(len(m.get("content") or "") for m in guided_messages),
+                    **{k: v for k, v in request_data.items() if k != "messages"},
+                },
                 response_data=response_data,
                 status_code=200,
                 duration_ms=duration_ms,

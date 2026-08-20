@@ -50,7 +50,7 @@ class AskQuestion(BaseModel):
 
 class AskSpec(BaseModel):
     """追问规格。对标 CC AskUserQuestionTool。
-    工具产出 ToolResult.ask → SSE 推前端 → 用户带 answers 重发 → dispatcher 重跑工具。"""
+    工具产出 ToolResult.ask → SSE 推前端 → 用户带 answers 重发 → 引擎从 interrupt 断点重跑工具。"""
     questions: list[AskQuestion]
 
 
@@ -91,15 +91,6 @@ class Tool(ABC):
     name: str                     # 工具名,LLM 选择时看到
     description: str              # 工具说明
     when: str                     # "何时用"短描述(填进选择 prompt)
-
-    # ── 安全声明(Fail-Closed,借鉴 CC Tool.ts:757)──
-    is_destructive: bool = True   # 默认破坏性,需 pack 显式声明 False 才认为安全
-    is_read_only: bool = False
-    # ── 并发安全声明(C.2-B:借鉴 CC isConcurrencySafe)──
-    is_concurrency_safe: bool = False
-    
-    # ── 插件化元数据 ──
-    requires_existing_artifact: bool = False  # 是否需要已有配置(modify 类工具)
 
     @abstractmethod
     def input_schema(self) -> dict:

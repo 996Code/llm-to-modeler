@@ -18,15 +18,6 @@ def _make_ctx(llm=None, asset_client=None, prompt_loader=None):
 
 
 class TestCloneFormToolDeclaration:
-    def test_is_destructive(self):
-        assert CloneFormTool().is_destructive is True
-
-    def test_is_not_read_only(self):
-        assert CloneFormTool().is_read_only is False
-
-    def test_is_not_concurrency_safe(self):
-        assert CloneFormTool().is_concurrency_safe is False
-
     def test_name(self):
         assert CloneFormTool().name == "clone_form"
 
@@ -225,8 +216,9 @@ class TestExecute:
         assert result.artifact is None
         assert result.error_for_llm is not None
 
-    def test_execute_create_failure(self):
-        """创建新表单失败 -> 返回错误。"""
+    def test_execute_never_persists(self):
+        """AI 永不落库：clone 产出 artifact 但绝不调上游 persist_artifact
+        （保存只属于业务人员的保存按钮）。"""
         tool = CloneFormTool()
         llm = MagicMock()
         llm.chat_json.return_value = {
@@ -241,13 +233,11 @@ class TestExecute:
             "formFieldConfigVos": [],
         }
         asset.validate_artifact.return_value = {"valid": True, "errors": []}
-        asset.persist_artifact.return_value = {"success": False}
         ctx = _make_ctx(llm=llm, asset_client=asset)
 
         result = tool.execute({"user_input": "复制请假表单"}, ctx)
-        assert result.artifact is None
-        assert result.error_for_llm is not None
-        assert "创建新表单失败" in result.error_for_llm
+        assert result.artifact is not None          # 产出克隆配置
+        asset.persist_artifact.assert_not_called()  # 但绝不落库
 
 
 class TestSummarizeArtifact:

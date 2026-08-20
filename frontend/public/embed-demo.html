@@ -295,10 +295,11 @@
 
   // dev 模式直接引入 embed.ts（Vite 原生支持 TS）
   // production 模式引入构建产物 embed.js
-  // 用 location.port 判断：dev server 在 13080
+  // 用 location.port 判断：dev server 在 13080。
+  // dev 路径必须带 base 前缀（vite base=/ai-modeler/）：裸 /src/embed.ts 会 404
   const isDev = location.port === '13080'
   const embedModule = isDev
-    ? await import('/src/embed.ts')
+    ? await import('/ai-modeler/src/embed.ts')
     : await import(MODELER_BASE_URL + '/embed.js')
 
   const LLMFormModeler = embedModule.default || window.LLMFormModeler
@@ -311,15 +312,18 @@
     userId: USER_ID,
     position: 'bottom-right',
 
+    // 宿主"设计器"的当前配置（GET_CONTEXT/APPLY 的 artifact 来源）——
+    // 与 mind-designer 的 currentVo() 同角色，AI 据此做增量修改的基线
+    getArtifact: () => currentConfig,
+
     // 配置生成成功（每次 LLM 生成后触发）
     onConfigGenerated: (config) => {
       log('收到配置: ' + (config.formName || '未命名'), 'info')
-      renderConfig(config)
     },
 
-    // 用户点击"应用配置"按钮
+    // 用户在 iframe 内点"应用配置"（契约 APPLY：渲染回调 + SDK 自动回执）
     onConfigApply: (config) => {
-      log('用户点击应用配置: ' + (config.formName || ''), 'apply')
+      log('应用配置到设计器: ' + (config.formName || ''), 'apply')
       renderConfig(config)
       highlightDesigner()
     },

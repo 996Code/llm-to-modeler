@@ -112,39 +112,7 @@ class TestSessionMeta:
         assert conv["currentConfig"]["formCode"] == "test"
 
 
-class TestPendingAsk:
-    """pending_ask 持久化与恢复。"""
-
-    def test_save_and_load_pending_ask(self, store):
-        store.create_conversation("user1")
-        conv_id = store.list_conversations("user1")[0]["id"]
-
-        store.append_event(conv_id, "ask", {
-            "tool": "create_form",
-            "ask": {"questions": [{"question": "需要哪些字段?"}]},
-            "round": 1,
-        })
-
-        loaded = store.load_pending_ask(conv_id)
-        assert loaded is not None
-        assert loaded["payload"]["tool"] == "create_form"
-        assert loaded["payload"]["round"] == 1
-
-    def test_clear_pending_ask(self, store):
-        store.create_conversation("user1")
-        conv_id = store.list_conversations("user1")[0]["id"]
-
-        store.append_event(conv_id, "ask", {"tool": "create_form", "round": 1})
-        assert store.load_pending_ask(conv_id) is not None
-
-        store.clear_pending_ask(conv_id)
-        assert store.load_pending_ask(conv_id) is None
-
-    def test_no_pending_ask_returns_none(self, store):
-        store.create_conversation("user1")
-        conv_id = store.list_conversations("user1")[0]["id"]
-        assert store.load_pending_ask(conv_id) is None
-
+# 注：TestPendingAsk 已随旧 ToolDispatcher 退役删除（追问现场由 LangGraph checkpointer 承担）
 
 class TestCrashRecovery:
     """崩溃重放恢复:写 100 轮后状态完整。"""

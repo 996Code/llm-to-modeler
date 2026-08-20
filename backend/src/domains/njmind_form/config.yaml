@@ -1,3 +1,8 @@
+# 领域声明（引擎一级路由的候选依据——描述里不带工具细节，引擎据此选"领域"）
+domain:
+  description: 表单/低代码表单的创建、修改、查询、复制（"加个字段/改必填/做个表单"类需求）
+  fallback: true   # 无任何领域匹配时的兜底 pack（闲聊/能力询问由本域 chat 承接）
+
 # njmind-form pack 静态配置
 # 所有 njmind 专属的 URL 路径、字段类型映射集中于此。
 # 换部署环境或上游 API 升级,只改此文件,不改代码。
@@ -14,33 +19,70 @@ paths:
   update: /api/mcp/forms/{code}/update
   get_form: /api/mcp/forms/{code}
 
-# 字段类型 code → 模板文件名 stem(原 nodes.py TYPE_TO_TEMPLATE)
-# 取模板时拼接为 f"{stem}_field"
+# 字段类型码 → 模板 stem 的例外覆盖（默认推导：类型名 name.lower()，见 create_form._step_fetch_templates）
+# 全量类型表以上游 guide.json 的 fieldTypes 为唯一事实源，此处只保留「推导规则不适用」的例外：
+#   类型码 0-19 全量由 guide.json 提供；本表仅覆盖个别类型名与模板名不一致的情况。
+#   上游无模板的类型（BAR_CODE=11 / TAB=13 / TEXT_SHOW=14 / SIGNATURE=19）→ fail-closed 追问，绝不回退 text。
 type_to_template:
-  0: text
-  1: number
-  2: date
-  3: file_upload
-  4: select
-  5: multiple_select
-  6: department
-  7: user
-  8: auto_number
-  9: child_form
-  12: segment
-  16: rich_text
+  10: related_data    # RELATION_DATA(关联数据) → related_data_field
+  17: reference_record # CITE_RECORD(引用记录) → reference_record_field
 
-# 字段类型 code → 类型名(原 nodes.py TYPE_NAMES)
-type_names:
-  0: TEXT
-  1: NUMBER
-  2: DATE
-  3: FILE_UPLOAD
-  4: SELECT
-  5: MULTIPLE_SELECT
-  6: DEPARTMENT
-  7: USER
-  8: AUTO_NUMBER
-  9: CHILD_FORM
-  12: SEGMENT
-  16: RICH_TEXT
+# 制品 manifest（供通用层消费：前端 diff / 版本历史 / 服务发现）
+artifact:
+  type: form-config
+  # 制品卡动作（前端按声明渲染；apply 仍叠加宿主 capabilities 双重判定）：
+  # view_json=查看JSON / apply=应用到宿主 / rewind=回滚到此版本
+  actions: [view_json, apply, rewind]
+  identity:
+    formFieldConfigVos: fieldTitleKey
+    formFieldConfigVos.*.childFormFieldConfigVo: fieldTitleKey
+  display:
+    title: formName
+    item_label: fieldTitleText
+    # 欢迎页大图标（前端通用图标集里的名字，未知名字回退默认图标）
+    welcome_icon: form
+    # ↓ 前端通用组件的渲染辅助（领域词只住在这里，不进前端代码）
+    # 数据结果卡片的 key→中文标签（查表结果展示用）
+    data_labels:
+      applicant: 申请人
+      leaveType: 请假类型
+      startDate: 开始日期
+      endDate: 结束日期
+      reason: 原因
+      status: 状态
+      approvalId: 审批编号
+      name: 姓名
+      department: 部门
+      phone: 手机号
+      email: 邮箱
+      address: 地址
+      type: 类型
+      title: 标题
+      description: 描述
+      amount: 金额
+      date: 日期
+      category: 分类
+      remark: 备注
+      id: 编号
+    # 数据卡片不展示的内部字段
+    data_hidden: [status, approvalId]
+    # 欢迎页示例卡（title/desc/prompt/icon；icon 取平台通用图标集里的名字）
+    welcome_examples:
+      - {title: 请假申请表, desc: 姓名、开始日期、结束日期、事由, prompt: 创建一个请假表单，包含姓名、开始日期、结束日期、请假事由, icon: form}
+      - {title: 联系人表, desc: 姓名、邮箱、电话、地址, prompt: 创建一个联系人表单，包含姓名、邮箱、电话、地址, icon: contacts}
+      - {title: 客户反馈表, desc: 客户名称、反馈类型、详细描述, prompt: 创建一个客户反馈表，包含客户名称、反馈类型（下拉选择）、详细描述, icon: contacts}
+
+# 依赖的上游服务名（地址由宿主 services 表 / env 提供，见 upstream_client.resolve_base）
+services:
+  njmind-modeler: {}
+
+# 校验机械修复的属性兜底值（第③级来源，前两级：表内同类型字段、上游模板）。
+# 背景：上游 user_field/department_field 模板自身缺 selectMode，按模板生成的
+# 产物首轮校验必挂；此表让「必填项缺失/值域不合法」在本地循环修复，不烧 LLM。
+required_prop_defaults:
+  7:            # USER
+    selectMode: 1
+  6:            # DEPARTMENT
+    selectMode: 1
+  12:           # SEGMENT
+    displayStyle: 1

@@ -92,7 +92,7 @@ def create_mcp_server(upstream, graph=None):
             "compressed_history": "",        # 压缩后的历史摘要（首轮为空）
             "conversation_id": f"mcp_{thread_id}",
             "forward_headers": {},           # 透传给上游的鉴权头（MCP 无外部用户，空）
-            "current_config": None,          # 已有配置（编辑场景用，生成场景为空）
+            "context_artifact": None,       # 对话上下文制品（MCP 单轮无宿主，为空）
             "tool_name": "",                 # 由 classify_intent 节点填入
             "intent_reason": "",             # 意图分类的 LLM 推理过程
             "tool_state": {},                # 工具内部状态机

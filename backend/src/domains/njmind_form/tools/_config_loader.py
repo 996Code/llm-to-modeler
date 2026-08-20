@@ -23,7 +23,7 @@
 Python 单线程内赋值即"发布",这里不考虑多线程并发首写(服务启动时单线程加载)。
 """
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional
 
 import yaml
 
@@ -33,6 +33,8 @@ _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 # 缓存槽:None 表示尚未加载;非 None 表示已缓存两个映射表。
 # 模块级变量,等价 Java 的 static 字段。
 _CACHE: Optional[Tuple[Dict[int, str], Dict[int, str]]] = None
+# 校验机械修复的属性兜底值缓存：{类型code: {属性名: 默认值}}
+_PROP_DEFAULTS: Optional[Dict[int, Dict[str, Any]]] = None
 
 
 def load_type_mappings() -> Tuple[Dict[int, str], Dict[int, str]]:
@@ -76,4 +78,30 @@ def load_type_mappings() -> Tuple[Dict[int, str], Dict[int, str]]:
 
     # 写入缓存并返回。后续所有调用走 if _CACHE is not None 分支。
     _CACHE = (t2t, tn)
+
+    # 顺带解析 required_prop_defaults（key 转 int，值保持原样）
+    global _PROP_DEFAULTS
+    _PROP_DEFAULTS = {
+        int(k): dict(v)
+        for k, v in (cfg.get("required_prop_defaults") or {}).items()
+    }
     return _CACHE
+
+
+def field_template_stem(type_code: int, type_name: str) -> str:
+    """类型 → 上游字段模板 stem（pack 内共用：create 拉模板 / modify 增量
+    add_field 骨架 fallback 两处同源）。
+
+    规则：config.yaml 的 type_to_template 例外表（按 code）优先，
+    默认按类型名小写推导（TEXT → text_field）。例外表与旧 create_form 的
+    _TYPE_OVERRIDES（按名）内容等价，统一收敛到这里单一事实源。
+    """
+    t2t, _ = load_type_mappings()
+    return t2t.get(int(type_code)) or type_name.lower()
+
+
+def load_prop_defaults() -> Dict[int, Dict[str, Any]]:
+    """类型 → 必填属性兜底值（校验机械修复第③级来源）。"""
+    if _PROP_DEFAULTS is None:
+        load_type_mappings()
+    return _PROP_DEFAULTS or {}

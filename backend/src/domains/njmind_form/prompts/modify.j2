@@ -5,23 +5,24 @@
 ## 任务
 根据用户的修改指令，修改现有的表单配置 JSON。
 输出修改后的完整 JSON（包含所有字段，不要省略未修改的部分）。
+输出为紧凑 JSON（无缩进无换行），减少生成时间。
 
 ## 修改规则
 1. 保留原有表单结构，只修改指令涉及的部分
 2. 新增字段时参照已有字段的结构
 3. 删除字段时从 formFieldConfigVos 数组中移除
 4. 修改字段类型时同步更新 formFieldType 和 fieldTypeName
-5. 修改字段名时同步更新 fieldTitleText 和 fieldTitleKey
-6. 不要改动 formCode、topButtons、bottomButtons 等系统字段（除非指令明确要求）
+5. 【硬约束】formCode、formConfigId 与已有字段的 fieldTitleKey 是数据库标识，与已存数据关联，**原样保留、禁止修改或删除**。修改字段名只改 fieldTitleText（中文名），key 不动
+6. 不要改动 topButtons、bottomButtons 等系统字段
 7. fieldConditionDisplays 必须为 []
-8. 只输出修改后的完整 JSON
+8. 只输出修改后的完整 JSON（formCode、formConfigId 与所有原有字段的 fieldTitleKey 必须原样出现在输出中）
 
 ## 字段类型代码
 {% include "njmind_form/prompts/_sections/field_types.j2" %}
 
-## 当前配置
+## 当前配置（紧凑格式）
 ```json
-{{ config | tojson(indent=2) }}
+{{ config | tojson }}
 ```
 
 {% include "njmind_form/prompts/_sections/keyword_hints.j2" %}

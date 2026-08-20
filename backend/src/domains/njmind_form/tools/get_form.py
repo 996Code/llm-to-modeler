@@ -45,14 +45,10 @@ class GetFormTool(Tool):
 
     # ── 安全声明 ──
     # 只读工具:不修改任何数据,并发安全
-    is_destructive = False
-    is_read_only = True
-    is_concurrency_safe = True
 
     # ── 插件化元数据 ──
     # 与 query_leave_status 不同:本工具不依赖已有 artifact,
     # 而是主动去查询并产出 artifact
-    requires_existing_artifact = False  # 不需要已有配置,而是去查询
 
     def input_schema(self) -> dict:
         """输入 schema:user_input 必填。
@@ -69,27 +65,46 @@ class GetFormTool(Tool):
         }
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
-        """执行查询:LLM 提取 formCode → 调用 API → 返回结果。
+        """执行查询：优先用当前上下文里的表单，其次才按 formCode 查上游。
 
-        【三步流程】
-          Step 1: LLM 提取 formCode(发 stage 事件告知前端进度)
-          Step 2: 调 asset_client.get_form 查询
-          Step 3: 返回 ToolResult(含 artifact + summary + extra)
-
-        【失败处理】
-          - formCode 提取失败 → 返回 error_for_llm,让 LLM 引导用户补充
-          - 表单不存在       → 同上
+        【两条路径】
+          路径 A（嵌入/多轮场景）：state.source_artifact 已有当前表单配置
+            （嵌入模式 = 宿主每次请求随 GET_CONTEXT 下发的画布；独立模式 = 会话内
+            最近一次制品）。"简述当前表单/表单里有什么"这类问题直接据此回答——
+            不该去用户消息里猜 formCode。
+          路径 B（无上下文）：LLM 从用户消息提取 formCode → 调上游查询（原逻辑）。
 
         Args:
-            state: 工作流状态,取 user_input
-            ctx:   执行上下文,提供 emit / llm_client / asset_client
+            state: 工作流状态，取 user_input / source_artifact
+            ctx:   执行上下文，提供 emit / llm_client / asset_client
 
         Returns:
-            ToolResult:成功时带 artifact;失败时带 error_for_llm。
+            ToolResult:成功时带 artifact + summary；失败时带 error_for_llm。
         """
         user_input = state.get("user_input", "")
 
-        # Step 1: LLM 提取 formCode
+        # ── 路径 A：当前上下文直接回答 ──
+        current = state.get("source_artifact")
+        if current and isinstance(current, dict) and current.get("formFieldConfigVos"):
+            fields = current.get("formFieldConfigVos", [])
+            form_name = current.get("formName") or current.get("formCode") or "当前表单"
+            # 摘要里带上字段名列表（前 15 个），"简述一下"这类问题用户要的就是这个
+            names = [f.get("fieldTitleText") or f.get("fieldTitleKey", "") for f in fields[:15]]
+            names_desc = "、".join(n for n in names if n)
+            if len(fields) > 15:
+                names_desc += f" 等 {len(fields)} 个字段"
+            ctx.emit("stage", "fetch_form", "正在读取当前页面的表单配置...")
+            ctx.emit("stage", "fetch_done", f"当前表单共 {len(fields)} 个字段 ✓")
+            return ToolResult(
+                artifact=current,
+                summary=f"当前表单「{form_name}」（{current.get('formCode', '')}），"
+                        f"共 {len(fields)} 个字段：{names_desc}",
+                extra={
+                    "formatted": self.format_result(current),
+                },
+            )
+
+        # ── 路径 B：无当前上下文 → LLM 提取 formCode 查上游（原逻辑）──
         # emit("stage", ...) 推一个 SSE 进度事件给前端(类比进度条更新)
         ctx.emit("stage", "extract_form_code", "AI 正在识别表单标识...")
         form_code = self._extract_form_code(user_input, ctx)

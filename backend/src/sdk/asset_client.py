@@ -107,6 +107,19 @@ class AssetClient(ABC):
             guide 内容(dict)。该内容会拼进 prompt 辅助 LLM 生成合规表单。
         """
 
+    def get_guide_for(self, service_name: str) -> dict:
+        """取指定上游服务的 guide.json（嵌入模式多服务地址）。
+
+        v1 兼容入口：无多服务时与 get_guide 等价；有 host services 时
+        按服务名解析 base（resolve_base 白名单拦截）+ 带 base 的缓存键。
+
+        Args:
+            service_name: 上游服务名（如 "njmind-modeler"）。
+
+        Returns:
+            guide 内容(dict)。
+        """
+
     def get_form(self, form_code: str) -> Optional[dict]:
         """根据 formCode 查询已有表单配置。
 

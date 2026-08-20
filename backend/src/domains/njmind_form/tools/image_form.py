@@ -20,12 +20,8 @@ class ImageFormTool(Tool):
     when = "用户上传图片并想生成表单,如'根据这张图生成表单'、'把这个草图变成表单'"
 
     # ── 安全声明 ──
-    is_destructive = False  # 只生成配置,不直接创建
-    is_read_only = True
-    is_concurrency_safe = True
     
     # ── 插件化元数据 ──
-    requires_existing_artifact = False
 
     def input_schema(self) -> dict:
         return {

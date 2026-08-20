@@ -1,15 +1,32 @@
 """LangGraph 节点函数 — StateGraph 的各个节点实现。
 
-节点:
-  - classify_intent: LLM 选工具(从 registry 动态生成 prompt)
-  - execute_tool:    执行选中的工具,支持 interrupt/restore 追问
-  - handle_result:   处理工具结果,分流到 SSE
+【本文件在链路中的位置】
+一条用户消息从 HTTP 进来后的完整路径（★标注本文件的参与点）：
+
+  POST /api/config/chat (api/config.py)
+    │  组装 context_artifact（宿主下发的画布制品）+ 历史透传头
+    ▼
+  stream_graph (engine/stream.py)
+    │  在工作线程内绑 thread-local（透传头/服务地址/实时推送）
+    ▼
+★classify_intent_node ─── 两级路由：
+    │    一级 _route_pack：请求属于哪个领域（单 pack 直通/多 pack LLM 选）
+    │    二级 pack router.route()：领域内选哪个工具（领域知识归 pack）
+    ▼
+  route_by_tool（条件边：tool_name 空 → END）
+    ▼
+★execute_tool_node ────── 调 tool.execute(state, ctx)
+    │    工具可能 raise ClarificationRaised → 转 LangGraph interrupt()
+    │    工具经 ctx.emit 实时推 SSE 进度（thread-local → stream → 前端）
+    ▼
+★handle_result_node ───── ToolResult 三态（reply/artifact/ask）分流为 SSE 事件
+    ▼
+  route_after_result（条件边：needs_rerun → execute_tool 重试 / done → END）
 
 设计原则:
   - 节点函数签名: (state: GraphState) -> dict(部分更新)
-  - 工具内部 state 通过 tool_state 透传,Graph 不读内部结构
-  - 追问通过 LangGraph interrupt() 实现,不用自研 save_pending_ask
-  - emit 回调通过 sse_events 列表传递,由 stream.py 消费
+  - 工具内部 state 通过 tool_state 透传,Graph 不读内部结构（开闭原则）
+  - 追问通过 LangGraph interrupt() 暂停 + Command(resume) 恢复（checkpointer 存档）
 """
 import logging
 from typing import Any, Dict, Optional
@@ -17,7 +34,8 @@ from typing import Any, Dict, Optional
 from langgraph.types import interrupt
 
 from engine.graph_state import GraphState
-from sdk.tool import Tool, ToolResult, ToolContext, AskSpec
+from engine.state_keys import STATE_CONTEXT_ARTIFACT as CONTEXT_ARTIFACT
+from sdk.tool import Tool, ToolResult, ToolContext, AskSpec, AskQuestion, AskOption, ClarificationRaised
 from sdk.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -25,7 +43,23 @@ logger = logging.getLogger(__name__)
 # ── 节点间共享的依赖(由 graph.py 在构建时注入) ──
 # LangGraph 节点函数签名只能是 (state) -> dict,
 # 外部依赖通过闭包或 module-level 变量注入。
+import threading as _threading
+# 实时推送通道（请求级，threading.local 绑定；None = 走列表兜底）
+_realtime_emitter = _threading.local()
+
+
+def set_realtime_emitter(fn):
+    """为本线程绑定实时 SSE 推送函数（stream.py 在工作线程内调用）。
+
+    fn 签名: fn(kind, payload, message) —— kind ∈ {"stage", "pipeline_definition"}
+    传 None 解绑（请求结束/兜底路径）。
+    """
+    _realtime_emitter.fn = fn
+
+
 _registry: Optional[ToolRegistry] = None
+# pack → 二级路由（两级路由架构：引擎选领域、pack 选工具）
+_pack_routers: dict = {}
 _llm_client: Any = None
 _asset_client: Any = None
 _conversation: Any = None
@@ -38,10 +72,12 @@ def configure(
     asset_client: Any,
     conversation: Any = None,
     prompt_loader: Any = None,
+    pack_routers: dict = None,
 ):
     """注入共享依赖(由 graph.py 构建时调用一次)。"""
-    global _registry, _llm_client, _asset_client, _conversation, _prompt_loader
+    global _registry, _llm_client, _asset_client, _conversation, _prompt_loader, _pack_routers
     _registry = registry
+    _pack_routers = pack_routers or {}
     _llm_client = llm_client
     _asset_client = asset_client
     _conversation = conversation
@@ -59,61 +95,39 @@ def classify_intent_node(state: GraphState) -> dict:
     user_input = state.get("user_input", "")  # 当前用户输入，类比 Java 的 request 参数
     compressed_history = state.get("compressed_history", "")  # 压缩后的历史，省 token
     # 是否已有配置：决定可用的工具集（如"修改"类工具需要已有配置）
-    has_existing_config = state.get("current_config") is not None
+    has_existing_config = state.get(CONTEXT_ARTIFACT) is not None
 
     # SSE 事件:告知前端正在识别意图
     # 类比 Java：服务端推送状态给前端，让 UI 显示 loading 文案
     sse_events = [{"type": "stage", "stage": "classify_intent", "message": "正在理解您的意图..."}]
 
-    # 动态构建意图识别 prompt（工具列表从 registry 读，而非硬编码）
-    system_prompt = _build_intent_prompt(has_existing_config)
+    # ── 两级路由 ──────────────────────────────────────────
+    # 一级（引擎，领域无关）：请求属于哪个领域（pack）？单 pack 直通（零 LLM 调用）。
+    # 二级（pack，领域知识归 pack）：领域内选哪个工具（如"画布有内容+增量话术
+    # =修改类"这类判断写在 pack 的 router 里，不再泄漏进引擎）。
+    pack_name = _route_pack(user_input, compressed_history)
 
     # 构建 user message
-    # 用列表 extend + join 拼字符串，比 f-string 多行更可控（类比 Java StringBuilder）
-    parts = []
-    if compressed_history:
-        # 有历史才追加历史段，避免空段干扰 LLM
-        parts.extend(["## 对话历史", compressed_history, ""])  # 末尾空串是 join 后的空行分隔
-    parts.extend([
-        f"## 是否有已有配置：{'是' if has_existing_config else '否'}",
-        "",
-        "## 用户消息",
-        user_input,
-        "",
-        "请判断意图并输出 JSON。",
-    ])
-    user_msg = "\n".join(parts)  # 拼成多段 markdown 文本
-
-    messages = [
-        {"role": "system", "content": system_prompt},  # 系统指令：工具列表 + 输出格式
-        {"role": "user", "content": user_msg},  # 用户输入 + 上下文
-    ]
-
     tool_name = ""  # 选中的工具名，空表示未选中
-    intent_reason = ""  # 选中理由，用于日志和调试
+    intent_reason = f"pack={pack_name}"  # 理由带 pack 信息，日志可观测两级路由
 
-    try:
-        # chat_json：要求 LLM 输出 JSON，自动走降级（json_object / 纯文本提取）
-        parsed = _llm_client.chat_json(messages)
-        tool_names = parsed.get("tools", [])  # LLM 返回的工具名列表
-        intent_reason = parsed.get("reason", "")  # LLM 给的选择理由
-
-        if tool_names:
-            # 遍历 LLM 推荐的工具名，取第一个"可用"的
-            # 类比 Java stream().filter(...).findFirst()
-            for name in tool_names:
-                tool = _registry.get(name)
-                if tool:
-                    # 安全检查:需要已有配置的工具,如果没有配置则跳过
-                    # 例：update_form 需要 current_config，没有配置时不能用
-                    if getattr(tool, 'requires_existing_artifact', False) and not has_existing_config:
-                        logger.info(f"Safety: {name} requires existing config but none found, skipping")
-                        continue  # 跳过不满足前置条件的工具，继续看下一个推荐
-                    tool_name = name  # 命中第一个可用的，跳出循环
-                    break
-    except Exception as e:
-        # LLM 调用失败：记 warning 但不崩，走兜底逻辑
-        logger.warning(f"Intent classification LLM failed: {e}")
+    router = _pack_routers.get(pack_name)
+    if router is not None:
+        try:
+            # 二级路由由 pack 提供领域规则；引擎只传消息/画布/历史与 LLM 客户端
+            name = router.route(
+                user_input,
+                state.get(CONTEXT_ARTIFACT),  # 画布（含未保存草稿）——pack 判断"修改 vs 创建"的依据
+                history=compressed_history,
+                llm_client=_llm_client,
+            )
+            # 名字校验（LLM 可能编造不存在的工具）；"需要画布但画布空"的
+            # 防线在 pack 路由（前置铁律）与工具自身 validate_input，引擎不再重复
+            if name and _registry.get(name):
+                tool_name = name
+        except Exception as e:
+            # pack 路由失败：记 warning 不崩，走兜底（与旧意图 LLM 失败同策略）
+            logger.warning(f"pack[{pack_name}] router failed: {e}")
 
     # 兜底:没选到工具时用 fallback
     # 类比 Java：try-catch 兜底默认值，保证流程不中断
@@ -129,7 +143,7 @@ def classify_intent_node(state: GraphState) -> dict:
         "tool_state": {
             "user_input": user_input,
             "compressed_history": compressed_history,
-            "source_artifact": state.get("current_config"),  # 已有配置（修改类工具需要）
+            "source_artifact": state.get(CONTEXT_ARTIFACT),  # 已有配置（修改类工具需要）
             "conversation_id": state.get("conversation_id", ""),
             "forward_headers": state.get("forward_headers", {}),  # 透传鉴权头
         },
@@ -163,13 +177,32 @@ def execute_tool_node(state: GraphState) -> dict:
             "sse_events": [],
         }
 
-    # 构建 SSE emit 回调 → 收集到 sse_events 列表
-    # 类比 Java：把观察者回调注入工具，工具内部 emit 时触发收集
+    # 构建 SSE emit 回调
+    # 两条通道（互斥，避免重复推送）：
+    #   实时通道：本请求的 StreamManager 直推（sm.stage 线程安全）——工具每 emit
+    #             一步前端立刻看到，不用等节点跑完（大表单 modify 100s 期间进度
+    #             全靠它，之前憋到节点结束才吐是"卡在上个阶段"的根因）；
+    #   列表通道：append 进 sse_events，随节点 chunk 由 _process_chunk 推送——
+    #             MCP 等不走 StreamManager 的调用方的兜底。
+    # 绑定用 threading.local：graph 在工作线程跑节点，stream.py 在同一线程注入，
+    # 并发请求互不串线。
     sse_events = []
 
     def emit(*args, **kwargs):
         """emit(event_type, stage_name, message, **extra)"""
-        # 可变参数 *args：兼容不同签名（3参带消息 / 2参只有阶段名）
+        rt = getattr(_realtime_emitter, "fn", None)
+        if rt is not None:
+            # 实时通道：直接推给 StreamManager（内部 call_soon_threadsafe 回事件循环）
+            if len(args) >= 3:
+                rt("stage", args[1], args[2])
+            elif len(args) == 2:
+                if args[0] == "pipeline_definition":
+                    rt("pipeline_definition", args[1], None)
+                else:
+                    rt("stage", args[1], "")
+            return  # 已实时推送，不再入列表（避免 chunk 阶段重复推）
+
+        # 列表通道（兜底）
         if len(args) >= 3:
             # 3参签名：emit(type, stage, message) —— 标准阶段进度事件
             sse_events.append({
@@ -218,6 +251,23 @@ def execute_tool_node(state: GraphState) -> dict:
     try:
         # 执行工具主逻辑，类比 Java toolService.execute(state, ctx)
         result = tool.execute(tool_state, ctx)
+    except ClarificationRaised as ce:
+        # 工具请求追问（旧协议：抛异常）。必须先于 Exception 捕获——
+        # 否则会被下面的兜底 except 吞成 error_for_llm，前端看到的是
+        # "工具执行失败: ['请问…']" 而不是追问卡片。
+        # 转成 v4 的 ToolResult.ask，走下方统一的 interrupt 机制。
+        result = ToolResult(
+            ask=AskSpec(questions=[
+                AskQuestion(
+                    question=q,
+                    header="补充信息",
+                    # 旧协议是开放问题（无选项）；给一个自由输入项，前端渲染文本输入
+                    options=[AskOption(label="自行输入", description="")],
+                )
+                for q in ce.questions
+            ]),
+            summary="需要补充信息",
+        )
     except Exception as e:
         # 工具执行抛异常：包装成 error 结果，不让流程崩
         logger.exception(f"Tool {tool_name} execution failed")
@@ -393,40 +443,77 @@ def route_after_result(state: GraphState) -> str:
 # ── 辅助函数 ──────────────────────────────────────────────
 
 
-def _build_intent_prompt(has_existing_config: bool) -> str:
-    """动态构建意图识别 prompt,从 registry.all() 读取工具描述。"""
-    tools_desc = []
-    # 遍历所有注册工具，拼接成"工具名: 触发条件"的列表
-    for tool in _registry.all():
-        requires_artifact = getattr(tool, 'requires_existing_artifact', False)
-        # 需要已有配置的工具加条件标注，提示 LLM 何时才选它
-        condition = " (仅当 has_existing_config=true)" if requires_artifact else ""
-        tools_desc.append(f"- {tool.name}: {tool.when}{condition}")
+def _route_pack(user_input: str, history: str = "") -> str:
+    """一级路由（领域无关）：请求属于哪个领域（pack）。
 
-    tools_list = "\n".join(tools_desc)  # 拼成多行字符串
+    - 单 pack：直通（零 LLM 调用——两级路由在单领域部署下不引入额外延迟）；
+    - 多 pack：LLM 从各 pack 的 manifest domain.description 里选；无匹配时
+      落到声明 fallback 的 pack（无 fallback 声明则取第一个）。
 
-    # 返回组装好的 system prompt，包含工具列表 + 当前状态 + 输出格式要求
-    return (
-        "你是意图识别器。根据用户消息选择最合适的工具,只返回 JSON。\n\n"
-        f"可选工具:\n{tools_list}\n\n"
-        f"当前 has_existing_config={has_existing_config}\n"
-        '输出格式: {"tools": ["tool_name"], "reason": "简短理由"}'
+    domain 声明来自 pack 的 config.yaml（main 启动时经 pack_routers 之外的
+    pack_configs 装配；本函数从 domains.load_pack_configs 读取并缓存）。
+    """
+    if len(_pack_routers) <= 1:
+        only = next(iter(_pack_routers), "")
+        logger.debug(f"route: single pack '{only}' passthrough")
+        return only
+
+    # 懒加载 domain 声明（启动后不变，进程级缓存）
+    global _pack_domains
+    if _pack_domains is None:
+        from domains import load_pack_configs
+        cfgs = load_pack_configs()
+        _pack_domains = {
+            name: (cfg.get("domain") or {}) for name, cfg in cfgs.items()
+        }
+    entries = [
+        f"- {name}: {(d.get('description') or '(无描述)')}"
+        + (" [fallback]" if d.get("fallback") else "")
+        for name, d in _pack_domains.items() if name in _pack_routers
+    ]
+    fallback = next((n for n, d in _pack_domains.items()
+                     if d.get("fallback") and n in _pack_routers),
+                    next(iter(_pack_routers)))
+
+    prompt = (
+        "你是领域路由器。判断用户消息属于哪个领域，只返回 JSON。\n\n"
+        f"候选领域:\n{'\n'.join(entries)}\n\n"
+        "规则：不确定或不属于任何领域时，选标注 [fallback] 的领域。\n"
+        '输出格式: {"pack": "领域名"}'
     )
+    parts = []
+    if history:
+        parts.extend(["## 对话历史", history, ""])
+    parts.extend(["## 用户消息", user_input, "", "请输出 JSON。"])
+    try:
+        parsed = _llm_client.chat_json([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "\n".join(parts)},
+        ])
+        name = parsed.get("pack") if isinstance(parsed, dict) else None
+        if name in _pack_routers:
+            logger.info(f"route: '{user_input[:30]}' -> pack '{name}'")
+            return name
+    except Exception as e:
+        logger.warning(f"pack routing LLM failed: {e}")
+    logger.info(f"route: fallback -> pack '{fallback}'")
+    return fallback
+
+
+# 一级路由的 domain 声明缓存（pack_routers 同生命周期）
+_pack_domains: Optional[dict] = None
+
 
 
 def _get_fallback_tool_name() -> str:
-    """获取兜底工具名(优先级:chat → 安全只读工具 → 第一个非 artifact 工具)。"""
+    """获取兜底工具名(优先级:chat → 第一个工具)。
+
+    chat 不存在时退第一个工具（其 validate_input 会挡不合法调用）。
+    """
     # 兜底优先级 1：优先用 chat 闲聊工具（最安全，不会改数据）
     chat_tool = _registry.get("chat")
     if chat_tool:
         return "chat"
-    # 兜底优先级 2：找安全的只读工具（is_read_only=True 且非破坏性）
-    # 类比 Java：stream().filter(t -> t.isReadOnly() && !t.isDestructive()).findFirst()
-    for tool in _registry.all():
-        if getattr(tool, 'is_read_only', False) and not getattr(tool, 'is_destructive', True):
-            return tool.name
-    # 兜底优先级 3：找不需要已有配置的工具
-    for tool in _registry.all():
-        if not getattr(tool, 'requires_existing_artifact', False):
-            return tool.name
-    return "chat"  # 兜底 —— 实在没找到，硬编码返回 chat
+    # 兜底优先级 2：任意第一个工具（聊胜于无；工具自身 validate_input 会再挡）
+    tools = _registry.all()
+    return tools[0].name if tools else "chat"

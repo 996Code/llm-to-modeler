@@ -36,8 +36,11 @@
 import { onMounted } from 'vue'
 // 导入 Pinia store（全局单例状态容器，类比 Spring @Service 单例 Bean）
 import { useConversationStore } from './stores/conversation'
-// 导入"设置透传 headers"的工具函数（嵌入模式下接收父系统的鉴权信息）
-import { setForwardedHeaders } from './composables/forwardHeaders'
+// HostPort 单例：嵌入态为 PostMessageHostPort，独立态为 NullHostPort
+// （INIT 下发的鉴权头由 hostPort 内部写入 forwardHeaders，此处不再经手）
+import { getHostPort } from './composables/hostPort'
+// 宿主下发的 userId 存这里（供 api.ts 取 X-User-Id）
+import { setUserId } from './composables/userIdentity'
 // 导入两个布局组件（.vue 可省略后缀，构建工具自动解析）
 import StandaloneLayout from './layouts/StandaloneLayout.vue'
 import EmbeddedLayout from './layouts/EmbeddedLayout.vue'
@@ -46,16 +49,32 @@ import EmbeddedLayout from './layouts/EmbeddedLayout.vue'
 const store = useConversationStore()
 
 // 组件挂载完成后的初始化逻辑（@PostConstruct）
+// 嵌入模式由这里驱动会话（握手成功→按 contextKey 恢复；握手失败/超时→新建），
+// EmbeddedLayout 不再自行创建，避免「先建一个无绑定会话、恢复时又建一个」的竞态。
 onMounted(() => {
-  // 嵌入模式：监听父系统通过 postMessage 传入的 headers
-  // （iframe 跨窗口通信，相当于父系统往子应用里"注入"鉴权上下文）
   if (store.isEmbedded) {
-    // window.addEventListener('message', ...) 监听跨窗口消息
-    window.addEventListener('message', (e) => {
-      // 只处理类型为 MODELER_INIT 且携带 headers 的消息（约定好的协议）
-      if (e.data?.type === 'MODELER_INIT' && e.data.payload?.headers) {
-        // 将父系统透传的 headers 存入全局，后续所有 API 请求都会带上
-        setForwardedHeaders(e.data.payload.headers)
+    const port = getHostPort()
+    port.init().then((r) => {
+      if (!r) {
+        // 3s 无 INIT（宿主未实现契约/链路断）：显式报错而非静默降级——
+        // 横幅告诉用户 AI 无法读写画布，避免"AI 笨"的误解
+        store.hostLinkError = '宿主握手失败（3 秒内未收到 INIT）：AI 将无法读写画布，请刷新页面重试'
+        void store.startNewConversation()
+        return
+      }
+      // 宿主下发的 userId：写入 userIdentity，供所有 API 请求的 X-User-Id 使用
+      if (r.userId) setUserId(r.userId)
+      // contextKey 存入 localStorage，供懒创建会话时绑定（sendMessage 内读取）
+      if (r.contextKey) localStorage.setItem('embedded_context_key', r.contextKey)
+      // token 刷新推送：userId 同步（headers 已由 hostPort 内部写入 forwardHeaders）
+      port.onAuthUpdated((id) => {
+        if (id?.userId) setUserId(id.userId)
+      })
+      // 恢复该 (userId, contextKey) 的历史会话；没有则新建（resumeConversation 内部兜底）
+      if (r.contextKey) {
+        void store.resumeConversation(r.userId, r.contextKey)
+      } else {
+        void store.startNewConversation()
       }
     })
   } else {

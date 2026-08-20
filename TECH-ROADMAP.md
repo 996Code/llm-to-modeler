@@ -3,6 +3,11 @@
 > 自然语言 → 低码配置生成引擎
 >
 > 版本：v0.6 | 日期：2026-07-22
+>
+> ⚠ 本文是演进路径的历史记录：文中 env 变量（ASSET_BASE_URL→已改 UPSTREAM_BASE_URL
+> 三级解析）、SDK 消息（MODELER_*→已演进为嵌入契约信封协议）、modify 管线（全量→
+> 已改增量指令集两相式）等示例反映的是当期形态；**当前行为以 README.md 与
+> doc/嵌入模式总体设计.md 为准**。
 
 ---
 
@@ -102,7 +107,7 @@
 │  │  │ (LLM选工具)  │  │ (含interrupt)│  │ (保存+推送)  │    │  │
 │  │  └──────────────┘  └──────────────┘  └──────────────┘    │  │
 │  │                                                            │  │
-│  │  Checkpoint: InMemorySaver (thread_id = conversation_id)  │  │
+│  │  Checkpoint: SqliteSaver (thread_id = conversation_id)  │  │
 │  │  interrupt → SSE needsClarification → Command(resume)     │  │
 │  └────────────────────────────────────────────────────────────┘  │
 │                              │                                    │
@@ -119,7 +124,7 @@
 ┌──────────────▼───────────────────────────────────────────────────┐
 │              上游业务 API (njmind 低码平台)                        │
 │                                                                  │
-│  ASSET_BASE_URL (环境变量配置)                                    │
+│  上游地址三级解析（宿主 services 表 → 白名单 → env 兜底）         │
 │  ├── /form/page/list           ← 表单列表                       │
 │  ├── /form/page/detail         ← 表单详情 (get_form)            │
 │  ├── /form/page/create         ← 创建表单 (create/clone)        │
@@ -127,7 +132,7 @@
 │  ├── /form/field/template/list ← 字段模板列表                   │
 │  ├── /form/field/template/detail← 字段模板详情                  │
 │  ├── /form/config/guide        ← 配置指南                       │
-│  └── /form/config/validate     ← 配置校验                       │
+│  └── /api/mcp/forms/validate   ← 配置校验 (mode=CREATE/UPDATE)  │
 └──────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────┐
@@ -338,7 +343,7 @@ Engine 层 (零领域知识,不含任何 form 相关代码)
   │    4. 如果 ToolResult.ask → interrupt() 挂起             │
   │    5. 用户回答 → Command(resume=answers) → 重跑同一工具  │
   │                                                          │
-  │  Checkpoint: InMemorySaver, thread_id = conversation_id  │
+  │  Checkpoint: SqliteSaver, thread_id = conversation_id  │
   └──────────────────────────────────────────────────────────┘
 
 SDK 层 (协议定义)
@@ -365,21 +370,21 @@ Domain Pack 层 (插件化,零耦合)
   │    → fetch_templates → generate(LLM) → validate          │
   │                                                          │
   │  modify_form  (CompositeTool, 3步管线)                   │
-  │    fetch_guide → modify(LLM) → validate                  │
-  │    requires_existing_artifact=True (需已有配置)           │
+  │    fetch_guide → modify(两相式:增量指令集/全量兜底) → validate │
+  │    前置铁律：画布无制品 → 路由强制走 create_form            │
   │                                                          │
   │  get_form     (Tool, 单步)                               │
-  │    根据 formCode 查询已有表单, is_read_only=True          │
+  │    根据 formCode 查询已有表单                             │
   │                                                          │
   │  clone_form   (Tool, 单步)                               │
-  │    复制已有表单并修改标识, is_destructive=True             │
+  │    复制已有表单并修改标识                                 │
   │                                                          │
   │  image_form   (Tool, 单步)                               │
-  │    图片识别 → 表单配置 (多模态 LLM), is_read_only=True    │
+  │    图片识别 → 表单配置 (多模态 LLM)                      │
   │    支持 image_url 和 image_base64 两种输入               │
   │                                                          │
   │  chat         (Tool, 兜底)                               │
-  │    闲聊 + 动态能力描述, is_read_only=True                 │
+  │    闲聊 + 动态能力描述                                   │
   └──────────────────────────────────────────────────────────┘
 
   触摸石: grep -rE "form|formCode|template|field" engine/ → 必须为空
@@ -460,7 +465,7 @@ Domain Pack 层 (插件化,零耦合)
 │ 提交API   │ create   │ update   │ -        │ create   │ (仅生成)     │
 ├──────────┴──────────┴──────────┴──────────┴──────────┴──────────────┤
 │  共同点：所有工具共享 ToolResult 三态(artifact/ask/error)            │
-│  安全声明：is_destructive / is_read_only / is_concurrency_safe      │
+│  安全防线：路由数据铁律 + 各工具 validate_input 语义自检            │
 │  插件化：新 pack 只需实现 pack.py 的 create_registry()              │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -477,10 +482,10 @@ class GraphState(TypedDict):
     compressed_history: str      # 压缩后的对话文本
     conversation_id: str         # 会话 ID (= checkpoint thread_id)
     forward_headers: dict        # 嵌入模式透传的请求头
-    current_config: dict | None  # 已有配置(modify 用)
+    context_artifact: dict|None  # 上下文制品(pack 判断画布状态 + modify 基线)
 
     # ── 意图识别 ──
-    tool_name: str               # 选中的工具名
+    tool_name: str               # 选中的工具名 (pack 二级路由)
     intent_reason: str           # 选择理由
 
     # ── 工具执行 ──
@@ -724,9 +729,8 @@ class GraphState(TypedDict):
 │              │        │                                         │
 │              │ POST   │ /api/config/modify    (已废弃→转发chat) │
 │              │        │                                         │
-│              │ POST   │ /api/config/validate                    │
-│              │        │ body: {config}                          │
-│              │        │ response: {valid, errors[]}             │
+│              │ POST   │ /api/config/validate  (已废弃→删除,校验 │
+│              │        │   走工具管线内的 validate_artifact)      │
 │              │        │                                         │
 ├──────────────┼────────┼─────────────────────────────────────────┤
 │              │        │                                         │
@@ -967,7 +971,7 @@ Response (SSE):
 │  │  tenant_id       TEXT               -- 租户ID (可选)      │   │
 │  │  title           TEXT               -- 会话标题 (自动生成) │   │
 │  │  skill_name      TEXT DEFAULT 'create'                    │   │
-│  │  current_config  TEXT               -- 当前配置 JSON      │   │
+│  │  current_config  TEXT               -- 当前制品快照(存储层字段名)│   │
 │  │  created_at      DATETIME                                │   │
 │  │  updated_at      DATETIME                                │   │
 │  │                                                           │   │
@@ -1150,7 +1154,7 @@ Response (SSE):
 │  │  result = app.invoke(input, config)                       │   │
 │  │                                                           │   │
 │  │  # 恢复对话时，LangGraph 自动从 Checkpoint 加载状态      │   │
-│  │  # 包括: conversation_history, current_config,            │   │
+│  │  # 包括: conversation_history, context_artifact,          │   │
 │  │  #        validation_errors, retry_count 等               │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
@@ -1599,7 +1603,7 @@ App.vue
     ├── useSSE.ts
     ├── useConversation.ts
     ├── useConfig.ts
-    └── useEmbedBridge.ts             ← 嵌入模式通信 hook
+    └── hostPort.ts                   ← 嵌入模式通信桥（旧名 useEmbedBridge）
 ```
 
 ### 9.6 embed.js SDK（给主系统引入）
@@ -1753,12 +1757,13 @@ llm-to-modler/
 │       │   ├── compression.py           # 压缩 sidechain + build_compressed_history
 │       │   ├── conversation.py          # ConversationManager
 │       │   ├── prompt_loader.py         # Jinja2 模板加载
-│       │   ├── logging_filter.py        # 日志凭证脱敏
-│       │   └── dispatcher.py            # [遗留] ToolDispatcher (MCP 兼容)
+│       │   ├── state_keys.py            # 跨模块状态键常量
+│       │   └── logging_filter.py        # 日志凭证脱敏
 │       │
 │       ├── sdk/                         # SDK 层 (协议定义)
 │       │   ├── tool.py                  # Tool / CompositeTool / ToolResult / AskSpec
 │       │   ├── registry.py              # ToolRegistry
+│       │   ├── pack_router.py           # PackRouter 协议 (一级/二级路由)
 │       │   ├── asset_client.py          # AssetClient 抽象
 │       │   └── sanitize.py              # 文本脱敏
 │       │
@@ -1847,8 +1852,8 @@ Week 2-3: 核心引擎 ✅ 已完成
   │ StateGraph   │  │ 工具实现     │  │ API + SSE    │
   │              │  │              │  │              │
   │ • 3 节点图   │  │ • create(6步)│  │ • /chat      │
-  │ • interrupt  │  │ • modify(3步)│  │ • /validate  │
-  │ • checkpoint │  │ • get/clone  │  │ • SSE 流     │
+  │ • interrupt  │  │ • modify(3步)│  │ • SSE 流     │
+  │ • checkpoint │  │ • get/clone  │  │              │
   │ • Prompt注入 │  │ • image/chat │  │              │
   └──────────────┘  └──────────────┘  └──────────────┘
 
@@ -1900,7 +1905,7 @@ Week 6: 集成 + 部署 ✅ 已完成
 │  M2: API + MCP 可用 ✅ 已完成                                   │
 │  ─────────────────────────────                                   │
 │  ✅ REST API 统一入口 (/api/config/chat)                        │
-│  ✅ MCP Server 使用 LangGraph (非旧 dispatcher)                  │
+│  ✅ MCP Server 使用 LangGraph (两级路由)                       │
 │  ✅ 6 个工具全部实现 (create/modify/get/clone/image/chat)       │
 │  ✅ 追问 interrupt/resume 机制                                   │
 │  ✅ 多轮对话上下文保持                                           │

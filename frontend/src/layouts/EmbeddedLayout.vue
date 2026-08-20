@@ -8,7 +8,7 @@
 
   仅在「嵌入模式」（store.isEmbedded === true）下由 App.vue 渲染。
   本组件被 embed.ts 创建的 iframe 加载（URL 带 embed=true 参数），
-  与宿主页面之间通过 postMessage 双向通信（详见 useEmbedBridge / embed.ts）。
+  与宿主页面之间通过嵌入契约 postMessage 双向通信（详见 composables/hostPort.ts）。
   =============================================================================
 -->
 <template>
@@ -26,13 +26,30 @@
         </div>
       </div>
       <div class="header-actions">
+        <!-- 新对话：清空当前对话历史回到欢迎页（嵌入布局无侧栏，这是唯一的
+             重开入口；后端会新建会话，AI 视角完全从零开始） -->
+        <a-button
+          type="text"
+          size="small"
+          class="new-chat-btn"
+          :disabled="store.streaming"
+          title="新对话（清空当前对话）"
+          @click="startNewChat"
+        >
+          <PlusOutlined />
+        </a-button>
         <!-- type="text" 无边框文字按钮；点击关闭通过 postMessage 通知父窗口 -->
         <a-button type="text" size="small" class="close-btn" @click="closeWindow">
-          <CloseOutlined />
+          ✕
         </a-button>
       </div>
     </div>
-    <!-- 聊天面板，传入 embedded 属性告诉它"我在嵌入模式"（会显示应用按钮） -->
+    <!-- 链路错误横幅：握手/上下文失败时置顶展示（刷新页面可重试握手） -->
+    <div v-if="store.hostLinkError" class="host-link-error">
+      ⚠️ {{ store.hostLinkError }}
+    </div>
+    <!-- 聊天面板，传入 embedded 属性告诉它"我在嵌入模式"（会显示应用按钮）。
+         版本回退能力在对话流的配置卡片上 -->
     <ChatPanel :embedded="true" />
   </div>
 </template>
@@ -42,33 +59,43 @@
 // 脚本区：本布局的初始化逻辑（类比 Java Controller 的初始化方法）
 // =============================================================================
 
-// onMounted：组件挂载完成钩子。
-// 【类比 Java】相当于 @PostConstruct —— 在组件实例创建并挂载到 DOM 后执行一次。
-import { onMounted } from 'vue'
-// 图标组件（关闭 X、表单图标）
-import { CloseOutlined, FormOutlined } from '@ant-design/icons-vue'
-// 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
+// 图标组件（表单图标 / 新对话加号）
+import { FormOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import { message as antdMessage } from 'ant-design-vue'
+// HostPort 单例：关闭走新协议
+import { getHostPort } from '../composables/hostPort'
+// 会话 Store（hostLinkError 驱动链路错误横幅）
 import { useConversationStore } from '../stores/conversation'
-// useEmbedBridge：嵌入通信桥组合式函数。
-// 【职责】封装「iframe 内层 → 宿主父窗口」的 postMessage 通信，
-//        提供 closeWindow 等便捷方法，避免在各处手写 window.parent.postMessage。
-import { useEmbedBridge } from '../composables/useEmbedBridge'
-// 子组件：聊天主面板（带 :embedded="true" 会让它显示「应用配置」按钮）
+// 子组件：聊天主面板（带 :embedded="true" 会让它显示「应用」按钮）
 import ChatPanel from '../components/chat/ChatPanel.vue'
 
-// 获取全局 store 实例（setup 中调用一次）
+// HostPort 单例（嵌入态 = PostMessageHostPort）
+const port = getHostPort()
+// 会话 Store（取当前会话 ID 作为快照链的 key；hostLinkError 驱动链路错误横幅）
 const store = useConversationStore()
-// 从桥中解构出 closeWindow（其它方法这里用不到，故不解构，类比 Java 的方法引用）
-const { closeWindow } = useEmbedBridge()
 
-// 组件挂载后立即创建新会话。
-// 【设计意图】嵌入模式下不依赖历史会话（历史由宿主系统管理），
-//            每次刷新/重新打开都开一个全新对话，保证宿主每次拿到的都是干净上下文。
-onMounted(async () => {
-  // 嵌入模式：每次刷新都创建新会话
-  // （嵌入态下不依赖历史，每次打开都是全新对话）
-  await store.startNewConversation()
-})
+// 隐藏窗口：发 CLOSE 让宿主收起悬浮窗（宿主只隐藏 iframe、会话保活）。
+// 注意用 notifyClose 而非 close：close 会拆掉监听器，导致重开后
+// APPLY_RESULT 收不到、应用永远超时——隐藏场景必须保活端口。
+const closeWindow = () => port.notifyClose()
+
+/**
+ * 新对话：清空当前对话历史回到欢迎页（嵌入布局无侧栏，这是唯一的重开入口）。
+ * 走 store.startNewConversation（后端新建会话 + 本地清 messages/currentConfig/
+ * baseline），下一条消息从零开始（GET_CONTEXT 拉当前画布作基线）。
+ */
+async function startNewChat() {
+  if (store.streaming) return
+  try {
+    await store.startNewConversation()
+    antdMessage.success('已开始新对话')
+  } catch {
+    antdMessage.error('新建对话失败，请稍后重试')
+  }
+}
+// 注：会话创建/恢复由 App.vue 的握手流程统一驱动（init → resume 或新建），
+// 本布局不再 onMounted 抢跑创建，避免产生无 contextKey 绑定的孤儿会话。
+// 版本回退能力在对话流里（配置卡片「回滚到此版本」），本布局不再自建版本 UI。
 </script>
 
 <style scoped>
@@ -102,6 +129,23 @@ onMounted(async () => {
 .title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
 .subtitle { font-size: 11px; color: var(--text-secondary); }
 .header-actions { display: flex; gap: 4px; }
+
+/* 链路错误横幅：红底置顶，明确告知嵌入链路异常（而非让 AI 看起来"笨"） */
+.host-link-error {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  background: #fff1f0;
+  border-bottom: 1px solid #ffa39e;
+  color: #cf1322;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.new-chat-btn { color: var(--text-secondary); }
+.new-chat-btn:hover { color: var(--color-primary); background: var(--bg-hover) !important; }
+
 .close-btn { color: var(--text-secondary); }
 .close-btn:hover { color: var(--text-primary); background: var(--bg-hover) !important; }
+
+/* ── 版本历史弹窗 ── */
 </style>

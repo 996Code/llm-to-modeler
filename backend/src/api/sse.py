@@ -58,6 +58,10 @@ class SSEEvent:
         ensure_ascii=False 保留中文（否则会被转义成 \\uXXXX）。
         default=str 兜底处理不可 JSON 序列化的对象（如 datetime → str）。
         """
+        if self.event == "__heartbeat__":
+            # 心跳输出为 SSE 注释行（冒号开头，规范要求客户端忽略）——
+            # 只为制造字节流动，不产生事件
+            return ": ping\n\n"
         data_str = json.dumps(self.data, ensure_ascii=False, default=str)
         return f"event: {self.event}\ndata: {data_str}\n\n"
 
@@ -93,6 +97,18 @@ class StreamManager:
         """
         self._loop = loop
         self._queue: asyncio.Queue = asyncio.Queue()
+
+    def heartbeat(self):
+        """推送 SSE 心跳（`: ping` 注释行，线程安全）。
+
+        用途：LLM 长生成期间（可能 100s+ 无阶段事件）保持连接有字节流动——
+        既防中间代理空闲断连，也让前端「空闲看门狗」能区分
+        「活着但在生成」与「连接已死」（后者连续无字节 → 主动断开解锁）。
+        注释行以冒号开头，SSE 规范要求客户端忽略，不影响事件解析。
+        """
+        self._loop.call_soon_threadsafe(
+            self._queue.put_nowait, SSEEvent("__heartbeat__", {})
+        )
 
     def stage(self, stage: str, message: str, **extra):
         """推送阶段进度事件（线程安全，可从工作线程调用）。
@@ -178,7 +194,7 @@ class StreamManager:
         while True:
             try:
                 # 120 秒超时——LLM 调用可能很慢，用 keepalive 保活
-                item = await asyncio.wait_for(self._queue.get(), timeout=120.0)
+                item = await asyncio.wait_for(self._queue.get(), timeout=30.0)
             except asyncio.TimeoutError:
                 # 超时发 keepalive 注释，保持连接（SSE 注释以 : 开头，客户端忽略）
                 yield ": keepalive\n\n"

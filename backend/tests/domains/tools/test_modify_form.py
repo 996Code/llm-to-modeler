@@ -18,12 +18,6 @@ def _make_ctx(llm=None, asset_client=None, prompt_loader=None):
 
 
 class TestModifyFormToolDeclaration:
-    def test_is_destructive(self):
-        assert ModifyFormTool().is_destructive is True
-
-    def test_is_not_concurrency_safe(self):
-        assert ModifyFormTool().is_concurrency_safe is False
-
     def test_steps_count(self):
         assert len(ModifyFormTool().steps) == 3
 
@@ -49,10 +43,12 @@ class TestValidateInput:
 
 class TestStepModify:
     def test_modify_uses_source_artifact_first_time(self):
-        """首次 modify:从 source_artifact 出发。"""
+        """首次 modify:从 source_artifact 出发；formCode 硬约束保留基线值。"""
         tool = ModifyFormTool()
         llm = MagicMock()
-        llm.chat_json.return_value = {"formCode": "modified", "formFieldConfigVos": []}
+        # LLM 越权改了 formCode（应为 modified）——代码层保护必须把它纠正回基线
+        llm.chat_json.return_value = {"formCode": "modified", "formName": "改名",
+                                      "formFieldConfigVos": []}
         ctx = _make_ctx(llm=llm)
 
         state = {
@@ -62,30 +58,50 @@ class TestStepModify:
         }
         tool._step_modify(state, ctx)
 
-        assert state["artifact"]["formCode"] == "modified"
+        assert state["artifact"]["formCode"] == "original"   # 数据库标识不可改
+        assert state["artifact"]["formName"] == "改名"        # 其他内容正常生效
         assert state["validation_errors"] == []
 
     def test_modify_uses_artifact_on_retry(self):
-        """retry:从 artifact(上次失败结果)出发。"""
+        """retry:增量路径基于 artifact(上次失败结果)构建目录，且带校验错误。"""
+        from types import SimpleNamespace
         tool = ModifyFormTool()
         llm = MagicMock()
-        llm.chat_json.return_value = {"formCode": "fixed", "formFieldConfigVos": []}
-        ctx = _make_ctx(llm=llm)
+        # 指令集输出：对 broken 产物里的字段做一次修改
+        llm.chat_json.return_value = {"ops": [
+            {"op": "update_field", "key": "brokenfield",
+             "patch": {"isRequiredField": 0}},
+        ]}
+        # render 直接回显 catalog 变量（目录文本进 system prompt 的断言用）
+        loader = SimpleNamespace(render=lambda d, n, **v: v.get("catalog", ""))
+        ctx = _make_ctx(llm=llm, prompt_loader=loader)
 
         state = {
             "user_input": "加字段",
-            "source_artifact": {"formCode": "original"},
-            "artifact": {"formCode": "broken"},
+            "source_artifact": {"formCode": "original",
+                                "formFieldConfigVos": [{"fieldTitleKey": "origfield",
+                                                        "fieldTitleText": "原",
+                                                        "formFieldType": 0}]},
+            "artifact": {"formCode": "broken",
+                         "formFieldConfigVos": [{"fieldTitleKey": "brokenfield",
+                                                 "fieldTitleText": "破",
+                                                 "formFieldType": 0,
+                                                 "isRequiredField": 1}]},
             "validation_errors": [{"message": "err"}],
             "guide": {},
         }
         tool._step_modify(state, ctx)
 
-        # LLM 应该收到 broken 配置(不是 original)
+        # LLM 收到的目录应基于 broken 产物（含 brokenfield），不是 original
         call_args = llm.chat_json.call_args
         messages = call_args[0][0]
+        system_msg = next(m for m in messages if m["role"] == "system")
         user_msg = next(m for m in messages if m["role"] == "user")
-        assert "broken" in user_msg["content"]
+        assert "brokenfield" in system_msg["content"]      # 目录 = artifact 的字段
+        assert "origfield" not in system_msg["content"]     # 不是 source 的字段
+        assert "err" in user_msg["content"]                 # 校验错误带进重试
+        # 增量成功：patch 已应用到副本
+        assert state["artifact"]["formFieldConfigVos"][0]["isRequiredField"] == 0
 
 
 class TestStepValidate:

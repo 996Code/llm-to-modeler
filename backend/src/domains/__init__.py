@@ -19,7 +19,7 @@ domains/ 目录,发现所有符合约定的子目录(工具包),动态导入并�
   - create_prompt_loader() 可选,返回 PromptLoader 或 None
     (纯数据类插件如 leave_application 不需要自定义 prompt)
   - 至少一个 pack 需要提供 prompt_loader,否则系统无法构建意图识别 prompt
-    (但不会崩溃,会使用 dispatcher 内置的动态 prompt 生成)
+    (但不会崩溃,二级路由使用 sdk 的 DefaultPackRouter 中性框架)
 
 【Java 类比】
 对标 Java 的 SPI(Service Provider Interface)+ 自动扫描:
@@ -90,7 +90,7 @@ def discover_packs() -> List[str]:
     return packs
 
 
-def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader]]:
+def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader], object]:
     """
     加载指定的工具包:动态导入它的 pack.py,调用工厂函数取出 registry 和 loader。
 
@@ -138,8 +138,21 @@ def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader]]:
         if hasattr(module, 'create_prompt_loader'):
             prompt_loader = module.create_prompt_loader()
 
+        # 可选契约 create_router：pack 自带二级路由（领域知识归 pack）。
+        # 缺失时回退 DefaultPackRouter（中性框架，行为同旧扁平路由）。
+        from sdk.pack_router import DefaultPackRouter
+        router = None
+        if hasattr(module, 'create_router'):
+            try:
+                router = module.create_router(registry)
+            except TypeError:
+                # 工厂签名不含参（如无参 create_router()），重试无参调用
+                router = module.create_router()
+        if router is None:
+            router = DefaultPackRouter(registry)
+
         logger.info(f"成功加载工具包: {pack_name}")
-        return registry, prompt_loader
+        return registry, prompt_loader, router
 
     except Exception as e:
         # 捕获后打日志再 raise —— 记录上下文便于排查,但异常原样上抛由调用方决策。
@@ -148,7 +161,7 @@ def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader]]:
         raise
 
 
-def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader]]:
+def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader], dict]:
     """
     加载所有已发现的工具包,合并它们的 registry 成一个全局注册表。
 
@@ -162,7 +175,7 @@ def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader]]:
         (merged_registry, primary_prompt_loader) 元组。
         - merged_registry: 合并后的全局工具注册表(至少 1 个工具)
         - primary_prompt_loader: 主 prompt 加载器,可能为 None
-          (所有 pack 都不提供时),此时 dispatcher 使用内置动态 prompt 生成。
+          (所有 pack 都不提供时),此时二级路由使用 DefaultPackRouter 中性框架。
 
     Raises:
         RuntimeError: 一个 pack 都没发现(系统无法工作)。
@@ -185,10 +198,13 @@ def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader]]:
     # 合并所有 registry:新建一个空 registry,逐个把工具搬进来。
     merged_registry = ToolRegistry()
     primary_prompt_loader = None
+    # pack → 二级路由映射（引擎一级路由选中领域后调它选工具）
+    pack_routers: dict = {}
 
     for pack_name in pack_names:
         try:
-            registry, prompt_loader = load_pack(pack_name)
+            registry, prompt_loader, router = load_pack(pack_name)
+            pack_routers[pack_name] = router
 
             # 合并工具:遍历该 pack 的所有工具,注册进全局 registry。
             # 注意 tool.name 全局唯一,同名会覆盖 —— pack 之间工具名不能冲突。
@@ -207,13 +223,37 @@ def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader]]:
             logger.error(f"跳过工具包 {pack_name}: {e}")
             continue
 
-    # 不再强制要求 prompt_loader — dispatcher 有内置动态 prompt 生成。
+    # 不再强制要求 prompt_loader — 二级路由有 DefaultPackRouter 兜底。
     # 即所有 pack 都没提供 prompt_loader 也能工作,只是意图识别精度可能下降。
     if primary_prompt_loader is None:
         logger.warning(
-            "没有工具包提供 prompt_loader,将使用 dispatcher 内置的动态 prompt 生成。"
+            "没有工具包提供 prompt_loader,二级路由将使用 DefaultPackRouter 中性框架。"
             "如需自定义 prompt,请在 pack.py 中实现 create_prompt_loader()。"
         )
 
     logger.info(f"成功加载 {len(pack_names)} 个工具包，共 {len(merged_registry.all())} 个工具")
-    return merged_registry, primary_prompt_loader
+    return merged_registry, primary_prompt_loader, pack_routers
+
+
+def load_pack_configs() -> dict:
+    """加载各 pack 的 config.yaml 为只读 dict（供 /api/meta/packs 暴露 manifest）。
+
+    pack 目录约定:``domains/<pack_name>/config.yaml`` 存在则读为 dict,
+    不存在返回空 dict(纯数据类 pack 可以没有静态配置)。
+    每个 pack 的 config.yaml 就是它的 manifest 声明(制品类型/diff 对齐键/服务依赖)。
+    """
+    import yaml
+
+    configs = {}
+    domains_dir = Path(__file__).parent
+    for item in domains_dir.iterdir():
+        if not item.is_dir() or item.name.startswith('_'):
+            continue
+        cfg_path = item / "config.yaml"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, encoding="utf-8") as f:
+                    configs[item.name] = yaml.safe_load(f) or {}
+            except Exception as e:
+                logger.error(f"加载 {item.name} config.yaml 失败: {e}")
+    return configs

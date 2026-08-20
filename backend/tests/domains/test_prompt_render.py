@@ -11,23 +11,6 @@ def loader():
     return PromptLoader(packs_root)
 
 
-class TestIntentPrompt:
-    """工具选择 prompt 测试。"""
-
-    def test_intent_prompt_renders(self, loader):
-        """intent.j2 能渲染，包含 3 种意图说明。"""
-        result = loader.render("njmind_form", "intent", has_existing_config=False)
-        assert "意图识别器" in result
-        assert "create" in result
-        assert "modify" in result
-        assert "general" in result
-
-    def test_intent_prompt_includes_config_flag(self, loader):
-        """intent.j2 包含 has_existing_config 变量。"""
-        result = loader.render("njmind_form", "intent", has_existing_config=True)
-        assert "has_existing_config=True" in result
-
-
 class TestParsePrompt:
     """字段解析 prompt 测试。"""
 

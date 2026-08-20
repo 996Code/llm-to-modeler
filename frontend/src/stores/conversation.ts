@@ -20,6 +20,38 @@ import { ref, computed } from 'vue'
 import type { Conversation, FormConfig, Message } from '../types'
 // 引入 API 层全部导出（* as api → api.xxx 调用），类比 Java 的 @Autowired private ApiService api
 import * as api from '../services/api'
+// HostPort：嵌入模式读取宿主上下文（最新配置 + 服务地址表），注入每次 chat 请求
+import { getHostPort, CONTEXT_KEY_ARTIFACT } from '../composables/hostPort'
+
+/**
+ * 嵌入模式下组装发给后端的附加上下文（每次发消息前调用）。
+ * 返回三态：
+ *   - undefined：非嵌入模式（无宿主），请求不带 context/services；
+ *   - null：嵌入模式但拉取宿主上下文失败（链路异常）——调用方必须拦截并报错，
+ *     不能静默降级（否则 AI 基于空配置回答，用户只会看到"我没拿到表单"的误导）；
+ *   - 对象：成功，context.artifact 为宿主最新画布。
+ */
+async function refreshEmbedContext() {
+  const port = getHostPort()
+  if (!port.connected) return undefined
+  // 拉宿主最新画布；失败先重试一次（瞬时抖动），仍失败则判链路异常
+  let hostCtx = await port.getContext()
+  if (!hostCtx) {
+    await new Promise((r) => setTimeout(r, 300))
+    hostCtx = await port.getContext()
+  }
+  if (!hostCtx) return null // 链路异常：让调用方拦截
+  const contextKey = localStorage.getItem('embedded_context_key') || undefined
+  const services = (port as any).hostServices as Record<string, string> | undefined
+  return {
+    context: {
+      [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
+      revision: hostCtx.revision ?? null,
+      contextKey,
+    },
+    services: services || undefined,
+  }
+}
 
 // 定义并导出名为 'conversation' 的 store 工厂。
 // 注意：use 开头 + 返回组合式对象的写法称为 "Setup Store"（Pinia 推荐写法）。
@@ -30,6 +62,15 @@ export const useConversationStore = defineStore('conversation', () => {
   const currentConversation = ref<Conversation | null>(null)  // 当前选中的会话
   const messages = ref<Message[]>([])                  // 当前会话的消息列表
   const currentConfig = ref<FormConfig | null>(null)    // 当前最新生成的表单配置
+  // diff 基线：AI 产出与之对比，渲染红删绿增变更视图（GitLab 风格）。
+  // 语义 = 「画布上/上一版的配置」：嵌入模式取宿主 GET_CONTEXT 的 artifact、
+  // 应用成功后取应用版；独立模式兜底为上一份 AI 产出。
+  const baselineConfig = ref<FormConfig | null>(null)
+
+  /** 设置 diff 基线（深拷贝断开引用，避免后续修改互相污染）。 */
+  function setBaseline(cfg: FormConfig) {
+    baselineConfig.value = JSON.parse(JSON.stringify(cfg))
+  }
   const loading = ref(false)                            // 是否正在加载（列表/详情）
   const streaming = ref(false)                          // 是否正在流式生成中（SSE 进行中）
   const stageMessage = ref('')                          // 当前阶段的提示文案（如"正在生成..."）
@@ -69,6 +110,9 @@ export const useConversationStore = defineStore('conversation', () => {
   const currentConfigFieldCount = computed(() => _latestFormattedData.value?.fieldCount)
   const currentConfigName = computed(() => _latestFormattedData.value?.formName || _latestFormattedData.value?.title)
 
+  // 链路错误横幅（嵌入模式握手/上下文失败时置位，EmbeddedLayout 顶部展示）
+  const hostLinkError = ref('')
+
   // ---------------- 动作（Actions，类比 Service 方法）----------------
 
   /**
@@ -95,6 +139,7 @@ export const useConversationStore = defineStore('conversation', () => {
       currentConversation.value = conv
       messages.value = conv.messages || []
       currentConfig.value = conv.currentConfig || null
+      baselineConfig.value = null  // 切会话：diff 基线随下一轮交互重建
     } finally {
       loading.value = false
     }
@@ -108,8 +153,30 @@ export const useConversationStore = defineStore('conversation', () => {
     currentConversation.value = conv
     messages.value = []
     currentConfig.value = null
+    baselineConfig.value = null
     // 刷新侧边栏列表（让新会话出现）
     await loadConversations()
+  }
+
+  /**
+   * 恢复会话：按 (userId, contextKey) 找该绑定下最新的历史会话并加载。
+   * 嵌入模式下重开侧栏不丢上下文（对话与快照链都在同一会话里）。
+   * @param userId   宿主下发的用户标识
+   * @param contextKey 宿主实体标识（designer 场景 = formCode）
+   */
+  async function resumeConversation(userId: string, contextKey: string) {
+    try {
+      const conv = await api.findLatestConversationByContext(userId, contextKey)
+      if (conv) {
+        currentConversation.value = conv
+        messages.value = conv.messages || []
+        currentConfig.value = conv.currentConfig || null
+        return
+      }
+    } catch {
+      // 后端未支持该接口 / 查询失败：降级为新会话（Fail-Closed）
+    }
+    await startNewConversation()
   }
 
   /**
@@ -141,7 +208,9 @@ export const useConversationStore = defineStore('conversation', () => {
     // 若没有当前会话，先创建一个（懒创建模式）
     let convId = currentConversation.value?.id
     if (!convId) {
-      const conv = await api.createConversation()
+      // 嵌入模式：优先用宿主 contextKey 创建（便于按 (userId, contextKey) 恢复）
+      const contextKey = isEmbedded.value ? localStorage.getItem('embedded_context_key') || undefined : undefined
+      const conv = await api.createConversation('', contextKey)
       convId = conv.id
       currentConversation.value = conv
       // 嵌入模式：保存会话 ID 到 localStorage，下次打开时恢复
@@ -149,6 +218,28 @@ export const useConversationStore = defineStore('conversation', () => {
         localStorage.setItem('embedded_conv_id', convId)
       }
       await loadConversations()
+    }
+
+    // 嵌入模式：发消息前向宿主拉最新画布（GET_CONTEXT），确保 AI 基于最新版修改。
+    // 拉取失败 = 链路异常：拦截本次发送并明确报错（不静默降级，避免 AI 基于空配置误导）
+    // 注：refreshEmbedContext 只有嵌入态才可能返回 null，此处判 null 即嵌入链路异常
+    const embedCtx = isEmbedded.value ? await refreshEmbedContext() : undefined
+    // 独立模式：把当前制品作为上下文传给后端（后端 req.context 优先于会话存储）。
+    // 场景：回滚/版本切换后 currentConfig 已变，继续修改必须基于当前生效版本
+    const localCtx = (!isEmbedded.value && currentConfig.value)
+      ? { context: { [CONTEXT_KEY_ARTIFACT]: currentConfig.value } }
+      : undefined
+    // 宿主画布即 diff 基线（每次发消息前都拉最新，基线随之刷新）
+    if (embedCtx && embedCtx.context && embedCtx.context[CONTEXT_KEY_ARTIFACT]) {
+      setBaseline(embedCtx.context[CONTEXT_KEY_ARTIFACT] as FormConfig)
+    }
+    if (embedCtx === null) {
+      hostLinkError.value = '宿主上下文获取失败：嵌入链路异常，消息未发送。请刷新页面后重试'
+      messages.value.push({
+        role: 'assistant',
+        content: `⚠️ ${hostLinkError.value}`,
+      })
+      return
     }
 
     // Add user message
@@ -165,6 +256,7 @@ export const useConversationStore = defineStore('conversation', () => {
       const clarifyAnswers = pendingClarification.value ? { text: text } : undefined
 
       // 调用 chat，注册各类 SSE 事件回调（回调内根据事件更新状态/UI）
+      // 嵌入模式：附加上下文（宿主最新配置 + 服务地址表），后端据此覆盖会话旧配置
       await api.chat(text, convId || null, {
         // 阶段更新回调
         onStage: (stage, msg) => {
@@ -219,6 +311,10 @@ export const useConversationStore = defineStore('conversation', () => {
           }
           // 配置生成/修改成功 (artifact_type=config, 默认)
           else if (result.config) {
+            // 独立模式兜底：无宿主基线时，上一份产出就是 diff 基线
+            if (baselineConfig.value == null && currentConfig.value != null) {
+              baselineConfig.value = JSON.parse(JSON.stringify(currentConfig.value))
+            }
             // 更新当前配置（侧边 JSON 面板会同步刷新）
             currentConfig.value = result.config
             // 提取 formatted 字段(由后端 tool.format_result() 钩子提供)
@@ -252,7 +348,7 @@ export const useConversationStore = defineStore('conversation', () => {
           stageMessage.value = ''
           currentStage.value = ''
         },
-      }, clarifyAnswers, imageBase64)
+      }, clarifyAnswers, imageBase64, embedCtx ?? localCtx)
     } catch (e: any) {  // e: any —— 捕获任意异常并当作 any 处理（才能访问 .message）
       messages.value.push({ role: 'assistant', content: `请求失败: ${e.message}` })
     } finally {
@@ -271,10 +367,13 @@ export const useConversationStore = defineStore('conversation', () => {
     currentConversation,
     messages,
     currentConfig,
+    baselineConfig,
+    setBaseline,
     loading,
     streaming,
     stageMessage,
     currentStage,
+    hostLinkError,
     pipelineSteps,
     pendingClarification,
     isEmbedded,
@@ -283,6 +382,7 @@ export const useConversationStore = defineStore('conversation', () => {
     loadConversations,
     selectConversation,
     startNewConversation,
+    resumeConversation,
     removeConversation,
     sendMessage,
   }

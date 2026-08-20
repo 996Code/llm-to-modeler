@@ -1,11 +1,12 @@
 <!--
   =============================================================================
-  组件职责：JSON 配置展示面板（带语法高亮 / 复制 / 下载 / 应用到主系统）
+  组件职责：JSON 配置展示面板（变更视图 / 复制 / 下载 / 应用到主系统）
   -----------------------------------------------------------------------------
   设计模式：纯展示组件（读取 store，不自持数据）。
-    - 从 store 读取 currentConfig；
-    - computed 派生格式化 JSON 文本 + 高亮 HTML；
-    - 动作（复制/下载/应用）调用浏览器原生 API。
+    - 从 store 读取 currentConfig（AI 最新产出）与 baselineConfig（diff 基线）；
+    - 变更渲染委托给 JsonDiffView（GitLab 风格红删绿增，与查看弹窗共用）；
+    - 动作（复制/下载）调用浏览器原生 API；应用走事件委托。
+
   Java 类比：相当于一个只读详情视图（DTO 的 JSON 渲染器）。
   =============================================================================
 -->
@@ -32,7 +33,7 @@
         </button>
         <!--
           应用到主系统按钮：仅嵌入模式显示（v-if）。
-          通过 postMessage 把配置发回父窗口。
+          实际应用逻辑在 ChatPanel.applyConfig（HostPort 信封协议），本组件只发事件。
         -->
         <button
           v-if="store.isEmbedded"
@@ -45,7 +46,7 @@
         </button>
       </div>
     </div>
-    <!-- 内容区：空态 or 高亮 JSON -->
+    <!-- 内容区：空态 or 变更视图（含完整 JSON 兜底，见 JsonDiffView） -->
     <div class="editor-container">
       <!-- 空态：无配置时显示占位 -->
       <div v-if="!config" class="empty">
@@ -56,11 +57,10 @@
         <p class="empty-desc">生成的配置将显示在这里</p>
       </div>
       <!--
-        v-else 与上方 v-if 互斥。
-        v-html 把字符串当 HTML 渲染（这里渲染高亮后的 JSON，含 <span> 标签）。
-        ⚠ v-html 有 XSS 风险，这里数据来自本地配置且已转义，可安全使用。
+        变更视图：基线（画布/上一版）vs 最新产出。
+        有差异默认红删绿增（可切完整 JSON），无差异直接显示完整 JSON。
       -->
-      <pre v-else class="json-view" v-html="highlightedJson"></pre>
+      <JsonDiffView v-else :oldObj="store.baselineConfig" :newObj="config" />
     </div>
   </div>
 </template>
@@ -72,56 +72,16 @@ import { computed } from 'vue'
 import { message } from 'ant-design-vue'
 import { CopyOutlined, DownloadOutlined, FileTextOutlined, CodeOutlined, CheckOutlined } from '@ant-design/icons-vue'
 import { useConversationStore } from '../../stores/conversation'
+import JsonDiffView from './JsonDiffView.vue'
+
+// defineEmits：声明本组件会抛出的事件（模板事件 + 类型检查双保险）
+const emit = defineEmits<{ (e: 'apply'): void }>()
 
 const store = useConversationStore()
 
 // 当前配置（从 store 派生，store.currentConfig 变化时自动更新）。
 // 【类比 Java】computed 类似带缓存的 getter：依赖不变则不重算。
 const config = computed(() => store.currentConfig)
-
-// 格式化为 2 空格缩进的 JSON 字符串；无配置则空串。
-// JSON.stringify(obj, null, 2)：第三参 2 表示缩进空格数。
-// 这里只做纯文本格式化，着色交给下面的 highlightedJson。
-const formattedJson = computed(() =>
-  config.value ? JSON.stringify(config.value, null, 2) : '',
-)
-
-// Minimal JSON syntax highlighter (escape → wrap keys/strings/numbers/bools)
-// 自实现的轻量 JSON 语法高亮：
-//   1. 先转义 < > & 防止 HTML 注入；
-//   2. 用正则把 key/字符串/数字/布尔 包进 <span class="j-xxx"> 里；
-//   3. CSS 按类名着色。
-const highlightedJson = computed(() => {
-  if (!formattedJson.value) return ''
-  // 转义特殊字符，避免被当作 HTML 标签解析
-  const escaped = formattedJson.value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-  // 正则匹配四类 token，回调里分别包 span（key/str/num/bool）
-  // 【正则分解】四个捕获组（用 | 并列，按顺序尝试匹配）：
-  //   1. key   —— "..." 紧跟冒号，识别对象键
-  //   2. str   —— "..." 字符串值
-  //   3. num   —— 数字（含小数和负号）
-  //   4. bool  —— true/false/null 字面量
-  // /g 表示全局匹配（替换所有）。(?:\\.|[^"\\]) 匹配转义字符或非引号字符。
-  return escaped.replace(
-    /("(?:\\.|[^"\\])*"\s*:)|("(?:\\.|[^"\\])*")|(\b-?\d+\.?\d*\b)|(\btrue\b|\bfalse\b|\bnull\b)/g,
-    // replace 回调的参数：整体匹配 + 每个捕获组（只有命中的那个非 undefined）
-    (match, key, str, num, bool) => {
-      // key：去掉末尾冒号后包 span，再把冒号加回去（冒号不染色）
-      if (key) return `<span class="j-key">${key.slice(0, -1).replace(/:$/, '')}</span>:`
-      // 字符串值：整体包绿色 span
-      if (str) return `<span class="j-str">${str}</span>`
-      // 数字：黄色 span
-      if (num) return `<span class="j-num">${num}</span>`
-      // 布尔/ null：红色 span
-      if (bool) return `<span class="j-bool">${bool}</span>`
-      // 未匹配任何组，原样返回（安全兜底）
-      return match
-    },
-  )
-})
 
 /**
  * 复制配置 JSON 到剪贴板。
@@ -155,15 +115,11 @@ function download() {
 }
 
 /**
- * 把当前配置通过 postMessage 发送给父窗口（嵌入模式下供宿主应用）。
+ * 应用事件：委托给外层（ChatPanel.applyConfig 走 HostPort 信封协议）。
  */
 function applyToParent() {
   if (!config.value) return
-  window.parent.postMessage(
-    { type: 'MODELER_CONFIG_APPLY', payload: { config: config.value } },
-    '*',
-  )
-  message.success('已发送到主系统')
+  emit('apply')
 }
 </script>
 
@@ -214,7 +170,7 @@ function applyToParent() {
 .icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* 内容区 */
-.editor-container { flex: 1; overflow: auto; }
+.editor-container { flex: 1; overflow: auto; min-height: 0; }
 /* 空态 */
 .empty {
   height: 100%;
@@ -235,20 +191,4 @@ function applyToParent() {
 }
 .empty-title { font-size: 14px; color: var(--text-secondary); margin-bottom: 4px; }
 .empty-desc { font-size: 12px; color: var(--text-placeholder); }
-
-/* JSON 显示区：等宽字体、保留空白 */
-.json-view {
-  padding: 16px;
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-  line-height: 1.7;
-  color: var(--text-regular);
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-/* :deep() 穿透 scoped，给 v-html 注入的 span 着色（scoped 默认改不到 v-html 内容） */
-.json-view :deep(.j-key) { color: #1f6feb; }
-.json-view :deep(.j-str) { color: #00a870; }
-.json-view :deep(.j-num) { color: #d4a72c; }
-.json-view :deep(.j-bool) { color: #f54a45; }
 </style>

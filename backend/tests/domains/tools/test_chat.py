@@ -22,15 +22,6 @@ def _make_ctx(llm_client=None, prompt_loader=None):
 class TestChatToolDeclaration:
     """安全声明:只读 + 可并发。"""
 
-    def test_is_read_only(self):
-        assert ChatTool().is_read_only is True
-
-    def test_is_concurrency_safe(self):
-        assert ChatTool().is_concurrency_safe is True
-
-    def test_is_not_destructive(self):
-        assert ChatTool().is_destructive is False
-
     def test_input_schema(self):
         schema = ChatTool().input_schema()
         assert schema["type"] == "object"

@@ -65,6 +65,14 @@ class HttpAssetClient(AssetClient):
         data = self._upstream.get_guide()
         return self._clean(data) if data else {}
 
+    def get_guide_for(self, service_name: str) -> dict:
+        """按服务名取上游 guide（嵌入模式多服务地址）。
+
+        委托 UpstreamClient.get_guide_for（resolve_base + 带 base 缓存键）。
+        """
+        data = self._upstream.get_guide_for(service_name)
+        return self._clean(data) if data else {}
+
     def validate_artifact(self, artifact: dict, mode: str) -> dict:
         """归一化上游 {pass, errors:[str]} → {valid, errors:[{message}]}。"""
         # mode 统一大写:上游接口要求大写枚举(CREATE/UPDATE)
@@ -79,8 +87,9 @@ class HttpAssetClient(AssetClient):
         }
 
     def persist_artifact(self, artifact: dict, mode: str) -> dict:
-        # 按 mode 分流到上游不同接口
-        # 类比 Java 的策略模式 if-else 分发
+        # 统一「AI 永不落库」：工具层不得调用本方法（见设计文档 §7.5 / 守门不变量 #4）。
+        # 保留实现作为「宿主反向注册工具进引擎」远期演进时的预留接口，当前无调用方。
+        # 类比 Java 的 @Deprecated 接口——API 稳定存在，但业务路径已禁止使用。
         if mode == "create":
             result = self._upstream.create_form(artifact)  # 新建走 create 接口
         elif mode == "update":

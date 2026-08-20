@@ -1,7 +1,7 @@
 """ChatTool - 闲聊工具。
 
 处理与任何具体工具都不匹配的闲聊/打招呼/解释性问题。
-声明 is_concurrency_safe=True、is_read_only=True(只读、可并发)。
+（只读、可并发）
 
 身份描述:ChatTool 是所有插件共享的兜底工具,不应绑定特定领域。
 system prompt 从注册的工具列表动态生成能力描述,确保新插件自动被介绍。
@@ -19,9 +19,6 @@ class ChatTool(Tool):
     when = "用户打招呼、闲聊、问你是谁、或消息与任何工具都不匹配时"
 
     # 安全声明:只读 + 可并发
-    is_destructive = False
-    is_read_only = True
-    is_concurrency_safe = True
 
     def input_schema(self) -> dict:
         return {

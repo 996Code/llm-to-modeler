@@ -26,11 +26,13 @@
       <!-- v-if 是条件渲染：为 false 时该 DOM 完全不存在（区别于 v-show 仅隐藏） -->
       <div v-if="!store.messages.length && !store.streaming" class="welcome">
         <div class="welcome-logo">
-          <FormOutlined />
+          <!-- 图标名来自 pack manifest（display.welcome_icon），未知/缺省回退表单无关的默认 -->
+          <component :is="welcomeIcon" />
         </div>
         <h1 class="welcome-title">智能助手</h1>
         <p class="welcome-subtitle">用自然语言描述你的需求，我来帮你完成</p>
-        <div class="examples">
+        <!-- v-if 守卫：无示例数据（manifest 未就绪/未声明）时不渲染空容器 -->
+        <div v-if="examples.length" class="examples">
           <!-- v-for：列表渲染（类比 Java 的 forEach）；:key 是 Vue 复用 DOM 的唯一标识 -->
           <div
             v-for="ex in examples"
@@ -108,13 +110,44 @@
                 </div>
               </div>
               <div class="config-card-actions">
-                <!-- @click.stop：阻止事件冒泡（避免触发外层 config-card 的点击） -->
-                <a-button size="small" type="link" @click.stop="showJsonViewer(msg.configSnapshot)">
+                <!-- @click.stop：阻止事件冒泡（避免触发外层 config-card 的点击）。
+                     按钮按 pack 声明的动作集渲染（actions: view_json/apply/rewind），
+                     组件不硬编码——下个插件的制品卡可声明不同的动作组合 -->
+                <a-button
+                  v-if="packActions.includes('view_json')"
+                  size="small" type="link"
+                  @click.stop="showJsonViewer(msg.configSnapshot)"
+                >
                   <EyeOutlined /> 查看 JSON
                 </a-button>
-                <!-- 仅嵌入模式显示「应用配置」：把配置通过 postMessage 推给父窗口 -->
-                <a-button v-if="embedded" size="small" type="primary" @click.stop="applyConfig(msg.configSnapshot)">
-                  <CheckOutlined /> 应用配置
+                <!-- 切换到此版本（git checkout 式：对话保留，只切制品）：
+                     pack 声明 rewind 且该版不是当前生效版本时显示（包括最后
+                     一张卡——从旧版跳回最新同样走这里） -->
+                <a-button
+                  v-if="packActions.includes('rewind') && !isCurrentVersion(msg)"
+                  size="small"
+                  type="link"
+                  :loading="rewinding"
+                  @click.stop="rewindToVersion(msg)"
+                >
+                  <RollbackOutlined /> 回滚到此版本
+                </a-button>
+                <!-- 仅嵌入模式显示「应用」：pack 声明 apply 且宿主 capabilities
+                     支持（双重判定），走 HostPort 协议渲染到宿主 -->
+                <a-button
+                  v-if="packActions.includes('apply') && embedded && port.capabilities.has('apply')"
+                  size="small"
+                  type="primary"
+                  :loading="applying"
+                  @click.stop="applyConfig(msg.configSnapshot)"
+                >
+                  <CheckOutlined /> 应用
+                </a-button>
+                <!-- 宿主不支持 apply：退化为复制 JSON。注意此项独立于 packActions
+                     声明——复制是任何制品的最后出口（逃生口原则），即便 pack
+                     未声明 view_json 也保留内容带走的能力 -->
+                <a-button v-if="!port.capabilities.has('apply')" size="small" type="link" @click.stop="copyConfig(msg.configSnapshot)">
+                  <CopyOutlined /> 复制 JSON
                 </a-button>
               </div>
             </div>
@@ -186,15 +219,20 @@
       :pending-clarification="store.pendingClarification"
     />
 
-    <!-- JSON 查看器 Modal -->
+    <!-- JSON 查看器 Modal：全屏（嵌入模式下 iframe 只有 420px 宽，弹窗必须拉满
+         视口才有可读性；撑大悬浮窗本体由 RESIZE 协议承担，见 showJsonViewer） -->
     <Modal
       v-model:open="jsonViewerVisible"
       title="配置 JSON"
       :footer="null"
-      width="80%"
-      style="top: 20px"
+      width="100%"
+      wrapClassName="json-viewer-fullscreen"
+      :bodyStyle="{ padding: 0, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }"
     >
-      <pre style="max-height: 70vh; overflow: auto; background: #f5f5f5; padding: 16px; border-radius: 4px; font-size: 12px; line-height: 1.5;">{{ jsonViewerContent }}</pre>
+      <!-- 变更视图：红删绿增（基线=画布/上一版），无基线时显示完整 JSON -->
+      <div class="json-viewer-body">
+        <JsonDiffView :oldObj="store.baselineConfig" :newObj="jsonViewerData" />
+      </div>
     </Modal>
   </div>
 </template>
@@ -202,70 +240,89 @@
 <script setup lang="ts">
 // ===== Vue Composition API 引入（类比 Java 的 import） =====
 // ref/computed/watch：见文件顶部说明；nextTick：等下一次 DOM 更新后再执行（用于滚动到底部）
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, onMounted } from 'vue'
 // 图标组件（ant-design-vue 图标库，按需引入以减小打包体积）
 import {
   UserOutlined, FormOutlined, TableOutlined, CheckOutlined,
   CheckCircleOutlined, EyeOutlined, QuestionCircleOutlined,
+  CopyOutlined, RollbackOutlined,
   SolutionOutlined, TeamOutlined, ContactsOutlined,
 } from '@ant-design/icons-vue'
-// Modal：ant-design-vue 的弹窗组件（命令式调用）
-import { Modal } from 'ant-design-vue'
+// Modal：ant-design-vue 的弹窗组件（模板里的 JSON 查看器）
+import { Modal, message as antdMessage } from 'ant-design-vue'
 // 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
 import { useConversationStore } from '../../stores/conversation'
 // 仅引入类型（编译期检查，运行时不打包）
 import type { FormConfig } from '../../types'
 // 子组件：输入框
 import ChatInput from './ChatInput.vue'
+// 子组件：JSON 变更视图（查看弹窗用，红删绿增）
+import JsonDiffView from '../json/JsonDiffView.vue'
+// HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage
+import { getHostPort } from '../../composables/hostPort'
+// 通用 diff（快照摘要的变更数统计）
+import { diffJson } from '../../utils/diff'
+import { getPackManifests } from '../../services/api'
 
 // ===== 组件入参（props）声明 =====
 // defineProps<{ embedded?: boolean }>() —— 编译宏，声明本组件接收一个可选的 embedded 标记。
 // 【类比 Java】相当于接口契约：父组件传递 embedded=true 表示当前是嵌入模式。
-// 嵌入模式下配置卡片会显示「应用配置」按钮（通过 postMessage 推给父窗口）。
+// 嵌入模式下配置卡片会显示「应用」按钮（走 HostPort 协议发给宿主）。
 defineProps<{ embedded?: boolean }>()
 
 // 获取全局 store 实例（setup 中调用一次，整个组件生命周期复用）
 const store = useConversationStore()
+// HostPort 单例：能力决定按钮是否可用（宿主无 apply → 自动退化复制 JSON）
+const port = getHostPort()
+
+// pack 的展示声明（data_labels/data_hidden/welcome_examples）——领域词住 manifest，
+// 本组件只按通用字段渲染。拉取失败回退空（不显示示例卡、key 不翻译）
+const packDisplay = ref<Record<string, any> | null>(null)
+const packArtifactType = ref<string | undefined>(undefined)
+// 制品卡动作集（pack 声明，未声明回退最小集 view_json）——不同插件的制品
+// 交互不同，按钮由声明驱动而非组件硬编码
+const packActions = ref<string[]>(['view_json'])
+onMounted(async () => {
+  try {
+    const manifests = await getPackManifests()
+    packDisplay.value = manifests[0]?.artifact?.display || null
+    packArtifactType.value = manifests[0]?.artifact?.type
+    const acts = manifests[0]?.artifact?.actions
+    if (Array.isArray(acts) && acts.length) packActions.value = acts
+  } catch {
+    packDisplay.value = null
+  }
+})
 // 消息列表容器的 DOM 引用，用于手动控制 scrollTop（自动滚到底部）
 const msgListRef = ref<HTMLElement>()
 
+// 应用进行中标记（防止重复点击）
+const applying = ref(false)
+
+// 回滚进行中标记（防止重复点击）
+const rewinding = ref(false)
+
 // JSON 查看器状态：弹窗显隐 + 弹窗内显示的 JSON 文本
 const jsonViewerVisible = ref(false)
-const jsonViewerContent = ref('')
+const jsonViewerData = ref<Record<string, any> | null>(null)
 
 /**
  * 打开 JSON 查看器弹窗：把任意对象格式化成 2 空格缩进的 JSON 字符串后展示。
  * @param data 要展示的对象（表单配置或数据结果）
  */
 function showJsonViewer(data: FormConfig | Record<string, any>) {
-  // JSON.stringify 第三参 2 表示缩进 2 空格（美化输出）
-  jsonViewerContent.value = JSON.stringify(data, null, 2)
+  // 存对象：变更视图在 JsonDiffView 内做序列化 + 行级 diff
+  jsonViewerData.value = data as Record<string, any>
   jsonViewerVisible.value = true
+  // 嵌入模式：请求宿主把悬浮窗临时撑大（420px 里看 diff 不可读）。
+  // 宿主不支持 RESIZE 则静默无效果（弹窗仍全屏占满 iframe 视口）
+  if (port.connected) port.notifyResize('expanded')
 }
 
-/** 字段 key → 中文标签映射(常用业务字段)，用于把后端返回的英文 key 翻译成中文展示 */
-const FIELD_LABEL_MAP: Record<string, string> = {
-  applicant: '申请人',
-  leaveType: '请假类型',
-  startDate: '开始日期',
-  endDate: '结束日期',
-  reason: '原因',
-  status: '状态',
-  approvalId: '审批编号',
-  name: '姓名',
-  department: '部门',
-  phone: '手机号',
-  email: '邮箱',
-  address: '地址',
-  type: '类型',
-  title: '标题',
-  description: '描述',
-  amount: '金额',
-  date: '日期',
-  category: '分类',
-  remark: '备注',
-  id: '编号',
-}
+// 关闭查看器：恢复宿主悬浮窗原始尺寸（v-model:open 关闭路径统一收口在这里）
+watch(jsonViewerVisible, (open) => {
+  if (!open && port.connected) port.notifyResize('normal')
+})
 
 /**
  * 从数据结果中提取「适合展示」的字段（最多 6 个）。
@@ -280,50 +337,36 @@ const FIELD_LABEL_MAP: Record<string, string> = {
  * @returns { 中文标签: 值字符串 } 的有序映射
  */
 function getDataDisplayFields(data: Record<string, any>): Record<string, string> {
-  // Set 类比 Java 的 HashSet，用于 O(1) 判断字段是否需隐藏
-  const HIDDEN_FIELDS = new Set(['status', 'approvalId'])
+  // 标签映射与隐藏字段清单来自 pack manifest（display.data_labels / data_hidden）
+  const labels: Record<string, string> = packDisplay.value?.data_labels || {}
+  const hidden = new Set<string>(packDisplay.value?.data_hidden || [])
   const result: Record<string, string> = {}
   let count = 0
-  // Object.entries 把对象转成 [key, value] 数组，便于遍历
   for (const [key, value] of Object.entries(data)) {
     if (count >= 6) break                        // 最多展示 6 个字段
-    if (HIDDEN_FIELDS.has(key)) continue        // 跳过内部字段
+    if (hidden.has(key)) continue                // 跳过 pack 声明的内部字段
     if (typeof value === 'object' && value !== null) continue  // 跳过嵌套对象
     if (value === '' || value === null || value === undefined) continue
-    const label = FIELD_LABEL_MAP[key] || key   // 有映射用中文,没有就保留原 key
+    const label = labels[key] || key             // pack 中文标签，缺省保留原 key
     result[label] = String(value)
     count++
   }
   return result
 }
 
-// 欢迎页示例卡片数据：点击会把 prompt 填入并发送给后端
-const examples = [
-  {
-    title: '请假申请表',
-    desc: '申请人、请假类型、日期范围',
-    prompt: '创建一个请假申请表，包含申请人、请假类型、开始日期、结束日期',
-    icon: SolutionOutlined,
-  },
-  {
-    title: '员工信息表',
-    desc: '姓名、部门、手机号、入职日期',
-    prompt: '创建一个员工信息表，包含姓名、部门、手机号、入职日期',
-    icon: TeamOutlined,
-  },
-  {
-    title: '联系人表单',
-    desc: '姓名、邮箱、电话、地址',
-    prompt: '创建一个联系人表单，包含姓名、邮箱、电话、地址',
-    icon: ContactsOutlined,
-  },
-  {
-    title: '客户反馈表',
-    desc: '客户名称、反馈类型、详细描述',
-    prompt: '创建一个客户反馈表，包含客户名称、反馈类型（下拉选择）、详细描述',
-    icon: FormOutlined,
-  },
-]
+// 欢迎页示例卡：内容来自 pack manifest（display.welcome_examples），
+// 本组件只提供通用图标集（名字→组件）；manifest 未提供则不显示示例区
+const ICON_SET: Record<string, any> = { form: FormOutlined, contacts: ContactsOutlined }
+const examples = computed(() =>
+  ((packDisplay.value?.welcome_examples || []) as any[])
+    .map((ex: any) => ({ ...ex, icon: ICON_SET[ex.icon] || FormOutlined }))
+)
+
+// 欢迎页大图标：manifest 的 welcome_icon 名字 → 通用图标集组件（缺省回退默认）
+const welcomeIcon = computed(() => {
+  const name = packDisplay.value?.welcome_icon
+  return (name && ICON_SET[name]) || FormOutlined
+})
 
 // ===== Pipeline 步骤状态计算 =====
 // 后端通过 SSE 推送阶段名（stage），命名约定如下：
@@ -397,15 +440,99 @@ function selectConfig(config: FormConfig) {
 }
 
 /**
- * 应用配置到主系统（仅嵌入模式可见的按钮）。
- * 通过 postMessage 把配置推给父窗口（宿主页面），由宿主写入业务表单。
+ * 应用配置到宿主（仅嵌入模式 + 宿主支持 apply 时显示的按钮）。
+ * 流程：拉宿主最新基线（漂移检测 revision）→ APPLY → 回执。
+ * 变更内容已在 JSON 面板的变更视图（红删绿增）里可视化，此处不再弹摘要确认；
+ * 画布即最终预览，应用成功后追加快照（版本历史可还原）并同步 diff 基线。
+ * @param config 配置结果
  */
-function applyConfig(config: FormConfig) {
-  // 深拷贝为纯 JSON，避免 Vue 响应式代理对象导致 DataCloneError
-  // （postMessage 内部用结构化克隆算法，无法克隆 Vue 的 Proxy 代理对象）
-  const plainConfig = JSON.parse(JSON.stringify(config))
-  // window.parent 是父窗口（嵌入本应用的页面）；'*' 表示不校验目标源
-  window.parent.postMessage({ type: 'MODELER_CONFIG_APPLY', payload: { config: plainConfig } }, '*')
+/** 该消息的制品是否就是当前生效版本（内容级比较；卡片少，全量 stringify 可接受） */
+function isCurrentVersion(msg: any): boolean {
+  if (!msg?.configSnapshot || !store.currentConfig) return false
+  return JSON.stringify(msg.configSnapshot) === JSON.stringify(store.currentConfig)
+}
+
+/**
+ * 切换到此版本（git checkout 式：**对话保留**，只切制品）。
+ * 把该版本的制品设为当前（diff 基线=切换前版本，变更视图可见差异）；嵌入
+ * 模式（宿主支持 apply）自动渲染回画布。之后想回到更新版本——点那张卡的
+ * 本按钮即可（对话里所有版本卡互为跳转锚点，包括"反悔用最新"）。
+ */
+function rewindToVersion(msg: any) {
+  if (rewinding.value) return
+  const canApply = port.connected && port.capabilities.has('apply')
+  Modal.confirm({
+    title: '切换到此版本',
+    content: '当前制品将恢复为该版本' + (canApply ? '并应用到画布' : '') +
+      '。对话记录保留，随时可再切换到其他版本（包括最新）。',
+    okText: '切换',
+    cancelText: '取消',
+    onOk: async () => {
+      rewinding.value = true
+      try {
+        // 深拷贝断引用（该版本对象与消息共享，避免后续修改互染）
+        const snap = JSON.parse(JSON.stringify(msg.configSnapshot))
+        const previous = store.currentConfig
+        store.currentConfig = snap
+        // diff 基线 = 切换前版本：变更视图显示"这次切换改了什么"；
+        // 嵌入自动应用成功后 applyConfig 会把基线同步为应用版（画布=该版本）
+        if (previous != null) {
+          store.setBaseline(previous)
+        }
+        if (canApply) {
+          await applyConfig(snap)
+        } else {
+          antdMessage.success('已切换到此版本')
+        }
+      } finally {
+        rewinding.value = false
+      }
+    },
+  })
+}
+
+async function applyConfig(config: FormConfig) {
+  if (applying.value) return
+  applying.value = true
+  try {
+    // 深拷贝为纯 JSON，避免 Vue 响应式代理对象导致 DataCloneError
+    // （postMessage 内部用结构化克隆算法，无法克隆 Vue 的 Proxy 代理对象）
+    const plainConfig = JSON.parse(JSON.stringify(config))
+    // 应用前向宿主拉最新上下文：拿 revision 供宿主漂移检测（画布被手动改则 REVISION_CONFLICT）
+    const hostCtx = await port.getContext()
+    const summary = store.currentConfigName || 'AI 生成配置'
+    const result = await port.applyArtifact({
+      artifact: plainConfig,
+      baseRevision: hostCtx?.revision ?? null,
+      summary,
+      artifactType: packArtifactType.value,
+    })
+    if (result.ok) {
+      // 应用成功：画布与 AI 产出一致，diff 基线同步为应用版（变更视图归零）。
+      store.setBaseline(result.artifact ?? plainConfig)
+      antdMessage.success('已应用到画布，请确认后手动保存')
+    } else {
+      // 失败：按错误码给出差异化提示（REVISION_CONFLICT 提示基于最新重改）
+      const hint =
+        result.code === 'REVISION_CONFLICT'
+          ? '画布已被手动修改，请基于最新配置重新生成后再应用'
+          : result.message || '应用失败'
+      antdMessage.error(hint)
+    }
+  } finally {
+    applying.value = false
+  }
+}
+
+
+/** 复制配置 JSON 到剪贴板（独立模式 / 宿主不支持 apply 时显示） */
+async function copyConfig(config: FormConfig) {
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(config, null, 2))
+    antdMessage.success('已复制配置 JSON')
+  } catch {
+    antdMessage.error('复制失败，请使用「查看 JSON」手动复制')
+  }
 }
 
 // ===== 自动滚动到底部 =====
@@ -424,6 +551,31 @@ watch(() => store.stageMessage, () => {
   })
 })
 </script>
+
+<!-- 全局样式块：wrapClassName 指定的 Modal 渲染在 body 直下，scoped 选择器够不着 -->
+<style>
+.json-viewer-fullscreen .ant-modal {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  top: 0;
+}
+.json-viewer-fullscreen .ant-modal-content {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0;
+}
+.json-viewer-fullscreen .ant-modal-header {
+  flex-shrink: 0;
+}
+.json-viewer-fullscreen .ant-modal-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+</style>
 
 <style scoped>
 /* =============================================================================
@@ -795,5 +947,13 @@ watch(() => store.stageMessage, () => {
   .examples { grid-template-columns: 1fr; }
   .message-row { padding: 0 12px; }
   .pipeline-card { padding: 0 12px; }
+}
+
+/* JSON 查看器内容区：撑满全屏 Modal 的 body（内部 diff 自行滚动） */
+.json-viewer-body {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  border-top: 1px solid var(--border-color-light);
 }
 </style>

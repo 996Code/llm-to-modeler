@@ -1,8 +1,12 @@
-"""集成测试:format_result 钩子化 + 连接复用 + 端到端 ToolResult 流。"""
+"""集成测试:format_result 钩子化（Engine 不直接读制品内部字段）。
+
+注：旧 ToolDispatcher 的连接复用/端到端测试已随 dispatcher.py 退役删除
+（graph 架构前的旧调度路径）；新链路的端到端由真实请求 E2E 与
+test_modify_form/test_incremental_ops 覆盖。
+"""
 import pytest
 from unittest.mock import MagicMock
 
-from engine.dispatcher import ToolDispatcher
 from sdk.registry import ToolRegistry
 from sdk.tool import Tool, ToolResult, ToolContext
 from domains.njmind_form.tools.create_form import CreateFormTool
@@ -57,7 +61,7 @@ class TestFormatResultHook:
             "fields": [{"fieldTitleText": "字段1", "fieldType": 0}],
         }
         asset = MagicMock()
-        asset.get_guide.return_value = {}
+        asset.get_guide.return_value = {"fieldTypes": [{"code": 0, "name": "TEXT"}]}
         asset.list_templates.return_value = []
         asset.get_template.return_value = {"formName": "模板"}
         asset.validate_artifact.return_value = {"valid": True, "errors": [], "warnings": []}
@@ -73,87 +77,3 @@ class TestFormatResultHook:
         result = tool.execute({"user_input": "创建测试表"}, ctx)
         assert "formatted" in result.extra
         assert result.extra["formatted"]["formName"] == "测试表"
-
-
-class TestAssetClientReuse:
-    """CRITICAL 修复:asset_client 复用,不每次 new UpstreamClient。"""
-
-    def test_asset_client_created_once(self):
-        """_build_ctx 首次创建 asset_client,后续复用同一实例。"""
-        registry = ToolRegistry()
-        registry.register(ChatTool())
-        llm = MagicMock()
-        llm.chat_json.return_value = {"tools": ["chat"]}
-        llm.chat.return_value = "回复"
-
-        dispatcher = ToolDispatcher(registry, llm, asset_client=MagicMock())
-
-        # 注入了 asset_client,不应再创建
-        ctx1 = dispatcher._build_ctx({}, lambda *a, **k: None)
-        ctx2 = dispatcher._build_ctx({}, lambda *a, **k: None)
-        assert ctx1.asset_client is ctx2.asset_client  # 同一实例
-
-    def test_asset_client_lazy_creation(self):
-        """未注入 asset_client 时,首次 _build_ctx 延迟创建并缓存。"""
-        registry = ToolRegistry()
-        registry.register(ChatTool())
-        llm = MagicMock()
-        llm.chat_json.return_value = {"tools": ["chat"]}
-        llm.chat.return_value = "回复"
-
-        dispatcher = ToolDispatcher(registry, llm)  # 不传 asset_client
-
-        # 首次创建
-        ctx1 = dispatcher._build_ctx({}, lambda *a, **k: None)
-        assert dispatcher._asset_client is not None
-        first_client = dispatcher._asset_client
-
-        # 第二次复用
-        ctx2 = dispatcher._build_ctx({}, lambda *a, **k: None)
-        assert dispatcher._asset_client is first_client  # 同一实例
-
-
-class TestEndToEndToolResultFlow:
-    """端到端:Dispatcher.run -> ToolResult 三态分流。"""
-
-    def test_e2e_chat_flow(self):
-        """闲聊端到端:LLM 选 chat -> ChatTool 执行 -> reply。"""
-        registry = ToolRegistry()
-        registry.register(ChatTool())
-        llm = MagicMock()
-        llm.chat_json.return_value = {"tools": ["chat"]}
-        llm.chat.return_value = "你好!我是助手。"
-
-        dispatcher = ToolDispatcher(
-            registry, llm,
-            asset_client=MagicMock(),
-            prompt_loader=None,
-        )
-        result = dispatcher.run("你好", "conv1")
-
-        assert result.reply == "你好!我是助手。"
-        assert result.summary
-        assert result.artifact is None
-        assert result.ask is None
-        assert result.error_for_llm is None
-
-    def test_e2e_error_flow(self):
-        """错误端到端:工具抛异常 -> error_for_llm。"""
-        class CrashTool(Tool):
-            name = "chat"
-            description = "d"
-            when = "w"
-            def input_schema(self): return {"type": "object"}
-            def execute(self, state, ctx):
-                raise RuntimeError("连接失败")
-
-        registry = ToolRegistry()
-        registry.register(CrashTool())
-        llm = MagicMock()
-        llm.chat_json.return_value = {"tools": ["chat"]}
-
-        dispatcher = ToolDispatcher(registry, llm, asset_client=MagicMock())
-        result = dispatcher.run("你好", "conv1")
-
-        assert result.error_for_llm is not None
-        assert "连接失败" in result.error_for_llm

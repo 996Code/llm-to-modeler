@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from engine.dispatcher import ToolDispatcher
 from engine.conversation import ConversationManager
+from engine.nodes import classify_intent_node
+from sdk.pack_router import DefaultPackRouter
 from api.sse import StreamManager
 
 
@@ -18,9 +19,10 @@ def _langgraph_available() -> bool:
 
 
 class TestEngineSkeleton:
-    def test_dispatcher_instantiable(self):
-        d = ToolDispatcher.__new__(ToolDispatcher)  # 不触发 __init__(需要依赖)
-        assert d is not None
+    def test_pack_router_instantiable(self):
+        """二级路由骨架可实例化（dispatcher 已退役，路由职责归 pack）。"""
+        r = DefaultPackRouter.__new__(DefaultPackRouter)  # 不触发 __init__(需要依赖)
+        assert r is not None
 
     def test_conversation_manager_instantiable(self):
         cm = ConversationManager.__new__(ConversationManager)

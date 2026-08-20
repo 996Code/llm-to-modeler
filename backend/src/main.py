@@ -49,6 +49,7 @@ from src.api.config import router as config_router
 from src.api.conversations import router as conversations_router
 from src.api.health import router as health_router
 from src.api.skills import router as skills_router
+from src.api.meta import router as meta_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
 from src.llm.client import LLMClient
 # 会话存储：SQLite，以追加写事件流方式记录对话
@@ -114,23 +115,27 @@ async def lifespan(app: FastAPI):
     # 自动发现和加载所有工具包
     # 延迟导入：这些模块依赖 app.state 之外的重型组件，延迟到启动时加载
     # 减少模块导入阶段的副作用，也让 lifespan 内的初始化顺序更清晰
-    from domains import load_all_packs
+    from domains import load_all_packs, load_pack_configs
     from engine.graph import build_graph
     from engine.conversation import ConversationManager
     from adapters.http_asset_client import HttpAssetClient
 
     # 自动扫描 domains/ 下的工具包，加载工具注册表和提示词模板
-    registry, prompt_loader = load_all_packs()
+    registry, prompt_loader, pack_routers = load_all_packs()
+    # 加载各 pack 的 config.yaml manifest（供 /api/meta/packs 暴露声明给前端）
+    pack_configs = load_pack_configs()
+    app.state.registry = registry
+    app.state.pack_configs = pack_configs
     # 会话管理器：封装会话上下文（历史消息、压缩历史）的读写
     conversation_manager = ConversationManager(store=conv_store)
     # 资产客户端：拉取表单资产数据（字段元信息等），走上游接口
     asset_client = HttpAssetClient(upstream=upstream)
-    # asset_client 的数据操作 base_url 从环境变量 ASSET_BASE_URL 读取,默认 mock API
 
-    # 构建 LangGraph StateGraph(替代旧 ToolDispatcher)
+    # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）
     # build_graph 装配节点（classify_intent/execute_tool/handle_result）并编译
     graph = build_graph(
         registry=registry,
+        pack_routers=pack_routers,
         llm_client=llm_client,
         asset_client=asset_client,
         conversation=conversation_manager,
@@ -164,12 +169,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS 中间件：允许所有来源跨域（开发期宽松，生产应收敛 allow_origins）
+# CORS 中间件：允许跨域来源。
+# 允许列表由环境变量 CORS_ALLOWED_ORIGINS 配置（逗号分隔）。
+# - 未配置时允许所有来源（开发期宽松默认，与旧行为一致）；
+# - 生产必须配置为宿主域名白名单，防止任意网页直调本服务烧 LLM key / 冒领凭证。
 # 注意：allow_origins=["*"] + allow_credentials=True 在浏览器规范上互斥，
-#       但 FastAPI/Starlette 会自动处理（回显具体 origin 而非 *），不会报错
+#       但 FastAPI/Starlette 会自动处理（回显具体 origin 而非 *），不会报错。
+_allowed_origins = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins or ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -180,6 +189,7 @@ app.include_router(health_router)
 app.include_router(config_router)
 app.include_router(skills_router)
 app.include_router(conversations_router)
+app.include_router(meta_router)
 
 
 if __name__ == "__main__":

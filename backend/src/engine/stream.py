@@ -26,6 +26,18 @@ Events)事件流。
   2. 追问恢复:input 是 ``Command(resume=answers)``,告诉 LangGraph
      "用户回答了之前的追问,从这里继续跑"
      (类比 Activiti 流程引擎的 ``runtimeService.signal(...)``)
+
+【线程模型 & 请求级隔离（踩坑记录）】
+  graph.stream 跑在 run_in_executor 的工作线程上；鉴权头（forward_headers）、
+  宿主服务地址（services）、实时 SSE 推送（emitter）都用 threading.local
+  做请求级隔离——**必须在 _run_graph 内部（工作线程上）绑定**，绑在事件
+  循环线程读不到（早期 bug：token/服务地址"随机丢失"）。finally 中清理。
+
+【SSE 三道保障】
+  ① 15s 心跳（_heartbeat）：长生成期间保持字节流动，防代理空闲断连
+  ② 响应头 no-transform：防 rsbuild 等代理的 gzip 中间件缓冲 event-stream
+     （真实事故：30 秒事件同一秒到达，前端表现为"一直无响应"）
+  ③ 前端 60s 空闲看门狗：以字节到达判断死活，超时主动断开并解锁输入
 """
 import asyncio
 import logging
@@ -38,6 +50,8 @@ from langgraph.types import Command
 from api.sse import SSEEvent, StreamManager
 from sdk.tool import ToolResult
 from engine.compression import build_compressed_history
+from engine.state_keys import STATE_CONTEXT_ARTIFACT
+from services.upstream_client import set_forward_headers, set_request_services
 
 # 模块级 logger
 logger = logging.getLogger(__name__)
@@ -52,8 +66,9 @@ async def stream_graph(
     image_base64: str = None,
     conversation_store=None,
     conversation_history: list = None,
-    current_config: dict = None,
+    context_artifact: dict = None,
     forward_headers: dict = None,
+    services: dict = None,
 ) -> AsyncGenerator[str, None]:
     """走 LangGraph StateGraph 的 SSE 流(异步生成器)。
 
@@ -77,7 +92,7 @@ async def stream_graph(
         image_base64:        图片 base64(给 ImageFormTool 用)
         conversation_store:  ConversationStore 实例(可空,空则不落库)
         conversation_history:历史对话(给 LLM 当上下文)
-        current_config:      当前已有的表单配置(修改场景的"基础配置")
+        context_artifact:     对话的上下文参数(宿主下发的当前制品)
         forward_headers:     嵌入模式下透传给上游的请求头(鉴权等)
 
     Yields:
@@ -103,7 +118,7 @@ async def stream_graph(
             "compressed_history": build_compressed_history(conversation_history),
             "conversation_id": conversation_id,
             "forward_headers": forward_headers or {},
-            "current_config": current_config,
+            STATE_CONTEXT_ARTIFACT: context_artifact,
             "tool_name": "",
             "intent_reason": "",
             # 图片等工具私有状态,只在需要时填充
@@ -199,7 +214,53 @@ async def stream_graph(
                 这是真正的"同步阻塞"调用:``for chunk in graph.stream(...)``
                 会一直阻塞,直到 graph 跑完或遇到 interrupt。
                 放进线程池正是为了避免阻塞 asyncio 事件循环。
+
+                【线程绑定（关键）】
+                上游客户端的透传头/服务地址表是 threading.local（请求级隔离），
+                而本函数运行在**线程池工作线程**上——如果在外层（事件循环线程）
+                绑定，工作线程读不到。所以必须在这里、跑图之前绑定，
+                跑完（含异常）在 finally 里清理，防止线程复用串请求。
                 """
+                set_forward_headers(forward_headers or {})
+                set_request_services(services)
+
+                # 实时进度通道：把 StreamManager 绑给工具 emit（同线程），
+                # 工具每推进一步前端立刻收到——不再等节点 chunk。
+                # sm.stage / sm.pipeline_definition 内部 call_soon_threadsafe，线程安全。
+                from engine import nodes as _nodes
+
+                def _realtime(kind: str, payload, message):
+                    """实时 SSE 回调——工具在【工作线程】执行时经此直接推进度。
+
+                    链路：工具 ctx.emit → thread-local emitter（本函数）→
+                    call_soon_threadsafe → 事件循环 → StreamManager → SSE。
+                    不经 sse_events 列表中转——那条路要等节点结束才 flush，
+                    30 秒的 LLM 调用用户只能看到"正在生成"不动（真实踩坑）。
+                    """
+                    try:
+                        if kind == "pipeline_definition":
+                            sm.pipeline_definition(payload.get("tool", ""), payload.get("steps", []))
+                        else:
+                            sm.stage(payload, message or "")
+                    except Exception:
+                        # 实时通道故障不阻断工具执行（列表兜底已因绑定而关闭，
+                        # 但丢一条进度事件远比崩掉生成流程可接受）
+                        pass
+
+                _nodes.set_realtime_emitter(_realtime)
+                # 心跳任务：图执行期间每 15s 推一条 SSE 注释行。作用：
+                #   a) 长生成期间连接始终有字节流动（防代理空闲断连）；
+                #   b) 前端「空闲看门狗」以字节到达为准判断死活——连接真死时
+                #      60s 无任何字节（含心跳）→ 前端主动断开并解锁输入。
+                _hb_stop = asyncio.Event()
+
+                async def _heartbeat():
+                    """SSE 心跳循环（跑在事件循环上，每 15s 一条 : ping）。"""
+                    while not _hb_stop.is_set():
+                        await asyncio.sleep(15)
+                        sm.heartbeat()
+
+                _hb_task = loop.create_task(_heartbeat())
                 try:
                     for chunk in graph.stream(input_data, config):
                         _process_chunk(chunk)
@@ -209,6 +270,12 @@ async def stream_graph(
                     loop.call_soon_threadsafe(
                         lambda: asyncio.ensure_future(sm.emit_error(str(e)))
                     )
+                finally:
+                    _hb_stop.set()
+                    # 清理本线程的请求级上下文（防串到线程池的下一个任务）
+                    set_forward_headers(None)
+                    set_request_services(None)
+                    _nodes.set_realtime_emitter(None)
 
             # 关键:把同步函数丢进默认线程池执行,await 等它跑完
             # 类比 Java:CompletableFuture.supplyAsync(worker, executor).join()
@@ -247,7 +314,7 @@ async def stream_graph(
             if result_holder["last_result"] and not result_holder["had_interrupt"]:
                 _save_result_conversation(
                     conversation_store, conversation_id, user_id,
-                    user_input, result_holder["last_result"], current_config,
+                    user_input, result_holder["last_result"], context_artifact,
                 )
 
             # 无论成功 / 失败 / 中断,都要发 done 让前端关闭连接
@@ -289,16 +356,16 @@ def _save_conversation(store, conv_id, user_id, user_input, assistant_content):
         logger.warning(f"Failed to save conversation: {e}")
 
 
-def _save_result_conversation(store, conv_id, user_id, user_input, result_data, current_config):
+def _save_result_conversation(store, conv_id, user_id, user_input, result_data, context_artifact):
     """保存工具执行结果到对话历史(含配置快照)。
 
     【逻辑】
       1. 落 user / assistant 两条消息
       2. 如果结果里带 config(表单配置),额外存一条带 config_snapshot 的消息
          (审计用:记录"这次操作把配置改成了什么样")
-      3. 更新会话的 current_config:
+      3. 更新会话的 current_config(存储层字段名,不改):
          - 已有配置 → 直接 update
-         - 首次配置 → 顺便用 formName 当会话标题
+         - 首次配置 → 用制品标题(pack 的 format_result 钩子输出的通用 title 键)起会话名
     """
     if not store or not conv_id or not user_id:
         return
@@ -316,12 +383,13 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
                 conv_id=conv_id, role="assistant",
                 content=summary, config_snapshot=config,
             )
-            if current_config:
-                # 修改场景:已有配置,只更新 current_config
+            if context_artifact:
+                # 修改场景:已有制品,更新会话存储的当前制品
                 store.update_conversation_config(conv_id, config)
             else:
-                # 创建场景:首次产出配置,顺便起个标题(用表单名)
-                title = result_data.get("formName", result_data.get("title", "新对话"))
+                # 创建场景:首次产出配置,用 format_result 输出的通用 title 键起标题
+                # (不读领域字段——formName 之类的键属于 pack,引擎只认钩子产出)
+                title = result_data.get("title", "新对话")
                 store.update_conversation_config(conv_id, config, title=title)
     except Exception as e:
         logger.warning(f"Failed to save result conversation: {e}")

@@ -19,12 +19,8 @@ class CloneFormTool(Tool):
     when = "用户想复制表单,如'复制请假表单'、'基于XXX创建一个副本'、'克隆表单'"
 
     # ── 安全声明 ──
-    is_destructive = True  # 会创建新表单
-    is_read_only = False
-    is_concurrency_safe = False
     
     # ── 插件化元数据 ──
-    requires_existing_artifact = False  # 不需要当前会话有配置,而是去查询源表单
 
     def input_schema(self) -> dict:
         return {
@@ -79,15 +75,9 @@ class CloneFormTool(Tool):
                 summary=f"复制失败:校验不通过",
             )
         
-        # Step 5: 创建新表单
-        ctx.emit("stage", "create_new", "正在创建新表单...")
-        create_result = ctx.asset_client.persist_artifact(new_config, mode="create")
-        
-        if not create_result or not create_result.get("success"):
-            return ToolResult(
-                error_for_llm="创建新表单失败",
-                summary="复制失败:创建新表单失败",
-            )
+        # Step 5: 完成（统一「AI 永不落库」不变量，见设计文档 §7.5）
+        # 不调用 persist_artifact：克隆结果与其他工具一样输出候选，落库由业务人员决定
+        ctx.emit("stage", "create_new", "复制配置已生成，等待应用确认")
         
         # Step 6: 返回结果
         final_form_name = new_config.get("formName", "")

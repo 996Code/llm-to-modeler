@@ -18,12 +18,6 @@ def _make_ctx(llm=None, asset_client=None, prompt_loader=None):
 
 
 class TestCreateFormToolDeclaration:
-    def test_is_destructive(self):
-        assert CreateFormTool().is_destructive is True
-
-    def test_is_not_concurrency_safe(self):
-        assert CreateFormTool().is_concurrency_safe is False
-
     def test_steps_count(self):
         assert len(CreateFormTool().steps) == 6
 
@@ -122,10 +116,18 @@ class TestStepFetchTemplates:
         tool = CreateFormTool()
         asset = MagicMock()
         asset.get_template.side_effect = lambda name: {"name": name}
+        # fieldTypes 是类型→模板的事实源（fail-closed 依赖它判断类型是否存在）
+        asset.get_guide.return_value = {"fieldTypes": [
+            {"code": 0, "name": "TEXT"}, {"code": 1, "name": "NUMBER"},
+        ]}
         ctx = _make_ctx(asset_client=asset)
 
         from domains.njmind_form.models import ParsedField
         state = {
+            # 类型表由 fetch_guide 步骤写入 state（fieldTypes 是事实源）
+            "guide": {"fieldTypes": [
+                {"code": 0, "name": "TEXT"}, {"code": 1, "name": "NUMBER"},
+            ]},
             "parsed_fields": [
                 ParsedField(fieldTitleText="姓名", formFieldType=0),  # TEXT -> text_field
                 ParsedField(fieldTitleText="金额", formFieldType=1),  # NUMBER -> number_field

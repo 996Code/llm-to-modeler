@@ -1,6 +1,11 @@
-"""Tool/CompositeTool ABC 测试 — Fail-Closed 默认值 + hooks。"""
+"""Tool/CompositeTool ABC 测试 — 抽象契约 + hooks。
+
+注：曾有 Fail-Closed 安全标记位（is_destructive 等）的默认值测试——
+标记位已整批退役（零消费/不可达消费，见 sdk/tool.py 注释），测试随退。
+"""
+from sdk.tool import Tool, CompositeTool, ToolResult, ToolContext, ClarificationRaised
+
 import pytest
-from sdk.tool import Tool, CompositeTool, ToolResult, ToolContext
 
 
 class DummyTool(Tool):
@@ -14,23 +19,6 @@ class DummyTool(Tool):
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         return ToolResult(reply="ok", summary="dummy 执行完成")
-
-
-class TestToolFailClosedDefaults:
-    """Fail-Closed:安全相关属性默认保守。"""
-
-    def test_is_destructive_defaults_true(self):
-        t = DummyTool()
-        assert t.is_destructive is True  # 默认破坏性
-
-    def test_is_read_only_defaults_false(self):
-        t = DummyTool()
-        assert t.is_read_only is False
-
-    def test_is_concurrency_safe_defaults_false(self):
-        """C.2-B:默认不可并发(保守)。"""
-        t = DummyTool()
-        assert t.is_concurrency_safe is False
 
 
 class TestToolHooks:

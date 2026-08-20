@@ -214,51 +214,6 @@ class ConversationManager:
                 "artifact": result.artifact,
             })
 
-    def save_pending_ask(self, conv_id: str, tool_name: str, ask_spec: Dict, round_num: int) -> None:
-        """保存追问现场。
-
-        当工具用 LangGraph interrupt 暂停向用户提问时,把追问上下文落库,保证:
-        - 用户回答回来时能恢复“是哪个工具、问的什么、第几轮”
-        - 前端刷新/断线重连也能取回未答追问
-
-        Args:
-            conv_id:   会话 ID
-            tool_name: 发起追问的工具名(恢复时要回到这个工具)
-            ask_spec:  追问规格(问题列表、可选项等,结构由工具定义)
-            round_num: 追问轮次(同一工具可能多轮追问)
-        """
-        if not self._store:
-            return
-        self._store.append_event(conv_id, "ask", {
-            "tool": tool_name,
-            "ask": ask_spec,
-            "round": round_num,
-        })
-
-    def load_pending_ask(self, conv_id: str) -> Optional[Dict[str, Any]]:
-        """加载追问现场(最新一条)。
-
-        Args:
-            conv_id: 会话 ID
-
-        Returns:
-            最新未答追问的 dict(结构同 save_pending_ask 的 payload),无则 None。
-            语义上 ``ask`` 事件只取最新一条(见 ``load`` 的分流逻辑)。
-        """
-        if not self._store:
-            return None
-        return self._store.load_pending_ask(conv_id)
-
-    def clear_pending_ask(self, conv_id: str) -> None:
-        """清除追问现场。
-
-        用途:用户回答完、或主动取消追问后调用。Java 类比:类似把“待办”标记完成。
-        实现由 store 决定(物理删 / 逻辑标记),本层只发指令。
-        """
-        if not self._store:
-            return
-        self._store.clear_pending_ask(conv_id)
-
     def list_meta(self, user_id: str) -> List[Dict[str, Any]]:
         """查询某用户的会话列表(只查 session_meta,**不 JOIN events**)。
 

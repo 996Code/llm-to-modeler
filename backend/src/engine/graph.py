@@ -57,12 +57,11 @@
   - ``route_after_result``: handle_result 之后,要重跑(如用户追问后参数变了)回 execute_tool,否则 END
 """
 import logging
+import os
 from typing import Any, Optional
 
 # StateGraph:LangGraph 的核心图容器,类比 Spring 的 BeanDefinition / Flow 定义
 from langgraph.graph import StateGraph, START, END
-# InMemorySaver:checkpointer 实现,把每步状态快照存内存。生产换 SqliteSaver/PostgresSaver
-from langgraph.checkpoint.memory import InMemorySaver
 
 from engine.graph_state import GraphState
 from engine import nodes
@@ -76,6 +75,7 @@ def build_graph(
     asset_client: Any,
     conversation: Any = None,
     prompt_loader: Any = None,
+    pack_routers: dict = None,
 ) -> Any:
     """构建并编译 LangGraph StateGraph。
 
@@ -107,6 +107,7 @@ def build_graph(
     # 没法在调用时传额外 context。
     nodes.configure(
         registry=registry,
+        pack_routers=pack_routers or {},
         llm_client=llm_client,
         asset_client=asset_client,
         conversation=conversation,
@@ -154,7 +155,7 @@ def build_graph(
     )
 
     # 3. 编译(带 checkpoint)
-    # ── InMemorySaver 的 WHY ──
+    # ── SqliteSaver 的 WHY（P6 生产化）──
     # checkpointer 的作用:每经过一个节点,自动把完整 state 快照存起来。
     # 好处:
     #   (a) 追问恢复:interrupt 暂停后,用户回答时带同一个 thread_id,框架自动恢复现场,
@@ -162,20 +163,31 @@ def build_graph(
     #       或会话对象序列化到 HttpSession/Redis。
     #   (b) 断点续跑:崩溃后能从最后一步重放,不用从头调 LLM(省钱省时)。
     #   (c) 调试/审计:可按 thread_id dump 任意一步的 state。
-    # 为什么用 InMemorySaver(而非 SqliteSaver/PostgresSaver):
-    #   - 开发期够用,零外部依赖;进程重启丢失,但对单测/本地联调无害。
-    #   - 生产替换为 PostgresSaver 即可,代码只改这一行。类比 Java 里
-    #     “开发用 H2、生产用 MySQL/Postgres”,换 driver 即可。
+    # 为什么用 SqliteSaver(而非 InMemorySaver):
+    #   - 生产场景进程会重启/多 worker,InMemorySaver 重启即丢失追问现场,
+    #     用户在嵌入侧栏改到一半刷新就丢——已从「开发期够用」升级为「生产必需」。
+    #   - SqliteSaver 把 checkpoint 落盘到与会话同库的 SQLite 文件,零外部依赖。
+    #   - 依赖包 langgraph-checkpoint-sqlite 已加入 requirements.txt。
     #   - 关键前提:checkpoint 的可恢复性依赖 thread_id 唯一标识会话,
     #     调用方必须保证同一会话始终传同一 thread_id(见 conversation_id 字段)。
-    checkpointer = InMemorySaver()
+    #
+    # 连接生命周期：from_conn_string 的 with 语义会在退出时 close 连接，
+    # 而编译后的图在后续每次请求 stream 时仍要用 checkpointer 读写 checkpoint——
+    # 所以这里显式创建进程级长连接（check_same_thread=False：LangGraph 可能跨线程调度节点），
+    # 由 app 生命周期（lifespan）持有并随进程退出释放。与 ConversationStore 同一思路。
+    import sqlite3
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
+    _conn = sqlite3.connect(db_path, check_same_thread=False)
+    checkpointer = SqliteSaver(conn=_conn)
 
     # compile 把 StateGraph 转成不可变、可调用的 CompiledStateGraph
     graph = workflow.compile(checkpointer=checkpointer)
 
     logger.info(
         f"LangGraph StateGraph compiled: "
-        f"{len(registry.all())} tools, checkpointer=InMemorySaver"
+        f"{len(registry.all())} tools, checkpointer=SqliteSaver"
     )
 
     return graph

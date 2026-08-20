@@ -8,7 +8,7 @@
 多轮追问:
   parse_info 检测关键字段(请假类型、日期)是否缺失,
   缺失时返回 ToolResult.ask 而非填默认值,确保用户确认后再提交。
-  这是破坏性操作(is_destructive=True)的安全设计。
+  （提交为不可逆操作：信息不足时追问、绝不填默认值——防线在 validate_input。）
 
 artifact_type="data" — 不是表单配置，是数据结果。
 前端渲染 data-card，不显示"应用配置"按钮。
@@ -31,7 +31,6 @@ class SubmitLeaveTool(CompositeTool):
     """提交请假申请到审批系统。
 
     安全设计:
-    - is_destructive=True: 提交是不可逆操作
     - 信息不足时追问,不自动填默认值提交
     """
 
@@ -40,9 +39,6 @@ class SubmitLeaveTool(CompositeTool):
     when = "用户想提交请假申请,如'我要请假'、'提交请假单'、'申请年假'、'请3天假'"
 
     # 安全声明
-    is_destructive = True
-    is_read_only = False
-    requires_existing_artifact = False
 
     # 管线定义
     steps = ["parse_info", "validate_rules", "submit"]

@@ -2,6 +2,9 @@
 
 **LLM 驱动的多插件智能助手引擎** — 通过 LangGraph StateGraph 编排意图识别、工具执行与追问恢复，支持自然语言驱动多种业务能力（表单配置、请假申请、审批查询等），Engine 层零领域知识。
 
+> 📖 **新入手必读**：`doc/插件开发与嵌入指南.md` —— 系统全景 / 从零写一个插件（请假为例）/
+> manifest 声明逐项 / 交互模式 / 嵌入契约协议（含完整消息往返举例）/ 增量修改协议 / FAQ。
+
 ## 技术栈
 
 | 层 | 技术 |
@@ -10,7 +13,7 @@
 | 后端 | Python 3.12 + FastAPI + LangGraph StateGraph |
 | LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型） |
 | 存储 | SQLite（对话历史 + LangGraph Checkpoint） |
-| 上游 | AssetClient 抽象（HTTP 适配，环境变量配置） |
+| 上游 | AssetClient 抽象（HTTP 适配；地址三级解析：宿主 services 表 → 白名单 → env 兜底） |
 
 ---
 
@@ -53,7 +56,7 @@
 │  │  │        │                                  ▼            │  │   │
 │  │  │        └──────────────────────→ handle_result ──→ END  │  │   │
 │  │  │                                                        │  │   │
-│  │  │  Checkpoint: InMemorySaver (thread_id = conv_id)       │  │   │
+│  │  │  Checkpoint: SqliteSaver (thread_id = conv_id)       │  │   │
 │  │  └────────────────────────────────────────────────────────┘  │   │
 │  │                                                              │   │
 │  │  辅助模块:                                                   │   │
@@ -106,16 +109,19 @@
 │                              │                                       │
 │  ┌──────────────────────────▼───────────────────────────────────┐   │
 │  │  Adapters (adapters/)                                        │   │
-│  │  HttpAssetClient — HTTP 上游适配 (ASSET_BASE_URL 环境变量)   │   │
+│  │  HttpAssetClient — HTTP 上游适配（地址:宿主services表优先,  │   │
+│  │  UPSTREAM_BASE_URL 仅兜底;详见 resolve_base 三级降级）      │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
          │                    │
          ▼                    ▼
 ┌────────────────┐   ┌─────────────────────┐
 │ 上游业务 API   │   │ LLM 推理服务         │
-│ (ASSET_BASE_URL│   │ (OpenAI 兼容接口)    │
-│  提交/查询数据)│   │ Qwen3 / GPT / ...    │
-└────────────────┘   └─────────────────────┘
+│ (地址三级解析: │   │ (OpenAI 兼容接口)    │
+│  宿主services表│   │ glm / Qwen / ...     │
+│  →白名单→env) │   └─────────────────────┘
+│  提交/查询数据)│
+└────────────────┘
 ```
 
 ### 架构试金石
@@ -194,11 +200,11 @@ class GraphState(TypedDict, total=False):
     compressed_history: str
     conversation_id: str
     forward_headers: dict          # 嵌入模式透传的请求头
-    current_config: dict | None    # 已有配置 (modify 用)
+    context_artifact: dict | None  # 上下文制品 (pack 判断画布状态 + modify 增量基线)
 
-    # 意图识别
-    tool_name: str                 # 选中的工具名
-    intent_reason: str
+    # 意图识别 (两级路由产出)
+    tool_name: str                 # 选中的工具名 (pack 二级路由决定)
+    intent_reason: str             # 路由理由 (含 pack 信息, 可观测)
 
     # 工具执行
     tool_state: dict               # 工具内部 state (透传, Engine 不读)
@@ -247,13 +253,15 @@ class Tool(ABC):
     description: str             # 工具说明
     when: str                    # "何时用" 描述
 
-    # 安全声明 (Fail-Closed 默认值)
-    is_destructive: bool = True
-    is_read_only: bool = False
-    is_concurrency_safe: bool = False
-    requires_existing_artifact: bool = False
+    # 语义自检 (Engine 在 execute 前调用, 失败则跳过 execute 回流给 LLM)
+    def validate_input(self, state: dict) -> str | None
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult
+
+    # 钩子方法 (Engine 通过钩子操作制品, 不直接读内部结构)
+    def format_result(self, artifact: dict) -> dict     # SSE 前端字段
+    def summarize_artifact(self, artifact: dict) -> str # 压缩器状态补偿
+    def title_for(self, artifact: dict) -> str          # 对话列表标题
 
 class CompositeTool(Tool):
     steps: list[str] = []        # 管线步骤名
@@ -302,7 +310,7 @@ def _build_capabilities(self, ctx):
 | 工具 | 类型 | 管线 | 说明 |
 |------|------|------|------|
 | create_form | CompositeTool | 6步 | 自然语言 → 完整表单配置 |
-| modify_form | CompositeTool | 3步 | 自然语言修改已有配置 |
+| modify_form | CompositeTool | 3步·两相式 | 自然语言修改已有配置（增量指令集为主，全量重生成兜底） |
 | get_form | Tool | - | 根据 formCode 查询已有表单 |
 | clone_form | Tool | - | 复制已有表单并修改标识 |
 | image_form | Tool | - | 图片识别 → 表单配置 (多模态) |
@@ -313,10 +321,19 @@ def _build_capabilities(self, ctx):
 fetch_guide → list_assets → parse_fields(LLM) → fetch_templates → generate(LLM) → validate
 ```
 
-**MODIFY 管线 (3步)：**
+**MODIFY 管线 (3步，modify 步两相式)：**
 ```
-fetch_guide → modify(LLM) → validate
+fetch_guide → modify → validate（差分校验）
+                ├─ 增量主路径（默认，~4s）：
+                │    build_catalog(字段目录~1KB) → plan_ops(LLM 只输出指令集)
+                │    → apply_ops(纯代码确定性合并) → postprocess
+                │    锚点失败带清单重试≤2次
+                └─ 全量兜底（升格后本会话锁定）：LLM 吃/吐完整配置（~33s）
+                     触发：LLM 主动 full_rewrite / 指令重试超限 / 输出不可解析
 ```
+前端进度条四节点（获取指南/规划指令/应用修改/校验结果）由
+`pipeline_steps` 声明动态下发，未提及字段经 `restore_untouched`
+从基线逐字节还原（改 A 不动 B）。
 
 ### 4.2 leave_application — 请假申请 (Demo 插件)
 
@@ -332,7 +349,7 @@ fetch_guide → modify(LLM) → validate
 parse_info(LLM) → validate_rules(API) → submit(API)
 ```
 
-**关键设计：破坏性操作(is_destructive=True)信息不足时追问，不填默认值。**
+**关键设计：信息不足时通过 `ToolResult.ask` + `AskSpec` 声明式追问，不填默认值。**
 
 ---
 
@@ -366,6 +383,9 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 - `graph.stream()` 是同步 API，在线程池中执行
 - 每个 chunk 通过 `loop.call_soon_threadsafe()` 实时推 SSE（不等全部完成）
 - interrupt 时检查 `graph.get_state()` 获取中断数据
+- 传输保障：后端 15s `: ping` 心跳；响应头 `Cache-Control: no-cache, no-transform`
+  （no-transform 禁止中间代理压缩——rsbuild 等 dev server 的 gzip 中间件会把
+  event-stream 攒到流结束才吐，表现为前端一直无响应）；前端 60s 空闲看门狗断流报错
 
 ---
 
@@ -395,6 +415,13 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 ></iframe>
 ```
 
+### 生产形态：嵌入契约协议（mind-designer 已接入）
+
+designer（field-edit 页右下角悬浮球）走**信封协议**：
+`READY / INIT / GET_CONTEXT / APPLY / AUTH_UPDATE / GET_AUTH / CLOSE / RESIZE`，
+带 requestId 关联与 capabilities 能力协商，配置读写走宿主前端、渲染画布不落库。
+完整协议规范见 **`doc/嵌入模式总体设计.md`**。下方 SDK / iframe 为独立演示形态。
+
 ### 请求头透传
 
 嵌入模式下，主系统的请求头会自动透传到后端（用于上游 API 鉴权等）：
@@ -418,20 +445,41 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 编辑 `.env`：
 
 ```env
-# 上游业务 API (AssetClient 的 base_url)
-ASSET_BASE_URL=http://192.168.99.22:19999
+# ── 上游业务 API（仅兜底地址，见下方三级解析）──
+UPSTREAM_BASE_URL=http://127.0.0.1:7001
+UPSTREAM_TIMEOUT=30
+UPSTREAM_CACHE_TTL=300
+# 宿主下发服务地址的白名单（逗号分隔）。⚠ 空缺省=不限制，仅限本地联调；
+# 生产必须配置，防"控制宿主下发内容的人让本服务带 token 请求任意地址"
+# UPSTREAM_ALLOWED_BASES=http://192.168.99.28:7114/codeBack
 
-# LLM 推理服务 (OpenAI 兼容接口)
-LLM_BASE_URL=http://127.0.0.1:1234/v1
-LLM_API_KEY=local-dev-key
-LLM_MODEL=qwen/qwen3.6-35b-a3b
-LLM_MAX_TOKENS=16384
+# ── LLM 推理服务 (OpenAI 兼容接口) ──
+LLM_BASE_URL=http://996code.top:18080/v1
+LLM_API_KEY=sk-xxxx
+LLM_MODEL=glm-5.3
+LLM_MAX_TOKENS=200000
 LLM_TIMEOUT=300
 
-# 服务端口
+# ── 服务端口 ──
 BACKEND_PORT=18080
 FRONTEND_PORT=13080
 ```
+
+健康检查：根路径 `GET /health`（运维/K8s 探针）与 `GET /api/health`
+（嵌入代理链别名，宿主探测 AI 服务是否部署用）双端点。
+
+#### 上游地址三级解析（重要）
+
+嵌入模式下 `UPSTREAM_BASE_URL` **只是兜底**，实际地址按以下优先级解析
+（`upstream_client.resolve_base`，每 pack 在自己的 manifest 里声明所需服务名，
+如 `njmind-modeler`）：
+
+1. **宿主 services 表**：designer 握手后经 chat 请求下发
+   （如 `http://192.168.99.28:7114/codeBack`，经 designer 代理到网关）；
+2. **白名单校验**：宿主地址必须命中 `UPSTREAM_ALLOWED_BASES`，越界回退默认并告警；
+3. **env 默认**：宿主未提供该服务时使用 `UPSTREAM_BASE_URL`。
+
+同一请求内所有上游调用（含缓存 key）绑定同一 base，不同环境不串缓存。
 
 ### 启动
 
@@ -507,18 +555,22 @@ llm-to-modler/
 │       │   ├── conversation.py    # 多轮对话管理
 │       │   ├── compression.py     # 上下文压缩 + build_compressed_history
 │       │   ├── prompt_loader.py   # Jinja2 模板加载
-│       │   ├── dispatcher.py      # 旧调度器 (遗留, MCP 兼容)
-│       │   └── logging_filter.py  # 日志脱敏
+│       │   │   ├── state_keys.py      # 跨模块状态键常量 (engine ↔ pack ↔ 前端)
+│       │   │   └── logging_filter.py  # 日志脱敏
 │       │
 │       ├── sdk/                   # ★ SDK 层 (协议定义)
 │       │   ├── tool.py            # Tool/CompositeTool/ToolResult/AskSpec
 │       │   ├── registry.py        # ToolRegistry (自动发现)
+│       │   ├── pack_router.py     # PackRouter 协议 (一级/二级路由)
 │       │   ├── asset_client.py    # AssetClient ABC
 │       │   └── sanitize.py        # Unicode 隐写清洗
 │       │
 │       ├── domains/               # ★ Domain Packs (领域知识全部在此)
 │       │   ├── njmind_form/       # 表单配置插件
 │       │   │   ├── pack.py
+│       │   │   ├── router.py      # NjmindFormRouter (领域路由规则)
+│       │   │   ├── keys.py        # pack 私有 JSON 键常量
+│       │   │   ├── config.yaml    # 领域描述/动作/欢迎语
 │       │   │   ├── models.py      # ParsedField 等数据模型
 │       │   │   ├── tools/         # create/modify/get/clone/image/chat
 │       │   │   └── prompts/       # Jinja2 模板
@@ -573,9 +625,9 @@ Engine 层不知道"表单"、"请假"等任何业务概念。所有领域知识
 
 ChatTool 通过 `ctx.registry.all()` 动态查询所有已注册工具的能力描述。新增插件后，ChatTool 的"我能做什么"自动更新，无需修改任何代码。
 
-### 4. 破坏性操作安全设计
+### 4. 信息不足时的声明式追问
 
-`is_destructive=True` 的工具（如提交请假申请）在信息不足时**必须追问**，不填默认值。通过 `ToolResult.ask` + `AskSpec` 声明式定义追问问题，Engine 统一处理 interrupt。
+工具信息不足时**必须追问**，不填默认值。通过 `ToolResult.ask` + `AskSpec` 声明式定义追问问题，Engine 统一处理 LangGraph interrupt/resume。
 
 ### 5. SSE 实时流式
 
@@ -585,9 +637,9 @@ ChatTool 通过 `ctx.registry.all()` 动态查询所有已注册工具的能力�
 
 嵌入模式下，主系统的 HTTP 请求头（X-User-Id、Authorization 等）通过 `forward_headers` 全链路透传到上游 API，实现零侵入的身份传递。
 
-### 7. Fail-Closed 安全默认
+### 7. 两级路由
 
-所有工具属性默认保守值：`is_destructive=True`、`is_read_only=False`、`is_concurrency_safe=False`。插件必须显式声明安全属性，避免误用。
+一级路由（引擎）按 `config.yaml` 的领域描述选领域包（pack），单包场景零 LLM 调用直通；二级路由（pack）选具体工具，领域规则（如"画布有内容+增量话术=修改类"）写在 pack 的 router 里，不泄漏进引擎。真正的安全防线是路由数据铁律（如"无制品必创建"）+ 各工具 `validate_input` 语义自检，而非声明式标记位。
 
 ---
 

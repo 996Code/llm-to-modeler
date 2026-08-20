@@ -31,6 +31,7 @@
 
 import json
 import logging
+import os
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -46,6 +47,11 @@ logger = logging.getLogger(__name__)
 # 节点内部调上游时再读出来（_get_forward_headers），实现请求级隔离。
 # 类比 Java 的 ThreadLocal<Map<String,String>>。
 _forward_headers = threading.local()
+
+# 线程本地存储：保存"每个请求"的宿主服务地址表（{服务名: base_url}）。
+# 与 _forward_headers 同构：嵌入模式下宿主在 chat 请求的 services 字段里
+# 声明上游地址，工作线程在请求期间读取并按 pack 声明的服务名解析。
+_request_services = threading.local()
 
 
 def set_forward_headers(headers: Optional[Dict[str, str]]):
@@ -79,6 +85,33 @@ def _get_forward_headers() -> Dict[str, str]:
     return getattr(_forward_headers, 'value', None) or {}
 
 
+def set_request_services(services: Optional[Dict[str, str]]):
+    """为本线程设置宿主服务地址表（请求级作用域）。
+
+    嵌入模式下，宿主在 chat 请求的 services 字段里提供上游地址表：
+      {"njmind-modeler": "http://192.168.99.22/codeBack", ...}
+    key 是 pack manifest 声明的服务名。工具执行时按服务名解析上游 base。
+
+    类比 Java：与 set_forward_headers 同构的 ThreadLocal 绑定。
+
+    Args:
+        services: 服务名 → base_url 表；None 表示清空（请求结束复位）。
+    """
+    if services:
+        _request_services.value = dict(services)
+    else:
+        _request_services.value = None
+
+
+def _get_request_services() -> Dict[str, str]:
+    """读取本线程当前的服务地址表。
+
+    Returns:
+        服务地址表；未设置过返回空字典。
+    """
+    return getattr(_request_services, 'value', None) or {}
+
+
 class UpstreamConfig:
     """上游服务配置（普通类，非 Pydantic）。
 
@@ -86,6 +119,8 @@ class UpstreamConfig:
         base_url: 上游基础地址（去掉末尾斜杠，避免拼接双斜杠）
         timeout: HTTP 超时秒数（默认 30，本地/内网通常够）
         cache_ttl: 缓存有效期秒数（默认 300=5 分钟，平衡新鲜度和上游压力）
+        allowed_bases: 宿主服务地址白名单（防 SSRF/token 外泄，
+                       未命中时回退 base_url，见 resolve_base）
     """
 
     def __init__(
@@ -93,12 +128,15 @@ class UpstreamConfig:
         base_url: str = "http://127.0.0.1:7001",
         timeout: int = 30,
         cache_ttl: int = 300,  # 5 minutes
+        allowed_bases: Optional[List[str]] = None,
     ):
         # rstrip("/") 去掉末尾斜杠，保证后续 url 拼接不会出现 //
         # 类比 Java：URI 构造时规范化 base path，避免 "http://host/" + "/api" 产生双斜杠
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout  # HTTP 连接+读取总超时，类比 OkHttp 的 timeout() 链式配置
         self.cache_ttl = cache_ttl  # 缓存有效期，类比 Caffeine/Guava Cache 的 expireAfterWrite
+        # 白名单归一化：去末尾斜杠，便于比对
+        self.allowed_bases = [b.rstrip("/") for b in (allowed_bases or [])]
 
 
 class UpstreamClient:
@@ -122,8 +160,11 @@ class UpstreamClient:
         """初始化上游客户端。
 
         Args:
-            config: 上游配置；None 时从环境变量 UPSTREAM_BASE_URL/UPSTREAM_TIMEOUT/
-                    UPSTREAM_CACHE_TTL 读取（默认 127.0.0.1:7001, 30s, 300s）。
+            config: 上游配置；None 时从环境变量读取（见下方默认值）。
+                    注意地址解析优先级（resolve_base）：嵌入模式下宿主经 chat
+                    请求 services 表下发的服务地址优先（每 pack 在 manifest
+                    声明所需服务名），env 的 UPSTREAM_BASE_URL 仅作兜底——
+                    "宿主表 → 白名单 → env 默认" 三级降级，详见 resolve_base。
             conversation_store: 会话存储，用于持久化上游调用日志（调试/监控）。
                                 None 时不记日志（只 warning 不影响主流程）。
         """
@@ -136,6 +177,15 @@ class UpstreamClient:
                 base_url=os.getenv("UPSTREAM_BASE_URL", "http://127.0.0.1:7001"),
                 timeout=int(os.getenv("UPSTREAM_TIMEOUT", "30")),
                 cache_ttl=int(os.getenv("UPSTREAM_CACHE_TTL", "300")),
+                # 宿主服务地址白名单（逗号分隔）。
+                # ⚠ 未配置（空列表）= 不限制，宿主下发的地址直接采用——仅适合
+                # 本地联调；生产必须配置（至少放行网关地址），否则任何能控制
+                # 宿主下发内容的人都能让本服务带着透传 token 请求任意地址。
+                allowed_bases=[
+                    b.strip()
+                    for b in os.getenv("UPSTREAM_ALLOWED_BASES", "").split(",")
+                    if b.strip()
+                ],
             )
 
         self.config = config
@@ -183,6 +233,62 @@ class UpstreamClient:
         except Exception as e:
             # 日志失败不能影响主流程，只 warning
             logger.warning(f"Failed to save upstream call log: {e}")
+
+    def resolve_base(self, service_name: str) -> str:
+        """按服务名解析上游 base URL（嵌入模式服务地址动态化）。
+
+        解析顺序（从最可信到最不可信，逐级降级）：
+          1. 宿主在 chat 请求 services 表里提供的该服务地址，
+             且必须命中 UPSTREAM_ALLOWED_BASES 白名单（防 SSRF/token 外泄）；
+          2. 未命中白名单 → 回退 env 默认 base_url，并告警；
+          3. 宿主未提供该服务 → 回退 env 默认 base_url。
+
+        同一服务名若命中，后续该请求的所有上游调用（含缓存 key）都用该 base。
+
+        Args:
+            service_name: pack manifest 声明的服务名（如 "njmind-modeler"）。
+
+        Returns:
+            规范化（去尾斜杠）后的 base URL。
+        """
+        host_bases = _get_request_services()  # 宿主提供的服务地址表（请求级）
+        provided = host_bases.get(service_name)
+        if provided:
+            provided = provided.rstrip("/")
+            # 白名单校验：命中白名单才可用；否则回退默认（防 SSRF/token 外泄）。
+            # 白名单为空（未配置）时视为「无白名单约束」→ 允许宿主地址（默认放宽，
+            # 生产必须配置 UPSTREAM_ALLOWED_BASES 收紧；空列表=不限制=仅限联调）。
+            if self.config.allowed_bases and provided not in self.config.allowed_bases:
+                logger.warning(
+                    f"Host-provided service base for '{service_name}' not in allowed bases, "
+                    f"falling back to default: {provided}"
+                )
+                return self.config.base_url
+            return provided
+        # 宿主未提供该服务 → 默认地址
+        return self.config.base_url
+
+    def _cache_key(self, prefix: str, key: str, service_name: str) -> str:
+        """生成带服务 base 的缓存键，避免多上游环境缓存串数据。
+
+        模板/Schema/guide 有 TTL 缓存（读多写少），不同上游环境的同名模板
+        必须用不同缓存键隔离——否则 A 环境的模板会被喂给 B 环境的生成。
+
+        Args:
+            prefix: 缓存命名空间前缀（如 "template"/"schema"）
+            key:    原始键（如模板文件名）
+            service_name: 上游服务名（决定 base，见 resolve_base）
+
+        Returns:
+            形如 "{prefix}:{base}:{key}" 的缓存键。
+        """
+        base = self.resolve_base(service_name)
+        return f"{prefix}:{base}:{key}"
+
+
+    def _service_base(self) -> str:
+        """当前请求的上游 base（resolve_base + 白名单），全部 MCP 调用统一走这里。"""
+        return self.resolve_base("njmind-modeler")
 
     def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """合并"透传头"和"额外头"。
@@ -242,10 +348,11 @@ class UpstreamClient:
         """
         import time  # 局部导入 time：仅计时需要，避免模块级污染
         start_time = time.time()  # 记录起始时间，用于后续算 duration_ms
-        endpoint = f"{self.config.base_url}/api/mcp/templates/list-templates"
+        base = self._service_base()
+        endpoint = f"{base}/api/mcp/templates/list-templates"
         try:
             # GET 请求，headers 透传本线程的鉴权头
-            resp = self._client.get("/api/mcp/templates/list-templates", headers=self._headers())
+            resp = self._client.get(endpoint, headers=self._headers())
             resp.raise_for_status()  # 非 2xx 抛 HTTPStatusError，类比 Java RestClient 的响应状态校验
             result = resp.json()  # 解析 JSON body 为 Python list/dict，类比 Jackson readValue
             duration_ms = int((time.time() - start_time) * 1000)  # 秒转毫秒，整型便于日志展示
@@ -283,15 +390,17 @@ class UpstreamClient:
         # 自动补全 .json 后缀，降低调用方心智负担
         # 三元表达式：类比 Java ternary `name.endsWith(".json") ? name : name + ".json"`
         filename = name if name.endswith(".json") else f"{name}.json"
-        endpoint = f"{self.config.base_url}/api/mcp/templates/{filename}"
-        cache_key = f"template:{filename}"  # 缓存键加前缀避免与 schema/guide 命名空间冲突
+        base = self._service_base()
+        endpoint = f"{base}/api/mcp/templates/{filename}"
+        # 缓存键带服务 base（多上游环境不串数据），前缀区分命名空间
+        cache_key = self._cache_key("template", filename, "njmind-modeler")
         cached = self._get_cached(cache_key)
         if cached is not None:
             # 命中缓存直接返回，跳过 HTTP 回源，类比 Spring Cache @Cacheable 命中
             return cached
 
         try:
-            resp = self._client.get(f"/api/mcp/templates/{filename}", headers=self._headers())
+            resp = self._client.get(endpoint, headers=self._headers())
             resp.raise_for_status()
             template = resp.json()
             self._set_cached(cache_key, template)  # 命中后缓存，下次 ttl 内直接命中
@@ -320,9 +429,10 @@ class UpstreamClient:
         """从上游获取 JSON Schema 文件名列表（失败返回空列表）。"""
         import time
         start_time = time.time()
-        endpoint = f"{self.config.base_url}/api/mcp/schemas/list-schemas"
+        base = self._service_base()
+        endpoint = f"{base}/api/mcp/schemas/list-schemas"
         try:
-            resp = self._client.get("/api/mcp/schemas/list-schemas", headers=self._headers())
+            resp = self._client.get(endpoint, headers=self._headers())
             resp.raise_for_status()
             result = resp.json()
             duration_ms = int((time.time() - start_time) * 1000)
@@ -356,14 +466,15 @@ class UpstreamClient:
         # Schema 命名规范是 xxx.schema.json，自动补全
         # 注意：只要名字已经以 .json 结尾就视为完整文件名，否则补 .schema.json
         filename = name if name.endswith(".json") else f"{name}.schema.json"
-        endpoint = f"{self.config.base_url}/api/mcp/schemas/{filename}"
-        cache_key = f"schema:{filename}"
+        base = self._service_base()
+        endpoint = f"{base}/api/mcp/schemas/{filename}"
+        cache_key = self._cache_key("schema", filename, "njmind-modeler")
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
         try:
-            resp = self._client.get(f"/api/mcp/schemas/{filename}", headers=self._headers())
+            resp = self._client.get(endpoint, headers=self._headers())
             resp.raise_for_status()
             schema = resp.json()
             self._set_cached(cache_key, schema)
@@ -392,23 +503,25 @@ class UpstreamClient:
         """从上游获取填写指南 guide.json（带 TTL 缓存）。
 
         指南是 LLM 生成配置时的重要参考（字段类型关键词索引），读多写少，适合缓存。
+        缓存键含 resolve_base 结果（服务地址），多上游环境不串数据。
         """
         import time
         start_time = time.time()
-        endpoint = f"{self.config.base_url}/api/mcp/guides/guide.json"
-        cache_key = "guide"
+        base = self.resolve_base("njmind-modeler")
+        cache_key = self._cache_key("guide", "guide", "njmind-modeler")
         cached = self._get_cached(cache_key)
         if cached is not None:
             return cached
 
         try:
-            resp = self._client.get("/api/mcp/guides/guide.json", headers=self._headers())
+            # 绝对 URL：httpx 会忽略 client 构造时的默认 base_url（多服务地址动态化）
+            resp = self._client.get(f"{base}/api/mcp/guides/guide.json", headers=self._headers())
             resp.raise_for_status()
             guide = resp.json()
             self._set_cached(cache_key, guide)
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
-                endpoint=endpoint,
+                endpoint=f"{base}/api/mcp/guides/guide.json",
                 response_data={"guideLoaded": True},
                 status_code=resp.status_code,
                 duration_ms=duration_ms,
@@ -417,12 +530,55 @@ class UpstreamClient:
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
-                endpoint=endpoint,
+                endpoint=f"{self.config.base_url}/api/mcp/guides/guide.json",
                 status_code=500,
                 duration_ms=duration_ms,
                 error_message=str(e),
             )
             logger.error(f"Failed to get guide: {e}")
+            return None
+
+    def get_guide_for(self, service_name: str = "njmind-modeler") -> Optional[Dict[str, Any]]:
+        """按服务名取上游 guide（嵌入模式多服务地址）。
+
+        与 get_guide 的区别：
+          - 先 resolve_base(service_name) 解析本次请求该服务对应的 base；
+          - 缓存键带 base（resolve_base 结果），避免多环境模板串数据；
+          - 无多服务（host 未提供 services）时行为与 get_guide 一致（走默认 base）。
+        """
+        import time
+        start_time = time.time()
+        base = self.resolve_base(service_name)
+        cache_key = self._cache_key("guide", f"guide:{service_name}", service_name)
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            # 共享 httpx.Client 构造时 base_url 是 env 默认；这里传绝对 URL，
+            # httpx 会忽略 client 的 base_url 直接使用（标准行为）
+            full_url = f"{base}/api/mcp/guides/guide.json"
+            resp = self._client.get(full_url, headers=self._headers())
+            resp.raise_for_status()
+            guide = resp.json()
+            self._set_cached(cache_key, guide)
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=full_url,
+                response_data={"guideLoaded": True},
+                status_code=resp.status_code,
+                duration_ms=duration_ms,
+            )
+            return guide
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            self._log_call(
+                endpoint=f"{base}/api/mcp/guides/guide.json",
+                status_code=500,
+                duration_ms=duration_ms,
+                error_message=str(e),
+            )
+            logger.error(f"Failed to get guide for '{service_name}': {e}")
             return None
 
     # ── Validation（校验，委托给上游，不缓存）─────────────────────
@@ -450,10 +606,11 @@ class UpstreamClient:
         """
         import time
         start_time = time.time()
-        endpoint = f"{self.config.base_url}/api/mcp/forms/validate?mode={mode}"
+        base = self._service_base()
+        endpoint = f"{base}/api/mcp/forms/validate?mode={mode}"
         try:
             resp = self._client.post(
-                "/api/mcp/forms/validate",
+                f"{base}/api/mcp/forms/validate",
                 params={"mode": mode},  # 查询参数 mode=CREATE/UPDATE，类比 Java RestClient 的 queryParam
                 json=form_config,  # bare JSON body, no wrapper —— 裸 JSON 体，无包装
                 headers=self._headers(),
@@ -525,9 +682,10 @@ class UpstreamClient:
         """
         import time
         start_time = time.time()
-        endpoint = f"{self.config.base_url}/api/mcp/forms/{form_code}"
+        base = self._service_base()
+        endpoint = f"{base}/api/mcp/forms/{form_code}"
         try:
-            resp = self._client.get(f"/api/mcp/forms/{form_code}", headers=self._headers())
+            resp = self._client.get(endpoint, headers=self._headers())
             resp.raise_for_status()
             result = resp.json()
             duration_ms = int((time.time() - start_time) * 1000)
@@ -560,9 +718,10 @@ class UpstreamClient:
         """
         import time
         start_time = time.time()
-        endpoint = f"{self.config.base_url}/api/mcp/forms/create"
+        base = self._service_base()
+        endpoint = f"{base}/api/mcp/forms/create"
         try:
-            resp = self._client.post("/api/mcp/forms/create", json=form_config, headers=self._headers())
+            resp = self._client.post(endpoint, json=form_config, headers=self._headers())
             resp.raise_for_status()
             result = resp.json()
             duration_ms = int((time.time() - start_time) * 1000)
@@ -602,10 +761,11 @@ class UpstreamClient:
         """
         import time
         start_time = time.time()
-        endpoint = f"{self.config.base_url}/api/mcp/forms/{form_code}/update"
+        base = self._service_base()
+        endpoint = f"{base}/api/mcp/forms/{form_code}/update"
         try:
             resp = self._client.post(
-                f"/api/mcp/forms/{form_code}/update",
+                endpoint,
                 json=form_config,
                 headers=self._headers(),
             )

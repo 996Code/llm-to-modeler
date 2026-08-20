@@ -12,28 +12,39 @@
 
 // axios：流行的 HTTP 客户端库（类似 Java 的 OkHttp / Apache HttpClient）
 import axios from 'axios'
+import { CONTEXT_KEY_ARTIFACT } from '../composables/hostPort'
 // 仅作为类型使用（import type），编译后不会进入运行时包，类似 Java 的接口引用
 import type { Conversation, SSEResult } from '../types'
 // 引入透传 headers 工具（嵌入模式下携带父系统的鉴权信息）
 import { getForwardedHeaders } from '../composables/forwardHeaders'
+// 引入 userId（嵌入模式下只信宿主下发的值，见 hostPort.ts）
+import { getUserId } from '../composables/userIdentity'
+
+// 统一项目前缀下的 API 基路径：BASE_URL（vite base，'/ai-modeler/'）+ 'api'。
+// 这样无论直连本服务（13080）还是经宿主/网关反代（同前缀透传），请求都落在
+// 正确路径上；SSE 的 fetch 也用同一常量（见 streamSSE / chat）。
+export const API_BASE = (import.meta.env.BASE_URL || '/') + 'api'
 
 // 创建一个预配置的 axios 实例。
-// baseURL='/api' 表示所有请求会自动加上 /api 前缀（如 get('/conversations') → /api/conversations）。
+// API_BASE 作为 baseURL：所有请求自动带上前缀（如 get('/conversations') → /ai-modeler/api/conversations）。
 // 类比 Java：RestTemplate + 配置好 baseUrl 的 RequestFactory。
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE,
   headers: { 'Content-Type': 'application/json' },
 })
 
 // 获取当前用户 ID（用于请求头 X-User-Id）。
-// 独立页面默认 admin，嵌入页面从 URL 参数或 localStorage 获取
-function getUserId(): string {
+// 优先级：嵌入模式下由 hostPort.init() 写入的 userId（宿主下发，防伪造）→
+//         URL 参数 userId → localStorage → 独立模式 admin / 嵌入兜底 anonymous
+function getRequestUserId(): string {
+  const hostId = getUserId()
+  if (hostId) return hostId
   // window.location.search 是 URL 中 ? 后面的查询串
   const params = new URLSearchParams(window.location.search)
   // 是否为嵌入模式：URL 带 embed=true，或当前窗口有父窗口（被 iframe 嵌入）
   const isEmbedded = params.get('embed') === 'true' || window.parent !== window
   if (isEmbedded) {
-    // 优先级：URL 参数 > localStorage > 匿名用户兜底
+    // 降级：URL 参数 > localStorage > 匿名用户兜底
     return params.get('userId') || localStorage.getItem('userId') || 'anonymous'
   }
   // 独立模式兜底用户为 admin
@@ -43,8 +54,8 @@ function getUserId(): string {
 // 注册 axios 请求拦截器：每个请求发出前自动注入 X-User-Id 和透传 headers。
 // 类比 Java：Spring 的 ClientHttpRequestInterceptor / Filter，统一改写请求。
 api.interceptors.request.use((config) => {
-  // 注入用户标识头
-  config.headers['X-User-Id'] = getUserId()
+  // 注入用户标识头（嵌入模式优先宿主下发值）
+  config.headers['X-User-Id'] = getRequestUserId()
   // 透传父系统的 headers（如 Authorization、X-Tenant-Id 等）
   const forwarded = getForwardedHeaders()
   for (const [key, val] of Object.entries(forwarded)) {
@@ -69,9 +80,10 @@ export async function listConversations(): Promise<Conversation[]> {
 /**
  * 创建新会话。
  * @param title 会话标题，默认空串
+ * @param contextKey 可选，嵌入模式宿主实体标识（如 formCode），用于会话绑定恢复
  */
-export async function createConversation(title = ''): Promise<Conversation> {
-  const { data } = await api.post('/conversations', { title })
+export async function createConversation(title = '', contextKey?: string): Promise<Conversation> {
+  const { data } = await api.post('/conversations', { title, context_key: contextKey || '' })
   return data
 }
 
@@ -92,7 +104,60 @@ export async function deleteConversation(id: string): Promise<void> {
   await api.delete(`/conversations/${id}`)
 }
 
+// ── Pack manifest（通用层消费的声明：diff 身份键 / 展示字段 / 服务依赖）────
+
+/** pack manifest（/api/meta/packs 返回项；字段对前端是不透明声明） */
+export interface PackManifest {
+  name: string
+  artifact: {
+    type: string
+    identity: Record<string, string>
+    display: Record<string, string>
+    /** 制品卡动作集（pack 声明）：view_json / apply / rewind。
+     *  未声明时后端回退最小集 ['view_json'] */
+    actions?: string[]
+  }
+  services: string[]
+}
+
+/** manifest 模块级缓存（启动后不变） */
+let _packCache: PackManifest[] | null = null
+
+/**
+ * 获取已加载 pack 的 manifest 声明（diff 对齐键 / 展示名来自这里）。
+ * 失败返回空数组 → diff 退化为整体对比（Fail-Closed 降级）。
+ */
+export async function getPackManifests(): Promise<PackManifest[]> {
+  if (_packCache) return _packCache
+  try {
+    const { data } = await api.get('/meta/packs')
+    _packCache = Array.isArray(data) ? data : []
+  } catch {
+    _packCache = []
+  }
+  return _packCache
+}
+
 // ── 配置生成（SSE 流式）────────────────────────────────────────
+
+/**
+ * 按 (userId, contextKey) 查找最新会话（嵌入模式会话恢复）。
+ * 后端未实现时返回 null（Fail-Closed），调用方降级为新会话。
+ * @param userId 用户标识
+ * @param contextKey 宿主实体标识（如 formCode）
+ */
+export async function findLatestConversationByContext(userId: string, contextKey: string): Promise<Conversation | null> {
+  try {
+    const { data } = await api.get('/conversations', {
+      params: { contextKey, latest: 'true' },
+    })
+    // 后端可能返回单对象（最新会话）或数组
+    if (Array.isArray(data)) return data[0] ?? null
+    return data ?? null
+  } catch {
+    return null
+  }
+}
 
 /**
  * SSE 回调集合（监听不同事件类型的钩子）。
@@ -116,6 +181,10 @@ export interface SSECallbacks {
  * @param callbacks      SSE 各类事件的回调
  * @param answers        追问回答（对应后端 LangGraph 的 Command(resume=answers)，从断点恢复）
  * @param imageBase64    图片 base64（用于 ImageFormTool 识别）
+ * @param options        嵌入模式附加上下文：
+ *                       context.artifact 宿主最新配置（覆盖会话旧配置，防陈旧基线）；
+ *                       context.revision / contextKey 宿主签发版本与实体标识；
+ *                       services 宿主服务地址表（如 {njmind-modeler: origin+/codeBack}）
  */
 export async function chat(
   message: string,
@@ -123,14 +192,20 @@ export async function chat(
   callbacks: SSECallbacks,
   answers?: Record<string, any>,  // 追问时透传用户回答
   imageBase64?: string,           // 图片识别时透传 base64
+  options?: {
+    context?: { [CONTEXT_KEY_ARTIFACT]: unknown; revision?: string | null; contextKey?: string }
+    services?: Record<string, string>
+  },
 ): Promise<void> {
   await streamSSE(
-    '/api/config/chat',
+    `${API_BASE}/config/chat`,
     {
       message,
       conversation_id: conversationId,
       answers,          // 追问时透传用户回答
       image_base64: imageBase64,  // 图片识别时透传 base64
+      context: options?.context ?? undefined,   // 嵌入模式宿主最新上下文
+      services: options?.services ?? undefined, // 宿主服务地址表
     },
     callbacks,
   )
@@ -156,7 +231,7 @@ async function streamSSE(
   // 合并用户 ID + 父系统透传的 headers
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'X-User-Id': getUserId(),
+    'X-User-Id': getRequestUserId(),
     ...getForwardedHeaders(),
   }
 
@@ -179,10 +254,32 @@ async function streamSSE(
   // 缓冲区：存放"尚未凑成完整事件"的半截文本（网络分片可能把一个事件切成两块）
   let buffer = ''
 
+  // ── 空闲看门狗 ──
+  // 服务端每 15s 发心跳（: ping），30s 兜底 keepalive——正常流「字节最长 30s 一动」。
+  // 连续 60s 无任何字节 = 连接已死（代理挂起/后端重启未通知/网络中断），
+  // 主动取消并报错解锁：否则 fetch 永远 pending，UI 卡在"正在…"且无法再发消息
+  //（历史上后端重启杀掉的旧流就是这种僵尸——必须有人先松手）。
+  const controller = new AbortController()
+  let lastActivity = Date.now()
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastActivity > 60_000) {
+      controller.abort()
+    }
+  }, 5_000)
+
+  try {
   // 经典的流读取循环：读到 done=true 表示流结束
   while (true) {
-    const { done, value } = await reader.read()
+    // 竞速：reader.read() vs 看门狗 abort。任何一字节到达都刷新活跃时间。
+    const { done, value } = await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) =>
+        controller.signal.addEventListener('abort', () =>
+          reject(new Error('SSE_IDLE_TIMEOUT')), { once: true })
+      ),
+    ])
     if (done) break
+    lastActivity = Date.now()
 
     // 把新数据拼接到缓冲区。{ stream: true } 表示"可能还有后续"，避免多字节字符被截断
     buffer += decoder.decode(value, { stream: true })
@@ -218,6 +315,15 @@ async function streamSSE(
       }
     }
   }
+  } catch (e: any) {
+    if (String(e?.message).includes('SSE_IDLE_TIMEOUT')) {
+      throw new Error('连接空闲超时（60 秒无响应）：链路已断开，请重试')
+    }
+    throw e
+  } finally {
+    clearInterval(watchdog)
+    controller.abort() // 正常结束也调（no-op），确保监听器可回收
+  }
 }
 
 /**
@@ -246,18 +352,4 @@ function parseSSEEvent(raw: string): { type: string; data: any } | null {
     // JSON 解析失败时退回空对象，保证流程不中断
     return { type, data: {} }
   }
-}
-
-// ── 配置校验 ───────────────────────────────────────────────────
-
-/**
- * 提交配置到后端做校验。
- * @param config 表单配置对象
- * @returns 校验结果：是否合法 + 错误列表 + 警告列表
- */
-export async function validateConfig(
-  config: Record<string, any>,
-): Promise<{ valid: boolean; errors: any[]; warnings: string[] }> {
-  const { data } = await api.post('/config/validate', { config })
-  return data
 }

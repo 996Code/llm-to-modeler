@@ -126,7 +126,18 @@ class ConversationStore:
             # 1. 检测旧表,RENAME 为 _legacy_ 留档(不导入数据)
             self._migrate_legacy_tables(conn)
 
-            # 2. 创建新表(append-only 事件流)
+            # 2. 存量库列迁移（必须在 executescript 之前：下面的索引引用新列，
+            #    而老表的列还没加上时建索引会直接失败）。
+            #    CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，必须显式 ALTER；
+            #    幂等：新库（表还不存在）或列已存在时 OperationalError 静默跳过，
+            #    随后 executescript 会建出完整的新表。
+            try:
+                conn.execute("ALTER TABLE session_meta ADD COLUMN context_key TEXT DEFAULT ''")
+                logger.info("Migrated: session_meta.context_key added")
+            except sqlite3.OperationalError:
+                pass  # 表不存在（新库）或列已存在，跳过
+
+            # 3. 创建新表(append-only 事件流)
             #    executescript 一次执行多段 DDL,类比 Java 里批量执行 SQL 脚本
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS events (
@@ -144,6 +155,7 @@ class ConversationStore:
                 CREATE TABLE IF NOT EXISTS session_meta (
                     conv_id TEXT PRIMARY KEY,    -- 会话 ID,与 events.conv_id 对应
                     user_id TEXT NOT NULL,       -- 归属用户
+                    context_key TEXT DEFAULT '', -- 宿主实体标识(嵌入模式绑定,如 formCode)
                     title TEXT DEFAULT '',       -- 会话标题(列表展示)
                     summary TEXT DEFAULT '',     -- 会话摘要(压缩后)
                     current_config TEXT,         -- 当前配置 JSON(表单配置快照)
@@ -152,6 +164,8 @@ class ConversationStore:
                 );
                 -- 列表查询索引:按用户 + 更新时间倒序(典型"我的会话列表"查询)
                 CREATE INDEX IF NOT EXISTS idx_meta_user ON session_meta(user_id, updated_at DESC);
+                -- 嵌入会话恢复索引:按 (user_id, context_key) 查最新会话
+                CREATE INDEX IF NOT EXISTS idx_meta_context ON session_meta(user_id, context_key, updated_at DESC);
 
                 CREATE TABLE IF NOT EXISTS call_logs (
                     id TEXT PRIMARY KEY,
@@ -208,12 +222,14 @@ class ConversationStore:
         self,
         user_id: str,
         title: str = "",
+        context_key: str = "",
     ) -> Dict[str, Any]:
         """创建新会话。
 
         Args:
             user_id: 用户 ID
             title:   会话标题,默认空字符串
+            context_key: 宿主实体标识(嵌入模式绑定,如 formCode),默认空
 
         Returns:
             包含 id / userId / title / createdAt 的字典,供前端直接使用。
@@ -225,12 +241,45 @@ class ConversationStore:
         now = _now()
         with self._get_conn() as conn:
             conn.execute(
-                "INSERT INTO session_meta (conv_id, user_id, title, summary, created_at, updated_at) VALUES (?, ?, ?, '', ?, ?)",
-                (conv_id, user_id, title, now, now),
+                "INSERT INTO session_meta (conv_id, user_id, context_key, title, summary, created_at, updated_at) VALUES (?, ?, ?, ?, '', ?, ?)",
+                (conv_id, user_id, context_key, title, now, now),
             )
             # 同时写一条 events(kind=checkpoint)记录会话创建
             self._append_event(conn, conv_id, "checkpoint", {"action": "created"})
         return {"id": conv_id, "userId": user_id, "title": title, "createdAt": now}
+
+    def find_latest_by_context(self, user_id: str, context_key: str) -> Optional[Dict[str, Any]]:
+        """按 (user_id, context_key) 查该绑定下最新会话(嵌入模式会话恢复)。
+
+        Args:
+            user_id: 用户 ID
+            context_key: 宿主实体标识(如 formCode)
+
+        Returns:
+            最新会话字典(与 get_conversation 同构,含 messages),没有则 None。
+        """
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT conv_id FROM session_meta WHERE user_id = ? AND context_key = ? ORDER BY updated_at DESC LIMIT 1",
+                (user_id, context_key),
+            ).fetchone()
+        if not row:
+            return None
+        return self._get_conversation(row["conv_id"], user_id)
+
+    def set_context_key(self, conv_id: str, context_key: str) -> None:
+        """为会话绑定/重绑 context_key(创建场景 APPLY_RESULT 回填 formCode 后用)。
+
+        Args:
+            conv_id: 会话 ID
+            context_key: 新的宿主实体标识
+        """
+        now = _now()
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE session_meta SET context_key = ?, updated_at = ? WHERE conv_id = ?",
+                (context_key, now, conv_id),
+            )
 
     def list_conversations(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """列出某用户的会话(按更新时间倒序)。只查 session_meta 表。
@@ -733,55 +782,4 @@ class ConversationStore:
             })
         return result
 
-    def load_pending_ask(self, conv_id: str) -> Optional[Dict[str, Any]]:
-        """加载 pending_ask(最近一条 kind=ask 事件)。
 
-        【用途】
-          当系统向用户发起追问(需要澄清)但用户还没回答时,追问的"现场"
-          (问题列表、上下文)会以 kind=ask 事件存入 events 表。
-          用户回来续聊时,调本方法取回现场,恢复 graph 执行。
-
-        【Java 类比】
-          类似把一个暂挂的流程实例(pending workflow instance)从 DB 捞回来
-          继续跑(类比 Activiti / Camunda 的 suspended process)。
-
-        Args:
-            conv_id: 会话 ID
-
-        Returns:
-            最近一条 ask 事件 {id, payload, created_at},没有则 None。
-        """
-        with self._get_conn() as conn:
-            # ORDER BY created_at DESC LIMIT 1:取最新的一条 ask
-            row = conn.execute(
-                "SELECT * FROM events WHERE conv_id = ? AND kind = 'ask' ORDER BY created_at DESC LIMIT 1",
-                (conv_id,),
-            ).fetchone()
-        if not row:
-            return None
-        r = dict(row)
-        return {
-            "id": r["id"],
-            "payload": json.loads(r["payload"]),
-            "created_at": r["created_at"],
-        }
-
-    def clear_pending_ask(self, conv_id: str) -> None:
-        """清除 pending_ask(删除该会话所有 kind=ask 事件)。
-
-        【设计说明】
-          append-only 原则上不删除数据,但 pending_ask 是临时状态——
-          追问一旦被回答就不再需要原现场。这里做两件事:
-            1. 删除老的 ask 事件(避免下次 load_pending_ask 拿到过期的)
-            2. 写一条 kind=checkpoint 事件标记"追问已解决",保留审计痕迹
-
-        Args:
-            conv_id: 会话 ID
-        """
-        with self._get_conn() as conn:
-            conn.execute(
-                "DELETE FROM events WHERE conv_id = ? AND kind = 'ask'",
-                (conv_id,),
-            )
-            # 留一条 checkpoint 记录"追问已解决",便于事后审计
-            self._append_event(conn, conv_id, "checkpoint", {"action": "ask_resolved"})

@@ -22,6 +22,9 @@ from fastapi import APIRouter, Request
 router = APIRouter(tags=["health"])
 
 
+# 别名：/api/health——嵌入场景宿主经统一前缀代理探测（/ai-modeler/api/* 剥前缀
+# 后到 /api/*），与业务 API 同链路。根路径 /health 保留（运维/K8s 探针惯例）。
+@router.get("/api/health")
 @router.get("/health")
 async def health_check(request: Request):
     """健康检查接口。

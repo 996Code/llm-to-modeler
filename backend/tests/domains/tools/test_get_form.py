@@ -18,15 +18,6 @@ def _make_ctx(llm=None, asset_client=None, prompt_loader=None):
 
 
 class TestGetFormToolDeclaration:
-    def test_is_not_destructive(self):
-        assert GetFormTool().is_destructive is False
-
-    def test_is_read_only(self):
-        assert GetFormTool().is_read_only is True
-
-    def test_is_concurrency_safe(self):
-        assert GetFormTool().is_concurrency_safe is True
-
     def test_name(self):
         assert GetFormTool().name == "get_form"
 
