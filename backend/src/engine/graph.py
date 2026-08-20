@@ -91,6 +91,9 @@ def build_graph(
         asset_client: AssetClient 实例,产物存储客户端(写 artifact)
         conversation: ConversationManager 实例,多轮对话历史管理(见 conversation.py)
         prompt_loader: PromptLoader 实例,Prompt 模板装配器(见 prompt_loader.py)
+        pack_routers: pack 名 → PackRouter 实例的映射(二级路由表,main 装配)
+        pack_configs: pack 名 → config.yaml 解析结果的映射(一级路由读
+            domain.description/fallback;引擎不 import domains,由启动注入)
 
     Returns:
         CompiledStateGraph:编译后的图。调用方传 ``config={"configurable": {"thread_id": ...}}``

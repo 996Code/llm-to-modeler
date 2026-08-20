@@ -34,8 +34,7 @@ import logging
 from typing import Any, Dict, Optional
 
 # CompositeTool:复合工具基类,提供 run_pipeline 模板方法
-# ClarificationRaised:需要追问时抛的异常(让 graph interrupt)
-from sdk.tool import CompositeTool, ToolResult, ToolContext, ClarificationRaised
+from sdk.tool import CompositeTool, ToolResult, ToolContext
 from domains.njmind_form.tools._postprocess import (
     postprocess_config, _collect_schema_keys, schema_projection,
     parse_unrecognized_fields, strip_keys, normalize_error,

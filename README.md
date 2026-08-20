@@ -395,7 +395,7 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 ### 方式 A：SDK 嵌入（推荐）
 
 ```html
-<script src="http://你的部署:13080/embed.js"></script>
+<script src="http://你的部署:13080/ai-modeler/embed.js"></script>
 <script>
   const assistant = new LLMFormModeler({
     baseUrl: 'http://192.168.99.22:13080',
@@ -411,7 +411,7 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 
 ```html
 <iframe
-  src="http://你的部署:13080/?embed=true&userId=用户ID"
+  src="http://你的部署:13080/ai-modeler/?embed=true"
   style="width: 400px; height: 600px; border: none;"
 ></iframe>
 ```
@@ -499,9 +499,9 @@ npm install && npm run dev
 
 | 地址 | 说明 |
 |------|------|
-| http://localhost:13080/ | 独立模式（三栏布局） |
-| http://localhost:13080/?embed=true | 嵌入模式（IM 聊天窗口） |
-| http://localhost:13080/embed-demo.html | 嵌入演示页（模拟主系统） |
+| http://localhost:13080/ai-modeler/ | 独立模式（三栏布局） |
+| http://localhost:13080/ai-modeler/?embed=true | 嵌入模式（宿主 iframe） |
+| http://localhost:13080/ai-modeler/embed-demo.html | 嵌入演示页（模拟主系统） |
 | http://localhost:13080/embed.js | 嵌入 SDK |
 | http://localhost:18080/docs | API 文档（Swagger） |
 | http://localhost:18080/health | 健康检查 |

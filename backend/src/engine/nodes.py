@@ -474,6 +474,10 @@ def _route_pack(user_input: str, history: str = "") -> str:
     """
     if len(_pack_routers) <= 1:
         only = next(iter(_pack_routers), "")
+        if not _pack_routers:
+            # 空装配（测试/异常初始化）：全部走 fallback 工具链，但必须留痕——
+            # 静默退化成"永远 chat"会让人误以为路由坏了
+            logger.warning("route: no pack_routers configured, falling to fallback tool")
         logger.debug(f"route: single pack '{only}' passthrough")
         return only
 
@@ -481,6 +485,13 @@ def _route_pack(user_input: str, history: str = "") -> str:
     pack_domains = {
         name: (cfg.get("domain") or {}) for name, cfg in _pack_configs.items()
     }
+    # 漏传 pack_configs（多 pack 却无 domain 声明）：候选域为空 → LLM 无从选择，
+    # 恒落第一个 pack。行为可用但配置有误，warning 留痕
+    if not pack_domains:
+        logger.warning(
+            "route: multi-pack but pack_configs empty "
+            "(configure(pack_configs=...) missing?), routing degrades to first pack"
+        )
     entries = [
         f"- {name}: {(d.get('description') or '(无描述)')}"
         + (" [fallback]" if d.get("fallback") else "")
@@ -490,9 +501,12 @@ def _route_pack(user_input: str, history: str = "") -> str:
                      if d.get("fallback") and n in _pack_routers),
                     next(iter(_pack_routers)))
 
+    # entries 拼接放表达式外：f-string 表达式内含反斜杠是 PEP 701（3.12+）特性，
+    # 3.11 及以下会 SyntaxError 且报错位置隐蔽——保持 3.11 兼容
+    entries_text = "\n".join(entries)
     prompt = (
         "你是领域路由器。判断用户消息属于哪个领域，只返回 JSON。\n\n"
-        f"候选领域:\n{'\n'.join(entries)}\n\n"
+        f"候选领域:\n{entries_text}\n\n"
         "规则：不确定或不属于任何领域时，选标注 [fallback] 的领域。\n"
         '输出格式: {"pack": "领域名"}'
     )
@@ -515,7 +529,6 @@ def _route_pack(user_input: str, history: str = "") -> str:
     return fallback
 
 
-# 一级路由的 domain 声明缓存（pack_routers 同生命周期）
 
 
 

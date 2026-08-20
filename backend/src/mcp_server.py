@@ -84,15 +84,17 @@ def create_mcp_server(upstream, graph=None):
 
         # 每次调用生成独立 thread_id，保证 LangGraph 会话隔离（线程本地状态不串）
         thread_id = str(uuid.uuid4())
-        # 构造 LangGraph 初始状态：所有字段必须给齐（StateGraph 要求）
-        # 这些字段对应 nodes.py 里 State 的所有键
+        # 构造 LangGraph 初始状态（与 stream.py 的装配同构；GraphState 是
+        # total=False 全字段可选，这里给齐是为让 MCP 首轮与 HTTP 首轮语义一致）
+        # 键名走 state_keys 常量，与 stream.py 同源（改名自动跟随）
+        from engine.state_keys import STATE_CONTEXT_ARTIFACT
         input_data = {
             "user_input": description,
             "conversation_history": [],      # 全量对话历史（MCP 单轮调用为空）
             "compressed_history": "",        # 压缩后的历史摘要（首轮为空）
             "conversation_id": f"mcp_{thread_id}",
             "forward_headers": {},           # 透传给上游的鉴权头（MCP 无外部用户，空）
-            "context_artifact": None,       # 对话上下文制品（MCP 单轮无宿主，为空）
+            STATE_CONTEXT_ARTIFACT: None,    # 对话上下文制品（MCP 单轮无宿主，为空）
             "tool_name": "",                 # 由 classify_intent 节点填入
             "intent_reason": "",             # 意图分类的 LLM 推理过程
             "tool_state": {},                # 工具内部状态机
@@ -112,10 +114,15 @@ def create_mcp_server(upstream, graph=None):
             logger.exception("Graph invocation failed")
             return json.dumps({"error": f"Graph invocation failed: {e}"}, ensure_ascii=False)
 
-        # 从最终状态提取工具产物
-        tool_result = result_state.get("tool_result")
-        if tool_result is None:
+        # 从最终状态提取工具产物。
+        # 注意：state 里存的是 ToolResult.model_dump() 后的 dict（见 nodes.py
+        # execute_tool_node 的返回），属性访问前必须先 model_validate 反序列化——
+        # 曾直接 tool_result.artifact 对 dict 做属性访问，成功路径必抛 AttributeError
+        raw = result_state.get("tool_result")
+        if raw is None:
             return json.dumps({"error": "No config generated"}, ensure_ascii=False)
+        from sdk.tool import ToolResult
+        tool_result = ToolResult.model_validate(raw)
 
         # 优先返回生成的 artifact（表单配置）
         # extra.validation_errors 存的是上游校验发现的问题列表

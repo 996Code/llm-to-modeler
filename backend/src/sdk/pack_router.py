@@ -67,12 +67,15 @@ class DefaultPackRouter:
 
     def route(self, user_input: str, artifact: Optional[dict],
               history: str = "", llm_client=None) -> Optional[str]:
-        """LLM 二级路由。无 llm_client 时退化为首个工具（测试/降级场景）。"""
+        """LLM 二级路由。无 llm_client 时退化为首个工具（测试/降级场景）。
+
+        Returns:
+            工具名；无合适工具/LLM 失败返回 None（由引擎兜底链接管）。
+        """
         if llm_client is None:
             tools = self._registry.all()
             return tools[0].name if tools else None
 
-        import json
         parts = []
         if history:
             parts.extend(["## 对话历史", history, ""])

@@ -204,7 +204,7 @@ async def chat(req: ChatRequest, request: Request):
             graph=graph,
             user_input=req.message,
             conversation_id=req.conversation_id,
-            user_id=request.headers.get("X-User-Id", ""),
+            user_id=request.headers.get("X-User-Id") or "anonymous",  # 与 conversations API 缺省一致（"" 会让 chat 流静默跳过落库）
             answers=req.answers,  # ← 追问回答（非空表示追问恢复）
             image_base64=req.image_base64,  # ← 图片 base64（图片识别）
             conversation_store=request.app.state.conversation_store,

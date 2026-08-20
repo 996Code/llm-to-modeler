@@ -30,28 +30,48 @@ class NjmindFormRouter(DefaultPackRouter):
 
     def route(self, user_input: str, artifact: Optional[dict],
               history: str = "", llm_client=None) -> Optional[str]:
-        """LLM 主判 + 数据铁律前置：
+        """LLM 主判 + 数据铁律复核。
 
-        前置铁律（数据事实，无语义争议，前置可省一次 LLM 调用）：
-          画布为空 → create_form（没东西可改——LLM 在此场景说 modify 是幻觉）。
+        铁律（数据事实，先于 LLM）：
+          画布为空时，modify_form 必为幻觉（没有基线可改）——把 modify 从候选中
+          排除。但**不直通 create_form**：空画布下图片识别（image_form）、查询
+          已有表单（get_form）、闲聊（chat）都是合法请求，直通会把它们一并吞掉
+          （曾把"识别这张图片生成表单"判成 create_form）。空画布只改走"无画布
+          候选集"的语义判断，modify 类被铁律挡在集合外。
 
-        其余交给 LLM 语义判断（领域规则在 build_prompt）。
+        Args:
+            user_input: 用户消息原文
+            artifact: 宿主下发的当前画布制品（空/None = 画布无内容）
+            history: 压缩后的对话历史
+            llm_client: LLM 客户端（None 时父类降级取第一个工具）
+
+        Returns:
+            工具名（不在注册表时由引擎兜底）。
         """
         has_fields = bool(
             artifact and artifact.get(FIELDS))
 
-        # 前置铁律：画布为空（数据事实，无争议）
-        if not has_fields:
-            return "create_form"
-
-        # LLM 语义主判（领域规则在 build_prompt 里）
-        return super().route(user_input, artifact, history=history,
-                             llm_client=llm_client)
+        # 画布"有内容"的领域语义 = 有字段列表（artifact 可能是 {} 或无字段的
+        # 空壳 dict——is not None 不等于有内容）。无字段时归一为 None 传父类，
+        # 父类的 has_artifact 判定与 build_prompt 的 modify 过滤由此保持一致。
+        return super().route(user_input, artifact if has_fields else None,
+                             history=history, llm_client=llm_client)
 
     def build_prompt(self, has_artifact: bool) -> str:
         # 复用父类的候选工具清单拼装，替换规则段为表单领域规则
         base = super().build_prompt(has_artifact)
         tools_section = base[base.find("候选工具:"):]
+
+        # 数据铁律在候选集层面执行：画布为空时 modify_form 不进候选——
+        # LLM 在此场景选 modify 是幻觉（没有基线可改），从集合里排除比在
+        # 规则里"劝阻"可靠（概率系统永远 <100% 遵循指令）。同时保留
+        # image_form/get_form/chat 等空画布下的合法选项（曾因直通 create_form
+        # 把"识别这张图片生成表单"也吞了）。
+        if not has_artifact:
+            tools_section = "\n".join(
+                line for line in tools_section.split("\n")
+                if not line.startswith("- modify_form:")
+            )
 
         return (
             "你是表单领域的工具路由器。根据用户消息与画布状态选工具，只返回 JSON。\n\n"

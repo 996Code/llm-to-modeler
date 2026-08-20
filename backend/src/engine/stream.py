@@ -47,8 +47,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 # 类比 Activiti 的 SignalEvent,用来"唤醒"被中断的流程
 from langgraph.types import Command
 
-from api.sse import SSEEvent, StreamManager
-from sdk.tool import ToolResult
+from api.sse import StreamManager
 from engine.compression import build_compressed_history
 from engine.state_keys import STATE_CONTEXT_ARTIFACT
 from services.upstream_client import set_forward_headers, set_request_services
@@ -202,10 +201,11 @@ async def stream_graph(
 
                         elif event_type == "error":
                             # 工具内部主动报错(非异常)
+                            # 默认参绑定 error 文本：闭包晚绑定会让同一 chunk 内
+                            # 多个 error 全展示最后一个的内容（对照上面 result 的 rd= 写法）
+                            err_text = event.get("data", {}).get("error", "未知错误")
                             loop.call_soon_threadsafe(
-                                lambda: asyncio.ensure_future(
-                                    sm.emit_error(event.get("data", {}).get("error", "未知错误"))
-                                )
+                                lambda et=err_text: asyncio.ensure_future(sm.emit_error(et))
                             )
 
             def _run_graph():
@@ -291,6 +291,10 @@ async def stream_graph(
                         if task.interrupts:
                             # 确认发生中断:标记,后续不再走"正常落库"分支
                             result_holder["had_interrupt"] = True
+                            # 落库只做一次（移出 interrupt 循环：fan-out 并行节点
+                            # 场景单 task 可能带多个 interrupt，循环内落会把同一句
+                            # user 消息存 N 次；当前图为线性单 interrupt，此为防御）
+                            first_intr_value = None
                             for intr in task.interrupts:
                                 # intr.value 是 interrupt 时传入的 payload(通常是问题列表)
                                 intr_value = intr.value if hasattr(intr, 'value') else intr
@@ -301,11 +305,13 @@ async def stream_graph(
                                         "questions": intr_value.get("questions", []),
                                         "summary": intr_value.get("summary", "需要补充信息"),
                                     })
-                                    # 中断场景也落库(把追问问题当作 assistant 消息存下)
-                                    _save_conversation(
-                                        conversation_store, conversation_id, user_id,
-                                        user_input, intr_value.get("summary", "需要补充信息"),
-                                    )
+                                    first_intr_value = first_intr_value or intr_value
+                            if first_intr_value is not None:
+                                # 中断场景也落库(把追问问题当作 assistant 消息存下)
+                                _save_conversation(
+                                    conversation_store, conversation_id, user_id,
+                                    user_input, first_intr_value.get("summary", "需要补充信息"),
+                                )
             except Exception as e:
                 # 状态查询失败不影响主流程,只记日志
                 logger.warning(f"Failed to check graph state for interrupts: {e}")
