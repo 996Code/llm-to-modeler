@@ -30,6 +30,9 @@ httpx>=0.28,<0.29                      # 调用上游 njmind-modeler
 Jinja2>=3.1,<3.2                       # PromptLoader 模板渲染(阶段 2)
 PyYAML>=6.0,<6.1                       # pack config.yaml 解析(阶段 1)
 
+# ── 日志 ──
+loguru>=0.7,<0.8                       # 集中式日志:控制台+轮转文件(对标 logback)
+
 # ── 测试 ──
 pytest>=9.1,<9.2
 pytest-asyncio>=1.4,<1.5

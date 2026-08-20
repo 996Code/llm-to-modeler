@@ -64,6 +64,7 @@
 │  │  ├── conversation.py 多轮对话管理 (append-only 事件流)      │   │
 │  │  ├── compression.py  上下文压缩 (70% 阈值 + 熔断器)         │   │
 │  │  ├── prompt_loader.py Jinja2 模板加载 (缓存 + 覆写/追加)    │   │
+│  │  ├── log_config.py   日志配置 (loguru: 控制台 + 轮转文件)   │   │
 │  │  └── logging_filter.py 日志脱敏过滤器                       │   │
 │  └──────────────────────────┬───────────────────────────────────┘   │
 │                              │                                       │
@@ -556,6 +557,7 @@ llm-to-modler/
 │       │   ├── compression.py     # 上下文压缩 + build_compressed_history
 │       │   ├── prompt_loader.py   # Jinja2 模板加载
 │       │   │   ├── state_keys.py      # 跨模块状态键常量 (engine ↔ pack ↔ 前端)
+│       │   │   ├── log_config.py      # 日志配置 (loguru: 控制台 + logs/app.log 轮转)
 │       │   │   └── logging_filter.py  # 日志脱敏
 │       │
 │       ├── sdk/                   # ★ SDK 层 (协议定义)

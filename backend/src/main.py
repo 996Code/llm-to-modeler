@@ -57,15 +57,14 @@ from src.services.conversation_store import ConversationStore
 # 上游客户端：调用 njmind-modeler（:7001）做校验/增删改/拉模板
 from src.services.upstream_client import UpstreamClient
 
-# 全局日志配置：INFO 级别，标准格式（时间-模块-级别-消息）
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+# 全局日志配置：控制台 + logs/app.log 文件双输出（按大小轮转，对标 logback
+# RollingFileAppender）。LOG_DIR/LOG_LEVEL 可用环境变量覆盖，见 engine/log_config.py。
+from engine.log_config import setup_logging
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # 挂载 RedactFilter 到 root logger(日志凭证脱敏)
-# 必须在 basicConfig 之后、组件初始化之前安装，确保所有后续日志都经过过滤
+# 必须在日志 handler 配置之后、组件初始化之前安装，确保所有后续日志都经过过滤
 from engine.logging_filter import install_redact_filter
 install_redact_filter()  # 挂到 root logger,所有子 logger 继承
 

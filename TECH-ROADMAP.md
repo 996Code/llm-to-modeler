@@ -1758,6 +1758,7 @@ llm-to-modler/
 │       │   ├── conversation.py          # ConversationManager
 │       │   ├── prompt_loader.py         # Jinja2 模板加载
 │       │   ├── state_keys.py            # 跨模块状态键常量
+│       │   ├── log_config.py            # 日志配置 (loguru: 控制台 + 轮转文件)
 │       │   └── logging_filter.py        # 日志凭证脱敏
 │       │
 │       ├── sdk/                         # SDK 层 (协议定义)
