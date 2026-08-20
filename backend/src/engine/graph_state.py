@@ -69,7 +69,8 @@ class GraphState(TypedDict, total=False):
     - compressed_history:   压缩后的历史文本(节省 token,对标 Claude Code 的 history compression)
     - conversation_id:      会话 ID,作为 checkpoint 的 thread_id(决定取哪份快照)
     - forward_headers:      嵌入(embed)模式透传的请求头(如上游租户、trace id)
-    - current_config:       当前已有配置(modify 类工具基于它做增量改动)
+    - context_artifact:     对话的上下文制品(宿主下发的画布,pack 路由判断画布状态,
+                            modify 类工具读它做增量基线;存储层字段名仍叫 current_config)
 
     ── 意图识别(classify_intent 节点产出) ──
     - tool_name:            选中的工具名(决定路由到哪个工具)

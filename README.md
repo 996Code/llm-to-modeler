@@ -336,9 +336,9 @@ fetch_guide → modify → validate（差分校验）
 `pipeline_steps` 声明动态下发，未提及字段经 `restore_untouched`
 从基线逐字节还原（改 A 不动 B）。
 
-### 4.2 leave_application — 请假申请 (Demo 插件)
+### 4.2 leave_application — 请假申请 (示例插件)
 
-> 注：此为架构演示插件，当前未在 pack.py 中注册。
+> 注：此插件已注册并随 pack 自动发现加载（作为多 pack 一级路由的演示域——"帮我查请假审批"会路由到它）。
 
 | 工具 | 类型 | 管线 | 说明 |
 |------|------|------|------|
@@ -513,14 +513,15 @@ npm install && npm run dev
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/config/chat` | **统一对话入口** (SSE 流式, 走 LangGraph) |
-| GET | `/api/conversations` | 对话列表（按 userId） |
+| GET | `/api/conversations` | 对话列表（按 userId；`?contextKey=x&latest=true` 恢复绑定会话） |
 | GET | `/api/conversations/:id` | 对话详情（含消息历史） |
-| POST | `/api/conversations` | 创建对话 |
+| POST | `/api/conversations` | 创建对话（可带 contextKey 绑定宿主实体） |
 | DELETE | `/api/conversations/:id` | 删除对话 |
+| GET | `/api/meta/packs` | pack manifest 声明（前端渲染 actions/展示字段/示例） |
 | GET | `/api/skills/templates` | 获取模板列表（代理上游） |
 | GET | `/api/skills/guide` | 获取配置指南（代理上游） |
 | POST | `/mcp` | MCP 协议（JSON-RPC 2.0） |
-| GET | `/health` | 健康检查 |
+| GET | `/health` `/api/health` | 健康检查（嵌入探测走 /api/health 同链路，`Cache-Control: no-store`） |
 
 **ChatRequest 格式：**
 

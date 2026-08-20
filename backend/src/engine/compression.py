@@ -168,11 +168,15 @@ class CompressionSidechain:
         llm_client: Any,
         conversation: Any = None,
         circuit_breaker: Optional[CompressionCircuitBreaker] = None,
+        compact_focus: str = "",
     ):
         self._llm = llm_client
         self._conversation = conversation
         self._cb = circuit_breaker or CompressionCircuitBreaker()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="compress")
+        # 摘要侧重点（pack 可注入，如"创建了什么表单、修改了哪些字段"）：
+        # 领域措辞不写死在引擎（零领域知识铁律）；空串则用通用表述。
+        self._compact_focus = compact_focus.strip()
 
     def compress_async(
         self,
@@ -300,10 +304,16 @@ class CompressionSidechain:
 
         PTL = Prompt Too Long:压缩 API 自己的输入超限。
         """
-        # 压缩 prompt：要求 LLM 把历史压缩成一句话，保留关键业务信息
+        # 压缩 prompt：要求 LLM 把历史压缩成一句话，保留关键业务信息。
+        # 侧重点措辞由 pack 注入（compact_focus）——"表单/字段"是领域词，
+        # 引擎只提供通用骨架；未注入时用通用表述（领域无关兜底）。
+        focus = (
+            f"（侧重点：{self._compact_focus}）" if self._compact_focus
+            else "（保留用户目标、已产出/已变更的关键结果与尚未完成的事项）"
+        )
         compact_prompt = (
             "你是对话压缩器。将下面的对话历史压缩成一句话摘要,"
-            "保留关键信息(创建了什么表单、修改了哪些字段、配置结果)。\n\n"
+            f"保留关键信息{focus}。\n\n"
             f"对话历史:\n{history_text}\n\n"
             "只返回一句话摘要,不要解释:"
         )

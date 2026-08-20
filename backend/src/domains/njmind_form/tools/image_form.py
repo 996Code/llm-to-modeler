@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from sdk.tool import Tool, ToolResult, ToolContext
+from domains.njmind_form.keys import FIELDS, FIELD_TITLE
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,7 @@ class ImageFormTool(Tool):
         
         # Step 4: 返回结果
         form_name = form_config.get("formName", "图片识别表单")
-        field_count = len(form_config.get("formFieldConfigVos", []))
+        field_count = len(form_config.get(FIELDS, []))
         
         ctx.emit("stage", "generate_done", f"生成成功 ✓ 共 {field_count} 个字段")
         
@@ -128,7 +129,7 @@ class ImageFormTool(Tool):
   "formName": "表单名称",
   "fields": [
     {
-      "fieldTitleText": "字段标题",
+      FIELD_TITLE: "字段标题",
       "fieldType": 0,
       "isRequired": true,
       "options": ["选项1", "选项2"]  // 仅下拉/单选/多选需要
@@ -188,9 +189,9 @@ class ImageFormTool(Tool):
 {
   "formCode": "表单标识(英文/拼音)",
   "formName": "表单名称",
-  "formFieldConfigVos": [
+  FIELDS: [
     {
-      "fieldTitleText": "字段标题",
+      FIELD_TITLE: "字段标题",
       "formFieldType": 0,  // 字段类型
       "isRequired": 1,     // 1=必填, 0=非必填
       "optionSettings": [  // 仅下拉/单选/多选需要
@@ -238,9 +239,9 @@ class ImageFormTool(Tool):
     def summarize_artifact(self, artifact: dict) -> str:
         """给压缩器用。"""
         form_name = artifact.get("formName", "")
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get(FIELDS, [])
         field_summary = ", ".join(
-            f.get("fieldTitleText", "") for f in fields[:10]
+            f.get(FIELD_TITLE, "") for f in fields[:10]
         )
         if len(fields) > 10:
             field_summary += f" ... 共 {len(fields)} 个字段"
@@ -252,7 +253,7 @@ class ImageFormTool(Tool):
 
     def format_result(self, artifact: dict) -> dict:
         """给 SSE 用:从制品提取前端需要的字段。"""
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get(FIELDS, [])
         return {
             "fieldCount": len(fields),
             "formName": artifact.get("formName", ""),

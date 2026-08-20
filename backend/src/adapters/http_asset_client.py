@@ -87,15 +87,18 @@ class HttpAssetClient(AssetClient):
         }
 
     def persist_artifact(self, artifact: dict, mode: str) -> dict:
-        # 统一「AI 永不落库」：工具层不得调用本方法（见设计文档 §7.5 / 守门不变量 #4）。
-        # 保留实现作为「宿主反向注册工具进引擎」远期演进时的预留接口，当前无调用方。
-        # 类比 Java 的 @Deprecated 接口——API 稳定存在，但业务路径已禁止使用。
+        """落库（预留接口，当前无调用方——「AI 永不落库」不变量，见设计文档 §7.5）。
+
+        update 模式走 UpstreamClient.update_form（按 formCode 更新），
+        不再用 create 兜底——create 兜底会把已有表单另建一份新记录。
+        """
         if mode == "create":
-            result = self._upstream.create_form(artifact)  # 新建走 create 接口
-        elif mode == "update":
-            # 现有 UpstreamClient 无 update_form,阶段 3 完善;先用 create 兜底
-            # 注意：临时用 create 兜底，后续接入真正的 update 接口
             result = self._upstream.create_form(artifact)
+        elif mode == "update":
+            form_code = artifact.get("formCode")
+            if not form_code:
+                raise ValueError("update 模式缺少 formCode，无法定位要更新的表单")
+            result = self._upstream.update_form(form_code, artifact)
         else:
             # 未知 mode:直接抛(防御性编程)
             # 抛异常而非静默处理：mode 错误是编程 bug，应尽早暴露

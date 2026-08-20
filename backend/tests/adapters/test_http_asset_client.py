@@ -14,6 +14,7 @@ def _make_mock_upstream():
     m.get_guide.return_value = {"title": "指\u202e南"}
     m.validate_form.return_value = {"pass": True, "errors": [], "warnings": []}
     m.create_form.return_value = {"success": True, "message": "ok"}
+    m.update_form.return_value = {"success": True, "message": "ok"}
     return m
 
 
@@ -74,7 +75,17 @@ class TestHttpAssetClient:
         client._upstream.create_form.assert_called_once()
 
     def test_persist_artifact_update(self):
-        """update 走 create_form 兜底(现有 UpstreamClient 无 update_form,阶段 3 完善)。"""
+        """update 走 update_form（按 formCode 更新，不再 create 兜底另建记录）。"""
         client = HttpAssetClient(upstream=_make_mock_upstream())
         result = client.persist_artifact({"formCode": "leave"}, mode="update")
         assert result["success"] is True
+        client._upstream.update_form.assert_called_once_with(
+            "leave", {"formCode": "leave"}
+        )
+        client._upstream.create_form.assert_not_called()
+
+    def test_persist_artifact_update_missing_code(self):
+        """update 但缺 formCode：编程错误直接抛（Fail-Fast），不静默兜底。"""
+        client = HttpAssetClient(upstream=_make_mock_upstream())
+        with pytest.raises(ValueError):
+            client.persist_artifact({"formName": "无编码"}, mode="update")

@@ -48,6 +48,7 @@ from domains.njmind_form.tools._incremental_ops import (
 from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem
 
 logger = logging.getLogger(__name__)
+from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
 
 # schema 允许键集合（懒加载缓存）：校验投影用。上游 schema 是 validate VO 的
 # 权威字段清单——设计器画布配置携带的 VO 外字段（mainTable/queryResultCols 等）
@@ -67,7 +68,7 @@ def _get_allowed_keys(ctx) -> set:
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"load schema {name} failed: {e}")
-    _ALLOWED_KEYS = keys or {"formFieldConfigVos"}  # 兜底：至少别把字段列表删了
+    _ALLOWED_KEYS = keys or {FIELDS}  # 兜底：至少别把字段列表删了
     return _ALLOWED_KEYS
 
 
@@ -186,7 +187,7 @@ class ModifyFormTool(CompositeTool):
         validation_errors = state.get("validation_errors", [])
         if artifact:
             form_name = artifact.get("formName", "")
-            field_count = len(artifact.get("formFieldConfigVos", []))
+            field_count = len(artifact.get(FIELDS, []))
             if validation_errors:
                 # 诚实化：校验未通过就不是"已修改"，避免误导用户点应用
                 errs = "; ".join(
@@ -227,9 +228,9 @@ class ModifyFormTool(CompositeTool):
         """
         form_name = artifact.get("formName", "")
         form_code = artifact.get("formCode", "")
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get(FIELDS, [])
         field_summary = ", ".join(
-            f.get("fieldTitleText", "") for f in fields[:10]
+            f.get(FIELD_TITLE, "") for f in fields[:10]
         )
         if len(fields) > 10:
             field_summary += f" ... 共 {len(fields)} 个字段"
@@ -257,7 +258,7 @@ class ModifyFormTool(CompositeTool):
         Returns:
             含 fieldCount / formName / formCode / title 的精简 dict。
         """
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get(FIELDS, [])
         return {
             "fieldCount": len(fields),
             "formName": artifact.get("formName", ""),
@@ -537,12 +538,12 @@ class ModifyFormTool(CompositeTool):
         #   零交集 = 换主题式重做（如"把这张表单改成请假单"）→ 新表单语义，
         #     不回填（强盖旧标识会产出"半新半旧"配置：formCode 是旧表单、
         #     字段 key 全新——已存数据列全部错位）。
-        base_keys = {str(f.get("fieldTitleKey"))
-                     for f in (base_config.get("formFieldConfigVos") or [])
-                     if f.get("fieldTitleKey")}
-        new_keys = {str(f.get("fieldTitleKey"))
-                    for f in (config.get("formFieldConfigVos") or [])
-                    if f.get("fieldTitleKey")}
+        base_keys = {str(f.get(FIELD_KEY))
+                     for f in (base_config.get(FIELDS) or [])
+                     if f.get(FIELD_KEY)}
+        new_keys = {str(f.get(FIELD_KEY))
+                    for f in (config.get(FIELDS) or [])
+                    if f.get(FIELD_KEY)}
         is_continuation = bool(base_keys & new_keys) or not new_keys
         if is_continuation:
             if base_config.get("formCode"):

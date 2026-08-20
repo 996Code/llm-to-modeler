@@ -76,6 +76,7 @@ def build_graph(
     conversation: Any = None,
     prompt_loader: Any = None,
     pack_routers: dict = None,
+    pack_configs: dict = None,
 ) -> Any:
     """构建并编译 LangGraph StateGraph。
 
@@ -108,6 +109,7 @@ def build_graph(
     nodes.configure(
         registry=registry,
         pack_routers=pack_routers or {},
+        pack_configs=pack_configs or {},
         llm_client=llm_client,
         asset_client=asset_client,
         conversation=conversation,

@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 from sdk.tool import Tool, ToolResult, ToolContext
 
 logger = logging.getLogger(__name__)
+from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
 
 
 class GetFormTool(Tool):
@@ -85,11 +86,11 @@ class GetFormTool(Tool):
 
         # ── 路径 A：当前上下文直接回答 ──
         current = state.get("source_artifact")
-        if current and isinstance(current, dict) and current.get("formFieldConfigVos"):
-            fields = current.get("formFieldConfigVos", [])
+        if current and isinstance(current, dict) and current.get(FIELDS):
+            fields = current.get(FIELDS, [])
             form_name = current.get("formName") or current.get("formCode") or "当前表单"
             # 摘要里带上字段名列表（前 15 个），"简述一下"这类问题用户要的就是这个
-            names = [f.get("fieldTitleText") or f.get("fieldTitleKey", "") for f in fields[:15]]
+            names = [f.get(FIELD_TITLE) or f.get(FIELD_KEY, "") for f in fields[:15]]
             names_desc = "、".join(n for n in names if n)
             if len(fields) > 15:
                 names_desc += f" 等 {len(fields)} 个字段"
@@ -131,7 +132,7 @@ class GetFormTool(Tool):
         # Step 3: 返回结果
         # 从配置里取展示用的字段:表单名 + 字段数
         form_name = form_config.get("formName", form_code)
-        field_count = len(form_config.get("formFieldConfigVos", []))
+        field_count = len(form_config.get(FIELDS, []))
 
         ctx.emit("stage", "fetch_done", f"查询成功 ✓ 共 {field_count} 个字段")
 
@@ -215,10 +216,10 @@ formCode 通常是英文或拼音组成的标识符,如:
         """
         form_name = artifact.get("formName", "")
         form_code = artifact.get("formCode", "")
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get(FIELDS, [])
         # 只取前 10 个字段名,超出的用"共 N 个字段"概括
         field_summary = ", ".join(
-            f.get("fieldTitleText", "") for f in fields[:10]
+            f.get(FIELD_TITLE, "") for f in fields[:10]
         )
         if len(fields) > 10:
             field_summary += f" ... 共 {len(fields)} 个字段"
@@ -249,7 +250,7 @@ formCode 通常是英文或拼音组成的标识符,如:
         Returns:
             只含 fieldCount / formName / formCode / title 的精简 dict。
         """
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get(FIELDS, [])
         return {
             "fieldCount": len(fields),
             "formName": artifact.get("formName", ""),

@@ -35,10 +35,10 @@ def _dedupe_fields(obj: Any) -> Any:
     if isinstance(obj, list):
         items = [_dedupe_fields(v) for v in obj]
         # 仅当列表元素是带 fieldTitleKey 的字段对象时去重（按钮等列表不受影响）
-        if items and all(isinstance(i, dict) and "fieldTitleKey" in i for i in items):
+        if items and all(isinstance(i, dict) and FIELD_KEY in i for i in items):
             seen, out = set(), []
             for i in items:
-                key = i.get("fieldTitleKey")
+                key = i.get(FIELD_KEY)
                 if key in seen:
                     logger.warning(f"postprocess: 去重重复字段 {key}")
                     continue
@@ -82,8 +82,8 @@ def postprocess_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if not cfg.get("formTitle"):
         title_key = cfg.get("titleFieldKey")
         if not title_key:
-            fields = cfg.get("formFieldConfigVos") or []
-            title_key = fields[0].get("fieldTitleKey", "name") if fields else "name"
+            fields = cfg.get(FIELDS) or []
+            title_key = fields[0].get(FIELD_KEY, "name") if fields else "name"
         cfg["formTitle"] = f"${title_key}$"
     return cfg
 
@@ -122,6 +122,7 @@ def schema_projection(obj: Any, allowed: set) -> Any:
 
 # ── 校验错误的机械处理 ────────────────────────────────────────────────
 import re as _re
+from domains.njmind_form.keys import FIELDS, FIELD_KEY
 
 _UNRECOGNIZED_RE = _re.compile(r'Unrecognized field "(\w+)"')
 
@@ -170,8 +171,8 @@ def fill_missing_required(config: Dict[str, Any], fixables: list,
     """
     if not fixables:
         return False
-    fields = config.get("formFieldConfigVos") or []
-    by_key = {str(f.get("fieldTitleKey")): f for f in fields if f.get("fieldTitleKey")}
+    fields = config.get(FIELDS) or []
+    by_key = {str(f.get(FIELD_KEY)): f for f in fields if f.get(FIELD_KEY)}
     prop_defaults = prop_defaults or {}
     changed = False
 
@@ -185,7 +186,7 @@ def fill_missing_required(config: Dict[str, Any], fixables: list,
         # ① 表内同类型字段（跳过出错字段自身——尤其值域错误时自身就是错值源头）
         for f in fields:
             if (f.get("formFieldType") == type_code and prop in f
-                    and str(f.get("fieldTitleKey")) != exclude_key
+                    and str(f.get(FIELD_KEY)) != exclude_key
                     and _ok(f[prop])):
                 return f[prop]
         # ② 上游模板

@@ -2,6 +2,8 @@
 domain:
   description: 表单/低代码表单的创建、修改、查询、复制（"加个字段/改必填/做个表单"类需求）
   fallback: true   # 无任何领域匹配时的兜底 pack（闲聊/能力询问由本域 chat 承接）
+  # 历史压缩摘要的侧重点（注入引擎压缩 prompt，领域措辞归 pack、引擎不写死）
+  compact_focus: 创建了什么表单、修改了哪些字段、配置结果
 
 # njmind-form pack 静态配置
 # 所有 njmind 专属的 URL 路径、字段类型映射集中于此。

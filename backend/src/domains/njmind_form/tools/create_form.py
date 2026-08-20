@@ -18,6 +18,7 @@ from domains.njmind_form.tools._postprocess import (
     postprocess_config, _collect_schema_keys, schema_projection,
     parse_unrecognized_fields, strip_keys,
 )
+from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def _get_allowed_keys(ctx) -> set:
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"load schema {name} failed: {e}")
-    _ALLOWED_KEYS = keys or {"formFieldConfigVos"}  # 兜底：至少别把字段列表删了
+    _ALLOWED_KEYS = keys or {FIELDS}  # 兜底：至少别把字段列表删了
     return _ALLOWED_KEYS
 
 
@@ -108,7 +109,7 @@ class CreateFormTool(CompositeTool):
         if artifact:
             # 成功:从制品提取表单名和字段数,拼人类可读摘要
             form_name = artifact.get("formName", "")
-            field_count = len(artifact.get("formFieldConfigVos", []))
+            field_count = len(artifact.get(FIELDS, []))
             if validation_errors:
                 # 诚实化：校验未通过就不是"已生成"
                 errs = "; ".join(
@@ -137,10 +138,10 @@ class CreateFormTool(CompositeTool):
         # 压缩后 LLM 会忘掉细节,这里把表单关键信息复灌回去
         form_name = artifact.get("formName", "")  # 表单中文名
         form_code = artifact.get("formCode", "")  # 表单编码(英文标识)
-        fields = artifact.get("formFieldConfigVos", [])  # 字段列表
+        fields = artifact.get(FIELDS, [])  # 字段列表
         # 只取前 10 个字段名拼摘要,避免补偿文本过长浪费 token
         field_summary = ", ".join(
-            f.get("fieldTitleText", "") for f in fields[:10]
+            f.get(FIELD_TITLE, "") for f in fields[:10]
         )
         if len(fields) > 10:
             # 超过 10 个:用省略号 + 总数提示,类比 Java 的 truncate
@@ -154,7 +155,7 @@ class CreateFormTool(CompositeTool):
 
     def format_result(self, artifact: dict) -> dict:
         """给 SSE 用:从制品提取前端需要的字段(钩子化,避免 Engine 读制品内部)。"""
-        fields = artifact.get("formFieldConfigVos", [])  # 字段列表
+        fields = artifact.get(FIELDS, [])  # 字段列表
         # 只提取前端展示需要的字段(钩子化:Engine 不直接读 njmind 业务字段)
         return {
             "fieldCount": len(fields),  # 字段总数(前端显示)
@@ -226,8 +227,8 @@ class CreateFormTool(CompositeTool):
         for f in raw_fields:
             type_code = f.get("fieldType", 0)  # 字段类型编码(数字)
             parsed_fields.append(ParsedField(
-                fieldTitleText=f.get("fieldTitleText", ""),  # 字段中文名
-                fieldTitleKey=f.get("fieldTitleKey", ""),  # 字段 key(英文标识)
+                fieldTitleText=f.get(FIELD_TITLE, ""),  # 字段中文名
+                fieldTitleKey=f.get(FIELD_KEY, ""),  # 字段 key(英文标识)
                 formFieldType=type_code,
                 # 类型名兜底:LLM 没给就从配置映射表查,再不行默认 TEXT
                 fieldTypeName=f.get("fieldTypeName", _TYPE_NAMES.get(type_code, "TEXT")),
@@ -311,8 +312,8 @@ class CreateFormTool(CompositeTool):
             "formCode": state.get("form_code", ""),
             "fields": [
                 {
-                    "fieldTitleText": f.fieldTitleText,
-                    "fieldTitleKey": f.fieldTitleKey,
+                    FIELD_TITLE: f.fieldTitleText,
+                    FIELD_KEY: f.fieldTitleKey,
                     "fieldType": f.formFieldType,
                     "fieldTypeName": f.fieldTypeName,
                     # 有 options 才加(单选/多选),避免空字段干扰

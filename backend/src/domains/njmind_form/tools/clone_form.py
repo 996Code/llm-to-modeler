@@ -7,6 +7,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from sdk.tool import Tool, ToolResult, ToolContext
+from domains.njmind_form.keys import FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ class CloneFormTool(Tool):
         # Step 6: 返回结果
         final_form_name = new_config.get("formName", "")
         final_form_code = new_config.get("formCode", "")
-        field_count = len(new_config.get("formFieldConfigVos", []))
+        field_count = len(new_config.get(FIELDS, []))
         
         ctx.emit("stage", "clone_done", f"复制成功 ✓ 新表单 {final_form_code}")
         
@@ -155,7 +156,7 @@ formCode 通常是英文或拼音组成的标识符。
         """给压缩器用。"""
         form_name = artifact.get("formName", "")
         form_code = artifact.get("formCode", "")
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get(FIELDS, [])
         return f"复制的表单: {form_name} ({form_code}), {len(fields)} 个字段"
 
     def title_for(self, artifact: dict) -> str:
@@ -164,7 +165,7 @@ formCode 通常是英文或拼音组成的标识符。
 
     def format_result(self, artifact: dict) -> dict:
         """给 SSE 用:从制品提取前端需要的字段。"""
-        fields = artifact.get("formFieldConfigVos", [])
+        fields = artifact.get(FIELDS, [])
         return {
             "fieldCount": len(fields),
             "formName": artifact.get("formName", ""),

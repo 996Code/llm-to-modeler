@@ -19,6 +19,7 @@ from typing import Optional
 
 from sdk.pack_router import DefaultPackRouter
 from sdk.registry import ToolRegistry
+from domains.njmind_form.keys import FIELDS
 
 
 class NjmindFormRouter(DefaultPackRouter):
@@ -37,7 +38,7 @@ class NjmindFormRouter(DefaultPackRouter):
         其余交给 LLM 语义判断（领域规则在 build_prompt）。
         """
         has_fields = bool(
-            artifact and artifact.get("formFieldConfigVos"))
+            artifact and artifact.get(FIELDS))
 
         # 前置铁律：画布为空（数据事实，无争议）
         if not has_fields:

@@ -135,6 +135,9 @@ async def lifespan(app: FastAPI):
     graph = build_graph(
         registry=registry,
         pack_routers=pack_routers,
+        # pack manifest（domain.description 等）注入引擎一级路由——启动已加载
+        # 的同一份，引擎不再自行 import domains（避免 engine↔domains 循环依赖）
+        pack_configs=pack_configs,
         llm_client=llm_client,
         asset_client=asset_client,
         conversation=conversation_manager,

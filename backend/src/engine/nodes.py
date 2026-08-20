@@ -64,6 +64,10 @@ _llm_client: Any = None
 _asset_client: Any = None
 _conversation: Any = None
 _prompt_loader: Any = None
+# pack → domain 声明（description/fallback，来自各 pack config.yaml）。
+# 由 graph.py 构建时注入（main 启动装配 pack 时已加载过，这里复用同一份，
+# 引擎不 import domains——零领域知识铁律，同时避免重复加载 manifest）。
+_pack_configs: dict = {}
 
 
 def configure(
@@ -73,11 +77,13 @@ def configure(
     conversation: Any = None,
     prompt_loader: Any = None,
     pack_routers: dict = None,
+    pack_configs: dict = None,
 ):
     """注入共享依赖(由 graph.py 构建时调用一次)。"""
-    global _registry, _llm_client, _asset_client, _conversation, _prompt_loader, _pack_routers
+    global _registry, _llm_client, _asset_client, _conversation, _prompt_loader, _pack_routers, _pack_configs
     _registry = registry
     _pack_routers = pack_routers or {}
+    _pack_configs = pack_configs or {}
     _llm_client = llm_client
     _asset_client = asset_client
     _conversation = conversation
@@ -463,28 +469,24 @@ def _route_pack(user_input: str, history: str = "") -> str:
     - 多 pack：LLM 从各 pack 的 manifest domain.description 里选；无匹配时
       落到声明 fallback 的 pack（无 fallback 声明则取第一个）。
 
-    domain 声明来自 pack 的 config.yaml（main 启动时经 pack_routers 之外的
-    pack_configs 装配；本函数从 domains.load_pack_configs 读取并缓存）。
+    domain 声明来自 pack 的 config.yaml，由 configure(pack_configs=...) 注入
+    （main 启动装配时加载，与 pack_routers 同源——引擎不 import domains）。
     """
     if len(_pack_routers) <= 1:
         only = next(iter(_pack_routers), "")
         logger.debug(f"route: single pack '{only}' passthrough")
         return only
 
-    # 懒加载 domain 声明（启动后不变，进程级缓存）
-    global _pack_domains
-    if _pack_domains is None:
-        from domains import load_pack_configs
-        cfgs = load_pack_configs()
-        _pack_domains = {
-            name: (cfg.get("domain") or {}) for name, cfg in cfgs.items()
-        }
+    # domain 声明视图：pack → {description, fallback}
+    pack_domains = {
+        name: (cfg.get("domain") or {}) for name, cfg in _pack_configs.items()
+    }
     entries = [
         f"- {name}: {(d.get('description') or '(无描述)')}"
         + (" [fallback]" if d.get("fallback") else "")
-        for name, d in _pack_domains.items() if name in _pack_routers
+        for name, d in pack_domains.items() if name in _pack_routers
     ]
-    fallback = next((n for n, d in _pack_domains.items()
+    fallback = next((n for n, d in pack_domains.items()
                      if d.get("fallback") and n in _pack_routers),
                     next(iter(_pack_routers)))
 
@@ -514,7 +516,6 @@ def _route_pack(user_input: str, history: str = "") -> str:
 
 
 # 一级路由的 domain 声明缓存（pack_routers 同生命周期）
-_pack_domains: Optional[dict] = None
 
 
 
