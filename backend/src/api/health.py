@@ -16,6 +16,7 @@
 """
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 # 创建路由器，tags=["health"] 让这些接口在 /docs 文档里归到 health 分组
 # 类比 Spring：@RestController + 在 controller 类上打标签
@@ -37,21 +38,28 @@ async def health_check(request: Request):
         request: 当前请求对象，用于读取 app 全局状态。
 
     Returns:
-        dict: {
+        JSONResponse: body 为 {
             status: 固定 "healthy"，
             service: 服务名，
             version: 应用版本号（从 app.version 读，和 main.py 同步），
             upstream: 上游客户端是否已初始化（True=已就绪）
         }
+
+    响应头 Cache-Control: no-store —— 健康检查响应禁止被网关/浏览器缓存：
+    曾出现网关对 200 做协商缓存回 304，宿主探测的 fetch 把缓存拼成 200
+    误判健康（后端已挂入口仍显示）。no-store 让每次探测都拿到实时状态。
     """
-    return {
-        "status": "healthy",
-        "service": "LLM Form Modeler",
-        "version": request.app.version,
-        # getattr 兜底：lifespan 未执行时 app.state.upstream 不存在，返回 None（Fail-Closed）
-        # lifespan 在 main.py 中初始化 UpstreamClient 并挂到 app.state.upstream
-        "upstream": getattr(request.app.state, "upstream", None) is not None,
-    }
+    return JSONResponse(
+        {
+            "status": "healthy",
+            "service": "LLM Form Modeler",
+            "version": request.app.version,
+            # getattr 兜底：lifespan 未执行时 app.state.upstream 不存在，返回 None（Fail-Closed）
+            # lifespan 在 main.py 中初始化 UpstreamClient 并挂到 app.state.upstream
+            "upstream": getattr(request.app.state, "upstream", None) is not None,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/")

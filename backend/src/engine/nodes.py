@@ -135,6 +135,19 @@ def classify_intent_node(state: GraphState) -> dict:
         tool_name = _get_fallback_tool_name()  # 通常兜底到 chat 闲聊工具
         intent_reason = "fallback"  # 标记为兜底，便于日志区分
 
+    # 路由观测日志：一次 INFO 看全"画布上下文到没到 + 选了什么工具"。
+    # 背景：曾出现"画布明明有表单却走了 create_form 生成全新 key"的事故，
+    # 排查要跨三端挖会话库——这行日志让定位缩短到一眼（artifact_bytes=0
+    # = 宿主上下文没到后端，查嵌入链路；非 0 但选了 create = 话术命中创建规则）。
+    # 注意：引擎不解析 artifact 内部结构（字段数是领域语义，归 pack），
+    # 只用序列化字节数做通用度量。
+    _artifact = state.get(CONTEXT_ARTIFACT)
+    _artifact_bytes = len(str(_artifact)) if _artifact else 0
+    logger.info(
+        f"route decide: tool={tool_name}, artifact_bytes={_artifact_bytes}, "
+        f"reason={intent_reason}, input={user_input[:40]!r}"
+    )
+
     return {
         "tool_name": tool_name,  # 选中的工具名（路由依据）
         "intent_reason": intent_reason,  # 选择理由（日志用）
