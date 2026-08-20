@@ -502,7 +502,7 @@ npm install && npm run dev
 | http://localhost:13080/ai-modeler/ | 独立模式（三栏布局） |
 | http://localhost:13080/ai-modeler/?embed=true | 嵌入模式（宿主 iframe） |
 | http://localhost:13080/ai-modeler/embed-demo.html | 嵌入演示页（模拟主系统） |
-| http://localhost:13080/embed.js | 嵌入 SDK |
+| http://localhost:13080/ai-modeler/embed.js | 嵌入 SDK |
 | http://localhost:18080/docs | API 文档（Swagger） |
 | http://localhost:18080/health | 健康检查 |
 
