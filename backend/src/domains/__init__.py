@@ -35,6 +35,7 @@ domains/ 目录,发现所有符合约定的子目录(工具包),动态导入并�
 """
 import importlib
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -48,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 def discover_packs() -> List[str]:
     """
-    自动发现 domains 目录下的所有工具包。
+    自动发现 domains 目录下的工具包（可被 PACKS_ENABLED 上层配置过滤）。
 
     扫描本文件所在目录(domains/)下的每个子目录,符合"包含 pack.py"
     即视为一个工具包。
@@ -58,13 +59,20 @@ def discover_packs() -> List[str]:
     - 目录名不以 '_' 开头(_ 前缀视为内部/隐藏目录,如 __pycache__、_common)
     - 目录内存在 pack.py 文件
 
+    上层配置（部署方决定加载哪些插件，未配置 = 全部加载的缺省逻辑）:
+    - 环境变量 PACKS_ENABLED（逗号分隔 pack 名）：白名单过滤。
+      生产部署只启用业务需要的 pack（如 "njmind_form"），演示 pack
+      （leave_application）不进生产；缺省不设 = 加载全部（向后兼容）。
+      配了但名单里的 pack 不存在 → 告警并忽略该名字（Fail-Open 到存在的）。
+
     Returns:
         发现的 pack 名称列表(即目录名,如 ["njmind_form", "leave_application"])。
         顺序由文件系统返回顺序决定,不保证固定;依赖顺序的逻辑应避免。
 
     【Java 类比】
     类似用 Files.walk 或 File.listFiles 扫描 classpath 目录,
-    再按约定过滤出"插件目录"。
+    再按约定过滤出"插件目录";PACKS_ENABLED ≈ Spring 的
+    spring.profiles.include 式白名单。
     """
     # __file__ 是本文件路径,Path(__file__).parent 取所在目录(domains/)。
     # Python 里靠运行时路径定位,而非 Java 的 classpath 抽象。
@@ -86,6 +94,16 @@ def discover_packs() -> List[str]:
         if pack_file.exists():
             packs.append(item.name)
             logger.info(f"发现工具包: {item.name}")
+
+    # 上层白名单过滤：部署方声明 PACKS_ENABLED 时只加载名单内的
+    enabled_raw = os.getenv("PACKS_ENABLED", "").strip()
+    if enabled_raw:
+        enabled = {n.strip() for n in enabled_raw.split(",") if n.strip()}
+        unknown = enabled - set(packs)
+        if unknown:
+            logger.warning(f"PACKS_ENABLED 含未发现的 pack（忽略）: {sorted(unknown)}")
+        packs = [p for p in packs if p in enabled]
+        logger.info(f"PACKS_ENABLED 白名单生效，加载: {packs}")
 
     return packs
 
