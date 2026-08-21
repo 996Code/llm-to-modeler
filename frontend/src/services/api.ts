@@ -129,7 +129,7 @@ let _packCache: PackManifest[] | null = null
  *
  * pack 子集声明的优先级回退链：
  *   1. 宿主 postMessage INIT 下发的 packs（嵌入态首选：动态、可刷新、不回显）
- *   2. iframe URL ?packs=njmind_form,xxx（兼容宿主 URL 拼接场景）
+ *   2. iframe URL ?packs=a,b,c（兼容宿主 URL 拼接场景）
  *   3. 都不传 → 后端走自身默认（env PACKS_ENABLED 或全量）
  * 后端统一按「宿主声明 ∩ 部署方 PACKS_ENABLED」过滤。
  */
