@@ -89,3 +89,7 @@ backend/dist/
 backend/nginx-single.conf
 backend/start-single.sh
 frontend/dist/
+
+# 部署运行时数据（compose 相对路径挂载的落盘内容，勿提交）
+deploy/data/
+deploy/logs/

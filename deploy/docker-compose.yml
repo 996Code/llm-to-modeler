@@ -23,10 +23,12 @@ services:
       # （compose 会检测 env_file 变化自动重建），restart 不会重读
       - ../.env
     volumes:
+      # 相对路径 bind mount（相对本 compose 文件 → deploy/data、deploy/logs）：
+      # 数据直接落在宿主目录，可见可备份可手工管理，不经 docker named volume
       # 会话 SQLite + LangGraph checkpoint（append-only，跨版本保留）
-      - llm-modeler-data:/app/data
+      - ./data:/app/data
       # 集中式日志（loguru 轮转文件；stdout 由 docker logs 消费）
-      - llm-modeler-logs:/app/logs
+      - ./logs:/app/logs
     healthcheck:
       # 与业务同链路（经容器内 nginx），返回值校验 status 字段
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ai-modeler/api/health | grep -q '\\\"status\\\": *\\\"healthy\\\"'"]
@@ -35,6 +37,3 @@ services:
       retries: 3
       start_period: 20s
 
-volumes:
-  llm-modeler-data:
-  llm-modeler-logs:
