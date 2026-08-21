@@ -122,15 +122,24 @@ docker run --rm -v "$PWD/backend:/app" -w /app \
 log "   .deps 就绪（$(du -sh backend/.deps | awk '{print $1}')）"
 
 # ── ②c nginx deb 预下载（docker run 容器内 apt --download-only）───────
+# 注意：--download-only 的 .deb 落在容器 /var/cache/apt/archives（含 partial/ 临时
+# 区）。网络抖动时 rename partial→archives 会失败，因此重试 3 次（每次重跑会先
+# update，已下载的 deb 不重复拉）。全部失败即退出——debs 缺失时 Dockerfile
+# 里 dpkg -i 也会失败，这里更早暴露问题。
 log "②c 预下载 nginx deb..."
 rm -rf backend/debs && mkdir -p backend/debs
-docker run --rm -v "$PWD/backend:/app" -w /app \
-  "$PY_IMAGE" sh -c "
-    apt-get update -qq &&
-    apt-get install -y --download-only --no-install-recommends nginx curl >/dev/null &&
-    cp /var/cache/apt/archives/*.deb /app/debs/
-  "
-[ "$(ls backend/debs/*.deb 2>/dev/null | wc -l)" -ge 1 ] || { err "nginx deb 下载失败"; exit 1; }
+debs_ok=0
+for attempt in 1 2 3; do
+  docker run --rm -v "$PWD/backend:/app" -w /app \
+    "$PY_IMAGE" sh -c "
+      apt-get update -qq &&
+      apt-get install -y --download-only --no-install-recommends nginx curl >/dev/null &&
+      cp /var/cache/apt/archives/*.deb /app/debs/
+    " && { debs_ok=1; break; }
+  log "   nginx deb 下载第 ${attempt} 次失败，重试..."
+done
+[ "$debs_ok" -eq 1 ] && [ "$(ls backend/debs/*.deb 2>/dev/null | wc -l)" -ge 1 ] \
+  || { err "nginx deb 下载失败"; exit 1; }
 log "   debs 就绪（$(ls backend/debs | wc -l) 个包）"
 
 # ── ③ 打镜像（纯 COPY，零联网 build）───────────────────────────────────
