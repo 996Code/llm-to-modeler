@@ -96,9 +96,8 @@ def discover_packs() -> List[str]:
             logger.info(f"发现工具包: {item.name}")
 
     # 上层白名单过滤：部署方声明 PACKS_ENABLED 时只加载名单内的
-    enabled_raw = os.getenv("PACKS_ENABLED", "").strip()
-    if enabled_raw:
-        enabled = {n.strip() for n in enabled_raw.split(",") if n.strip()}
+    enabled = _packs_whitelist()
+    if enabled is not None:
         unknown = enabled - set(packs)
         if unknown:
             logger.warning(f"PACKS_ENABLED 含未发现的 pack（忽略）: {sorted(unknown)}")
@@ -106,6 +105,19 @@ def discover_packs() -> List[str]:
         logger.info(f"PACKS_ENABLED 白名单生效，加载: {packs}")
 
     return packs
+
+
+def _packs_whitelist() -> Optional[set]:
+    """读取部署方白名单 PACKS_ENABLED（逗号分隔 pack 名）。
+
+    未配置返回 None（= 加载全部，含演示 pack）；配置后只允许名单内的 pack。
+    discover_packs() 与 load_pack_configs() 共享同一套过滤，
+    保证 /api/meta/packs 不暴露禁用插件的 manifest。
+    """
+    raw = os.getenv("PACKS_ENABLED", "").strip()
+    if not raw:
+        return None
+    return {n.strip() for n in raw.split(",") if n.strip()}
 
 
 def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader], object]:
@@ -259,13 +271,19 @@ def load_pack_configs() -> dict:
     pack 目录约定:``domains/<pack_name>/config.yaml`` 存在则读为 dict,
     不存在返回空 dict(纯数据类 pack 可以没有静态配置)。
     每个 pack 的 config.yaml 就是它的 manifest 声明(制品类型/diff 对齐键/服务依赖)。
+
+    与 discover_packs 共享同一白名单过滤:部署方设置 PACKS_ENABLED 时,
+    /api/meta/packs 只暴露名单内的 pack,避免禁用插件的信息(工具/服务依赖)外泄。
     """
     import yaml
 
+    allowed = _packs_whitelist()
     configs = {}
     domains_dir = Path(__file__).parent
     for item in domains_dir.iterdir():
         if not item.is_dir() or item.name.startswith('_'):
+            continue
+        if allowed is not None and item.name not in allowed:
             continue
         cfg_path = item / "config.yaml"
         if cfg_path.exists():
