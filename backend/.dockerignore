@@ -1,0 +1,12 @@
+# 构建上下文瘦身（deploy.sh 的 docker build backend/ 以本目录为 context）
+venv/
+.venv/
+data/
+logs/
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
+mock_api_server.py
+pyproject.toml
+pytest.ini
