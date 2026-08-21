@@ -285,9 +285,13 @@ const packActions = ref<string[]>(['view_json'])
 onMounted(async () => {
   try {
     const manifests = await getPackManifests()
-    packDisplay.value = manifests[0]?.artifact?.display || null
-    packArtifactType.value = manifests[0]?.artifact?.type
-    const acts = manifests[0]?.artifact?.actions
+    // 不能取 manifests[0]：pack 顺序是文件系统发现序（多 pack 时不稳定，
+    // 曾把无 artifact 声明的示例 pack 排前——标题回退"智能助手"、apply
+    // 按钮消失）。优先选声明了 artifact 的主交互 pack，全都没有才回退第一个
+    const primary = manifests.find((m: any) => m.artifact?.display) || manifests[0]
+    packDisplay.value = primary?.artifact?.display || null
+    packArtifactType.value = primary?.artifact?.type
+    const acts = primary?.artifact?.actions
     if (Array.isArray(acts) && acts.length) packActions.value = acts
   } catch {
     packDisplay.value = null
