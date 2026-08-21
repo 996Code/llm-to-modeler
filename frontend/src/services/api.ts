@@ -126,11 +126,16 @@ let _packCache: PackManifest[] | null = null
 /**
  * 获取已加载 pack 的 manifest 声明（diff 对齐键 / 展示名来自这里）。
  * 失败返回空数组 → diff 退化为整体对比（Fail-Closed 降级）。
+ *
+ * 嵌入宿主可在 iframe URL 上声明要用的 pack 子集（?packs=njmind_form,xxx），
+ * 拼到请求里让后端按「宿主声明 ∩ 部署方 PACKS_ENABLED」过滤；未传则该参数
+ * 不出现，后端走自身默认（env 白名单或全量）。
  */
 export async function getPackManifests(): Promise<PackManifest[]> {
   if (_packCache) return _packCache
   try {
-    const { data } = await api.get('/meta/packs')
+    const packs = new URLSearchParams(window.location.search).get('packs')
+    const { data } = await api.get('/meta/packs', { params: packs ? { packs } : undefined })
     _packCache = Array.isArray(data) ? data : []
   } catch {
     _packCache = []
