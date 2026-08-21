@@ -1,0 +1,40 @@
+# =============================================================================
+# llm-to-modeler 容器编排（单容器一体：nginx 静态/反代 + uvicorn API）
+#
+# 镜像由 deploy/deploy.sh 预构建（纯 COPY、零联网 build），compose 只负责
+# 声明式管理：启停/替换/日志/数据卷。版本经 TAG 环境变量切换：
+#   TAG=a84e26a docker compose -f deploy/docker-compose.yml up -d
+# （deploy.sh 已自动带 TAG；手工操作时缺省 latest）
+#
+# 日常命令（在仓库根执行）：
+#   docker compose -f deploy/docker-compose.yml ps        # 状态
+#   docker compose -f deploy/docker-compose.yml logs -f   # 日志
+#   docker compose -f deploy/docker-compose.yml down      # 停止
+# =============================================================================
+services:
+  llm-modeler:
+    image: llm-modeler:${TAG:-latest}
+    container_name: llm-modeler
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-28080}:80"
+    env_file:
+      # 后端配置（LLM/上游地址）。注意：改 .env 后需 up -d 重建容器
+      # （compose 会检测 env_file 变化自动重建），restart 不会重读
+      - ../.env
+    volumes:
+      # 会话 SQLite + LangGraph checkpoint（append-only，跨版本保留）
+      - llm-modeler-data:/app/data
+      # 集中式日志（loguru 轮转文件；stdout 由 docker logs 消费）
+      - llm-modeler-logs:/app/logs
+    healthcheck:
+      # 与业务同链路（经容器内 nginx），返回值校验 status 字段
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ai-modeler/api/health | grep -q '\\\"status\\\": *\\\"healthy\\\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  llm-modeler-data:
+  llm-modeler-logs:

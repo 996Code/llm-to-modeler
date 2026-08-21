@@ -28,5 +28,4 @@ frontend/coverage/
 !.env.example
 docker-compose.yml
 deploy/
-!deploy/nginx-allin1.conf
-!deploy/supervisord-allin1.conf
+doc/
