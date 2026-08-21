@@ -81,3 +81,11 @@ htmlcov/
 
 doc/
 docs/
+
+# deploy.sh 预构建产物（容器内生成，勿提交）
+backend/.deps/
+backend/debs/
+backend/dist/
+backend/nginx-single.conf
+backend/start-single.sh
+frontend/dist/

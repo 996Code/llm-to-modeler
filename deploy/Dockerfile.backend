@@ -1,0 +1,25 @@
+# =============================================================================
+# llm-to-modeler 后端镜像（纯 COPY，零联网构建）
+# 依赖在宿主侧经 docker run 预装到 backend/.deps/（见 deploy/deploy.sh 步骤②b，
+# docker run 的容器 DNS/网络正常——不在 docker build 里做联网 RUN，
+# 规避构建容器 DNS 依赖 daemon 启动快照的坑，与 njmind 系列镜像同款思路）。
+# =============================================================================
+FROM python:3.12-slim
+WORKDIR /app
+# 预装好的依赖目录（pip install -t 产物，含 bin/uvicorn）
+COPY .deps/ /app/deps/
+# 后端源码
+COPY src/ /app/src/
+
+RUN mkdir -p /app/data /app/logs
+VOLUME ["/app/data", "/app/logs"]
+
+# /app/src 必须在 path：源码内混用两种导入风格（main.py 用 from src.xxx，
+# api/nodes 等用裸 from engine.xxx）——两者都要可达
+ENV PYTHONPATH=/app/deps:/app:/app/src \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# uvicorn 在 deps/bin/（pip -t 安装的脚本带宿主前缀 shebang，用 python -m 启动最稳）
+CMD ["python", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

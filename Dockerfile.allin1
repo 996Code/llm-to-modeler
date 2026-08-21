@@ -1,0 +1,71 @@
+# =============================================================================
+# llm-to-modeler 一体镜像（all-in-one）：前端静态 + nginx 反代 + 后端 FastAPI
+# 单容器单端口（默认 8080），供 deploy.sh 一键更新发布使用。
+#
+# 形态选择（与 docker-compose.yml 双容器方案并存，按需取用）：
+#   - 一体镜像：单容器部署简单、无服务间网络依赖，适合单机一键发布；
+#   - compose 双容器：前后端独立伸缩/排障，适合多实例或演化为 K8s。
+#
+# 多阶段构建：
+#   Stage 1  node:20-alpine   → 前端 vite build（产物 dist/，base=/ai-modeler/）
+#   Stage 2  python:3.12-slim → 后端依赖 + 源码 + venv
+#   Stage 3  合体运行镜像      → nginx + uvicorn 双进程（supervisord 托管）
+# =============================================================================
+FROM node:20-alpine AS frontend-builder
+WORKDIR /web
+# 先装依赖（层缓存：源码变动不重装 node_modules）
+COPY frontend/package.json frontend/pnpm-lock.yaml* ./
+# 国内镜像源：npmmirror（淘宝）——npmjs 官方源在内容网络慢/超时
+RUN npm config set registry https://registry.npmmirror.com \
+    && npm install -g pnpm \
+    && pnpm config set registry https://registry.npmmirror.com \
+    && (pnpm install --frozen-lockfile || pnpm install)
+# 再拷源码构建（dist 内资源挂在 /ai-modeler/ 前缀下，vite base 已同步）
+COPY frontend/ ./
+RUN pnpm run build
+
+
+FROM python:3.12-slim AS backend-builder
+WORKDIR /app
+# 后端依赖（清华源加速；requirements 为准，避免 pyproject 装入测试依赖）
+COPY backend/requirements.txt ./
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsingua.edu.cn/simple \
+    -r requirements.txt -t /app/deps
+# 后端源码
+COPY backend/src/ ./src/
+
+
+# =============================================================================
+# 运行镜像：nginx（前端 + 反代）+ uvicorn（后端），supervisord 统一托管
+# —— 为什么不用一个进程：nginx 代理静态/SSE 缓冲控制、uvicorn 跑 ASGI，
+#    两者职责不同；supervisord 保证任一进程崩溃自动拉起，容器不随之退出。
+# =============================================================================
+FROM python:3.12-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nginx supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# 后端：依赖 + 源码（deps 整目录拷入，运行时 PYTHONPATH=/app/deps:/app）
+COPY --from=backend-builder /app/deps/ /app/deps/
+COPY --from=backend-builder /app/src/ /app/src/
+# 前端构建产物（nginx 提供静态资源，路径与 vite base=/ai-modeler/ 一致）
+COPY --from=frontend-builder /web/dist/ /usr/share/nginx/html/
+# nginx 配置：/ai-modeler/ 静态 + /ai-modeler/api 等反代到本机 8000
+COPY deploy/nginx-allin1.conf /etc/nginx/conf.d/default.conf
+# 删除 debian 默认 server 块（监听 80 会与我们的 default server 冲突）
+RUN rm -f /etc/nginx/sites-enabled/default
+# supervisord：托管 nginx + uvicorn 双进程
+COPY deploy/supervisord-allin1.conf /etc/supervisor/conf.d/allin1.conf
+
+# 数据落这里（会话 SQLite + checkpoint；宿主挂卷持久化）
+RUN mkdir -p /app/data /app/logs
+VOLUME ["/app/data", "/app/logs"]
+
+ENV PYTHONPATH=/app/deps:/app \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8080
+
+# 日志集中到 stdout/stderr（docker logs / loguru 文件双通道均可消费）
+CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]

@@ -1,0 +1,9 @@
+# =============================================================================
+# llm-to-modeler 前端镜像（纯 COPY，零联网构建）
+# dist 在宿主侧经 docker run 预构建到 frontend/dist/（deploy.sh 步骤②a）。
+# 基础镜像用服务器已有的 nginx:stable-alpine（免拉取）。
+# =============================================================================
+FROM nginx:stable-alpine
+COPY dist/ /usr/share/nginx/html/
+COPY nginx-two-container.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
