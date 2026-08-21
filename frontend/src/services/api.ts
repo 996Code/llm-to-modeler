@@ -12,7 +12,7 @@
 
 // axios：流行的 HTTP 客户端库（类似 Java 的 OkHttp / Apache HttpClient）
 import axios from 'axios'
-import { CONTEXT_KEY_ARTIFACT } from '../composables/hostPort'
+import { CONTEXT_KEY_ARTIFACT, getHostPort } from '../composables/hostPort'
 // 仅作为类型使用（import type），编译后不会进入运行时包，类似 Java 的接口引用
 import type { Conversation, SSEResult } from '../types'
 // 引入透传 headers 工具（嵌入模式下携带父系统的鉴权信息）
@@ -127,14 +127,18 @@ let _packCache: PackManifest[] | null = null
  * 获取已加载 pack 的 manifest 声明（diff 对齐键 / 展示名来自这里）。
  * 失败返回空数组 → diff 退化为整体对比（Fail-Closed 降级）。
  *
- * 嵌入宿主可在 iframe URL 上声明要用的 pack 子集（?packs=njmind_form,xxx），
- * 拼到请求里让后端按「宿主声明 ∩ 部署方 PACKS_ENABLED」过滤；未传则该参数
- * 不出现，后端走自身默认（env 白名单或全量）。
+ * pack 子集声明的优先级回退链：
+ *   1. 宿主 postMessage INIT 下发的 packs（嵌入态首选：动态、可刷新、不回显）
+ *   2. iframe URL ?packs=njmind_form,xxx（兼容宿主 URL 拼接场景）
+ *   3. 都不传 → 后端走自身默认（env PACKS_ENABLED 或全量）
+ * 后端统一按「宿主声明 ∩ 部署方 PACKS_ENABLED」过滤。
  */
 export async function getPackManifests(): Promise<PackManifest[]> {
   if (_packCache) return _packCache
   try {
-    const packs = new URLSearchParams(window.location.search).get('packs')
+    const hostPacks = getHostPort().packs
+    const urlPacks = new URLSearchParams(window.location.search).get('packs')
+    const packs = hostPacks?.join(',') ?? urlPacks ?? undefined
     const { data } = await api.get('/meta/packs', { params: packs ? { packs } : undefined })
     _packCache = Array.isArray(data) ? data : []
   } catch {

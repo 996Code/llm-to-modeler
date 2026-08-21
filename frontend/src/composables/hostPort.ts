@@ -65,6 +65,8 @@ export interface HostInitResult {
   userId: string
   contextKey?: string
   services?: Record<string, string>
+  /** 宿主声明的默认插件集（可选；未声明则由 URL/部署方配置兜底） */
+  packs?: string[]
 }
 
 /**
@@ -74,6 +76,8 @@ export interface HostInitResult {
 export interface HostPort {
   readonly connected: boolean
   readonly capabilities: ReadonlySet<HostCapability>
+  /** 宿主声明的默认插件集（嵌入态 INIT 下发；独立态为 null） */
+  readonly packs: string[] | null
   /** 握手；无宿主返回 null → 调用方切独立模式布局 */
   init(): Promise<HostInitResult | null>
   getContext(): Promise<HostContext | null>
@@ -131,6 +135,8 @@ export class PostMessageHostPort implements HostPort {
   private _messageHandler: ((e: MessageEvent) => void) | null = null
   /** 宿主 INIT 下发的服务地址表（供 chat 请求携带 services 字段） */
   hostServices: Record<string, string> | null = null
+  /** 宿主 INIT 下发的 pack 白名单（上层声明默认插件，供 meta/packs 请求过滤） */
+  hostPacks: string[] | null = null
 
   private _nextId = 0
   private _seq = (): string => `r${++this._nextId}`
@@ -142,6 +148,11 @@ export class PostMessageHostPort implements HostPort {
 
   get capabilities(): ReadonlySet<HostCapability> {
     return this._capsRef.value
+  }
+
+  /** 宿主声明的默认插件集（INIT 已到达时；否则 null） */
+  get packs(): string[] | null {
+    return this.hostPacks
   }
 
   /** 出站发送：targetOrigin 白名单校验 */
@@ -180,6 +191,8 @@ export class PostMessageHostPort implements HostPort {
         if (data.payload?.headers) setForwardedHeaders(data.payload.headers)
         if (data.payload?.capabilities) this._capsRef.value = new Set(data.payload.capabilities)
         if (data.payload?.services) this.hostServices = data.payload.services
+        // 宿主声明的默认插件集（与 userId 同通道下发，仅嵌入模式有值）
+        if (data.payload?.packs) this.hostPacks = data.payload.packs
         break
       case 'AUTH_UPDATE':
         // token 刷新：新鉴权头整体替换（userId 的同步由 onAuthUpdated 监听方处理）
@@ -223,10 +236,13 @@ export class PostMessageHostPort implements HostPort {
       this._offOnce = this.onMessageOnce('INIT', (payload) => {
         clearTimeout(timeout)
         this._offOnce = null
+        // 与 _handle 的 INIT 分支一致地保存宿主声明（本函数可能先于 _handle 触发）
+        if (payload?.packs) this.hostPacks = payload.packs
         resolve({
           userId: payload.userId,
           contextKey: payload.contextKey,
           services: payload.services,
+          packs: payload.packs,
         })
       })
     })
@@ -299,6 +315,10 @@ export class PostMessageHostPort implements HostPort {
 class NullHostPort implements HostPort {
   readonly connected = false
   readonly capabilities: ReadonlySet<HostCapability> = new Set()
+  /** 独立态无宿主声明 → 不参与过滤（packs 交给 URL/env） */
+  get packs(): string[] | null {
+    return null
+  }
   init(): Promise<HostInitResult | null> {
     return Promise.resolve(null)
   }
