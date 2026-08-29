@@ -14,7 +14,7 @@
 <template>
   <!-- 最外层容器：纵向 flex，高度撑满整个 iframe 视口 -->
   <div class="embedded-layout">
-    <!-- 顶部标题栏：品牌 + 历史对话入口 + 关闭按钮 -->
+    <!-- 顶部标题栏：品牌 + 操作按钮（历史对话/新对话/关闭） -->
     <div class="embedded-header">
       <div class="header-brand">
         <div class="brand-logo">
@@ -24,16 +24,15 @@
           <span class="title">智能助手</span>
           <span class="subtitle">自然语言驱动，多场景智能服务</span>
         </div>
-        <!-- 历史对话：嵌入布局无侧栏，这是用户翻自己历史会话的唯一入口。
-             列表按当前用户隔离（X-User-Id=宿主下发 userId），点选后
-             覆盖当前对话继续沟通（有确认提示，防误触丢上下文） -->
+      </div>
+      <div class="header-actions">
+        <!-- 历史对话（右上角图标入口）：嵌入布局无侧栏，这是用户翻自己
+             历史会话的唯一入口。列表按当前用户隔离（X-User-Id=宿主下发
+             userId），点选后覆盖当前对话继续沟通（有确认提示防误触） -->
         <a-button type="text" size="small" class="history-btn" title="历史对话"
           @click="openHistory">
           <HistoryOutlined />
-          <span class="history-label">历史对话</span>
         </a-button>
-      </div>
-      <div class="header-actions">
         <!-- 新对话：清空当前对话历史回到欢迎页（嵌入布局无侧栏，这是唯一的
              重开入口；后端会新建会话，AI 视角完全从零开始） -->
         <a-button
@@ -60,8 +59,8 @@
          版本回退能力在对话流的配置卡片上 -->
     <ChatPanel :embedded="true" />
 
-    <!-- 历史对话抽屉：仅当前用户的会话；点选 → 覆盖确认 → 载入继续沟通 -->
-    <a-drawer v-model:open="historyOpen" placement="left" width="300" title="历史对话"
+    <!-- 历史对话抽屉：右侧弹出；仅当前用户的会话；点选 → 覆盖确认 → 载入继续沟通 -->
+    <a-drawer v-model:open="historyOpen" placement="right" width="300" title="历史对话"
       class="history-drawer" :body-style="{ padding: '8px' }">
       <a-spin v-if="historyLoading" style="display: block; padding: 40px 0; text-align: center" />
       <a-empty v-else-if="!historyList.length" description="暂无历史对话" style="padding: 40px 0" />
@@ -230,10 +229,8 @@ function relativeTime(iso?: string): string {
 .subtitle { font-size: 11px; color: var(--text-secondary); }
 .header-actions { display: flex; gap: 4px; }
 
-/* 历史对话入口（左上角，品牌区右侧） */
-.history-btn { margin-left: 10px; color: var(--text-secondary); }
-.history-btn :deep(span) { display: inline-flex; align-items: center; gap: 4px; }
-.history-label { font-size: 12px; }
+/* 历史对话入口（右上角图标，与 新对话/关闭 同组） */
+.history-btn { color: var(--text-secondary); }
 .history-list { display: flex; flex-direction: column; gap: 4px; }
 .history-item {
   padding: 8px 10px; border-radius: var(--radius-md, 8px); cursor: pointer;
