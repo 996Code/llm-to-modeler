@@ -33,8 +33,9 @@
           @click="openHistory">
           <HistoryOutlined />
         </a-button>
-        <!-- 新对话：清空当前对话历史回到欢迎页（嵌入布局无侧栏，这是唯一的
-             重开入口；后端会新建会话，AI 视角完全从零开始） -->
+        <!-- 新对话：清空当前对话回到欢迎页（嵌入布局无侧栏，这是唯一的
+             重开入口；懒创建模式下只重置本地，首条消息发出时后端才建会话，
+             AI 视角完全从零开始） -->
         <a-button
           type="text"
           size="small"
@@ -61,7 +62,7 @@
 
     <!-- 历史对话抽屉：右侧弹出；仅当前用户的会话；点选 → 覆盖确认 → 载入继续沟通 -->
     <a-drawer v-model:open="historyOpen" placement="right" width="300" title="历史对话"
-      class="history-drawer" :body-style="{ padding: '8px' }">
+      :body-style="{ padding: '8px' }">
       <a-spin v-if="historyLoading" style="display: block; padding: 40px 0; text-align: center" />
       <a-empty v-else-if="!historyList.length" description="暂无历史对话" style="padding: 40px 0" />
       <div v-else class="history-list">
@@ -113,9 +114,10 @@ const store = useConversationStore()
 const closeWindow = () => port.notifyClose()
 
 /**
- * 新对话：清空当前对话历史回到欢迎页（嵌入布局无侧栏，这是唯一的重开入口）。
- * 走 store.startNewConversation（后端新建会话 + 本地清 messages/currentConfig/
- * baseline），下一条消息从零开始（GET_CONTEXT 拉当前画布作基线）。
+ * 新对话：清空当前对话回到欢迎页（嵌入布局无侧栏，这是唯一的重开入口）。
+ * 走 store.startNewConversation——懒创建模式下只重置本地（messages/
+ * currentConfig/baseline），首条消息发出时后端才建会话，AI 从零开始
+ * （GET_CONTEXT 拉当前画布作基线）。
  */
 async function startNewChat() {
   if (store.streaming) return
