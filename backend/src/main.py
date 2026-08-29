@@ -45,6 +45,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # 业务路由模块（各模块内部定义 router，这里集中挂载）
+from src.api.admin import router as admin_router
 from src.api.config import router as config_router
 from src.api.conversations import router as conversations_router
 from src.api.health import router as health_router
@@ -111,37 +112,54 @@ async def lifespan(app: FastAPI):
     app.state.llm_client = llm_client
 
     # 新架构:LangGraph StateGraph
-    # 自动发现和加载所有工具包
     # 延迟导入：这些模块依赖 app.state 之外的重型组件，延迟到启动时加载
     # 减少模块导入阶段的副作用，也让 lifespan 内的初始化顺序更清晰
-    from domains import load_all_packs, load_pack_configs
+    from domains import scan_pack_dirs
+    from src.services.pack_state import PackState
     from engine.graph import build_graph
     from engine.conversation import ConversationManager
     from adapters.http_asset_client import HttpAssetClient
 
-    # 自动扫描 domains/ 下的工具包，加载工具注册表和提示词模板
-    registry, prompt_loader, pack_routers = load_all_packs()
-    # 加载各 pack 的 config.yaml manifest（供 /api/meta/packs 暴露声明给前端）
-    pack_configs = load_pack_configs()
-    app.state.registry = registry
-    app.state.pack_configs = pack_configs
+    # pack 启停状态(管理端热切换的载体):优先级 状态文件 > PACKS_ENABLED env
+    # > 全部发现。文件落在 data/ 下(与 conversations.db 同目录,随部署卷持久化)
+    pack_state = PackState(
+        os.getenv("PACK_STATE_PATH", "data/pack_state.json"),
+        scan_pack_dirs(),
+    )
+    app.state.pack_state = pack_state
+
     # 会话管理器：封装会话上下文（历史消息、压缩历史）的读写
     conversation_manager = ConversationManager(store=conv_store)
+    app.state.conversation_manager = conversation_manager  # 挂 state:pack 热切换要重新注入 nodes
     # 资产客户端：拉取表单资产数据（字段元信息等），走上游接口
     asset_client = HttpAssetClient(upstream=upstream)
+    app.state.asset_client = asset_client  # 挂 state:同上
+
+    # 上下文压缩 sidechain:token 超窗口 70% 时异步 LLM 摘要(api/config.py
+    # 触发),写 compacted/compact_trace 事件(管理端链路可见),下一轮以
+    # [历史摘要] 前缀注入 prompt。此前该组件写好但从未装配(线上跑的是
+    # 简单截断),本次接线补齐闭环。
+    from engine.compression import CompressionSidechain
+    compressor = CompressionSidechain(llm_client=llm_client, conversation=conversation_manager)
+    app.state.compressor = compressor
+
+    # 装配工具注册表/提示词/pack 路由/manifest —— 与管理端热切换(api/admin.py)
+    # 共用同一条装配路径,保证冷启动与热切换行为一致
+    from src.services.pack_manager import assemble_packs
+    assemble_packs(app.state, sorted(pack_state.enabled_names()))
 
     # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）
     # build_graph 装配节点（classify_intent/execute_tool/handle_result）并编译
     graph = build_graph(
-        registry=registry,
-        pack_routers=pack_routers,
+        registry=app.state.registry,
+        pack_routers=app.state.pack_routers,
         # pack manifest（domain.description 等）注入引擎一级路由——启动已加载
         # 的同一份，引擎不再自行 import domains（避免 engine↔domains 循环依赖）
-        pack_configs=pack_configs,
+        pack_configs=app.state.pack_configs,
         llm_client=llm_client,
         asset_client=asset_client,
         conversation=conversation_manager,
-        prompt_loader=prompt_loader,
+        prompt_loader=app.state.prompt_loader,
     )
     app.state.graph = graph
     logger.info("LangGraph StateGraph architecture initialized")
@@ -151,14 +169,36 @@ async def lifespan(app: FastAPI):
     from src.mcp_server import create_mcp_server
     mcp_server = create_mcp_server(upstream, graph=graph)
     app.state.mcp = mcp_server
-    # 把 MCP 的 Streamable HTTP 应用挂到 /mcp 子路径
-    app.mount("/mcp", mcp_server.streamable_http_app())
+    # 挂载的两个坑(修复前的真实故障:MCP 客户端全部连不上):
+    #   1. 子应用自带 streamable_http_path="/mcp",挂在根前缀下才能拼出最终
+    #      路径 /mcp;若 mount("/mcp", ...) 会变成 /mcp/mcp,而 /mcp 被 307
+    #      到 /mcp/ 后 404。挂在 "/" 不影响业务路由(Starlette 按注册顺序
+    #      匹配,上面的 API 路由先注册先命中)。
+    #   2. Mount 不执行子应用的 lifespan,StreamableHTTPSessionManager 的
+    #      任务组必须在这里手动 run(),否则每个 MCP 请求都
+    #      RuntimeError("Task group is not initialized") 500。
+    mcp_app = mcp_server.streamable_http_app()
+    app.mount("/", mcp_app)
 
-    logger.info("LLM Form Modeler started")
-    yield  # 此处之后应用开始对外服务，直到收到关闭信号
+    # 管理端访问模式提示:开放模式是内网部署取舍,必须让运维在日志里看见
+    from src.api.admin import get_admin_token
+    if get_admin_token():
+        logger.info("Admin console: token-protected (X-Admin-Token)")
+    else:
+        logger.warning(
+            "Admin console: OPEN ACCESS (ADMIN_TOKEN not set) — "
+            "任何能访问本服务的客户端都可查看全部会话/删除数据/切换插件; "
+            "公网或不可信网络部署必须配置 ADMIN_TOKEN"
+        )
+
+    # MCP 会话管理器的任务组随应用生命周期启停(包住 yield)
+    async with mcp_server.session_manager.run():
+        logger.info("LLM Form Modeler started")
+        yield  # 此处之后应用开始对外服务，直到收到关闭信号
 
     # === 关闭阶段（@PreDestroy 等价物）===
     logger.info("Shutting down...")
+    compressor.close()  # 关闭压缩后台线程(不等待排队任务)
     upstream.close()  # 关闭 httpx 连接池，释放 socket
 
 
@@ -192,6 +232,8 @@ app.include_router(config_router)
 app.include_router(skills_router)
 app.include_router(conversations_router)
 app.include_router(meta_router)
+# 管理端路由（X-Admin-Token 守门,ADMIN_TOKEN 未配置时整组 503）
+app.include_router(admin_router)
 
 
 

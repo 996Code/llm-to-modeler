@@ -29,6 +29,9 @@ events.kind 取值(类比 Java 的枚举):
   - compact_trace 压缩轨迹(审计用)
   - checkpoint    artifact 快照 / 会话生命周期标记
   - ask           pending_ask 现场(追问未回答时的现场快照)
+  - trace         链路追踪打点(管理端链路视图;引擎自动打点 +
+                  pack 经 ToolContext.trace() 写入的业务打点。
+                  conversation.load 的重放分流忽略本 kind,不进消息上下文)
 
 【兼容性】
 对外保留旧 API(create_conversation / list_conversations / get_conversation /
@@ -314,34 +317,105 @@ class ConversationStore:
             })
         return result
 
-    def list_all_conversations(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """列出全部会话(管理后台用,不限用户)。字段比 list 多了 userId。
+    def list_all_conversations(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """列出全部会话(管理后台用,不限用户,支持分页与过滤)。
 
         Args:
-            limit: 最多返回条数
+            limit:  最多返回条数
+            offset: 偏移量(分页)
+            user_id: 非空时只看该用户的会话(按用户名精确过滤)
+            q:      非空时按标题/首条消息模糊匹配(LIKE)
 
         Returns:
-            字典列表,每条额外包含 userId 字段供管理员区分归属。
+            字典列表,每条包含 userId / contextKey / messageCount / displayTitle。
+            displayTitle:展示级标题——引擎只在首次产出制品时写 title,
+            闲聊/追问/失败的会话永远是"新对话"(对管理端毫无辨识度),
+            故按「真实 title > 首条用户消息截断 > 新对话」推导,不动存量数据。
+        """
+        where, params = self._admin_conversation_where(user_id, q)
+        sql = f"""
+            SELECT m.*,
+                   (SELECT COUNT(*) FROM events e
+                     WHERE e.conv_id = m.conv_id
+                       AND e.kind IN ('user', 'assistant', 'tool_result')) AS message_count,
+                   (SELECT payload FROM events e
+                     WHERE e.conv_id = m.conv_id AND e.kind = 'user'
+                     ORDER BY e.created_at ASC LIMIT 1) AS first_user_payload
+              FROM session_meta m {where}
+             ORDER BY m.updated_at DESC
+             LIMIT ? OFFSET ?
         """
         with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM session_meta ORDER BY updated_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+            rows = conn.execute(sql, (*params, limit, offset)).fetchall()
 
         result = []
         for r in rows:
             item = dict(r)
             current_config = json.loads(item["current_config"]) if item.get("current_config") else None
+            first_user = ""
+            if item.get("first_user_payload"):
+                try:
+                    first_user = str(json.loads(item["first_user_payload"]).get("content") or "")
+                except (ValueError, TypeError):
+                    first_user = ""
             result.append({
                 "id": item["conv_id"],
                 "userId": item["user_id"],
+                "contextKey": item["context_key"] or "",
                 "title": item["title"] or "新对话",
+                "displayTitle": self._derive_display_title(item["title"], first_user),
+                "messageCount": item["message_count"],
                 "currentConfig": current_config,
                 "createdAt": item["created_at"],
                 "updatedAt": item["updated_at"],
             })
         return result
+
+    @staticmethod
+    def _derive_display_title(title: Optional[str], first_user: str, max_len: int = 40) -> str:
+        """展示标题推导:真实 title > 首条用户消息截断 > '新对话'。
+
+        max_len=40:管理端列表标题列是主信息列,给足辨识度;超长悬停 tooltip 看全文。
+        """
+        if title and title != "新对话":
+            return title
+        if first_user:
+            text = first_user.strip().replace("\n", " ")
+            return text[:max_len] + ("…" if len(text) > max_len else "")
+        return "新对话"
+
+    def count_all_conversations(
+        self,
+        user_id: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> int:
+        """统计满足管理端过滤条件的会话总数(分页用,过滤条件与 list_all 一致)。"""
+        where, params = self._admin_conversation_where(user_id, q)
+        with self._get_conn() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS c FROM session_meta m {where}", params
+            ).fetchone()
+        return int(row["c"])
+
+    @staticmethod
+    def _admin_conversation_where(user_id: Optional[str], q: Optional[str]) -> tuple:
+        """拼装管理端会话列表的 WHERE 子句与参数(动态 SQL,参数化防注入)。"""
+        clauses, params = [], []
+        if user_id:
+            clauses.append("m.user_id = ?")
+            params.append(user_id)
+        if q:
+            clauses.append("(m.title LIKE ? OR m.conv_id IN ("
+                           "SELECT e.conv_id FROM events e WHERE e.kind = 'user' AND e.payload LIKE ?))")
+            params.extend([f"%{q}%", f"%{q}%"])
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return where, params
 
     def get_conversation(self, conv_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """获取会话(含全部消息)。校验用户归属,非本人返回 None。
@@ -354,6 +428,19 @@ class ConversationStore:
             会话字典(含 messages),或 None(不存在或不属于该用户)。
         """
         return self._get_conversation(conv_id, user_id)
+
+    def conversation_exists(self, conv_id: str, user_id: str) -> bool:
+        """会话存在且属于该用户(轻量 meta 查询,不重建消息)。
+
+        供 chat 历史加载前的归属校验:cm.load(conv_id) 本身不带权限
+        过滤,不校验的话任何拿到 conv_id 的人都能借 chat 套取他人历史。
+        """
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM session_meta WHERE conv_id = ? AND user_id = ?",
+                (conv_id, user_id),
+            ).fetchone()
+        return row is not None
 
     def get_conversation_any_user(self, conv_id: str) -> Optional[Dict[str, Any]]:
         """获取会话(管理员视角,不校验用户)。
@@ -418,9 +505,14 @@ class ConversationStore:
                 "createdAt": r["created_at"],
             })
 
+        first_user = next((m["content"] for m in messages if m.get("role") == "user"), "")
         return {
             "id": meta["conv_id"],
+            "userId": meta["user_id"],
+            "contextKey": meta.get("context_key") or "",
+            "summary": meta.get("summary") or "",
             "title": meta["title"] or "新对话",
+            "displayTitle": self._derive_display_title(meta["title"], str(first_user or "")),
             "currentConfig": current_config,
             "messages": messages,
             "createdAt": meta["created_at"],
@@ -449,6 +541,23 @@ class ConversationStore:
             # events 也删除(级联)
             conn.execute("DELETE FROM events WHERE conv_id = ?", (conv_id,))
             # rowcount 是受影响行数,> 0 表示确实删了
+            return cursor.rowcount > 0
+
+    def delete_conversation_any_user(self, conv_id: str) -> bool:
+        """删除会话(管理员视角,不校验归属)。级联删除 events,语义同 delete_conversation。
+
+        Args:
+            conv_id: 会话 ID。
+
+        Returns:
+            True 表示删除成功,False 表示会话不存在。
+        """
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM session_meta WHERE conv_id = ?",
+                (conv_id,),
+            )
+            conn.execute("DELETE FROM events WHERE conv_id = ?", (conv_id,))
             return cursor.rowcount > 0
 
     def update_conversation_config(
@@ -642,28 +751,14 @@ class ConversationStore:
         Returns:
             日志字典列表,request_data / response_data 已自动反序列化为 dict。
         """
+        # 过滤条件拼装收敛在 _call_logs_where(等价 MyBatis 的 <if> 动态 SQL),
+        # 与 query_call_logs 共用一套 WHERE,避免两处分支漂移
+        where, params = self._call_logs_where(conv_id, call_type)
         with self._get_conn() as conn:
-            # 四种 WHERE 组合(等价于 MyBatis 的 <if> 动态 SQL)
-            if conv_id and call_type:
-                rows = conn.execute(
-                    "SELECT * FROM call_logs WHERE conv_id = ? AND call_type = ? ORDER BY created_at DESC LIMIT ?",
-                    (conv_id, call_type, limit),
-                ).fetchall()
-            elif conv_id:
-                rows = conn.execute(
-                    "SELECT * FROM call_logs WHERE conv_id = ? ORDER BY created_at DESC LIMIT ?",
-                    (conv_id, limit),
-                ).fetchall()
-            elif call_type:
-                rows = conn.execute(
-                    "SELECT * FROM call_logs WHERE call_type = ? ORDER BY created_at DESC LIMIT ?",
-                    (call_type, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM call_logs ORDER BY created_at DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+            rows = conn.execute(
+                f"SELECT * FROM call_logs {where} ORDER BY created_at DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
 
         result = []
         for r in rows:
@@ -675,6 +770,104 @@ class ConversationStore:
                 item["response_data"] = json.loads(item["response_data"])
             result.append(item)
         return result
+
+    def query_call_logs(
+        self,
+        conv_id: Optional[str] = None,
+        call_type: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """管理端分页查询调用日志(过滤条件与 get_call_logs 一致,多分页与总数)。
+
+        Returns:
+            {"items": [...], "total": 满足条件的总条数}。items 反序列化规则同 get_call_logs。
+        """
+        where, params = self._call_logs_where(conv_id, call_type)
+        with self._get_conn() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) AS c FROM call_logs {where}", params
+            ).fetchone()["c"]
+            rows = conn.execute(
+                f"SELECT * FROM call_logs {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+
+        items = []
+        for r in rows:
+            item = dict(r)
+            if item.get("request_data"):
+                item["request_data"] = json.loads(item["request_data"])
+            if item.get("response_data"):
+                item["response_data"] = json.loads(item["response_data"])
+            items.append(item)
+        return {"items": items, "total": int(total)}
+
+    def get_admin_stats(self) -> Dict[str, Any]:
+        """管理端概览统计:会话/用户/消息/事件/链路打点/调用聚合/时间范围。
+
+        单次连接内跑多条聚合 SQL(都是 COUNT/AVG/SUM,走索引,毫秒级),
+        避免管理端仪表盘发一堆请求。
+        """
+        with self._get_conn() as conn:
+            conv_count = conn.execute("SELECT COUNT(*) AS c FROM session_meta").fetchone()["c"]
+            user_count = conn.execute(
+                "SELECT COUNT(DISTINCT user_id) AS c FROM session_meta"
+            ).fetchone()["c"]
+            event_count = conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
+            message_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE kind IN ('user', 'assistant')"
+            ).fetchone()["c"]
+            trace_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM events WHERE kind = 'trace'"
+            ).fetchone()["c"]
+            span = conn.execute(
+                "SELECT MIN(created_at) AS lo, MAX(created_at) AS hi FROM events"
+            ).fetchone()
+            call_total = conn.execute("SELECT COUNT(*) AS c FROM call_logs").fetchone()["c"]
+            call_agg = conn.execute(
+                """SELECT call_type, COUNT(*) AS c,
+                          COALESCE(SUM(duration_ms), 0) AS ms
+                     FROM call_logs GROUP BY call_type"""
+            ).fetchall()
+            avg_duration = conn.execute(
+                "SELECT AVG(duration_ms) AS d FROM call_logs WHERE duration_ms IS NOT NULL"
+            ).fetchone()["d"]
+
+        by_type = {r["call_type"]: r for r in call_agg}
+        llm_row = by_type.get("llm")
+        up_row = by_type.get("upstream")
+
+        return {
+            "conversations": int(conv_count),
+            "users": int(user_count),
+            "events": int(event_count),
+            "messages": int(message_count),
+            "traceEvents": int(trace_count),
+            "firstAt": span["lo"] if span else None,
+            "lastAt": span["hi"] if span else None,
+            "calls": {
+                "total": int(call_total),
+                "llm": int(llm_row["c"]) if llm_row else 0,
+                "llmMs": int(llm_row["ms"]) if llm_row else 0,
+                "upstream": int(up_row["c"]) if up_row else 0,
+                "upstreamMs": int(up_row["ms"]) if up_row else 0,
+                "avgDurationMs": round(float(avg_duration)) if avg_duration is not None else None,
+            },
+        }
+
+    @staticmethod
+    def _call_logs_where(conv_id: Optional[str], call_type: Optional[str]) -> tuple:
+        """拼装 call_logs 查询的 WHERE 子句与参数(参数化防注入)。"""
+        clauses, params = [], []
+        if conv_id:
+            clauses.append("conv_id = ?")
+            params.append(conv_id)
+        if call_type:
+            clauses.append("call_type = ?")
+            params.append(call_type)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        return where, params
 
     # ── Append-only 事件流 API(新) ─────────────────────────────
 

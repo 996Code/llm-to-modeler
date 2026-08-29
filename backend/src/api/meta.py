@@ -63,8 +63,16 @@ async def list_packs(request: Request):
 
     # 查询参数白名单：?packs=njmind_form,xxx（宿主在 iframe URL 上声明）
     request_names = _parse_names(request.query_params.get("packs"))
-    # env 白名单：PACKS_ENABLED（部署方声明，与 load_pack_configs 同源）
-    env_names = _packs_whitelist()
+    # 部署方白名单：优先读运行时启停状态（app.state.pack_state，管理端热切换
+    # 后即时生效）；未装配（旧测试环境）时回退读 env PACKS_ENABLED。
+    # 语义与 PACKS_ENABLED 一致——请求参数是上层（宿主）声明、部署方声明是
+    # 运行时状态，两者**取交集**：只返回两处都允许的 pack；某一方未声明时
+    # 不参与限制。
+    pack_state = getattr(request.app.state, "pack_state", None)
+    if pack_state is not None:
+        env_names: Optional[set] = set(pack_state.enabled_names())
+    else:
+        env_names = _packs_whitelist()
     if request_names is not None and env_names is not None:
         # 两处都声明 → 交集（宿主想要且部署方允许的）
         allowed = request_names & env_names

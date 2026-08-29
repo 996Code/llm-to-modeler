@@ -43,6 +43,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'index.html'),
+        // 管理端独立页面(/ai-modeler/admin.html):与主聊天应用平行的多页入口
+        admin: resolve(__dirname, 'admin.html'),
         embed: resolve(__dirname, 'src/embed.ts'),
       },
       output: {

@@ -12,16 +12,20 @@
 核心设计（Java 视角）：
   - 无登录态：本服务不维护用户登录，user_id 由上游系统通过 X-User-Id 请求头透传。
     类比 Spring 里前置网关已经鉴权，业务层直接信任 header。
-  - admin 越权：user_id == "admin" 时可查看/访问所有用户的会话（运维/客服场景）。
+  - admin 越权：user_id == "admin" 且请求满足管理端授权（api/admin.py 的
+    is_admin_authorized——口令模式须带合法 X-Admin-Token，开放模式直接放行）
+    时可查看/访问所有用户的会话。未满足时 "admin" 退化为普通用户名。
   - app.state.conversation_store：ConversationStore 单例，类比 @Autowired Repository。
     在 main.py lifespan 中初始化。
 """
 
 import logging
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
+
+from src.api.admin import is_admin_authorized
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -101,8 +105,8 @@ async def list_conversations(
     latest = request.query_params.get("latest") == "true"
     if context_key and latest:
         return store.find_latest_by_context(user_id, context_key)
-    # admin 可查看所有用户的对话
-    if user_id == "admin":
+    # admin + 合法管理口令 可查看所有用户的对话（跨用户审计走管理端鉴权）
+    if user_id == "admin" and is_admin_authorized(request):
         return store.list_all_conversations()
     return store.list_conversations(user_id)
 
@@ -128,8 +132,8 @@ async def get_conversation(
     """
     store = request.app.state.conversation_store
     user_id = _get_user_id(request, x_user_id)
-    # admin 可访问任何对话
-    if user_id == "admin":
+    # admin + 合法管理口令 可访问任何对话（同 list 的越权收紧）
+    if user_id == "admin" and is_admin_authorized(request):
         conv = store.get_conversation_any_user(conv_id)
     else:
         conv = store.get_conversation(conv_id, user_id)

@@ -47,6 +47,26 @@ from engine.prompt_loader import PromptLoader
 logger = logging.getLogger(__name__)
 
 
+def scan_pack_dirs() -> List[str]:
+    """纯目录扫描:返回 domains/ 下所有符合 pack 约定的目录名(不过滤)。
+
+    与 discover_packs 的分工:
+      - scan_pack_dirs:只回答"磁盘上有哪些 pack"(管理端全量列表、
+        PackState 的"全部启用"默认值都需要完整清单)
+      - discover_packs:scan + PACKS_ENABLED 过滤,回答"这次启动加载哪些"
+    """
+    domains_dir = Path(__file__).parent
+    packs = []
+    for item in domains_dir.iterdir():
+        if not item.is_dir():
+            continue
+        if item.name.startswith('_'):
+            continue
+        if (item / 'pack.py').exists():
+            packs.append(item.name)
+    return packs
+
+
 def discover_packs() -> List[str]:
     """
     自动发现 domains 目录下的工具包（可被 PACKS_ENABLED 上层配置过滤）。
@@ -74,26 +94,10 @@ def discover_packs() -> List[str]:
     再按约定过滤出"插件目录";PACKS_ENABLED ≈ Spring 的
     spring.profiles.include 式白名单。
     """
-    # __file__ 是本文件路径,Path(__file__).parent 取所在目录(domains/)。
-    # Python 里靠运行时路径定位,而非 Java 的 classpath 抽象。
-    domains_dir = Path(__file__).parent
-    packs = []
-
-    # 遍历 domains/ 下每一项(文件或目录)。iterdir() 等价 Java 的 listFiles()。
-    for item in domains_dir.iterdir():
-        # 跳过非目录(如 __init__.py 本身、README 等)。
-        if not item.is_dir():
-            continue
-        # 下划线开头的目录视为内部/隐藏(约定),如 __pycache__、_common 工具库。
-        # 这是"下划线 = 内部"的 Python 惯例,类似 Java 里 internal 包。
-        if item.name.startswith('_'):
-            continue
-
-        # 拼出 pack.py 的预期路径并检查是否存在。
-        pack_file = item / 'pack.py'
-        if pack_file.exists():
-            packs.append(item.name)
-            logger.info(f"发现工具包: {item.name}")
+    # 目录扫描逻辑收敛在 scan_pack_dirs(供 PackState 等需要"全量清单"的调用方复用)
+    packs = scan_pack_dirs()
+    for name in packs:
+        logger.info(f"发现工具包: {name}")
 
     # 上层白名单过滤：部署方声明 PACKS_ENABLED 时只加载名单内的
     enabled = _packs_whitelist()
@@ -191,24 +195,27 @@ def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader], obj
         raise
 
 
-def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader], dict]:
+def load_all_packs(pack_names: Optional[List[str]] = None) -> Tuple[ToolRegistry, Optional[PromptLoader], dict, dict]:
     """
-    加载所有已发现的工具包,合并它们的 registry 成一个全局注册表。
+    加载工具包,合并它们的 registry 成一个全局注册表。
 
-    流程:
-      1. discover_packs() 扫出所有 pack 名
-      2. 逐个 load_pack 加载
-      3. 把每个 pack 的工具合并进同一个 merged_registry
-      4. 选第一个非空的 prompt_loader 作为 primary
+    Args:
+        pack_names: 显式指定要加载的 pack 名单(管理端热切换路径)。
+            None = 走 discover_packs()(PACKS_ENABLED env 过滤,启动缺省路径)。
+            显式名单跳过 env 过滤——启停状态由 PackState 管理(PACKS_ENABLED
+            只是首次初始化的默认值),env 不再二次收窄,否则"管理端启用一个
+            env 名单外的 pack"会被 env 静默吃掉。
 
     Returns:
-        (merged_registry, primary_prompt_loader) 元组。
+        (merged_registry, primary_prompt_loader, pack_routers, pack_tools) 四元组。
         - merged_registry: 合并后的全局工具注册表(至少 1 个工具)
         - primary_prompt_loader: 主 prompt 加载器,可能为 None
           (所有 pack 都不提供时),此时二级路由使用 DefaultPackRouter 中性框架。
+        - pack_routers: pack 名 → 二级路由实例(引擎一级路由用)
+        - pack_tools: pack 名 → 工具名列表(管理端展示"每个 pack 有哪些工具")
 
     Raises:
-        RuntimeError: 一个 pack 都没发现(系统无法工作)。
+        RuntimeError: 一个可用 pack 都没有(系统无法工作)。
 
     【容错策略】
     - 单个 pack 加载失败不会让整个系统启动失败:catch 后 continue 跳过,
@@ -219,7 +226,16 @@ def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader], dict]:
     类似 Spring 启动时把所有 @Component 扫进同一个 ApplicationContext:
     某个 Bean 加载失败通常只影响自身(可降级),全失败才中止。
     """
-    pack_names = discover_packs()
+    if pack_names is None:
+        pack_names = discover_packs()
+    else:
+        # 显式名单与磁盘发现取交集:状态文件里引用的 pack 可能已被删除
+        discovered = set(scan_pack_dirs())
+        unknown = [n for n in pack_names if n not in discovered]
+        if unknown:
+            logger.warning(f"加载名单含未发现的 pack(忽略): {sorted(unknown)}")
+        pack_names = [n for n in pack_names if n in discovered]
+        logger.info(f"按显式名单加载 pack: {pack_names}")
 
     if not pack_names:
         # 一个 pack 都没有 —— 系统无工具可用,直接终止启动(Fail-Closed)。
@@ -230,6 +246,8 @@ def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader], dict]:
     primary_prompt_loader = None
     # pack → 二级路由映射（引擎一级路由选中领域后调它选工具）
     pack_routers: dict = {}
+    # pack → 工具名列表（管理端展示;合并注册表本身不保留来源信息）
+    pack_tools: dict = {}
 
     for pack_name in pack_names:
         try:
@@ -238,8 +256,10 @@ def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader], dict]:
 
             # 合并工具:遍历该 pack 的所有工具,注册进全局 registry。
             # 注意 tool.name 全局唯一,同名会覆盖 —— pack 之间工具名不能冲突。
+            pack_tools[pack_name] = []
             for tool in registry.all():
                 merged_registry.register(tool)
+                pack_tools[pack_name].append(tool.name)
                 logger.debug(f"注册工具: {tool.name} (来自 {pack_name})")
 
             # 使用第一个 pack 的 prompt_loader 作为主要的。
@@ -262,22 +282,30 @@ def load_all_packs() -> Tuple[ToolRegistry, Optional[PromptLoader], dict]:
         )
 
     logger.info(f"成功加载 {len(pack_names)} 个工具包，共 {len(merged_registry.all())} 个工具")
-    return merged_registry, primary_prompt_loader, pack_routers
+    return merged_registry, primary_prompt_loader, pack_routers, pack_tools
 
 
-def load_pack_configs() -> dict:
+def load_pack_configs(pack_names: Optional[List[str]] = None) -> dict:
     """加载各 pack 的 config.yaml 为只读 dict（供 /api/meta/packs 暴露 manifest）。
 
     pack 目录约定:``domains/<pack_name>/config.yaml`` 存在则读为 dict,
     不存在返回空 dict(纯数据类 pack 可以没有静态配置)。
     每个 pack 的 config.yaml 就是它的 manifest 声明(制品类型/diff 对齐键/服务依赖)。
 
+    Args:
+        pack_names: 显式指定要读哪些 pack 的 manifest(管理端热切换路径,
+            语义同 load_all_packs 的同名参数)。None = discover_packs()
+            (PACKS_ENABLED env 过滤)——env 只作启动缺省,显式名单跳过 env。
+
     与 discover_packs 共享同一白名单过滤:部署方设置 PACKS_ENABLED 时,
     /api/meta/packs 只暴露名单内的 pack,避免禁用插件的信息(工具/服务依赖)外泄。
     """
     import yaml
 
-    allowed = _packs_whitelist()
+    if pack_names is None:
+        allowed = _packs_whitelist()
+    else:
+        allowed = set(pack_names)
     configs = {}
     domains_dir = Path(__file__).parent
     for item in domains_dir.iterdir():

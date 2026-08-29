@@ -522,6 +522,10 @@ npm install && npm run dev
 | GET | `/api/skills/guide` | 获取配置指南（代理上游） |
 | POST | `/mcp` | MCP 协议（JSON-RPC 2.0） |
 | GET | `/health` `/api/health` | 健康检查（嵌入探测走 /api/health 同链路，`Cache-Control: no-store`） |
+| GET/DELETE | `/api/admin/conversations` | **管理端**：全量会话分页/详情/删除（需 `X-Admin-Token`） |
+| GET | `/api/admin/call-logs` | **管理端**：LLM/上游调用审计日志分页查询 |
+| GET/POST | `/api/admin/packs`、`/api/admin/packs/:name/enable\|disable` | **管理端**：插件清单与启停（热生效） |
+| GET | `/api/admin/stats` | **管理端**：概览统计 |
 
 **ChatRequest 格式：**
 
@@ -539,6 +543,60 @@ npm install && npm run dev
 - 请求头自动透传到上游（嵌入模式）
 
 ---
+
+## 八.五、管理端（Admin Console）
+
+运维/客服视角的独立页面：**`/ai-modeler/admin.html`**（与主聊天应用平行的 vite 多页入口，不经嵌入 SDK）。
+
+### 访问与鉴权
+
+- **默认(未配置 `ADMIN_TOKEN`):开放访问**——打开页面直接用,无口令(内网/网关后部署的取舍;启动日志会打醒目警告)
+- 配置 `ADMIN_TOKEN` 后:页面首次输入口令(存浏览器本地),所有 `/api/admin/*` 请求带 `X-Admin-Token` 头
+- ⚠ 开放模式下,凡能访问本服务的客户端都可查看全部会话(含完整 prompt)/删除会话/切换插件——公网部署必须配置口令
+- 普通会话接口上 `X-User-Id: admin` 的跨用户查看能力与管理端同模式(开放即放行,口令模式须带口令)
+
+### 功能
+
+| Tab | 能力 |
+|-----|------|
+| 概览 | 会话/用户/消息/事件计数、LLM 与上游调用量、平均耗时、插件启用数 |
+| 会话 | 跨用户全量会话（分页/按用户/按标题过滤）、**链路追踪**（见下）、删除 |
+| 调用日志 | `call_logs` 审计流水（LLM/上游），按会话/类型过滤，抽屉查看请求/响应全文 |
+| 插件 | 全部已发现 pack 的启停开关 |
+
+### 会话链路追踪
+
+会话列表点"查看"进入链路视图（`GET /api/admin/conversations/{id}/trace`）：全量事件流
+与 LLM/上游调用日志按时间合并成统一时间线，**按轮分组**（每轮 = 一条用户消息到
+下一条之前的全部活动），每轮聚合墙钟耗时 / LLM 次数与耗时 / 上游次数与耗时。
+
+时间线覆盖的环节：
+
+| 环节 | 来源 |
+|------|------|
+| 意图路由决策（选领域/选工具/是否兜底） | 引擎自动 trace 打点 + LLM 调用明细 |
+| LLM 调用（**完整 prompt 与响应**、token 用量、耗时、环节标签 stage） | `call_logs`（按 conv_id 关联；`LLM_LOG_FULL=0` 可退回摘要模式） |
+| 上游 API 调用（请求/响应全文、状态码、耗时） | `call_logs`（会话归属经线程上下文自动绑定，插件零改动） |
+| 工具执行（工具名、耗时、ok/ask/error 结论） | 引擎自动 trace 打点 |
+| 插件内部业务步骤 | pack 调 `ctx.trace()` 写入（见插件指南 §2.2） |
+| 历史压缩（压缩点/轨迹/压缩 LLM 调用） | compacted/compact_trace 事件 + call_logs |
+| 快照 / 追问现场 | checkpoint / ask 事件 |
+
+
+### 插件热启停
+
+- 开关**热生效**：禁用的插件立即从工具注册表、`/api/meta/packs`、宿主插件列表中消失，无需重启服务（实现见 `src/services/pack_manager.py`——重新 `nodes.configure` 注入 + 替换 `app.state` 引用，graph 拓扑不变不重建）
+- 状态持久化在 `PACK_STATE_PATH`（默认 `data/pack_state.json`，随部署卷持久化），重启后保持
+- 优先级：**状态文件 > `PACKS_ENABLED` env > 全部发现**。管理端第一次切换后 env 即退化为"首次初始化默认值"
+- 保护：不允许禁用最后一个启用的插件（引擎会无工具可用）
+
+### 鉴权边界（重要）
+
+- `ADMIN_TOKEN` 未配置 → 开放模式（无口令直接访问,启动日志有醒目警告）；配置后校验失败 → 401
+- 普通会话接口上 `X-User-Id: admin` 的跨用户查看能力，同样要求携带合法管理口令——只报 admin 用户名没有口令时，"admin" 就是一个普通用户，只能看自己的会话
+
+---
+
 
 ## 九、目录结构
 
