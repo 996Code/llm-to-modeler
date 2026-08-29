@@ -146,16 +146,16 @@ export const useConversationStore = defineStore('conversation', () => {
   }
 
   /**
-   * 开始新会话：后端创建后清空当前上下文。
+   * 开始新会话:只重置本地上下文,不调后端(懒创建)。
+   * 会话在首条消息发出时由后端创建并经 result 事件回传 id——
+   * 避免"点一下新建就落库一条 0 消息空会话"(管理端列表曾被这类
+   * 空会话刷屏)。侧边栏也不刷新:未入库的会话本就不该出现在列表里。
    */
-  async function startNewConversation() {
-    const conv = await api.createConversation()
-    currentConversation.value = conv
+  function startNewConversation() {
+    currentConversation.value = null
     messages.value = []
     currentConfig.value = null
     baselineConfig.value = null
-    // 刷新侧边栏列表（让新会话出现）
-    await loadConversations()
   }
 
   /**
@@ -204,19 +204,16 @@ export const useConversationStore = defineStore('conversation', () => {
     // 空消息或正在流式生成中，直接忽略
     if ((!text.trim() && !imageBase64) || streaming.value) return
 
-    // Auto-create conversation if none selected
-    // 若没有当前会话，先创建一个（懒创建模式）
+    // 会话 ID:独立模式首聊不带 id(后端懒创建,经 result 事件回传);
+    // 嵌入模式保留预创建——contextKey 绑定/侧栏重开恢复依赖建会话时带上绑定
     let convId = currentConversation.value?.id
-    if (!convId) {
-      // 嵌入模式：优先用宿主 contextKey 创建（便于按 (userId, contextKey) 恢复）
-      const contextKey = isEmbedded.value ? localStorage.getItem('embedded_context_key') || undefined : undefined
+    if (!convId && isEmbedded.value) {
+      const contextKey = localStorage.getItem('embedded_context_key') || undefined
       const conv = await api.createConversation('', contextKey)
       convId = conv.id
       currentConversation.value = conv
       // 嵌入模式：保存会话 ID 到 localStorage，下次打开时恢复
-      if (isEmbedded.value) {
-        localStorage.setItem('embedded_conv_id', convId)
-      }
+      localStorage.setItem('embedded_conv_id', convId)
       await loadConversations()
     }
 
@@ -270,6 +267,15 @@ export const useConversationStore = defineStore('conversation', () => {
         },
         // 收到最终结果回调：这里按优先级分流（决定 UI 渲染哪种卡片）
         onResult: (result) => {
+          // 懒创建采纳:首条消息不带 id 发出的会话在此拿到后端回传的新 id,
+          // 采纳后后续轮次/刷新/恢复都基于它(见 startNewConversation 注释)
+          if (result.conversationId && !currentConversation.value) {
+            currentConversation.value = { id: result.conversationId } as Conversation
+            if (isEmbedded.value) {
+              localStorage.setItem('embedded_conv_id', result.conversationId)
+            }
+            loadConversations()  // 刷侧边栏,让新会话出现(不 await,不阻塞渲染)
+          }
           // onResult 分流顺序(由后端 ToolResult 三态决定):
           // 1. general  — 闲聊(reply 通道),显示纯文本
           // 2. needsClarification — 追问(ask 通道),显示问题卡片

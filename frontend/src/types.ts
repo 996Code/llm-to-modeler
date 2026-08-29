@@ -106,4 +106,5 @@ export interface SSEResult {
   needsClarification?: boolean        // 是否需要追问
   questions?: ClarificationQuestion[]  // 后端 AskQuestion 对象(非纯字符串)
   intent?: string                    // 意图分类："create" | "modify" | "general"
+  conversationId?: string            // 会话 ID(懒创建场景:首条消息不带 id,后端建好后随 result 回传)
 }
