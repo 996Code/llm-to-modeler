@@ -190,7 +190,7 @@ formCode 通常是英文或拼音组成的标识符,如:
         try:
             # chat_json:让 LLM 返回 JSON 并自动解析成 dict
             # conv_id 用于上游服务的日志关联 / 限流
-            result = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
+            result = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id, stage="get_form.parse")
             # strip 去掉首尾空白,避免空格干扰
             return result.get("formCode", "").strip()
         except Exception as e:

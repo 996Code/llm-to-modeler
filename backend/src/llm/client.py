@@ -27,8 +27,40 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+# 会话上下文:日志层读线程绑定的 conv_id 兜底(call_context 无任何依赖,无循环)
+from services.call_context import current_conversation_id
+
 from openai import OpenAI
 from pydantic import BaseModel
+
+
+def _sanitize_messages_for_log(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """日志用的消息清洗:多模态图片转占位符,其余原样(浅拷贝,不动调用方)。
+
+    图片 content 是 data URL base64(单张可达数 MB),入库会撑爆 call_logs
+    且对追溯无意义——prompt 的"文字部分"才是排查依据。占位符保留长度信息,
+    便于判断"是不是传了张巨图导致慢/超限"。
+    """
+    sanitized = []
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            sanitized.append(m)  # 纯文本消息:原样(引用共享,append-only 场景安全)
+            continue
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url") or ""
+                part = {
+                    **part,
+                    "image_url": {
+                        **(part.get("image_url") or {}),
+                        "url": f"<image data omitted: {len(url)} chars>",
+                    },
+                }
+            parts.append(part)
+        sanitized.append({**m, "content": parts})
+    return sanitized
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +121,13 @@ class LLMClient:
         self.config = config  # 保存配置实例，后续方法读 model/temperature 等
         self._conversation_store = conversation_store  # 可选的日志存储，None 时跳过日志
 
+        # 完整 prompt 入库开关(LLM_LOG_FULL,默认开):管理端全链路追溯的核心。
+        # 开=call_logs 记录完整 messages(图片转占位符)与完整响应;
+        # 关=退回旧行为(仅条数/字符量 + 响应截断 500 字,隐私/体积优先)。
+        self._log_full = os.getenv("LLM_LOG_FULL", "1").strip().lower() not in (
+            "0", "false", "no", "off",
+        )
+
         if not config.api_key:
             # 没配 api_key 时只 warning 不抛异常：本地模型（LM Studio）常无需 key
             # 真正调用失败时由 SDK 抛错，这里给开发者一个提前提示
@@ -119,16 +158,27 @@ class LLMClient:
         duration_ms: Optional[int] = None,
         error_message: Optional[str] = None,
         conv_id: Optional[str] = None,
+        stage: Optional[str] = None,
     ):
         """持久化 LLM 调用日志到数据库 call_logs 表。
 
         类比 Java 的 AOP 日志切面——每次 LLM 调用自动记录，
         含请求/响应/耗时/状态码，方便调试和性能监控。
         日志保存失败不影响主流程（只 warning 不抛异常）。
+
+        stage 是调用环节标签（route_pack/route_tool/generate 等），
+        合并进 request_data 落库——管理端链路追踪据此区分"这次 LLM
+        调用是在做意图路由还是配置生成"，无需改 call_logs 表结构。
         """
         if not self._conversation_store:
             return
+        if not conv_id:
+            # 线程绑定的会话上下文兜底(stream.py 在 graph 工作线程绑定):
+            # 调用方忘传 conv_id 时日志仍能关联会话,链路不断
+            conv_id = current_conversation_id()
         try:
+            if stage:
+                request_data = {**(request_data or {}), "stage": stage}
             self._conversation_store.save_call_log(
                 call_type="llm",
                 endpoint=endpoint,
@@ -148,6 +198,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         conv_id: Optional[str] = None,
+        stage: Optional[str] = None,
     ) -> str:
         """发送对话请求，返回纯文本响应（同步）。
 
@@ -217,7 +268,8 @@ class LLMClient:
             # 记录成功日志
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
-                "content": result[:500],  # 截断避免过大，类比 Java log 的 StringUtils.truncate
+                # 完整入库开关:开=完整内容(全链路追溯);关=截断 500 字(旧默认)
+                "content": result if self._log_full else result[:500],
                 "finish_reason": choice.finish_reason,  # stop=正常结束, length=截断
                 # model_dump() 是 Pydantic 转 dict，类比 Jackson 序列化对象为 Map
                 "usage": response.usage.model_dump() if response.usage else None,  # token 用量
@@ -228,22 +280,25 @@ class LLMClient:
             )
             self._log_call(
                 endpoint=endpoint,
-                # 日志只记数量/体积，不记完整内容（含用户隐私 + 太大）
+                # LLM_LOG_FULL=1(默认):完整 messages 入库(图片转占位符)——
+                # 管理端链路视图可直接回放当时的 prompt;关闭时只记数量/体积
                 request_data={
                     "messages_count": len(messages),
                     "messages_chars": messages_chars,
                     **{k: v for k, v in request_data.items() if k != "messages"},
+                    **({"messages": _sanitize_messages_for_log(messages)} if self._log_full else {}),
                 },
                 response_data=response_data,
                 status_code=200,
                 duration_ms=duration_ms,
                 conv_id=conv_id,
+                stage=stage,
             )
 
             return result
 
         except Exception as e:
-            # 记录失败日志
+            # 记录失败日志(完整模式下带上 prompt——失败排查最需要的就是当时发了什么)
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
                 endpoint=endpoint,
@@ -251,11 +306,13 @@ class LLMClient:
                     "messages_count": len(messages),
                     "messages_chars": sum(len(m.get("content") or "") for m in messages),
                     **{k: v for k, v in request_data.items() if k != "messages"},
+                    **({"messages": _sanitize_messages_for_log(messages)} if self._log_full else {}),
                 },
                 status_code=500,
                 duration_ms=duration_ms,
                 error_message=str(e),
                 conv_id=conv_id,
+                stage=stage,
             )
             logger.error(f"LLM chat failed: {e}")
             raise  # 重新抛出，让上层决定降级策略（不在此吞异常）
@@ -265,6 +322,7 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         temperature: Optional[float] = None,
         conv_id: Optional[str] = None,
+        stage: Optional[str] = None,
     ) -> Dict[str, Any]:
         """发送对话请求并解析 JSON 响应。
 
@@ -339,7 +397,8 @@ class LLMClient:
             # 记录成功日志
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
-                "content": str(result)[:500],  # 截断避免日志过大
+                # 完整入库开关:开=完整解析结果(全链路追溯);关=截断 500 字
+                "content": str(result) if self._log_full else str(result)[:500],
                 "finish_reason": response.choices[0].finish_reason,
                 "usage": response.usage.model_dump() if response.usage else None,
             }
@@ -349,11 +408,13 @@ class LLMClient:
                     "messages_count": len(guided_messages),
                     "messages_chars": sum(len(m.get("content") or "") for m in guided_messages),
                     **{k: v for k, v in request_data.items() if k != "messages"},
+                    **({"messages": _sanitize_messages_for_log(guided_messages)} if self._log_full else {}),
                 },
                 response_data=response_data,
                 status_code=200,
                 duration_ms=duration_ms,
                 conv_id=conv_id,
+                stage=stage,
             )
 
             return result
@@ -366,7 +427,7 @@ class LLMClient:
         # 中文说明：第二级降级——纯文本模式 + 手动 JSON 提取
         # 适用于不支持 response_format 的模型（如老版本 Qwen、本地 LM Studio）
         logger.info("json_object mode not supported, using plain text")
-        raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id)  # 复用 chat 走 Qwen3 回退
+        raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id, stage=stage)  # 复用 chat 走 Qwen3 回退
         return self._parse_json_from_text(raw)  # 三级容错解析
 
     # ── JSON 提取辅助方法 ────────────────────────────────

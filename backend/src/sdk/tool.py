@@ -33,6 +33,49 @@ class ToolContext(BaseModel):
     conv_id: Optional[str] = None  # 会话 ID，用于日志记录
     registry: Any = None           # ToolRegistry(只读),供工具查询能力
 
+    def trace(
+        self,
+        stage: str,
+        title: str = "",
+        status: str = "info",
+        duration_ms: Optional[int] = None,
+        detail: Optional[dict] = None,
+    ) -> None:
+        """写入一条链路追踪事件(events 表 kind=trace),供管理端链路视图展示。
+
+        这是 pack 向会话链路贡献业务打点的官方 API——工具内部的关键步骤
+        (调了哪个上游、校验结论、内部阶段切换)都可以入链,与引擎自动
+        打点(意图路由/工具执行耗时/历史压缩)汇成同一条时间线。
+
+        Args:
+            stage:      环节标识,建议 "工具名.动作" 命名空间(如
+                        "create_form.fetch_template"),避免跨工具撞名。
+            title:      人类可读标题(管理端时间线展示),缺省用 stage。
+            status:     "info" / "ok" / "error"(时间线着色用)。
+            duration_ms: 该环节耗时(毫秒,可选)。
+            detail:     结构化明细 dict(可选)。注意保持小体积——
+                        trace 是高频审计流,别把完整制品塞进来。
+
+        设计约束(Fail-Open):无会话上下文(MCP 单轮等)静默跳过;
+        写入异常只记日志不上抛——追踪永远不能影响工具主流程。
+        """
+        import logging
+        if not self.conversation or not self.conv_id:
+            return
+        try:
+            # conversation 是 ConversationManager(见 nodes.py 注入),
+            # append 即 store.append_event——append-only,不污染消息重放
+            # (conversation.load 的 kind 分流会忽略 trace)
+            self.conversation.append(self.conv_id, "trace", {
+                "stage": stage,
+                "title": title or stage,
+                "status": status,
+                "duration_ms": duration_ms,
+                "detail": detail,
+            })
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"trace write failed ({stage}): {e}")
+
 
 class AskOption(BaseModel):
     """追问选项。"""

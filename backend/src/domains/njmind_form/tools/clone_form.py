@@ -117,7 +117,7 @@ formCode 通常是英文或拼音组成的标识符。
         ]
 
         try:
-            result = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
+            result = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id, stage="clone_form.parse")
             return {
                 "source_form_code": result.get("source_form_code", "").strip(),
                 "new_form_name": result.get("new_form_name", "").strip(),

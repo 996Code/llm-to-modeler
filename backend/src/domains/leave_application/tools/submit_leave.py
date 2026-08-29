@@ -114,7 +114,7 @@ class SubmitLeaveTool(CompositeTool):
         ]
 
         try:
-            parsed = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
+            parsed = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id, stage="submit_leave.parse")
         except Exception as e:
             logger.warning(f"parse_info LLM failed: {e}")
             parsed = {}

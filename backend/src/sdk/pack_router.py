@@ -66,8 +66,11 @@ class DefaultPackRouter:
         )
 
     def route(self, user_input: str, artifact: Optional[dict],
-              history: str = "", llm_client=None) -> Optional[str]:
+              history: str = "", llm_client=None, conv_id: str = None) -> Optional[str]:
         """LLM 二级路由。无 llm_client 时退化为首个工具（测试/降级场景）。
+
+        conv_id 透传给 LLM 调用日志（管理端链路追踪按会话关联）；
+        不传时日志无会话归属，功能不受影响（向后兼容）。
 
         Returns:
             工具名；无合适工具/LLM 失败返回 None（由引擎兜底链接管）。
@@ -91,7 +94,7 @@ class DefaultPackRouter:
             {"role": "system", "content": self.build_prompt(artifact is not None)},
             {"role": "user", "content": "\n".join(parts)},
         ]
-        parsed = llm_client.chat_json(messages)
+        parsed = llm_client.chat_json(messages, conv_id=conv_id, stage="route_tool")
         name = parsed.get("tool") if isinstance(parsed, dict) else None
         # 校验名字真实存在（LLM 可能编造）——不存在视为无匹配
         if name and any(t.name == name for t in self._registry.all()):

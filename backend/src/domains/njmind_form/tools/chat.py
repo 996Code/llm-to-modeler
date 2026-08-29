@@ -43,7 +43,7 @@ class ChatTool(Tool):
             {"role": "user", "content": user_message},
         ]
 
-        reply = ctx.llm_client.chat(messages, temperature=0.7, conv_id=ctx.conv_id)
+        reply = ctx.llm_client.chat(messages, temperature=0.7, conv_id=ctx.conv_id, stage="chat.reply")
 
         return ToolResult(
             reply=reply,

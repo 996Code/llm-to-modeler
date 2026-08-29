@@ -36,6 +36,9 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+# 会话上下文(同包,无循环依赖):日志层读线程绑定的 conv_id 兜底
+from services.call_context import current_conversation_id
+
 # httpx：现代 Python HTTP 客户端，类比 Java 的 OkHttp，支持连接池和同步/异步
 import httpx
 
@@ -216,9 +219,15 @@ class UpstreamClient:
         类比 Java 的 AOP 日志切面——每次上游调用自动记录，
         含请求/响应/耗时/状态码，方便调试和性能监控。
         日志保存失败不影响主流程（只 warning 不抛异常）。
+
+        conv_id 链路归属：显式参数优先；未传时读线程绑定的会话上下文
+        （call_context,由 stream.py 在 graph 工作线程绑定）——插件经
+        ctx.asset_client 的调用无需透传 conv_id 即自动关联会话入链。
         """
         if not self._conversation_store:
             return
+        if not conv_id:
+            conv_id = current_conversation_id()
         try:
             self._conversation_store.save_call_log(
                 call_type="upstream",

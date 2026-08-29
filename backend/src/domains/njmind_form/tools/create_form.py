@@ -209,7 +209,7 @@ class CreateFormTool(CompositeTool):
         ]
 
         # 调 LLM(要求返回 JSON),conv_id 用于多轮上下文追踪
-        parsed = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
+        parsed = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id, stage="create_form.parse")
 
         # 检查是否需要追问:LLM 判断信息不足时,抛 ClarificationRaised
         # 该异常会被 execute_tool_node 捕获,转成 interrupt 挂起等用户回答
@@ -358,7 +358,7 @@ class CreateFormTool(CompositeTool):
         ]
 
         # 调 LLM 生成完整配置,存为 artifact
-        config = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
+        config = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id, stage="create_form.generate")
         # 机械后处理（布尔→0/1、字段去重、formTitle 兜底）：确定性偏差不烧 LLM 重试
         config = postprocess_config(config)
         state["artifact"] = config

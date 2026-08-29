@@ -158,8 +158,15 @@ class ImageFormTool(Tool):
                 ],
             })
         elif image_base64:
-            # 假设是 PNG,如果不是可以后续调整
-            data_url = f"data:image/png;base64,{image_base64}"
+            # 兼容两种入参:完整 data URL(前端上传的主流形态,见 ChatRequest
+            # 示例)或纯 base64。修复前无条件再包一层前缀——前端传 data URL
+            # 时变成 "data:...base64,data:...base64,...",模型侧报
+            # "image format is illegal"(图片识别从未真正跑通)。
+            data_url = (
+                image_base64
+                if image_base64.startswith("data:")
+                else f"data:image/png;base64,{image_base64}"
+            )
             messages.append({
                 "role": "user",
                 "content": [
@@ -170,7 +177,7 @@ class ImageFormTool(Tool):
         
         try:
             # 调用多模态 LLM
-            result = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
+            result = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id, stage="image_form.analyze")
             return result
         except Exception as e:
             logger.warning(f"image analysis failed: {e}")
@@ -230,7 +237,7 @@ class ImageFormTool(Tool):
         ]
 
         try:
-            config = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id)
+            config = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id, stage="image_form.generate")
             return config
         except Exception as e:
             logger.warning(f"config generation failed: {e}")

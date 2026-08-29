@@ -29,6 +29,7 @@
   - 追问通过 LangGraph interrupt() 暂停 + Command(resume) 恢复（checkpointer 存档）
 """
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from langgraph.types import interrupt
@@ -100,6 +101,7 @@ def classify_intent_node(state: GraphState) -> dict:
     """
     user_input = state.get("user_input", "")  # 当前用户输入，类比 Java 的 request 参数
     compressed_history = state.get("compressed_history", "")  # 压缩后的历史，省 token
+    conversation_id = state.get("conversation_id", "")  # 会话 ID（LLM 调用日志按此关联会话）
     # 是否已有配置：决定可用的工具集（如"修改"类工具需要已有配置）
     has_existing_config = state.get(CONTEXT_ARTIFACT) is not None
 
@@ -111,7 +113,8 @@ def classify_intent_node(state: GraphState) -> dict:
     # 一级（引擎，领域无关）：请求属于哪个领域（pack）？单 pack 直通（零 LLM 调用）。
     # 二级（pack，领域知识归 pack）：领域内选哪个工具（如"画布有内容+增量话术
     # =修改类"这类判断写在 pack 的 router 里，不再泄漏进引擎）。
-    pack_name = _route_pack(user_input, compressed_history)
+    # conv_id/stage：让两级路由的 LLM 调用日志关联到会话并标注环节（管理端链路追踪）
+    pack_name = _route_pack(user_input, compressed_history, conv_id=conversation_id or None)
 
     # 构建 user message
     tool_name = ""  # 选中的工具名，空表示未选中
@@ -121,11 +124,19 @@ def classify_intent_node(state: GraphState) -> dict:
     if router is not None:
         try:
             # 二级路由由 pack 提供领域规则；引擎只传消息/画布/历史与 LLM 客户端
+            # conv_id(可选契约):pack 路由内部若调 LLM,用它关联调用日志到会话。
+            # 按签名协商传入——旧 pack 的 route 可能没有这个参数,硬传会
+            # TypeError 被兜底吞掉(真实事故:njmind_form 规则路由被兜到 chat,
+            # 闲聊工具谎称"已创建表单")。inspect 一次判断,无重试副作用。
+            route_kwargs = {}
+            if conversation_id and _route_accepts_conv_id(router):
+                route_kwargs["conv_id"] = conversation_id
             name = router.route(
                 user_input,
                 state.get(CONTEXT_ARTIFACT),  # 画布（含未保存草稿）——pack 判断"修改 vs 创建"的依据
                 history=compressed_history,
                 llm_client=_llm_client,
+                **route_kwargs,
             )
             # 名字校验（LLM 可能编造不存在的工具）；"需要画布但画布空"的
             # 防线在 pack 路由（前置铁律）与工具自身 validate_input，引擎不再重复
@@ -154,6 +165,20 @@ def classify_intent_node(state: GraphState) -> dict:
         f"reason={intent_reason}, input={user_input[:40]!r}"
     )
 
+    # 链路追踪:两级路由决策入链(选中哪个 pack/工具、是否兜底)——
+    # 管理端时间线上不用打开 LLM 调用详情就能看到路由结论
+    _append_trace(state, {
+        "stage": "intent_route",
+        "title": "意图路由",
+        "status": "ok",
+        "detail": {
+            "pack": pack_name,
+            "tool": tool_name,
+            "reason": intent_reason,
+            "fallback": intent_reason == "fallback",
+        },
+    })
+
     return {
         "tool_name": tool_name,  # 选中的工具名（路由依据）
         "intent_reason": intent_reason,  # 选择理由（日志用）
@@ -165,6 +190,10 @@ def classify_intent_node(state: GraphState) -> dict:
             "source_artifact": state.get(CONTEXT_ARTIFACT),  # 已有配置（修改类工具需要）
             "conversation_id": state.get("conversation_id", ""),
             "forward_headers": state.get("forward_headers", {}),  # 透传鉴权头
+            # 图片识别:stream.py 放进初始 tool_state 的图片在此透传。
+            # 修复前的断链:classify 重建 tool_state 时丢掉该键,
+            # image_form 收到"未提供图片"(LangGraph 重构遗留回归)。
+            "image_base64": state.get("tool_state", {}).get("image_base64"),
         },
         "sse_events": sse_events,
     }
@@ -267,6 +296,7 @@ def execute_tool_node(state: GraphState) -> dict:
         tool_state["clarify_answers"] = clarify_answers  # 注入回答供工具消费
 
     # ── 执行工具 ──
+    _tool_start = time.time()  # 工具执行计时(链路追踪的耗时指标)
     try:
         # 执行工具主逻辑，类比 Java toolService.execute(state, ctx)
         result = tool.execute(tool_state, ctx)
@@ -294,6 +324,20 @@ def execute_tool_node(state: GraphState) -> dict:
             error_for_llm=str(e),
             summary=f"工具执行失败: {e}",
         )
+
+    # 链路追踪:工具执行耗时与结论入链。状态三态:
+    #   ok=正常完成 / ask=挂起追问(中断不是失败,resume 重跑会再写一条) /
+    #   error=执行异常
+    _append_trace(state, {
+        "stage": "tool_execute",
+        "title": f"执行工具 {tool_name}",
+        "status": (
+            "error" if result.error_for_llm
+            else ("ask" if result.ask is not None else "ok")
+        ),
+        "duration_ms": int((time.time() - _tool_start) * 1000),
+        "detail": {"tool": tool_name},
+    })
 
     # ── 处理追问:interrupt! ──
     if result.ask is not None:
@@ -462,7 +506,40 @@ def route_after_result(state: GraphState) -> str:
 # ── 辅助函数 ──────────────────────────────────────────────
 
 
-def _route_pack(user_input: str, history: str = "") -> str:
+def _append_trace(state: GraphState, payload: Dict[str, Any]) -> None:
+    """写一条链路追踪事件(events 表 kind=trace;管理端链路视图消费)。
+
+    引擎自动打点(意图路由/工具执行)与 pack 的 ctx.trace() 走同一存储,
+    汇成同一条时间线。Fail-Open:无会话上下文跳过,写失败只记日志——
+    追踪永远不影响节点主流程。
+    """
+    conv_id = state.get("conversation_id")
+    if not _conversation or not conv_id:
+        return
+    try:
+        _conversation.append(conv_id, "trace", payload)
+    except Exception as e:
+        logger.warning(f"trace write failed ({payload.get('stage')}): {e}")
+
+
+def _route_accepts_conv_id(router: Any) -> bool:
+    """检查 pack 路由的 route() 是否声明了 conv_id 参数(可选契约协商)。
+
+    支持 **kwargs 的路由视为接受。不做缓存:inspect 是微秒级,且每条消息
+    只判一次(相比 LLM 调用可忽略);用 id() 做缓存键反而有对象回收后
+    地址复用串值的隐患。
+    """
+    try:
+        import inspect
+        params = inspect.signature(router.route).parameters
+        return ("conv_id" in params) or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _route_pack(user_input: str, history: str = "", conv_id: str = None) -> str:
     """一级路由（领域无关）：请求属于哪个领域（pack）。
 
     - 单 pack：直通（零 LLM 调用——两级路由在单领域部署下不引入额外延迟）；
@@ -518,7 +595,7 @@ def _route_pack(user_input: str, history: str = "") -> str:
         parsed = _llm_client.chat_json([
             {"role": "system", "content": prompt},
             {"role": "user", "content": "\n".join(parts)},
-        ])
+        ], conv_id=conv_id, stage="route_pack")
         name = parsed.get("pack") if isinstance(parsed, dict) else None
         if name in _pack_routers:
             logger.info(f"route: '{user_input[:30]}' -> pack '{name}'")
