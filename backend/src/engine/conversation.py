@@ -84,6 +84,8 @@ class ConversationManager:
         compact_trace   压缩轨迹(审计用,**不进** messages)
         checkpoint      快照(artifact、active_tool 等大对象,**不进** messages)
         ask             追问现场(工具 interrupt 时持久化,最新一条生效)
+        trace           链路追踪打点(管理端链路视图;**重放分流忽略**,
+                        不进 messages 也不影响任何视图字段)
         =============== ======================================================
         """
         if not self._store:
@@ -126,7 +128,8 @@ class ConversationManager:
             无 store 时返回空视图(``messages=[]`` 等)。
         """
         if not self._store:
-            return {"messages": [], "pending_ask": None, "checkpoints": []}
+            return {"messages": [], "pending_ask": None, "checkpoints": [],
+                    "last_compacted_idx": -1, "compressed_summary": ""}
 
         events = self._store.load_events(conv_id)
         messages = []
@@ -134,6 +137,9 @@ class ConversationManager:
         pending_ask = None
         # -1 表示从未发生过压缩;一旦遇到 compacted 事件,更新为当前 messages 长度
         last_compacted_idx = -1
+        # 最新一次压缩的摘要(compacted 事件可能多次,取最新一条生效)。
+        # 供下一轮 prompt 组装 compressed_history = "[历史摘要] …" + 最近消息
+        compressed_summary = ""
 
         # 重放事件流:遍历顺序就是事件追加顺序(时间序)
         for i, event in enumerate(events):
@@ -150,6 +156,7 @@ class ConversationManager:
             elif kind == "compacted":
                 # 压缩点:记录此处的 messages 长度(此后的消息是 keep-recent)
                 last_compacted_idx = len(messages)
+                compressed_summary = str(payload.get("summary") or "")
             elif kind == "checkpoint":
                 # 大对象快照单独放,不混进 messages(避免 messages 体积膨胀)
                 checkpoints.append(payload)
@@ -162,6 +169,7 @@ class ConversationManager:
             "pending_ask": pending_ask,
             "checkpoints": checkpoints,
             "last_compacted_idx": last_compacted_idx,
+            "compressed_summary": compressed_summary,
         }
 
     def save(self, conv_id: str, user_input: str, result: Any) -> None:

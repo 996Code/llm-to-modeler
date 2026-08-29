@@ -50,6 +50,7 @@ from langgraph.types import Command
 from api.sse import StreamManager
 from engine.compression import build_compressed_history
 from engine.state_keys import STATE_CONTEXT_ARTIFACT
+from services.call_context import bind_conversation, clear_conversation
 from services.upstream_client import set_forward_headers, set_request_services
 
 # 模块级 logger
@@ -65,6 +66,7 @@ async def stream_graph(
     image_base64: str = None,
     conversation_store=None,
     conversation_history: list = None,
+    compressed_summary: str = "",
     context_artifact: dict = None,
     forward_headers: dict = None,
     services: dict = None,
@@ -102,6 +104,21 @@ async def stream_graph(
     # StreamManager 内部维护一个异步队列,等价于 SseEmitter + BlockingQueue
     sm = StreamManager(loop)
 
+    # ── 懒创建:首条消息不带会话 ID 时在此自动建会话 ──
+    # 必须发生在 input_data/config 构造之前:conversation_id 同时是 LangGraph
+    # checkpoint 的 thread_id 与链路日志的会话归属,跑图后再换 id 会把
+    # 追问现场和调用日志全部关联错。新 id 随 result 事件回传给前端,
+    # 前端后续轮次带上(此前的前端是"点新建就落库",制造了大量 0 消息
+    # 空会话——见管理端会话列表)。
+    if not conversation_id and conversation_store and user_id:
+        try:
+            created = conversation_store.create_conversation(user_id, "")
+            conversation_id = created["id"]
+            logger.info(f"lazy-created conversation {conversation_id} for user {user_id}")
+        except Exception as e:
+            # 创建失败不阻断对话(消息不落库,但用户当轮还能收到回复)
+            logger.warning(f"lazy create conversation failed: {e}")
+
     # 构建 graph 的输入
     if answers:
         # 路径 2:追问恢复 —— 用 Command 告诉 graph "这是对之前 interrupt 的回答"
@@ -113,8 +130,13 @@ async def stream_graph(
         input_data = {
             "user_input": user_input,
             "conversation_history": conversation_history or [],
-            # 压缩后的历史(超长对话会被摘要),省 token
-            "compressed_history": build_compressed_history(conversation_history),
+            # 压缩后的历史(超长对话被摘要,以[历史摘要]前缀 + 最近消息注入),省 token
+            "compressed_history": build_compressed_history(
+                conversation_history, summary=compressed_summary
+            ),
+            # 注意键名必须是 snake_case 的 conversation_id:GraphState 按此声明,
+            # 驼峰键会被 LangGraph 过滤丢弃,节点内 state 就拿不到会话 ID
+            # (真实事故:统一 SSE 键风格的批量替换误伤过此键,链路打点全断)
             "conversation_id": conversation_id,
             "forward_headers": forward_headers or {},
             STATE_CONTEXT_ARTIFACT: context_artifact,
@@ -193,6 +215,8 @@ async def stream_graph(
                             # 最终结果:工具完成的产物
                             # 注意 result 是异步推送的,要用 call_soon_threadsafe
                             result_data = event.get("data", {})
+                            # 注入会话 ID:懒创建场景前端靠它拿到新会话并沿用
+                            result_data = {**result_data, "conversationId": conversation_id}
                             # 记下来,后面判断是否落库用
                             result_holder["last_result"] = result_data
                             loop.call_soon_threadsafe(
@@ -220,9 +244,12 @@ async def stream_graph(
                 而本函数运行在**线程池工作线程**上——如果在外层（事件循环线程）
                 绑定，工作线程读不到。所以必须在这里、跑图之前绑定，
                 跑完（含异常）在 finally 里清理，防止线程复用串请求。
+                会话 ID 同理绑定(call_context):插件经 ctx.asset_client /
+                ctx.llm_client 的底层调用日志自动关联会话,链路不断。
                 """
                 set_forward_headers(forward_headers or {})
                 set_request_services(services)
+                bind_conversation(conversation_id)
 
                 # 实时进度通道：把 StreamManager 绑给工具 emit（同线程），
                 # 工具每推进一步前端立刻收到——不再等节点 chunk。
@@ -275,6 +302,7 @@ async def stream_graph(
                     # 清理本线程的请求级上下文（防串到线程池的下一个任务）
                     set_forward_headers(None)
                     set_request_services(None)
+                    clear_conversation()
                     _nodes.set_realtime_emitter(None)
 
             # 关键:把同步函数丢进默认线程池执行,await 等它跑完
@@ -300,10 +328,12 @@ async def stream_graph(
                                 intr_value = intr.value if hasattr(intr, 'value') else intr
                                 if isinstance(intr_value, dict):
                                     # 推一个 needsClarification 事件给前端:弹追问表单
+                                    # (首轮即追问的场景,前端同样靠这里的 id 采纳新会话)
                                     await sm.emit_result({
                                         "needsClarification": True,
                                         "questions": intr_value.get("questions", []),
                                         "summary": intr_value.get("summary", "需要补充信息"),
+                                        "conversationId": conversation_id,
                                     })
                                     first_intr_value = first_intr_value or intr_value
                             if first_intr_value is not None:

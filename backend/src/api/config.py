@@ -135,34 +135,53 @@ def _extract_forward_headers(request: Request) -> Dict[str, str]:
     return forwarded
 
 
-def _load_history(request: Request, conv_id: Optional[str]) -> List[Dict[str, str]]:
-    """加载对话历史作为 LLM 上下文。
+def _load_history(request: Request, conv_id: Optional[str]):
+    """加载对话历史作为 LLM 上下文,并做压缩治理。
 
-    只返回 role + content（不含配置快照等额外数据，LLM 不需要）。
-    类比 Java 的 Conversation.history() 但精简为 LLM 需要的格式。
+    返回 (messages, compressed_summary):
+      - messages: 本轮注入 prompt 的消息(压缩发生时降为 keep-recent;
+        已压缩部分按压缩点折叠,不再重复进 prompt)
+      - compressed_summary: 已落库的压缩摘要(build_compressed_history
+        以「[历史摘要]」前缀拼接)
 
-    Returns:
-        [{role: "user"/"assistant", content: "..."}] 列表
+    压缩触发:token 估算超窗口 70%(LLM_CONTEXT_WINDOW 可配)。异步执行——
+    当轮立即用 keep-recent(不等待),后台线程 LLM 摘要并写
+    compacted/compact_trace 事件(链路视图可见);下一轮起摘要进 prompt。
     """
     if not conv_id:
-        return []  # 无会话：空历史
+        return [], ""
     user_id = request.headers.get("X-User-Id") or "anonymous"  # 多租户隔离
     store = request.app.state.conversation_store
+    cm = getattr(request.app.state, "conversation_manager", None)
+    if cm is None:
+        return [], ""
     try:
-        conv = store.get_conversation(conv_id, user_id)
-        if not conv or not conv.get("messages"):
-            return []  # 会话不存在或无消息：空历史
-        # Only pass role + content (LLM doesn't need config snapshots in history)
-        # 中文说明：只取 role + content，丢弃配置快照等元数据（LLM 只需要对话文本）
-        # 列表推导：类比 Java stream().map(m -> Map.of("role",...)).collect(toList())
-        return [
-            {"role": m["role"], "content": m["content"]}
-            for m in conv["messages"]
-        ]
+        # 归属校验:cm.load 不带权限过滤,先确认会话属于当前用户
+        # (防"拿别人 conv_id 借 chat 套历史"的越权)
+        if not store.conversation_exists(conv_id, user_id):
+            return [], ""
+        from engine.compression import should_compress
+
+        view = cm.load(conv_id)
+        full = view.get("messages", [])
+        summary = view.get("compressed_summary") or ""
+        idx = view.get("last_compacted_idx", -1)
+
+        # 触发判定用全量(真实上下文压力);触发后当轮降为 keep-recent
+        compressor = getattr(request.app.state, "compressor", None)
+        recent = full
+        if compressor and full and should_compress(full):
+            recent = compressor.compress_async(conv_id, full)
+            logger.info(f"compression triggered for {conv_id} (full={len(full)})")
+
+        # 折叠已压缩部分:压缩点之前的历史已折进摘要,不重复进 prompt
+        if 0 < idx < len(recent):
+            recent = recent[idx:]
+        return recent, summary
     except Exception as e:
         # 历史加载失败：记 warning 但返回空历史（不阻断主流程）
         logger.warning(f"Failed to load history for conv {conv_id}: {e}")
-        return []
+        return [], ""
 
 
 @router.post("/chat")
@@ -186,7 +205,7 @@ async def chat(req: ChatRequest, request: Request):
     context_artifact = (
         req.context.get(CONTEXT_ARTIFACT) if req.context and req.context.get(CONTEXT_ARTIFACT) else None
     ) or _load_current_config(request, req.conversation_id)  # 宿主上下文优先，会话存储兜底
-    history = _load_history(request, req.conversation_id)  # 对话历史（LLM 上下文）
+    history, compressed_summary = _load_history(request, req.conversation_id)  # 对话历史(+压缩治理)
     fwd = _extract_forward_headers(request)  # 透传头（嵌入模式 SSO）
 
     # 宿主服务地址表经 stream_graph 传入，在工作线程内绑定 thread-local
@@ -209,6 +228,7 @@ async def chat(req: ChatRequest, request: Request):
             image_base64=req.image_base64,  # ← 图片 base64（图片识别）
             conversation_store=request.app.state.conversation_store,
             conversation_history=history,
+            compressed_summary=compressed_summary,  # 压缩摘要(以[历史摘要]前缀注入 prompt)
             context_artifact=context_artifact,
             forward_headers=fwd,
             services=req.services,  # ← 宿主服务地址表（工作线程内绑定）

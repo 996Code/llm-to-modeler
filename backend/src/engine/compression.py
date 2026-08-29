@@ -9,6 +9,7 @@
 机制归 Engine,内容归 pack(summarize_artifact + compact prompt)。
 """
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -20,8 +21,10 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────
 
-# 模型上下文窗口(默认 200K,对标 Qwen3)
-MODEL_CONTEXT_WINDOW = 200_000
+# 模型上下文窗口(默认 200K,对标 Qwen3)。可用 LLM_CONTEXT_WINDOW 覆盖——
+# 不同模型窗口不同(qwen-plus 32K / max 200K / 本地模型更小),压缩触发线
+# 跟着窗口走,配错会导致"该压不压"(窗口小的模型爆上下文)或"过早压缩"
+MODEL_CONTEXT_WINDOW = int(os.getenv("LLM_CONTEXT_WINDOW", "200000"))
 
 # 预留给 Summary API 的最大输出 Token 数
 MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
@@ -71,17 +74,19 @@ def estimate_messages_tokens(messages: List[Dict[str, str]]) -> int:
     return total
 
 
-def build_compressed_history(history: list, max_messages: int = 6, max_chars: int = 200) -> str:
-    """把对话历史格式化为文本(简单截断版,后续接压缩器)。
+def build_compressed_history(history: list, max_messages: int = 6, max_chars: int = 200,
+                             summary: str = "") -> str:
+    """把对话历史格式化为文本(截断版 + 可选压缩摘要前缀)。
 
-    共享实现:stream.py 和 dispatcher.py 都调用此函数,避免逻辑重复。
-    当前策略:保留最近 max_messages 条,每条截断 max_chars 字符。
-    后续由 CompressionSidechain 实现智能压缩(LLM 摘要)。
+    summary 非空 = 该会话发生过压缩:更早的历史已被 LLM 摘要成一句话,
+    以「[历史摘要] …」前缀注入 prompt,后接 keep-recent 的最近消息——
+    这就是压缩"生效"的形态(此前 summary 只落库从不进 prompt,断链)。
     """
-    if not history:
-        return ""  # 空历史直接返回空串
+    if not history and not summary:
+        return ""  # 空历史且无摘要:空串
     parts = []
-    # history[-max_messages:] 切片取最后 N 条，类比 Java list.subList(from, to)
+    if summary:
+        parts.append(f"[历史摘要] {summary}")
     for msg in history[-max_messages:]:
         role = "用户" if msg.get("role") == "user" else "助手"  # 角色中文化
         # [:max_chars] 截断超长消息，避免单条撑爆 prompt
@@ -178,6 +183,10 @@ class CompressionSidechain:
         # 领域措辞不写死在引擎（零领域知识铁律）；空串则用通用表述。
         self._compact_focus = compact_focus.strip()
 
+    def close(self) -> None:
+        """停机:关闭后台压缩线程池(不等待排队任务,避免拖住进程退出)。"""
+        self._executor.shutdown(wait=False)
+
     def compress_async(
         self,
         conv_id: str,
@@ -245,14 +254,19 @@ class CompressionSidechain:
                 # 传空 artifact 是简化处理（真实场景应传当前 artifact）
                 state_compensation = tool.summarize_artifact({})
 
-            # 3. LLM 摘要旧历史
-            # 把旧历史拼成"用户: xxx\n助手: yyy"的文本，每条截断 200 字符防爆
+            # 3. LLM 摘要:范围 = 全量历史(而非仅 old_messages)。
+            # 原因:compacted 事件 append 在事件流末尾,重放折叠时会把
+            # "压缩点之前"的全部消息(含压缩瞬间的 keep-recent)都折进摘要——
+            # 若摘要只覆盖 old 段,recent 段既不进摘要也不再进 prompt,上下文
+            # 就丢了。keep-recent 只作为"当轮"的过渡上下文(compress_async
+            # 的返回值),从下一轮起全部历史由摘要承接。
             history_text = "\n".join(
                 f"{'用户' if m.get('role') == 'user' else '助手'}: {m.get('content', '')[:200]}"
-                for m in old_messages
+                for m in messages
             )
             # 带 PTL 防御的压缩：输入超限时自动剥洋葱重试
-            summary = self._compress_with_ptl_defense(history_text)
+            # conv_id 透传:压缩也是一次 LLM 调用,链路追踪按会话关联
+            summary = self._compress_with_ptl_defense(history_text, conv_id=conv_id)
 
             # 4. 写 compacted + compact_trace
             # compacted：压缩结果（下次对话时作为上下文）
@@ -299,7 +313,7 @@ class CompressionSidechain:
                     "duration_ms": int((time.monotonic() - start_time) * 1000),
                 })
 
-    def _compress_with_ptl_defense(self, history_text: str) -> str:
+    def _compress_with_ptl_defense(self, history_text: str, conv_id: str = None) -> str:
         """LLM 摘要 + PTL 防御(摘要本身超限时剥洋葱重试)。
 
         PTL = Prompt Too Long:压缩 API 自己的输入超限。
@@ -324,7 +338,7 @@ class CompressionSidechain:
                 # temperature=0.0：摘要要稳定确定性，不要发散（类比 Java 的固定种子随机）
                 summary = self._llm.chat([
                     {"role": "user", "content": compact_prompt}
-                ], temperature=0.0)
+                ], temperature=0.0, conv_id=conv_id, stage="compress_history")
                 return summary.strip() if summary else ""  # 去首尾空白，空则返回空串
             except Exception as e:
                 # 判断是否 PTL（Prompt Too Long）错误
