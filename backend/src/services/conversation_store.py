@@ -289,6 +289,8 @@ class ConversationStore:
 
         为什么不 JOIN events? 因为 session_meta 是物化的读模型(CQRS),
         列表查询只需扫小表,避免对大表 events 做 GROUP BY / 聚合。
+        displayTitle/message_count 用相关子查询取(嵌入模式历史对话列表
+        与管理端同一套推导:真实 title > 首条用户消息截断 > 新对话)。
 
         Args:
             user_id: 用户 ID
@@ -299,7 +301,18 @@ class ConversationStore:
         """
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM session_meta WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?",
+                """
+                SELECT m.*,
+                       (SELECT COUNT(*) FROM events e
+                         WHERE e.conv_id = m.conv_id
+                           AND e.kind IN ('user', 'assistant', 'tool_result')) AS message_count,
+                       (SELECT payload FROM events e
+                         WHERE e.conv_id = m.conv_id AND e.kind = 'user'
+                         ORDER BY e.created_at ASC LIMIT 1) AS first_user_payload
+                  FROM session_meta m
+                 WHERE m.user_id = ?
+                 ORDER BY m.updated_at DESC LIMIT ?
+                """,
                 (user_id, limit),
             ).fetchall()
 
@@ -308,9 +321,17 @@ class ConversationStore:
             item = dict(r)
             # current_config 是 JSON 字符串,需反序列化为 dict
             current_config = json.loads(item["current_config"]) if item.get("current_config") else None
+            first_user = ""
+            if item.get("first_user_payload"):
+                try:
+                    first_user = str(json.loads(item["first_user_payload"]).get("content") or "")
+                except (ValueError, TypeError):
+                    first_user = ""
             result.append({
                 "id": item["conv_id"],
                 "title": item["title"] or "新对话",
+                "displayTitle": self._derive_display_title(item["title"], first_user),
+                "messageCount": item["message_count"],
                 "currentConfig": current_config,
                 "createdAt": item["created_at"],
                 "updatedAt": item["updated_at"],

@@ -81,6 +81,8 @@ export interface ClarificationOption {
 export interface Conversation {
   id: string                        // 会话 ID
   title: string                     // 会话标题
+  displayTitle?: string             // 展示标题(真实 title > 首条用户消息截断 > 新对话)
+  messageCount?: number             // 消息数(列表接口子查询)
   currentConfig?: FormConfig | null // 当前会话最新配置（可选）
   messages?: Message[]              // 该会话的消息列表（可选，列表接口可能不返回）
   createdAt?: string                // 创建时间

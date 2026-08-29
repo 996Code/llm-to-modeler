@@ -14,7 +14,7 @@
 <template>
   <!-- 最外层容器：纵向 flex，高度撑满整个 iframe 视口 -->
   <div class="embedded-layout">
-    <!-- 顶部标题栏：品牌 + 副标题 + 关闭按钮 -->
+    <!-- 顶部标题栏：品牌 + 历史对话入口 + 关闭按钮 -->
     <div class="embedded-header">
       <div class="header-brand">
         <div class="brand-logo">
@@ -24,6 +24,14 @@
           <span class="title">智能助手</span>
           <span class="subtitle">自然语言驱动，多场景智能服务</span>
         </div>
+        <!-- 历史对话：嵌入布局无侧栏，这是用户翻自己历史会话的唯一入口。
+             列表按当前用户隔离（X-User-Id=宿主下发 userId），点选后
+             覆盖当前对话继续沟通（有确认提示，防误触丢上下文） -->
+        <a-button type="text" size="small" class="history-btn" title="历史对话"
+          @click="openHistory">
+          <HistoryOutlined />
+          <span class="history-label">历史对话</span>
+        </a-button>
       </div>
       <div class="header-actions">
         <!-- 新对话：清空当前对话历史回到欢迎页（嵌入布局无侧栏，这是唯一的
@@ -51,6 +59,28 @@
     <!-- 聊天面板，传入 embedded 属性告诉它"我在嵌入模式"（会显示应用按钮）。
          版本回退能力在对话流的配置卡片上 -->
     <ChatPanel :embedded="true" />
+
+    <!-- 历史对话抽屉：仅当前用户的会话；点选 → 覆盖确认 → 载入继续沟通 -->
+    <a-drawer v-model:open="historyOpen" placement="left" width="300" title="历史对话"
+      class="history-drawer" :body-style="{ padding: '8px' }">
+      <a-spin v-if="historyLoading" style="display: block; padding: 40px 0; text-align: center" />
+      <a-empty v-else-if="!historyList.length" description="暂无历史对话" style="padding: 40px 0" />
+      <div v-else class="history-list">
+        <div
+          v-for="conv in historyList"
+          :key="conv.id"
+          class="history-item"
+          :class="{ active: conv.id === store.currentConversation?.id }"
+          @click="pickConversation(conv)"
+        >
+          <div class="item-title">{{ conv.displayTitle || conv.title }}</div>
+          <div class="item-meta">
+            <span>{{ conv.messageCount ?? 0 }} 条消息</span>
+            <span>{{ relativeTime(conv.updatedAt) }}</span>
+          </div>
+        </div>
+      </div>
+    </a-drawer>
   </div>
 </template>
 
@@ -59,13 +89,17 @@
 // 脚本区：本布局的初始化逻辑（类比 Java Controller 的初始化方法）
 // =============================================================================
 
-// 图标组件（表单图标 / 新对话加号）
-import { FormOutlined, PlusOutlined } from '@ant-design/icons-vue'
-import { message as antdMessage } from 'ant-design-vue'
+// 图标组件（表单图标 / 新对话加号 / 历史对话）
+import { FormOutlined, PlusOutlined, HistoryOutlined } from '@ant-design/icons-vue'
+import { message as antdMessage, Modal } from 'ant-design-vue'
+import { ref } from 'vue'
 // HostPort 单例：关闭走新协议
 import { getHostPort } from '../composables/hostPort'
 // 会话 Store（hostLinkError 驱动链路错误横幅）
 import { useConversationStore } from '../stores/conversation'
+// API：历史会话列表（嵌入态 X-User-Id=宿主下发 userId，天然按用户隔离）
+import { listConversations } from '../services/api'
+import type { Conversation } from '../types'
 // 子组件：聊天主面板（带 :embedded="true" 会让它显示「应用」按钮）
 import ChatPanel from '../components/chat/ChatPanel.vue'
 
@@ -92,6 +126,72 @@ async function startNewChat() {
   } catch {
     antdMessage.error('新建对话失败，请稍后重试')
   }
+}
+
+// ── 历史对话：列表 + 覆盖载入 ─────────────────────────────
+const historyOpen = ref(false)
+const historyLoading = ref(false)
+const historyList = ref<Conversation[]>([])
+
+/** 打开抽屉并刷新列表（每次打开都拉最新，覆盖后回来看状态也是新的） */
+async function openHistory() {
+  historyOpen.value = true
+  historyLoading.value = true
+  try {
+    historyList.value = await listConversations()
+  } catch {
+    antdMessage.error('历史对话加载失败')
+    historyList.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+/**
+ * 点选历史会话：先提示覆盖（当前对话内容将被替换，防误触丢上下文），
+ * 确认后载入（消息 + 最新配置 + 快照链），之后的消息都发往该会话继续沟通。
+ */
+function pickConversation(conv: Conversation) {
+  if (store.streaming) {
+    antdMessage.warning('正在回复中，请稍后再切换')
+    return
+  }
+  if (conv.id === store.currentConversation?.id) {
+    historyOpen.value = false  // 点的就是当前会话：直接收起
+    return
+  }
+  const title = conv.displayTitle || conv.title
+  Modal.confirm({
+    title: '覆盖当前对话？',
+    content: `将载入「${title}」的对话内容与最新配置，当前未应用的变更将被替换。`,
+    okText: '覆盖载入',
+    cancelText: '取消',
+    onOk: async () => {
+      try {
+        await store.selectConversation(conv.id)
+        historyOpen.value = false
+        antdMessage.success(`已载入「${title}」，可继续沟通`)
+      } catch {
+        antdMessage.error('载入失败，请稍后重试')
+      }
+    },
+  })
+}
+
+/** 相对时间（列表用：「5 分钟前 / 今天 14:20 / 08-21」） */
+function relativeTime(iso?: string): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const diff = Date.now() - d.getTime()
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`
+  const today = new Date()
+  const sameDay = d.toDateString() === today.toDateString()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return sameDay
+    ? `今天 ${pad(d.getHours())}:${pad(d.getMinutes())}`
+    : `${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 // 注：会话创建/恢复由 App.vue 的握手流程统一驱动（init → resume 或新建），
 // 本布局不再 onMounted 抢跑创建，避免产生无 contextKey 绑定的孤儿会话。
@@ -129,6 +229,29 @@ async function startNewChat() {
 .title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
 .subtitle { font-size: 11px; color: var(--text-secondary); }
 .header-actions { display: flex; gap: 4px; }
+
+/* 历史对话入口（左上角，品牌区右侧） */
+.history-btn { margin-left: 10px; color: var(--text-secondary); }
+.history-btn :deep(span) { display: inline-flex; align-items: center; gap: 4px; }
+.history-label { font-size: 12px; }
+.history-list { display: flex; flex-direction: column; gap: 4px; }
+.history-item {
+  padding: 8px 10px; border-radius: var(--radius-md, 8px); cursor: pointer;
+  border: 1px solid transparent;
+}
+.history-item:hover { background: var(--bg-hover, #f5f7fa); }
+.history-item.active {
+  background: var(--color-primary-bg, #f0f5ff);
+  border-color: var(--color-primary, #3370ff);
+}
+.item-title {
+  font-size: 13px; color: var(--text-primary); font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.item-meta {
+  display: flex; justify-content: space-between; margin-top: 3px;
+  font-size: 11px; color: var(--text-secondary);
+}
 
 /* 链路错误横幅：红底置顶，明确告知嵌入链路异常（而非让 AI 看起来"笨"） */
 .host-link-error {
