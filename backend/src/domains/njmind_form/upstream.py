@@ -19,12 +19,15 @@ HttpAssetClient（adapter）的配置类方法委托本模块实现，经 pack �
 import logging
 from typing import Any, Dict, List, Optional
 
-from domains.njmind_form.tools._config_loader import load_paths, load_service_name
+from domains.njmind_form.tools._config_loader import (
+    load_paths, load_service_name,
+)
 
 logger = logging.getLogger(__name__)
 
-# 与 config.yaml services 声明同源（_preflight 的 MODELER 也引用此处）
-SERVICE_NAME = "njmind-modeler"
+# 与 config.yaml services 声明同源（load_service_name 读 manifest 首个 key；
+# _preflight 的 MODELER_SERVICE 也引用此处——改 manifest 即生效，无平行源）
+SERVICE_NAME = load_service_name() or "njmind-modeler"
 
 
 class ModelerAPI:
@@ -72,43 +75,46 @@ class ModelerAPI:
         return self._t.get(service_name, self._path("guide"),
                            auth=False, cache=True)
 
-    # ── 业务端点（透传凭证，不缓存）──────────────────────────────
+    # ── 业务端点（透传凭证，不缓存；主键/枚举/归一化语义归 pack） ──
 
-    def validate_form(self, form_config: Dict[str, Any],
-                      mode: str = "CREATE") -> Dict[str, Any]:
-        """校验表单配置。归一化 {pass,errors:[str]} → {valid,errors:[{message}]}。
+    def validate_artifact(self, artifact: Dict[str, Any], mode: str) -> Dict[str, Any]:
+        """校验制品。mode 由 adapter 原样透传（领域客户端负责枚举归一化）。
 
-        失败 Fail-Closed 返回 valid=False——"请求失败"绝不能被误判为"校验通过"。
+        归一化 {pass,errors:[str]} → {valid,errors:[{message}]}。
+        失败 Fail-Closed 返回 valid=False。
         """
         raw, err = self._t.post(
             SERVICE_NAME, self._path("validate"),
-            json_body=form_config, params={"mode": mode.upper()}, auth=True,
+            json_body=artifact, params={"mode": mode.upper()}, auth=True,
         )
         if raw is None:
             reason = f"Upstream validation request failed: {err}"
-            if err and ("权限" in err or "信封" in reason):
+            if err and "权限" in err:
                 reason = (f"上游校验未执行：{err}（多为登录态过期，"
                           f"请刷新设计器页面后重开 AI 助手）")
             return {"valid": False,
                     "errors": [{"message": reason}], "warnings": []}
         return {
-            "valid": raw.get("pass", False),  # 缺省 False，Fail-Closed
+            "valid": raw.get("pass", False),
             "errors": [{"message": e} if isinstance(e, str) else e
                        for e in (raw.get("errors") or [])],
             "warnings": raw.get("warnings") or [],
         }
 
-    def get_form(self, form_code: str) -> Optional[Dict[str, Any]]:
-        return self._t.get(SERVICE_NAME, self._path("get_form", code=form_code),
-                           auth=True)
-
-    def create_form(self, form_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        data, _err = self._t.post(SERVICE_NAME, self._path("create"),
-                                  json_body=form_config, auth=True)
-        return data
-
-    def update_form(self, form_code: str,
-                    form_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def persist_artifact(self, artifact: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]:
+        """落库（预留接口；主键提取与 create/update 分路归 pack）。"""
+        if mode == "create":
+            data, _err = self._t.post(SERVICE_NAME, self._path("create"),
+                                      json_body=artifact, auth=True)
+            return data
+        form_code = artifact.get("formCode")
+        if not form_code:
+            raise ValueError("update 模式缺少 formCode，无法定位要更新的表单")
         data, _err = self._t.post(SERVICE_NAME, self._path("update", code=form_code),
-                                  json_body=form_config, auth=True)
+                                  json_body=artifact, auth=True)
         return data
+
+    def get_artifact(self, entry_id: str) -> Optional[Dict[str, Any]]:
+        """按制品标识（formCode）查询已有配置。"""
+        return self._t.get(SERVICE_NAME, self._path("get_form", code=entry_id),
+                           auth=True)

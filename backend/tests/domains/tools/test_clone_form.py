@@ -142,7 +142,7 @@ class TestExecute:
             "new_form_code": "nianjia_sqb",
         }
         asset = MagicMock()
-        asset.get_form.return_value = {
+        asset.get_artifact.return_value = {
             "formCode": "qingjia_sqb",
             "formName": "请假申请表",
             "formFieldConfigVos": [{"fieldTitleText": "姓名"}],
@@ -167,7 +167,7 @@ class TestExecute:
             "new_form_code": "",
         }
         asset = MagicMock()
-        asset.get_form.return_value = None
+        asset.get_artifact.return_value = None
         ctx = _make_ctx(llm=llm, asset_client=asset)
 
         result = tool.execute({"user_input": "复制不存在的表单"}, ctx)
@@ -185,7 +185,7 @@ class TestExecute:
             "new_form_code": "",
         }
         asset = MagicMock()
-        asset.get_form.return_value = {
+        asset.get_artifact.return_value = {
             "formCode": "qingjia_sqb",
             "formName": "请假申请表",
             "formFieldConfigVos": [],
@@ -227,7 +227,7 @@ class TestExecute:
             "new_form_code": "qingjia_copy",
         }
         asset = MagicMock()
-        asset.get_form.return_value = {
+        asset.get_artifact.return_value = {
             "formCode": "qingjia_sqb",
             "formName": "请假申请表",
             "formFieldConfigVos": [],

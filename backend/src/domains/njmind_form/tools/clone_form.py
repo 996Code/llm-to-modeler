@@ -57,7 +57,7 @@ class CloneFormTool(Tool):
         
         # Step 2: 查询源表单
         ctx.emit("stage", "fetch_source", f"正在查询源表单 {source_form_code}...")
-        source_config = ctx.asset_client.get_form(source_form_code)
+        source_config = ctx.asset_client.get_artifact(source_form_code)
         
         if not source_config:
             return ToolResult(

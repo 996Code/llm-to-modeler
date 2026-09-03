@@ -169,7 +169,8 @@ class UpstreamClient:
     # ── 通用 HTTP API（给插件的领域客户端调用）────────────────────
 
     def get(self, service_name: str, path: str, *,
-            auth: bool = True, cache: bool = False) -> Optional[Any]:
+            auth: bool = True, cache: bool = False,
+            extra_headers: Optional[Dict[str, str]] = None) -> Optional[Any]:
         """GET 并解析 JSON。成功返回 data；失败（网络/非2xx/假200信封）返回 None。
 
         Args:
@@ -177,6 +178,7 @@ class UpstreamClient:
             path: 相对该服务 base 的路径（领域客户端从 manifest paths 表取）。
             auth: True 附带本请求透传头（业务端点）；False 匿名（静态公共资产）。
             cache: True 时按 (base, path) 做 TTL 缓存（仅静态读内容使用）。
+            extra_headers: 额外头（如 Content-Type），与透传头合并、同名覆盖。
         """
         url = f"{self.resolve_base(service_name)}{path}"
         if cache:
@@ -185,7 +187,7 @@ class UpstreamClient:
                 return cached
         start = time.time()
         try:
-            resp = self._client.get(url, headers=self._headers(auth))
+            resp = self._client.get(url, headers=self._headers(auth, extra_headers))
             resp.raise_for_status()
             data = resp.json()
             env_msg = self._envelope_error_msg(data)
@@ -204,17 +206,18 @@ class UpstreamClient:
 
     def post(self, service_name: str, path: str, *,
              json_body: Any = None, params: Optional[dict] = None,
-             auth: bool = True) -> Tuple[Optional[Any], Optional[str]]:
+             auth: bool = True,
+             extra_headers: Optional[Dict[str, str]] = None) -> Tuple[Optional[Any], Optional[str]]:
         """POST 并解析 JSON。成功返回 (data, None)；失败返回 (None, 原因)。
 
-        失败原因给调用方（领域客户端）决定业务语义——如 njmind 的 validate
-        收到信封错误时转成「校验未执行」的 Fail-Closed 结果。
+        失败原因给调用方（领域客户端）决定业务语义。extra_headers 与
+        透传头合并（同名覆盖）——数据类操作需要 Content-Type 等额外头。
         """
         url = f"{self.resolve_base(service_name)}{path}"
         start = time.time()
         try:
             resp = self._client.post(url, json=json_body, params=params,
-                                     headers=self._headers(auth))
+                                     headers=self._headers(auth, extra_headers))
             resp.raise_for_status()
             data = resp.json()
             env_msg = self._envelope_error_msg(data)
@@ -231,9 +234,13 @@ class UpstreamClient:
 
     # ── 内部：凭证/缓存/信封/日志 ─────────────────────────────────
 
-    def _headers(self, auth: bool) -> Optional[Dict[str, str]]:
-        """按调用方决策组装请求头：auth=False 匿名（None）；True 带透传头。"""
-        return (_get_forward_headers() or None) if auth else None
+    def _headers(self, auth: bool,
+                 extra: Optional[Dict[str, str]] = None) -> Optional[Dict[str, str]]:
+        """按调用方决策组装请求头：auth=False 匿名；True 带透传头；extra 叠加。"""
+        base = (_get_forward_headers() or {}) if auth else {}
+        if extra:
+            base = {**base, **extra}
+        return base or None
 
     @classmethod
     def _envelope_error_msg(cls, data: Any) -> Optional[str]:

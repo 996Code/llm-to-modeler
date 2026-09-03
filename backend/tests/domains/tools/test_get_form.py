@@ -61,7 +61,7 @@ class TestExecute:
         llm = MagicMock()
         llm.chat_json.return_value = {"formCode": "qingjia_sqb"}
         asset = MagicMock()
-        asset.get_form.return_value = {
+        asset.get_artifact.return_value = {
             "formName": "请假申请表",
             "formCode": "qingjia_sqb",
             "formFieldConfigVos": [
@@ -83,7 +83,7 @@ class TestExecute:
         llm = MagicMock()
         llm.chat_json.return_value = {"formCode": "not_exist"}
         asset = MagicMock()
-        asset.get_form.return_value = None
+        asset.get_artifact.return_value = None
         ctx = _make_ctx(llm=llm, asset_client=asset)
 
         result = tool.execute({"user_input": "查看不存在的表单"}, ctx)

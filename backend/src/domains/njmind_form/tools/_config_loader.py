@@ -35,6 +35,8 @@ _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 _CACHE: Optional[Tuple[Dict[int, str], Dict[int, str]]] = None
 # 校验机械修复的属性兜底值缓存：{类型code: {属性名: 默认值}}
 _PROP_DEFAULTS: Optional[Dict[int, Dict[str, Any]]] = None
+# 服务名缓存
+_SERVICE_NAME: Optional[str] = None
 
 
 def load_type_mappings() -> Tuple[Dict[int, str], Dict[int, str]]:
@@ -145,9 +147,12 @@ def load_paths() -> Dict[str, Any]:
 def load_service_name() -> str:
     """读取 manifest 声明的上游服务名（services 段的第一个 key）。
 
-    与宿主 services 表的 key 对应（has_service/resolve_base 按此名解析）。
+    与宿主 services 表的 key 对应。结果缓存（配置启动后不变）。
     """
-    import yaml
-    cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    services = cfg.get("services") or {}
-    return next(iter(services), "")
+    global _SERVICE_NAME
+    if _SERVICE_NAME is None:
+        import yaml
+        cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        services = cfg.get("services") or {}
+        _SERVICE_NAME = next(iter(services), "")
+    return _SERVICE_NAME

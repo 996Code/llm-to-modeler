@@ -17,12 +17,14 @@
 (sdk.sanitize.sanitize_obj),防止上游数据携带零宽字符 / 方向反转字符等
 隐写指令。这是 prompt injection 防御的硬约束,见 sdk/sanitize.py。
 
-【方法分两类】
-1. 表单配置类操作(get_template / get_schema / validate_artifact /
-   persist_artifact 等):抽象方法,子类必须实现。
-2. 通用数据操作(submit_data / query_data):非抽象,默认抛
-   NotImplementedError,子类按需覆写 —— 因为纯配置类 pack 不需要这些,
-   而数据类 pack(如 leave_application)才需要。
+【方法分三组】
+1. 读资产(get_template / get_schema / get_guide / list_templates):
+   静态配置数据,供 LLM 生成参考;抽象方法。
+2. 制品操作(validate_artifact / persist_artifact / get_artifact):
+   校验/落库预留/按标识查询;抽象方法。
+3. 通用数据(submit_data / query_data + has_service):
+   非配置类插件的读写出入口 + 地址可用性探测;非抽象,默认抛
+   NotImplementedError,子类按需覆写。
 
 【扩展(插件化阶段)】
 - submit_data / query_data:通用数据提交/查询,供非配置类插件使用。
@@ -100,27 +102,24 @@ class AssetClient(ABC):
         """
 
     @abstractmethod
-    def get_guide(self) -> dict:
+    def get_guide(self) -> Optional[dict]:
         """取 guide.json(填表指引、字段说明等辅助生成的内容)。
 
         Returns:
             guide 内容(dict)。该内容会拼进 prompt 辅助 LLM 生成合规表单。
         """
 
-    def get_guide_for(self, service_name: str) -> dict:
+    def get_guide_for(self, service_name: str) -> Optional[dict]:
         """取指定上游服务的 guide.json（嵌入模式多服务地址）。
 
-        v1 兼容入口：无多服务时与 get_guide 等价；有 host services 时
-        按服务名解析 base（resolve_base 请求级解析）+ 带 base 的缓存键。
-
-        Args:
-            service_name: 上游服务名（如 "njmind-modeler"）。
-
-        Returns:
-            guide 内容(dict)。
+        按服务名取 guide,无多服务时与 get_guide 等价。
         """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 get_guide_for; "
+            "如需按服务取 guide 请覆写此方法或使用 HttpAssetClient"
+        )
 
-    def get_form(self, form_code: str) -> Optional[dict]:
+    def get_artifact(self, entry_id: str) -> Optional[dict]:
         """根据 formCode 查询已有表单配置。
 
         用于 modify / clone 类工具:先查回现有配置,再在其基础上修改,
@@ -180,6 +179,15 @@ class AssetClient(ABC):
         Note:
             abstract 方法,子类必须实现。这是写操作,上游应有幂等/事务保护。
         """
+
+
+    def has_service(self, service_name: str) -> bool:
+        """该上游服务当前是否可解析出地址(宿主 services 表有该服务)。
+
+        供工具 preflight 钩子做执行前提校验(fail-fast)。
+        默认 True(非 HTTP 实现或测试桩不限制;HTTP 实现覆写为真实判定)。
+        """
+        return True
 
     # ── 通用数据操作(插件化扩展,钩子方法) ──
 

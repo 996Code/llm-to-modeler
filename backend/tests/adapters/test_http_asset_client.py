@@ -12,16 +12,16 @@ def _make_modeler():
     m.get_template.return_value = {"formName": "表\u200B单", "fields": []}
     m.get_schema.return_value = {"type": "object", "properties": {}}
     m.get_guide.return_value = {"title": "指\u202e南"}
-    m.validate_form.return_value = {"valid": True, "errors": [], "warnings": []}
-    m.create_form.return_value = {"success": True, "message": "ok"}
-    m.update_form.return_value = {"success": True, "formCode": "leave"}
+    m.validate_artifact.return_value = {"valid": True, "errors": [], "warnings": []}
+    m.persist_artifact.return_value = {"success": True, "message": "ok"}
+    m.persist_artifact.return_value = {"success": True, "formCode": "leave"}
     return m
 
 
 def _make_client():
     """HttpAssetClient + 注入 mock 领域客户端（upstream 用 mock 传输占位）。"""
     client = HttpAssetClient(upstream=MagicMock())
-    client.set_modeler_api(_make_modeler())
+    client.set_config_api(_make_modeler())
     return client
 
 
@@ -44,41 +44,36 @@ class TestHttpAssetClient:
 
     def test_get_template_missing_returns_empty(self):
         client = _make_client()
-        client._modeler.get_template.return_value = None
+        client._config_api.get_template.return_value = None
         assert client.get_template("nope") == {}
 
     def test_validate_artifact_normalizes_response(self):
         assert _make_client().validate_artifact({"a": 1}, mode="create")["valid"] is True
 
-    def test_validate_artifact_mode_uppercased(self):
-        """mode 统一大写（上游 CREATE/UPDATE 枚举）。"""
+    def test_validate_artifact_passthrough(self):
+        """mode 原样透传（枚举归一化归领域客户端）。"""
         client = _make_client()
         client.validate_artifact({"a": 1}, mode="update")
-        client._modeler.validate_form.assert_called_once_with({"a": 1}, mode="UPDATE")
+        client._config_api.validate_artifact.assert_called_once_with({"a": 1}, mode="update")
 
-    def test_persist_artifact_create(self):
-        assert _make_client().persist_artifact({"formCode": "leave"}, mode="create")["success"] is True
-
-    def test_persist_artifact_update(self):
+    def test_persist_artifact_delegates(self):
+        """persist 整体委托领域客户端（主键提取归 pack）。"""
         client = _make_client()
         result = client.persist_artifact({"formCode": "leave"}, mode="update")
         assert result["success"] is True
-        client._modeler.update_form.assert_called_once_with("leave", {"formCode": "leave"})
-
-    def test_persist_artifact_update_missing_code(self):
-        with pytest.raises(ValueError):
-            _make_client().persist_artifact({"formName": "无编码"}, mode="update")
+        client._config_api.persist_artifact.assert_called_once_with(
+            {"formCode": "leave"}, mode="update")
 
     def test_guide_none_passthrough(self):
         """guide 拉取失败 None 透传（工具层据此追问用户刷新）。"""
         client = _make_client()
-        client._modeler.get_guide.return_value = None
+        client._config_api.get_guide.return_value = None
         assert client.get_guide() is None
 
     def test_config_ops_require_modeler(self):
         """未注入领域客户端时配置类操作显式报错（装配遗漏快速暴露）。"""
         client = HttpAssetClient(upstream=MagicMock())
-        with pytest.raises(RuntimeError, match="set_modeler_api"):
+        with pytest.raises(RuntimeError, match="set_config_api"):
             client.list_templates()
 
 
@@ -91,7 +86,8 @@ class TestDataOpsViaTransport:
         result = client.submit_data(path="/api/leave/submit",
                                     data={"a": 1}, service_name="leave-system")
         client._upstream.post.assert_called_once_with(
-            "leave-system", "/api/leave/submit", json_body={"a": 1}, auth=True)
+            "leave-system", "/api/leave/submit", json_body={"a": 1}, auth=True,
+            extra_headers={"Content-Type": "application/json"})
         assert result["success"] is True  # pass 归一化为 success
 
     def test_submit_data_fail_closed(self):
@@ -108,5 +104,5 @@ class TestDataOpsViaTransport:
         result = client.query_data(path="/api/leave/status",
                                    service_name="leave-system", params={"q": 1})
         client._upstream.get.assert_called_once_with(
-            "leave-system", "/api/leave/status", auth=True)
+            "leave-system", "/api/leave/status", auth=True, extra_headers=None)
         assert result["status"] == "approved"

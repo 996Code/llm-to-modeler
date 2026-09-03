@@ -93,7 +93,7 @@ class TestModelerCredentialsPolicy:
         c = _transport()
         set_forward_headers({"Authorization": "Bearer x"})
         c._client.post.return_value = _Resp({"pass": True, "errors": []})
-        ModelerAPI(c).validate_form({"formName": "t"}, mode="CREATE")
+        ModelerAPI(c).validate_artifact({"formName": "t"}, mode="CREATE")
         sent = c._client.post.call_args.kwargs.get("headers")
         assert sent and sent.get("Authorization") == "Bearer x"
 
@@ -101,7 +101,7 @@ class TestModelerCredentialsPolicy:
         """validate 收信封：校验未执行，Fail-Closed 且指引用户刷新。"""
         c = _transport()
         c._client.post.return_value = _Resp({"code": 403, "data": None, "msg": "没有该操作权限"})
-        result = ModelerAPI(c).validate_form({"formName": "t"}, mode="CREATE")
+        result = ModelerAPI(c).validate_artifact({"formName": "t"}, mode="CREATE")
         assert result["valid"] is False
         assert "上游校验未执行" in result["errors"][0]["message"]
         assert "刷新设计器" in result["errors"][0]["message"]

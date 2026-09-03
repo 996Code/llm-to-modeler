@@ -112,4 +112,4 @@ def enhance_asset_client(asset_client, upstream):
     pack_manager 装配/热切换时调用（可选钩子，无此函数的 pack 跳过）。
     """
     from domains.njmind_form.upstream import ModelerAPI
-    asset_client.set_modeler_api(ModelerAPI(upstream))
+    asset_client.set_config_api(ModelerAPI(upstream))

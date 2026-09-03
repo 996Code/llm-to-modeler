@@ -125,7 +125,7 @@ class GetFormTool(Tool):
 
         # Step 2: 调用 API 查询
         ctx.emit("stage", "fetch_form", f"正在查询表单 {form_code}...")
-        form_config = ctx.asset_client.get_form(form_code)
+        form_config = ctx.asset_client.get_artifact(form_code)
 
         if not form_config:
             # 表单不存在:同样让 LLM 引导用户
