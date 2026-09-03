@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional
 
 # CompositeTool:复合工具基类,提供 run_pipeline 模板方法
 from sdk.tool import CompositeTool, ToolResult, ToolContext
+from domains.njmind_form.tools._preflight import require_modeler_service
 from domains.njmind_form.tools._postprocess import (
     postprocess_config, _collect_schema_keys, schema_projection,
     parse_unrecognized_fields, strip_keys, normalize_error,
@@ -157,6 +158,10 @@ class ModifyFormTool(CompositeTool):
         if not state.get("source_artifact"):
             return "修改表单需要已有配置(source_artifact),但当前没有"
         return None
+
+    def preflight(self, state: dict, ctx: ToolContext) -> Optional[ToolResult]:
+        """执行前提：上游地址可解析，缺失时 fail-fast 拦截（不进管线烧调用）。"""
+        return require_modeler_service(ctx) or super().preflight(state, ctx)
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行 3 步管线。

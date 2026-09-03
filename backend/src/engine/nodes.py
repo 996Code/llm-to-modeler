@@ -231,7 +231,7 @@ def execute_tool_node(state: GraphState) -> dict:
     #             一步前端立刻看到，不用等节点跑完（大表单 modify 100s 期间进度
     #             全靠它，之前憋到节点结束才吐是"卡在上个阶段"的根因）；
     #   列表通道：append 进 sse_events，随节点 chunk 由 _process_chunk 推送——
-    #             MCP 等不走 StreamManager 的调用方的兜底。
+    #             不经 stream_graph 的调用方（脚本直跑图等）的兜底。
     # 绑定用 threading.local：graph 在工作线程跑节点，stream.py 在同一线程注入，
     # 并发请求互不串线。
     sse_events = []
@@ -295,8 +295,31 @@ def execute_tool_node(state: GraphState) -> dict:
     if clarify_answers:
         tool_state["clarify_answers"] = clarify_answers  # 注入回答供工具消费
 
-    # ── 执行工具 ──
+    # ── 前置校验(抽象层 preflight 钩子,流程链路的标准环节) ──
+    # 业务工具在钩子里写自己的执行前提校验(如上游服务地址可解析、画布就绪)。
+    # 引擎只负责调用并透传结论(零领域知识);非 None = 拦截,fail-fast——
+    # 错误直达用户,不进 execute、不烧 LLM/上游调用。
     _tool_start = time.time()  # 工具执行计时(链路追踪的耗时指标)
+    try:
+        preflight_result = tool.preflight(tool_state, ctx)
+    except Exception as e:
+        # 钩子自身异常不拦执行(校验器故障 ≠ 业务不可用),交给后续环节兜底
+        logger.warning(f"tool {tool_name} preflight raised: {e}")
+        preflight_result = None
+    if preflight_result is not None:
+        _append_trace(state, {
+            "stage": "preflight",
+            "title": f"前置校验 {tool_name}",
+            "status": "error",
+            "detail": {"summary": preflight_result.summary},
+        })
+        logger.warning(f"tool {tool_name} blocked by preflight: {preflight_result.summary}")
+        return {
+            "tool_result": preflight_result.model_dump(),
+            "sse_events": sse_events,
+        }
+
+    # ── 执行工具 ──
     try:
         # 执行工具主逻辑，类比 Java toolService.execute(state, ctx)
         result = tool.execute(tool_state, ctx)

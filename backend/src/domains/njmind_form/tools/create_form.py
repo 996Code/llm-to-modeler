@@ -7,9 +7,10 @@
 """
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from sdk.tool import CompositeTool, ToolResult, ToolContext, ClarificationRaised
+from domains.njmind_form.tools._preflight import require_modeler_service
 from domains.njmind_form.models import ParsedField
 from domains.njmind_form.tools._config_loader import load_type_mappings
 from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem
@@ -88,6 +89,10 @@ class CreateFormTool(CompositeTool):
             },
             "required": ["user_input"],  # user_input 必填
         }
+
+    def preflight(self, state: dict, ctx: ToolContext) -> Optional[ToolResult]:
+        """执行前提：上游地址可解析，缺失时 fail-fast 拦截（不进管线烧调用）。"""
+        return require_modeler_service(ctx) or super().preflight(state, ctx)
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行 6 步管线。retry 在 _step_validate 内部处理。"""

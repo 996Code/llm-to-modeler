@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from sdk.tool import Tool, ToolResult, ToolContext
+from domains.njmind_form.tools._preflight import require_modeler_service
 from domains.njmind_form.keys import FIELDS, FIELD_TITLE
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,10 @@ class ImageFormTool(Tool):
             },
             "required": ["user_input"],
         }
+
+    def preflight(self, state: dict, ctx: ToolContext) -> Optional[ToolResult]:
+        """执行前提：上游地址可解析，缺失时 fail-fast 拦截（不进管线烧调用）。"""
+        return require_modeler_service(ctx) or super().preflight(state, ctx)
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行图片识别:分析图片 → 提取字段 → 生成配置 → 校验。"""

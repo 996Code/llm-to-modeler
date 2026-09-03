@@ -21,6 +21,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from sdk.tool import Tool, ToolResult, ToolContext
+from domains.njmind_form.tools._preflight import require_modeler_service
 
 logger = logging.getLogger(__name__)
 from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
@@ -64,6 +65,10 @@ class GetFormTool(Tool):
             },
             "required": ["user_input"],
         }
+
+    def preflight(self, state: dict, ctx: ToolContext) -> Optional[ToolResult]:
+        """执行前提：上游地址可解析，缺失时 fail-fast 拦截（不进管线烧调用）。"""
+        return require_modeler_service(ctx) or super().preflight(state, ctx)
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行查询：优先用当前上下文里的表单，其次才按 formCode 查上游。

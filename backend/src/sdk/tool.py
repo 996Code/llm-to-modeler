@@ -149,6 +149,19 @@ class Tool(ABC):
         把错误写进 ToolResult.error_for_llm 回流给下一轮选择。"""
         return None
 
+    def preflight(self, state: dict, ctx: ToolContext) -> Optional[ToolResult]:
+        """执行前提校验——流程链路的标准环节(Engine 在 execute 前调用)。
+
+        与 validate_input 的分工:
+          - validate_input 校验「输入语义」(只看 state,如画布是否有内容);
+          - preflight 校验「执行前提」(需要 ctx,如依赖的上游服务地址是否
+            可解析、外部资源是否就绪)——这些条件不在会话状态里,在请求上下文里。
+
+        返回 None = 通过,继续 execute;返回 ToolResult(error_for_llm) =
+        拦截执行(fail-fast:错误直达用户,不烧 LLM/上游调用)。
+        默认通过;业务工具按需覆写(引擎不感知校验内容,零领域知识)。"""
+        return None
+
     def requires_follow_up(self, result: ToolResult) -> bool:
         """工具执行后是否需要 Engine 再做一轮选择。默认 False。
         未来引入 Agent Loop 时,工具可声明"我做完但还需要继续判断"。"""
