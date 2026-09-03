@@ -57,6 +57,52 @@ from services.upstream_client import set_forward_headers, set_request_services
 logger = logging.getLogger(__name__)
 
 
+def _mask_header_value(value: str) -> str:
+    """遮蔽透传头的值入链(可追溯 ≠ 可泄露)。
+
+    只保留前 8 个字符供辨识(如 "Bearer e" / tenant 前缀),其余打码;
+    短值(≤8)整体打码——追查时需要的是「哪个头到了、值变没变」,
+    不是值本身,Authorization 原文落库本身就是审计面扩大。
+    """
+    v = str(value)
+    return f"{v[:8]}****" if len(v) > 8 else "****"
+
+
+def _request_context_trace(
+    store, conv_id: str, user_id: str, services: dict,
+    forward_headers: dict, context_artifact, answers, image_base64,
+) -> None:
+    """请求初始化参数入链(kind=trace;管理端链路视图按轮展示)。
+
+    记录本轮 chat 请求携带的:宿主服务地址表(services,原文——URL 非敏感,
+    且正是排障要看的)、透传鉴权头(仅键名 + 遮蔽值)、画布上下文规格、
+    恢复/图片标记——每轮请求"到底带了什么"事后一眼可查。
+
+    Fail-Open:与 nodes._append_trace 同策略,写失败只记日志不影响主流程。
+    """
+    if not store or not conv_id:
+        return
+    try:
+        store.append_event(conv_id, "trace", {
+            "stage": "request_context",
+            "title": "请求初始化参数",
+            "status": "ok",
+            "detail": {
+                "user_id": user_id,
+                "services": dict(services or {}),
+                "forward_headers": {
+                    k: _mask_header_value(v)
+                    for k, v in (forward_headers or {}).items()
+                },
+                "context_artifact_bytes": len(str(context_artifact)) if context_artifact else 0,
+                "resume_answers": bool(answers),
+                "with_image": bool(image_base64),
+            },
+        })
+    except Exception as e:
+        logger.warning(f"request_context trace write failed: {e}")
+
+
 async def stream_graph(
     graph,
     user_input: str,
@@ -250,6 +296,12 @@ async def stream_graph(
                 set_forward_headers(forward_headers or {})
                 set_request_services(services)
                 bind_conversation(conversation_id)
+                # 本轮请求的初始化参数入链(services 表/掩蔽鉴权头/上下文规格)——
+                # 打点紧跟绑定:时间线上先于意图路由,按轮可追溯
+                _request_context_trace(
+                    conversation_store, conversation_id, user_id, services,
+                    forward_headers or {}, context_artifact, answers, image_base64,
+                )
 
                 # 实时进度通道：把 StreamManager 绑给工具 emit（同线程），
                 # 工具每推进一步前端立刻收到——不再等节点 chunk。
