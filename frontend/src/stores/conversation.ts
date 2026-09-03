@@ -159,27 +159,6 @@ export const useConversationStore = defineStore('conversation', () => {
   }
 
   /**
-   * 恢复会话：按 (userId, contextKey) 找该绑定下最新的历史会话并加载。
-   * 嵌入模式下重开侧栏不丢上下文（对话与快照链都在同一会话里）。
-   * @param userId   宿主下发的用户标识
-   * @param contextKey 宿主实体标识（designer 场景 = formCode）
-   */
-  async function resumeConversation(userId: string, contextKey: string) {
-    try {
-      const conv = await api.findLatestConversationByContext(userId, contextKey)
-      if (conv) {
-        currentConversation.value = conv
-        messages.value = conv.messages || []
-        currentConfig.value = conv.currentConfig || null
-        return
-      }
-    } catch {
-      // 后端未支持该接口 / 查询失败：降级为新会话（Fail-Closed）
-    }
-    await startNewConversation()
-  }
-
-  /**
    * 删除会话；若删的正是当前会话，则清空当前上下文。
    * @param id 会话 ID
    */
@@ -212,8 +191,6 @@ export const useConversationStore = defineStore('conversation', () => {
       const conv = await api.createConversation('', contextKey)
       convId = conv.id
       currentConversation.value = conv
-      // 嵌入模式：保存会话 ID 到 localStorage，下次打开时恢复
-      localStorage.setItem('embedded_conv_id', convId)
       await loadConversations()
     }
 
@@ -271,9 +248,6 @@ export const useConversationStore = defineStore('conversation', () => {
           // 采纳后后续轮次/刷新/恢复都基于它(见 startNewConversation 注释)
           if (result.conversationId && !currentConversation.value) {
             currentConversation.value = { id: result.conversationId } as Conversation
-            if (isEmbedded.value) {
-              localStorage.setItem('embedded_conv_id', result.conversationId)
-            }
             loadConversations()  // 刷侧边栏,让新会话出现(不 await,不阻塞渲染)
           }
           // onResult 分流顺序(由后端 ToolResult 三态决定):
@@ -398,7 +372,6 @@ export const useConversationStore = defineStore('conversation', () => {
     loadConversations,
     selectConversation,
     startNewConversation,
-    resumeConversation,
     removeConversation,
     sendMessage,
   }

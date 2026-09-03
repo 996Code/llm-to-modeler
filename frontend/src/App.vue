@@ -49,8 +49,8 @@ import EmbeddedLayout from './layouts/EmbeddedLayout.vue'
 const store = useConversationStore()
 
 // 组件挂载完成后的初始化逻辑（@PostConstruct）
-// 嵌入模式由这里驱动会话（握手成功→按 contextKey 恢复；握手失败/超时→新建），
-// EmbeddedLayout 不再自行创建，避免「先建一个无绑定会话、恢复时又建一个」的竞态。
+// 嵌入模式：握手成功只做身份/绑定登记，首开即新对话——不自动恢复
+// 上一会话（继续旧对话走右上角历史抽屉显式载入）。
 onMounted(() => {
   if (store.isEmbedded) {
     const port = getHostPort()
@@ -70,12 +70,7 @@ onMounted(() => {
       port.onAuthUpdated((id) => {
         if (id?.userId) setUserId(id.userId)
       })
-      // 恢复该 (userId, contextKey) 的历史会话；没有则新建（resumeConversation 内部兜底）
-      if (r.contextKey) {
-        void store.resumeConversation(r.userId, r.contextKey)
-      } else {
-        void store.startNewConversation()
-      }
+      void store.startNewConversation()
     })
   } else {
     // 独立页面加载历史对话
