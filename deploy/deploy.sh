@@ -34,6 +34,10 @@ COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
 
 # 工作目录 = 仓库根（.env 所在处）：脚本位于 deploy/ 子目录
 WORKDIR="$(cd "$(dirname "$0")/.." && pwd)"
+# 本脚本绝对路径 + 启动时内容指纹：pull 若换掉脚本本体，bash 会按字节
+# 偏移续读旧文件执行错位内容——检测到变化后用新脚本 re-exec（见 ① 段）
+SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+SELF_HASH="$(sha256sum "$SCRIPT_PATH" 2>/dev/null | cut -d' ' -f1)"
 
 log()  { printf '\033[32m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
 err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
@@ -81,6 +85,14 @@ if [ "$SKIP_PULL" -eq 0 ] && [ -d .git ]; then
   else
     rm -f frontend/pnpm-workspace.yaml  # pnpm 新版遇 ignored-builds 会自动生成残缺模板,清掉防污染
     git pull --ff-only "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null || true
+    # 自更新保护：本次提交改了 deploy.sh 本体时，当前进程读的仍是旧文件
+    # 偏移——交给磁盘上的新脚本从 --skip-pull 重新跑（真实事故：错位执行
+    # 跳过了 dist 同步步骤导致构建失败）
+    NEW_HASH="$(sha256sum "$SCRIPT_PATH" 2>/dev/null | cut -d' ' -f1)"
+    if [ -n "$SELF_HASH" ] && [ "$SELF_HASH" != "$NEW_HASH" ]; then
+      log "   deploy.sh 已被本次更新修改，切换到新脚本继续"
+      exec bash "$SCRIPT_PATH" --skip-pull
+    fi
     GIT_TAG="$(git rev-parse --short HEAD)"
   fi
 else
