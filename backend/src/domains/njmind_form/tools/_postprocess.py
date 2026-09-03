@@ -30,6 +30,53 @@ def _bool_to_int(obj: Any) -> Any:
     return obj
 
 
+# ── 值类型矫正：LLM 常把整型属性写成字符串数字，Jackson 反序列化直接 500 ──
+# 白名单保守匹配：只矫正确定是整型的属性键，避免误伤真字符串字段
+# （fieldTitleText 之类的键永远不会出现在这里）。
+_INT_KEYS = frozenset({
+    "formFieldType", "isRequiredField", "isDefaultField", "isEditField",
+    "isShowFieldAdd", "isShowFieldDetail", "isShowFieldTitle",
+    "isLimitOptionsAvailable", "isRecycleBin", "fieldWidth",
+    "formColumnsNumber", "selectMode", "displayStyle", "multipleTag",
+    "fieldFormat", "fieldDefaultValueType", "optionalRangeType",
+    "selectionMethod", "formState", "dataVersion", "configEnable",
+    "hasDataDifLog", "fieldButtonDrafts", "fieldButtonStage",
+    "fieldButtonSubmit", "backgroundStyle", "detailFieldTitlePc",
+    "fieldTitlePc", "fieldTitlePhone", "fieldTitleStyleAlignPhone",
+    "fieldTitleStyleAlignment", "fieldTitleStyleWidth",
+    "fieldTitleStyleWidthPhone", "optionValue", "fieldOrder",
+})
+
+
+def _coerce_scalar(key: str, v: Any) -> Any:
+    """白名单整型键的字符串值 → int："12"→12、"true"→1、"false"→0。
+
+    非纯数字（"12.5"、空串等）保持原样——强行转换会掩盖真实错误，
+    交给上游校验报出具体字段。
+    """
+    if not isinstance(v, str) or key not in _INT_KEYS:
+        return v
+    s = v.strip()
+    if s in ("true", "True"):
+        return 1
+    if s in ("false", "False"):
+        return 0
+    try:
+        return int(s)
+    except ValueError:
+        return v
+
+
+def _coerce_int_strings(obj: Any) -> Any:
+    """递归对 dict 的键做白名单整型矫正（list 原样下钻）。"""
+    if isinstance(obj, dict):
+        return {k: _coerce_int_strings(_coerce_scalar(k, v))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_coerce_int_strings(v) for v in obj]
+    return obj
+
+
 # 数组按 fieldTitleKey 去重（保留首个）。递归处理子表单/标签页内的字段数组。
 def _dedupe_fields(obj: Any) -> Any:
     if isinstance(obj, list):
@@ -71,11 +118,13 @@ def _strip_frontend_fields(obj: Any) -> Any:
 
 
 def postprocess_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """生成配置的统一后处理：剥前端标记与 null、布尔→0/1、字段去重、formTitle 兜底。"""
+    """生成配置的统一后处理：剥前端标记与 null、布尔→0/1、数字串矫正、
+    字段去重、formTitle 兜底。"""
     if not isinstance(config, dict):
         return config
     cfg = _strip_frontend_fields(config)
     cfg = _bool_to_int(cfg)
+    cfg = _coerce_int_strings(cfg)
     cfg = _dedupe_fields(cfg)
     # formTitle 兜底：宿主画布配置无此字段，上游 F4 要求非空；
     # 格式约定为 $fieldKey$（取标题字段或第一个字段）
@@ -247,3 +296,49 @@ def strip_keys(obj: Any, keys: set) -> Any:
 def normalize_error(e) -> str:
     """错误归一化为可比对字符串（差分校验用）。"""
     return e.get("message", "") if isinstance(e, dict) else str(e)
+
+
+# ── 校验错误归一化（修复 prompt 专用）────────────────────────────────────
+# 背景：上游 validate 请求失败（500/超时/连接异常）时 Fail-Closed 会把
+# httpx 异常文本塞进 errors——这类文本对 LLM 没有任何修复指向，直接喂进
+# 修复 prompt 只会烧光重试次数（真实痛点：值类型不符导致上游 Jackson
+# 反序列化 500，LLM 拿着 "Server error '500' for url ..." 无从下手）。
+_TRANSPORT_ERROR_MARKERS = (
+    "validation request failed", "internal server error",
+    "connect error", "connection refused", "timeout", "timed out",
+)
+
+
+def normalize_validation_errors(errors: list, max_items: int = 6) -> list:
+    """校验错误 → 修复 prompt 用的编号指令列表。
+
+    - 传输/序列化失败（异常文本特征）：聚合替换为一条可执行的类型修复清单
+      ——值类型不符是这类失败的主因，给出明确的检查项比原始异常文本有效；
+    - 业务校验错误：按原意编号保留（截断单条长度）；
+    - 超出 max_items 的部分聚合为一条计数提示，避免 prompt 膨胀。
+    """
+    if not errors:
+        return []
+    business, has_transport = [], False
+    for e in errors:
+        msg = normalize_error(e).strip()
+        if any(m in msg for m in _TRANSPORT_ERROR_MARKERS):
+            has_transport = True
+            continue
+        business.append(msg[:200])
+    out = []
+    if has_transport:
+        out.append(
+            "【类型错误】上游无法解析配置 JSON（多为字段值类型不符）。逐项检查并修复："
+            "① 布尔/枚举属性输出整数 0 或 1，禁止 true/false；"
+            "② 数字类属性（fieldWidth、formColumnsNumber、selectMode、displayStyle、"
+            "optionValue、isRequiredField 等）必须是整数，禁止加引号写成字符串；"
+            "③ 必填项禁止输出 null，给合理默认值或省略该属性；"
+            "④ 不要输出上游不认识的属性"
+        )
+    shown = business[:max_items]
+    out.extend(f"{i}. {m}" for i, m in enumerate(shown, start=1))
+    rest = len(business) - len(shown)
+    if rest > 0:
+        out.append(f"（另有 {rest} 条同类校验错误，一并修复）")
+    return out

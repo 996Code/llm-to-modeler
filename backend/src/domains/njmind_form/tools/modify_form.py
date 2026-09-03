@@ -40,6 +40,7 @@ from domains.njmind_form.tools._postprocess import (
     postprocess_config, _collect_schema_keys, schema_projection,
     parse_unrecognized_fields, strip_keys, normalize_error,
     parse_fixable_field_errors, fill_missing_required,
+    normalize_validation_errors,
 )
 from domains.njmind_form.tools._incremental_ops import (
     build_catalog, apply_ops, format_failures, restore_untouched,
@@ -500,12 +501,9 @@ class ModifyFormTool(CompositeTool):
             user_parts.extend(["## 对话历史", state["compressed_history"], ""])
 
         if is_retry:
-            # 重试模式:把校验错误明示给 LLM,让它针对性修复
-            # 只取前 5 条错误,避免 prompt 过长
-            error_msgs = [
-                e.get("message", str(e))
-                for e in state.get("validation_errors", [])[:5]
-            ]
+            # 重试模式:错误先归一化(序列化失败翻译成可执行的类型修复清单,
+            # 业务错误编号截断),让 LLM 针对性修复
+            error_lines = normalize_validation_errors(state.get("validation_errors", []))
             # 注意：不在 user 消息里重复转储完整配置——system 的「当前配置」
             # 已包含（大表单重复一份 = prompt 直接翻倍，141K 字符的元凶之一）
             user_parts.extend([
@@ -513,9 +511,9 @@ class ModifyFormTool(CompositeTool):
                 state.get("user_input", ""),
                 "",
                 "## 校验失败，请修复（基于 system 中的当前配置）",
-                "\n".join(f"- {m}" for m in error_msgs),
+                "\n".join(error_lines),
                 "",
-                "请修复后输出完整配置。",
+                "修复以上问题后输出完整配置（紧凑 JSON，不要代码围栏，只输出 JSON）。",
             ])
         else:
             # 首次模式:只给指令,让 LLM 自由修改

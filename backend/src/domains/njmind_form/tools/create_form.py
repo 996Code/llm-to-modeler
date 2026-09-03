@@ -17,7 +17,7 @@ from domains.njmind_form.tools._config_loader import load_prop_defaults, field_t
 from domains.njmind_form.tools._postprocess import (
     parse_fixable_field_errors, fill_missing_required,
     postprocess_config, _collect_schema_keys, schema_projection,
-    parse_unrecognized_fields, strip_keys,
+    parse_unrecognized_fields, strip_keys, normalize_validation_errors,
 )
 from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
 
@@ -334,19 +334,16 @@ class CreateFormTool(CompositeTool):
             user_parts.extend(["## 对话历史", state["compressed_history"], ""])
 
         if is_retry and state.get("artifact"):
-            # 重试路径:把校验错误 + 当前配置给 LLM,让它针对性修复
-            # 只取前 5 条错误,避免 prompt 过长
-            error_msgs = [
-                e.get("message", str(e))
-                for e in state.get("validation_errors", [])[:5]
-            ]
+            # 重试路径：错误先归一化（序列化失败翻译成可执行的类型修复清单，
+            # 业务错误编号截断），再给当前配置让它针对性修复
+            error_lines = normalize_validation_errors(state.get("validation_errors", []))
             user_parts.extend([
                 "## 校验失败，请修复",
-                "\n".join(f"- {m}" for m in error_msgs),
+                "\n".join(error_lines),
                 "",
                 "## 当前配置",
                 f"```json\n{json.dumps(state['artifact'], ensure_ascii=False)}\n```",
-                "请修复后输出完整配置。",
+                "修复以上问题后输出完整配置（紧凑 JSON，不要代码围栏，只输出 JSON）。",
             ])
         else:
             # 首次生成:给字段信息,让 LLM 按模板组装
