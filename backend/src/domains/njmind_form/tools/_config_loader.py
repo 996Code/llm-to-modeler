@@ -105,3 +105,20 @@ def load_prop_defaults() -> Dict[int, Dict[str, Any]]:
     if _PROP_DEFAULTS is None:
         load_type_mappings()
     return _PROP_DEFAULTS or {}
+
+
+def sanitize_guide(raw: Any) -> Dict[str, Any]:
+    """guide 合法性护栏：非 dict / 缺 fieldTypes 视为无效，降级为空 dict。
+
+    上游异常返回（网关错误页、残缺 JSON）解析出的 dict 缺关键键时，
+    直接进 state 会让类型表为空、模板对 guide 的访问踩雷（真实事故：
+    升格全量路径渲染 modify 崩 'dict object' has no attribute
+    'keywordIndex'）。空 guide 模板侧已条件渲染、工具侧 ft_map 为空只
+    影响提示质量，不再崩。
+    """
+    if isinstance(raw, dict) and isinstance(raw.get("fieldTypes"), list) and raw["fieldTypes"]:
+        return raw
+    import logging
+    logging.getLogger(__name__).warning(
+        f"guide 无效(缺 fieldTypes)，降级为空 guide: {str(raw)[:120]}")
+    return {}

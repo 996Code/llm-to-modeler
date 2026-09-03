@@ -13,7 +13,7 @@ from sdk.tool import CompositeTool, ToolResult, ToolContext, ClarificationRaised
 from domains.njmind_form.tools._preflight import require_modeler_service
 from domains.njmind_form.models import ParsedField
 from domains.njmind_form.tools._config_loader import load_type_mappings
-from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem
+from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem, sanitize_guide
 from domains.njmind_form.tools._postprocess import (
     parse_fixable_field_errors, fill_missing_required,
     postprocess_config, _collect_schema_keys, schema_projection,
@@ -175,8 +175,9 @@ class CreateFormTool(CompositeTool):
         """获取配置指南。"""
         # emit 推进度事件给前端(类比 Java 的进度回调)
         ctx.emit("stage", "fetch_guide", "正在从上游获取配置指南...")
-        # 从上游拉配置指南(字段说明、约束规则等),存进 state 供后续步骤用
-        state["guide"] = ctx.asset_client.get_guide()
+        # 从上游拉配置指南(字段说明、约束规则等),存进 state 供后续步骤用;
+        # 合法性护栏:异常返回降级为空 guide(模板已条件渲染,不崩)
+        state["guide"] = sanitize_guide(ctx.asset_client.get_guide())
 
     def _step_list_assets(self, state: dict, ctx: ToolContext) -> None:
         """列出可用模板和 Schema 文件名。"""

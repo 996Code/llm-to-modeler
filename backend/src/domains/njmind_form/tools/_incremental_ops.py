@@ -144,6 +144,23 @@ def _find_field(fields: List[Dict], key: str = "", title: str = "") -> Optional[
     return None
 
 
+def _norm_type_code(v):
+    """类型码归一：LLM 偶发把类型码写成字符串 "4"，统一转 int。
+
+    不可转（None/乱串）原样返回——same_type 比对不中会走模板回退，
+    失败信息如实反馈给 LLM 修正指令。
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    if isinstance(v, str) and v.strip().lstrip("-").isdigit():
+        return int(v.strip())
+    return v
+
+
 def _skeleton_for(fields: List[Dict], new_field: Dict,
                   template_loader: Optional[Callable[[int], Optional[Dict]]]) -> Tuple[Optional[Dict], str]:
     """add_field 的骨架补全：LLM 只给 4-5 个关键属性，其余结构从骨架继承。
@@ -152,7 +169,10 @@ def _skeleton_for(fields: List[Dict], new_field: Dict,
     现状最一致（含该类型在本表单的惯用配置），且零网络调用；
     无同类型时才调 template_loader（上游字段模板，create 管线同源）。
     """
-    code = new_field.get(FIELD_TYPE)
+    # 类型码归一并写回 field：字符串码既会误报「模板不可用」烧光增量重试，
+    # 也会进产物导致上游序列化失败
+    code = _norm_type_code(new_field.get(FIELD_TYPE))
+    new_field[FIELD_TYPE] = code
     same_type = next((f for f in fields if f.get(FIELD_TYPE) == code), None)
     if same_type is not None:
         skeleton = copy.deepcopy(same_type)

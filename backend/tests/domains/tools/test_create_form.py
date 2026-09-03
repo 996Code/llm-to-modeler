@@ -63,6 +63,19 @@ class TestSummarizeArtifact:
 
 class TestStepFetchGuide:
     def test_fetch_guide_stores_in_state(self):
+        """合法 guide（含 fieldTypes）原样入 state。"""
+        tool = CreateFormTool()
+        asset = MagicMock()
+        valid = {"title": "指南", "fieldTypes": [{"code": 4, "name": "SELECT"}]}
+        asset.get_guide.return_value = valid
+        ctx = _make_ctx(asset_client=asset)
+
+        state = {}
+        tool._step_fetch_guide(state, ctx)
+        assert state["guide"] == valid
+
+    def test_fetch_guide_invalid_downgraded(self):
+        """异常 guide（缺 fieldTypes，事故形态）降级为空 dict，不再直通下游。"""
         tool = CreateFormTool()
         asset = MagicMock()
         asset.get_guide.return_value = {"title": "指南"}
@@ -70,7 +83,7 @@ class TestStepFetchGuide:
 
         state = {}
         tool._step_fetch_guide(state, ctx)
-        assert state["guide"] == {"title": "指南"}
+        assert state["guide"] == {}
 
 
 class TestStepParseFields:

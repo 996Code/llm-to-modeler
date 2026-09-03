@@ -1,8 +1,13 @@
 {# 关键词映射参考(原 build_parse_prompt/build_modify_prompt 的 guide.keywordIndex 部分)
-   仅当 guide 有 keywordIndex 时渲染。传入 guide 变量。 #}
-{% if guide and guide.keywordIndex %}
+   仅当 guide 有 keywordIndex 时渲染。传入 guide 变量。
+   用 guide.get('keywordIndex') 而非点访问:StrictUndefined 环境下
+   dict 缺 key 的点访问直接抛错(真实事故:升格全量路径渲染 modify
+   时崩 'dict object' has no attribute 'keywordIndex');dict.get 缺 key
+   安全返回 None。 #}
+{% set kw_index = guide.get('keywordIndex') if guide is mapping else none %}
+{% if kw_index %}
 ## 关键词映射参考
-{% for kw, ftypes in (guide.keywordIndex.items() | list)[:30] %}
+{% for kw, ftypes in (kw_index.items() | list)[:30] %}
   '{{ kw }}' → {% if ftypes is iterable and ftypes is not string %}{{ ftypes | join(', ') }}{% else %}{{ ftypes }}{% endif %}
 {% endfor %}
 {% endif %}

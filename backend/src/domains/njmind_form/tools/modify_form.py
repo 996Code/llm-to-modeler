@@ -43,10 +43,10 @@ from domains.njmind_form.tools._postprocess import (
     normalize_validation_errors,
 )
 from domains.njmind_form.tools._incremental_ops import (
-    build_catalog, apply_ops, format_failures, restore_untouched,
+    build_catalog, apply_ops, format_failures, restore_untouched, _norm_type_code,
 )
 # 模板 stem 推导表与 create 管线同源（add_field 骨架 fallback 拉上游模板用）
-from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem
+from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem, sanitize_guide
 
 logger = logging.getLogger(__name__)
 from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
@@ -285,7 +285,8 @@ class ModifyFormTool(CompositeTool):
             ctx:   提供 asset_client + emit
         """
         ctx.emit("stage", "fetch_guide", "正在从上游获取配置指南...")
-        state["guide"] = ctx.asset_client.get_guide()
+        # 合法性护栏:异常返回降级为空 guide(模板已条件渲染,不崩)
+        state["guide"] = sanitize_guide(ctx.asset_client.get_guide())
 
     def _step_modify(self, state: dict, ctx: ToolContext) -> None:
         """Step 2: 修改配置 —— 增量主路径 + 全量兜底（两相式）。
@@ -443,6 +444,9 @@ class ModifyFormTool(CompositeTool):
                 ft_map[int(t["code"])] = t
 
         def loader(type_code):
+            # 字符串类型码归一（LLM 偶发输出 "4"）：isinstance 挡字符串的
+            # 旧写法会静默返回 None → 误报「模板不可用」烧光增量重试
+            type_code = _norm_type_code(type_code)
             ftype = ft_map.get(int(type_code)) if isinstance(type_code, (int, float)) else None
             if not ftype:
                 return None
