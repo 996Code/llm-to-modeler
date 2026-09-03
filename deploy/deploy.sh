@@ -72,10 +72,14 @@ docker info >/dev/null 2>&1 || { err "docker daemon 未运行"; exit 1; }
 if [ "$SKIP_PULL" -eq 0 ] && [ -d .git ]; then
   log "① 拉取代码（${GIT_REMOTE}/${GIT_BRANCH}）..."
   git fetch "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null || true
-  if [ -n "$(git status --porcelain)" ]; then
-    log "   工作区有未提交改动，按当前工作区构建（dirty）"
+  # dirty 只看 tracked 改动:untracked(运维手工放的文件/构建产物)不阻断
+  # 发布——真实事故:服务器一个 untracked Dockerfile 让 pull 永远跳过,
+  # 连续多次"发布成功"实际全程构建旧代码
+  if ! git diff --quiet -- || ! git diff --cached --quiet; then
+    log "   tracked 文件有未提交改动，按当前工作区构建（dirty）"
     GIT_TAG="dirty-$(date '+%m%d%H%M')"
   else
+    rm -f frontend/pnpm-workspace.yaml  # pnpm 新版遇 ignored-builds 会自动生成残缺模板,清掉防污染
     git pull --ff-only "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null || true
     GIT_TAG="$(git rev-parse --short HEAD)"
   fi
