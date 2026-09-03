@@ -49,7 +49,7 @@ class ToolContext(BaseModel):
 
         Args:
             stage:      环节标识,建议 "工具名.动作" 命名空间(如
-                        "create_form.fetch_template"),避免跨工具撞名。
+                        "tool_a.step_a"),避免跨工具撞名。
             title:      人类可读标题(管理端时间线展示),缺省用 stage。
             status:     "info" / "ok" / "error"(时间线着色用)。
             duration_ms: 该环节耗时(毫秒,可选)。
@@ -183,7 +183,7 @@ class Tool(ABC):
         return ""
 
     def format_result(self, artifact: dict) -> dict:
-        """给 SSE 用:从制品提取前端需要的字段(如字段数、名称等)。
+        """给 SSE 用:从制品提取前端需要的字段(如条目数、名称等)。
         Engine 调用此方法,避免直接读制品内部结构(架构试金石)。
         默认返回空 dict,pack 按需覆写。"""
         return {}

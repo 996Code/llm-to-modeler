@@ -8,7 +8,7 @@
 返回增量字段,框架自动 merge 回 state。这是图节点之间唯一的“通信总线”。
 
 替代旧 ``graph/state.py`` 的 ``AgentState``,适配多工具插件化架构:
-- 不再硬编码表单字段(guide/template_names 等):每个工具自己定义内部 state
+- 不再硬编码领域字段(旧版曾内置领域专属 state 键):每个工具自己定义内部 state
 - 工具内部状态通过 ``tool_state`` 透传,Graph 层不读它的内部结构(开闭原则)
 - 支持 LangGraph interrupt/restore 的追问机制(暂停 → 问用户 → 恢复)
 
@@ -70,7 +70,7 @@ class GraphState(TypedDict, total=False):
     - conversation_id:      会话 ID,作为 checkpoint 的 thread_id(决定取哪份快照)
     - forward_headers:      嵌入(embed)模式透传的请求头(如上游租户、trace id)
     - context_artifact:     对话的上下文制品(宿主下发的画布,pack 路由判断画布状态,
-                            modify 类工具读它做增量基线;存储层字段名仍叫 current_config)
+                            增量修改类工具读它做增量基线;存储层字段名仍叫 current_config)
 
     ── 意图识别(classify_intent 节点产出) ──
     - tool_name:            选中的工具名(决定路由到哪个工具)

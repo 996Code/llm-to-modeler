@@ -35,7 +35,7 @@ class CreateConversationRequest(BaseModel):
     """新建会话请求体（Pydantic 模型）。
 
     类比 Java 的 DTO + Bean Validation，Pydantic 自动校验 JSON 结构。
-    title 可空，默认空字符串。context_key 用于嵌入模式会话绑定（如 formCode）。
+    title 可空，默认空字符串。context_key 用于嵌入模式会话绑定（如宿主实体标识 entryId）。
     """
     title: Optional[str] = ""
     context_key: Optional[str] = ""
@@ -99,7 +99,7 @@ async def list_conversations(
     user_id = _get_user_id(request, x_user_id)
     # 嵌入模式会话恢复：按 (user_id, contextKey) 查该绑定下最新会话
     # 前端 GET /api/conversations?contextKey=xxx&latest=true 触发。
-    # 「还没有历史会话」是预期状态（首次打开该表单），返回 200 + null 而非 404：
+    # 「还没有历史会话」是预期状态（首次打开该上下文），返回 200 + null 而非 404：
     # 404 会在浏览器控制台刷红，容易被误判为链路故障（真正的错误仍走异常）。
     context_key = request.query_params.get("contextKey")
     latest = request.query_params.get("latest") == "true"

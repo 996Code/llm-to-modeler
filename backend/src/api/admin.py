@@ -131,8 +131,8 @@ async def admin_conversation_trace(conv_id: str, request: Request):
     时序都正确。
 
     LLM 调用的环节标注(stage)来自调用日志 request_data.stage:
-      route_pack(一级路由)/route_tool(二级路由)/create_form.generate/
-      image_form.analyze/compress_history 等(见 llm/client.py 与各调用点)。
+      route_pack(一级路由)/route_tool(二级路由)/tool_a.generate/
+      tool_b.analyze/compress_history 等(见 llm/client.py 与各调用点)。
     """
     store = request.app.state.conversation_store
     conv = store.get_conversation_any_user(conv_id)

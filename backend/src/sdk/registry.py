@@ -50,7 +50,7 @@ class ToolRegistry:
         """注册一个工具到注册表。
 
         Args:
-            tool: 工具实例(Tool 的子类实例,如 CreateFormTool)。
+            tool: 工具实例(Tool 的子类实例,如 ToolA)。
 
         Note:
             以 tool.name 为 key,若同名工具已存在会被静默覆盖。
@@ -97,19 +97,19 @@ class ToolRegistry:
         注入到意图识别 prompt 中,告诉大模型"当前可选哪些工具、分别用在什么场景"。
 
         Args:
-            state: 当前会话状态 dict(如是否已有 artifact、当前表单配置等)。
+            state: 当前会话状态 dict(如是否已有 artifact、当前制品配置等)。
                 当前实现未使用此参数;阶段 3 将基于 state 过滤掉不可用工具
-                (例如没有 artifact 时,modify 类工具不应出现在清单里)。
+                (例如没有 artifact 时,增量修改类工具不应出现在清单里)。
 
         Returns:
             多行字符串,形如:
                 可用工具:
-                - create_form: 创建表单 (适用: 用户要新建表单)
-                - modify_form: 修改表单 (适用: 用户要改已有表单)
+                - tool_a: 新建制品 (适用: 用户要新建制品)
+                - tool_b: 修改制品 (适用: 用户要修改已有制品)
                 ...
 
         【扩展点】
-        阶段 3 增强:按 state 过滤不可用工具(如无 artifact 时禁用 modify)。
+        阶段 3 增强:按 state 过滤不可用工具(如无 artifact 时禁用增量修改类工具)。
         """
         # 首行固定为标题,后续每行描述一个工具。
         lines = ["可用工具:"]

@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 router = APIRouter(tags=["health"])
 
 
-# 别名：/api/health——嵌入场景宿主经统一前缀代理探测（/ai-modeler/api/* 剥前缀
+# 别名：/api/health——嵌入场景宿主经统一前缀代理探测（宿主前缀 /<mount>/api/* 剥前缀
 # 后到 /api/*），与业务 API 同链路。根路径 /health 保留（运维/K8s 探针惯例）。
 @router.get("/api/health")
 @router.get("/health")
@@ -31,7 +31,7 @@ async def health_check(request: Request):
     """健康检查接口：只回答「本服务是否活着」。
 
     供运维监控、负载均衡、K8s liveness 探针与嵌入宿主（悬浮球显隐）调用。
-    不探测上游 njmind-modeler——嵌入模式下真实上游地址由宿主 services
+    不探测上游服务——嵌入模式下真实上游地址由宿主 services
     按请求下发，启动/探测期不存在可探的目标；上游可用性由请求时的
     preflight 前置校验与 resolve_base fail-closed 保证。
 

@@ -18,9 +18,9 @@ config.yaml paths 表（单一事实源）。
     transport.get(SERVICE, path, auth=True, cache=False)  -> data | None
     transport.post(SERVICE, path, json_body=..., auth=True) -> (data, error)
   - auth=True：附带本请求的透传头（鉴权/租户等）；auth=False 匿名——
-    静态公共资产应匿名（njmind 网关对 MCP 资产匿名放行、带登录凭证
-    反而触发端点功能权限校验，真实事故：有效 token 拉 guide 收
-    {code:403, 没有该操作权限}，而同请求的 schemas/validate 全 200）。
+    静态公共资产应匿名（上游网关对公共资产匿名放行、带登录凭证
+    反而触发端点功能权限校验，真实事故：有效 token 拉取静态资产收到
+    {code:403, 没有该操作权限}，而同请求的其他资产接口全 200）。
   - 假 200 信封（HTTP 200 + {code≠成功, msg}）：按失败处理（GET 返回
     None、不进缓存；POST 返回 (None, msg)），由调用方决定业务语义。
 
@@ -110,9 +110,9 @@ class UpstreamClient:
     domains/njmind_form/upstream.py 的 ModelerAPI）。
     """
 
-    # njmind 网关的「假 200」：HTTP 200 但 body 是业务错误信封 {code≠成功, msg}。
+    # 上游网关的「假 200」：HTTP 200 但 body 是业务错误信封 {code≠成功, msg}。
     # 只看状态码会把信封当正常内容——真实事故：有效 token 拉到
-    # {code:403, msg:'没有该操作权限'} 被当 guide 缓存 300s 毒化后续请求。
+    # {code:403, msg:'没有该操作权限'} 被当静态资产缓存 300s 毒化后续请求。
     _ENVELOPE_OK_CODES = (0, 200, "0", "200")
 
     def __init__(self, config: Optional[UpstreamConfig] = None, conversation_store=None):

@@ -21,7 +21,7 @@
         system_prompt.j2            # 主模板
         _sections/
           intro.j2                  # 静态片段(角色介绍等)
-          field_types.j2            # 静态片段(字段类型说明)
+          notes.j2                  # 静态片段(补充说明)
           ...
       <pack_name>/prompts/xxx.j2    # 工具用 prompt
 
@@ -32,7 +32,7 @@
 ============
 
 - **C.2-C — section 级缓存**:缓存粒度是单个 section(片段),不是整份 prompt。
-  静态片段(intro/field_types)无变量、渲染一次后永久复用;动态段(当前 artifact、
+  静态片段(intro/notes)无变量、渲染一次后永久复用;动态段(当前 artifact、
   压缩历史)每请求重算。Java 类比:类似 Spring 的 ``@Cacheable`` 按 key 缓存方法结果,
   但只在“输入不变”时命中。
 - **C.2-E — override/append 区分**:宿主(embed 模式)可注入 ``override``(整体替换
@@ -92,7 +92,7 @@ class PromptLoader:
     ================
 
     缓存粒度是 **section,不是整份 prompt**:
-    - 静态片段(intro/field_types 等)**无变量 + cacheable=True** → 渲染一次后缓存,
+    - 静态片段(intro/notes 等)**无变量 + cacheable=True** → 渲染一次后缓存,
       后续命中直接返回,省掉 Jinja2 解析 + 磁盘 IO。
     - 动态段(当前 artifact、压缩历史)带了变量 → 不缓存,每次重算。
 
@@ -193,7 +193,7 @@ class PromptLoader:
         Args:
             pack_name:     pack 名
             template_name: 主模板名
-            sections:      静态 section 名列表(如 ``["intro", "field_types"]``)
+            sections:      静态 section 名列表(如 ``["intro", "notes"]``)
             dynamic:       主模板的动态变量(如 ``{"artifact": ..., "history": ...}``)
             overrides:     可选的 override/append 指令
 

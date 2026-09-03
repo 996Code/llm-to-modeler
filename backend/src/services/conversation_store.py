@@ -163,10 +163,10 @@ class ConversationStore:
                 CREATE TABLE IF NOT EXISTS session_meta (
                     conv_id TEXT PRIMARY KEY,    -- 会话 ID,与 events.conv_id 对应
                     user_id TEXT NOT NULL,       -- 归属用户
-                    context_key TEXT DEFAULT '', -- 宿主实体标识(嵌入模式绑定,如 formCode)
+                    context_key TEXT DEFAULT '', -- 宿主实体标识(嵌入模式绑定,如 entryId)
                     title TEXT DEFAULT '',       -- 会话标题(列表展示)
                     summary TEXT DEFAULT '',     -- 会话摘要(压缩后)
-                    current_config TEXT,         -- 当前配置 JSON(表单配置快照)
+                    current_config TEXT,         -- 当前配置 JSON(制品配置快照)
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL     -- 列表按此字段倒序排序
                 );
@@ -237,7 +237,7 @@ class ConversationStore:
         Args:
             user_id: 用户 ID
             title:   会话标题,默认空字符串
-            context_key: 宿主实体标识(嵌入模式绑定,如 formCode),默认空
+            context_key: 宿主实体标识(嵌入模式绑定,如 entryId),默认空
 
         Returns:
             包含 id / userId / title / createdAt 的字典,供前端直接使用。
@@ -261,7 +261,7 @@ class ConversationStore:
 
         Args:
             user_id: 用户 ID
-            context_key: 宿主实体标识(如 formCode)
+            context_key: 宿主实体标识(如 entryId)
 
         Returns:
             最新会话字典(与 get_conversation 同构,含 messages),没有则 None。
@@ -276,7 +276,7 @@ class ConversationStore:
         return self._get_conversation(row["conv_id"], user_id)
 
     def set_context_key(self, conv_id: str, context_key: str) -> None:
-        """为会话绑定/重绑 context_key(创建场景 APPLY_RESULT 回填 formCode 后用)。
+        """为会话绑定/重绑 context_key(创建场景拿到宿主实体标识后回填绑定用)。
 
         Args:
             conv_id: 会话 ID

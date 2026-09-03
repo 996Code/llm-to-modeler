@@ -13,7 +13,7 @@
     类比 Spring MVC 的 DispatcherServlet 统一分发。
   - 上下文优先级：context.artifact（宿主当次下发的画布）> 会话存储的
     上次产出——防止陈旧基线覆盖用户手动修改。
-  - 请求头透传：嵌入模式下，宿主系统的认证头透传到上游 njmind-modeler API。
+  - 请求头透传：嵌入模式下，宿主系统的认证头透传到 pack 声明的上游服务 API。
     类比 Spring 的 SecurityContext 跨系统传递。
   - SSE 流式：StreamingResponse + text/event-stream，实时推送管线进度。
     响应头 no-transform 防 rsbuild 等代理的 gzip 缓冲（见 stream.py 模块注释）。
@@ -42,18 +42,18 @@ class ChatRequest(BaseModel):
         恢复时是新的 HTTP 请求带 answers。
 
     图片识别：
-        image_base64 非空时，传给 ImageFormTool 做图片识别（多模态）。
+        image_base64 非空时，传给多模态工具做图片识别。
 
     嵌入模式扩展（P1）：
         context: 宿主下发的当前制品（覆盖会话旧配置再进图，防止陈旧基线覆盖手动修改）。
-        services: 宿主提供的服务地址表（如 {njmind-modeler: origin+/codeBack}），
+        services: 宿主提供的服务地址表（如 {"pack-service-x": "https://host/base"}），
                   按请求切换上游地址（见 upstream_client.resolve_base）。
 
     Attributes:
         message: 用户消息文本
         conversation_id: 会话 ID（首次对话可不传，后端自动创建）
         answers: 追问回答（非空表示追问恢复）
-        image_base64: 图片 base64 编码（用于图片识别表单）
+        image_base64: 图片 base64 编码（用于图片识别）
         context: 宿主当前上下文（可选）
         services: 宿主服务地址表（可选）
     """
@@ -66,10 +66,10 @@ class ChatRequest(BaseModel):
 
 
 def _load_current_config(request: Request, conv_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """从会话存储加载当前表单配置。
+    """从会话存储加载当前制品配置。
 
     用于统一对话入口——判断是否有已有配置（影响意图识别，
-    如"修改表单"需要已有配置才能执行）。
+    如"修改制品"类操作需要已有配置才能执行）。
 
     类比 Java 的 Session.getAttribute()，但是从 SQLite 读。
     """
@@ -82,18 +82,18 @@ def _load_current_config(request: Request, conv_id: Optional[str]) -> Optional[D
     try:
         conv = store.get_conversation(conv_id, user_id)  # 从 SQLite 读会话
         if conv and conv.get("currentConfig"):
-            return conv["currentConfig"]  # 返回已有的表单配置
+            return conv["currentConfig"]  # 返回已有的制品配置
     except Exception:
         # 读取异常静默吞掉：不影响主流程，最多当作无已有配置处理（Fail-Closed）
         pass
     return None
 
 
-# 需要透传到上游 njmind-modeler 的请求头前缀。
+# 需要透传到上游服务的请求头前缀。
 # 排除 hop-by-hop 头（host/content-length 等）和内部头（X-User-Id 是本项目自己用的）。
 # 类比 Java 的 HeaderPropagationFilter——选择性地把请求头传给下游服务。
 # 可被环境变量 FORWARD_HEADER_PREFIXES 覆盖（逗号分隔）：接入新宿主时头名不同，
-# 改环境变量即可，无需改代码。默认值含 enterprise，保证 mind-designer 的
+# 改环境变量即可，无需改代码。默认值含 enterprise，保证宿主的
 # enterprise-id 头不被丢弃。
 _DEFAULT_FORWARD_PREFIXES = ("x-", "authorization", "cookie", "tenant", "enterprise", "accept-language")
 _FORWARD_PREFIXES = tuple(
@@ -107,7 +107,7 @@ def _extract_forward_headers(request: Request) -> Dict[str, str]:
     """提取需要透传到上游的请求头。
 
     嵌入模式下，宿主系统的认证信息（Authorization/Cookie/X-*-Tenant）
-    需要透传到上游 njmind-modeler API，实现单点登录。
+    需要透传到上游服务 API，实现单点登录。
 
     排除：
       - hop-by-hop 头（host/content-length/content-type/connection）
@@ -239,7 +239,7 @@ async def chat(req: ChatRequest, request: Request):
         stream(),  # 传入 async generator 作为响应体
         media_type="text/event-stream",  # SSE 的 MIME 类型
         # Cache-Control: no-cache 防缓存；no-transform 禁止任何中间代理压缩/改写流
-        #   （designer rsbuild 的 gzip 中间件会缓冲 SSE 攒到流结束才吐，必须跳过）
+        #   （宿主前端 rsbuild 的 gzip 中间件会缓冲 SSE 攒到流结束才吐，必须跳过）
         # X-Accel-Buffering: no 禁止 Nginx 缓冲（SSE 要实时推送，缓冲会导致延迟）
         headers={
             "Cache-Control": "no-cache, no-transform",

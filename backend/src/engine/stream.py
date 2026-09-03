@@ -137,7 +137,7 @@ async def stream_graph(
         conversation_id:     会话 ID,同时用作 LangGraph checkpoint 的 thread_id
         user_id:             用户 ID(落库用)
         answers:             追问回答;非空时走 ``Command(resume=answers)`` 路径
-        image_base64:        图片 base64(给 ImageFormTool 用)
+        image_base64:        图片 base64(供多模态工具使用)
         conversation_store:  ConversationStore 实例(可空,空则不落库)
         conversation_history:历史对话(给 LLM 当上下文)
         context_artifact:     对话的上下文参数(宿主下发的当前制品)
@@ -389,7 +389,7 @@ async def stream_graph(
                                 # intr.value 是 interrupt 时传入的 payload(通常是问题列表)
                                 intr_value = intr.value if hasattr(intr, 'value') else intr
                                 if isinstance(intr_value, dict):
-                                    # 推一个 needsClarification 事件给前端:弹追问表单
+                                    # 推一个 needsClarification 事件给前端:弹追问界面
                                     # (首轮即追问的场景,前端同样靠这里的 id 采纳新会话)
                                     await sm.emit_result({
                                         "needsClarification": True,
@@ -459,7 +459,7 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
 
     【逻辑】
       1. 落 user / assistant 两条消息
-      2. 如果结果里带 config(表单配置),额外存一条带 config_snapshot 的消息
+      2. 如果结果里带 config(配置制品),额外存一条带 config_snapshot 的消息
          (审计用:记录"这次操作把配置改成了什么样")
       3. 更新会话的 current_config(存储层字段名,不改):
          - 已有配置 → 直接 update
@@ -486,7 +486,7 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
                 store.update_conversation_config(conv_id, config)
             else:
                 # 创建场景:首次产出配置,用 format_result 输出的通用 title 键起标题
-                # (不读领域字段——formName 之类的键属于 pack,引擎只认钩子产出)
+                # (不读领域字段——制品标题之类的键属于 pack,引擎只认钩子产出)
                 title = result_data.get("title", "新对话")
                 store.update_conversation_config(conv_id, config, title=title)
     except Exception as e:

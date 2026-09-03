@@ -12,7 +12,7 @@ PACKS_ENABLED(env)只能"改配置重启生效"。本模块把启停状态变成
   3. 状态文件不存在 + env 未配置 → 全部发现的 pack 都启用(向后兼容)
 
 【持久化】
-  - 文件格式:{"version": 1, "enabled": ["njmind_form", ...]}
+  - 文件格式:{"version": 1, "enabled": ["pack_a", ...]}
   - 原子写:先写同目录临时文件再 os.replace(崩溃不会留下半截 JSON)
   - 默认路径 data/pack_state.json(与 conversations.db 同目录,随 deploy/data
     bind mount 一起持久化);可用 PACK_STATE_PATH 覆盖

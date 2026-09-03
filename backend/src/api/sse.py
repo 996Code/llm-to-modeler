@@ -114,12 +114,12 @@ class StreamManager:
         """推送阶段进度事件（线程安全，可从工作线程调用）。
 
         这是传给工具执行的进度回调。工具每完成一步就调这个方法，
-        前端实时显示管线进度（如"正在获取填写指南..."）。
+        前端实时显示管线进度（如"正在获取参考资料..."）。
 
         类比 Java 的进度监听器回调，但通过队列异步推送。
 
         Args:
-            stage: 阶段标识（如 fetch_guide/list_assets/parse_fields/generate/validate）
+            stage: 阶段标识（如 step_a/list_assets/step_b 等,由工具自定义）
             message: 给用户看的进度文案
             **extra: 额外数据（如 pipeline_step 序号）
         """
@@ -139,8 +139,8 @@ class StreamManager:
         类比 Java 的 Workflow 定义，但动态推送给前端。
 
         Args:
-            tool_name: 工具名（如 create_form）
-            steps: 步骤名列表（如 ["fetch_guide", "generate", "validate"]）
+            tool_name: 工具名（如 tool_a）
+            steps: 步骤名列表（如 ["step_a", "step_b"]）
         """
         data = {"tool": tool_name, "steps": steps}
         self._loop.call_soon_threadsafe(

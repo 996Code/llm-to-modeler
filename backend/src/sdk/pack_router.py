@@ -39,7 +39,7 @@ class DefaultPackRouter:
     """默认二级路由：中性框架文本 + 工具 when 描述（原引擎扁平路由的下沉版）。
 
     不含任何领域知识——工具怎么选完全由各工具的 `when` 描述承载。
-    pack 想要自己的领域规则（如"画布有字段则倾向修改类"）时提供
+    pack 想要自己的领域规则（如"画布已有内容则倾向修改类"）时提供
     create_router() 覆盖本实现。
     """
 
@@ -51,7 +51,7 @@ class DefaultPackRouter:
         """构建二级路由 prompt（protected：领域路由子类可复用骨架换规则）。
 
         工具是否需要画布等适用条件由各工具的 when 描述自行表达（领域语言），
-        框架不做属性级标注——需要精细规则的 pack 覆写本方法（见 njmind router）。
+        框架不做属性级标注——需要精细规则的 pack 覆写本方法（见领域 pack 的 router）。
         """
         tools_list = "\n".join(f"- {t.name}: {t.when}" for t in self._registry.all())
 

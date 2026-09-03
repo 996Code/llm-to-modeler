@@ -31,7 +31,7 @@ def _manifest_for(pack_name: str, cfg: Dict[str, Any], tools: List[Any]) -> Dict
             "identity": artifact.get("identity", {}),
             "display": artifact.get("display", {}),
             # 制品卡动作集（pack 声明，前端按此渲染按钮）：view_json/apply/rewind。
-            # 不同插件的制品交互不同——如请假申请类制品可能只要 apply 不要
+            # 不同插件的制品交互不同——如某类制品可能只要 apply 不要
             # view_json/rewind。未声明时前端回退最小集（仅 view_json）。
             "actions": artifact.get("actions", ["view_json"]),
         },
@@ -52,7 +52,7 @@ async def list_packs(request: Request):
     这些是「不透明声明」，领域词不泄漏到协议层（守门不变量 #2）。
 
     可选查询参数 ``?packs=a,b,c``：嵌入宿主可在 iframe URL 上声明要用的
-    pack 子集（如 designer 指定默认插件）。语义与 PACKS_ENABLED 一致——
+    pack 子集（如宿主指定默认插件）。语义与 PACKS_ENABLED 一致——
     请求参数是上层（宿主）声明、env 是部署方声明，两者**取交集**：
     只返回两处都允许的 pack；某一方未声明时不参与限制。
     """
@@ -61,7 +61,7 @@ async def list_packs(request: Request):
     if not registry:
         return []  # 未装配（启动失败/测试）→ Fail-Closed 空列表
 
-    # 查询参数白名单：?packs=njmind_form,xxx（宿主在 iframe URL 上声明）
+    # 查询参数白名单：?packs=pack_a,pack_b（宿主在 iframe URL 上声明）
     request_names = _parse_names(request.query_params.get("packs"))
     # 部署方白名单：优先读运行时启停状态（app.state.pack_state，管理端热切换
     # 后即时生效）；未装配（旧测试环境）时回退读 env PACKS_ENABLED。

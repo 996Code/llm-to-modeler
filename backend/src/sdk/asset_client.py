@@ -1,7 +1,7 @@
 """AssetClient 抽象 — 资产/数据来源的统一抽象接口。
 
 【模块定位】
-这是 pack(工具包)与上游系统(模板服务、表单配置服务、业务 API)之间的
+这是 pack(工具包)与上游系统(资产服务、制品配置服务、业务 API)之间的
 "中间层抽象"。所有对上游的读取(取模板/schema/guide/校验/持久化)和数据
 读写(提交/查询业务数据)都必须通过 AssetClient,pack 不直接接触 HTTP 客户端。
 
@@ -52,7 +52,7 @@ class AssetClient(ABC):
     - 抽象基类(ABC):Python 用 abc.ABC + @abstractmethod 强制子类实现,
       等价 Java 的 abstract class + abstract 方法;未实现的抽象方法被实例化
       时会直接抛 TypeError(类似 Java 不允许 new 抽象类)。
-    - 模板方法 + 钩子:部分方法(get_form / submit_data / query_data)
+    - 模板方法 + 钩子:部分方法(get_artifact / submit_data / query_data)
       提供默认"未实现"实现,子类选择性覆写,而不是强制全部实现。
 
     【Java 类比】
@@ -66,7 +66,7 @@ class AssetClient(ABC):
         }
     """
 
-    # ── 表单配置类操作(原有,抽象方法强制实现) ──
+    # ── 制品配置类操作(抽象方法强制实现) ──
 
     @abstractmethod
     def get_template(self, name: str) -> dict:
@@ -92,7 +92,7 @@ class AssetClient(ABC):
 
     @abstractmethod
     def get_schema(self, name: str) -> dict:
-        """取 JSON Schema(用于校验表单结构)。
+        """取 JSON Schema(用于校验制品结构)。
 
         Args:
             name: schema 标识名。
@@ -103,10 +103,10 @@ class AssetClient(ABC):
 
     @abstractmethod
     def get_guide(self) -> Optional[dict]:
-        """取 guide.json(填表指引、字段说明等辅助生成的内容)。
+        """取 guide.json(生成指引、条目说明等辅助生成的内容)。
 
         Returns:
-            guide 内容(dict)。该内容会拼进 prompt 辅助 LLM 生成合规表单。
+            guide 内容(dict)。该内容会拼进 prompt 辅助 LLM 生成合规制品。
         """
 
     def get_guide_for(self, service_name: str) -> Optional[dict]:
@@ -120,16 +120,16 @@ class AssetClient(ABC):
         )
 
     def get_artifact(self, entry_id: str) -> Optional[dict]:
-        """根据 formCode 查询已有表单配置。
+        """根据标识(entry_id)查询已有制品配置。
 
-        用于 modify / clone 类工具:先查回现有配置,再在其基础上修改,
-        避免让 LLM 从零重建整个表单。
+        用于增量修改/复制类工具:先查回现有配置,再在其基础上修改,
+        避免让 LLM 从零重建整个制品。
 
         Args:
-            form_code: 表单唯一标识(上游系统的主键)。
+            entry_id: 制品唯一标识(上游系统的主键)。
 
         Returns:
-            表单配置 dict;不存在时返回 None(由调用方决定是否追问用户)。
+            制品配置 dict;不存在时返回 None(由调用方决定是否追问用户)。
 
         Note:
             默认实现抛 NotImplementedError —— 这是一个"钩子"方法,非强制实现:
@@ -148,12 +148,12 @@ class AssetClient(ABC):
 
     @abstractmethod
     def validate_artifact(self, artifact: dict, mode: str) -> dict:
-        """校验制品(生成的表单配置)是否符合上游规则。
+        """校验制品(生成的制品配置)是否符合上游规则。
 
         Args:
-            artifact: 待校验的制品(表单配置 dict)。
+            artifact: 待校验的制品(配置 dict)。
             mode: 校验模式,"create"(新建)或 "update"(更新),
-                  两者可能走不同校验规则(如 update 要求 formCode 已存在)。
+                  两者可能走不同校验规则(如 update 要求制品已存在)。
 
         Returns:
             dict,固定结构 {valid: bool, errors: list, warnings: list}。
@@ -167,10 +167,10 @@ class AssetClient(ABC):
 
     @abstractmethod
     def persist_artifact(self, artifact: dict, mode: str) -> dict:
-        """持久化制品到上游(真正写入表单配置)。
+        """持久化制品到上游(真正写入上游存储)。
 
         Args:
-            artifact: 待持久化的制品(表单配置 dict)。
+            artifact: 待持久化的制品(配置 dict)。
             mode: "create"(新建)或 "update"(更新),决定走 POST 还是 PUT 语义。
 
         Returns:
@@ -195,13 +195,13 @@ class AssetClient(ABC):
                     headers: dict = None) -> dict:
         """提交数据到指定上游服务的相对路径(POST)。
 
-        为非配置类插件(如 leave_application)提供通用的"写"出口:
+        为非配置类插件(如数据提交类 pack)提供通用的"写"出口:
         pack 不再直接调 httpx,而是统一走这里,从而保证清洗/透传/重试一致。
         地址解析与配置类操作同一套(宿主 services 表按请求下发,未下发
         fail-closed,见 upstream_client.resolve_base)。
 
         Args:
-            path: 相对该服务 base 的 API 路径(如 "/api/leave/submit")。
+            path: 相对该服务 base 的 API 路径(如 "/api/items")。
             data: 提交的数据体(会被序列化为 JSON)。
             service_name: pack manifest 声明的上游服务名(决定 base)。
             headers: 额外请求头(典型场景:嵌入模式透传的 forward_headers,
@@ -228,7 +228,7 @@ class AssetClient(ABC):
         为非配置类插件提供通用的"读"出口。地址解析与 submit_data 同一套。
 
         Args:
-            path: 相对该服务 base 的 API 路径(如 "/api/leave/status")。
+            path: 相对该服务 base 的 API 路径(如 "/api/items/{id}")。
             service_name: pack manifest 声明的上游服务名(决定 base)。
             params: 查询参数(会被拼成 query string)。
             headers: 额外请求头(典型场景:嵌入模式透传的 forward_headers)。
