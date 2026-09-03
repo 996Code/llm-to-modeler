@@ -17,6 +17,13 @@
 #
 # 容器管理：docker compose（deploy/docker-compose.yml）——版本经 TAG 切换，
 # 数据卷/健康检查声明式维护；回滚 = 旧 TAG 再 up。
+#
+# ⚠ 服务器侧拉码加速（国内服务器直连 GitHub 慢且常失败，fetch 3-4 分钟
+# 还会静默吞错导致"发布成功"实为旧码）。服务器 repo 的 origin 应指向
+# gh-proxy 镜像（只读拉取；本机 push 仍直连 GitHub）：
+#   git remote set-url origin \
+#     https://gh-proxy.org/https://github.com/996Code/llm-to-modeler.git
+# 实测：直连 fetch 3-4 分钟/常失败 → 代理 1-3 秒。
 # =============================================================================
 set -euo pipefail
 

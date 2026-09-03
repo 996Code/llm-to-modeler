@@ -12,6 +12,13 @@
 #
 # 认证：优先走 ssh key；没有 key 时 ssh 会交互式提示输密码
 # （密码不写入仓库；想免密请把公钥追加到服务器 ~/.ssh/authorized_keys）
+#
+# 服务器初始化（新环境首次部署）：
+#   1. git clone https://gh-proxy.org/https://github.com/996Code/llm-to-modeler.git
+#      （国内服务器直连 GitHub 慢且常失败，gh-proxy 实测 1-3 秒；
+#       已有检出则 set-url 切到同地址——本机 push 仍走 GitHub 直连）
+#   2. 配好仓库根 .env（LLM key 等，参考 .env.example）
+#   3. ./deploy/deploy.sh 首次发布
 # =============================================================================
 set -euo pipefail
 
