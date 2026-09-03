@@ -5,7 +5,7 @@ FastAPI 应用入口模块。
   1. 加载 .env 配置
   2. 配置日志（含凭证脱敏过滤器）
   3. 在 lifespan 中初始化所有核心组件（会话存储、上游客户端、LLM 客户端、
-     LangGraph 图、MCP 服务），并挂到 app.state 供路由共享
+     LangGraph 图），并挂到 app.state 供路由共享
   4. 创建 FastAPI app、注册中间件（CORS）和路由
 
 LangGraph StateGraph 架构：
@@ -19,7 +19,7 @@ LangGraph StateGraph 架构：
     比 startup/shutdown 事件更现代，FastAPI 推荐写法。
   - app.state：类比 Spring ApplicationContext（全局单例容器）。
     所有组件都挂在这里，路由通过 request.app.state.xxx 访问。
-  - 依赖加载顺序很重要：先底层（数据库/上游），再上层（图/MCP）。
+  - 依赖加载顺序很重要：先底层（数据库/上游），再上层（图）。
 
 配置加载顺序（从项目根目录往上找 .env）：
   1. <repo>/backend/../.env（项目根的 .env，部署环境常用）
@@ -49,13 +49,12 @@ from src.api.admin import router as admin_router
 from src.api.config import router as config_router
 from src.api.conversations import router as conversations_router
 from src.api.health import router as health_router
-from src.api.skills import router as skills_router
 from src.api.meta import router as meta_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
 from src.llm.client import LLMClient
 # 会话存储：SQLite，以追加写事件流方式记录对话
 from src.services.conversation_store import ConversationStore
-# 上游客户端：调用 njmind-modeler（:7001）做校验/增删改/拉模板
+# 上游客户端：调用 njmind-modeler 做校验/增删改/拉模板（地址按请求由宿主 services 表解析）
 from src.services.upstream_client import UpstreamClient
 
 # 全局日志配置：控制台 + logs/app.log 文件双输出（按大小轮转，对标 logback
@@ -82,7 +81,6 @@ async def lifespan(app: FastAPI):
       2. 上游客户端（HTTP，可能依赖日志通道）
       3. LLM 客户端（依赖日志通道）
       4. LangGraph 图（依赖上游、LLM、会话存储）
-      5. MCP 服务（依赖上游、图）
 
     Args:
         app: FastAPI 应用实例，组件挂到 app.state 供路由访问。
@@ -95,17 +93,11 @@ async def lifespan(app: FastAPI):
     conv_store = ConversationStore(db_path)
     app.state.conversation_store = conv_store
 
-    # 上游客户端：注入会话存储，用于持久化上游调用日志（调试/监控用）
+    # 上游客户端：注入会话存储，用于持久化上游调用日志（调试/监控用）。
+    # 不做启动期上游探测：上游地址由宿主 services 按请求下发，启动期
+    # 无可探目标；地址可用性在请求时由 preflight / resolve_base fail-closed 校验
     upstream = UpstreamClient(conversation_store=conv_store)
     app.state.upstream = upstream
-
-    # 启动时探测上游可达性（不发 fatal，只 warning）
-    # Fail-Open：上游不可达不阻断启动，因为前端还能浏览历史会话，
-    # 只是生成/校验功能会失败
-    if upstream.health_check():
-        logger.info("Upstream njmind-modeler reachable")
-    else:
-        logger.warning("Upstream njmind-modeler NOT reachable - generation will fail")
 
     # LLM 客户端：注入会话存储，用于持久化 LLM 调用日志
     llm_client = LLMClient(conversation_store=conv_store)
@@ -164,22 +156,6 @@ async def lifespan(app: FastAPI):
     app.state.graph = graph
     logger.info("LangGraph StateGraph architecture initialized")
 
-    # MCP Server(使用 LangGraph StateGraph)
-    # MCP（Model Context Protocol）：让外部 AI 客户端（如 Claude Code）能调用本服务工具
-    from src.mcp_server import create_mcp_server
-    mcp_server = create_mcp_server(upstream, graph=graph)
-    app.state.mcp = mcp_server
-    # 挂载的两个坑(修复前的真实故障:MCP 客户端全部连不上):
-    #   1. 子应用自带 streamable_http_path="/mcp",挂在根前缀下才能拼出最终
-    #      路径 /mcp;若 mount("/mcp", ...) 会变成 /mcp/mcp,而 /mcp 被 307
-    #      到 /mcp/ 后 404。挂在 "/" 不影响业务路由(Starlette 按注册顺序
-    #      匹配,上面的 API 路由先注册先命中)。
-    #   2. Mount 不执行子应用的 lifespan,StreamableHTTPSessionManager 的
-    #      任务组必须在这里手动 run(),否则每个 MCP 请求都
-    #      RuntimeError("Task group is not initialized") 500。
-    mcp_app = mcp_server.streamable_http_app()
-    app.mount("/", mcp_app)
-
     # 管理端访问模式提示:开放模式是内网部署取舍,必须让运维在日志里看见
     from src.api.admin import get_admin_token
     if get_admin_token():
@@ -191,10 +167,8 @@ async def lifespan(app: FastAPI):
             "公网或不可信网络部署必须配置 ADMIN_TOKEN"
         )
 
-    # MCP 会话管理器的任务组随应用生命周期启停(包住 yield)
-    async with mcp_server.session_manager.run():
-        logger.info("LLM Form Modeler started")
-        yield  # 此处之后应用开始对外服务，直到收到关闭信号
+    logger.info("LLM Form Modeler started")
+    yield  # 此处之后应用开始对外服务，直到收到关闭信号
 
     # === 关闭阶段（@PreDestroy 等价物）===
     logger.info("Shutting down...")
@@ -229,7 +203,6 @@ app.add_middleware(
 # 注册各业务路由（顺序不影响路由匹配，FastAPI 按精确路径优先）
 app.include_router(health_router)
 app.include_router(config_router)
-app.include_router(skills_router)
 app.include_router(conversations_router)
 app.include_router(meta_router)
 # 管理端路由（X-Admin-Token 守门,ADMIN_TOKEN 未配置时整组 503）

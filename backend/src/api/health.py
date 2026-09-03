@@ -28,21 +28,21 @@ router = APIRouter(tags=["health"])
 @router.get("/api/health")
 @router.get("/health")
 async def health_check(request: Request):
-    """健康检查接口。
+    """健康检查接口：只回答「本服务是否活着」。
 
-    供运维监控、负载均衡、K8s liveness 探针调用。
-    注意：这里只检查 upstream 客户端是否已初始化（对象存在），
-    不发实际网络请求（避免每次探针都打上游），属于轻量级存活检查。
+    供运维监控、负载均衡、K8s liveness 探针与嵌入宿主（悬浮球显隐）调用。
+    不探测上游 njmind-modeler——嵌入模式下真实上游地址由宿主 services
+    按请求下发，启动/探测期不存在可探的目标；上游可用性由请求时的
+    preflight 前置校验与 resolve_base fail-closed 保证。
 
     Args:
         request: 当前请求对象，用于读取 app 全局状态。
 
     Returns:
         JSONResponse: body 为 {
-            status: 固定 "healthy"，
+            status: 固定 "healthy"（本进程存活即可达），
             service: 服务名，
-            version: 应用版本号（从 app.version 读，和 main.py 同步），
-            upstream: 上游客户端是否已初始化（True=已就绪）
+            version: 应用版本号（从 app.version 读，和 main.py 同步）
         }
 
     响应头 Cache-Control: no-store —— 健康检查响应禁止被网关/浏览器缓存：
@@ -54,9 +54,6 @@ async def health_check(request: Request):
             "status": "healthy",
             "service": "LLM Form Modeler",
             "version": request.app.version,
-            # getattr 兜底：lifespan 未执行时 app.state.upstream 不存在，返回 None（Fail-Closed）
-            # lifespan 在 main.py 中初始化 UpstreamClient 并挂到 app.state.upstream
-            "upstream": getattr(request.app.state, "upstream", None) is not None,
         },
         headers={"Cache-Control": "no-store"},
     )
