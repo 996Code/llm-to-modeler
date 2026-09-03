@@ -21,7 +21,7 @@ import logging
 from typing import Any, Dict
 
 from sdk.tool import Tool, ToolResult, ToolContext
-from domains.leave_application.upstream import SERVICE_NAME
+from domains.leave_application.upstream import SERVICE_NAME, PATHS
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class QueryLeaveStatusTool(Tool):
             # 通过抽象的 AssetClient 调上游,不直接 httpx
             # forward_headers 透传鉴权头(嵌入模式下由宿主系统提供)
             result = ctx.asset_client.query_data(
-                path="/api/leave/status",
+                path=PATHS.get("status", "/api/leave/status"),
                 service_name=SERVICE_NAME,
                 params={"query": user_input},
                 headers=ctx.forward_headers,

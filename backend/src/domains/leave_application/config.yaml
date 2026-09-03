@@ -6,4 +6,11 @@ domain:
 services:
   leave-system: {}
 
+# 上游端点路径（与 njmind_form 的 paths 段同构；工具代码从此表取，单一事实源）
+paths:
+  validate: /api/leave/validate
+  submit: /api/leave/submit
+  status: /api/leave/status
+
 # 演示插件说明：本 pack 为插件化架构的最小示例（Demo），生产按需保留。
+# data 类制品无 identity/diff 对齐需求，故省略 artifact 段。

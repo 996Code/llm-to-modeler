@@ -41,6 +41,7 @@ Events)事件流。
 """
 import asyncio
 import logging
+import threading
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 # Command 是 LangGraph 的控制指令:用于 resume / goto / update state 等
@@ -331,7 +332,13 @@ async def stream_graph(
                 #   a) 长生成期间连接始终有字节流动（防代理空闲断连）；
                 #   b) 前端「空闲看门狗」以字节到达为准判断死活——连接真死时
                 #      60s 无任何字节（含心跳）→ 前端主动断开并解锁输入。
-                _hb_stop = asyncio.Event()
+                # 【线程安全（关键）】本函数跑在 executor 工作线程上，而
+                # asyncio.Event / loop.create_task 只允许在事件循环线程调用
+                # （跨线程调用行为未定义，可能丢唤醒/竞态）。因此：
+                #   - 停止标记用 threading.Event（set()/is_set() 线程安全）；
+                #   - 心跳协程用 run_coroutine_threadsafe 提交回事件循环
+                #     （返回 concurrent.futures.Future，其 cancel() 也是线程安全的）。
+                _hb_stop = threading.Event()
 
                 async def _heartbeat():
                     """SSE 心跳循环（跑在事件循环上，每 15s 一条 : ping）。"""
@@ -339,7 +346,7 @@ async def stream_graph(
                         await asyncio.sleep(15)
                         sm.heartbeat()
 
-                _hb_task = loop.create_task(_heartbeat())
+                _hb_task = asyncio.run_coroutine_threadsafe(_heartbeat(), loop)
                 try:
                     for chunk in graph.stream(input_data, config):
                         _process_chunk(chunk)
@@ -350,7 +357,10 @@ async def stream_graph(
                         lambda: asyncio.ensure_future(sm.emit_error(str(e)))
                     )
                 finally:
+                    # 先设停止标记再 cancel：协程若正卡在 sleep 会被直接取消，
+                    # 若已退出则 cancel 是 no-op——两条路径都不泄漏任务
                     _hb_stop.set()
+                    _hb_task.cancel()
                     # 清理本线程的请求级上下文（防串到线程池的下一个任务）
                     set_forward_headers(None)
                     set_request_services(None)

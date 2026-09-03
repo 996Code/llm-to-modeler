@@ -57,6 +57,11 @@ from typing import Any, Dict, List, Optional
 # 模块级 logger,等价于 Java 里 LoggerFactory.getLogger(getClass())
 logger = logging.getLogger(__name__)
 
+# DATABASE_PATH 未配置时的默认库文件路径(相对当前工作目录)。
+# 【单一事实来源】main.py / engine/graph.py 等处的 env 默认值统一引用本常量,
+# 避免 "data/conversations.db" 字面量散落多处——改默认库路径时只动这里。
+DEFAULT_DB_PATH = "data/conversations.db"
+
 
 def _now() -> str:
     """获取当前 UTC 时间的 ISO 8601 字符串(timezone-aware,带时区)。
@@ -89,7 +94,7 @@ class ConversationStore:
       都新建连接。配合 WAL 模式,多线程读 / 单线程写,并发性足够。
     """
 
-    def __init__(self, db_path: str = "data/conversations.db"):
+    def __init__(self, db_path: str = DEFAULT_DB_PATH):
         """初始化存储。
 
         Args:

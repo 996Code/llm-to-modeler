@@ -65,6 +65,9 @@ from langgraph.graph import StateGraph, START, END
 
 from engine.graph_state import GraphState
 from engine import nodes
+# DATABASE_PATH 未配置时的默认库路径——单一事实来源在 conversation_store,
+# 此处引用同一常量,避免 "data/conversations.db" 字面量多处散落后漏改
+from services.conversation_store import DEFAULT_DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -178,17 +181,21 @@ def build_graph(
     #
     # 连接生命周期：from_conn_string 的 with 语义会在退出时 close 连接，
     # 而编译后的图在后续每次请求 stream 时仍要用 checkpointer 读写 checkpoint——
-    # 所以这里显式创建进程级长连接（check_same_thread=False：LangGraph 可能跨线程调度节点），
-    # 由 app 生命周期（lifespan）持有并随进程退出释放。与 ConversationStore 同一思路。
+    # 所以这里显式创建进程级长连接（check_same_thread=False：LangGraph 可能跨线程调度节点）。
+    # 连接引用挂在 graph._conn 上，由调用方（main.lifespan 关闭段）经
+    # getattr(app.state.graph, "_conn", None) 拿到并 close——与 ConversationStore 同一收口思路。
     import sqlite3
     from langgraph.checkpoint.sqlite import SqliteSaver
 
-    db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
-    _conn = sqlite3.connect(db_path, check_same_thread=False)
-    checkpointer = SqliteSaver(conn=_conn)
+    db_path = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    checkpointer = SqliteSaver(conn=conn)
 
     # compile 把 StateGraph 转成不可变、可调用的 CompiledStateGraph
     graph = workflow.compile(checkpointer=checkpointer)
+    # 连接挂到 graph 对象上：checkpointer 持有的这条长连接必须有人负责关，
+    # 否则进程退出前一直占用 SQLite 文件句柄（WAL 模式下还留 -wal/-shm 伴生文件）
+    graph._conn = conn
 
     logger.info(
         f"LangGraph StateGraph compiled: "

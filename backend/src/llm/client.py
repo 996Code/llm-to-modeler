@@ -149,6 +149,22 @@ class LLMClient:
             f"max_tokens={config.max_tokens}"
         )
 
+    def close(self):
+        """关闭底层 OpenAI SDK 客户端（释放其内嵌的 httpx 连接池与 socket）。
+
+        由应用生命周期调用（main.lifespan 关闭段），与 upstream.close() /
+        checkpointer 连接关闭同一收口思路——SDK 客户端不显式关闭时，
+        连接池里的 socket 要等 GC 才释放。关闭失败只记 warning，
+        不阻断其余组件的清理（@PreDestroy 链式调用不应互相影响）。
+        """
+        client = getattr(self, "client", None)
+        if client is None:
+            return
+        try:
+            client.close()
+        except Exception as e:
+            logger.warning(f"Failed to close LLM client: {e}")
+
     def _log_call(
         self,
         endpoint: str,

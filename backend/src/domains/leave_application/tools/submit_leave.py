@@ -22,8 +22,8 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-from sdk.tool import CompositeTool, ToolResult, ToolContext, AskSpec, AskQuestion, AskOption
-from domains.leave_application.upstream import SERVICE_NAME
+from sdk.tool import CompositeTool, ToolResult, ToolContext, AskSpec, AskQuestion, AskOption, ClarificationRaised
+from domains.leave_application.upstream import SERVICE_NAME, PATHS
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class SubmitLeaveTool(CompositeTool):
     # 安全声明
 
     # 管线定义
-    steps = ["parse_info", "validate_rules", "submit"]
+    steps = ["parse_info", "validate_rules", "confirm", "submit"]
     pipeline_steps = [
         {"key": "parse_info", "label": "解析请假信息"},
         {"key": "validate_rules", "label": "校验请假规则"},
@@ -177,7 +177,7 @@ class SubmitLeaveTool(CompositeTool):
 
         try:
             result = ctx.asset_client.submit_data(
-                path="/api/leave/validate",
+                path=PATHS.get("validate", "/api/leave/validate"),
                 data=leave_data,
                 service_name=SERVICE_NAME,
                 headers=ctx.forward_headers,
@@ -210,6 +210,29 @@ class SubmitLeaveTool(CompositeTool):
             ctx.emit("stage", "validate_rules_done", "请假规则校验通过 ✓ (mock)")
             state["validation_errors"] = []
 
+    def _step_confirm(self, state: dict, ctx: ToolContext) -> None:
+        """提交前确认中断：不可逆操作必须有用户确认门槛（审计④发现）。
+
+        此前字段齐全时一步直写上游（无"确认后提交"中间停顿），与
+        「AI 产物只能输出候选给用户确认」的精神不一致。
+        通过 ClarificationRaised 挂起 → 用户确认 → resume 继续跑 submit。
+        resume 时 clarify_answers 注入 tool_state，此处消费并放行。
+        """
+        if state.get("clarify_answers"):
+            # 用户已确认（resume 路径）——放行进入 submit
+            return
+        # 首次执行：挂起确认
+        leave_data = state.get("leave_data", {})
+        summary = (
+            f"即将提交请假申请：{leave_data.get('applicant', '')} "
+            f"{leave_data.get('leaveType', '')} "
+            f"({leave_data.get('startDate', '')} ~ {leave_data.get('endDate', '')})"
+        )
+        ctx.emit("stage", "confirm", "等待确认提交...")
+        raise ClarificationRaised([
+            f'{summary}。确认提交吗？（回复"确认"或"取消"）'
+        ])
+
     def _step_submit(self, state: dict, ctx: ToolContext) -> None:
         """提交请假申请（通过 AssetClient 调上游 API）。
 
@@ -222,7 +245,7 @@ class SubmitLeaveTool(CompositeTool):
 
         try:
             result = ctx.asset_client.submit_data(
-                path="/api/leave/submit",
+                path=PATHS.get("submit", "/api/leave/submit"),
                 data=leave_data,
                 service_name=SERVICE_NAME,
                 headers=ctx.forward_headers,

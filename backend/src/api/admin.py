@@ -385,7 +385,9 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
         503: 热装配失败(状态已落盘但引擎还是旧装配——返回错误让运维感知,
              下次重启会按状态文件载入正确集合)。
     """
-    from src.services.pack_manager import assemble_packs
+    # 裸包名 import(非 src.services.*):双根 sys.path 下 src.X 与 X 是两个
+    # 模块对象,thread-local(如请求 services 表)跨副本不可见(见 main.py 同款注释)
+    from services.pack_manager import assemble_packs
 
     pack_state = request.app.state.pack_state
     if not pack_state.is_discovered(name):

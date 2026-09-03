@@ -53,7 +53,9 @@ from api.meta import router as meta_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
 from llm.client import LLMClient
 # 会话存储：SQLite，以追加写事件流方式记录对话
-from services.conversation_store import ConversationStore
+# DEFAULT_DB_PATH：DATABASE_PATH 未配置时的默认库路径(单一事实来源,
+# engine/graph.py 等处引用同一常量,避免 "data/conversations.db" 字面量散落多处)
+from services.conversation_store import DEFAULT_DB_PATH, ConversationStore
 # 上游客户端：调用 njmind-modeler 做校验/增删改/拉模板（地址按请求由宿主 services 表解析）
 from services.upstream_client import UpstreamClient
 
@@ -88,8 +90,8 @@ async def lifespan(app: FastAPI):
     logger.info("Starting LLM Form Modeler (LangGraph architecture)...")
 
     # Conversation store (SQLite, append-only 事件流)
-    # DATABASE_PATH 未配置时默认 data/conversations.db（相对当前工作目录）
-    db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
+    # 默认路径收敛在 conversation_store.DEFAULT_DB_PATH(见顶部 import 注释)
+    db_path = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
     conv_store = ConversationStore(db_path)
     app.state.conversation_store = conv_store
 
@@ -107,7 +109,9 @@ async def lifespan(app: FastAPI):
     # 延迟导入：这些模块依赖 app.state 之外的重型组件，延迟到启动时加载
     # 减少模块导入阶段的副作用，也让 lifespan 内的初始化顺序更清晰
     from domains import scan_pack_dirs
-    from src.services.pack_state import PackState
+    # 注意用裸包名 services.* 而非 src.services.*:sys.path 同时含仓库根与
+    # src/ 时,src.X 与 X 会加载成两个模块对象(thread-local 双副本互不可见)
+    from services.pack_state import PackState
     from engine.graph import build_graph
     from engine.conversation import ConversationManager
     from adapters.http_asset_client import HttpAssetClient
@@ -127,18 +131,29 @@ async def lifespan(app: FastAPI):
     asset_client = HttpAssetClient(upstream=upstream)
     app.state.asset_client = asset_client  # 挂 state:同上
 
+    # 装配工具注册表/提示词/pack 路由/manifest —— 与管理端热切换(api/admin.py)
+    # 共用同一条装配路径,保证冷启动与热切换行为一致
+    from services.pack_manager import assemble_packs
+    assemble_packs(app.state, sorted(pack_state.enabled_names()))
+
     # 上下文压缩 sidechain:token 超窗口 70% 时异步 LLM 摘要(api/config.py
     # 触发),写 compacted/compact_trace 事件(管理端链路可见),下一轮以
     # [历史摘要] 前缀注入 prompt。此前该组件写好但从未装配(线上跑的是
     # 简单截断),本次接线补齐闭环。
+    # 必须在 assemble_packs 之后：compact_focus 从 pack manifest 聚合
+    # （manifest domain.compact_focus，多 pack 分号拼接）——此前声明被
+    # 静默架空（审计①发现，config.yaml 自标"待接线"两年）
     from engine.compression import CompressionSidechain
-    compressor = CompressionSidechain(llm_client=llm_client, conversation=conversation_manager)
+    _focus_parts = []
+    for _cfg in (getattr(app.state, 'pack_configs', None) or {}).values():
+        _f = (_cfg.get("domain") or {}).get("compact_focus")
+        if _f:
+            _focus_parts.append(_f.strip())
+    compressor = CompressionSidechain(
+        llm_client=llm_client, conversation=conversation_manager,
+        compact_focus="；".join(_focus_parts),
+    )
     app.state.compressor = compressor
-
-    # 装配工具注册表/提示词/pack 路由/manifest —— 与管理端热切换(api/admin.py)
-    # 共用同一条装配路径,保证冷启动与热切换行为一致
-    from src.services.pack_manager import assemble_packs
-    assemble_packs(app.state, sorted(pack_state.enabled_names()))
 
     # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）
     # build_graph 装配节点（classify_intent/execute_tool/handle_result）并编译
@@ -174,6 +189,15 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down...")
     compressor.close()  # 关闭压缩后台线程(不等待排队任务)
     upstream.close()  # 关闭 httpx 连接池，释放 socket
+    llm_client.close()  # 关闭 OpenAI SDK 底层 httpx 连接池，释放 socket
+    # 关闭 checkpointer 的 SQLite 长连接——build_graph 把连接挂在 graph._conn
+    # 上(进程级连接,check_same_thread=False),这里拿到引用统一释放
+    _checkpointer_conn = getattr(app.state.graph, "_conn", None)
+    if _checkpointer_conn is not None:
+        try:
+            _checkpointer_conn.close()
+        except Exception:
+            logger.warning("Failed to close checkpointer connection", exc_info=True)
 
 
 # 创建 FastAPI 应用，lifespan 绑定生命周期
