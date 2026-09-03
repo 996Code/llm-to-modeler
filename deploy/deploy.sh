@@ -103,12 +103,9 @@ docker run --rm -v "$PWD/frontend:/app" -w /app \
   "$NODE_IMAGE" sh -c "
     export CI=true &&
     npm config set registry https://registry.npmmirror.com &&
-    (command -v pnpm >/dev/null || npm install -g pnpm) &&
+    npm install -g pnpm@9 &&
     pnpm config set registry https://registry.npmmirror.com &&
-    (pnpm install --frozen-lockfile --dangerously-allow-all-builds ||
-     pnpm install --frozen-lockfile ||
-     pnpm install --dangerously-allow-all-builds ||
-     pnpm install) &&
+    pnpm install --frozen-lockfile &&
     pnpm run build
   " 2>&1 | tail -3
 [ -f frontend/dist/index.html ] || { err "前端构建失败"; exit 1; }
