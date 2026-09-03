@@ -1,23 +1,16 @@
-"""HttpAssetClient — AssetClient 的通用 HTTP 实现。
+"""HttpAssetClient — AssetClient 的通用 HTTP 适配器（零领域知识）。
 
-不绑 njmind。委托现有 UpstreamClient 发请求,返回前调 sanitize_obj。
-njmind 的具体路径表由 UpstreamClient 内部管理(阶段 1 暂保留),
-后续 UpstreamClient 也会从 config.yaml 读路径(本阶段不强改)。
-
-归一化:
-- validate_form 返回 {pass, errors:[str], warnings} → {valid, errors:[{message}], warnings}
-- create/update 返回 {success, ...} 原样
-
-扩展(插件化阶段):
-- submit_data / query_data: 通用数据提交/查询,供非配置类插件使用。
-  地址与配置类操作同一套解析(upstream.resolve_base:宿主 services 表
-  按请求下发,未下发 fail-closed),服务名由 pack manifest 声明、
-  工具调用时传入。返回前统一 sanitize_obj。
+职责边界：
+  - 配置类操作（模板/Schema/guide/校验/表单 CRUD）：委托 pack 注入的
+    领域客户端（njmind_form 的 ModelerAPI，经 pack.py 的
+    enhance_asset_client 钩子在装配时注入）——端点表/凭证策略/响应
+    归一化都是领域知识，归 pack；
+  - 通用数据操作（submit_data/query_data）：面向非配置类 pack，
+    按 service_name 经通用传输收发，返回前 sanitize_obj；
+  - has_service：透传通用传输的地址可用性判定（preflight 用）。
 """
 import logging
-from typing import Any, Optional
-
-import httpx
+from typing import Optional
 
 from sdk.asset_client import AssetClient
 from sdk.sanitize import sanitize_obj
@@ -26,98 +19,81 @@ logger = logging.getLogger(__name__)
 
 
 class HttpAssetClient(AssetClient):
-    """通用 HTTP 资产客户端。
-
-    本阶段(阶段 1):委托 UpstreamClient 发请求,加 sanitize 层。
-    通用数据操作(submit_data/query_data)通过 httpx 直接请求,
-    base 由 resolve_base(service_name) 按请求解析。
-    """
+    """通用 HTTP 资产适配器：领域实现注入 + 通用数据收发。"""
 
     def __init__(self, upstream):
-        """upstream: 现有 UpstreamClient 实例(数据操作经它解析服务地址)。"""
+        """upstream: 通用传输（services.upstream_client.UpstreamClient）。
+
+        配置类领域实现（modeler）由 pack 装配时经 set_modeler_api 注入；
+        未注入前配置类方法不可用（测试桩可不注入）。
+        """
         self._upstream = upstream
+        self._modeler = None
+
+    def set_modeler_api(self, modeler):
+        """注入配置类领域客户端（pack 装配钩子调用）。"""
+        self._modeler = modeler
+
+    def _m(self):
+        if self._modeler is None:
+            raise RuntimeError(
+                "配置类操作不可用：pack 未注入领域客户端（set_modeler_api）")
+        return self._modeler
 
     def _clean(self, data):
-        """返回前清洗。"""
-        # sanitize_obj:统一清理返回数据(如去除 null/归一化字段名),类比 Java 的 DTO 转换
+        """返回前清洗（去除 null/归一化字段名/清理隐写字符）。"""
         return sanitize_obj(data)
 
     def has_service(self, service_name: str) -> bool:
-        """该上游服务当前是否可解析地址（委托 UpstreamClient.has_service）。
-
-        供工具 preflight 钩子做执行前提校验：进管线前确认地址可用，
-        缺失时 fail-fast，而不是跑到第一次元数据调用才抛错。
-        """
+        """该上游服务当前是否可解析地址（透传通用传输判定，preflight 用）。"""
         return self._upstream.has_service(service_name)
 
-    # ── 表单配置类操作(原有) ──
+    # ── 表单配置类操作（领域知识归 pack，此处仅 sanitize 透传） ──
 
-    def list_templates(self) -> list[str]:
-        # 委托上游 + 清洗返回(本类只加 sanitize 层,不改业务逻辑)
-        return self._clean(self._upstream.list_templates())
+    def list_templates(self) -> list:
+        return self._clean(self._m().list_templates())
 
     def get_template(self, name: str) -> dict:
-        data = self._upstream.get_template(name)
-        # 上游可能返回 None(模板不存在),兜底成空 dict 避免下游 KeyError
+        data = self._m().get_template(name)
         return self._clean(data) if data else {}
 
     def get_schema(self, name: str) -> dict:
-        data = self._upstream.get_schema(name)
+        data = self._m().get_schema(name)
         return self._clean(data) if data else {}
 
     def get_guide(self) -> dict:
-        data = self._upstream.get_guide()
+        data = self._m().get_guide()
         # None 透传语义：上游失败/假200信封——工具层据此追问用户刷新重开,
         # 不再静默降级成空 guide 盲跑(真实事故:整轮无类型表烧了3分半重试)
         return self._clean(data) if data else None
 
     def get_guide_for(self, service_name: str) -> dict:
-        """按服务名取上游 guide（嵌入模式多服务地址）。
-
-        委托 UpstreamClient.get_guide_for（resolve_base + 带 base 缓存键）。
-        """
-        data = self._upstream.get_guide_for(service_name)
-        return self._clean(data) if data else {}
+        data = self._m().get_guide_for(service_name)
+        return self._clean(data) if data else None
 
     def validate_artifact(self, artifact: dict, mode: str) -> dict:
-        """归一化上游 {pass, errors:[str]} → {valid, errors:[{message}]}。"""
-        # mode 统一大写:上游接口要求大写枚举(CREATE/UPDATE)
-        raw = self._upstream.validate_form(artifact, mode=mode.upper())
-        raw = self._clean(raw) or {}  # 清洗 + 防 None
-        return {
-            "valid": raw.get("pass", False),  # 上游用 pass,统一成 valid
-            # errors 统一成 [{message}] 结构:字符串包成对象,对象原样保留
-            "errors": [{"message": e} if isinstance(e, str) else e
-                       for e in (raw.get("errors") or [])],
-            "warnings": raw.get("warnings") or [],
-        }
+        """校验（mode 统一大写：上游接口要求 CREATE/UPDATE 枚举）。"""
+        raw = self._m().validate_form(artifact, mode=mode.upper())
+        return self._clean(raw) or {"valid": False, "errors": [], "warnings": []}
 
     def persist_artifact(self, artifact: dict, mode: str) -> dict:
-        """落库（预留接口，当前无调用方——「AI 永不落库」不变量，见设计文档 §7.5）。
-
-        update 模式走 UpstreamClient.update_form（按 formCode 更新），
-        不再用 create 兜底——create 兜底会把已有表单另建一份新记录。
-        """
+        """落库（预留接口，「AI 永不落库」不变量；update 按 formCode 定位）。"""
         if mode == "create":
-            result = self._upstream.create_form(artifact)
+            result = self._m().create_form(artifact)
         elif mode == "update":
             form_code = artifact.get("formCode")
             if not form_code:
                 raise ValueError("update 模式缺少 formCode，无法定位要更新的表单")
-            result = self._upstream.update_form(form_code, artifact)
+            result = self._m().update_form(form_code, artifact)
         else:
-            # 未知 mode:直接抛(防御性编程)
-            # 抛异常而非静默处理：mode 错误是编程 bug，应尽早暴露
             raise ValueError(f"unknown mode: {mode}")
-        return self._clean(result) or {}  # 清洗 + 防 None
+        return self._clean(result) or {}
 
     def get_form(self, form_code: str) -> Optional[dict]:
-        """根据 formCode 查询已有表单配置(委托 UpstreamClient)。"""
-        result = self._upstream.get_form(form_code)
-        # 找不到返回 None(区别于空 dict:None 表示不存在,空 dict 表示存在但无数据)
+        result = self._m().get_form(form_code)
         return self._clean(result) if result else None
 
-    # ── 通用数据操作(插件化扩展) ──
+    # ── 通用数据操作（非配置类 pack，按 service_name 经通用传输） ──
 
     def submit_data(self, path: str, data: dict, service_name: str,
                     headers: dict = None) -> dict:
@@ -126,70 +102,60 @@ class HttpAssetClient(AssetClient):
         Args:
             path: 相对该服务 base 的 API 路径,如 "/api/leave/submit"
             data: 提交的数据体
-            service_name: pack manifest 声明的上游服务名(决定 base,见 resolve_base)
-            headers: 额外请求头(如 forward_headers)
-
-        Returns:
-            上游返回的 JSON,统一归一化:
-            - success: bool (从 "pass" 或 "success" 字段推断)
-            - errors: list[str] (原始错误列表)
-            - 其余字段原样透传
+            service_name: pack manifest 声明的上游服务名(决定 base)
+            headers: 额外请求头(如 forward_headers;默认走透传凭证)
         """
-        req_headers = {"Content-Type": "application/json"}  # 默认 JSON 头（POST 带体）
-        if headers:
-            # 合并透传头（如 forward_headers 里的鉴权 token），覆盖默认
-            # 类比 Java 的 HttpHeaders 多源合并
-            req_headers.update(headers)
         try:
-            # 地址与配置类操作同一套解析；解析失败(宿主表未下发该服务)
-            # 同样走 Fail-Closed 降级,调用方拿 success=False 统一处理
-            base = self._upstream.resolve_base(service_name)
-            url = f"{base}{path}"
-            # httpx POST:超时 10 秒(防止上游卡死拖垮整个请求)
-            # timeout=10 是硬限制，超时后抛 ReadTimeout
-            resp = httpx.post(url, json=data, headers=req_headers, timeout=10)
-            result = resp.json()  # 解析响应 JSON
+            if headers:
+                return self._submit_with_extra(service_name, path, data, headers)
+            result, err = self._upstream.post(
+                service_name, path, json_body=data, auth=True)
+            if result is None:
+                # Fail-Closed：地址不可解析/网络失败/假200信封统一降级，
+                # 调用方拿 success=False 处理，无需 try-catch
+                return {"success": False, "errors": [err or "unknown"]}
         except Exception as e:
-            # 网络异常/超时/解析失败/地址不可解析:降级返回失败结构,不向上抛
-            # Fail-Closed：返回 success=False，调用方能正常处理失败，无需 try-catch
+            # 地址不可解析等传输层抛错：同样 Fail-Closed 降级
+            return {"success": False, "errors": [str(e)]}
+        result = self._clean(result) or {}
+        # 归一化:上游可能返回 "pass" 或 "success",统一成 success
+        if "success" not in result and "pass" in result:
+            result["success"] = result["pass"]
+        return result
+
+    def _submit_with_extra(self, service_name, path, data, extra):
+        """带自定义头的提交（透传头 + 额外头合并；仍走传输的地址解析）。"""
+        import httpx
+        try:
+            merged = {**(self._upstream._headers(True) or {}), **extra}
+            url = f"{self._upstream.resolve_base(service_name)}{path}"
+            resp = httpx.post(url, json=data, headers=merged, timeout=10)
+            result = self._clean(resp.json()) or {}
+            if "success" not in result and "pass" in result:
+                result["success"] = result["pass"]
+            return result
+        except Exception as e:
             logger.warning(f"submit_data POST {service_name}{path} failed: {e}")
             return {"success": False, "errors": [str(e)]}
 
-        result = self._clean(result) or {}  # 清洗 + 防 None
-        # 归一化:上游可能返回 "pass" 或 "success",统一成 success
-        # 有些上游用 pass（兼容校验接口风格），有些用 success，这里做字段名统一
-        if "success" not in result and "pass" in result:
-            result["success"] = result["pass"]  # pass 值复制到 success
-        return result
-
     def query_data(self, path: str, service_name: str, params: dict = None,
                    headers: dict = None) -> dict:
-        """查询上游数据(GET)。
-
-        Args:
-            path: 相对该服务 base 的 API 路径,如 "/api/leave/status"
-            service_name: pack manifest 声明的上游服务名(决定 base,见 resolve_base)
-            params: 查询参数
-            headers: 额外请求头(如 forward_headers)
-
-        Returns:
-            上游返回的 JSON(dict)
-        """
-        req_headers = {}
-        if headers:
-            # 合并透传头(GET 一般不需 Content-Type,因为没有 body)
-            req_headers.update(headers)
+        """查询上游数据(GET,按 service_name 经通用传输)。"""
         try:
-            base = self._upstream.resolve_base(service_name)
-            url = f"{base}{path}"
-            # httpx GET:参数通过 params 传递(会拼到 query string)
-            # params={} 或 None 都行：params or {} 防止传 None 报错
-            resp = httpx.get(url, params=params or {}, headers=req_headers, timeout=10)
-            result = resp.json()  # 解析响应 JSON
+            if headers:
+                return self._query_with_extra(service_name, path, params, headers)
+            data = self._upstream.get(service_name, path, auth=True)
+            return self._clean(data) or {}
         except Exception as e:
-            # 异常降级:返回失败结构,不向上抛(保证调用方稳定)
-            # Fail-Closed：调用方拿到 success=False 就知道查询失败
-            logger.warning(f"query_data GET {service_name}{path} failed: {e}")
             return {"success": False, "errors": [str(e)]}
 
-        return self._clean(result) or {}  # 清洗 + 防 None
+    def _query_with_extra(self, service_name, path, params, extra):
+        import httpx
+        try:
+            merged = {**(self._upstream._headers(True) or {}), **extra}
+            url = f"{self._upstream.resolve_base(service_name)}{path}"
+            resp = httpx.get(url, params=params or {}, headers=merged, timeout=10)
+            return self._clean(resp.json()) or {}
+        except Exception as e:
+            logger.warning(f"query_data GET {service_name}{path} failed: {e}")
+            return {"success": False, "errors": [str(e)]}

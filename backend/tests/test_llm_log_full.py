@@ -128,8 +128,7 @@ def test_call_context_binds_upstream_logs(store):
     bind_conversation("conv-upstream")
     try:
         # 模拟插件经 asset_client 触发的上游调用(方法内部即调 _log_call,无 conv_id 参数)
-        up._log_call("endpoint=/api/form/get", request_data={"code": "F1"},
-                     status_code=200, duration_ms=12)
+        up._log("endpoint=/api/form/get", status_code=200, duration=12)
     finally:
         clear_conversation()
 

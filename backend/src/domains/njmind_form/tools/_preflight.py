@@ -11,9 +11,7 @@ from typing import Optional
 
 from sdk.tool import ToolContext, ToolResult
 
-# pack manifest（config.yaml services 段）声明的服务名——单一事实源在同目录
-# config.yaml，此处若改名需两处同步
-MODELER_SERVICE = "njmind-modeler"
+from domains.njmind_form.upstream import SERVICE_NAME as MODELER_SERVICE
 
 
 def require_modeler_service(ctx: ToolContext) -> Optional[ToolResult]:

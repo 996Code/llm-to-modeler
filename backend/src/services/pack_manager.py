@@ -54,6 +54,22 @@ def assemble_packs(app_state: Any, pack_names: Optional[List[str]] = None) -> Di
     registry, prompt_loader, pack_routers, pack_tools = load_all_packs(pack_names=pack_names)
     pack_configs = load_pack_configs(pack_names=pack_names)
 
+    # pack 可选钩子 enhance_asset_client(asset_client, upstream)：向通用
+    # adapter 注入本 pack 的领域客户端（端点表/凭证策略/响应归一化归 pack，
+    # adapter/传输层零领域知识）。无此钩子的 pack（如纯数据类）跳过；
+    # 测试态 app_state 可能缺 upstream，一并守卫。
+    if (getattr(app_state, "asset_client", None) is not None
+            and getattr(app_state, "upstream", None) is not None):
+        import importlib
+        for pack_name in (pack_configs or {}):
+            try:
+                mod = importlib.import_module(f"domains.{pack_name}.pack")
+                hook = getattr(mod, "enhance_asset_client", None)
+                if callable(hook):
+                    hook(app_state.asset_client, app_state.upstream)
+            except ImportError:
+                continue
+
     # 重新注入节点模块全局:graph 对象不重建(见模块文档),
     # 节点函数执行时读到的就是这套新依赖
     nodes.configure(

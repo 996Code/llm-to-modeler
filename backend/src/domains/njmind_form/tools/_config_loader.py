@@ -122,3 +122,32 @@ def sanitize_guide(raw: Any) -> Dict[str, Any]:
     logging.getLogger(__name__).warning(
         f"guide 无效(缺 fieldTypes)，降级为空 guide: {str(raw)[:120]}")
     return {}
+
+
+# 上游端点路径表缓存（config.yaml paths 段，单一事实源）
+_PATHS: Optional[Dict[str, Any]] = None
+
+
+def load_paths() -> Dict[str, Any]:
+    """读取 config.yaml 的 paths 表（上游端点路径，相对服务 base）。
+
+    换部署环境或上游 API 升级只改 config.yaml，不改代码——这张表
+    此前声明了却从未被读取（端点路径硬编码在通用传输层，违反分层）。
+    """
+    global _PATHS
+    if _PATHS is None:
+        import yaml
+        cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        _PATHS = cfg.get("paths") or {}
+    return _PATHS
+
+
+def load_service_name() -> str:
+    """读取 manifest 声明的上游服务名（services 段的第一个 key）。
+
+    与宿主 services 表的 key 对应（has_service/resolve_base 按此名解析）。
+    """
+    import yaml
+    cfg = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    services = cfg.get("services") or {}
+    return next(iter(services), "")

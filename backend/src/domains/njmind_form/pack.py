@@ -101,3 +101,15 @@ def create_router(registry: ToolRegistry = None):
     if registry is None:
         registry = create_registry()
     return NjmindFormRouter(registry)
+
+
+def enhance_asset_client(asset_client, upstream):
+    """pack 装配钩子：向通用 adapter 注入本 pack 的领域客户端。
+
+    端点表/服务名/凭证策略/响应归一化都是 njmind 领域知识，住在
+    domains/njmind_form/upstream.py；adapter（HttpAssetClient）保持零
+    领域知识，配置类方法全部委托此处注入的 ModelerAPI。
+    pack_manager 装配/热切换时调用（可选钩子，无此函数的 pack 跳过）。
+    """
+    from domains.njmind_form.upstream import ModelerAPI
+    asset_client.set_modeler_api(ModelerAPI(upstream))
