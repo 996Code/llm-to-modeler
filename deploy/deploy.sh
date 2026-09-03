@@ -150,10 +150,15 @@ log "   debs 就绪（$(ls backend/debs | wc -l) 个包）"
 # ── ③ 打镜像（纯 COPY，零联网 build）───────────────────────────────────
 log "③ 打镜像 ${IMAGE_NAME}:${GIT_TAG}（纯 COPY）..."
 # 构建上下文 = backend/（deps/src/dist/debs/Dockerfile 同处）
+# ⚠ dist 必须从 frontend/ 同步过来:Dockerfile 的 COPY dist/ 指 backend/dist。
+# 缺这步时镜像会一直打进 backend/ 下的陈旧 dist（真实事故:线上前端
+# 停在 8-21 的手工拷贝,管理页缺失、新功能两周未上线）
+rm -rf backend/dist && cp -R frontend/dist backend/dist
 cp deploy/single/Dockerfile backend/Dockerfile
 cp deploy/single/nginx.conf backend/nginx-single.conf
 cp deploy/single/start.sh backend/start-single.sh
 docker build -t "${IMAGE_NAME}:${GIT_TAG}" -t "${IMAGE_NAME}:latest" backend/
+rm -f backend/Dockerfile backend/nginx-single.conf backend/start-single.sh
 
 # ── ④ compose 切换容器（记录旧 TAG 供回滚）────────────────────────────
 OLD_TAG=$(dc ps --format '{{.Image}}' 2>/dev/null | sed 's/.*://' || true)
