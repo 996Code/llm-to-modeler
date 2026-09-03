@@ -59,8 +59,16 @@ class SubmitLeaveTool(CompositeTool):
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行管线。parse_info 可能设置 _need_clarify 标记,
-        此时跳过后续步骤,直接返回追问。"""
+        此时跳过后续步骤,直接返回追问。confirm 步骤取消时设置
+        _cancelled 标记，跳过后续并返回取消回复。"""
         self.run_pipeline(state, ctx)
+
+        # ── 取消分支:用户在确认步回答了"取消" ──
+        if state.get("_cancelled"):
+            return ToolResult(
+                reply="已取消提交，本次未向上游发送任何数据。",
+                summary="已取消请假提交",
+            )
 
         # ── 追问分支:信息不足,需要用户补充 ──
         if state.get("_need_clarify"):
@@ -215,13 +223,18 @@ class SubmitLeaveTool(CompositeTool):
 
         此前字段齐全时一步直写上游（无"确认后提交"中间停顿），与
         「AI 产物只能输出候选给用户确认」的精神不一致。
-        通过 ClarificationRaised 挂起 → 用户确认 → resume 继续跑 submit。
-        resume 时 clarify_answers 注入 tool_state，此处消费并放行。
+        首次执行挂起（ClarificationRaised）→ 用户回答 → resume 重跑本工具，
+        clarify_answers 注入 tool_state 后本步骤消费：
+        回答含取消语义 → 置 _cancelled 短路管线；否则放行 submit。
         """
-        if state.get("clarify_answers"):
-            # 用户已确认（resume 路径）——放行进入 submit
-            return
-        # 首次执行：挂起确认
+        answers = state.get("clarify_answers") or {}
+        if answers:
+            reply = str(answers.get("text", answers) if isinstance(answers, dict) else answers)
+            if any(w in reply for w in ("取消", "不要", "算了", "否")):
+                state["_cancelled"] = True
+                state["_need_clarify"] = True  # 断掉后续步骤(execute 先查 _cancelled)
+                return
+            return  # 确认（或非取消表述）→ 放行 submit
         leave_data = state.get("leave_data", {})
         summary = (
             f"即将提交请假申请：{leave_data.get('applicant', '')} "

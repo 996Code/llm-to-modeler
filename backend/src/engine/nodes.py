@@ -126,8 +126,8 @@ def classify_intent_node(state: GraphState) -> dict:
             # 二级路由由 pack 提供领域规则；引擎只传消息/画布/历史与 LLM 客户端
             # conv_id(可选契约):pack 路由内部若调 LLM,用它关联调用日志到会话。
             # 按签名协商传入——旧 pack 的 route 可能没有这个参数,硬传会
-            # TypeError 被兜底吞掉(真实事故:njmind_form 规则路由被兜到 chat,
-            # 闲聊工具谎称"已创建表单")。inspect 一次判断,无重试副作用。
+            # TypeError 被兜底吞掉(真实事故:某 pack 的规则路由被兜到闲聊工具,
+            # 闲聊工具谎称"已创建制品")。inspect 一次判断,无重试副作用。
             route_kwargs = {}
             if conversation_id and _route_accepts_conv_id(router):
                 route_kwargs["conv_id"] = conversation_id
@@ -149,13 +149,13 @@ def classify_intent_node(state: GraphState) -> dict:
     # 兜底:没选到工具时用 fallback
     # 类比 Java：try-catch 兜底默认值，保证流程不中断
     if not tool_name:
-        tool_name = _get_fallback_tool_name()  # 通常兜底到 chat 闲聊工具
+        tool_name = _get_fallback_tool_name()  # 通常兜底到闲聊类工具
         intent_reason = "fallback"  # 标记为兜底，便于日志区分
 
     # 路由观测日志：一次 INFO 看全"画布上下文到没到 + 选了什么工具"。
-    # 背景：曾出现"画布明明有表单却走了 create_form 生成全新 key"的事故，
+    # 背景：曾出现"画布明明已有制品却走了新建工具生成全新 key"的事故，
     # 排查要跨三端挖会话库——这行日志让定位缩短到一眼（artifact_bytes=0
-    # = 宿主上下文没到后端，查嵌入链路；非 0 但选了 create = 话术命中创建规则）。
+    # = 宿主上下文没到后端，查嵌入链路；非 0 但选了新建工具 = 话术命中创建规则）。
     # 注意：引擎不解析 artifact 内部结构（字段数是领域语义，归 pack），
     # 只用序列化字节数做通用度量。
     _artifact = state.get(CONTEXT_ARTIFACT)
@@ -192,7 +192,7 @@ def classify_intent_node(state: GraphState) -> dict:
             "forward_headers": state.get("forward_headers", {}),  # 透传鉴权头
             # 图片识别:stream.py 放进初始 tool_state 的图片在此透传。
             # 修复前的断链:classify 重建 tool_state 时丢掉该键,
-            # image_form 收到"未提供图片"(LangGraph 重构遗留回归)。
+            # 图片类工具收到"未提供图片"(LangGraph 重构遗留回归)。
             "image_base64": state.get("tool_state", {}).get("image_base64"),
         },
         "sse_events": sse_events,
@@ -228,7 +228,7 @@ def execute_tool_node(state: GraphState) -> dict:
     # 构建 SSE emit 回调
     # 两条通道（互斥，避免重复推送）：
     #   实时通道：本请求的 StreamManager 直推（sm.stage 线程安全）——工具每 emit
-    #             一步前端立刻看到，不用等节点跑完（大表单 modify 100s 期间进度
+            #             一步前端立刻看到，不用等节点跑完（大型制品增量修改 100s 期间进度
     #             全靠它，之前憋到节点结束才吐是"卡在上个阶段"的根因）；
     #   列表通道：append 进 sse_events，随节点 chunk 由 _process_chunk 推送——
     #             不经 stream_graph 的调用方（脚本直跑图等）的兜底。
@@ -374,7 +374,7 @@ def execute_tool_node(state: GraphState) -> dict:
         )
 
         interrupt_value = {
-            "questions": questions_data,  # 结构化问题（前端渲染表单用）
+            "questions": questions_data,  # 结构化问题（前端渲染追问界面用）
             "summary": questions_text,  # 文本摘要（前端直接展示用）
         }
 
@@ -388,7 +388,7 @@ def execute_tool_node(state: GraphState) -> dict:
         # ── resume 后到这里 ──
         # 把用户的回答注入 tool_state,准备重跑工具
         logger.info(f"Resumed with answer: {answer}")
-        # answer 可能是 dict（表单回答）或字符串，统一成 dict 结构
+        # answer 可能是 dict（结构化回答）或字符串，统一成 dict 结构
         tool_state["clarify_answers"] = answer if isinstance(answer, dict) else {"text": str(answer)}
 
         # ★ 关键:清除上一轮的中断标记,否则 run_pipeline 会在第一步前就 break,
@@ -448,16 +448,16 @@ def handle_result_node(state: GraphState) -> dict:
         })
 
     elif result.reply:
-        # 状态二：闲聊回复 —— chat 工具的直接文本回复
+        # 状态二：闲聊回复 —— 闲聊工具的直接文本回复
         sse_events.append({
             "type": "result",
             "data": {"intent": "general", "reply": result.reply, "summary": result.summary},
         })
 
     elif result.artifact:
-        # 状态三：制品结果 —— 生成了表单配置或数据
+        # 状态三：制品结果 —— 生成了制品配置或数据
         artifact_type = getattr(result, 'artifact_type', 'config')  # config 或 data
-        config = result.artifact  # 制品内容（表单 JSON 或查询数据）
+        config = result.artifact  # 制品内容（配置 JSON 或查询数据）
         formatted = result.extra.get("formatted", {})  # 格式化字段(钩子产出,经 extra 自由通道)
         # 校验无错误才算 valid：影响前端是否显示"保存"按钮
         # (显式 ToolResult 字段,从 extra 魔法键升格——引擎不再伸手进领域扩展区)
@@ -474,7 +474,7 @@ def handle_result_node(state: GraphState) -> dict:
             payload.update(formatted)  # 合并格式化字段
             sse_events.append({"type": "result", "data": payload})
         else:
-            # 配置型制品（表单配置）—— 需要带校验错误给前端
+            # 配置型制品 —— 需要带校验错误给前端
             # 归一化 validationErrors:统一为 [{message: str}] 格式
             raw_errors = result.validation_errors or []
             # 列表推导：字符串包装成对象，统一结构便于前端渲染
@@ -483,7 +483,7 @@ def handle_result_node(state: GraphState) -> dict:
                 for e in raw_errors
             ]
             payload = {
-                "config": config,  # 表单配置 JSON
+                "config": config,  # 制品配置 JSON
                 "valid": is_valid,  # 是否通过校验
                 "validationErrors": normalized_errors,  # 校验错误列表
                 "summary": result.summary,
@@ -507,7 +507,7 @@ def handle_result_node(state: GraphState) -> dict:
 def route_by_tool(state: GraphState) -> str:
     """classify_intent 之后:根据 tool_name 路由。
 
-    所有工具都走 execute_tool 节点(包括 chat),
+    所有工具都走 execute_tool 节点(包括闲聊工具),
     因为 execute_tool 内部会统一处理 ToolResult 三态。
     """
     tool_name = state.get("tool_name", "")
@@ -639,22 +639,26 @@ def _get_fallback_tool_name() -> str:
 
     优先级：pack manifest 声明 fallback_tool → 声明 fallback=true 的
     pack 里的第一个工具 → 全局第一个工具。
-    此前硬编码 "chat"——多 pack 部署下任何 pack 的路由失败都会跨域
-    兜到 njmind_form 的闲聊工具（审计①发现）。
+    此前兜底工具名硬编码——多 pack 部署下任何 pack 的路由失败都会跨域
+    兜到固定 pack 的闲聊工具（审计①发现）。
     """
     # 优先级 1：pack 声明的 fallback_tool（manifest domain.fallback_tool）
     for cfg in (_pack_configs or {}).values():
         name = (cfg.get("domain") or {}).get("fallback_tool")
         if name and _registry.get(name):
             return name
-    # 优先级 2：声明 fallback=true 的 pack 里第一个工具
+    # 优先级 2：声明 fallback=true 的 pack 的第一个工具
+    # （router._registry 是 pack_router 构造注入的注册表，pack 侧契约成员）
     for pack_name, cfg in (_pack_configs or {}).items():
-        if (cfg.get("domain") or {}).get("fallback"):
-            for tool in _registry.all():
-                if tool.name in ((_pack_routers.get(pack_name) and
-                                  _pack_routers[pack_name]._registry and
-                                  [t.name for t in _pack_routers[pack_name]._registry.all()]) or []):
-                    return tool.name
+        if not (cfg.get("domain") or {}).get("fallback"):
+            continue
+        router = _pack_routers.get(pack_name)
+        if router is None:
+            continue
+        pack_tool_names = {t.name for t in router._registry.all()}
+        for tool in _registry.all():
+            if tool.name in pack_tool_names:
+                return tool.name
     # 优先级 3：全局第一个工具（聊胜于无；工具自身 validate_input 会再挡）
     tools = _registry.all()
     return tools[0].name if tools else "chat"
