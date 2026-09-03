@@ -101,16 +101,18 @@ class TestLeaveConfirmGate:
         assert "确认提交" in ei.value.questions[0]
 
     def test_confirm_answer_proceeds(self):
-        """回答"确认" → 放行（不抛、不置取消标记）。"""
+        """回答"确认"（挂起者=confirm）→ 放行（不抛、不置取消标记）。"""
         tool = SubmitLeaveTool()
         state = self._tool_state(answers={"text": "确认"})
+        state["_awaiting"] = "confirm"
         tool._step_confirm(state, _ctx())
         assert not state.get("_cancelled")
 
     def test_cancel_answer_short_circuits(self):
-        """回答"取消" → _cancelled+_need_clarify 置位（execute 短路成取消回复）。"""
+        """回答"取消"（挂起者=confirm）→ 短路标记置位。"""
         tool = SubmitLeaveTool()
         state = self._tool_state(answers={"text": "取消"})
+        state["_awaiting"] = "confirm"
         tool._step_confirm(state, _ctx())
         assert state["_cancelled"] is True
         assert state["_need_clarify"] is True

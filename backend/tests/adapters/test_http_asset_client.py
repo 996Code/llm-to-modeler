@@ -99,10 +99,12 @@ class TestDataOpsViaTransport:
         assert result["success"] is False
 
     def test_query_data_via_transport(self):
+        """params 必须透传（终审#1 回归锚：曾整参被吞，查询条件失效）。"""
         client = HttpAssetClient(upstream=MagicMock())
         client._upstream.get.return_value = {"status": "approved"}
         result = client.query_data(path="/api/leave/status",
                                    service_name="leave-system", params={"q": 1})
         client._upstream.get.assert_called_once_with(
-            "leave-system", "/api/leave/status", auth=True, extra_headers=None)
+            "leave-system", "/api/leave/status", auth=True,
+            params={"q": 1}, extra_headers=None)
         assert result["status"] == "approved"

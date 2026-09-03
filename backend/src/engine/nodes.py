@@ -648,14 +648,16 @@ def _get_fallback_tool_name() -> str:
         if name and _registry.get(name):
             return name
     # 优先级 2：声明 fallback=true 的 pack 的第一个工具
-    # （router._registry 是 pack_router 构造注入的注册表，pack 侧契约成员）
+    # （_registry 是 DefaultPackRouter 构造注入的成员；裸 Protocol 实现的
+    # 自定义路由可能没有——防御性 getattr 跳过，不让兜底路径炸请求）
     for pack_name, cfg in (_pack_configs or {}).items():
         if not (cfg.get("domain") or {}).get("fallback"):
             continue
         router = _pack_routers.get(pack_name)
-        if router is None:
+        pack_registry = getattr(router, "_registry", None) if router else None
+        if pack_registry is None:
             continue
-        pack_tool_names = {t.name for t in router._registry.all()}
+        pack_tool_names = {t.name for t in pack_registry.all()}
         for tool in _registry.all():
             if tool.name in pack_tool_names:
                 return tool.name

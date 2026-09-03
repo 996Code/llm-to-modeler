@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 
 # 与 config.yaml services 声明同源（load_service_name 读 manifest 首个 key；
 # _preflight 的 MODELER_SERVICE 也引用此处——改 manifest 即生效，无平行源）
-SERVICE_NAME = load_service_name() or "njmind-modeler"
+# manifest 缺 services 段时为空串——has_service("")=False，preflight
+# fail-closed 拦截并报配置错误，不静默回退硬编码名（平行源复活）
+SERVICE_NAME = load_service_name()
 
 
 class ModelerAPI:
@@ -104,17 +106,22 @@ class ModelerAPI:
         }
 
     def persist_artifact(self, artifact: Dict[str, Any], mode: str) -> Optional[Dict[str, Any]]:
-        """落库（预留接口；主键提取与 create/update 分路归 pack）。"""
+        """落库（预留接口；主键提取与 create/update 分路归 pack）。
+
+        未知 mode 显式报错（编程错误尽早暴露），不静默按 update 发请求。
+        """
         if mode == "create":
             data, _err = self._t.post(SERVICE_NAME, self._path("create"),
                                       json_body=artifact, auth=True)
             return data
-        form_code = artifact.get("formCode")
-        if not form_code:
-            raise ValueError("update 模式缺少 formCode，无法定位要更新的表单")
-        data, _err = self._t.post(SERVICE_NAME, self._path("update", code=form_code),
-                                  json_body=artifact, auth=True)
-        return data
+        if mode == "update":
+            form_code = artifact.get("formCode")
+            if not form_code:
+                raise ValueError("update 模式缺少 formCode，无法定位要更新的表单")
+            data, _err = self._t.post(SERVICE_NAME, self._path("update", code=form_code),
+                                      json_body=artifact, auth=True)
+            return data
+        raise ValueError(f"unknown mode: {mode}")
 
     def get_artifact(self, entry_id: str) -> Optional[Dict[str, Any]]:
         """按制品标识（formCode）查询已有配置。"""

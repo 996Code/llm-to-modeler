@@ -142,7 +142,7 @@ class AssetClient(ABC):
         """
         # self.__class__.__name__ 取运行时子类类名,放进错误信息便于定位。
         raise NotImplementedError(
-            f"{self.__class__.__name__} 未实现 get_form; "
+            f"{self.__class__.__name__} 未实现 get_artifact; "
             "如需查询表单请覆写此方法或使用 HttpAssetClient"
         )
 

@@ -30,5 +30,5 @@ def load_service_name() -> str:
     return next(iter(services), "")
 
 
-SERVICE_NAME = load_service_name() or "leave-system"
+SERVICE_NAME = load_service_name()  # 缺声明为空串→preflight fail-closed
 PATHS = load_paths()

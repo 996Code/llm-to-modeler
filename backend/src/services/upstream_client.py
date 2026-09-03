@@ -170,6 +170,7 @@ class UpstreamClient:
 
     def get(self, service_name: str, path: str, *,
             auth: bool = True, cache: bool = False,
+            params: Optional[dict] = None,
             extra_headers: Optional[Dict[str, str]] = None) -> Optional[Any]:
         """GET 并解析 JSON。成功返回 data；失败（网络/非2xx/假200信封）返回 None。
 
@@ -177,17 +178,20 @@ class UpstreamClient:
             service_name: pack manifest 声明的服务名（决定 base）。
             path: 相对该服务 base 的路径（领域客户端从 manifest paths 表取）。
             auth: True 附带本请求透传头（业务端点）；False 匿名（静态公共资产）。
-            cache: True 时按 (base, path) 做 TTL 缓存（仅静态读内容使用）。
+            cache: True 时按 (base, path) 做 TTL 缓存；params 非空时禁用
+                （缓存键不含查询串，带参请求命中会串数据）。
+            params: 查询参数（拼 query string）。
             extra_headers: 额外头（如 Content-Type），与透传头合并、同名覆盖。
         """
         url = f"{self.resolve_base(service_name)}{path}"
-        if cache:
+        if cache and not params:
             cached = self._get_cached(url)
             if cached is not None:
                 return cached
         start = time.time()
         try:
-            resp = self._client.get(url, headers=self._headers(auth, extra_headers))
+            resp = self._client.get(url, params=params,
+                                    headers=self._headers(auth, extra_headers))
             resp.raise_for_status()
             data = resp.json()
             env_msg = self._envelope_error_msg(data)
@@ -195,7 +199,7 @@ class UpstreamClient:
                 logger.warning(f"GET {path} 假200业务信封: {env_msg}")
                 self._log(url, error_message=f"业务信封: {env_msg}", duration=self._ms(start))
                 return None
-            if cache:
+            if cache and not params:
                 self._set_cached(url, data)
             self._log(url, status_code=resp.status_code, duration=self._ms(start))
             return data
@@ -289,5 +293,8 @@ class UpstreamClient:
             logger.warning(f"Failed to save upstream call log: {e}")
 
     def close(self):
-        """关闭 HTTP 客户端，释放连接池。"""
-        self._client.close()
+        """关闭 HTTP 客户端，释放连接池（失败不阻断清理链的后续组件）。"""
+        try:
+            self._client.close()
+        except Exception as e:
+            logger.warning(f"upstream close failed: {e}")

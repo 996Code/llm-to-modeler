@@ -91,7 +91,7 @@ class QueryLeaveStatusTool(Tool):
             # 通过抽象的 AssetClient 调上游,不直接 httpx
             # forward_headers 透传鉴权头(嵌入模式下由宿主系统提供)
             result = ctx.asset_client.query_data(
-                path=PATHS.get("status", "/api/leave/status"),
+                path=PATHS["status"],
                 service_name=SERVICE_NAME,
                 params={"query": user_input},
                 headers=ctx.forward_headers,

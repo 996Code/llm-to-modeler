@@ -4,8 +4,7 @@ domain:
   fallback: true   # 无任何领域匹配时的兜底 pack（闲聊/能力询问由本域 chat 承接）
   fallback_tool: chat  # 工具级兜底：路由失败/LLM 编造工具名时兜到闲聊工具（声明驱动，引擎不硬编码）
   # 历史压缩摘要的侧重点（注入引擎压缩 prompt，领域措辞归 pack、引擎不写死）。
-  # ⚠ 待接线：CompressionSidechain（LLM 摘要链路）尚未接入生产主链（当前
-  # build_compressed_history 仅截断），接线时从此声明读取传给构造参数
+  # 装配时由 pack_manager 聚合注入 CompressionSidechain（冷启动与热切换同一路径）
   compact_focus: 创建了什么表单、修改了哪些字段、配置结果
 
 # njmind-form pack 静态配置

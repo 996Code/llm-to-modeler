@@ -17,9 +17,8 @@ from domains.njmind_form.upstream import SERVICE_NAME as MODELER_SERVICE
 def require_modeler_service(ctx: ToolContext) -> Optional[ToolResult]:
     """校验 njmind-modeler 地址可用。None=通过；ToolResult=拦截。
 
-    has_service 不在 AssetClient 抽象契约内（通用 ABC 无此方法），
-    用 getattr 探测：非 HTTP 实现（测试桩等）视为通过，运行期由
-    resolve_base 的 fail-closed 兜底。
+    has_service 是 AssetClient ABC 钩子（默认 True 兜非 HTTP 实现/测试桩），
+    运行期由 resolve_base 的 fail-closed 兜底。
     """
     has = getattr(ctx.asset_client, "has_service", None)
     if callable(has) and not has(MODELER_SERVICE):

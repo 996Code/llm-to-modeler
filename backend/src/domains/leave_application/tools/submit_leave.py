@@ -109,9 +109,13 @@ class SubmitLeaveTool(CompositeTool):
         user_input = state.get("user_input", "")
         compressed_history = state.get("compressed_history", "")
 
-        # 如果是追问恢复,用户回答已经在 state 里,合并到 user_input
-        clarify_answers = state.get("clarify_answers", {})
-        if clarify_answers:
+        # 消费本轮 resume 回答——仅当挂起者是本步骤（_awaiting 路由）。
+        # clarify_answers 在 ask→resume→rerun 链路会残留：不区分归属的话，
+        # 上一轮"请假类型"的补充回答会被 confirm 误当"已确认"放行提交
+        # （交叉终审 1a：常见路径 100% 绕过确认门槛）。
+        if state.get("_awaiting") == "parse_info":
+            clarify_answers = state.pop("clarify_answers", {}) or {}
+            state.pop("_awaiting", None)
             parts = [user_input]
             for k, v in clarify_answers.items():
                 parts.append(f"{k}: {v}")
@@ -158,8 +162,11 @@ class SubmitLeaveTool(CompositeTool):
             ))
 
         if missing_questions:
-            # 设置追问标记,execute 会跳过后续步骤
+            # 设置追问标记,execute 会跳过后续步骤。
+            # _awaiting 标记"本轮挂起者"：resume 重跑时只有本步骤消费 answers，
+            # 防止残留回答被 confirm 误当"已确认"（交叉终审 1a）
             state["_need_clarify"] = True
+            state["_awaiting"] = "parse_info"
             state["_clarify_spec"] = AskSpec(questions=missing_questions)
             state["_clarify_summary"] = "需要补充请假信息才能提交"
             ctx.emit("stage", "parse_info_incomplete", "信息不足，需要补充...")
@@ -185,7 +192,7 @@ class SubmitLeaveTool(CompositeTool):
 
         try:
             result = ctx.asset_client.submit_data(
-                path=PATHS.get("validate", "/api/leave/validate"),
+                path=PATHS["validate"],
                 data=leave_data,
                 service_name=SERVICE_NAME,
                 headers=ctx.forward_headers,
@@ -221,26 +228,32 @@ class SubmitLeaveTool(CompositeTool):
     def _step_confirm(self, state: dict, ctx: ToolContext) -> None:
         """提交前确认中断：不可逆操作必须有用户确认门槛（审计④发现）。
 
-        此前字段齐全时一步直写上游（无"确认后提交"中间停顿），与
-        「AI 产物只能输出候选给用户确认」的精神不一致。
-        首次执行挂起（ClarificationRaised）→ 用户回答 → resume 重跑本工具，
-        clarify_answers 注入 tool_state 后本步骤消费：
-        回答含取消语义 → 置 _cancelled 短路管线；否则放行 submit。
+        answers 消费用 _awaiting 路由：只有本轮挂起者是 confirm 时才把
+        resume 回答当确认判定——否则（挂起者是 parse_info 的字段补充回答）
+        属残留，必须重新挂起确认（交叉终审 1a：不区分归属时最常见的
+        "缺字段→追问→回答"路径 100% 绕过门槛直写上游）。
+        取消词不含单字"否"（"是否确认"会被子串误配）。
         """
-        answers = state.get("clarify_answers") or {}
-        if answers:
+        if state.get("_awaiting") == "confirm":
+            answers = state.pop("clarify_answers", {}) or {}
+            state.pop("_awaiting", None)
             reply = str(answers.get("text", answers) if isinstance(answers, dict) else answers)
-            if any(w in reply for w in ("取消", "不要", "算了", "否")):
+            if any(w in reply for w in ("取消", "不要", "算了", "不提交")):
                 state["_cancelled"] = True
                 state["_need_clarify"] = True  # 断掉后续步骤(execute 先查 _cancelled)
                 return
             return  # 确认（或非取消表述）→ 放行 submit
+
+        # 无属主回答（或属 parse_info 的残留）→ 挂起确认
         leave_data = state.get("leave_data", {})
         summary = (
             f"即将提交请假申请：{leave_data.get('applicant', '')} "
             f"{leave_data.get('leaveType', '')} "
             f"({leave_data.get('startDate', '')} ~ {leave_data.get('endDate', '')})"
         )
+        # 挂起者标记要在 raise 前写入（raise 后本函数不再执行，
+        # resume 重跑时靠它识别 answers 归属）
+        state["_awaiting"] = "confirm"
         ctx.emit("stage", "confirm", "等待确认提交...")
         raise ClarificationRaised([
             f'{summary}。确认提交吗？（回复"确认"或"取消"）'
@@ -258,7 +271,7 @@ class SubmitLeaveTool(CompositeTool):
 
         try:
             result = ctx.asset_client.submit_data(
-                path=PATHS.get("submit", "/api/leave/submit"),
+                path=PATHS["submit"],
                 data=leave_data,
                 service_name=SERVICE_NAME,
                 headers=ctx.forward_headers,

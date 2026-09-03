@@ -117,9 +117,10 @@ class HttpAssetClient(AssetClient):
 
     def query_data(self, path: str, service_name: str, params: dict = None,
                    headers: dict = None) -> dict:
-        """查询上游数据(GET,按 service_name 经通用传输)。"""
+        """查询上游数据(GET,按 service_name 经通用传输;params 拼 query string)。"""
         try:
             data = self._upstream.get(service_name, path, auth=True,
+                                      params=params,
                                       extra_headers=headers or None)
             if data is None:
                 return {"success": False, "errors": ["查询失败"]}
