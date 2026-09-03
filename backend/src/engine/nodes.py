@@ -458,9 +458,11 @@ def handle_result_node(state: GraphState) -> dict:
         # 状态三：制品结果 —— 生成了表单配置或数据
         artifact_type = getattr(result, 'artifact_type', 'config')  # config 或 data
         config = result.artifact  # 制品内容（表单 JSON 或查询数据）
-        formatted = result.extra.get("formatted", {})  # 格式化后的展示数据
+        formatted = result.extra.get("formatted", {})  # 格式化字段(钩子产出,经 extra 自由通道)
         # 校验无错误才算 valid：影响前端是否显示"保存"按钮
-        is_valid = len(result.extra.get("validation_errors", [])) == 0
+        # (显式 ToolResult 字段,从 extra 魔法键升格——引擎不再伸手进领域扩展区)
+        is_valid = (result.valid is not False and
+                    not (result.validation_errors or []))
 
         if artifact_type == "data":
             # 数据型制品（如查询结果表格）
@@ -474,7 +476,7 @@ def handle_result_node(state: GraphState) -> dict:
         else:
             # 配置型制品（表单配置）—— 需要带校验错误给前端
             # 归一化 validationErrors:统一为 [{message: str}] 格式
-            raw_errors = result.extra.get("validation_errors", [])
+            raw_errors = result.validation_errors or []
             # 列表推导：字符串包装成对象，统一结构便于前端渲染
             normalized_errors = [
                 {"message": e} if isinstance(e, str) else e
@@ -633,14 +635,26 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None) -> str:
 
 
 def _get_fallback_tool_name() -> str:
-    """获取兜底工具名(优先级:chat → 第一个工具)。
+    """获取工具级兜底工具名（声明驱动）。
 
-    chat 不存在时退第一个工具（其 validate_input 会挡不合法调用）。
+    优先级：pack manifest 声明 fallback_tool → 声明 fallback=true 的
+    pack 里的第一个工具 → 全局第一个工具。
+    此前硬编码 "chat"——多 pack 部署下任何 pack 的路由失败都会跨域
+    兜到 njmind_form 的闲聊工具（审计①发现）。
     """
-    # 兜底优先级 1：优先用 chat 闲聊工具（最安全，不会改数据）
-    chat_tool = _registry.get("chat")
-    if chat_tool:
-        return "chat"
-    # 兜底优先级 2：任意第一个工具（聊胜于无；工具自身 validate_input 会再挡）
+    # 优先级 1：pack 声明的 fallback_tool（manifest domain.fallback_tool）
+    for cfg in (_pack_configs or {}).values():
+        name = (cfg.get("domain") or {}).get("fallback_tool")
+        if name and _registry.get(name):
+            return name
+    # 优先级 2：声明 fallback=true 的 pack 里第一个工具
+    for pack_name, cfg in (_pack_configs or {}).items():
+        if (cfg.get("domain") or {}).get("fallback"):
+            for tool in _registry.all():
+                if tool.name in ((_pack_routers.get(pack_name) and
+                                  _pack_routers[pack_name]._registry and
+                                  [t.name for t in _pack_routers[pack_name]._registry.all()]) or []):
+                    return tool.name
+    # 优先级 3：全局第一个工具（聊胜于无；工具自身 validate_input 会再挡）
     tools = _registry.all()
     return tools[0].name if tools else "chat"

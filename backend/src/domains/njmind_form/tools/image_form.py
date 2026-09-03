@@ -84,8 +84,9 @@ class ImageFormTool(Tool):
             return ToolResult(
                 artifact=form_config,
                 summary=f"已生成配置,但校验失败: {'; '.join(error_msgs)}",
+                valid=False,
+                validation_errors=errors,
                 extra={
-                    "validation_errors": errors,
                     "formatted": self.format_result(form_config),
                 },
             )

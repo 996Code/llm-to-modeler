@@ -101,10 +101,14 @@ class ToolResult(BaseModel):
     """工具执行结果。三层设计:
     - artifact: 不透明制品,Engine 不读内部结构
     - artifact_type: 制品类型,决定 SSE 桥接和前端渲染方式
-      - "config": 表单配置(存 config_snapshot,显示应用按钮)
+      - "config": 配置类制品(存 config_snapshot,显示应用按钮)
       - "data": 数据结果(只存消息,不存 config,显示摘要卡片)
     - summary: 标准化摘要,进 ConversationManager 历史
     - extra: 领域自由扩展,不进历史
+    - valid: 制品是否通过上游校验(前端保存按钮显隐依据;默认 None=
+      工具未声明——前端按"可保存"处理)
+    - validation_errors: 校验错误列表(引擎透传给 SSE result 事件,
+      不解析内部结构;None=无错误信息)
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -115,6 +119,9 @@ class ToolResult(BaseModel):
     summary: str = ""
     extra: dict = Field(default_factory=dict)
     error_for_llm: Optional[str] = None
+    # ── 校验结果显式通道(从 extra 魔法键升格,引擎不再伸手进领域扩展区) ──
+    valid: Optional[bool] = None
+    validation_errors: Optional[list] = None
 
 
 class ClarificationRaised(Exception):

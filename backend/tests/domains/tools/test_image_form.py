@@ -236,8 +236,8 @@ class TestExecute:
         assert result.artifact is not None
         assert result.artifact["formName"] == "请假表"
         assert "校验失败" in result.summary
-        assert result.extra.get("validation_errors") is not None
-        assert len(result.extra["validation_errors"]) == 1
+        assert result.validation_errors is not None
+        assert len(result.validation_errors) == 1
 
 
 class TestSummarizeArtifact:

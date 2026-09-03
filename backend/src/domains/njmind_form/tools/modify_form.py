@@ -212,9 +212,10 @@ class ModifyFormTool(CompositeTool):
         return ToolResult(
             artifact=artifact,
             summary=summary,
+            # 校验结论走显式字段（引擎/前端消费），不再塞 extra 魔法键
+            valid=(not state.get("validation_errors")) if artifact else None,
+            validation_errors=state.get("validation_errors", []) or None,
             extra={
-                # 校验错误列表(供前端展示 / LLM 解释失败原因)
-                "validation_errors": state.get("validation_errors", []),
                 "formatted": self.format_result(artifact) if artifact else {},
             },
         )

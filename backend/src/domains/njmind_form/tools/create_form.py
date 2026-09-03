@@ -130,10 +130,11 @@ class CreateFormTool(CompositeTool):
         return ToolResult(
             artifact=artifact,
             summary=summary,
+            # 校验结论走显式字段（引擎/前端消费），不再塞 extra 魔法键
+            valid=(not validation_errors) if artifact else None,
+            validation_errors=state.get("validation_errors", []) or None,
             extra={
-                # 校验错误透传给 handle_result,前端据此决定是否禁用保存按钮
-                "validation_errors": state.get("validation_errors", []),
-                # format_result 提取前端要的字段(钩子化,避免 Engine 读制品内部)
+                # format_result 提取前端要的字段(钩子产出,经 extra 自由通道)
                 "formatted": self.format_result(artifact) if artifact else {},
             },
         )
