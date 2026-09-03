@@ -149,6 +149,9 @@ debs_ok=0
 for attempt in 1 2 3; do
   docker run --rm -v "$PWD/backend:/app" -w /app \
     "$PY_IMAGE" sh -c "
+      # Debian 换清华源：默认官方源在国内极慢（apt 步骤曾是发布耗时大头）
+      echo 'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main' > /etc/apt/sources.list &&
+      echo 'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main' >> /etc/apt/sources.list &&
       apt-get update -qq &&
       apt-get install -y --download-only --no-install-recommends nginx curl >/dev/null &&
       cp /var/cache/apt/archives/*.deb /app/debs/
