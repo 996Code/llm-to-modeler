@@ -95,6 +95,8 @@ export interface Conversation {
  * 字段大多是可选的，因为不同事件类型会带不同的字段子集。
  */
 export interface SSEResult {
+  error?: boolean                   // 执行失败/被前置校验拦截(error_for_llm 通道)
+  message?: string                  // 失败时的详细原因(与 error 搭配)
   config?: FormConfig               // 生成的表单配置（仅配置类结果有）
   artifactType?: 'config' | 'data'  // 区分配置结果和数据结果（判别式字段）
   data?: Record<string, any>         // artifactType='data' 时的数据
