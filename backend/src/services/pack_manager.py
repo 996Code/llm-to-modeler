@@ -89,6 +89,17 @@ def assemble_packs(app_state: Any, pack_names: Optional[List[str]] = None) -> Di
     app_state.pack_tools = pack_tools
     app_state.prompt_loader = prompt_loader
 
+    # 刷新压缩侧重点：热切换后启用集变化，manifest compact_focus 声明
+    # 需重新聚合（与 main.lifespan 启动装配同一语义，覆盖启动时的初值）
+    compressor = getattr(app_state, "compressor", None)
+    if compressor is not None:
+        focus_parts = [
+            (cfg.get("domain") or {}).get("compact_focus", "").strip()
+            for cfg in (pack_configs or {}).values()
+            if (cfg.get("domain") or {}).get("compact_focus")
+        ]
+        compressor.set_compact_focus("；".join(focus_parts))
+
     total_tools = sum(len(v) for v in pack_tools.values())
     logger.info(f"packs assembled: {sorted(pack_routers)} , {total_tools} tools")
     return {"loaded": sorted(pack_routers), "tools": total_tools, "pack_tools": pack_tools}

@@ -89,7 +89,9 @@ class ModelerAPI:
         )
         if raw is None:
             reason = f"Upstream validation request failed: {err}"
-            if err and "权限" in err:
+            # 网关假200信封的两种典型文案：403 无权限(端点权限/登录态问题)、
+            # 500 功能异常(无效 token 触发)——都指引用户刷新重开
+            if err and ("权限" in err or "功能异常" in err):
                 reason = (f"上游校验未执行：{err}（多为登录态过期，"
                           f"请刷新设计器页面后重开 AI 助手）")
             return {"valid": False,

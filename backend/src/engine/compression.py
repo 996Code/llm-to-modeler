@@ -179,9 +179,13 @@ class CompressionSidechain:
         self._conversation = conversation
         self._cb = circuit_breaker or CompressionCircuitBreaker()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="compress")
-        # 摘要侧重点（pack 可注入，如"创建了什么表单、修改了哪些字段"）：
+        # 摘要侧重点（pack 可注入，如"创建了什么制品、修改了哪些条目"）：
         # 领域措辞不写死在引擎（零领域知识铁律）；空串则用通用表述。
         self._compact_focus = compact_focus.strip()
+
+    def set_compact_focus(self, compact_focus: str) -> None:
+        """更新摘要侧重点（pack 热切换后由装配方刷新，manifest 声明聚合）。"""
+        self._compact_focus = (compact_focus or "").strip()
 
     def close(self) -> None:
         """停机:关闭后台压缩线程池(不等待排队任务,避免拖住进程退出)。"""
@@ -319,7 +323,7 @@ class CompressionSidechain:
         PTL = Prompt Too Long:压缩 API 自己的输入超限。
         """
         # 压缩 prompt：要求 LLM 把历史压缩成一句话，保留关键业务信息。
-        # 侧重点措辞由 pack 注入（compact_focus）——"表单/字段"是领域词，
+        # 侧重点措辞由 pack 注入（compact_focus）——具体领域名词归 pack，
         # 引擎只提供通用骨架；未注入时用通用表述（领域无关兜底）。
         focus = (
             f"（侧重点：{self._compact_focus}）" if self._compact_focus

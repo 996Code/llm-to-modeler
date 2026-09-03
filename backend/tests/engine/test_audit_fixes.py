@@ -128,3 +128,45 @@ class TestToolResultValidationFields:
         r = ToolResult(artifact={"a": 1}, valid=False,
                        validation_errors=[{"message": "x"}])
         assert r.valid is False and len(r.validation_errors) == 1
+
+
+class TestCompactFocusWiring:
+    """compact_focus 接线：assemble_packs 聚合 manifest 声明并刷新 compressor。"""
+
+    def test_assemble_refreshes_focus(self, monkeypatch):
+        """装配后 compressor.compact_focus = 启用 pack 声明的聚合（分号拼接）。"""
+        from unittest.mock import patch
+        import services.pack_manager as pm
+
+        app_state = MagicMock()
+        compressor = MagicMock()
+        app_state.compressor = compressor
+        app_state.pack_configs = {}  # 装配后会被真实 manifest 覆盖
+
+        with patch("domains.load_all_packs") as lap, \
+             patch("domains.load_pack_configs") as lpc, \
+             patch("engine.nodes.configure"):
+            lap.return_value = (MagicMock(), None, {}, {})
+            # njmind_form 声明了 compact_focus
+            lpc.return_value = {
+                "njmind_form": {"domain": {"compact_focus": " 创建了什么表单、修改了哪些字段 "}},
+                "leave_application": {"domain": {}},
+            }
+            pm.assemble_packs(app_state)
+
+        compressor.set_compact_focus.assert_called_once_with(
+            "创建了什么表单、修改了哪些字段")
+
+    def test_no_compressor_skips_refresh(self):
+        """compressor 未就位（异常装配序）不炸，静默跳过刷新。"""
+        import services.pack_manager as pm
+        from unittest.mock import patch
+
+        app_state = MagicMock()
+        app_state.compressor = None  # 显式无 compressor
+        with patch("domains.load_all_packs") as lap, \
+             patch("domains.load_pack_configs") as lpc, \
+             patch("engine.nodes.configure"):
+            lap.return_value = (MagicMock(), None, {}, {})
+            lpc.return_value = {}
+            pm.assemble_packs(app_state)  # 不抛即通过

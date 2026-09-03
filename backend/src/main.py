@@ -56,7 +56,7 @@ from llm.client import LLMClient
 # DEFAULT_DB_PATH：DATABASE_PATH 未配置时的默认库路径(单一事实来源,
 # engine/graph.py 等处引用同一常量,避免 "data/conversations.db" 字面量散落多处)
 from services.conversation_store import DEFAULT_DB_PATH, ConversationStore
-# 上游客户端：调用 njmind-modeler 做校验/增删改/拉模板（地址按请求由宿主 services 表解析）
+# 上游客户端：调用上游服务做校验/增删改/拉取资产（地址按请求由宿主 services 表解析）
 from services.upstream_client import UpstreamClient
 
 # 全局日志配置：控制台 + logs/app.log 文件双输出（按大小轮转，对标 logback
@@ -127,33 +127,28 @@ async def lifespan(app: FastAPI):
     # 会话管理器：封装会话上下文（历史消息、压缩历史）的读写
     conversation_manager = ConversationManager(store=conv_store)
     app.state.conversation_manager = conversation_manager  # 挂 state:pack 热切换要重新注入 nodes
-    # 资产客户端：拉取表单资产数据（字段元信息等），走上游接口
+    # 资产客户端：拉取资产数据（元信息等），走上游接口
     asset_client = HttpAssetClient(upstream=upstream)
     app.state.asset_client = asset_client  # 挂 state:同上
-
-    # 装配工具注册表/提示词/pack 路由/manifest —— 与管理端热切换(api/admin.py)
-    # 共用同一条装配路径,保证冷启动与热切换行为一致
-    from services.pack_manager import assemble_packs
-    assemble_packs(app.state, sorted(pack_state.enabled_names()))
 
     # 上下文压缩 sidechain:token 超窗口 70% 时异步 LLM 摘要(api/config.py
     # 触发),写 compacted/compact_trace 事件(管理端链路可见),下一轮以
     # [历史摘要] 前缀注入 prompt。此前该组件写好但从未装配(线上跑的是
     # 简单截断),本次接线补齐闭环。
-    # 必须在 assemble_packs 之后：compact_focus 从 pack manifest 聚合
-    # （manifest domain.compact_focus，多 pack 分号拼接）——此前声明被
-    # 静默架空（审计①发现，config.yaml 自标"待接线"两年）
+    # compact_focus(摘要侧重点)由 assemble_packs 从各 pack manifest 的
+    # domain.compact_focus 声明聚合刷新——冷启动与热切换同一逻辑,
+    # 聚合实现单一源在 pack_manager(此前声明被静默架空两年,审计①发现)
     from engine.compression import CompressionSidechain
-    _focus_parts = []
-    for _cfg in (getattr(app.state, 'pack_configs', None) or {}).values():
-        _f = (_cfg.get("domain") or {}).get("compact_focus")
-        if _f:
-            _focus_parts.append(_f.strip())
     compressor = CompressionSidechain(
         llm_client=llm_client, conversation=conversation_manager,
-        compact_focus="；".join(_focus_parts),
     )
     app.state.compressor = compressor
+
+    # 装配工具注册表/提示词/pack 路由/manifest —— 与管理端热切换(api/admin.py)
+    # 共用同一条装配路径,保证冷启动与热切换行为一致。
+    # 兼刷新 compressor 的 compact_focus(app.state.compressor 已就位)
+    from services.pack_manager import assemble_packs
+    assemble_packs(app.state, sorted(pack_state.enabled_names()))
 
     # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）
     # build_graph 装配节点（classify_intent/execute_tool/handle_result）并编译
