@@ -100,3 +100,22 @@ class TestToolsClarifyOnGuideFailure:
         with pytest.raises(ClarificationRaised) as ei:
             tool._step_fetch_guide({}, _ctx(_AssetNone()))
         assert "刷新设计器" in ei.value.questions[0]
+
+
+class TestStaticAssetsAnonymous:
+    def test_guide_fetch_does_not_forward_credentials(self):
+        """静态资产读取匿名：即使线程绑定了透传凭证也不携带。
+
+        端点级权限管控下,有效 token 也会吃 403 信封;匿名走白名单放行
+        (真实事故:同请求 guide 403 而 schemas/validate 全 200)。
+        """
+        from services.upstream_client import set_forward_headers
+        set_forward_headers({"Authorization": "Bearer valid-but-no-endpoint-perm"})
+        try:
+            c = _client()
+            c._client.get.return_value = _Resp({"fieldTypes": [{"code": 4}]})
+            assert c.get_guide() is not None
+            kwargs = c._client.get.call_args.kwargs
+            assert kwargs.get("headers") is None, "静态资产请求不得携带透传凭证"
+        finally:
+            set_forward_headers(None)

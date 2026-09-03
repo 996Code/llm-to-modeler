@@ -362,7 +362,11 @@ class UpstreamClient:
         endpoint = f"{base}/api/mcp/templates/list-templates"
         try:
             # GET 请求，headers 透传本线程的鉴权头
-            resp = self._client.get(endpoint, headers=self._headers())
+            # 静态公共资产匿名请求(不带透传凭证):此类端点匿名走白名单放行,
+            # 带登录凭证反而触发「已登录但无此端点功能权限」的假200信封
+            # (真实事故:有效 token 拉 guide 收 {code:403,没有该操作权限},
+            # 而同请求的 schemas/validate 全部 200——端点级权限管控)
+            resp = self._client.get(endpoint, headers=None)
             resp.raise_for_status()  # 非 2xx 抛 HTTPStatusError，类比 Java RestClient 的响应状态校验
             result = resp.json()  # 解析 JSON body 为 Python list/dict，类比 Jackson readValue
             duration_ms = int((time.time() - start_time) * 1000)  # 秒转毫秒，整型便于日志展示
@@ -410,7 +414,11 @@ class UpstreamClient:
             return cached
 
         try:
-            resp = self._client.get(endpoint, headers=self._headers())
+            # 静态公共资产匿名请求(不带透传凭证):此类端点匿名走白名单放行,
+            # 带登录凭证反而触发「已登录但无此端点功能权限」的假200信封
+            # (真实事故:有效 token 拉 guide 收 {code:403,没有该操作权限},
+            # 而同请求的 schemas/validate 全部 200——端点级权限管控)
+            resp = self._client.get(endpoint, headers=None)
             resp.raise_for_status()
             template = resp.json()
             env_msg = self._envelope_error_msg(template)
@@ -446,7 +454,11 @@ class UpstreamClient:
         base = self._service_base()
         endpoint = f"{base}/api/mcp/schemas/list-schemas"
         try:
-            resp = self._client.get(endpoint, headers=self._headers())
+            # 静态公共资产匿名请求(不带透传凭证):此类端点匿名走白名单放行,
+            # 带登录凭证反而触发「已登录但无此端点功能权限」的假200信封
+            # (真实事故:有效 token 拉 guide 收 {code:403,没有该操作权限},
+            # 而同请求的 schemas/validate 全部 200——端点级权限管控)
+            resp = self._client.get(endpoint, headers=None)
             resp.raise_for_status()
             result = resp.json()
             duration_ms = int((time.time() - start_time) * 1000)
@@ -488,7 +500,11 @@ class UpstreamClient:
             return cached
 
         try:
-            resp = self._client.get(endpoint, headers=self._headers())
+            # 静态公共资产匿名请求(不带透传凭证):此类端点匿名走白名单放行,
+            # 带登录凭证反而触发「已登录但无此端点功能权限」的假200信封
+            # (真实事故:有效 token 拉 guide 收 {code:403,没有该操作权限},
+            # 而同请求的 schemas/validate 全部 200——端点级权限管控)
+            resp = self._client.get(endpoint, headers=None)
             resp.raise_for_status()
             schema = resp.json()
             env_msg = self._envelope_error_msg(schema)
@@ -533,7 +549,11 @@ class UpstreamClient:
 
         try:
             # 绝对 URL（resolve_base 解析），client 无级基址
-            resp = self._client.get(f"{base}/api/mcp/guides/guide.json", headers=self._headers())
+            # 静态公共资产匿名请求(不带透传凭证):此类端点匿名走白名单放行,
+            # 带登录凭证反而触发「已登录但无此端点功能权限」的假200信封
+            # (真实事故:有效 token 拉 guide 收 {code:403,没有该操作权限},
+            # 而同请求的 schemas/validate 全部 200——端点级权限管控)
+            resp = self._client.get(f"{base}/api/mcp/guides/guide.json", headers=None)
             resp.raise_for_status()
             guide = resp.json()
             # 假 200 业务信封（403 无权限等）：按失败处理且不进缓存
@@ -588,7 +608,11 @@ class UpstreamClient:
         try:
             # client 无级基址，直接用 resolve_base 解析出的绝对 URL
             full_url = f"{base}/api/mcp/guides/guide.json"
-            resp = self._client.get(full_url, headers=self._headers())
+            # 静态公共资产匿名请求(不带透传凭证):此类端点匿名走白名单放行,
+            # 带登录凭证反而触发「已登录但无此端点功能权限」的假200信封
+            # (真实事故:有效 token 拉 guide 收 {code:403,没有该操作权限},
+            # 而同请求的 schemas/validate 全部 200——端点级权限管控)
+            resp = self._client.get(full_url, headers=None)
             resp.raise_for_status()
             guide = resp.json()
             env_msg = self._envelope_error_msg(guide)
