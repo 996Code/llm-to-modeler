@@ -111,7 +111,7 @@ class AssetClient(ABC):
         """取指定上游服务的 guide.json（嵌入模式多服务地址）。
 
         v1 兼容入口：无多服务时与 get_guide 等价；有 host services 时
-        按服务名解析 base（resolve_base 白名单拦截）+ 带 base 的缓存键。
+        按服务名解析 base（resolve_base 请求级解析）+ 带 base 的缓存键。
 
         Args:
             service_name: 上游服务名（如 "njmind-modeler"）。
@@ -183,15 +183,19 @@ class AssetClient(ABC):
 
     # ── 通用数据操作(插件化扩展,钩子方法) ──
 
-    def submit_data(self, path: str, data: dict, headers: dict = None) -> dict:
-        """提交数据到上游指定路径。
+    def submit_data(self, path: str, data: dict, service_name: str,
+                    headers: dict = None) -> dict:
+        """提交数据到指定上游服务的相对路径(POST)。
 
         为非配置类插件(如 leave_application)提供通用的"写"出口:
         pack 不再直接调 httpx,而是统一走这里,从而保证清洗/透传/重试一致。
+        地址解析与配置类操作同一套(宿主 services 表按请求下发,未下发
+        fail-closed,见 upstream_client.resolve_base)。
 
         Args:
-            path: 上游 API 路径(如 "/api/leave/submit")。
+            path: 相对该服务 base 的 API 路径(如 "/api/leave/submit")。
             data: 提交的数据体(会被序列化为 JSON)。
+            service_name: pack manifest 声明的上游服务名(决定 base)。
             headers: 额外请求头(典型场景:嵌入模式透传的 forward_headers,
                 如鉴权 token、租户标识等,需原样带到上游)。
 
@@ -209,13 +213,15 @@ class AssetClient(ABC):
             "如需提交数据请覆写此方法或使用 HttpAssetClient"
         )
 
-    def query_data(self, path: str, params: dict = None, headers: dict = None) -> dict:
-        """查询上游数据。
+    def query_data(self, path: str, service_name: str, params: dict = None,
+                   headers: dict = None) -> dict:
+        """查询上游数据(GET)。
 
-        为非配置类插件提供通用的"读"出口。
+        为非配置类插件提供通用的"读"出口。地址解析与 submit_data 同一套。
 
         Args:
-            path: 上游 API 路径(如 "/api/leave/status")。
+            path: 相对该服务 base 的 API 路径(如 "/api/leave/status")。
+            service_name: pack manifest 声明的上游服务名(决定 base)。
             params: 查询参数(会被拼成 query string)。
             headers: 额外请求头(典型场景:嵌入模式透传的 forward_headers)。
 

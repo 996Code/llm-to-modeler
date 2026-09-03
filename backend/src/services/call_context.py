@@ -30,7 +30,7 @@ def bind_conversation(conv_id: Optional[str]) -> None:
     """在当前线程绑定会话 ID(graph 工作线程开始时调用)。
 
     Args:
-        conv_id: 会话 ID;None 表示无会话上下文(MCP 单轮/联调),清空绑定。
+        conv_id: 会话 ID;None 表示无会话上下文(脚本直跑图/联调),清空绑定。
     """
     _conversation.conv_id = conv_id or None
 

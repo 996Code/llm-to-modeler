@@ -47,7 +47,7 @@ class ChatRequest(BaseModel):
     嵌入模式扩展（P1）：
         context: 宿主下发的当前制品（覆盖会话旧配置再进图，防止陈旧基线覆盖手动修改）。
         services: 宿主提供的服务地址表（如 {njmind-modeler: origin+/codeBack}），
-                  按请求切换上游地址（过白名单，见 upstream_client.resolve_base）。
+                  按请求切换上游地址（见 upstream_client.resolve_base）。
 
     Attributes:
         message: 用户消息文本

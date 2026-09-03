@@ -89,3 +89,64 @@ class TestHttpAssetClient:
         client = HttpAssetClient(upstream=_make_mock_upstream())
         with pytest.raises(ValueError):
             client.persist_artifact({"formName": "无编码"}, mode="update")
+
+
+class TestDataOpsServiceAddressing:
+    """数据操作按 service_name 寻址（与配置类操作同一套 resolve_base）。"""
+
+    def test_submit_data_resolves_base_via_service_name(self, monkeypatch):
+        """URL = resolve_base(service_name) + path；resolve 异常走 Fail-Closed。"""
+        from services.upstream_client import ServiceUnresolvableError
+
+        client = HttpAssetClient(upstream=_make_mock_upstream())
+        client._upstream.resolve_base.return_value = "http://leave-svc:19999"
+
+        captured = {}
+
+        def _fake_post(url, **kwargs):
+            captured["url"] = url
+
+            class _R:
+                def json(self):
+                    return {"pass": True}
+
+            return _R()
+
+        monkeypatch.setattr("adapters.http_asset_client.httpx.post", _fake_post)
+        result = client.submit_data(
+            path="/api/leave/submit", data={"a": 1}, service_name="leave-system",
+        )
+        assert captured["url"] == "http://leave-svc:19999/api/leave/submit"
+        client._upstream.resolve_base.assert_called_once_with("leave-system")
+        # 上游返回 pass 归一化为 success
+        assert result["success"] is True
+
+        # 地址不可解析 → Fail-Closed 返回 success=False,不向上抛
+        client._upstream.resolve_base.side_effect = ServiceUnresolvableError("no base")
+        failed = client.submit_data(
+            path="/api/leave/submit", data={}, service_name="leave-system",
+        )
+        assert failed["success"] is False
+
+    def test_query_data_resolves_base_via_service_name(self, monkeypatch):
+        client = HttpAssetClient(upstream=_make_mock_upstream())
+        client._upstream.resolve_base.return_value = "http://leave-svc:19999"
+
+        captured = {}
+
+        def _fake_get(url, **kwargs):
+            captured["url"] = url
+
+            class _R:
+                def json(self):
+                    return {"status": "approved"}
+
+            return _R()
+
+        monkeypatch.setattr("adapters.http_asset_client.httpx.get", _fake_get)
+        result = client.query_data(
+            path="/api/leave/status", service_name="leave-system",
+            params={"query": "张三"},
+        )
+        assert captured["url"] == "http://leave-svc:19999/api/leave/status"
+        assert result["status"] == "approved"

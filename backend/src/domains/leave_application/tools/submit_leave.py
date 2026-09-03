@@ -16,13 +16,14 @@ artifact_type="data" — 不是表单配置，是数据结果。
 架构约定:
   - 所有上游调用走 ctx.asset_client (AssetClient 抽象),不直接用 httpx
   - 保证: sanitize_obj 清洗 / forward_headers 传播 / 连接池统一管理
-  - 上游 base_url 通过环境变量 ASSET_BASE_URL 配置,默认 mock API
+  - 上游地址经 service_name 寻址(宿主 services 表按请求下发,见 upstream.py)
 """
 import json
 import logging
 from typing import Any, Dict, Optional
 
 from sdk.tool import CompositeTool, ToolResult, ToolContext, AskSpec, AskQuestion, AskOption
+from domains.leave_application.upstream import SERVICE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,7 @@ class SubmitLeaveTool(CompositeTool):
             result = ctx.asset_client.submit_data(
                 path="/api/leave/validate",
                 data=leave_data,
+                service_name=SERVICE_NAME,
                 headers=ctx.forward_headers,
             )
             logger.info(f"validate_rules response: {result}")
@@ -222,6 +224,7 @@ class SubmitLeaveTool(CompositeTool):
             result = ctx.asset_client.submit_data(
                 path="/api/leave/submit",
                 data=leave_data,
+                service_name=SERVICE_NAME,
                 headers=ctx.forward_headers,
             )
             logger.info(f"submit response: {result}")

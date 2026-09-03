@@ -15,16 +15,13 @@
   - 所有上游调用走 ``ctx.asset_client``(AssetClient 抽象),不直接用 httpx
     → 类比 Java:不直接 new HttpClient,而是注入 ``@Autowired AssetClient``
     → 好处:可替换实现(真实接口 / Mock),便于单测
-  - 上游 base_url 通过环境变量 ``ASSET_BASE_URL`` 配置,默认指向 mock API
+  - 上游地址经 service_name 寻址(宿主 services 表按请求下发,见 upstream.py)
 """
 import logging
 from typing import Any, Dict
 
-# Tool / ToolResult / ToolContext 是工具体系的三个核心抽象
-#   - Tool:        工具基类(定义 name/description/execute 等契约)
-#   - ToolResult:  工具返回值(含 reply/summary/artifact 等字段)
-#   - ToolContext: 执行上下文(注入 llm_client/asset_client 等依赖)
 from sdk.tool import Tool, ToolResult, ToolContext
+from domains.leave_application.upstream import SERVICE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +92,7 @@ class QueryLeaveStatusTool(Tool):
             # forward_headers 透传鉴权头(嵌入模式下由宿主系统提供)
             result = ctx.asset_client.query_data(
                 path="/api/leave/status",
+                service_name=SERVICE_NAME,
                 params={"query": user_input},
                 headers=ctx.forward_headers,
             )

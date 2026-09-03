@@ -76,7 +76,7 @@ artifact:
       - {title: 联系人表, desc: 姓名、邮箱、电话、地址, prompt: 创建一个联系人表单，包含姓名、邮箱、电话、地址, icon: contacts}
       - {title: 客户反馈表, desc: 客户名称、反馈类型、详细描述, prompt: 创建一个客户反馈表，包含客户名称、反馈类型（下拉选择）、详细描述, icon: contacts}
 
-# 依赖的上游服务名（地址由宿主 services 表 / env 提供，见 upstream_client.resolve_base）
+# 依赖的上游服务名（地址由宿主 services 表按请求下发，未下发 fail-closed，见 upstream_client.resolve_base）
 services:
   njmind-modeler: {}
 

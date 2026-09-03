@@ -2,4 +2,8 @@
 domain:
   description: 请假申请的提交与审批状态查询（"帮我请假/查审批进度"类需求）
 
+# 依赖的上游服务名（地址由宿主 services 表按请求下发，未下发 fail-closed，见 upstream_client.resolve_base）
+services:
+  leave-system: {}
+
 # 演示插件说明：本 pack 为插件化架构的最小示例（Demo），生产按需保留。

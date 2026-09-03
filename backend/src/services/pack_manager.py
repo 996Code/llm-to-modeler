@@ -13,7 +13,7 @@ graph.py 构建图时把节点函数(nodes.classify_intent_node 等模块级函�
 + 两条条件边)不随 pack 增减变化,变化只体现在注入的依赖上。因此:
   - 热切换 = 重新 nodes.configure(...) + 替换 app.state 引用
   - graph 对象保持不变:checkpointer 连接不重建(避免连接泄漏),
-    MCP 闭包里持有的 graph 引用也自动"看到"新工具集
+    各处闭包里持有的 graph 引用也自动"看到"新工具集
 
 【时序语义】
 切换瞬间在途的请求持有旧依赖引用或恰好读到新全局,最坏情况是某个工具
@@ -66,7 +66,7 @@ def assemble_packs(app_state: Any, pack_names: Optional[List[str]] = None) -> Di
         pack_configs=pack_configs,
     )
 
-    # 替换 app.state 上的共享引用(meta/skills/admin 路由按请求读取)
+    # 替换 app.state 上的共享引用(meta/admin 路由按请求读取)
     app_state.registry = registry
     app_state.pack_configs = pack_configs
     app_state.pack_routers = pack_routers

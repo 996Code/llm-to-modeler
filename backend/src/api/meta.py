@@ -84,8 +84,8 @@ async def list_packs(request: Request):
     for pack_name, cfg in pack_configs.items():
         if allowed is not None and pack_name not in allowed:
             continue
-        # v1 的 manifest.tools 从空（工具清单由 /api/skills 提供；前端 diff/历史
-        # 只用 artifact/services，不需要工具列表——避免维护「工具→pack」反向表）
+        # manifest.tools 从空：前端 diff/历史只用 artifact/services，
+        # 不需要工具列表——避免维护「工具→pack」反向表
         result.append(_manifest_for(pack_name, cfg, []))
     return result
 

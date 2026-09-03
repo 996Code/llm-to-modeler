@@ -1,5 +1,5 @@
 """
-上游 HTTP 客户端模块 —— 调用 njmind-modeler（:7001）的所有接口。
+上游 HTTP 客户端模块 —— 调用 njmind-modeler 的所有接口（地址按请求解析）。
 
 本项目是"桥接层"（BRIDGE）：所有数据格式（模板、Schema、填写指南、校验规则）
 都不在本服务内部存储或生成，全部通过 HTTP 从上游 njmind-modeler 拉取或提交。
@@ -115,31 +115,26 @@ def _get_request_services() -> Dict[str, str]:
     return getattr(_request_services, 'value', None) or {}
 
 
+class ServiceUnresolvableError(RuntimeError):
+    """请求的上游服务不在本请求的宿主 services 表中（fail-closed 抛出）。
+
+    无地址时宁可明确报错也不猜测目标——把请求打到错误地址比失败更糟。
+    工具层捕获后转成用户可读的错误信息。
+    """
+
+
 class UpstreamConfig:
     """上游服务配置（普通类，非 Pydantic）。
 
-    从环境变量加载，包含：
-        base_url: 上游基础地址（去掉末尾斜杠，避免拼接双斜杠）
+    上游地址不在此配置——按请求从宿主 services 表解析（见 resolve_base），
+    未下发的服务 fail-closed。此处仅保留 HTTP 行为参数：
         timeout: HTTP 超时秒数（默认 30，本地/内网通常够）
         cache_ttl: 缓存有效期秒数（默认 300=5 分钟，平衡新鲜度和上游压力）
-        allowed_bases: 宿主服务地址白名单（防 SSRF/token 外泄，
-                       未命中时回退 base_url，见 resolve_base）
     """
 
-    def __init__(
-        self,
-        base_url: str = "http://127.0.0.1:7001",
-        timeout: int = 30,
-        cache_ttl: int = 300,  # 5 minutes
-        allowed_bases: Optional[List[str]] = None,
-    ):
-        # rstrip("/") 去掉末尾斜杠，保证后续 url 拼接不会出现 //
-        # 类比 Java：URI 构造时规范化 base path，避免 "http://host/" + "/api" 产生双斜杠
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, timeout: int = 30, cache_ttl: int = 300):
         self.timeout = timeout  # HTTP 连接+读取总超时，类比 OkHttp 的 timeout() 链式配置
         self.cache_ttl = cache_ttl  # 缓存有效期，类比 Caffeine/Guava Cache 的 expireAfterWrite
-        # 白名单归一化：去末尾斜杠，便于比对
-        self.allowed_bases = [b.rstrip("/") for b in (allowed_bases or [])]
 
 
 class UpstreamClient:
@@ -163,11 +158,10 @@ class UpstreamClient:
         """初始化上游客户端。
 
         Args:
-            config: 上游配置；None 时从环境变量读取（见下方默认值）。
-                    注意地址解析优先级（resolve_base）：嵌入模式下宿主经 chat
-                    请求 services 表下发的服务地址优先（每 pack 在 manifest
-                    声明所需服务名），env 的 UPSTREAM_BASE_URL 仅作兜底——
-                    "宿主表 → 白名单 → env 默认" 三级降级，详见 resolve_base。
+            config: 上游配置；None 时从环境变量读取 HTTP 行为参数
+                    （超时/缓存 TTL）。地址解析见 resolve_base：宿主经 chat
+                    请求 services 表按请求下发（每 pack 在 manifest 声明所需
+                    服务名），未下发则 fail-closed 报错。
             conversation_store: 会话存储，用于持久化上游调用日志（调试/监控）。
                                 None 时不记日志（只 warning 不影响主流程）。
         """
@@ -175,34 +169,22 @@ class UpstreamClient:
 
         if config is None:
             # 显式 config 为 None 时走环境变量降级路径，类比 Spring 的 @Value("${...:默认值}")
-            # int() 包裹是因为 getenv 返回 str，类比 Integer.parseInt()
             config = UpstreamConfig(
-                base_url=os.getenv("UPSTREAM_BASE_URL", "http://127.0.0.1:7001"),
                 timeout=int(os.getenv("UPSTREAM_TIMEOUT", "30")),
                 cache_ttl=int(os.getenv("UPSTREAM_CACHE_TTL", "300")),
-                # 宿主服务地址白名单（逗号分隔）。
-                # ⚠ 未配置（空列表）= 不限制，宿主下发的地址直接采用——仅适合
-                # 本地联调；生产必须配置（至少放行网关地址），否则任何能控制
-                # 宿主下发内容的人都能让本服务带着透传 token 请求任意地址。
-                allowed_bases=[
-                    b.strip()
-                    for b in os.getenv("UPSTREAM_ALLOWED_BASES", "").split(",")
-                    if b.strip()
-                ],
             )
 
         self.config = config
-        # 创建 httpx 客户端（带连接池），类比 Java 的 OkHttpClient 单例
-        self._client = httpx.Client(
-            base_url=config.base_url,
-            timeout=config.timeout,
-        )
+        # 创建 httpx 客户端（带连接池），类比 Java 的 OkHttpClient 单例。
+        # 无 client 级 base_url：上游地址按请求解析（resolve_base 返回
+        # 绝对 URL），httpx 在此仅作为连接池/超时载体
+        self._client = httpx.Client(timeout=config.timeout)
         # 内存缓存：key → (data, timestamp)。注意非线程安全，但本场景读多写少、
         # 偶发重复回源可接受，故未加锁（避免锁开销）。
         self._cache: Dict[str, tuple] = {}  # key → (data, timestamp)
         self._conversation_store = conversation_store
 
-        logger.info(f"UpstreamClient initialized: {config.base_url}")
+        logger.info("UpstreamClient initialized (上游地址按请求从宿主 services 表解析)")
 
     def _log_call(
         self,
@@ -244,13 +226,15 @@ class UpstreamClient:
             logger.warning(f"Failed to save upstream call log: {e}")
 
     def resolve_base(self, service_name: str) -> str:
-        """按服务名解析上游 base URL（嵌入模式服务地址动态化）。
+        """按服务名解析上游 base URL（请求级，唯一来源是宿主 services 表）。
 
-        解析顺序（从最可信到最不可信，逐级降级）：
-          1. 宿主在 chat 请求 services 表里提供的该服务地址，
-             且必须命中 UPSTREAM_ALLOWED_BASES 白名单（防 SSRF/token 外泄）；
-          2. 未命中白名单 → 回退 env 默认 base_url，并告警；
-          3. 宿主未提供该服务 → 回退 env 默认 base_url。
+        解析规则（fail-closed）：
+          宿主在 chat 请求 services 表里提供的该服务地址，直接采用；
+          未下发 → 抛 ServiceUnresolvableError——宁可明确报错也不猜测目标。
+
+        信任边界：本服务部署在内网可信边界之后，宿主下发的地址直接采用，
+        SSRF 防线在网络层/网关。每轮请求实际采用的地址记录在会话链路的
+        request_context 打点中（含 services 原文，事后可追溯）。
 
         同一服务名若命中，后续该请求的所有上游调用（含缓存 key）都用该 base。
 
@@ -259,23 +243,26 @@ class UpstreamClient:
 
         Returns:
             规范化（去尾斜杠）后的 base URL。
+
+        Raises:
+            ServiceUnresolvableError: 本请求的宿主 services 表未下发该服务。
         """
         host_bases = _get_request_services()  # 宿主提供的服务地址表（请求级）
         provided = host_bases.get(service_name)
         if provided:
-            provided = provided.rstrip("/")
-            # 白名单校验：命中白名单才可用；否则回退默认（防 SSRF/token 外泄）。
-            # 白名单为空（未配置）时视为「无白名单约束」→ 允许宿主地址（默认放宽，
-            # 生产必须配置 UPSTREAM_ALLOWED_BASES 收紧；空列表=不限制=仅限联调）。
-            if self.config.allowed_bases and provided not in self.config.allowed_bases:
-                logger.warning(
-                    f"Host-provided service base for '{service_name}' not in allowed bases, "
-                    f"falling back to default: {provided}"
-                )
-                return self.config.base_url
-            return provided
-        # 宿主未提供该服务 → 默认地址
-        return self.config.base_url
+            return provided.rstrip("/")
+        raise ServiceUnresolvableError(
+            f"上游服务 '{service_name}' 无可用地址：本请求的宿主 services 表"
+            f"未下发该服务。请检查宿主 INIT 的 services 字段是否包含该服务名。"
+        )
+
+    def has_service(self, service_name: str) -> bool:
+        """该服务当前是否可解析出地址（宿主 services 表有该服务）。
+
+        供工具的 preflight 钩子做执行前提校验（fail-fast，比 resolve_base
+        抛错更早一步、在进管线前就拦下）。只判可用性，不真正解析地址。
+        """
+        return service_name in _get_request_services()
 
     def _cache_key(self, prefix: str, key: str, service_name: str) -> str:
         """生成带服务 base 的缓存键，避免多上游环境缓存串数据。
@@ -296,7 +283,7 @@ class UpstreamClient:
 
 
     def _service_base(self) -> str:
-        """当前请求的上游 base（resolve_base + 白名单），全部 MCP 调用统一走这里。"""
+        """当前请求的上游 base（resolve_base 请求级解析），全部 MCP 调用统一走这里。"""
         return self.resolve_base("njmind-modeler")
 
     def _headers(self, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -523,7 +510,7 @@ class UpstreamClient:
             return cached
 
         try:
-            # 绝对 URL：httpx 会忽略 client 构造时的默认 base_url（多服务地址动态化）
+            # 绝对 URL（resolve_base 解析），client 无级基址
             resp = self._client.get(f"{base}/api/mcp/guides/guide.json", headers=self._headers())
             resp.raise_for_status()
             guide = resp.json()
@@ -539,7 +526,7 @@ class UpstreamClient:
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
-                endpoint=f"{self.config.base_url}/api/mcp/guides/guide.json",
+                endpoint=f"{base}/api/mcp/guides/guide.json",
                 status_code=500,
                 duration_ms=duration_ms,
                 error_message=str(e),
@@ -564,8 +551,7 @@ class UpstreamClient:
             return cached
 
         try:
-            # 共享 httpx.Client 构造时 base_url 是 env 默认；这里传绝对 URL，
-            # httpx 会忽略 client 的 base_url 直接使用（标准行为）
+            # client 无级基址，直接用 resolve_base 解析出的绝对 URL
             full_url = f"{base}/api/mcp/guides/guide.json"
             resp = self._client.get(full_url, headers=self._headers())
             resp.raise_for_status()
@@ -800,27 +786,6 @@ class UpstreamClient:
             )
             logger.error(f"Failed to update form '{form_code}': {e}")
             return None
-
-    # ── Health（健康探测）─────────────────────────────────────────
-
-    def health_check(self) -> bool:
-        """探测上游是否可达。
-
-        用一个轻量 GET（拉 guide.json）+ 5 秒短超时来判断。
-        注意只看 HTTP 200，不验证响应内容，属于"连通性"检查而非"业务可用性"检查。
-
-        Returns:
-            True 表示上游返回 200；任何异常或非 200 返回 False（Fail-Closed）。
-        """
-        try:
-            # timeout=5 覆盖默认 30s，避免健康检查时长时间卡住（尤其启动期）
-            # 类比 Java actuator health 的短超时探活，5 秒判定连通性足够
-            resp = self._client.get("/api/mcp/guides/guide.json", timeout=5, headers=self._headers())
-            # 只判 200，不验证 body 内容——这是"连通性"检查而非"业务可用性"检查
-            return resp.status_code == 200
-        except Exception:
-            # 任何异常（连接拒绝/超时/DNS 失败）都视为不可用，Fail-Closed
-            return False
 
     def clear_cache(self):
         """清空内存缓存（用于强制刷新上游数据的场景，如上游模板更新后）。"""

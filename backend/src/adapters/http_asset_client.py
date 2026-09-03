@@ -10,11 +10,11 @@ njmind 的具体路径表由 UpstreamClient 内部管理(阶段 1 暂保留),
 
 扩展(插件化阶段):
 - submit_data / query_data: 通用数据提交/查询,供非配置类插件使用。
-  通过 httpx 直接请求,base_url 从环境变量 ASSET_BASE_URL 读取,
-  默认 http://localhost:19999(mock API)。返回前统一 sanitize_obj。
+  地址与配置类操作同一套解析(upstream.resolve_base:宿主 services 表
+  按请求下发,未下发 fail-closed),服务名由 pack manifest 声明、
+  工具调用时传入。返回前统一 sanitize_obj。
 """
 import logging
-import os
 from typing import Any, Optional
 
 import httpx
@@ -24,27 +24,31 @@ from sdk.sanitize import sanitize_obj
 
 logger = logging.getLogger(__name__)
 
-# 通用数据操作的 base URL,从环境变量读取,默认 mock API
-_DEFAULT_BASE_URL = "http://localhost:19999"
-
 
 class HttpAssetClient(AssetClient):
     """通用 HTTP 资产客户端。
 
     本阶段(阶段 1):委托 UpstreamClient 发请求,加 sanitize 层。
-    通用数据操作(submit_data/query_data)通过 httpx 直接请求。
+    通用数据操作(submit_data/query_data)通过 httpx 直接请求,
+    base 由 resolve_base(service_name) 按请求解析。
     """
 
     def __init__(self, upstream):
-        """upstream: 现有 UpstreamClient 实例。"""
+        """upstream: 现有 UpstreamClient 实例(数据操作经它解析服务地址)。"""
         self._upstream = upstream
-        # 通用数据操作的 base URL,优先读环境变量(嵌入模式可指向宿主 mock API)
-        self._data_base_url = os.environ.get("ASSET_BASE_URL", _DEFAULT_BASE_URL)
 
     def _clean(self, data):
         """返回前清洗。"""
         # sanitize_obj:统一清理返回数据(如去除 null/归一化字段名),类比 Java 的 DTO 转换
         return sanitize_obj(data)
+
+    def has_service(self, service_name: str) -> bool:
+        """该上游服务当前是否可解析地址（委托 UpstreamClient.has_service）。
+
+        供工具 preflight 钩子做执行前提校验：进管线前确认地址可用，
+        缺失时 fail-fast，而不是跑到第一次元数据调用才抛错。
+        """
+        return self._upstream.has_service(service_name)
 
     # ── 表单配置类操作(原有) ──
 
@@ -113,12 +117,14 @@ class HttpAssetClient(AssetClient):
 
     # ── 通用数据操作(插件化扩展) ──
 
-    def submit_data(self, path: str, data: dict, headers: dict = None) -> dict:
-        """提交数据到上游指定路径(POST)。
+    def submit_data(self, path: str, data: dict, service_name: str,
+                    headers: dict = None) -> dict:
+        """提交数据到指定上游服务的相对路径(POST)。
 
         Args:
-            path: API 路径,如 "/api/leave/submit"
+            path: 相对该服务 base 的 API 路径,如 "/api/leave/submit"
             data: 提交的数据体
+            service_name: pack manifest 声明的上游服务名(决定 base,见 resolve_base)
             headers: 额外请求头(如 forward_headers)
 
         Returns:
@@ -127,21 +133,24 @@ class HttpAssetClient(AssetClient):
             - errors: list[str] (原始错误列表)
             - 其余字段原样透传
         """
-        url = f"{self._data_base_url}{path}"  # 拼完整 URL（base + 路径）
         req_headers = {"Content-Type": "application/json"}  # 默认 JSON 头（POST 带体）
         if headers:
             # 合并透传头（如 forward_headers 里的鉴权 token），覆盖默认
             # 类比 Java 的 HttpHeaders 多源合并
             req_headers.update(headers)
         try:
+            # 地址与配置类操作同一套解析；解析失败(宿主表未下发该服务)
+            # 同样走 Fail-Closed 降级,调用方拿 success=False 统一处理
+            base = self._upstream.resolve_base(service_name)
+            url = f"{base}{path}"
             # httpx POST:超时 10 秒(防止上游卡死拖垮整个请求)
             # timeout=10 是硬限制，超时后抛 ReadTimeout
             resp = httpx.post(url, json=data, headers=req_headers, timeout=10)
             result = resp.json()  # 解析响应 JSON
         except Exception as e:
-            # 网络异常/超时/解析失败:降级返回失败结构,不向上抛
+            # 网络异常/超时/解析失败/地址不可解析:降级返回失败结构,不向上抛
             # Fail-Closed：返回 success=False，调用方能正常处理失败，无需 try-catch
-            logger.warning(f"submit_data POST {url} failed: {e}")
+            logger.warning(f"submit_data POST {service_name}{path} failed: {e}")
             return {"success": False, "errors": [str(e)]}
 
         result = self._clean(result) or {}  # 清洗 + 防 None
@@ -151,23 +160,26 @@ class HttpAssetClient(AssetClient):
             result["success"] = result["pass"]  # pass 值复制到 success
         return result
 
-    def query_data(self, path: str, params: dict = None, headers: dict = None) -> dict:
+    def query_data(self, path: str, service_name: str, params: dict = None,
+                   headers: dict = None) -> dict:
         """查询上游数据(GET)。
 
         Args:
-            path: API 路径,如 "/api/leave/status"
+            path: 相对该服务 base 的 API 路径,如 "/api/leave/status"
+            service_name: pack manifest 声明的上游服务名(决定 base,见 resolve_base)
             params: 查询参数
             headers: 额外请求头(如 forward_headers)
 
         Returns:
             上游返回的 JSON(dict)
         """
-        url = f"{self._data_base_url}{path}"  # 拼完整 URL
         req_headers = {}
         if headers:
             # 合并透传头(GET 一般不需 Content-Type,因为没有 body)
             req_headers.update(headers)
         try:
+            base = self._upstream.resolve_base(service_name)
+            url = f"{base}{path}"
             # httpx GET:参数通过 params 传递(会拼到 query string)
             # params={} 或 None 都行：params or {} 防止传 None 报错
             resp = httpx.get(url, params=params or {}, headers=req_headers, timeout=10)
@@ -175,7 +187,7 @@ class HttpAssetClient(AssetClient):
         except Exception as e:
             # 异常降级:返回失败结构,不向上抛(保证调用方稳定)
             # Fail-Closed：调用方拿到 success=False 就知道查询失败
-            logger.warning(f"query_data GET {url} failed: {e}")
+            logger.warning(f"query_data GET {service_name}{path} failed: {e}")
             return {"success": False, "errors": [str(e)]}
 
         return self._clean(result) or {}  # 清洗 + 防 None
