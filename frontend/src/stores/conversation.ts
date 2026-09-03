@@ -277,12 +277,22 @@ export const useConversationStore = defineStore('conversation', () => {
             loadConversations()  // 刷侧边栏,让新会话出现(不 await,不阻塞渲染)
           }
           // onResult 分流顺序(由后端 ToolResult 三态决定):
+          // 0. error — 执行失败/前置校验拦截(error_for_llm 通道),显示错误提示
           // 1. general  — 闲聊(reply 通道),显示纯文本
           // 2. needsClarification — 追问(ask 通道),显示问题卡片
           // 3. artifactType='data' — 数据结果(非配置),显示 data-card
           //    必须在 config 检查之前:artifactType 是后端设置的显式判别式
           // 4. result.config — 配置结果(默认),显示 config-card + 应用按钮
-          if (result.intent === 'general') {
+          if (result.error) {
+            // 工具执行失败/被前置校验拦截:显示明确错误(缺地址/校验失败等),
+            // 不静默——用户必须知道这轮为什么没有产出
+            messages.value.push({
+              role: 'assistant',
+              content: `⚠️ ${result.summary || result.message || '执行失败'}`,
+            })
+          }
+          // 闲聊
+          else if (result.intent === 'general') {
             // 闲聊：只塞一条纯文本助手消息
             messages.value.push({
               role: 'assistant',
