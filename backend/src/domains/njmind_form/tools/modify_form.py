@@ -34,7 +34,7 @@ import logging
 from typing import Any, Dict, Optional
 
 # CompositeTool:复合工具基类,提供 run_pipeline 模板方法
-from sdk.tool import CompositeTool, ToolResult, ToolContext
+from sdk.tool import CompositeTool, ToolResult, ToolContext, ClarificationRaised
 from domains.njmind_form.tools._preflight import require_modeler_service
 from domains.njmind_form.tools._postprocess import (
     postprocess_config, _collect_schema_keys, schema_projection,
@@ -285,8 +285,15 @@ class ModifyFormTool(CompositeTool):
             ctx:   提供 asset_client + emit
         """
         ctx.emit("stage", "fetch_guide", "正在从上游获取配置指南...")
-        # 合法性护栏:异常返回降级为空 guide(模板已条件渲染,不崩)
-        state["guide"] = sanitize_guide(ctx.asset_client.get_guide())
+        # 拉取失败(网络/假200信封如登录态过期403)→ 直接追问用户刷新重开,
+        # 不进管线盲跑;合法内容经 sanitize_guide 护栏
+        raw = ctx.asset_client.get_guide()
+        if raw is None:
+            raise ClarificationRaised([
+                "获取上游配置指南失败（可能登录态过期或服务不可用），"
+                "请刷新设计器页面后重新打开 AI 助手再试"
+            ])
+        state["guide"] = sanitize_guide(raw)
 
     def _step_modify(self, state: dict, ctx: ToolContext) -> None:
         """Step 2: 修改配置 —— 增量主路径 + 全量兜底（两相式）。

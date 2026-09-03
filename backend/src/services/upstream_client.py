@@ -264,6 +264,20 @@ class UpstreamClient:
         """
         return service_name in _get_request_services()
 
+    # njmind 网关的「假 200」：HTTP 200 但 body 是业务错误信封 {code≠成功, msg}。
+    # 只看状态码会把信封当正常内容——真实事故：过期 token 拉到
+    # {code:403, msg:'没有该操作权限'} 被当 guide 缓存 300s 毒化后续请求，
+    # 且整轮管线在「无字段类型表」下盲跑，校验重试烧了 3 分半。
+    _ENVELOPE_OK_CODES = (0, 200, "0", "200")
+
+    @classmethod
+    def _envelope_error_msg(cls, data: Any) -> Optional[str]:
+        """识别业务错误信封：是错误信封返回 msg，否则 None（含成功信封）。"""
+        if isinstance(data, dict) and "code" in data and "msg" in data:
+            if data.get("code") not in cls._ENVELOPE_OK_CODES:
+                return str(data.get("msg") or f"code={data.get('code')}")
+        return None
+
     def _cache_key(self, prefix: str, key: str, service_name: str) -> str:
         """生成带服务 base 的缓存键，避免多上游环境缓存串数据。
 
@@ -399,6 +413,10 @@ class UpstreamClient:
             resp = self._client.get(endpoint, headers=self._headers())
             resp.raise_for_status()
             template = resp.json()
+            env_msg = self._envelope_error_msg(template)
+            if env_msg:
+                logger.warning(f"get_template 响应为业务错误信封: {env_msg}")
+                return None
             self._set_cached(cache_key, template)  # 命中后缓存，下次 ttl 内直接命中
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
@@ -473,6 +491,10 @@ class UpstreamClient:
             resp = self._client.get(endpoint, headers=self._headers())
             resp.raise_for_status()
             schema = resp.json()
+            env_msg = self._envelope_error_msg(schema)
+            if env_msg:
+                logger.warning(f"get_schema 响应为业务错误信封: {env_msg}")
+                return None
             self._set_cached(cache_key, schema)
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
@@ -514,6 +536,19 @@ class UpstreamClient:
             resp = self._client.get(f"{base}/api/mcp/guides/guide.json", headers=self._headers())
             resp.raise_for_status()
             guide = resp.json()
+            # 假 200 业务信封（403 无权限等）：按失败处理且不进缓存
+            env_msg = self._envelope_error_msg(guide)
+            if env_msg:
+                duration_ms = int((time.time() - start_time) * 1000)
+                self._log_call(
+                    endpoint=f"{base}/api/mcp/guides/guide.json",
+                    response_data={"envelopeError": env_msg},
+                    status_code=resp.status_code,
+                    duration_ms=duration_ms,
+                    error_message=env_msg,
+                )
+                logger.warning(f"guide 响应为业务错误信封: {env_msg}")
+                return None
             self._set_cached(cache_key, guide)
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
@@ -556,6 +591,10 @@ class UpstreamClient:
             resp = self._client.get(full_url, headers=self._headers())
             resp.raise_for_status()
             guide = resp.json()
+            env_msg = self._envelope_error_msg(guide)
+            if env_msg:
+                logger.warning(f"guide 响应为业务错误信封: {env_msg}")
+                return None
             self._set_cached(cache_key, guide)
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
@@ -612,6 +651,15 @@ class UpstreamClient:
             )
             resp.raise_for_status()
             raw = resp.json()  # 原始响应，格式可能是 {pass, errors, warnings}
+            # 假 200 业务信封（403 无权限等）：校验根本没执行，Fail-Closed
+            # 带明确原因返回——缺 errors 字段时曾被误判为「校验通过」
+            env_msg = self._envelope_error_msg(raw)
+            if env_msg:
+                return {
+                    "valid": False,
+                    "errors": [{"message": f"上游校验未执行：{env_msg}（多为登录态过期，请刷新设计器页面后重开 AI 助手）"}],
+                    "warnings": [],
+                }
 
             # 归一化上游响应格式
             # upstream: {pass: bool, errors: [str], warnings: [str]}
@@ -683,6 +731,10 @@ class UpstreamClient:
             resp = self._client.get(endpoint, headers=self._headers())
             resp.raise_for_status()
             result = resp.json()
+            env_msg = self._envelope_error_msg(result)
+            if env_msg:
+                logger.warning(f"get_form 响应为业务错误信封: {env_msg}")
+                return None
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
                 endpoint=endpoint,

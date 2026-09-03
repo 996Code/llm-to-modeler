@@ -67,7 +67,9 @@ class HttpAssetClient(AssetClient):
 
     def get_guide(self) -> dict:
         data = self._upstream.get_guide()
-        return self._clean(data) if data else {}
+        # None 透传语义：上游失败/假200信封——工具层据此追问用户刷新重开,
+        # 不再静默降级成空 guide 盲跑(真实事故:整轮无类型表烧了3分半重试)
+        return self._clean(data) if data else None
 
     def get_guide_for(self, service_name: str) -> dict:
         """按服务名取上游 guide（嵌入模式多服务地址）。

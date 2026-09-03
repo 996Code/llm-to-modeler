@@ -176,8 +176,15 @@ class CreateFormTool(CompositeTool):
         # emit 推进度事件给前端(类比 Java 的进度回调)
         ctx.emit("stage", "fetch_guide", "正在从上游获取配置指南...")
         # 从上游拉配置指南(字段说明、约束规则等),存进 state 供后续步骤用;
-        # 合法性护栏:异常返回降级为空 guide(模板已条件渲染,不崩)
-        state["guide"] = sanitize_guide(ctx.asset_client.get_guide())
+        # 拉取失败(网络/假200信封如登录态过期403)→ 直接追问用户刷新重开,
+        # 不进管线盲跑(无类型表的生成质量塌方,校验重试烧几分钟)
+        raw = ctx.asset_client.get_guide()
+        if raw is None:
+            raise ClarificationRaised([
+                "获取上游配置指南失败（可能登录态过期或服务不可用），"
+                "请刷新设计器页面后重新打开 AI 助手再试"
+            ])
+        state["guide"] = sanitize_guide(raw)
 
     def _step_list_assets(self, state: dict, ctx: ToolContext) -> None:
         """列出可用模板和 Schema 文件名。"""
