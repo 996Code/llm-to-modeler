@@ -252,6 +252,7 @@ import {
 import { Modal, message as antdMessage } from 'ant-design-vue'
 // 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
 import { useConversationStore } from '../../stores/conversation'
+import { copyText } from '../../utils/clipboard'
 // 仅引入类型（编译期检查，运行时不打包）
 import type { FormConfig } from '../../types'
 // 子组件：输入框
@@ -531,12 +532,10 @@ async function applyConfig(config: FormConfig) {
 
 /** 复制配置 JSON 到剪贴板（独立模式 / 宿主不支持 apply 时显示） */
 async function copyConfig(config: FormConfig) {
-  try {
-    await navigator.clipboard.writeText(JSON.stringify(config, null, 2))
-    antdMessage.success('已复制配置 JSON')
-  } catch {
-    antdMessage.error('复制失败，请使用「查看 JSON」手动复制')
-  }
+  // copyText：http 非安全上下文降级（navigator.clipboard 不可用时兜底）
+  const ok = await copyText(JSON.stringify(config, null, 2))
+  if (ok) antdMessage.success('已复制配置 JSON')
+  else antdMessage.error('复制失败，请使用「查看 JSON」手动复制')
 }
 
 // ===== 自动滚动到底部 =====

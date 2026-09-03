@@ -28,6 +28,7 @@
 // 聊天端 JsonDiffView 的 highlightLine 同路线。
 import { computed, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
+import { copyText } from '../../utils/clipboard'
 
 const props = withDefaults(defineProps<{
   label?: string
@@ -77,11 +78,12 @@ const lineCount = computed(() => lines.value.length)
 watch(() => props.data, () => { collapsed.value = props.defaultCollapsed })
 
 async function copy() {
-  try {
-    await navigator.clipboard.writeText(prettyText.value)
+  // copyText：http 非安全上下文降级（navigator.clipboard 不可用时兜底）
+  const ok = await copyText(prettyText.value)
+  if (ok) {
     copied.value = true
     setTimeout(() => (copied.value = false), 1500)
-  } catch {
+  } else {
     message.error('复制失败')
   }
 }

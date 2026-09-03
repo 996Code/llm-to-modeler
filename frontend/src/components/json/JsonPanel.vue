@@ -72,6 +72,7 @@ import { computed } from 'vue'
 import { message } from 'ant-design-vue'
 import { CopyOutlined, DownloadOutlined, FileTextOutlined, CodeOutlined, CheckOutlined } from '@ant-design/icons-vue'
 import { useConversationStore } from '../../stores/conversation'
+import { copyText } from '../../utils/clipboard'
 import JsonDiffView from './JsonDiffView.vue'
 
 // defineEmits：声明本组件会抛出的事件（模板事件 + 类型检查双保险）
@@ -85,13 +86,14 @@ const config = computed(() => store.currentConfig)
 
 /**
  * 复制配置 JSON 到剪贴板。
- * navigator.clipboard 是浏览器原生剪贴板 API（需 https 或 localhost）。
+ * copyText 内部处理安全上下文：navigator.clipboard 仅 https/localhost
+ * 可用，内网 http 访问走 execCommand 兜底。
  */
 async function copy() {
   if (!config.value) return
-  await navigator.clipboard.writeText(JSON.stringify(config.value, null, 2))
-  // 弹出成功提示
-  message.success('已复制到剪贴板')
+  const ok = await copyText(JSON.stringify(config.value, null, 2))
+  if (ok) message.success('已复制到剪贴板')
+  else message.error('复制失败')
 }
 
 /**

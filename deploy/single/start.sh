@@ -5,7 +5,9 @@
 set -e
 
 # 后台拉起后端（单进程：SqliteSaver/checkpoint 单写者；并发由线程池承担）
-python -m uvicorn src.main:app --host 127.0.0.1 --port 8000 &
+# 以 main:app 启动（PYTHONPATH 含 /app/src）：若以 src.main:app 启动，
+# src.X 与 X 双模块加载会让 thread-local（services 表/透传头）互不可见
+python -m uvicorn main:app --host 127.0.0.1 --port 8000 &
 UVC_PID=$!
 
 # 等 uvicorn 就绪再起 nginx（避免 nginx 启动时反代目标不存在报错退出）

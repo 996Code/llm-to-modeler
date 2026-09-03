@@ -93,7 +93,8 @@ if [ "$START_BACKEND" = true ]; then
   log_info "启动 Backend Server (端口 ${BACKEND_PORT})..."
   log_info "  日志: ${BACKEND_LOG}"
   cd "$BACKEND_DIR"
-  python3 -m uvicorn src.main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload > "$BACKEND_LOG" 2>&1 &
+  # main:app + PYTHONPATH=src：src.X 与 X 双模块加载会让 thread-local 互不可见
+  (cd "$BACKEND_DIR" && PYTHONPATH=src python3 -m uvicorn main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload > "$BACKEND_LOG" 2>&1 &)
   BACKEND_PID=$!
   log_info "Backend PID: ${BACKEND_PID}"
 

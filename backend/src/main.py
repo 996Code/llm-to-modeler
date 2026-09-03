@@ -45,17 +45,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # 业务路由模块（各模块内部定义 router，这里集中挂载）
-from src.api.admin import router as admin_router
-from src.api.config import router as config_router
-from src.api.conversations import router as conversations_router
-from src.api.health import router as health_router
-from src.api.meta import router as meta_router
+from api.admin import router as admin_router
+from api.config import router as config_router
+from api.conversations import router as conversations_router
+from api.health import router as health_router
+from api.meta import router as meta_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
-from src.llm.client import LLMClient
+from llm.client import LLMClient
 # 会话存储：SQLite，以追加写事件流方式记录对话
-from src.services.conversation_store import ConversationStore
+from services.conversation_store import ConversationStore
 # 上游客户端：调用 njmind-modeler 做校验/增删改/拉模板（地址按请求由宿主 services 表解析）
-from src.services.upstream_client import UpstreamClient
+from services.upstream_client import UpstreamClient
 
 # 全局日志配置：控制台 + logs/app.log 文件双输出（按大小轮转，对标 logback
 # RollingFileAppender）。LOG_DIR/LOG_LEVEL 可用环境变量覆盖，见 engine/log_config.py。
@@ -157,7 +157,7 @@ async def lifespan(app: FastAPI):
     logger.info("LangGraph StateGraph architecture initialized")
 
     # 管理端访问模式提示:开放模式是内网部署取舍,必须让运维在日志里看见
-    from src.api.admin import get_admin_token
+    from api.admin import get_admin_token
     if get_admin_token():
         logger.info("Admin console: token-protected (X-Admin-Token)")
     else:
@@ -214,5 +214,9 @@ if __name__ == "__main__":
     # 直接 python main.py 运行时的入口（开发用）
     # reload=True：代码改动自动重启，配合 LangGraph 调试很方便
     # 生产一般用 uvicorn 命令行启动，不走这里
+    # ⚠ 以 main:app（非 src.main:app）启动：sys.path 同时含仓库根与 src/
+    # 时，src.X 与 X 会被加载成两个模块对象——thread-local（services 表/
+    # 透传头）在两个副本间互不可见（真实事故：宿主 services 下发了但
+    # resolve_base 读不到，被 env 兜底掩盖数周）
     import uvicorn
-    uvicorn.run("src.main:app", host="0.0.0.0", port=18080, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=18080, reload=True)
