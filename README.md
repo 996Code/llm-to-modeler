@@ -13,7 +13,7 @@
 | 后端 | Python 3.12 + FastAPI + LangGraph StateGraph |
 | LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型） |
 | 存储 | SQLite（对话历史 + LangGraph Checkpoint） |
-| 上游 | AssetClient 抽象（HTTP 适配；地址三级解析：宿主 services 表 → 白名单 → env 兜底） |
+| 上游 | AssetClient 抽象（HTTP 适配；地址请求级解析：宿主 services 表按请求下发） |
 
 ---
 
@@ -33,7 +33,7 @@
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │  API 层 (api/)                                               │   │
-│  │  /api/config/chat  /api/conversations  /mcp  /health         │   │
+│  │  /api/config/chat  /api/conversations  /health             │   │
 │  └──────────────────────────┬───────────────────────────────────┘   │
 │                              │                                       │
 │  ┌──────────────────────────▼───────────────────────────────────┐   │
@@ -110,17 +110,17 @@
 │                              │                                       │
 │  ┌──────────────────────────▼───────────────────────────────────┐   │
 │  │  Adapters (adapters/)                                        │   │
-│  │  HttpAssetClient — HTTP 上游适配（地址:宿主services表优先,  │   │
-│  │  UPSTREAM_BASE_URL 仅兜底;详见 resolve_base 三级降级）      │   │
+│  │  HttpAssetClient — HTTP 上游适配（地址:宿主 services 表          │   │
+│  │  按请求下发;详见 resolve_base 请求级解析）                    │   │
 │  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
          │                    │
          ▼                    ▼
 ┌────────────────┐   ┌─────────────────────┐
 │ 上游业务 API   │   │ LLM 推理服务         │
-│ (地址三级解析: │   │ (OpenAI 兼容接口)    │
+│ (地址请求级解析:│   │ (OpenAI 兼容接口)    │
 │  宿主services表│   │ glm / Qwen / ...     │
-│  →白名单→env) │   └─────────────────────┘
+│  按请求下发)   │   └─────────────────────┘
 │  提交/查询数据)│
 └────────────────┘
 ```
@@ -446,13 +446,9 @@ designer（field-edit 页右下角悬浮球）走**信封协议**：
 编辑 `.env`：
 
 ```env
-# ── 上游业务 API（仅兜底地址，见下方三级解析）──
-UPSTREAM_BASE_URL=http://127.0.0.1:7001
-UPSTREAM_TIMEOUT=30
-UPSTREAM_CACHE_TTL=300
-# 宿主下发服务地址的白名单（逗号分隔）。⚠ 空缺省=不限制，仅限本地联调；
-# 生产必须配置，防"控制宿主下发内容的人让本服务带 token 请求任意地址"
-# UPSTREAM_ALLOWED_BASES=http://192.168.99.28:7114/codeBack
+# ── 上游业务 API（地址由宿主 services 按请求下发，无 env 地址配置）──
+# UPSTREAM_TIMEOUT=30
+# UPSTREAM_CACHE_TTL=300
 
 # ── LLM 推理服务 (OpenAI 兼容接口) ──
 LLM_BASE_URL=http://996code.top:18080/v1
@@ -469,18 +465,20 @@ FRONTEND_PORT=13080
 健康检查：根路径 `GET /health`（运维/K8s 探针）与 `GET /api/health`
 （嵌入代理链别名，宿主探测 AI 服务是否部署用）双端点。
 
-#### 上游地址三级解析（重要）
+#### 上游地址请求级解析（重要）
 
-嵌入模式下 `UPSTREAM_BASE_URL` **只是兜底**，实际地址按以下优先级解析
-（`upstream_client.resolve_base`，每 pack 在自己的 manifest 里声明所需服务名，
-如 `njmind-modeler`）：
+上游地址**只来自宿主 services 表**：designer 握手后经 chat 请求下发
+（如 `http://192.168.99.28:7114/codeBack`，经 designer 代理到网关），
+按 pack 在 manifest 里声明的服务名（如 `njmind-modeler`）解析。
+未下发的服务调用时抛 `ServiceUnresolvableError`（fail-closed，报错信息
+指引排查方向）。
 
-1. **宿主 services 表**：designer 握手后经 chat 请求下发
-   （如 `http://192.168.99.28:7114/codeBack`，经 designer 代理到网关）；
-2. **白名单校验**：宿主地址必须命中 `UPSTREAM_ALLOWED_BASES`，越界回退默认并告警；
-3. **env 默认**：宿主未提供该服务时使用 `UPSTREAM_BASE_URL`。
+工具侧还有一层 `preflight` 前置校验（SDK 钩子，业务工具自己声明执行前提——
+如 njmind_form 校验上游地址可解析），缺地址在进管线前就拦截，错误直达用户，
+不烧 LLM/上游调用。
 
 同一请求内所有上游调用（含缓存 key）绑定同一 base，不同环境不串缓存。
+每轮请求实际采用的地址记录在会话链路的 `request_context` 打点中（管理端可查）。
 
 ### 启动
 
@@ -518,9 +516,6 @@ npm install && npm run dev
 | POST | `/api/conversations` | 创建对话（可带 contextKey 绑定宿主实体） |
 | DELETE | `/api/conversations/:id` | 删除对话 |
 | GET | `/api/meta/packs` | pack manifest 声明（前端渲染 actions/展示字段/示例） |
-| GET | `/api/skills/templates` | 获取模板列表（代理上游） |
-| GET | `/api/skills/guide` | 获取配置指南（代理上游） |
-| POST | `/mcp` | MCP 协议（JSON-RPC 2.0） |
 | GET | `/health` `/api/health` | 健康检查（嵌入探测走 /api/health 同链路，`Cache-Control: no-store`） |
 | GET/DELETE | `/api/admin/conversations` | **管理端**：全量会话分页/详情/删除（需 `X-Admin-Token`） |
 | GET | `/api/admin/call-logs` | **管理端**：LLM/上游调用审计日志分页查询 |
@@ -605,7 +600,6 @@ llm-to-modler/
 ├── backend/
 │   └── src/
 │       ├── main.py                # FastAPI 入口, 构建 Graph
-│       ├── mcp_server.py          # MCP 协议服务 (使用 LangGraph)
 │       │
 │       ├── engine/                # ★ Engine 层 (零领域知识)
 │       │   ├── graph.py           # StateGraph 构建 + compile
@@ -642,7 +636,6 @@ llm-to-modler/
 │       ├── api/                   # 路由层
 │       │   ├── config.py          # /api/config/chat
 │       │   ├── conversations.py   # /api/conversations
-│       │   ├── skills.py          # /api/skills
 │       │   ├── health.py          # /health
 │       │   └── sse.py             # SSE 工具类
 │       │

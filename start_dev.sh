@@ -8,8 +8,7 @@
 #   ./start_dev.sh --backend-only  # 只启动 Backend
 #
 # 环境变量:
-#   ASSET_BASE_URL  — 上游 API 地址(默认 http://localhost:19999)
-#   MOCK_PORT       — Mock API 端口(默认 19999)
+#   MOCK_PORT       — Mock API 端口(默认 19999,leave demo 的独立联调上游)
 #   BACKEND_PORT    — Backend 端口(默认 18080)
 # ──────────────────────────────────────────────────────────────
 
@@ -29,7 +28,6 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # 默认配置
 MOCK_PORT=${MOCK_PORT:-19999}
 BACKEND_PORT=${BACKEND_PORT:-18080}
-ASSET_BASE_URL=${ASSET_BASE_URL:-"http://localhost:${MOCK_PORT}"}
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="${SCRIPT_DIR}/backend"
 MOCK_LOG="/tmp/mock-api.log"
@@ -92,10 +90,6 @@ fi
 
 # ── 启动 Backend Server ──
 if [ "$START_BACKEND" = true ]; then
-  # 设置环境变量
-  export ASSET_BASE_URL
-  log_info "ASSET_BASE_URL=${ASSET_BASE_URL}"
-
   log_info "启动 Backend Server (端口 ${BACKEND_PORT})..."
   log_info "  日志: ${BACKEND_LOG}"
   cd "$BACKEND_DIR"
