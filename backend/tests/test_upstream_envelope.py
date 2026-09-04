@@ -89,13 +89,13 @@ class TestModelerCredentialsPolicy:
         ModelerAPI(c).get_guide()
         assert c._client.get.call_args.kwargs.get("headers") is None
 
-    def test_business_endpoints_forward_credentials(self):
+    def test_all_endpoints_anonymous(self):
+        """全端点匿名（部署事实：mcp 端点族带用户身份反而 403）。"""
         c = _transport()
         set_forward_headers({"Authorization": "Bearer x"})
         c._client.post.return_value = _Resp({"pass": True, "errors": []})
         ModelerAPI(c).validate_artifact({"formName": "t"}, mode="CREATE")
-        sent = c._client.post.call_args.kwargs.get("headers")
-        assert sent and sent.get("Authorization") == "Bearer x"
+        assert c._client.post.call_args.kwargs.get("headers") is None
 
     def test_validate_envelope_fail_closed(self):
         """validate 收信封：校验未执行，Fail-Closed 且指引用户刷新。"""

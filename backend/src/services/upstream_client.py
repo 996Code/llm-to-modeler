@@ -88,6 +88,16 @@ class ServiceUnresolvableError(RuntimeError):
     """
 
 
+def _mask_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """请求头掩蔽：值只留前 8 字符辨识（Authorization 原文不落库）。
+
+    与 engine.stream 的 request_context 打点同一掩码策略——日志要的是
+    "哪个头发了、形态对不对"，不是凭证本身。
+    """
+    return {k: (f"{str(v)[:8]}****" if len(str(v)) > 8 else "****")
+            for k, v in (headers or {}).items()}
+
+
 class UpstreamConfig:
     """传输层行为参数（普通类，非 Pydantic）。
 
@@ -189,23 +199,26 @@ class UpstreamClient:
             if cached is not None:
                 return cached
         start = time.time()
+        sent_headers = self._headers(auth, extra_headers)
         try:
-            resp = self._client.get(url, params=params,
-                                    headers=self._headers(auth, extra_headers))
+            resp = self._client.get(url, params=params, headers=sent_headers)
             resp.raise_for_status()
             data = resp.json()
             env_msg = self._envelope_error_msg(data)
             if env_msg:
                 logger.warning(f"GET {path} 假200业务信封: {env_msg}")
-                self._log(url, error_message=f"业务信封: {env_msg}", duration=self._ms(start))
+                self._log(url, error_message=f"业务信封: {env_msg}",
+                          duration=self._ms(start), headers=sent_headers)
                 return None
             if cache and not params:
                 self._set_cached(url, data)
-            self._log(url, status_code=resp.status_code, duration=self._ms(start))
+            self._log(url, status_code=resp.status_code,
+                      duration=self._ms(start), headers=sent_headers)
             return data
         except Exception as e:
             logger.warning(f"GET {path} failed: {e}")
-            self._log(url, error_message=str(e), duration=self._ms(start))
+            self._log(url, error_message=str(e),
+                      duration=self._ms(start), headers=sent_headers)
             return None
 
     def post(self, service_name: str, path: str, *,
@@ -219,21 +232,25 @@ class UpstreamClient:
         """
         url = f"{self.resolve_base(service_name)}{path}"
         start = time.time()
+        sent_headers = self._headers(auth, extra_headers)
         try:
             resp = self._client.post(url, json=json_body, params=params,
-                                     headers=self._headers(auth, extra_headers))
+                                     headers=sent_headers)
             resp.raise_for_status()
             data = resp.json()
             env_msg = self._envelope_error_msg(data)
             if env_msg:
                 logger.warning(f"POST {path} 假200业务信封: {env_msg}")
-                self._log(url, error_message=f"业务信封: {env_msg}", duration=self._ms(start))
+                self._log(url, error_message=f"业务信封: {env_msg}",
+                          duration=self._ms(start), headers=sent_headers)
                 return None, env_msg
-            self._log(url, status_code=resp.status_code, duration=self._ms(start))
+            self._log(url, status_code=resp.status_code,
+                      duration=self._ms(start), headers=sent_headers)
             return data, None
         except Exception as e:
             logger.warning(f"POST {path} failed: {e}")
-            self._log(url, error_message=str(e), duration=self._ms(start))
+            self._log(url, error_message=str(e),
+                      duration=self._ms(start), headers=sent_headers)
             return None, str(e)
 
     # ── 内部：凭证/缓存/信封/日志 ─────────────────────────────────
@@ -274,9 +291,15 @@ class UpstreamClient:
         return int((time.time() - start) * 1000)
 
     def _log(self, endpoint: str, *, status_code: Optional[int] = None,
-             error_message: Optional[str] = None, duration: int = 0):
+             error_message: Optional[str] = None, duration: int = 0,
+             headers: Optional[Dict[str, str]] = None):
         """上游调用日志入链（call_type='upstream'）。conv_id 从线程上下文兜底，
-        插件经领域客户端的调用无需透传 conv_id 即自动关联会话。"""
+        插件经领域客户端的调用无需透传 conv_id 即自动关联会话。
+
+        headers：本次实际发出的请求头（键名 + 掩蔽值）——排查"带头被 403 /
+        匿名才放行"类网关权限问题的关键证据（可追溯 ≠ 可泄露：Authorization
+        只留前 8 字符辨识）。调用方（get/post）在发请求后传入。
+        """
         if not self._conversation_store:
             return
         conv_id = current_conversation_id()
@@ -284,6 +307,8 @@ class UpstreamClient:
             self._conversation_store.save_call_log(
                 call_type="upstream",
                 endpoint=endpoint,
+                request_data=({"headers": _mask_headers(headers)}
+                              if headers else None),
                 status_code=status_code or (500 if error_message else 200),
                 duration_ms=duration,
                 error_message=error_message,

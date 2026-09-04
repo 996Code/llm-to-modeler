@@ -77,7 +77,11 @@ class ModelerAPI:
         return self._t.get(service_name, self._path("guide"),
                            auth=False, cache=True)
 
-    # ── 业务端点（透传凭证，不缓存；主键/枚举/归一化语义归 pack） ──
+    # ── 业务端点（匿名，不缓存；主键/枚举/归一化语义归 pack） ──
+    # 凭证策略（部署事实定的）：njmind 网关对 /api/mcp/* 端点族是「匿名
+    # 白名单放行、带身份按身份鉴权」——普通 designer 用户未被授权该端点族，
+    # 带其 token 反而 403（生产实证：同一请求 guide/validate 带头全 403、
+    # 匿名全通）。此端点族本就是服务间匿名调用语义，统一不带用户凭证。
 
     def validate_artifact(self, artifact: Dict[str, Any], mode: str) -> Dict[str, Any]:
         """校验制品。mode 由 adapter 原样透传（领域客户端负责枚举归一化）。
@@ -87,7 +91,7 @@ class ModelerAPI:
         """
         raw, err = self._t.post(
             SERVICE_NAME, self._path("validate"),
-            json_body=artifact, params={"mode": mode.upper()}, auth=True,
+            json_body=artifact, params={"mode": mode.upper()}, auth=False,
         )
         if raw is None:
             reason = f"Upstream validation request failed: {err}"
@@ -112,18 +116,18 @@ class ModelerAPI:
         """
         if mode == "create":
             data, _err = self._t.post(SERVICE_NAME, self._path("create"),
-                                      json_body=artifact, auth=True)
+                                      json_body=artifact, auth=False)
             return data
         if mode == "update":
             form_code = artifact.get("formCode")
             if not form_code:
                 raise ValueError("update 模式缺少 formCode，无法定位要更新的表单")
             data, _err = self._t.post(SERVICE_NAME, self._path("update", code=form_code),
-                                      json_body=artifact, auth=True)
+                                      json_body=artifact, auth=False)
             return data
         raise ValueError(f"unknown mode: {mode}")
 
     def get_artifact(self, entry_id: str) -> Optional[Dict[str, Any]]:
         """按制品标识（formCode）查询已有配置。"""
         return self._t.get(SERVICE_NAME, self._path("get_form", code=entry_id),
-                           auth=True)
+                           auth=False)

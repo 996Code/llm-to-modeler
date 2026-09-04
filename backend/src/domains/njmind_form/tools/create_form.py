@@ -437,6 +437,17 @@ class CreateFormTool(CompositeTool):
         logger = logging.getLogger(__name__)
         logger.warning(f"Validation failed (retry {state['retry_count']}): {result}")
 
+        # 传输类失败（校验未执行：假200信封/网络错误）短路——重试不可能自愈
+        # （token 不会因重新生成而变好），烧 3 轮 LLM 只会拖 1 分钟才把
+        # "请刷新设计器"给到用户（生产日志实证）
+        _msgs = [e.get("message", str(e)) if isinstance(e, dict) else str(e)
+                 for e in errors]
+        if any(m.startswith("上游校验未执行") or
+               m.startswith("Upstream validation request failed") for m in _msgs):
+            state["retry_count"] = MAX_RETRIES  # 跳过重试循环
+            ctx.emit("stage", "validate_fail", _msgs[0][:80])
+            return
+
         if state["retry_count"] < MAX_RETRIES:
             error_msgs = [e.get("message", str(e))[:3] if isinstance(e, dict) else str(e)[:3] for e in state["validation_errors"][:3]]
             error_msgs = [e.get("message", str(e))[:60] if isinstance(e, dict) else str(e)[:60] for e in state["validation_errors"][:3]]
