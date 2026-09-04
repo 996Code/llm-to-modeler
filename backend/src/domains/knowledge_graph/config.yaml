@@ -1,0 +1,38 @@
+# 知识图谱插件 manifest
+# 依赖声明(环境变量/设置页补配均可) + 管理页/设置页注册。
+
+domain:
+  description: >
+    知识库/知识图谱的检索与问答("查一下知识库里""XX 和 YY 是什么关系"
+    "根据产品手册回答…")类需求;需要基于已导入文档回答事实性问题时路由到本域
+  compact_focus: 检索过的知识库名、查询到的实体与得出的结论
+
+admin:
+  settings: settings.schema.yaml   # 声明式配置页(连接/抽取/检索参数)
+  page: knowledge_graph            # 自定义管理页组件 key(前端注册表解析)
+  title: 知识图谱
+
+# 基础设施依赖:字段引用 settings.schema.yaml 的 key(解析链 设置页 > env > 默认)。
+# 未配置 → 插件中心"依赖未配置"不可加载;配好 env 或设置页补配后"重新检测"热加载。
+dependencies:
+  neo4j:
+    required: true
+    fields:
+      - neo4j_uri
+      - neo4j_user
+      - neo4j_password
+    probe:
+      module: domains.knowledge_graph.probes
+      fn: neo4j
+  milvus:
+    required: true
+    fields:
+      - milvus_uri
+    probe:
+      module: domains.knowledge_graph.probes
+      fn: milvus
+
+# 数据制品(检索返回的子图走 data 制品,前端通用数据卡可展示)
+artifact:
+  type: data
+  actions: [view_json]

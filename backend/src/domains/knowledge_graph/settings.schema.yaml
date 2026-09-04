@@ -1,0 +1,160 @@
+# 知识图谱插件配置 schema(管理端"插件设置"渲染为通用表单)
+# 优先级:设置页保存值 > 环境变量(env) > 默认值(default)
+version: 1
+groups:
+  - key: connection
+    title: 存储连接
+    fields:
+      - key: neo4j_uri
+        type: string
+        label: Neo4j 地址
+        env: NEO4J_URI
+        required: true
+        placeholder: bolt://localhost:7687
+        help: 图谱存储;本机 docker 可用 kg-neo4j 容器
+      - key: neo4j_user
+        type: string
+        label: Neo4j 用户
+        env: NEO4J_USER
+        default: neo4j
+      - key: neo4j_password
+        type: secret
+        label: Neo4j 密码
+        env: NEO4J_PASSWORD
+        required: true
+      - key: neo4j_database
+        type: string
+        label: Neo4j 数据库
+        env: NEO4J_DATABASE
+        default: neo4j
+        help: 社区版只有默认库 neo4j
+      - key: milvus_uri
+        type: string
+        label: Milvus 地址
+        env: MILVUS_URI
+        required: true
+        placeholder: http://localhost:19530
+        help: 向量存储;每个知识库一个独立 collection
+      - key: milvus_user
+        type: string
+        label: Milvus 用户
+        env: MILVUS_USER
+        help: 未开启认证的实例留空
+      - key: milvus_password
+        type: secret
+        label: Milvus 密码
+        env: MILVUS_PASSWORD
+
+  - key: extraction
+    title: 抽取与批次
+    fields:
+      - key: chunk_target_chars
+        type: int
+        label: 目标块字数
+        default: 1200
+        min: 200
+        max: 8000
+        help: 结构感知切块的目标大小(标题边界优先)
+      - key: chunk_overlap_chars
+        type: int
+        label: 块重叠字数
+        default: 100
+        min: 0
+        max: 500
+      - key: chunk_max_chars
+        type: int
+        label: 单块硬上限
+        default: 3000
+        min: 500
+        max: 16000
+      - key: llm_batch_size
+        type: int
+        label: 每批 chunk 数
+        default: 4
+        min: 1
+        max: 16
+        help: 批次 = 并行与断点单位(批次间串行更新实体词表 + 落 checkpoint)
+      - key: llm_concurrency
+        type: int
+        label: 批内并行度
+        default: 2
+        min: 1
+        max: 8
+        help: 批内并行的 LLM 抽取调用数(注意上游限流)
+      - key: llm_max_retries
+        type: int
+        label: 单块重试次数
+        default: 2
+        min: 0
+        max: 5
+      - key: failure_threshold
+        type: int
+        label: 连续失败熔断阈值
+        default: 5
+        min: 1
+        max: 50
+        help: 连续抽取失败达到该数则中止任务(防上游故障烧重试)
+      - key: glossary_top_k
+        type: int
+        label: 跨块实体词表上限
+        default: 100
+        min: 0
+        max: 500
+        help: 注入后续 prompt 的已知实体数(命名一致性;0 = 关闭)
+      - key: extraction_temperature
+        type: int
+        label: 抽取温度(x100)
+        default: 10
+        min: 0
+        max: 100
+        help: 存整数避免浮点表单精度问题,10 = 0.1
+      - key: embed_batch_size
+        type: int
+        label: 向量化批大小
+        default: 16
+        min: 1
+        max: 64
+
+  - key: retrieval
+    title: 检索与问答
+    fields:
+      - key: graph_max_hops
+        type: int
+        label: 图谱扩展跳数
+        default: 2
+        min: 1
+        max: 3
+      - key: graph_max_nodes
+        type: int
+        label: 子图节点上限
+        default: 80
+        min: 10
+        max: 300
+      - key: graph_max_edges
+        type: int
+        label: 子图边上限
+        default: 150
+        min: 10
+        max: 600
+      - key: vector_top_k
+        type: int
+        label: 向量召回条数
+        default: 5
+        min: 1
+        max: 20
+      - key: answer_temperature
+        type: int
+        label: 回答温度(x100)
+        default: 30
+        min: 0
+        max: 100
+
+  - key: files
+    title: 上传限制
+    fields:
+      - key: max_upload_mb
+        type: int
+        label: 单文件上限(MB)
+        default: 20
+        min: 1
+        max: 200
