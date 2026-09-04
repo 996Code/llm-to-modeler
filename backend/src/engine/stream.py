@@ -59,14 +59,12 @@ logger = logging.getLogger(__name__)
 
 
 def _mask_header_value(value: str) -> str:
-    """遮蔽透传头的值入链(可追溯 ≠ 可泄露)。
+    """透传头的值（历史名保留避免动调用点；按产品决策原文记录）。
 
-    只保留前 8 个字符供辨识(如 "Bearer e" / tenant 前缀),其余打码;
-    短值(≤8)整体打码——追查时需要的是「哪个头到了、值变没变」,
-    不是值本身,Authorization 原文落库本身就是审计面扩大。
+    内网审计定位需要完整凭证形态（比对 token 过期/租户头缺失），
+    不做掩蔽。
     """
-    v = str(value)
-    return f"{v[:8]}****" if len(v) > 8 else "****"
+    return str(value)
 
 
 def _request_context_trace(

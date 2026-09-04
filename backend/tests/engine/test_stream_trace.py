@@ -73,10 +73,9 @@ def test_request_context_recorded_with_services():
     assert payload is not None, "request_context 打点缺失"
     detail = payload["detail"]
     assert detail["services"] == {"njmind-modeler": "http://192.168.99.22/codeBack"}
-    # 长值遮蔽:保留前 8 字符辨识,其余打码
-    assert detail["forward_headers"]["Authorization"] == "Bearer s****"
-    # 短值整体打码(tenant-id="1" 不留任何内容)
-    assert detail["forward_headers"]["tenant-id"] == "****"
+    # 请求头原文记录（产品决策：内网审计需要完整凭证形态）
+    assert detail["forward_headers"]["Authorization"] == "Bearer sk-super-secret-token"
+    assert detail["forward_headers"]["tenant-id"] == "1"
     assert detail["context_artifact_bytes"] > 0
     assert detail["user_id"] == "qa"
     assert detail["resume_answers"] is False
@@ -93,8 +92,7 @@ def test_request_context_standalone_empty_services():
     assert detail["context_artifact_bytes"] == 0
 
 
-def test_mask_header_value():
-    """掩码边界:≤8 字符整体打码,>8 保留前 8 + ****。"""
-    assert _mask_header_value("1") == "****"
-    assert _mask_header_value("12345678") == "****"
-    assert _mask_header_value("123456789") == "12345678****"
+def test_mask_header_value_raw():
+    """请求头值原文记录（历史函数名保留；产品决策不做掩蔽）。"""
+    assert _mask_header_value("1") == "1"
+    assert _mask_header_value("Bearer abc.def.ghi") == "Bearer abc.def.ghi"

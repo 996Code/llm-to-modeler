@@ -89,13 +89,12 @@ class ServiceUnresolvableError(RuntimeError):
 
 
 def _mask_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
-    """请求头掩蔽：值只留前 8 字符辨识（Authorization 原文不落库）。
+    """请求头整理（历史名保留 _mask_headers 避免动调用点）。
 
-    与 engine.stream 的 request_context 打点同一掩码策略——日志要的是
-    "哪个头发了、形态对不对"，不是凭证本身。
+    按产品决策：请求头原文落库，不做掩蔽——内网审计定位需要完整凭证
+    形态（如比对 token 是否过期/哪个租户头缺失）。
     """
-    return {k: (f"{str(v)[:8]}****" if len(str(v)) > 8 else "****")
-            for k, v in (headers or {}).items()}
+    return dict(headers or {})
 
 
 class UpstreamConfig:
@@ -296,9 +295,8 @@ class UpstreamClient:
         """上游调用日志入链（call_type='upstream'）。conv_id 从线程上下文兜底，
         插件经领域客户端的调用无需透传 conv_id 即自动关联会话。
 
-        headers：本次实际发出的请求头（键名 + 掩蔽值）——排查"带头被 403 /
-        匿名才放行"类网关权限问题的关键证据（可追溯 ≠ 可泄露：Authorization
-        只留前 8 字符辨识）。调用方（get/post）在发请求后传入。
+        headers：本次实际发出的请求头（原文落库，产品决策：内网审计
+        需要完整凭证形态）。调用方（get/post）在发请求后传入。
         """
         if not self._conversation_store:
             return
@@ -307,7 +305,7 @@ class UpstreamClient:
             self._conversation_store.save_call_log(
                 call_type="upstream",
                 endpoint=endpoint,
-                request_data=({"headers": _mask_headers(headers)}
+                request_data=({"headers": dict(headers)}
                               if headers else None),
                 status_code=status_code or (500 if error_message else 200),
                 duration_ms=duration,
