@@ -148,7 +148,10 @@ class TestCompactFocusWiring:
         with patch("domains.load_all_packs") as lap, \
              patch("domains.load_pack_configs") as lpc, \
              patch("engine.nodes.configure"):
-            lap.return_value = (MagicMock(), None, {}, {})
+            # pack_routers 含两个 pack = "都加载成功"(manifest 保留的过滤条件)
+            lap.return_value = (MagicMock(), None,
+                                {"njmind_form": MagicMock(), "leave_application": MagicMock()},
+                                {}, {})
             # njmind_form 声明了 compact_focus
             lpc.return_value = {
                 "njmind_form": {"domain": {"compact_focus": " 创建了什么表单、修改了哪些字段 "}},
@@ -169,6 +172,6 @@ class TestCompactFocusWiring:
         with patch("domains.load_all_packs") as lap, \
              patch("domains.load_pack_configs") as lpc, \
              patch("engine.nodes.configure"):
-            lap.return_value = (MagicMock(), None, {}, {})
+            lap.return_value = (MagicMock(), None, {}, {}, {})
             lpc.return_value = {}
             pm.assemble_packs(app_state)  # 不抛即通过

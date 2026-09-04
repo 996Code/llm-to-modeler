@@ -50,6 +50,7 @@ from api.config import router as config_router
 from api.conversations import router as conversations_router
 from api.health import router as health_router
 from api.meta import router as meta_router
+from api.tasks import router as tasks_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
 from llm.client import LLMClient
 # 会话存储：SQLite，以追加写事件流方式记录对话
@@ -101,6 +102,20 @@ async def lifespan(app: FastAPI):
     upstream = UpstreamClient(conversation_store=conv_store)
     app.state.upstream = upstream
 
+    # 插件设置存储(声明式配置页的保存值;与依赖检测共用解析链)
+    from services.pack_settings import PackSettingsStore
+    settings_store = PackSettingsStore(db_path)
+    app.state.settings_store = settings_store
+
+    # 通用后台任务框架(任务表/日志表 + 线程池调度;handler 由 pack 注册)
+    from services.task_store import TaskStore
+    from services.task_manager import TaskManager
+    task_store = TaskStore(db_path)
+    task_manager = TaskManager(task_store)
+    app.state.task_store = task_store
+    app.state.task_manager = task_manager
+    task_manager.recover_on_startup()  # 上次进程遗留的 active 任务标 interrupted
+
     # LLM 客户端：注入会话存储，用于持久化 LLM 调用日志
     llm_client = LLMClient(conversation_store=conv_store)
     app.state.llm_client = llm_client
@@ -147,8 +162,9 @@ async def lifespan(app: FastAPI):
     # 装配工具注册表/提示词/pack 路由/manifest —— 与管理端热切换(api/admin.py)
     # 共用同一条装配路径,保证冷启动与热切换行为一致。
     # 兼刷新 compressor 的 compact_focus(app.state.compressor 已就位)
+    # app 透传:装配末尾动态挂载各 pack 的自有 API 路由(/api/packs/{name})
     from services.pack_manager import assemble_packs
-    assemble_packs(app.state, sorted(pack_state.enabled_names()))
+    assemble_packs(app.state, sorted(pack_state.enabled_names()), app=app)
 
     # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）
     # build_graph 装配节点（classify_intent/execute_tool/handle_result）并编译
@@ -190,6 +206,10 @@ async def lifespan(app: FastAPI):
 
     # === 关闭阶段（@PreDestroy 等价物）===
     logger.info("Shutting down...")
+    try:
+        task_manager.close()  # 关闭后台任务线程池(在跑任务下次启动标 interrupted)
+    except Exception:
+        logger.warning("task manager close failed", exc_info=True)
     try:
         compressor.close()  # 关闭压缩后台线程(不等待排队任务)
     except Exception:
@@ -237,6 +257,8 @@ app.include_router(conversations_router)
 app.include_router(meta_router)
 # 管理端路由（X-Admin-Token 守门,ADMIN_TOKEN 未配置时整组 503）
 app.include_router(admin_router)
+# 任务中心路由（同 admin 口令守门;SSE 实时进度/日志）
+app.include_router(tasks_router)
 
 
 

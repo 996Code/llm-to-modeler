@@ -322,8 +322,24 @@ async def admin_call_logs(request: Request):
 
 # ── 插件(pack)管理 ────────────────────────────────────────────
 
+def _dependency_status_for(request: Request, name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """取某 pack 的依赖检测状态。
+
+    优先用最近一次装配的缓存结果(装配时已跑过探针,状态最真实);
+    不在装配名单里的 pack(禁用中)即时评估配置存在性——不跑探针,
+    列表接口不能被网络探测拖慢。
+    """
+    cached = (getattr(request.app.state, "pack_dependency_status", None) or {}).get(name)
+    if cached:
+        return cached
+    from services.pack_dependency import evaluate_pack
+    return evaluate_pack(
+        name, cfg, getattr(request.app.state, "settings_store", None), use_probe=False
+    )
+
+
 def _packs_payload(request: Request) -> Dict[str, Any]:
-    """组装插件管理页数据:全量发现清单 + 启停状态 + manifest 摘要。
+    """组装插件管理页数据:全量发现清单 + 启停状态 + manifest 摘要 + 依赖状态。
 
     manifest 摘要对全部 pack 提供(含禁用的,管理端本来就有权看);
     工具清单只对已启用的 pack 提供(pack_tools 只在装配时生成)。
@@ -342,6 +358,8 @@ def _packs_payload(request: Request) -> Dict[str, Any]:
         cfg = all_configs.get(name, {})
         domain = cfg.get("domain", {}) or {}
         services = cfg.get("services", {}) or {}
+        admin_cfg = cfg.get("admin", {}) or {}
+        dep = _dependency_status_for(request, name, cfg)
         items.append({
             "name": name,
             "enabled": pack_state.is_enabled(name),
@@ -350,6 +368,12 @@ def _packs_payload(request: Request) -> Dict[str, Any]:
             "artifactType": (cfg.get("artifact", {}) or {}).get("type", "config"),
             "services": sorted(services.keys()),
             "tools": pack_tools.get(name, []),
+            # 依赖检测:ok / missing_dependency / probe_failed + 缺失清单
+            "dependency": dep,
+            # 声明式配置页/自定义管理页的注册信息(前端渲染入口)
+            "hasSettings": bool(admin_cfg.get("settings")),
+            "adminPage": admin_cfg.get("page", "") or "",
+            "adminTitle": admin_cfg.get("title", "") or name,
         })
     return {
         "items": items,
@@ -381,7 +405,8 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
 
     Raises:
         404: pack 不存在(未发现该目录)。
-        400: 试图禁用最后一个启用的 pack(会让引擎无工具可用)。
+        400: 试图禁用最后一个启用的 pack(会让引擎无工具可用);
+             或启用一个依赖配置缺失的 pack(先补配置或走设置页)。
         503: 热装配失败(状态已落盘但引擎还是旧装配——返回错误让运维感知,
              下次重启会按状态文件载入正确集合)。
     """
@@ -395,17 +420,155 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     if not enabled and len(pack_state.enabled_names()) <= 1:
         raise HTTPException(400, "Cannot disable the last enabled pack")
 
+    # 启用守卫:依赖配置缺失的 pack 拒绝启用(fail-closed;
+    # 探针失败不在此拦——装配期探针会再判一次,这里只查"配置都没配")
+    if enabled:
+        from domains import load_pack_configs
+        from services.pack_dependency import evaluate_pack
+        cfg = load_pack_configs(pack_names=[name]).get(name) or {}
+        dep = evaluate_pack(
+            name, cfg, getattr(request.app.state, "settings_store", None), use_probe=False
+        )
+        if dep["status"] != "ok":
+            raise HTTPException(
+                400,
+                f"依赖未满足,无法启用「{name}」: {dep['detail']}。"
+                f"请在 .env 配置或在插件设置页补配后重试。",
+            )
+
     changed = pack_state.set_enabled(name, enabled)
+    # 审计留痕:插件启停改变引擎装配面与对外路由,失败时只看状态文件无法还原
+    # "何时被谁改过",记一条 info(成功/失败由后续 hot-reload 日志与状态文件共同佐证)
+    logger.info(f"pack toggled: {name} enabled={enabled} changed={changed}")
     result = {"changed": changed, **_packs_payload(request)}
     # 无论状态是否变化都重新装配:装配幂等(importlib 有模块缓存,开销毫秒级),
     # 且能自愈"上次状态已落盘但装配失败"的残留(否则引擎与状态不一致要到重启才恢复)
+    # app 透传:同步挂载/卸载该 pack 的自有 API 路由
     try:
-        summary = assemble_packs(request.app.state, sorted(pack_state.enabled_names()))
+        summary = assemble_packs(
+            request.app.state, sorted(pack_state.enabled_names()), app=request.app
+        )
         result["loaded"] = summary["loaded"]
         result["toolCount"] = summary["tools"]
     except Exception as e:
         logger.exception(f"hot-reload packs failed after toggling {name}")
         raise HTTPException(503, f"State saved but hot-reload failed: {e}")
+    return result
+
+
+# ── 插件设置(声明式配置页) ─────────────────────────────────────
+
+def _pack_or_404(request: Request, name: str):
+    pack_state = request.app.state.pack_state
+    if not pack_state.is_discovered(name):
+        raise HTTPException(404, f"Pack '{name}' not found")
+    return pack_state
+
+
+@router.get("/packs/{name}/settings")
+async def admin_get_pack_settings(name: str, request: Request):
+    """读取插件配置:schema(表单声明) + 已保存值(secret 掩码)。
+
+    读 schema/保存值都不 import pack 模块——依赖未满足、未加载的插件
+    也能打开设置页补配(这正是"设置页救活依赖缺失插件"的前提)。
+    """
+    _pack_or_404(request, name)
+    from services.pack_settings import mask_secrets, read_settings_schema
+
+    schema = read_settings_schema(name)
+    if schema is None:
+        raise HTTPException(404, f"Pack '{name}' 未声明 settings.schema.yaml(无配置页)")
+    store = getattr(request.app.state, "settings_store", None)
+    saved = store.get_values(name) if store else {}
+    return {
+        "name": name,
+        "schema": schema,
+        "values": mask_secrets(schema, saved),
+    }
+
+
+@router.put("/packs/{name}/settings")
+async def admin_put_pack_settings(name: str, request: Request, payload: Dict[str, Any]):
+    """保存插件配置(部分更新:只提交要改的键)。
+
+    - 校验按 schema 做(类型/枚举/范围),schema 外的键整体拒绝。
+    - secret 哨兵(未改动)被跳过,空串 = 清除该项(回落 env/默认)。
+    - 保存后返回最新依赖状态(即时评估配置存在性,不跑探针)——
+      前端据此提示"配置已生效,可点重新检测加载插件"。
+    """
+    _pack_or_404(request, name)
+    from services.pack_settings import (
+        mask_secrets, read_settings_schema, validate_values,
+    )
+
+    schema = read_settings_schema(name)
+    if schema is None:
+        raise HTTPException(404, f"Pack '{name}' 未声明 settings.schema.yaml(无配置页)")
+    values = payload.get("values")
+    if not isinstance(values, dict):
+        raise HTTPException(422, "请求体必须是 {\"values\": {...}}")
+
+    clean, errors = validate_values(schema, values)
+    if errors:
+        raise HTTPException(422, detail={"message": "配置校验失败", "errors": errors})
+
+    store = getattr(request.app.state, "settings_store", None)
+    if store is None:
+        raise HTTPException(503, "设置存储未初始化")
+    store.save_values(name, clean)
+    # 审计留痕:配置变更是管理端敏感操作(依赖判定/连接凭据都可能随它改变),
+    # 必须能在服务日志里追溯"谁在什么时候改了哪个插件的哪些项"。
+    # 只记字段名不记值——secret 类字段的明文永不进日志。
+    logger.info(f"pack settings saved: {name} fields={sorted(clean.keys())}")
+
+    # 返回最新视图(值掩码 + 依赖状态),前端免一次往返
+    saved = store.get_values(name)
+    from domains import load_pack_configs
+    from services.pack_dependency import evaluate_pack
+    cfg = load_pack_configs(pack_names=[name]).get(name) or {}
+    dep = evaluate_pack(name, cfg, store, use_probe=False)
+    return {
+        "name": name,
+        "schema": schema,
+        "values": mask_secrets(schema, saved),
+        "dependency": dep,
+    }
+
+
+@router.post("/packs/{name}/recheck")
+async def admin_recheck_pack(name: str, request: Request):
+    """重新检测插件依赖:清探针缓存 → 全量评估(含探针)。
+
+    依赖满足且该 pack 处于启用态时顺触发热装配(把之前因依赖缺失
+    而没加载进引擎的 pack 现场加载,含挂载其 API)——补配后无需重启。
+    """
+    pack_state = _pack_or_404(request, name)
+    from domains import load_pack_configs
+    from services.pack_dependency import clear_probe_cache, evaluate_pack, probe_enabled
+    from services.pack_manager import assemble_packs
+
+    clear_probe_cache(name)
+    cfg = load_pack_configs(pack_names=[name]).get(name) or {}
+    dep = evaluate_pack(
+        name, cfg, getattr(request.app.state, "settings_store", None),
+        use_probe=probe_enabled(),
+    )
+
+    result: Dict[str, Any] = {"name": name, "dependency": dep, "reloaded": False}
+    if dep["status"] == "ok" and pack_state.is_enabled(name):
+        try:
+            summary = assemble_packs(
+                request.app.state, sorted(pack_state.enabled_names()), app=request.app
+            )
+            result["reloaded"] = name in summary["loaded"]
+            result["loaded"] = summary["loaded"]
+        except Exception as e:
+            logger.exception(f"recheck 后热装配失败: {name}")
+            raise HTTPException(503, f"Dependency ok but hot-reload failed: {e}")
+    # 刷新装配缓存后的最新状态一起带回
+    result["dependency"] = (
+        getattr(request.app.state, "pack_dependency_status", None) or {}
+    ).get(name, dep)
     return result
 
 

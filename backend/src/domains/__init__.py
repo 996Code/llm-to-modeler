@@ -37,7 +37,7 @@ import importlib
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from sdk.registry import ToolRegistry
 from engine.prompt_loader import PromptLoader
@@ -124,17 +124,20 @@ def _packs_whitelist() -> Optional[set]:
     return {n.strip() for n in raw.split(",") if n.strip()}
 
 
-def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader], object]:
+def load_pack(pack_name: str, app_state: Any = None) -> Tuple[ToolRegistry, Optional[PromptLoader], object]:
     """
     加载指定的工具包:动态导入它的 pack.py,调用工厂函数取出 registry 和 loader。
 
     流程:
       1. importlib.import_module("domains.<pack_name>.pack") 动态导入模块
       2. 调用模块的 create_registry() —— 必须,返回工具集合
+         (可选接收 app_state:需要平台组件的 pack 由此持有引用,
+          如 knowledge_graph 的 kb_search 要取 llm_client/settings_store)
       3. 若模块定义了 create_prompt_loader(),也调用它 —— 可选
 
     Args:
         pack_name: 工具包名称(目录名,如 "njmind_form")。
+        app_state: FastAPI app.state(可选;透传给 create_registry 工厂)。
 
     Returns:
         (registry, prompt_loader) 二元组。
@@ -164,7 +167,11 @@ def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader], obj
         if not hasattr(module, 'create_registry'):
             raise AttributeError(f"{pack_name}.pack 缺少 create_registry 函数")
 
-        registry = module.create_registry()
+        # 优先单参签名(可拿平台组件),TypeError 回退无参(保持旧契约兼容)
+        try:
+            registry = module.create_registry(app_state)
+        except TypeError:
+            registry = module.create_registry()
 
         # 调用 create_prompt_loader(如果存在)— 返回 None 表示不需要自定义 prompt。
         # 这是可选契约,所以先 hasattr 判定再调用,缺失时给 None 默认值。
@@ -195,7 +202,11 @@ def load_pack(pack_name: str) -> Tuple[ToolRegistry, Optional[PromptLoader], obj
         raise
 
 
-def load_all_packs(pack_names: Optional[List[str]] = None) -> Tuple[ToolRegistry, Optional[PromptLoader], dict, dict]:
+def load_all_packs(
+    pack_names: Optional[List[str]] = None,
+    settings_store=None,
+    app_state: Any = None,
+) -> Tuple[ToolRegistry, Optional[PromptLoader], dict, dict, dict]:
     """
     加载工具包,合并它们的 registry 成一个全局注册表。
 
@@ -205,14 +216,20 @@ def load_all_packs(pack_names: Optional[List[str]] = None) -> Tuple[ToolRegistry
             显式名单跳过 env 过滤——启停状态由 PackState 管理(PACKS_ENABLED
             只是首次初始化的默认值),env 不再二次收窄,否则"管理端启用一个
             env 名单外的 pack"会被 env 静默吃掉。
+        settings_store: PackSettingsStore 实例(可选)。传入时依赖检测会把
+            管理端设置页保存值纳入解析链(保存值 > env > 默认);None = 纯
+            env 模式(部分测试场景)。依赖未满足的 pack 在 import 前被跳过。
 
     Returns:
-        (merged_registry, primary_prompt_loader, pack_routers, pack_tools) 四元组。
+        (merged_registry, primary_prompt_loader, pack_routers, pack_tools,
+         dependency_status) 五元组。
         - merged_registry: 合并后的全局工具注册表(至少 1 个工具)
         - primary_prompt_loader: 主 prompt 加载器,可能为 None
           (所有 pack 都不提供时),此时二级路由使用 DefaultPackRouter 中性框架。
         - pack_routers: pack 名 → 二级路由实例(引擎一级路由用)
         - pack_tools: pack 名 → 工具名列表(管理端展示"每个 pack 有哪些工具")
+        - dependency_status: pack 名 → 依赖检测结果(含被跳过的;
+          {status, missing, detail, dependencies},见 services/pack_dependency)
 
     Raises:
         RuntimeError: 一个可用 pack 都没有(系统无法工作)。
@@ -220,12 +237,17 @@ def load_all_packs(pack_names: Optional[List[str]] = None) -> Tuple[ToolRegistry
     【容错策略】
     - 单个 pack 加载失败不会让整个系统启动失败:catch 后 continue 跳过,
       只记录错误日志。这是"尽力而为"策略,保证可用 pack 仍能服务。
+      依赖检测未过的 pack 同样跳过(但插件中心仍可见——目录扫描与 import
+      是两回事),状态进 dependency_status 供管理端展示"依赖未配置"。
     - 但没有任何可用 pack 时,抛 RuntimeError 终止启动。
 
     【Java 类比】
     类似 Spring 启动时把所有 @Component 扫进同一个 ApplicationContext:
-    某个 Bean 加载失败通常只影响自身(可降级),全失败才中止。
+    某个 Bean 加载失败通常只影响自身(可降级),全失败才中止。依赖检测
+    ≈ @ConditionalOnProperty / @RequiresProperty 的声明式装配条件。
     """
+    from services.pack_dependency import evaluate_pack, probe_enabled
+
     if pack_names is None:
         pack_names = discover_packs()
     else:
@@ -248,10 +270,23 @@ def load_all_packs(pack_names: Optional[List[str]] = None) -> Tuple[ToolRegistry
     pack_routers: dict = {}
     # pack → 工具名列表（管理端展示;合并注册表本身不保留来源信息）
     pack_tools: dict = {}
+    # pack → 依赖检测结果（含被跳过的;管理端插件中心展示用）
+    dependency_status: dict = {}
 
     for pack_name in pack_names:
+        # ── 依赖闸门:import 之前评估 manifest 声明的外部依赖 ──
+        # 不满足 → 跳过加载(不 import 模块,连探针都不跑),状态记录给管理端。
+        manifest = load_pack_configs(pack_names=[pack_name]).get(pack_name) or {}
+        dep = evaluate_pack(pack_name, manifest, settings_store, use_probe=probe_enabled())
+        dependency_status[pack_name] = dep
+        if dep["status"] != "ok":
+            logger.warning(
+                f"跳过工具包 {pack_name}(依赖未满足: {dep['status']}): {dep['detail']}"
+            )
+            continue
+
         try:
-            registry, prompt_loader, router = load_pack(pack_name)
+            registry, prompt_loader, router = load_pack(pack_name, app_state=app_state)
             pack_routers[pack_name] = router
 
             # 合并工具:遍历该 pack 的所有工具,注册进全局 registry。
@@ -270,6 +305,7 @@ def load_all_packs(pack_names: Optional[List[str]] = None) -> Tuple[ToolRegistry
 
         except Exception as e:
             # 单个 pack 失败:打日志后跳过,不中断整体启动(尽力而为)。
+            # 依赖检测未过的 pack 也走同一条跳过路径(见上方依赖闸门)。
             logger.error(f"跳过工具包 {pack_name}: {e}")
             continue
 
@@ -281,8 +317,13 @@ def load_all_packs(pack_names: Optional[List[str]] = None) -> Tuple[ToolRegistry
             "如需自定义 prompt,请在 pack.py 中实现 create_prompt_loader()。"
         )
 
-    logger.info(f"成功加载 {len(pack_names)} 个工具包，共 {len(merged_registry.all())} 个工具")
-    return merged_registry, primary_prompt_loader, pack_routers, pack_tools
+    # 名单数含被依赖闸门跳过的;实际加载成功的以 pack_routers 的键为准
+    logger.info(
+        f"成功加载 {len(pack_routers)}/{len(pack_names)} 个工具包"
+        f"(依赖跳过 {sorted(set(pack_names) - set(pack_routers))}),"
+        f"共 {len(merged_registry.all())} 个工具"
+    )
+    return merged_registry, primary_prompt_loader, pack_routers, pack_tools, dependency_status
 
 
 def load_pack_configs(pack_names: Optional[List[str]] = None) -> dict:

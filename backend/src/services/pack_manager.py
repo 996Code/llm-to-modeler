@@ -30,7 +30,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-def assemble_packs(app_state: Any, pack_names: Optional[List[str]] = None) -> Dict[str, Any]:
+def assemble_packs(
+    app_state: Any,
+    pack_names: Optional[List[str]] = None,
+    app: Any = None,
+) -> Dict[str, Any]:
     """按启停名单装配 pack 依赖并热替换引擎/路由共享的引用。
 
     Args:
@@ -39,9 +43,12 @@ def assemble_packs(app_state: Any, pack_names: Optional[List[str]] = None) -> Di
         pack_names: 要加载的 pack 名单。None = 交给 load_all_packs 走
             PACKS_ENABLED env 缺省路径(仅 main.py 启动时使用;
             热切换调用方应始终传 PackState 解析出的显式名单)。
+        app: FastAPI 实例(可选)。传入时同步挂载 pack 自有 API 路由
+            (/api/packs/{name});冷启动传 main 的 app,热切换传 request.app。
 
     Returns:
-        装配摘要:{"loaded": [...], "tools": 总工具数, "pack_tools": {...}}。
+        装配摘要:{"loaded": [...], "tools": 总工具数, "pack_tools": {...},
+        "dependency_status": {...}}。
 
     Raises:
         RuntimeError: 名单里一个 pack 都加载不出来(load_all_packs 抛出,
@@ -51,8 +58,18 @@ def assemble_packs(app_state: Any, pack_names: Optional[List[str]] = None) -> Di
     from domains import load_all_packs, load_pack_configs
     from engine import nodes
 
-    registry, prompt_loader, pack_routers, pack_tools = load_all_packs(pack_names=pack_names)
-    pack_configs = load_pack_configs(pack_names=pack_names)
+    settings_store = getattr(app_state, "settings_store", None)
+    registry, prompt_loader, pack_routers, pack_tools, dep_status = load_all_packs(
+        pack_names=pack_names, settings_store=settings_store, app_state=app_state
+    )
+    # manifest 只保留"实际加载成功"的 pack:依赖被跳过的 pack 工具并不存在,
+    # 若把它的 manifest 留在 pack_configs,/api/meta/packs 会把它暴露给
+    # 前端欢迎页(声明了却不存在的工具集)。管理端插件中心走 load_pack_configs
+    # 全量清单 + dependency_status,不受此影响。
+    pack_configs = {
+        name: cfg for name, cfg in load_pack_configs(pack_names=pack_names).items()
+        if name in pack_routers
+    }
 
     # pack 可选钩子 enhance_asset_client(asset_client, upstream)：向通用
     # adapter 注入本 pack 的领域客户端（端点表/凭证策略/响应归一化归 pack，
@@ -88,6 +105,34 @@ def assemble_packs(app_state: Any, pack_names: Optional[List[str]] = None) -> Di
     app_state.pack_routers = pack_routers
     app_state.pack_tools = pack_tools
     app_state.prompt_loader = prompt_loader
+    # 依赖检测状态(含被跳过的 pack;管理端插件中心"依赖未配置"徽标的数据源)
+    app_state.pack_dependency_status = dep_status
+
+    # pack 可选钩子 register_tasks(task_manager, app_state):注册后台任务
+    # handler。每次装配先清空再由在载 pack 重新注册——禁用的 pack 任务类型
+    # 随之失效(submit 会拒绝),与工具/路由的启停语义一致。
+    # app_state 透传给钩子:handler 运行期要取 llm_client / settings_store。
+    task_manager = getattr(app_state, "task_manager", None)
+    if task_manager is not None:
+        task_manager.reset_handlers()
+        import importlib
+        for pack_name in (pack_routers or {}):
+            try:
+                mod = importlib.import_module(f"domains.{pack_name}.pack")
+                hook = getattr(mod, "register_tasks", None)
+                if callable(hook):
+                    try:
+                        hook(task_manager, app_state)
+                    except TypeError:
+                        hook(task_manager)  # 兼容单参签名(无 app_state 诉求的 pack)
+            except ImportError:
+                continue
+
+    # pack 自有 HTTP API 动态挂载(先卸后挂;app 未提供时跳过,如部分测试态)
+    api_mounted: List[str] = []
+    if app is not None:
+        from services.pack_api_mount import mount_pack_routers
+        api_mounted = mount_pack_routers(app, list(pack_routers.keys()))
 
     # 刷新压缩侧重点：热切换后启用集变化，manifest compact_focus 声明
     # 需重新聚合（与 main.lifespan 启动装配同一语义，覆盖启动时的初值）
@@ -101,5 +146,14 @@ def assemble_packs(app_state: Any, pack_names: Optional[List[str]] = None) -> Di
         compressor.set_compact_focus("；".join(focus_parts))
 
     total_tools = sum(len(v) for v in pack_tools.values())
-    logger.info(f"packs assembled: {sorted(pack_routers)} , {total_tools} tools")
-    return {"loaded": sorted(pack_routers), "tools": total_tools, "pack_tools": pack_tools}
+    logger.info(
+        f"packs assembled: {sorted(pack_routers)} , {total_tools} tools"
+        f"{f' , pack api: {api_mounted}' if api_mounted else ''}"
+    )
+    return {
+        "loaded": sorted(pack_routers),
+        "tools": total_tools,
+        "pack_tools": pack_tools,
+        "dependency_status": dep_status,
+        "api_mounted": api_mounted,
+    }
