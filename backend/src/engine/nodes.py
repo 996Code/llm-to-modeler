@@ -103,7 +103,6 @@ def classify_intent_node(state: GraphState) -> dict:
     compressed_history = state.get("compressed_history", "")  # 压缩后的历史，省 token
     conversation_id = state.get("conversation_id", "")  # 会话 ID（LLM 调用日志按此关联会话）
     # 是否已有配置：决定可用的工具集（如"修改"类工具需要已有配置）
-    has_existing_config = state.get(CONTEXT_ARTIFACT) is not None
 
     # SSE 事件:告知前端正在识别意图
     # 类比 Java：服务端推送状态给前端，让 UI 显示 loading 文案

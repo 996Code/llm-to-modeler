@@ -135,7 +135,7 @@ class ImageFormTool(Tool):
   "formName": "表单名称",
   "fields": [
     {
-      FIELD_TITLE: "字段标题",
+      "fieldTitleText": "字段标题",
       "fieldType": 0,
       "isRequired": true,
       "options": ["选项1", "选项2"]  // 仅下拉/单选/多选需要
@@ -192,8 +192,6 @@ class ImageFormTool(Tool):
     def _generate_config(self, analysis: dict, ctx: ToolContext) -> Optional[dict]:
         """根据分析结果生成表单配置。"""
         # 获取指南和模板
-        guide = ctx.asset_client.get_guide()
-        templates = ctx.asset_client.list_templates()
         
         # 构建配置生成 prompt
         system_prompt = """你是表单配置生成器。根据分析结果生成符合 njmind 低码平台规范的表单配置 JSON。
@@ -202,9 +200,9 @@ class ImageFormTool(Tool):
 {
   "formCode": "表单标识(英文/拼音)",
   "formName": "表单名称",
-  FIELDS: [
+  "formFieldConfigVos": [
     {
-      FIELD_TITLE: "字段标题",
+      "fieldTitleText": "字段标题",
       "formFieldType": 0,  // 字段类型
       "isRequired": 1,     // 1=必填, 0=非必填
       "optionSettings": [  // 仅下拉/单选/多选需要

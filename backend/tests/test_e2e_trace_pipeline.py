@@ -20,8 +20,9 @@ def test_chat_writes_trace_points_end_to_end(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:9/v1")  # 不可达:走 fallback
     monkeypatch.setenv("LLM_API_KEY", "x")
 
-    import sys
-    sys.path.insert(0, ".")
+    # conftest 已把 backend/src 放进 sys.path，直接 import main 即可；
+    # 此前 sys.path.insert(0, ".") 会把 cwd（backend/ 根目录）也放进
+    # 搜索路径，触发隐式命名空间包问题导致 main 模块不正确加载
     from fastapi.testclient import TestClient
     import main
 

@@ -9,7 +9,6 @@ FIELDS = "formFieldConfigVos"             # 字段列表
 FORM_CODE = "formCode"                    # 表单编码（数据库标识，禁改）
 FORM_CONFIG_ID = "formConfigId"           # 表单数据 ID（已保存表单的标识，禁改）
 FORM_NAME = "formName"                    # 表单名
-FORM_TITLE = "formTitle"                  # 标题模板（$key$ 引用）
 
 # 字段对象
 FIELD_KEY = "fieldTitleKey"               # 字段标识（数据库标识，禁改）

@@ -80,6 +80,7 @@ def build_graph(
     prompt_loader: Any = None,
     pack_routers: dict = None,
     pack_configs: dict = None,
+    msgpack_whitelist: list = None,
 ) -> Any:
     """构建并编译 LangGraph StateGraph。
 
@@ -190,17 +191,15 @@ def build_graph(
 
     db_path = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    # msgpack 反序列化类型白名单：tool_state 里的领域模型对象（如
-    # njmind_form 的 ParsedField）会被 checkpoint 序列化，resume 时重建。
-    # LangGraph 正在收紧"从序列化数据实例化任意类"（pickle 式攻击面），
-    # 未显式注册的类型未来版本直接拒绝——这里按警告提示注册，追问恢复
-    # 升级后不断链。新增会被存进 state 的领域类须同步登记。
+    # msgpack 反序列化类型白名单：tool_state 里的领域模型对象会被
+    # checkpoint 序列化，resume 时重建。LangGraph 正在收紧"从序列化数据
+    # 实例化任意类"（pickle 式攻击面），未注册类型未来版本直接拒绝。
+    # 白名单由装配层（main.py）从 pack manifest 声明聚合注入——引擎
+    # 不硬编码领域类名（零领域知识铁律）。
     checkpointer = SqliteSaver(
         conn=conn,
         serde=JsonPlusSerializer(
-            allowed_msgpack_modules=[
-                ("domains.njmind_form.models", "ParsedField"),
-            ],
+            allowed_msgpack_modules=list(msgpack_whitelist or []),
         ),
     )
 

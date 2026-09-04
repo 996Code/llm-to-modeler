@@ -23,7 +23,7 @@ import json
 
 from domains.njmind_form.keys import (
     FIELDS, FIELD_KEY, FIELD_TITLE, FIELD_TYPE, FIELD_REQUIRED,
-    OPTION_SETTINGS, FORM_CODE, FORM_CONFIG_ID,
+    OPTION_SETTINGS,
 )
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple

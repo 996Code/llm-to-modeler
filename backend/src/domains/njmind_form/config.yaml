@@ -6,6 +6,9 @@ domain:
   # 历史压缩摘要的侧重点（注入引擎压缩 prompt，领域措辞归 pack、引擎不写死）。
   # 装配时由 pack_manager 聚合注入 CompressionSidechain（冷启动与热切换同一路径）
   compact_focus: 创建了什么表单、修改了哪些字段、配置结果
+  # checkpoint 序列化的领域模型类（引擎从 manifest 聚合注入 msgpack 白名单）
+  msgpack_classes:
+    - [domains.njmind_form.models, ParsedField]
 
 # njmind-form pack 静态配置
 # 所有 njmind 专属的 URL 路径、字段类型映射集中于此。

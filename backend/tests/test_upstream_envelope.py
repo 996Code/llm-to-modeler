@@ -81,7 +81,7 @@ class TestTransportEnvelope:
 
 
 class TestModelerCredentialsPolicy:
-    """凭证策略由 pack 代码控制：静态资产匿名、业务端点透传。"""
+    """凭证策略：全端点匿名（部署事实），固定标识头（传输层注入）。"""
 
     def test_static_assets_anonymous(self):
         """匿名 = 不带透传凭证；固定标识头（X-AI-Client，传输层注入）除外。"""

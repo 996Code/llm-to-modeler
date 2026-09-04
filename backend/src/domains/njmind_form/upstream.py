@@ -5,11 +5,10 @@
 本模块持有 njmind 的全部领域知识：
   - 服务名：manifest config.yaml services 段声明（njmind-modeler）；
   - 端点路径：manifest config.yaml paths 段（单一事实源，本模块只引用）；
-  - 凭证策略（代码决定，不走配置）：
-      静态资产（guide/模板/schema）匿名——网关对 MCP 资产匿名放行，
-      带登录凭证反而触发端点功能权限校验（真实事故：有效 token 拉
-      guide 收 {code:403}，同请求的 schemas/validate 全 200）；
-      业务端点（校验/表单 CRUD）透传凭证；
+  - 凭证策略（代码决定，不走配置）：全端点匿名——njmind 网关对
+      /api/mcp/* 端点族是「匿名白名单放行、带身份按身份鉴权」，普通
+      designer 用户未被授权该端点族，带其 token 反而 403（生产实证）。
+      此端点族本就是服务间匿名调用语义。
   - 响应归一化：validate 的 {pass,errors:[str]} → {valid,errors:[{message}]}；
     文件名后缀补全等 njmind 约定。
 

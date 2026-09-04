@@ -137,3 +137,69 @@ class TestConfirmGateRerun:
         result = tool.execute(state, ctx)
         # "是否"含"否"但不应触发取消 → 正常提交
         assert result.artifact_type == "data"
+
+
+class TestFullWalkFixes:
+    """全量走查(①#1/②H-1)修复的回归锚。"""
+
+    def test_double_round_trip_converges(self):
+        """①#1主案：缺字段→追问→答字段→确认挂起→答确认→提交（一锤收敛）。
+
+        修复前：confirm 挂起后 rerun 重解析用原始残缺输入→再追问→死循环。
+        修复后：clarified_input 累积回写 + leave_data 完整时跳过重解析。
+        """
+        tool = SubmitLeaveTool()
+        ctx, llm, asset = _ctx(llm_parsed={"applicant": "张三"})  # 缺类型/日期
+
+        # Round 1: 缺字段追问
+        state = {"user_input": "帮我请假"}
+        r1 = tool.execute(dict(state), ctx)
+        assert r1.ask is not None
+        _assert_no_submit(asset)
+
+        # Round 2: 补充字段，parse 完整，confirm 挂起
+        state2 = {**state, "clarify_answers": {"text": "年假 9/4~9/6"},
+                  "_awaiting": "parse_info"}
+        llm.chat_json.return_value = dict(FULL_FIELDS)
+        with pytest.raises(ClarificationRaised) as ei:
+            tool.execute(dict(state2), ctx)
+        assert "确认提交" in ei.value.questions[0]
+        _assert_no_submit(asset)
+
+        # Round 3: 用户答确认 → 提交成功（不再回到字段追问）
+        state3 = {**state2,
+                  "clarified_input": "帮我请假; text: 年假 9/4~9/6",
+                  "leave_data": dict(FULL_FIELDS),
+                  "clarify_answers": {"text": "确认"},
+                  "_awaiting": "confirm"}
+        result = tool.execute(state3, ctx)
+        assert result.artifact_type == "data"
+        assert result.artifact.get("approvalId") == "PENDING-1"
+
+    def test_submit_upstream_failure_honest(self):
+        """②H-1主案：上游返回 success=False → 诚实报告失败，不伪造成功。"""
+        ctx, llm, asset = _ctx()
+        asset.submit_data.return_value = {"success": False,
+                                          "errors": ["上游校验拒绝"]}
+        state = {"user_input": "帮我请假",
+                 "clarified_input": "帮我请假",
+                 "leave_data": dict(FULL_FIELDS),
+                 "clarify_answers": {"text": "确认"},
+                 "_awaiting": "confirm"}
+        result = SubmitLeaveTool().execute(state, ctx)
+        # 失败语义直达用户
+        assert "提交失败" in result.summary
+        assert result.artifact is None or result.artifact.get("approvalId") is None
+
+    def test_confirm_empty_answer_re_asks(self):
+        """空回答→重新挂起（不放行）。"""
+        tool = SubmitLeaveTool()
+        ctx, _, asset = _ctx()
+        state = {"user_input": "帮我请假",
+                 "leave_data": dict(FULL_FIELDS),
+                 "clarify_answers": {"text": ""},
+                 "_awaiting": "confirm"}
+        with pytest.raises(ClarificationRaised) as ei:
+            tool.execute(state, ctx)
+        assert "确认" in ei.value.questions[0]
+        _assert_no_submit(asset)

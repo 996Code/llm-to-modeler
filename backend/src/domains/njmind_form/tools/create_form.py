@@ -49,7 +49,7 @@ def _get_allowed_keys(ctx) -> set:
 # 类型码 → 模板 stem 的例外覆盖表（config.yaml 读取）。
 # 全量类型表以上游 guide.json 的 fieldTypes 为唯一事实源（见 _step_fetch_templates），
 # 这里只保留「推导规则（name.lower()）不适用」的例外。
-_TYPE_TO_TEMPLATE, _TYPE_NAMES = load_type_mappings()
+_TYPE_NAMES = load_type_mappings()[1]
 
 
 
@@ -265,7 +265,7 @@ class CreateFormTool(CompositeTool):
 
         # 以 guide.json 的 fieldTypes 为唯一事实源，运行时构建 code→(模板stem, 类型名) 映射。
         # 类型名 → 模板 stem 默认按 name.lower() 推导（TEXT → text_field）；
-        # 个别不一致的类型名由 config.yaml 的 type_template_overrides 覆盖。
+        # 个别不一致的类型名由 config.yaml 的 type_to_template 覆盖。
         # 上游无模板的类型（条码/标签页/文本段/签名）→ fail-closed，禁止静默回退 text。
         guide = state.get("guide") or {}
         ft_map = {}
@@ -449,7 +449,6 @@ class CreateFormTool(CompositeTool):
             return
 
         if state["retry_count"] < MAX_RETRIES:
-            error_msgs = [e.get("message", str(e))[:3] if isinstance(e, dict) else str(e)[:3] for e in state["validation_errors"][:3]]
             error_msgs = [e.get("message", str(e))[:60] if isinstance(e, dict) else str(e)[:60] for e in state["validation_errors"][:3]]
             ctx.emit("stage", "validate_retry",
                      f"校验失败：{'；'.join(error_msgs)}，正在重试（第 {state['retry_count']} 次）...")

@@ -14,7 +14,6 @@ modify→full_rewrite→字段 key 全换但标识被回填保留，产出"半�
 create）+ modify_form._modify_full 的延续性回填（字段 key 零交集=新表单
 语义，不保留旧标识——那条同样是确定性数据规则）。
 """
-import re  # noqa: F401 （保留 import 供后续规则扩展；当前无正则短路）
 from typing import Optional
 
 from sdk.pack_router import DefaultPackRouter

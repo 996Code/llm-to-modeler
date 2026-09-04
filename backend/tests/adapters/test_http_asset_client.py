@@ -13,7 +13,6 @@ def _make_modeler():
     m.get_schema.return_value = {"type": "object", "properties": {}}
     m.get_guide.return_value = {"title": "指\u202e南"}
     m.validate_artifact.return_value = {"valid": True, "errors": [], "warnings": []}
-    m.persist_artifact.return_value = {"success": True, "message": "ok"}
     m.persist_artifact.return_value = {"success": True, "formCode": "leave"}
     return m
 

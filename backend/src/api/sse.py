@@ -183,7 +183,7 @@ class StreamManager:
 
         FastAPI 的 StreamingResponse 消费这个 generator，逐个 yield SSE 字符串。
 
-        120 秒超时机制：如果 120 秒内没有事件，发一个 keepalive 注释（`: keepalive\\n\\n`）
+        30 秒超时机制：如果 30 秒内没有事件，发一个 keepalive 注释（`: keepalive\\n\\n`）
         保持连接不被代理/浏览器断开。SSE 注释以 `:` 开头，客户端会忽略。
 
         遇到哨兵 _STREAM_END 时终止流。
@@ -193,7 +193,7 @@ class StreamManager:
         """
         while True:
             try:
-                # 120 秒超时——LLM 调用可能很慢，用 keepalive 保活
+                # 30 秒超时——LLM 调用可能很慢，用 keepalive 保活
                 item = await asyncio.wait_for(self._queue.get(), timeout=30.0)
             except asyncio.TimeoutError:
                 # 超时发 keepalive 注释，保持连接（SSE 注释以 : 开头，客户端忽略）

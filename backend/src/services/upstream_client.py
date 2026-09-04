@@ -265,7 +265,7 @@ class UpstreamClient:
     def _headers(self, auth: bool,
                  extra: Optional[Dict[str, str]] = None) -> Optional[Dict[str, str]]:
         """组装请求头：固定标识头 + auth 决定的透传头 + extra 叠加（后者同名覆盖）。"""
-        base = (_get_forward_headers() or {}) if auth else {}
+        base = dict(_get_forward_headers()) if auth else {}
         if extra:
             base = {**base, **extra}
         base[CLIENT_HEADER_KEY] = CLIENT_ID  # 固定标识头最后写（不被覆盖）

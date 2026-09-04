@@ -18,9 +18,7 @@ artifact_type="data" — 不是表单配置，是数据结果。
   - 保证: sanitize_obj 清洗 / forward_headers 传播 / 连接池统一管理
   - 上游地址经 service_name 寻址(宿主 services 表按请求下发,见 upstream.py)
 """
-import json
 import logging
-from typing import Any, Dict, Optional
 
 from sdk.tool import CompositeTool, ToolResult, ToolContext, AskSpec, AskQuestion, AskOption, ClarificationRaised
 from domains.leave_application.upstream import SERVICE_NAME, PATHS
@@ -101,18 +99,24 @@ class SubmitLeaveTool(CompositeTool):
     def _step_parse_info(self, state: dict, ctx: ToolContext) -> None:
         """LLM 解析用户消息，提取请假信息。
 
-        关键字段缺失时设置 _need_clarify 标记,execute 会跳过后续步骤返回追问。
-        不再为缺失字段填默认值——破坏性操作必须用户确认。
+        管线幂等性（全量走查①#1 修复）：字段追问的回答累积回写
+        state["clarified_input"]——rerun 从 confirm 挂起恢复时（_awaiting
+        != "parse_info"），已有完整 leave_data 则跳过重解析，防止
+        "追问→回答→确认→rerun 用原始残缺输入重解析→再追问"死循环。
         """
+        # 已有完整数据且挂起者不是本步骤 → 跳过重解析（管线幂等短路）
+        if (state.get("leave_data", {}).get("leaveType")
+                and state.get("_awaiting") != "parse_info"):
+            return
+
         ctx.emit("stage", "parse_info", "AI 正在解析您的请假需求...")
 
-        user_input = state.get("user_input", "")
+        user_input = state.get("clarified_input") or state.get("user_input", "")
         compressed_history = state.get("compressed_history", "")
 
         # 消费本轮 resume 回答——仅当挂起者是本步骤（_awaiting 路由）。
-        # clarify_answers 在 ask→resume→rerun 链路会残留：不区分归属的话，
-        # 上一轮"请假类型"的补充回答会被 confirm 误当"已确认"放行提交
-        # （交叉终审 1a：常见路径 100% 绕过确认门槛）。
+        # 累积回写 clarified_input：下次 rerun（如 confirm→确认→rerun）
+        # 拼的是完整输入而非原始残缺消息。
         if state.get("_awaiting") == "parse_info":
             clarify_answers = state.pop("clarify_answers", {}) or {}
             state.pop("_awaiting", None)
@@ -120,6 +124,7 @@ class SubmitLeaveTool(CompositeTool):
             for k, v in clarify_answers.items():
                 parts.append(f"{k}: {v}")
             user_input = "; ".join(p for p in parts if p)
+            state["clarified_input"] = user_input
 
         messages = [
             {"role": "system", "content": _PARSE_INFO_PROMPT},
@@ -238,6 +243,11 @@ class SubmitLeaveTool(CompositeTool):
             answers = state.pop("clarify_answers", {}) or {}
             state.pop("_awaiting", None)
             reply = str(answers.get("text", answers) if isinstance(answers, dict) else answers)
+            if not reply.strip() or reply == "{}" or reply == "{'text': ''}":
+                # 空/无文本回答——不安全（全量走查①#1）：重新挂起要求明确回复
+                state["_awaiting"] = "confirm"
+                ctx.emit("stage", "confirm", "等待确认提交...")
+                raise ClarificationRaised(["请回复「确认」或「取消」"])
             if any(w in reply for w in ("取消", "不要", "算了", "不提交")):
                 state["_cancelled"] = True
                 state["_need_clarify"] = True  # 断掉后续步骤(execute 先查 _cancelled)
@@ -262,8 +272,10 @@ class SubmitLeaveTool(CompositeTool):
     def _step_submit(self, state: dict, ctx: ToolContext) -> None:
         """提交请假申请（通过 AssetClient 调上游 API）。
 
-        AssetClient.submit_data 归一化返回:
-          {success: bool, id: str, ...}
+        Fail-Closed：上游失败（地址/网络/假200信封）→ adapter 返回
+        {success: False, errors: [...]} 而非抛异常——此处必须读 success
+        字段，失败时绝不伪造"提交成功 + PENDING 编号"（不可逆操作，
+        误报成功是审计②号终审发现的 Fail-Closed 链条断裂）。
         """
         ctx.emit("stage", "submit", "正在提交请假申请...")
 
@@ -278,7 +290,16 @@ class SubmitLeaveTool(CompositeTool):
             )
             logger.info(f"submit response: {result}")
 
-            # 补充提交结果
+            if not result.get("success"):
+                # 上游拒绝/失败：错误直达用户，不落 status/approvalId
+                errors = result.get("errors") or ["上游未返回错误详情"]
+                error_strs = [e if isinstance(e, str) else str(e) for e in errors]
+                state["summary"] = f"提交失败：{'；'.join(error_strs[:3])}"
+                ctx.emit("stage", "submit_fail",
+                         f"提交失败：{'；'.join(error_strs[:2])}")
+                return
+
+            # 上游确认成功
             leave_data["status"] = "submitted"
             leave_data["approvalId"] = result.get("id", "PENDING")
             state["leave_data"] = leave_data
@@ -292,7 +313,7 @@ class SubmitLeaveTool(CompositeTool):
                      f"提交成功 ✓ 审批编号: {leave_data['approvalId']}")
 
         except NotImplementedError:
-            # AssetClient 未实现 submit_data — 降级为本地模式
+            # AssetClient 未实现 submit_data — 降级为本地模式（演示桩场景）
             logger.warning("AssetClient.submit_data not implemented, using local mode")
             leave_data["status"] = "submitted"
             leave_data["approvalId"] = f"LOCAL-{id(leave_data) % 10000:04d}"
@@ -301,13 +322,10 @@ class SubmitLeaveTool(CompositeTool):
             ctx.emit("stage", "submit_done",
                      f"提交成功 ✓ (本地模式) 编号: {leave_data['approvalId']}")
         except Exception as e:
+            # 非预期异常（编程错误等）——诚实报告，不伪造成功
             logger.warning(f"submit API failed: {e}")
-            leave_data["status"] = "submitted"
-            leave_data["approvalId"] = f"LOCAL-{id(leave_data) % 10000:04d}"
-            state["leave_data"] = leave_data
-            state["summary"] = f"已提交请假申请（本地模式），编号 {leave_data['approvalId']}"
-            ctx.emit("stage", "submit_done",
-                     f"提交成功 ✓ (本地模式) 编号: {leave_data['approvalId']}")
+            state["summary"] = f"提交失败：{e}"
+            ctx.emit("stage", "submit_fail", f"提交失败：{str(e)[:80]}")
 
 
 _PARSE_INFO_PROMPT = """你是请假信息提取器。从用户消息中提取请假申请信息,只返回 JSON。

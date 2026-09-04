@@ -152,6 +152,13 @@ async def lifespan(app: FastAPI):
 
     # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）
     # build_graph 装配节点（classify_intent/execute_tool/handle_result）并编译
+    # msgpack 反序列化白名单：从各 pack manifest 的 domain.msgpack_classes
+    # 声明聚合（pack 声明自己的领域模型类，引擎/装配层不硬编码）
+    _mp_wl = []
+    for _cfg in (app.state.pack_configs or {}).values():
+        for _cls in ((_cfg.get("domain") or {}).get("msgpack_classes") or []):
+            if isinstance(_cls, (list, tuple)) and len(_cls) == 2:
+                _mp_wl.append(tuple(_cls))
     graph = build_graph(
         registry=app.state.registry,
         pack_routers=app.state.pack_routers,
@@ -162,6 +169,7 @@ async def lifespan(app: FastAPI):
         asset_client=asset_client,
         conversation=conversation_manager,
         prompt_loader=app.state.prompt_loader,
+        msgpack_whitelist=_mp_wl,
     )
     app.state.graph = graph
     logger.info("LangGraph StateGraph architecture initialized")
@@ -182,7 +190,10 @@ async def lifespan(app: FastAPI):
 
     # === 关闭阶段（@PreDestroy 等价物）===
     logger.info("Shutting down...")
-    compressor.close()  # 关闭压缩后台线程(不等待排队任务)
+    try:
+        compressor.close()  # 关闭压缩后台线程(不等待排队任务)
+    except Exception:
+        logger.warning("compressor close failed", exc_info=True)
     upstream.close()  # 关闭 httpx 连接池，释放 socket
     llm_client.close()  # 关闭 OpenAI SDK 底层 httpx 连接池，释放 socket
     # 关闭 checkpointer 的 SQLite 长连接——build_graph 把连接挂在 graph._conn

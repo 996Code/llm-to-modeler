@@ -18,7 +18,6 @@
   - 上游地址经 service_name 寻址(宿主 services 表按请求下发,见 upstream.py)
 """
 import logging
-from typing import Any, Dict
 
 from sdk.tool import Tool, ToolResult, ToolContext
 from domains.leave_application.upstream import SERVICE_NAME, PATHS
