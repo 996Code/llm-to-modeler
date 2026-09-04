@@ -76,9 +76,13 @@ class ModelerAPI:
         归一化 {pass,errors:[str]} → {valid,errors:[{message}]}。
         失败 Fail-Closed 返回 valid=False。
         """
+        # TEMP-DEMO-HEADER: 临时写死的演示头——验证 call_logs 的请求头
+        # 记录链路（用户要求：日志里能看到效果后删除）。X- 头不触发网关
+        # 身份鉴权，不影响匿名语义。
         raw, err = self._t.post(
             SERVICE_NAME, self._path("validate"),
             json_body=artifact, params={"mode": mode.upper()}, auth=False,
+            extra_headers={"X-AI-Demo-Header": "llm-modeler-log-demo"},
         )
         if raw is None:
             reason = f"Upstream validation request failed: {err}"

@@ -88,6 +88,18 @@ class ServiceUnresolvableError(RuntimeError):
     """
 
 
+def _trunc_json(obj: Any, limit: int = 400) -> str:
+    """JSON 序列化并截断（日志观测用；超长内容以 ...<N chars> 标注总长）。"""
+    import json as _json
+    try:
+        text = _json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        return str(obj)[:limit]
+    if len(text) > limit:
+        return text[:limit] + f"...<总长{len(text)}字符>"
+    return text
+
+
 class UpstreamConfig:
     """传输层行为参数（普通类，非 Pydantic）。
 
@@ -198,17 +210,20 @@ class UpstreamClient:
             if env_msg:
                 logger.warning(f"GET {path} 假200业务信封: {env_msg}")
                 self._log(url, error_message=f"业务信封: {env_msg}",
-                          duration=self._ms(start), headers=sent_headers)
+                          duration=self._ms(start), headers=sent_headers,
+                          method="GET", params=params, response=data)
                 return None
             if cache and not params:
                 self._set_cached(url, data)
             self._log(url, status_code=resp.status_code,
-                      duration=self._ms(start), headers=sent_headers)
+                      duration=self._ms(start), headers=sent_headers,
+                      method="GET", params=params, response=data)
             return data
         except Exception as e:
             logger.warning(f"GET {path} failed: {e}")
             self._log(url, error_message=str(e),
-                      duration=self._ms(start), headers=sent_headers)
+                      duration=self._ms(start), headers=sent_headers,
+                      method="GET", params=params)
             return None
 
     def post(self, service_name: str, path: str, *,
@@ -232,15 +247,20 @@ class UpstreamClient:
             if env_msg:
                 logger.warning(f"POST {path} 假200业务信封: {env_msg}")
                 self._log(url, error_message=f"业务信封: {env_msg}",
-                          duration=self._ms(start), headers=sent_headers)
+                          duration=self._ms(start), headers=sent_headers,
+                          method="POST", params=params, body=json_body,
+                          response=data)
                 return None, env_msg
             self._log(url, status_code=resp.status_code,
-                      duration=self._ms(start), headers=sent_headers)
+                      duration=self._ms(start), headers=sent_headers,
+                      method="POST", params=params, body=json_body,
+                      response=data)
             return data, None
         except Exception as e:
             logger.warning(f"POST {path} failed: {e}")
             self._log(url, error_message=str(e),
-                      duration=self._ms(start), headers=sent_headers)
+                      duration=self._ms(start), headers=sent_headers,
+                      method="POST", params=params, body=json_body)
             return None, str(e)
 
     # ── 内部：凭证/缓存/信封/日志 ─────────────────────────────────
@@ -278,22 +298,34 @@ class UpstreamClient:
 
     def _log(self, endpoint: str, *, status_code: Optional[int] = None,
              error_message: Optional[str] = None, duration: int = 0,
-             headers: Optional[Dict[str, str]] = None):
+             headers: Optional[Dict[str, str]] = None,
+             method: str = "GET", params: Optional[dict] = None,
+             body: Any = None, response: Any = None):
         """上游调用日志入链（call_type='upstream'）。conv_id 从线程上下文兜底，
         插件经领域客户端的调用无需透传 conv_id 即自动关联会话。
 
-        headers：本次实际发出的请求头（原文落库，产品决策：内网审计
-        需要完整凭证形态）。调用方（get/post）在发请求后传入。
+        request_data: {method, params, headers, body 截断}；
+        response_data: 响应 JSON 截断——通用层不认识领域字段，
+        截断原文是最诚实的观测（旧版记领域摘要如 formName，分层后归 pack
+        不再可行）。conv_id 从线程上下文兜底。
         """
         if not self._conversation_store:
             return
         conv_id = current_conversation_id()
+        request_data = {
+            "method": method,
+            "params": params,
+            "headers": dict(headers or {}),
+        }
+        if body is not None:
+            request_data["body"] = _trunc_json(body)
+        response_data = _trunc_json(response) if response is not None else None
         try:
             self._conversation_store.save_call_log(
                 call_type="upstream",
                 endpoint=endpoint,
-                request_data=({"headers": dict(headers)}
-                              if headers else None),
+                request_data=request_data,
+                response_data=response_data,
                 status_code=status_code or (500 if error_message else 200),
                 duration_ms=duration,
                 error_message=error_message,

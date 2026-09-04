@@ -95,7 +95,9 @@ class TestModelerCredentialsPolicy:
         set_forward_headers({"Authorization": "Bearer x"})
         c._client.post.return_value = _Resp({"pass": True, "errors": []})
         ModelerAPI(c).validate_artifact({"formName": "t"}, mode="CREATE")
-        assert c._client.post.call_args.kwargs.get("headers") is None
+        sent = c._client.post.call_args.kwargs.get("headers")
+        # 匿名 = 不带透传凭证；演示头（TEMP-DEMO-HEADER，验证日志链路用）除外
+        assert sent is None or all(k.startswith("X-AI-Demo") for k in sent)
 
     def test_validate_envelope_fail_closed(self):
         """validate 收信封：校验未执行，Fail-Closed 且指引用户刷新。"""
