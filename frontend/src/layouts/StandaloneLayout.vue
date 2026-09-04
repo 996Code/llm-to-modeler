@@ -95,6 +95,16 @@ const store = useConversationStore()
   flex-direction: column;
   /* !important 覆盖 Ant Design 默认深色侧边栏背景为白 */
   background: var(--bg-container) !important;
+  /* 内容超高由内部列表滚动,不把整页撑出滚动条 */
+  overflow: hidden;
+}
+/* Ant 的 sider 会包一层 .ant-layout-sider-children;不给它 flex/高度约束,
+   conv-list 的 flex:1 失效 → 50 条会话把侧栏撑到 1900px+,整页跟随滚动 */
+.sider :deep(.ant-layout-sider-children) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
 }
 .sider-header {
   padding: 16px;

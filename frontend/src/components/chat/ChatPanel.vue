@@ -166,8 +166,13 @@
                 </a-tag>
               </div>
               <div class="data-card-body">
+                <!-- 知识图谱检索结果:专用子图卡片(G6 懒加载渲染 + 来源引用) -->
+                <KgGraphCard
+                  v-if="msg.dataResult?.type === 'kg_search_result'"
+                  :result="msg.dataResult"
+                />
                 <!-- 遍历「提取后的可显示字段」（getDataDisplayFields 已做中文化与过滤） -->
-                <div v-for="(value, key) in getDataDisplayFields(msg.dataResult)" :key="key" class="data-field">
+                <div v-else v-for="(value, key) in getDataDisplayFields(msg.dataResult)" :key="key" class="data-field">
                   <span class="data-field-label">{{ key }}</span>
                   <span class="data-field-value">{{ value }}</span>
                 </div>
@@ -257,6 +262,7 @@ import { copyText } from '../../utils/clipboard'
 import type { FormConfig } from '../../types'
 // 子组件：输入框
 import ChatInput from './ChatInput.vue'
+import KgGraphCard from './KgGraphCard.vue'
 // 子组件：JSON 变更视图（查看弹窗用，红删绿增）
 import JsonDiffView from '../json/JsonDiffView.vue'
 // HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage
