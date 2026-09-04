@@ -84,10 +84,12 @@ class TestModelerCredentialsPolicy:
     """凭证策略由 pack 代码控制：静态资产匿名、业务端点透传。"""
 
     def test_static_assets_anonymous(self):
+        """匿名 = 不带透传凭证；演示头（TEMP-DEMO-HEADER）除外。"""
         c = _transport()
         c._client.get.return_value = _Resp({"fieldTypes": []})
         ModelerAPI(c).get_guide()
-        assert c._client.get.call_args.kwargs.get("headers") is None
+        sent = c._client.get.call_args.kwargs.get("headers")
+        assert sent is None or all(k.startswith("X-AI-Demo") for k in sent)
 
     def test_all_endpoints_anonymous(self):
         """全端点匿名（部署事实：mcp 端点族带用户身份反而 403）。"""

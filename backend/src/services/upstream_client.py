@@ -88,18 +88,6 @@ class ServiceUnresolvableError(RuntimeError):
     """
 
 
-def _trunc_json(obj: Any, limit: int = 400) -> str:
-    """JSON 序列化并截断（日志观测用；超长内容以 ...<N chars> 标注总长）。"""
-    import json as _json
-    try:
-        text = _json.dumps(obj, ensure_ascii=False, default=str)
-    except Exception:
-        return str(obj)[:limit]
-    if len(text) > limit:
-        return text[:limit] + f"...<总长{len(text)}字符>"
-    return text
-
-
 class UpstreamConfig:
     """传输层行为参数（普通类，非 Pydantic）。
 
@@ -304,10 +292,10 @@ class UpstreamClient:
         """上游调用日志入链（call_type='upstream'）。conv_id 从线程上下文兜底，
         插件经领域客户端的调用无需透传 conv_id 即自动关联会话。
 
-        request_data: {method, params, headers, body 截断}；
-        response_data: 响应 JSON 截断——通用层不认识领域字段，
-        截断原文是最诚实的观测（旧版记领域摘要如 formName，分层后归 pack
-        不再可行）。conv_id 从线程上下文兜底。
+        request_data: {method, params, headers, body}——存结构化对象，
+        前端 JsonViewer 自动格式化渲染（此前存截断字符串导致前端显示
+        一坨未格式化文本）。response_data 同理存原始响应对象，不截断
+        （产品决策：完整观测优先于 DB 体积）。
         """
         if not self._conversation_store:
             return
@@ -318,8 +306,8 @@ class UpstreamClient:
             "headers": dict(headers or {}),
         }
         if body is not None:
-            request_data["body"] = _trunc_json(body)
-        response_data = _trunc_json(response) if response is not None else None
+            request_data["body"] = body
+        response_data = response
         try:
             self._conversation_store.save_call_log(
                 call_type="upstream",
