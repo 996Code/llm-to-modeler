@@ -58,13 +58,14 @@ class TaskHandle:
 
     def log(self, message: str, level: str = "info", **data) -> None:
         """写一条任务日志(持久化 + SSE;**data 进结构化附加字段)。"""
-        log_id = self._manager._store.append_log(
+        log_id, created_at = self._manager._store.append_log(
             self.task_id, level=level, message=message, data=data or None
         )
         self._manager._publish(self.task_id, {
             "event": "log",
             "data": {"id": log_id, "taskId": self.task_id, "level": level,
-                     "message": message, "data": data or None},
+                     "message": message, "data": data or None,
+                     "createdAt": created_at},
         })
 
     @property
@@ -107,6 +108,10 @@ class TaskManager:
         self._running_count = 0
         self._cancel_flags: set = set()          # 被要求取消的 running 任务
         self._listeners: Dict[str, List["queue.Queue"]] = {}
+        # 终态监听者(任务到达 succeeded/failed/cancelled 时回调,收 task dict)。
+        # pack 用它释放"提交期登记、但 handler 可能根本没执行"的资源
+        # (如 pending 期被取消的任务——finally 不生效,只能靠这里兜底)。
+        self._terminal_listeners: List[Callable[[Dict[str, Any]], None]] = []
 
     # ── handler 注册(装配期调用) ───────────────────────────
 
@@ -133,6 +138,27 @@ class TaskManager:
             {"type": t, "packName": meta.get("packName", "")}
             for t, meta in sorted(self._handler_meta.items())
         ]
+
+    def add_terminal_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """注册终态监听者:任务到达终态(任何路径,含 pending 期取消)时回调。
+
+        回调收完整 task dict(含 payload),供 pack 做资源回收(如在途防重
+        表的释放)。回调异常只记日志,不影响任务收尾与其他监听者。
+        """
+        self._terminal_listeners.append(callback)
+
+    def _notify_terminal(self, task_id: str) -> None:
+        """通知终态监听者(锁外调用;任务收尾的最后一环)。"""
+        if not self._terminal_listeners:
+            return
+        task = self._store.get_task(task_id)
+        if task is None:
+            return
+        for cb in list(self._terminal_listeners):
+            try:
+                cb(task)
+            except Exception:
+                logger.exception(f"terminal listener failed for task {task_id}")
 
     # ── 提交与调度 ─────────────────────────────────────────
 
@@ -180,52 +206,58 @@ class TaskManager:
             self._executor.submit(self._run, task_id, key)
 
     def _run(self, task_id: str, effective_key: str) -> None:
-        """任务执行包装:状态迁移 + 异常兜底 + 收尾派发(SSE 终态事件在内)。"""
+        """任务执行包装:状态迁移 + 异常兜底 + 收尾派发(SSE 终态事件在内)。
+
+        整个方法体都在 try/finally 保护下——store 异常(SQLite busy/磁盘满)
+        也必须走 _finish 释放串行键与并发额度,否则该键后续任务永久 pending、
+        泄漏满 WORKERS 次后整个框架停摆。
+        """
         from datetime import datetime, timezone
-        task = self._store.get_task(task_id)
-        handler = self._handlers.get(task["taskType"]) if task else None
-        if task is None or handler is None:
-            # 理论小概率:提交后 handler 被热切换清掉 → 按失败收尾
-            self._store.update_task(
-                task_id, status="failed",
-                error="任务类型已不可用(插件被禁用?)",
-                finished_at=datetime.now(timezone.utc).isoformat(),
-            )
-            self._finish(task_id, effective_key)
-            return
-
-        self._store.update_task(
-            task_id, status="running", started_at=datetime.now(timezone.utc).isoformat()
-        )
-        self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "running"}})
-
-        handle = TaskHandle(self, task_id, task.get("payload") or {})
         try:
-            result = handler(handle)
+            task = self._store.get_task(task_id)
+            handler = self._handlers.get(task["taskType"]) if task else None
+            if task is None or handler is None:
+                # 理论小概率:提交后 handler 被热切换清掉 → 按失败收尾
+                self._store.update_task(
+                    task_id, status="failed",
+                    error="任务类型已不可用(插件被禁用?)",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                )
+                return
+
             self._store.update_task(
-                task_id, status="succeeded",
-                result=result if isinstance(result, (dict, list)) else {"value": result},
-                finished_at=datetime.now(timezone.utc).isoformat(),
+                task_id, status="running", started_at=datetime.now(timezone.utc).isoformat()
             )
-            self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "succeeded"}})
-        except TaskCancelled:
-            self._store.update_task(
-                task_id, status="cancelled",
-                finished_at=datetime.now(timezone.utc).isoformat(),
-            )
-            self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "cancelled"}})
-        except Exception as e:
-            logger.exception(f"task {task_id} ({task['taskType']}) failed")
-            self._store.update_task(
-                task_id, status="failed", error=str(e),
-                finished_at=datetime.now(timezone.utc).isoformat(),
-            )
-            self._store.append_log(task_id, level="error", message=f"任务失败: {e}")
-            self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "failed", "error": str(e)}})
+            self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "running"}})
+
+            handle = TaskHandle(self, task_id, task.get("payload") or {})
+            try:
+                result = handler(handle)
+                self._store.update_task(
+                    task_id, status="succeeded",
+                    result=result if isinstance(result, (dict, list)) else {"value": result},
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                )
+                self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "succeeded"}})
+            except TaskCancelled:
+                self._store.update_task(
+                    task_id, status="cancelled",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                )
+                self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "cancelled"}})
+            except Exception as e:
+                logger.exception(f"task {task_id} ({task['taskType']}) failed")
+                self._store.update_task(
+                    task_id, status="failed", error=str(e),
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                )
+                self._store.append_log(task_id, level="error", message=f"任务失败: {e}")
+                self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "failed", "error": str(e)}})
         finally:
             with self._lock:
                 self._cancel_flags.discard(task_id)
             self._finish(task_id, effective_key)
+            self._notify_terminal(task_id)
 
     def _finish(self, task_id: str, effective_key: str) -> None:
         """收尾:释放串行键/并发额度,派发下一个等待任务。"""
@@ -271,7 +303,16 @@ class TaskManager:
                 finished_at=datetime.now(timezone.utc).isoformat(),
             )
             self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "cancelled"}})
+            self._notify_terminal(task_id)
         else:
+            # 竞态复核:读到非终态到拿锁之间,任务可能恰好跑完(_run 的 finally
+            # 已清标志)。此时丢弃我们刚加的孤儿标志并原样返回——不覆盖终态
+            # 任务的进度文案,也不在 _cancel_flags 里留永不清理的项。
+            latest = self._store.get_task(task_id)
+            if latest and latest["status"] in FINAL_STATUSES:
+                with self._lock:
+                    self._cancel_flags.discard(task_id)
+                return latest
             self._store.update_task(task_id, progress_message="等待任务在检查点响应取消…")
         return self._store.get_task(task_id)
 
@@ -319,5 +360,22 @@ class TaskManager:
         return self._store.mark_interrupted_on_startup()
 
     def close(self) -> None:
-        """停机:关闭线程池(不等待在跑任务;它们会被下次启动标 interrupted)。"""
+        """停机:请求取消全部 running/pending 任务后关闭线程池。
+
+        线程池线程非 daemon(解释器退出会 join),长任务(如 LLM 导入)会把
+        退出挂死到任务自然结束——所以先给所有在跑任务置取消标志,让它们在
+        下一个检查点(批次边界)自行中止,线程随即归还;仍在途的单次 LLM
+        HTTP 调用不受影响(最多等它返回)。没等到检查点的任务由下次启动的
+        recover 标 interrupted,pack 幂等重跑承接。
+        """
+        try:
+            tasks, _ = self._store.list_tasks(status="running", limit=1000)
+            running_ids = [t["id"] for t in tasks]
+        except Exception:
+            logger.exception("停机时查询运行中任务失败(跳过取消标记)")
+            running_ids = []
+        if running_ids:
+            with self._lock:
+                for tid in running_ids:
+                    self._cancel_flags.add(tid)
         self._executor.shutdown(wait=False)

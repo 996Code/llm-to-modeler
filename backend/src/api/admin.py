@@ -516,6 +516,10 @@ async def admin_put_pack_settings(name: str, request: Request, payload: Dict[str
     if store is None:
         raise HTTPException(503, "设置存储未初始化")
     store.save_values(name, clean)
+    # 配置变了,探针结果缓存必须作废——否则补配后 60s 内 enable 路径仍
+    # 命中旧的失败缓存,把"配置已改对"的插件继续拒载(设置页救活主路径)。
+    from services.pack_dependency import clear_probe_cache
+    clear_probe_cache(name)
     # 审计留痕:配置变更是管理端敏感操作(依赖判定/连接凭据都可能随它改变),
     # 必须能在服务日志里追溯"谁在什么时候改了哪个插件的哪些项"。
     # 只记字段名不记值——secret 类字段的明文永不进日志。
@@ -565,10 +569,12 @@ async def admin_recheck_pack(name: str, request: Request):
         except Exception as e:
             logger.exception(f"recheck 后热装配失败: {name}")
             raise HTTPException(503, f"Dependency ok but hot-reload failed: {e}")
-    # 刷新装配缓存后的最新状态一起带回
-    result["dependency"] = (
-        getattr(request.app.state, "pack_dependency_status", None) or {}
-    ).get(name, dep)
+        # 只有真触发了热装配才用装配结果刷新——刚才是全量重探测的结论;
+        # 探测失败时绝不能用装配缓存的旧 ok 覆盖(那正是故障期,谎报 ok
+        # 会让"重新检测"这个诊断手段在最需要时给出相反结论)。
+        result["dependency"] = (
+            getattr(request.app.state, "pack_dependency_status", None) or {}
+        ).get(name, dep)
     return result
 
 

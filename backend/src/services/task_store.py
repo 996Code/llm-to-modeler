@@ -219,8 +219,12 @@ class TaskStore:
         level: str = "info",
         message: str = "",
         data: Optional[Dict[str, Any]] = None,
-    ) -> int:
-        """追加一条日志,返回自增 id(前端把它当 SSE 断线补齐的游标)。"""
+    ) -> tuple:
+        """追加一条日志,返回 (自增 id, created_at)。
+
+        id 是前端 SSE 断线补齐的游标;created_at 随事件一起发布,前端
+        增量日志行的时间列不再依赖轮询补齐。
+        """
         now = _now()
         with self._get_conn() as conn:
             cur = conn.execute(
@@ -232,7 +236,7 @@ class TaskStore:
                     now,
                 ),
             )
-            return int(cur.lastrowid)
+            return int(cur.lastrowid), now
 
     def list_logs(self, task_id: str, after_id: int = 0, limit: int = 500) -> List[Dict[str, Any]]:
         """读日志(id > after_id,升序)——订阅时回放 + 断线重连补齐共用。"""

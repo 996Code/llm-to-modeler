@@ -386,3 +386,92 @@ class TestPackApiMount:
         count = len(app.router.routes)
         m.mount_pack_routers(app, ["zz_mount_test"])  # 全量重挂(冷启动=热切换)
         assert len(app.router.routes) == count
+
+    def test_mount_factory_internal_error_skips_pack(self, mounted_app):
+        """【M3 回归锚】pack 路由工厂内部异常只跳过该 pack,不拖垮装配。"""
+        import types
+        import sys
+        mod = types.ModuleType("domains.zz_broken_pack.pack")
+        def broken_factory():
+            raise TypeError("真实内部错误,不是签名问题")
+        mod.create_api_router = broken_factory
+        sys.modules["domains.zz_broken_pack.pack"] = mod
+        sys.modules.setdefault("domains.zz_broken_pack", types.ModuleType("domains.zz_broken_pack"))
+        try:
+            m, app, client = mounted_app
+            mounted = m.mount_pack_routers(app, ["zz_mount_test", "zz_broken_pack"])
+            # 坏 pack 被跳过,好 pack 照常挂载
+            assert mounted == ["zz_mount_test"]
+            assert client.get("/api/packs/zz_mount_test/ping").status_code == 200
+        finally:
+            sys.modules.pop("domains.zz_broken_pack.pack", None)
+            sys.modules.pop("domains.zz_broken_pack", None)
+
+
+class TestAuditFixes:
+    """全量走查修复的回归锚(平台层)。"""
+
+    def test_run_exception_still_releases_key(self, task_manager, monkeypatch, wait_for):
+        """【M1 回归锚】store 异常(未保护段)不泄漏串行键/并发额度。"""
+        m = task_manager
+        m.register("zz.boom", lambda h: None, pack_name="test")
+
+        real_update = m.store.update_task
+        def flaky_update(task_id, **fields):
+            # running 状态迁移时炸(修复前该段在 try/finally 之外)
+            if fields.get("status") == "running":
+                raise RuntimeError("sqlite boom")
+            return real_update(task_id, **fields)
+        monkeypatch.setattr(m.store, "update_task", flaky_update)
+
+        t = m.submit("zz.boom", queue_key="k1")
+        wait_for(lambda: m.store.get_task(t["id"])["status"]
+                 in ("succeeded", "failed", "cancelled", "interrupted"))
+        # 关键断言:串行键与并发额度必须已释放(否则同键任务永久 pending)
+        with m._lock:
+            assert "k1" not in m._active_keys
+            assert m._running_count == 0
+        t2 = m.submit("zz.boom", queue_key="k1")
+        wait_for(lambda: m.store.get_task(t2["id"])["status"]
+                 in ("succeeded", "failed", "cancelled", "interrupted"))
+
+    def test_terminal_listener_fires_on_all_paths(self, task_manager, wait_for):
+        """终态回调覆盖 succeeded / pending 取消 / handler 缺失路径。"""
+        m = task_manager
+        seen = []
+        m.add_terminal_listener(lambda task: seen.append(
+            (task["id"], task["status"])))
+
+        m.register("zz.ok", lambda h: {"fine": 1}, pack_name="test")
+        t1 = m.submit("zz.ok")
+        wait_for(lambda: any(i == t1["id"] for i, _ in seen))
+        assert dict(seen)[t1["id"]] == "succeeded"
+
+        # pending 期取消(不执行 handler)
+        m.register("zz.slow", lambda h: None, pack_name="test")
+        # 占满 worker 让下一任务停在 pending
+        import threading
+        barrier = threading.Event()
+        m2 = TaskManager(m.store, max_workers=1)
+        m2.register("zz.block", lambda h: barrier.wait(timeout=5), pack_name="test")
+        m2.register("zz.ok", lambda h: {"fine": 1}, pack_name="test")
+        m2_seen = []
+        m2.add_terminal_listener(lambda task: m2_seen.append(task["status"]))
+        m2.submit("zz.block")
+        tp = m2.submit("zz.ok")["id"]
+        cancelled = m2.cancel(tp)
+        assert cancelled["status"] == "cancelled"
+        assert "cancelled" in m2_seen
+        barrier.set()
+        m2.close()
+
+    def test_cancel_completed_task_no_orphan_flag(self, task_manager, wait_for):
+        """【L1 回归锚】终态任务取消:不留孤儿标志、不覆盖终态进度文案。"""
+        m = task_manager
+        m.register("zz.fast", lambda h: None, pack_name="test")
+        t = m.submit("zz.fast")
+        wait_for(lambda: m.store.get_task(t["id"])["status"] == "succeeded")
+        result = m.cancel(t["id"])
+        assert result["status"] == "succeeded"          # 幂等返回
+        with m._lock:
+            assert t["id"] not in m._cancel_flags       # 无孤儿标志

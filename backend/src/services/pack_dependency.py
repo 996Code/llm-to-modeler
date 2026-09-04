@@ -62,9 +62,12 @@ STATUS_PROBE_FAILED = "probe_failed"
 _PROBE_CACHE: Dict[tuple, tuple] = {}
 _PROBE_CACHE_TTL = 60.0
 
-# 探针执行线程池(只为"可超时地跑一个函数",单线程够用)
+# 探针执行线程池。多线程是必要的:future.result(timeout) 只放弃等待、
+# 杀不掉底层线程,单线程池里一个挂死的探针(如被防火墙丢包的 TCP 连接
+# 一直挂到驱动自身超时)会占住唯一线程,让排在后面的健康依赖被 3s 超时
+# 误判为失败——错误的 fail-closed。容量取"并行评估的全部探针数 + 余量"。
 _PROBE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=1, thread_name_prefix="dep-probe"
+    max_workers=8, thread_name_prefix="dep-probe"
 )
 
 
