@@ -446,6 +446,61 @@ class LLMClient:
         raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id, stage=stage)  # 复用 chat 走 Qwen3 回退
         return self._parse_json_from_text(raw)  # 三级容错解析
 
+    # ── Embeddings(知识图谱插件的向量检索用;通用能力,任何 pack 可用) ──
+
+    def embeddings(
+        self,
+        texts: List[str],
+        conv_id: Optional[str] = None,
+        stage: Optional[str] = None,
+    ) -> List[List[float]]:
+        """批量向量化(OpenAI 兼容 /v1/embeddings;同步)。
+
+        模型由 env ``LLM_EMBED_MODEL`` 指定(与对话模型分离——embedding
+        通常用专用小模型);未配置直接抛 RuntimeError,由调用方降级
+        (如知识图谱的纯图谱检索模式)。
+
+        Returns:
+            与输入等长等序的向量列表。
+
+        Failure:
+            RuntimeError: LLM_EMBED_MODEL 未配置。
+            SDK 原生异常: 网络/鉴权/模型不存在(调用方决定重试或降级)。
+        """
+        model = os.getenv("LLM_EMBED_MODEL", "").strip()
+        if not model:
+            raise RuntimeError("LLM_EMBED_MODEL 未配置,向量能力不可用")
+        texts = [str(t) for t in texts]
+        start = time.monotonic()
+        error = None
+        vectors: List[List[float]] = []
+        try:
+            resp = self.client.embeddings.create(model=model, input=texts)
+            # 按 index 归位(SDK 不保证返回有序)
+            ordered = sorted(resp.data, key=lambda d: d.index)
+            vectors = [list(item.embedding) for item in ordered]
+            if len(vectors) != len(texts):
+                raise ValueError(f"embeddings 数量不符: {len(vectors)} != {len(texts)}")
+            return vectors
+        except Exception as e:
+            error = str(e)
+            raise
+        finally:
+            # 与 chat 同款观测:入 call_logs(文本量大时只记条数/字符量,不记全文)
+            self._log_call(
+                endpoint=f"embeddings:{model}",
+                request_data={
+                    "stage": stage or "embeddings",
+                    "count": len(texts),
+                    "chars": sum(len(t) for t in texts),
+                },
+                response_data={"dim": len(vectors[0]) if vectors else None, "count": len(vectors)},
+                status_code=None if not error else 500,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                error_message=error,
+                conv_id=conv_id,
+            )
+
     # ── JSON 提取辅助方法 ────────────────────────────────
 
     def _extract_json(self, response) -> Dict[str, Any]:
