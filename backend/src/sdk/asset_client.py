@@ -109,15 +109,6 @@ class AssetClient(ABC):
             guide 内容(dict)。该内容会拼进 prompt 辅助 LLM 生成合规制品。
         """
 
-    def get_guide_for(self, service_name: str) -> Optional[dict]:
-        """取指定上游服务的 guide.json（嵌入模式多服务地址）。
-
-        按服务名取 guide,无多服务时与 get_guide 等价。
-        """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} 未实现 get_guide_for; "
-            "如需按服务取 guide 请覆写此方法或使用 HttpAssetClient"
-        )
 
     def get_artifact(self, entry_id: str) -> Optional[dict]:
         """根据标识(entry_id)查询已有制品配置。

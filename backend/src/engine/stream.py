@@ -58,15 +58,6 @@ from services.upstream_client import set_forward_headers, set_request_services
 logger = logging.getLogger(__name__)
 
 
-def _mask_header_value(value: str) -> str:
-    """透传头的值（历史名保留避免动调用点；按产品决策原文记录）。
-
-    内网审计定位需要完整凭证形态（比对 token 过期/租户头缺失），
-    不做掩蔽。
-    """
-    return str(value)
-
-
 def _request_context_trace(
     store, conv_id: str, user_id: str, services: dict,
     forward_headers: dict, context_artifact, answers, image_base64,
@@ -89,10 +80,7 @@ def _request_context_trace(
             "detail": {
                 "user_id": user_id,
                 "services": dict(services or {}),
-                "forward_headers": {
-                    k: _mask_header_value(v)
-                    for k, v in (forward_headers or {}).items()
-                },
+                "forward_headers": dict(forward_headers or {}),
                 "context_artifact_bytes": len(str(context_artifact)) if context_artifact else 0,
                 "resume_answers": bool(answers),
                 "with_image": bool(image_base64),

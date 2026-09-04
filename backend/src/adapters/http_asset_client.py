@@ -66,11 +66,6 @@ class HttpAssetClient(AssetClient):
         # None 透传语义：上游失败/假200信封——工具层据此追问用户刷新重开
         return self._clean(data) if data else None
 
-    def get_guide_for(self, service_name: str) -> Optional[dict]:
-        data = self._c().get_guide_for(service_name)
-        return self._clean(data) if data else None
-
-    # ── 制品操作（领域客户端持有主键/枚举/归一化语义） ──
 
     def validate_artifact(self, artifact: dict, mode: str) -> dict:
         """校验（mode 语义由领域客户端解释，adapter 只透传）。"""

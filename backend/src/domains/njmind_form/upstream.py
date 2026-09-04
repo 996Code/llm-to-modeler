@@ -58,9 +58,6 @@ class ModelerAPI:
         return self._t.get(SERVICE_NAME, self._path("template", name=filename),
                            auth=False, cache=True)
 
-    def list_schemas(self) -> List[str]:
-        return self._t.get(SERVICE_NAME, self._path("schemas_list"),
-                           auth=False) or []
 
     def get_schema(self, name: str) -> Optional[Dict[str, Any]]:
         # njmind Schema 命名规范 xxx.schema.json；已 .json 结尾视为完整名
@@ -72,16 +69,6 @@ class ModelerAPI:
         return self._t.get(SERVICE_NAME, self._path("guide"),
                            auth=False, cache=True)
 
-    def get_guide_for(self, service_name: str = SERVICE_NAME) -> Optional[Dict[str, Any]]:
-        """按服务名取 guide（多服务地址场景；无多服务时与 get_guide 等价）。"""
-        return self._t.get(service_name, self._path("guide"),
-                           auth=False, cache=True)
-
-    # ── 业务端点（匿名，不缓存；主键/枚举/归一化语义归 pack） ──
-    # 凭证策略（部署事实定的）：njmind 网关对 /api/mcp/* 端点族是「匿名
-    # 白名单放行、带身份按身份鉴权」——普通 designer 用户未被授权该端点族，
-    # 带其 token 反而 403（生产实证：同一请求 guide/validate 带头全 403、
-    # 匿名全通）。此端点族本就是服务间匿名调用语义，统一不带用户凭证。
 
     def validate_artifact(self, artifact: Dict[str, Any], mode: str) -> Dict[str, Any]:
         """校验制品。mode 由 adapter 原样透传（领域客户端负责枚举归一化）。

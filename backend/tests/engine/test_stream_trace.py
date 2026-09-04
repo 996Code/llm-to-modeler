@@ -15,7 +15,7 @@ try:
 except ImportError:
     _HAS_LANGGRAPH = False
 
-from engine.stream import stream_graph, _mask_header_value
+from engine.stream import stream_graph
 
 pytestmark = pytest.mark.skipif(
     not _HAS_LANGGRAPH, reason="langgraph package not installed"
@@ -91,8 +91,3 @@ def test_request_context_standalone_empty_services():
     assert detail["forward_headers"] == {}
     assert detail["context_artifact_bytes"] == 0
 
-
-def test_mask_header_value_raw():
-    """请求头值原文记录（历史函数名保留；产品决策不做掩蔽）。"""
-    assert _mask_header_value("1") == "1"
-    assert _mask_header_value("Bearer abc.def.ghi") == "Bearer abc.def.ghi"

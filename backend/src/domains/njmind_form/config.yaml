@@ -15,7 +15,6 @@ domain:
 paths:
   templates_list: /api/mcp/templates/list-templates
   template: /api/mcp/templates/{name}
-  schemas_list: /api/mcp/schemas/list-schemas
   schema: /api/mcp/schemas/{name}
   guide: /api/mcp/guides/guide.json
   validate: /api/mcp/forms/validate

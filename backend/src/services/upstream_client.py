@@ -88,15 +88,6 @@ class ServiceUnresolvableError(RuntimeError):
     """
 
 
-def _mask_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
-    """请求头整理（历史名保留 _mask_headers 避免动调用点）。
-
-    按产品决策：请求头原文落库，不做掩蔽——内网审计定位需要完整凭证
-    形态（如比对 token 是否过期/哪个租户头缺失）。
-    """
-    return dict(headers or {})
-
-
 class UpstreamConfig:
     """传输层行为参数（普通类，非 Pydantic）。
 
@@ -280,10 +271,6 @@ class UpstreamClient:
     def _set_cached(self, key: str, data: Any):
         self._cache[key] = (data, time.time())
 
-    def clear_cache(self):
-        """清空内存缓存（上游资产更新后强制刷新用）。"""
-        self._cache.clear()
-        logger.info("Upstream cache cleared")
 
     @staticmethod
     def _ms(start: float) -> int:
