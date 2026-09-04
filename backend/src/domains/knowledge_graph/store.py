@@ -277,6 +277,31 @@ class KGStore:
             conn.execute("DELETE FROM kg_chunks WHERE doc_id = ?", (doc_id,))
             return cur.rowcount > 0
 
+    def recover_importing_docs(self, active_doc_ids) -> int:
+        """把没有存活任务支撑的 importing 文档收敛为 failed(启动恢复用)。
+
+        active_doc_ids = 当前确实 pending/running 的导入任务对应的 doc_id
+        (热切换重装配时活任务不能被误伤)。Returns: 收敛的行数。
+        """
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                """UPDATE kg_documents
+                   SET import_status = 'failed',
+                       error = '服务重启导致导入中断(可重新发起,已完成块会续跑)',
+                       updated_at = ?
+                   WHERE import_status = 'importing'""",
+                (_now(),),
+            )
+            # 排除活任务:先整体收敛再放回 importing(集合小,两步比拼 NOT IN 简单)
+            for doc_id in active_doc_ids:
+                conn.execute(
+                    """UPDATE kg_documents SET import_status = 'importing', error = '',
+                           updated_at = ? WHERE id = ? AND import_status = 'failed'
+                           AND error LIKE '服务重启导致导入中断%'""",
+                    (_now(), doc_id),
+                )
+            return cur.rowcount
+
     def document_file_path(self, doc_id: str) -> Optional[str]:
         with self._get_conn() as conn:
             row = conn.execute(

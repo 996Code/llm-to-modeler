@@ -259,7 +259,9 @@ class TestSearchEndpoint:
         client, env = search_client
         env.store.create_kb("库一"); env.store.create_kb("库二")
         r = client.post("/api/packs/knowledge_graph/search", json={"query": "x"})
-        assert r.status_code == 422 and "库一" in r.text
+        # 用户级端点不回显库名清单(枚举探测面)——只给数量与指引
+        assert r.status_code == 422 and "2 个知识库" in r.text
+        assert "库一" not in r.text and "库二" not in r.text
 
     def test_search_no_kb_at_all(self, search_client):
         client, _ = search_client

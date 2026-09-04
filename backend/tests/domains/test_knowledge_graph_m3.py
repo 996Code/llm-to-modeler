@@ -267,11 +267,31 @@ class TestImportPipeline:
 
         # 修复"上游"后重跑:不 force → 复用 chunk,只重抽失败块
         env.llm.fail_markers = []
+        deletes_before = len(env.graph.delete_calls)
         t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t2["status"] == "succeeded" and t2["result"]["status"] == "succeeded"
         re_extracted = env.llm.extract_calls - calls_after_first
         assert re_extracted == statuses.count("failed")
         assert all(c["status"] == "done" for c in env.store.list_chunks(doc["id"]))
+        # 【B1 回归锚】断点续跑严禁清理图谱:已完成块的贡献只活在图里,
+        # 清了又不重抽(done 块被跳过)等于静默丢数据
+        assert len(env.graph.delete_calls) == deletes_before
+
+    def test_resume_preserves_done_chunk_entities(self, env):
+        """B1 主案:失败重跑后,已完成块抽取出的实体仍在图谱里。"""
+        pad = "背景铺垫文字。" * 30   # 单段即超切块目标,确保两段独立成块
+        kb, doc = _make_doc(env, "保留", [
+            f"{pad}[E:甲] [E:乙]",
+            f"{pad}坏块标记XYZ [E:丙]",
+        ])
+        env.llm.fail_markers = ["坏块标记XYZ"]
+        _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert env.graph.counts(kb["id"])["entities"] == 2   # 甲乙已入图
+        # 重跑(修复上游)后:甲乙必须还在(丙补上,共 3)
+        env.llm.fail_markers = []
+        t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t2["status"] == "succeeded"
+        assert env.graph.counts(kb["id"])["entities"] == 3
 
     def test_circuit_breaker(self, env):
         env.settings.save_values("knowledge_graph", {"failure_threshold": 2})
@@ -302,6 +322,40 @@ class TestImportPipeline:
         # 完成后可再次提交
         t2 = tasks.submit_import(env.app_state, kb["id"], doc["id"])
         assert _wait(env.manager, t2["id"])["status"] == "succeeded"
+
+    def test_pending_cancel_releases_inflight(self, env):
+        """【H2 回归锚】排队期取消的任务也必须释放防重登记。
+
+        handler 不执行 → finally 不生效;不挂终态回调的话该文档会
+        永久报"已有进行中的导入任务"直到重启。
+        """
+        # 占满并发额度,让后续任务停留在 pending
+        kb1, doc1 = _make_doc(env, "占位1", [f"[E:甲{i}]" for i in range(30)])
+        kb2, doc2 = _make_doc(env, "占位2", [f"[E:乙{i}]" for i in range(30)])
+        orig = env.llm.chat_json
+        def slow(*a, **kw):
+            time.sleep(0.05)
+            return orig(*a, **kw)
+        env.llm.chat_json = slow
+        env.manager.submit("kg.import_document",
+                           payload={"kb_id": kb1["id"], "doc_id": doc1["id"]},
+                           title="占位1", queue_key=f"kg:{kb1['id']}")
+        env.manager.submit("kg.import_document",
+                           payload={"kb_id": kb2["id"], "doc_id": doc2["id"]},
+                           title="占位2", queue_key=f"kg:{kb2['id']}")
+        # 构造 pending 任务占住 doc1 的防重表(模拟提交后排队)
+        pending_task = env.manager.submit(
+            "kg.import_document",
+            payload={"kb_id": kb1["id"], "doc_id": doc1["id"], "force": False},
+            title="pending取消案", queue_key=f"kg:{kb1['id']}x")
+        with tasks._inflight_lock:
+            tasks._inflight[doc1["id"]] = pending_task["id"]
+        # 取消 pending 任务(不执行 handler)
+        cancelled = env.manager.cancel(pending_task["id"])
+        assert cancelled["status"] == "cancelled"
+        # 终态回调必须已释放防重登记 → 可以再次提交该文档
+        t = tasks.submit_import(env.app_state, kb1["id"], doc1["id"])
+        assert _wait(env.manager, t["id"])["status"] == "succeeded"
 
     def test_vector_mode_enabled_and_upserted(self, env, monkeypatch):
         monkeypatch.setenv("LLM_EMBED_MODEL", "mock-embed")

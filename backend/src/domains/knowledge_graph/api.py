@@ -123,6 +123,16 @@ async def delete_kb(kb_id: str, request: Request):
     _kb_or_404(request, kb_id)
     store = runtime.get_kg_store(request.app.state)
 
+    # 删除守卫:有进行中的导入/归纳任务时拒绝——任务与删除并发会让
+    # upsert 在清理之后回写,产出再也触达不了的孤儿子图。等任务结束再删。
+    from domains.knowledge_graph import tasks as kg_tasks
+    for doc in store.list_documents(kb_id):
+        with kg_tasks._inflight_lock:
+            task_id = kg_tasks._inflight.get(doc["id"])
+        if task_id:
+            raise HTTPException(
+                409, f"库内有正在导入的文档(任务 {task_id[:8]}…),请等任务结束后再删除")
+
     # 三存储 + 文件联动清理(单点失败不阻断:后续残留可再删一次)
     errors: List[str] = []
     try:
@@ -168,8 +178,25 @@ async def upload_documents(
             results.append({"filename": f.filename, "ok": False,
                             "reason": "不支持的格式(仅 md/txt/pdf/docx)"})
             continue
-        data = await f.read()
-        if len(data) > max_bytes:
+        # 分块读取 + 上限截断:Content-Length 只做预检(可伪造),真正的
+        # 上限在读取中强制——超限时读到 max+1 即停,GB 级恶意上传不会
+        # 先占满内存再被拒绝
+        declared = int(f.size or 0)
+        if declared and declared > max_bytes:
+            results.append({"filename": f.filename, "ok": False,
+                            "reason": f"超过单文件上限 {max_bytes // 1024 // 1024}MB"})
+            continue
+        data = b""
+        oversized = False
+        while True:
+            part = await f.read(1024 * 1024)
+            if not part:
+                break
+            data += part
+            if len(data) > max_bytes:
+                oversized = True
+                break
+        if oversized:
             results.append({"filename": f.filename, "ok": False,
                             "reason": f"超过单文件上限 {max_bytes // 1024 // 1024}MB"})
             continue
@@ -232,9 +259,21 @@ async def delete_document(kb_id: str, doc_id: str, request: Request):
     if not doc or doc["kbId"] != kb_id:
         raise HTTPException(404, "文档不存在")
 
+    # 删除守卫:导入进行中拒绝——否则任务后续批次的 upsert 会在清理之后
+    # 回写,留下 source_docs 指向已删文档的孤儿实体(取消/等待后重删即可)
+    from domains.knowledge_graph import tasks as kg_tasks
+    with kg_tasks._inflight_lock:
+        inflight_task = kg_tasks._inflight.get(doc_id)
+    if inflight_task:
+        raise HTTPException(
+            409, f"该文档正在导入中(任务 {inflight_task[:8]}…),请等任务结束或先取消任务")
+
     errors: List[str] = []
-    # 图谱贡献清理(未导入过的文档跳过)
-    if doc["importStatus"] in ("succeeded", "partial", "importing"):
+    # 图谱贡献清理。failed 也必须清:失败文档按设计保留已完成块的贡献,
+    # 删文档不清图 = 永久孤儿(元数据已删,再也触达不了清理)。
+    # uploaded = 从未导入过,图谱无贡献,跳过。
+    imported_states = ("succeeded", "partial", "importing", "failed")
+    if doc["importStatus"] in imported_states:
         try:
             _graph(request).delete_document(kb_id, doc_id)
         except Exception as e:
@@ -242,7 +281,7 @@ async def delete_document(kb_id: str, doc_id: str, request: Request):
     # 向量清理(向量启用且导入过的库)
     kb = store.get_kb(kb_id)
     try:
-        if kb and kb.get("vectorEnabled") and doc["importStatus"] in ("succeeded", "partial", "importing"):
+        if kb and kb.get("vectorEnabled") and doc["importStatus"] in imported_states:
             runtime.get_vector(request.app.state).delete_by_doc(kb_id, doc_id)
     except Exception as e:
         errors.append(f"milvus: {e}")
@@ -405,8 +444,9 @@ async def search(request: Request, payload: Dict[str, Any]):
         elif not kbs:
             raise HTTPException(404, "当前没有任何知识库")
         else:
-            raise HTTPException(422, f"存在 {len(kbs)} 个知识库,请用 kb 参数指定: "
-                                     f"{[k['name'] for k in kbs]}")
+            # 不回显全部库名——这是无管理口令的用户级端点,库名清单本身
+            # 是信息泄露面(可被枚举探测)。给数量与指引即可。
+            raise HTTPException(422, f"存在 {len(kbs)} 个知识库,请用 kb 参数指定目标库")
     if not kb:
         raise HTTPException(404, f"知识库不存在: {kb_ref}")
 
@@ -415,11 +455,13 @@ async def search(request: Request, payload: Dict[str, Any]):
     user = user_id(request)
     try:
         return retrieval.answer_question(
-            request.app.state, kb, query, conv_id=None,
+            request.app.state, kb, query, conv_id=None, top_k=top_k,
         ) | {"user": user}
     except Exception as e:
+        # 异常详情只进服务端日志;用户级端点不回显内部错误串(可能带
+        # 中间件地址等内部拓扑)
         logger.exception("search failed")
-        raise HTTPException(502, f"检索失败: {e}")
+        raise HTTPException(502, "检索失败,请稍后重试或联系管理员")
 
 
 # ── 依赖状态(设置页"重新检测"用) ─────────────────────────────

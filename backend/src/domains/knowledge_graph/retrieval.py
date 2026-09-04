@@ -142,12 +142,13 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
 
 def answer_question(app_state, kb: Dict[str, Any], query: str,
                     conv_id: Optional[str] = None,
-                    retrieved: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    retrieved: Optional[Dict[str, Any]] = None,
+                    top_k: Optional[int] = None) -> Dict[str, Any]:
     """混合检索 + LLM 综合回答。Returns:
     {answer, subgraph, chunks, intent, sources}
     """
     if retrieved is None:
-        retrieved = hybrid_retrieve(app_state, kb, query, conv_id=conv_id)
+        retrieved = hybrid_retrieve(app_state, kb, query, conv_id=conv_id, top_k=top_k)
     ctx = linearize_context(retrieved)
 
     prompt = _prompt_loader().render(

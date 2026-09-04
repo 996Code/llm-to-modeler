@@ -58,16 +58,38 @@ def parse_to_text(filename: str, data: bytes) -> str:
 
 
 def _decode_text(data: bytes) -> str:
-    """UTF-8 优先,失败回退 GBK(中文办公环境常见),再失败用 errors=replace。"""
+    """UTF-8 优先,失败回退 GBK(中文办公环境常见),再失败用 errors=replace。
+
+    BOM/零字节探测:UTF-16/UTF-32 字节流常能"成功"通过 GBK 解码成含 NUL
+    的乱码(不抛异常),这类垃圾进切块再进 LLM 就是一张废图谱——所以
+    GBK 解出来后若含 NUL 或高占比替换符,按解码失败处理。
+    """
     if data[:3] == b"\xef\xbb\xbf":
         return data[3:].decode("utf-8", errors="replace")
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    if data[:4] in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        return data.decode("utf-32", errors="replace")
+    if b"\x00" in data[:200]:
+        # 无 BOM 但含零字节:未知宽字符编码,按 UTF-16 兜底再校验
+        guess = data.decode("utf-16", errors="ignore")
+        if guess and "\x00" not in guess:
+            return guess
+        raise ValueError("无法识别的文本编码(疑似宽字符/二进制内容)")
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         try:
-            return data.decode("gbk")
+            text = data.decode("gbk")
+            if "\x00" in text:
+                raise ValueError("无法识别的文本编码(疑似宽字符/二进制内容)")
+            return text
         except UnicodeDecodeError:
-            return data.decode("utf-8", errors="replace")
+            fallback = data.decode("utf-8", errors="replace")
+            # 替换符占比过高 = 实际上没解出来,别把乱码当文本
+            if fallback.count("\ufffd") > len(fallback) * 0.05:
+                raise ValueError("无法识别的文本编码")
+            return fallback
 
 
 def _parse_pdf(data: bytes) -> str:

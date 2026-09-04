@@ -52,6 +52,36 @@ def register_tasks(manager, app_state=None) -> None:
                      pack_name=runtime.PACK_NAME)
     manager.register("kg.induce_schema", run_induce_schema,
                      pack_name=runtime.PACK_NAME)
+    # 终态兜底:_inflight 只靠 handler finally 释放会漏(pending 期被取消/
+    # handler 被热切换清掉时 handler 根本不执行)。挂到任务管理器的终态
+    # 回调上——任何路径到达终态都释放,防重表不再永久卡死该文档。
+    manager.add_terminal_listener(_release_inflight_on_terminal)
+    # 启动收敛:进程重启后遗留 importing 状态的文档,其任务已被标
+    # interrupted,不会再有 handler 去收敛它——不处理就永远显示"导入中"。
+    # 只在首次装配(=启动)时执行,且排除当前确实在跑/排队的导入任务,
+    # 避免热切换误伤活任务。
+    _recover_stale_importing(manager)
+
+
+def _recover_stale_importing(manager) -> None:
+    """把"没有存活任务支撑"的 importing 文档收敛为 failed(可重跑续传)。"""
+    if not _app_state:
+        return
+    try:
+        active_doc_ids = set()
+        for status in ("pending", "running"):
+            tasks, _ = manager.store.list_tasks(
+                status=status, task_type="kg.import_document", limit=1000)
+            for t in tasks:
+                doc_id = str((t.get("payload") or {}).get("doc_id") or "")
+                if doc_id:
+                    active_doc_ids.add(doc_id)
+        store = runtime.get_kg_store(_app_state)
+        recovered = store.recover_importing_docs(active_doc_ids)
+        if recovered:
+            logger.info(f"启动收敛: {recovered} 个 importing 文档标记为 failed(任务已被中断)")
+    except Exception:
+        logger.exception("启动收敛 importing 文档失败(不影响服务启动)")
 
 
 # ── 提交入口(api 调用) ───────────────────────────────────────
@@ -66,21 +96,42 @@ def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False) -> Di
     doc = store.get_document(doc_id)
     if not doc or doc["kbId"] != kb_id:
         raise ValueError("文档不存在")
+    # 占位先入表再提交:占位与检查在同一临界区,双击/并发提交只有一个能过;
+    # 若先提交后登记,任务可能已在另一线程跑完并 release(此时表还没登记,
+    # release 落空)→ 我们再登记 = 永久泄漏。
     with _inflight_lock:
         if doc_id in _inflight:
             raise ValueError(f"该文档已有进行中的导入任务(任务 {_inflight[doc_id][:8]}…)")
+        _inflight[doc_id] = "(提交中)"
 
     kb = store.get_kb(kb_id)
-    task = app_state.task_manager.submit(
-        "kg.import_document",
-        payload={"kb_id": kb_id, "doc_id": doc_id, "force": bool(force)},
-        title=f"导入文档: {doc['filename']} → {kb['name'] if kb else kb_id[:8]}",
-        pack_name=runtime.PACK_NAME,
-        queue_key=f"kg:{kb_id}",  # 同库串行:不并发写图
-    )
+    try:
+        task = app_state.task_manager.submit(
+            "kg.import_document",
+            payload={"kb_id": kb_id, "doc_id": doc_id, "force": bool(force)},
+            title=f"导入文档: {doc['filename']} → {kb['name'] if kb else kb_id[:8]}",
+            pack_name=runtime.PACK_NAME,
+            queue_key=f"kg:{kb_id}",  # 同库串行:不并发写图
+        )
+    except Exception:
+        _release_inflight(doc_id)
+        raise
     with _inflight_lock:
+        # 终态回调按 task id 精确释放;若极端时序下任务已瞬终态并按占位
+        # 释放过(值不匹配未释放),这里登记后由下面再补一次释放判定
         _inflight[doc_id] = task["id"]
+        if _task_is_terminal(app_state, task["id"]):
+            _inflight.pop(doc_id, None)
     return task
+
+
+def _task_is_terminal(app_state, task_id: str) -> bool:
+    """轻查任务是否已到终态(极端快任务场景兜底,失败视为未终态)。"""
+    try:
+        t = app_state.task_manager.store.get_task(task_id)
+        return bool(t and t.get("status") in ("succeeded", "failed", "cancelled", "interrupted"))
+    except Exception:
+        return False
 
 
 def submit_induce_schema(app_state, kb_id: str, sample_chunks: int = 8) -> Dict[str, Any]:
@@ -101,6 +152,23 @@ def submit_induce_schema(app_state, kb_id: str, sample_chunks: int = 8) -> Dict[
 def _release_inflight(doc_id: str) -> None:
     with _inflight_lock:
         _inflight.pop(doc_id, None)
+
+
+def _release_inflight_on_terminal(task: Dict[str, Any]) -> None:
+    """TaskManager 终态回调:kg.import_document 到终态即释放防重登记。
+
+    按 task id 精确匹配(而不是盲目 pop doc_id)——防止旧任务的迟到终态
+    误删新一次提交刚登记的防重项。
+    """
+    if task.get("taskType") != "kg.import_document":
+        return
+    payload = task.get("payload") or {}
+    doc_id = str(payload.get("doc_id") or "")
+    if not doc_id:
+        return
+    with _inflight_lock:
+        if _inflight.get(doc_id) == task.get("id"):
+            _inflight.pop(doc_id, None)
 
 
 # ── 配置取值 ─────────────────────────────────────────────────
@@ -153,25 +221,15 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     handle.log(f"开始导入: {doc['filename']}({doc['sizeBytes']}B,库「{kb['name']}」)")
     store.update_document(doc_id, import_status="importing", error="")
 
-    # 1) 清理旧贡献(重导路径;首次导入为无害空操作)
-    try:
-        graph = runtime.get_graph(app_state)
-        removed = graph.delete_document(kb_id, doc_id)
-        handle.log(f"清理旧图谱贡献: 删 {removed.get('edges', 0)} 边 / "
-                   f"{removed.get('orphanEntities', 0)} 孤立实体(幂等重导)")
-    except Exception as e:
-        raise RuntimeError(f"Neo4j 清理失败: {e}")
-    if kb.get("vectorEnabled"):
-        try:
-            runtime.get_vector(app_state).delete_by_doc(kb_id, doc_id)
-        except Exception as e:
-            handle.log(f"Milvus 旧向量清理失败(继续导入,完成后可重试): {e}", level="warn")
-
-    # 2) 解析 + 切块(结构感知)
+    # 2) 解析 + 切块(结构感知)——先于清理:清理是否执行取决于是否存在
+    #    可续跑的已完成块,必须先拿到 chunk 状态才能决定。
     #    【chunk 复用 = 断点续跑的前提】同一文档行的内容固定(内容变化会
     #    因 hash 查重生成新文档行),重跑时复用已有 chunk(保留 done 状态);
     #    force=True 才整体重建(全部重抽)。
     existing_chunks = store.list_chunks(doc_id)
+    resume = bool(existing_chunks) and not force and any(
+        c["status"] == "done" for c in existing_chunks
+    )
     if existing_chunks and not force:
         chunks = existing_chunks
         handle.set_progress(_W_PARSE, f"复用已有切块: {len(chunks)} 块"
@@ -200,6 +258,26 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
         handle.log(f"切块完成: {len(chunks)} 块(目标 "
                    f"{_cfg(app_state, 'chunk_target_chars', 1200)} 字/块)")
         handle.set_progress(_W_PARSE, f"切块完成: {len(chunks)} 块")
+
+    # 1) 清理旧贡献。
+    #    只有"全量重导"(force / 首次导入 / 无任何已完成块的失败重跑)才清理;
+    #    续跑路径(resume=True)严禁清理——已完成块的贡献只存在于 Neo4j/Milvus
+    #    里,清了又不重抽(done 块被跳过)等于永久丢数据。
+    graph = runtime.get_graph(app_state)   # 抽取批写入/收尾统计都要用,无条件获取
+    if resume:
+        handle.log("断点续跑: 保留图谱中已完成块的贡献,只补抽未完成块")
+    else:
+        try:
+            removed = graph.delete_document(kb_id, doc_id)
+            handle.log(f"清理旧图谱贡献: 删 {removed.get('edges', 0)} 边 / "
+                       f"{removed.get('orphanEntities', 0)} 孤立实体(幂等重导)")
+        except Exception as e:
+            raise RuntimeError(f"Neo4j 清理失败: {e}")
+        if kb.get("vectorEnabled"):
+            try:
+                runtime.get_vector(app_state).delete_by_doc(kb_id, doc_id)
+            except Exception as e:
+                handle.log(f"Milvus 旧向量清理失败(继续导入,完成后可重试): {e}", level="warn")
 
     # 3) 向量准备(模型未配置 → 纯图谱模式,不阻断)
     vector_ready = _prepare_vector(handle, app_state, store, kb, conv_id)
@@ -339,7 +417,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
 
 
 def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
-    """向量模式准备:已启用 → 确保 collection;未决 → 探测一次定夺。
+    """向量模式准备:已启用 → 校验模型一致性 + 确保 collection;未决 → 探测。
 
     Returns:
         True = 本库向量可用(后续按批 upsert);False = 纯图谱模式。
@@ -347,6 +425,19 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
     handle.set_progress(_W_PARSE + 1, "准备向量存储")
     try:
         if kb.get("vectorEnabled"):
+            import os
+            current_model = os.getenv("LLM_EMBED_MODEL", "").strip()
+            stored_model = (kb.get("embeddingModel") or "").strip()
+            # 模型一致性校验:换 embedding 模型 = 换维度,旧 collection 里
+            # 的向量与新模型不可比。不校验的话后续 upsert/search 全部静默
+            # 失败(每批 warn 一条),导入却仍报成功——向量检索"悄悄消失"。
+            if stored_model and current_model and stored_model != current_model:
+                handle.log(
+                    f"embedding 模型已变更(库建立时 {stored_model},当前 {current_model}),"
+                    f"向量不兼容——本库降级纯图谱模式。如需向量检索,请清空重建该库"
+                    f"或在设置中切回原模型", level="warn")
+                store.set_kb_vector_info(kb["id"], stored_model, kb.get("vectorDim"), False)
+                return False
             runtime.get_vector(app_state).ensure_collection(kb["id"], kb["vectorDim"] or 1024)
             return True
         # 未决:探测 embedding 模型
@@ -509,8 +600,13 @@ def _enforce_schema(kb: Dict, entities: List[Dict], relations: List[Dict]):
 
 
 def _merge_pending_proposals(store, kb: Dict, proposals: List[Dict]) -> None:
-    """把新提案并入 schema.pending_types(去重),原子写回。"""
-    schema = dict(kb.get("schema") or {})
+    """把新提案并入 schema.pending_types(去重),原子写回。
+
+    写前重读库的最新 schema——kb 是任务开始时的快照,长导入期间管理员
+    可能已在本体页做过编辑/审批,拿旧快照整包写回会静默覆盖那些修改。
+    """
+    fresh = store.get_kb(kb["id"]) or kb
+    schema = dict(fresh.get("schema") or {})
     pending = list(schema.get("pending_types") or [])
     existing = {(p.get("kind"), p.get("key")) for p in pending}
     for p in proposals:
@@ -551,14 +647,20 @@ def run_induce_schema(handle) -> Dict[str, Any]:
         [{"role": "user", "content": prompt}],
         temperature=0.2, conv_id=conv_id, stage="kg.induce_schema",
     )
+    if not isinstance(data, dict):
+        # chat_json 的三级容错可能返回 list/str——与 _normalize_extraction
+        # 同款防御,报人话错误而不是裸 AttributeError
+        raise RuntimeError(f"归纳输出格式异常({type(data).__name__}),可重试")
 
     entity_types = _clean_induced(data.get("entity_types"), is_relation=False)
     relation_types = _clean_induced(data.get("relation_types"), is_relation=True)
     if not entity_types:
         raise RuntimeError("归纳结果为空(可重试或手写本体)")
 
-    # 存为"整体本体提案"待审(不直接覆盖现本体)
-    schema = dict(kb.get("schema") or {})
+    # 存为"整体本体提案"待审(不直接覆盖现本体)。写前重读:LLM 调用耗时
+    # 分钟级,期间本体页的任何编辑不能被开始时的快照覆盖
+    fresh = store.get_kb(kb_id) or kb
+    schema = dict(fresh.get("schema") or {})
     schema["pending_schema_induction"] = {
         "entity_types": entity_types,
         "relation_types": relation_types,

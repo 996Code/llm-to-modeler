@@ -127,7 +127,9 @@ class Neo4jGraphStore:
                         SET e.type = ent.type,
                             e.description = CASE WHEN e.description IS NULL OR e.description = ''
                                                 THEN ent.description ELSE e.description END,
-                            e.aliases = CASE WHEN size(ent.aliases) > 0 THEN ent.aliases ELSE e.aliases END,
+                            e.aliases = CASE WHEN size(ent.aliases) > 0
+                                THEN [a IN coalesce(e.aliases, []) WHERE NOT a IN ent.aliases] + ent.aliases
+                                ELSE coalesce(e.aliases, []) END,
                             e.source_docs = CASE WHEN ent.doc_id IN e.source_docs
                                                  THEN e.source_docs ELSE coalesce(e.source_docs, []) + ent.doc_id END,
                             e.type_status = ent.type_status,
@@ -345,6 +347,20 @@ class Neo4jGraphStore:
                 kb=kb_id, terms=normalized, n=limit,
             ).data()
             if not rows:
+                # 前缀匹配先试:能吃 (kb_id, name) 上的 range 索引
+                # (kg_entity_name),不用全表扫
+                rows = s.run(
+                    """
+                    UNWIND $terms AS t
+                    MATCH (e:Entity {kb_id: $kb})
+                    WHERE e.normalized_name STARTS WITH t
+                    RETURN DISTINCT e LIMIT $n
+                    """,
+                    kb=kb_id, terms=normalized, n=limit,
+                ).data()
+            if not rows:
+                # 子串兜底:CONTAINS 无法用索引,按 kb 限定扫描(仅当前库,
+                # 库内实体量级可控;大库场景应优先命中前两层)
                 rows = s.run(
                     """
                     UNWIND $terms AS t
@@ -406,7 +422,10 @@ class Neo4jGraphStore:
                 if node["id"] not in visited:
                     if len(visited) < max_nodes:
                         visited[node["id"]] = node
-                        next_frontier.append(node["name"])
+                        # BFS 下一跳按 normalized_name 匹配(查询侧匹配的就是
+                        # normalized_name;用原始 name 会让大写/全角实体在
+                        # hop≥2 时静默匹配落空,多跳检索被截断成一跳)
+                        next_frontier.append(node["normalized"])
                 eid = r["props"].get("id") or f"{r['sid']}->{r['tid']}"
                 if eid not in edge_keys:
                     edge_keys.add(eid)
