@@ -102,11 +102,11 @@
 
 <script setup lang="ts">
 // 任务中心:任务表格(进度条/状态) + 日志抽屉(SSE 实时 + 断流降级轮询)。
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   TaskItem, TaskLogItem, TaskStatus, TaskTypeItem,
-  cancelTask, fetchTaskLogs, fetchTasks, fetchTaskTypes, fmtTime, streamTaskEvents,
+  cancelTask, fetchTask, fetchTaskLogs, fetchTasks, fetchTaskTypes, fmtTime, streamTaskEvents,
 } from '../api'
 import type { LoadSafely } from './loadSafely'
 
@@ -205,7 +205,12 @@ onMounted(async () => {
     if (autoRefresh.value && !document.hidden) load()
   }, 5000)
 })
-onBeforeUnmount(() => window.clearInterval(timer))
+// 卸载必须连日志抽屉的 SSE 流/轮询一起停——只清列表定时器会让抽屉的
+// 3s 轮询和 fetch 流在组件销毁后永久空转(登出场景),内存+网络双泄漏
+onBeforeUnmount(() => {
+  window.clearInterval(timer)
+  stopWatching()
+})
 
 async function doCancel(record: TaskItem) {
   await loadSafely(async () => {
@@ -225,6 +230,13 @@ const logsBox = ref<HTMLElement | null>(null)
 let abortStream: (() => void) | null = null
 let pollTimer: number | undefined
 let lastLogId = 0
+
+// 关抽屉即停监听:SSE 流 + 轮询只为抽屉服务,抽屉关了继续跑是纯浪费
+watch(logsOpen, (open) => {
+  if (!open) stopWatching()
+})
+
+const FINAL = ['succeeded', 'failed', 'cancelled', 'interrupted']
 
 function mergeLog(lg: TaskLogItem) {
   if (lg.id <= lastLogId) return
@@ -261,17 +273,29 @@ function startWatching(task: TaskItem) {
     onLog: mergeLog,
     onStatus: (d) => {
       if (activeTask.value) activeTask.value.status = d.status
-      if (['succeeded', 'failed', 'cancelled', 'interrupted'].includes(d.status)) {
+      if (FINAL.includes(d.status)) {
         message.info(`任务${statusLabel(d.status)}`)
         stopWatching()
         load()
       }
     },
   })
-  // 轮询降级:SSE 断了(或环境不支持)也能持续看到进度/日志
+  // 轮询降级:SSE 断了(或环境不支持)也能持续看到进度/日志。
+  // 同时补任务状态(不只补日志)——SSE 断流期间进度条/状态会冻结,
+  // 任务到终态时也靠这里停表,轮询才有自然的终点
   pollTimer = window.setInterval(async () => {
     if (document.hidden) return
     try {
+      const t = await fetchTask(task.id)
+      if (activeTask.value?.id === task.id) {
+        activeTask.value = { ...activeTask.value, ...t }
+      }
+      if (FINAL.includes(t.status)) {
+        message.info(`任务${statusLabel(t.status)}`)
+        stopWatching()
+        load()
+        return
+      }
       const { items } = await fetchTaskLogs(task.id, lastLogId)
       items.forEach(mergeLog)
     } catch { /* 静默:下一轮再试 */ }

@@ -8,8 +8,8 @@
         <a-alert type="info" show-icon style="margin-bottom: 16px">
           <template #message>配置优先级:此处保存值 &gt; 环境变量 &gt; 默认值</template>
           <template #description>
-            密钥类字段已配置时不回显,留空提交表示保持不变;清空内容提交表示清除
-            (回落到环境变量/默认值)。
+            只提交有改动的字段。密钥类字段已配置时显示为密文点,不改动即保持;
+            清空后提交 = 删除该项(回落到环境变量/默认值)。
           </template>
         </a-alert>
 
@@ -99,16 +99,21 @@ const loading = ref(false)
 const saving = ref(false)
 /** 打开时拍下的初始快照(save 时做差集,只提交变化键) */
 let baseline: Record<string, unknown> = {}
+let loadSeq = 0   // 快速开合切换插件时,旧请求的晚到响应不得覆盖当前表单
 
 watch(() => props.open, async (open) => {
   if (!open || !props.packName) return
+  const myPack = props.packName
+  const seq = ++loadSeq
   loading.value = true
   await loadSafely(async () => {
-    payload.value = await fetchPackSettings(props.packName)
-    form.value = { ...payload.value.values }
-    baseline = { ...payload.value.values }
+    const data = await fetchPackSettings(myPack)
+    if (seq !== loadSeq || props.packName !== myPack || !props.open) return
+    payload.value = data
+    form.value = { ...data.values }
+    baseline = { ...data.values }
   })
-  loading.value = false
+  if (seq === loadSeq) loading.value = false
 })
 
 function fieldLabel(f: SettingsField): string {
@@ -129,8 +134,10 @@ function buildDelta(): Record<string, unknown> {
   const delta: Record<string, unknown> = {}
   const keys = new Set([...Object.keys(form.value), ...Object.keys(baseline)])
   for (const key of keys) {
-    const cur = form.value[key]
-    const old = baseline[key]
+    // antd Select 的 allow-clear 置值为 undefined(JSON.stringify 会丢键导致
+    // "清除"静默不生效),统一归一为 '' 再进清除分支
+    const cur = form.value[key] ?? ''
+    const old = baseline[key] ?? ''
     if (cur === old) continue
     // 空串 → null(显式清除,回落 env/默认);secret 哨兵 SET 原样传,后端跳过
     delta[key] = cur === '' ? null : cur

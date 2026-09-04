@@ -109,6 +109,7 @@ const importingAll = ref(false)
 const uploadResults = ref<{ filename: string; ok: boolean; reason?: string }[]>([])
 const taskByDoc = ref<Record<string, TaskItem>>({})
 const maxMb = 20
+let loadSeq = 0   // 请求序号守卫(切库错序防护)
 
 const columns = [
   { title: '文件', key: 'filename', ellipsis: true },
@@ -141,23 +142,40 @@ function extOf(name: string): string {
 }
 
 async function load() {
+  // 请求序号守卫:快速切换知识库时,旧库的晚到响应不得覆盖新库数据
+  const myKb = props.kbId
+  const seq = ++loadSeq
   loading.value = true
   await loadSafely(async () => {
-    docs.value = await fetchKgDocuments(props.kbId)
+    const items = await fetchKgDocuments(myKb)
+    if (seq !== loadSeq || props.kbId !== myKb) return
+    docs.value = items
   })
-  loading.value = false
+  if (seq === loadSeq) loading.value = false
 }
+
+// antd Upload 对每个文件各触发一次 onChange,且每次回调里的 fileList 都是
+// "累积全量"——不防护的话选 N 个文件会以递增子集重复上传(共 N×N 份)。
+// 用"文件清单签名"去重:同一批文件只在签名变化时上传一次。
+let lastUploadKey = ''
 
 async function onFilesPicked(info: UploadChangeParam) {
   const files = (info.fileList || []).map((f) => f.originFileObj).filter(Boolean) as File[]
   if (!files.length) return
+  if (uploading.value) return
+  const key = files.map((f) => `${f.name}:${f.size}:${f.lastModified}`).sort().join('|')
+  if (key === lastUploadKey) return
+  lastUploadKey = key
   uploading.value = true
-  await loadSafely(async () => {
-    uploadResults.value = await uploadKgDocuments(props.kbId, files)
-    const okCount = uploadResults.value.filter((r) => r.ok).length
-    if (okCount) message.success(`${okCount} 个文件上传成功`)
-  })
-  uploading.value = false
+  try {
+    await loadSafely(async () => {
+      uploadResults.value = await uploadKgDocuments(props.kbId, files)
+      const okCount = uploadResults.value.filter((r) => r.ok).length
+      if (okCount) message.success(`${okCount} 个文件上传成功`)
+    })
+  } finally {
+    uploading.value = false
+  }
   await load()
   emit('changed')
 }

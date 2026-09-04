@@ -110,7 +110,7 @@
 <script setup lang="ts">
 // 本体编辑:模式切换 + 实体/关系类型表编辑(颜色供图谱可视化) +
 // semi_open 待审类型 + LLM 归纳提案应用/丢弃。
-import { computed, inject, onMounted, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   BulbOutlined, CheckOutlined, CloseOutlined, DeleteOutlined, PlusOutlined, SaveOutlined,
@@ -130,6 +130,7 @@ const kbVector = ref(false)
 const kbDim = ref<number | null>(null)
 const saving = ref(false)
 const inductionOpen = ref<string[]>([])
+let loadSeq = 0   // 请求序号守卫(切库错序防护)
 
 const entityTypes = ref<KgEntityTypeDef[]>([])
 const relationTypes = ref<KgRelationTypeDef[]>([])
@@ -137,9 +138,14 @@ const pendingTypes = computed(() => schema.value?.pending_types || [])
 const induction = computed(() => schema.value?.pending_schema_induction || null)
 
 async function load() {
+  // 请求序号守卫:快速切库时旧库晚到响应不得覆盖当前本体(否则据此
+  // 保存会把 A 库本体写进 B 库)
+  const myKb = props.kbId
+  const seq = ++loadSeq
   await loadSafely(async () => {
     const kbs = await fetchKgKbs()
-    const kb = kbs.find((k) => k.id === props.kbId) as KgKnowledgeBase | undefined
+    if (seq !== loadSeq || props.kbId !== myKb) return
+    const kb = kbs.find((k) => k.id === myKb) as KgKnowledgeBase | undefined
     if (!kb) return
     schema.value = { ...(kb.schema || { schema_mode: 'semi_open', entity_types: [], relation_types: [], pending_types: [] }) }
     // 深拷贝到可编辑副本
@@ -221,17 +227,21 @@ function approveAllPending() {
   message.info('已并入类型表(点「保存」落库)')
 }
 
+let inducePollTimer: number | undefined   // 归纳任务轮询(卸载必须清)
+
 async function doInduce() {
   await loadSafely(async () => {
     const task = await induceKgSchema(props.kbId)
     message.info(`归纳任务已提交(${task.id.slice(0, 8)}…),完成后此处出现待审提案;日志见任务中心`)
-    // 轮询任务结束后重载本体
-    const poll = window.setInterval(async () => {
+    // 轮询任务结束后重载本体(卸载/切库时由清理兜底停止)
+    if (inducePollTimer) window.clearInterval(inducePollTimer)
+    inducePollTimer = window.setInterval(async () => {
       try {
         const { fetchTask } = await import('../../api')
         const t = await fetchTask(task.id)
         if (['succeeded', 'failed', 'cancelled', 'interrupted'].includes(t.status)) {
-          window.clearInterval(poll)
+          window.clearInterval(inducePollTimer)
+          inducePollTimer = undefined
           await load()
           if (t.status === 'succeeded') message.success('本体归纳完成,请审核提案')
         }
@@ -243,6 +253,11 @@ async function doInduce() {
 watch(() => props.kbId, load)
 watch(() => props.refreshTick, load)
 onMounted(load)
+onBeforeUnmount(() => {
+  if (inducePollTimer) window.clearInterval(inducePollTimer)
+  inducePollTimer = undefined
+  loadSeq++   // 让在途 load 的响应因序号过期而被丢弃
+})
 </script>
 
 <style scoped>

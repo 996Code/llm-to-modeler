@@ -117,6 +117,7 @@ const filterQ = ref('')
 const filterTypes = ref<string[]>([])
 const nodes = ref<KgGraphNode[]>([])
 const edges = ref<KgGraphEdge[]>([])
+let loadSeq = 0        // 请求序号守卫(切库错序防护)
 
 const nodeDetail = ref<KgGraphNode | null>(null)
 const edgeDetail = ref<KgGraphEdge | null>(null)
@@ -150,39 +151,49 @@ function _esc(s: unknown): string {
 // ── 数据加载与渲染 ──────────────────────────────────────
 
 async function reload() {
+  // 请求序号守卫:快速切换知识库时,旧库的晚到响应不得渲染到新库画布
+  const myKb = props.kbId
+  const seq = ++loadSeq
   loading.value = true
   await loadSafely(async () => {
-    const data = await fetchKgGraph(props.kbId, {
+    const data = await fetchKgGraph(myKb, {
       q: filterQ.value || undefined,
       types: filterTypes.value.length ? filterTypes.value.join(',') : undefined,
     })
+    if (seq !== loadSeq || props.kbId !== myKb) return
     nodes.value = data.nodes
     edges.value = data.edges
     dirty.value = false
     await render(true)
   })
-  loading.value = false
+  if (seq === loadSeq) loading.value = false
 }
 
 async function expandNode(node: KgGraphNode) {
+  // 并发守卫:双击连点/抽屉按钮与双击并发时,两次请求都基于同一份旧
+  // nodes 去重再各自 merge → 同一节点 ID 出现两份,G6 setData 渲染异常
+  if (expanding.value) return
   expanding.value = true
-  await loadSafely(async () => {
-    const add = await expandKgNode(props.kbId, node.id)
-    const knownIds = new Set(nodes.value.map((n) => n.id))
-    const added = add.nodes.filter((n) => !knownIds.has(n.id))
-    const knownEdgeIds = new Set(edges.value.map((e) => e.id))
-    const addedEdges = add.edges.filter((e) => !knownEdgeIds.has(e.id) &&
-      add.nodes.some((n) => n.id === e.source) && add.nodes.some((n) => n.id === e.target))
-    nodes.value = [...nodes.value, ...added]
-    edges.value = [...edges.value, ...addedEdges]
-    dirty.value = true
-    await render(false)  // 增量重渲染不 fitView(保持用户当前视角)
-    // 新邻居高亮一下,让"展开了什么"可感知
-    graph?.setElementState(node.id, ['selected'])
-    added.forEach((n) => graph?.setElementState(n.id, ['selected']))
-    message.success(`展开:新增 ${added.length} 节点 / ${addedEdges.length} 边`)
-  })
-  expanding.value = false
+  try {
+    await loadSafely(async () => {
+      const add = await expandKgNode(props.kbId, node.id)
+      const knownIds = new Set(nodes.value.map((n) => n.id))
+      const added = add.nodes.filter((n) => !knownIds.has(n.id))
+      const knownEdgeIds = new Set(edges.value.map((e) => e.id))
+      const addedEdges = add.edges.filter((e) => !knownEdgeIds.has(e.id) &&
+        add.nodes.some((n) => n.id === e.source) && add.nodes.some((n) => n.id === e.target))
+      nodes.value = [...nodes.value, ...added]
+      edges.value = [...edges.value, ...addedEdges]
+      dirty.value = true
+      await render(false)  // 增量重渲染不 fitView(保持用户当前视角)
+      // 新邻居高亮一下,让"展开了什么"可感知
+      graph?.setElementState(node.id, ['selected'])
+      added.forEach((n) => graph?.setElementState(n.id, ['selected']))
+      message.success(`展开:新增 ${added.length} 节点 / ${addedEdges.length} 边`)
+    })
+  } finally {
+    expanding.value = false
+  }
 }
 
 function resetView() {

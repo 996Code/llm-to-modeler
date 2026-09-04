@@ -143,13 +143,18 @@ onMounted(async () => {
     ],
   })
 
-  await graph.render()
-  await graph.fitView()
-  // 大图 fitView 后过小时放大到可读比例(参考 chat-bi 的矫正逻辑)
-  if (graph.getZoom() < 0.8) {
-    graph.zoomTo(0.8)
-    await graph.fitCenter()
-  }
+  // 卸载窗口防护:动态 import 与 render 期间组件可能已销毁(graph 已
+  // destroy/置空),后续调用会产生未捕获 rejection——纯噪音但污染控制台
+  try {
+    await graph.render()
+    await graph.fitView()
+    // 大图 fitView 后过小时放大到可读比例(参考 chat-bi 的矫正逻辑)
+    if (graph && graph.getZoom() < 0.8) {
+      graph.zoomTo(0.8)
+      await graph.fitCenter()
+    }
+  } catch { /* 渲染中断(多为卸载竞态),静默 */ }
+  if (!graph || !box.value) return
   resizeObserver = new ResizeObserver(() => {
     if (graph && box.value) graph.resize(box.value.offsetWidth, 240)
   })
