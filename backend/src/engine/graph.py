@@ -186,10 +186,23 @@ def build_graph(
     # getattr(app.state.graph, "_conn", None) 拿到并 close——与 ConversationStore 同一收口思路。
     import sqlite3
     from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     db_path = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
     conn = sqlite3.connect(db_path, check_same_thread=False)
-    checkpointer = SqliteSaver(conn=conn)
+    # msgpack 反序列化类型白名单：tool_state 里的领域模型对象（如
+    # njmind_form 的 ParsedField）会被 checkpoint 序列化，resume 时重建。
+    # LangGraph 正在收紧"从序列化数据实例化任意类"（pickle 式攻击面），
+    # 未显式注册的类型未来版本直接拒绝——这里按警告提示注册，追问恢复
+    # 升级后不断链。新增会被存进 state 的领域类须同步登记。
+    checkpointer = SqliteSaver(
+        conn=conn,
+        serde=JsonPlusSerializer(
+            allowed_msgpack_modules=[
+                ("domains.njmind_form.models", "ParsedField"),
+            ],
+        ),
+    )
 
     # compile 把 StateGraph 转成不可变、可调用的 CompiledStateGraph
     graph = workflow.compile(checkpointer=checkpointer)
