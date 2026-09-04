@@ -1,0 +1,25 @@
+你是知识图谱本体设计师。以下是知识库的文档抽样片段,请归纳一套适合该库的实体类型与关系类型体系(本体)。
+
+## 要求
+1. 实体类型 4~10 个,关系类型 5~12 个,面向**该库文档反复出现的核心概念**。
+2. 每个类型给 key(英文小写下划线)、label(中文)、description(一句话)、examples(2~3 个,取自片段)。
+3. 关系类型尽量给 domain/range(允许的源/目标实体类型 key 列表),无法约束时给空列表。
+4. 关系类型里包含一个语义兜底的"相关"类型。
+5. 类型边界要清晰,避免同义类型(如"人员"与"人物"并存)。
+
+## 输出格式(严格 JSON,不要输出其他内容)
+{
+  "entity_types": [
+    {"key": "person", "label": "人物", "description": "...", "examples": ["...", "..."]}
+  ],
+  "relation_types": [
+    {"key": "reports_to", "label": "汇报给", "description": "...", "domain": ["person"], "range": ["person"]}
+  ]
+}
+
+## 文档抽样片段(共 {{ sample_count }} 段)
+{% for s in samples -%}
+### 片段 {{ loop.index }}
+{{ s }}
+
+{% endfor %}
