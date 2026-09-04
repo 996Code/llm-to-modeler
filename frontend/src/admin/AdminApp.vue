@@ -56,9 +56,18 @@
             <template #tab><ApiOutlined /> 调用日志</template>
             <CallLogsTab />
           </a-tab-pane>
+          <a-tab-pane key="tasks">
+            <template #tab><CloudServerOutlined /> 任务中心</template>
+            <TasksTab />
+          </a-tab-pane>
           <a-tab-pane key="packs">
             <template #tab><AppstoreOutlined /> 插件</template>
-            <PacksTab />
+            <PacksTab @open-page="openPackPage" @refresh-pages="loadPackPages" />
+          </a-tab-pane>
+          <!-- pack 自定义管理页(manifest admin.page 声明 → 注册表解析;异步 chunk) -->
+          <a-tab-pane v-for="p in packPages" :key="`pack-page:${p.pageKey}`">
+            <template #tab><PartitionOutlined /> {{ p.title }}</template>
+            <component :is="p.component" />
           </a-tab-pane>
         </a-tabs>
       </div>
@@ -69,14 +78,22 @@
 
 <script setup lang="ts">
 // 管理端根组件:开放模式直达 / 口令模式登录门 + 卡片化控制台外壳。
+// Tab 结构 = 静态基础 Tab(概览/会话/调用日志/任务中心/插件) + pack 动态 Tab
+// (manifest admin.page 声明 → packPages/registry 解析,未注册的 key 优雅降级)。
 import { onMounted, provide, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { DashboardOutlined, MessageOutlined, ApiOutlined, AppstoreOutlined } from '@ant-design/icons-vue'
+import type { Component } from 'vue'
+import {
+  ApiOutlined, AppstoreOutlined, CloudServerOutlined, DashboardOutlined,
+  MessageOutlined, PartitionOutlined,
+} from '@ant-design/icons-vue'
 import OverviewTab from './components/OverviewTab.vue'
 import ConversationsTab from './components/ConversationsTab.vue'
 import CallLogsTab from './components/CallLogsTab.vue'
+import TasksTab from './components/TasksTab.vue'
 import PacksTab from './components/PacksTab.vue'
-import { apiErrorMessage, fetchStats, getAdminToken, setAdminToken, UnauthorizedError } from './api'
+import { hasPackPage, packPageRegistry } from './packPages/registry'
+import { apiErrorMessage, fetchPacks, fetchStats, getAdminToken, setAdminToken, UnauthorizedError } from './api'
 
 // null = 校验中;true = 已通过;false = 未登录/口令失效
 const authed = ref<boolean | null>(null)
@@ -85,6 +102,28 @@ const tokenInput = ref('')
 const gateError = ref('')
 const checking = ref(false)
 const tab = ref('overview')
+
+// pack 动态管理页:pageKey → { pageKey, title, component }(仅已启用且依赖正常的)
+const packPages = ref<{ pageKey: string; title: string; component: Component }[]>([])
+
+async function loadPackPages() {
+  try {
+    const data = await fetchPacks()
+    packPages.value = data.items
+      .map((p) => ({ p, key: p.adminPage || '' }))
+      .filter(({ p, key }) => p.enabled && key && p.dependency?.status === 'ok' && hasPackPage(key))
+      .map(({ p, key }) => ({ pageKey: key, title: p.adminTitle || p.name, component: packPageRegistry[key] }))
+    // 当前停留在已被移除的动态 Tab 上 → 回落插件 Tab
+    if (tab.value.startsWith('pack-page:') && !packPages.value.some((p) => `pack-page:${p.pageKey}` === tab.value)) {
+      tab.value = 'packs'
+    }
+  } catch { /* 拉取失败保持现状;插件 Tab 内的开关操作会再次触发刷新 */ }
+}
+
+function openPackPage(pageKey: string) {
+  if (hasPackPage(pageKey)) tab.value = `pack-page:${pageKey}`
+  else message.info('该插件的管理页组件尚未注册(前端未实现)')
+}
 
 // 子 Tab 捕获 401 时回调:清口令回登录页;统一错误包装供各 Tab 复用
 function onAuthFail() {
@@ -139,6 +178,7 @@ onMounted(async () => {
     const s = await fetchStats()
     authMode.value = s.authMode ?? null
     authed.value = true
+    loadPackPages()  // 登录态就绪后再拉动态 Tab(不阻塞首屏)
   } catch (e) {
     authed.value = false
     if (!(e instanceof UnauthorizedError)) gateError.value = apiErrorMessage(e)
