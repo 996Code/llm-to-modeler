@@ -20,7 +20,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from domains.njmind_form.tools._config_loader import (
-    load_paths, load_service_name,
+    load_paths, load_service_name
 )
 
 logger = logging.getLogger(__name__)
@@ -34,11 +34,6 @@ SERVICE_NAME = load_service_name()
 
 class ModelerAPI:
     """njmind-modeler 的领域 API（构造注入通用传输 transport）。"""
-
-    # TEMP-DEMO-HEADER: 临时写死的演示头——验证 call_logs 请求头记录链路
-    # （用户要求：日志里能看到效果后删除）。X- 头不触发网关身份鉴权，
-    # 不影响匿名语义。所有上游请求统一携带。
-    _DEMO_HEADERS = {"X-AI-Demo-Header": "llm-modeler-log-demo"}
 
     def __init__(self, transport):
         """transport: 通用传输（services.upstream_client.UpstreamClient）。"""
@@ -56,26 +51,23 @@ class ModelerAPI:
 
     def list_templates(self) -> List[str]:
         return self._t.get(SERVICE_NAME, self._path("templates_list"),
-                           auth=False, extra_headers=self._DEMO_HEADERS) or []
+                           auth=False) or []
 
     def get_template(self, name: str) -> Optional[Dict[str, Any]]:
         filename = name if name.endswith(".json") else f"{name}.json"
         return self._t.get(SERVICE_NAME, self._path("template", name=filename),
-                           auth=False, cache=True,
-                           extra_headers=self._DEMO_HEADERS)
+                           auth=False, cache=True)
 
 
     def get_schema(self, name: str) -> Optional[Dict[str, Any]]:
         # njmind Schema 命名规范 xxx.schema.json；已 .json 结尾视为完整名
         filename = name if name.endswith(".json") else f"{name}.schema.json"
         return self._t.get(SERVICE_NAME, self._path("schema", name=filename),
-                           auth=False, cache=True,
-                           extra_headers=self._DEMO_HEADERS)
+                           auth=False, cache=True)
 
     def get_guide(self) -> Optional[Dict[str, Any]]:
         return self._t.get(SERVICE_NAME, self._path("guide"),
-                           auth=False, cache=True,
-                           extra_headers=self._DEMO_HEADERS)
+                           auth=False, cache=True)
 
 
     def validate_artifact(self, artifact: Dict[str, Any], mode: str) -> Dict[str, Any]:
@@ -86,8 +78,7 @@ class ModelerAPI:
         """
         raw, err = self._t.post(
             SERVICE_NAME, self._path("validate"),
-            json_body=artifact, params={"mode": mode.upper()}, auth=False,
-            extra_headers=self._DEMO_HEADERS,
+            json_body=artifact, params={"mode": mode.upper()}, auth=False
         )
         if raw is None:
             reason = f"Upstream validation request failed: {err}"
@@ -112,20 +103,18 @@ class ModelerAPI:
         """
         if mode == "create":
             data, _err = self._t.post(SERVICE_NAME, self._path("create"),
-                                      json_body=artifact, auth=False,
-                                      extra_headers=self._DEMO_HEADERS)
+                                      json_body=artifact, auth=False)
             return data
         if mode == "update":
             form_code = artifact.get("formCode")
             if not form_code:
                 raise ValueError("update 模式缺少 formCode，无法定位要更新的表单")
             data, _err = self._t.post(SERVICE_NAME, self._path("update", code=form_code),
-                                      json_body=artifact, auth=False,
-                                      extra_headers=self._DEMO_HEADERS)
+                                      json_body=artifact, auth=False)
             return data
         raise ValueError(f"unknown mode: {mode}")
 
     def get_artifact(self, entry_id: str) -> Optional[Dict[str, Any]]:
         """按制品标识（formCode）查询已有配置。"""
         return self._t.get(SERVICE_NAME, self._path("get_form", code=entry_id),
-                           auth=False, extra_headers=self._DEMO_HEADERS)
+                           auth=False)

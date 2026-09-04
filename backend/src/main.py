@@ -57,7 +57,7 @@ from llm.client import LLMClient
 # engine/graph.py 等处引用同一常量,避免 "data/conversations.db" 字面量散落多处)
 from services.conversation_store import DEFAULT_DB_PATH, ConversationStore
 # 上游客户端：调用上游服务做校验/增删改/拉取资产（地址按请求由宿主 services 表解析）
-from services.upstream_client import UpstreamClient
+from services.upstream_client import UpstreamClient, CLIENT_VERSION
 
 # 全局日志配置：控制台 + logs/app.log 文件双输出（按大小轮转，对标 logback
 # RollingFileAppender）。LOG_DIR/LOG_LEVEL 可用环境变量覆盖，见 engine/log_config.py。
@@ -200,7 +200,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LLM Form Modeler",
     description="Natural language to form config generator (bridge to njmind-modeler)",
-    version="0.4.0",
+    version=CLIENT_VERSION,  # 单一源在 services.upstream_client(标识头同源)
     lifespan=lifespan,
 )
 

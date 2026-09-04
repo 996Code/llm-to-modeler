@@ -88,6 +88,15 @@ class ServiceUnresolvableError(RuntimeError):
     """
 
 
+# ── 服务标识头（固定，与领域无关）─────────────────────────────
+# 所有上游请求统一携带：上游侧可据此识别/过滤/监控 AI 服务流量，
+# 调用日志(call_logs)同步可见。key 固定，value 按规则生成（服务名/版本）。
+# 版本单一源在此；main.py 的 FastAPI(version=) 同源引用。
+CLIENT_VERSION = "0.4.0"
+CLIENT_ID = f"llm-modeler/{CLIENT_VERSION}"
+CLIENT_HEADER_KEY = "X-AI-Client"
+
+
 class UpstreamConfig:
     """传输层行为参数（普通类，非 Pydantic）。
 
@@ -255,11 +264,12 @@ class UpstreamClient:
 
     def _headers(self, auth: bool,
                  extra: Optional[Dict[str, str]] = None) -> Optional[Dict[str, str]]:
-        """按调用方决策组装请求头：auth=False 匿名；True 带透传头；extra 叠加。"""
+        """组装请求头：固定标识头 + auth 决定的透传头 + extra 叠加（后者同名覆盖）。"""
         base = (_get_forward_headers() or {}) if auth else {}
         if extra:
             base = {**base, **extra}
-        return base or None
+        base[CLIENT_HEADER_KEY] = CLIENT_ID  # 固定标识头最后写（不被覆盖）
+        return base
 
     @classmethod
     def _envelope_error_msg(cls, data: Any) -> Optional[str]:

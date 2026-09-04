@@ -84,12 +84,13 @@ class TestModelerCredentialsPolicy:
     """凭证策略由 pack 代码控制：静态资产匿名、业务端点透传。"""
 
     def test_static_assets_anonymous(self):
-        """匿名 = 不带透传凭证；演示头（TEMP-DEMO-HEADER）除外。"""
+        """匿名 = 不带透传凭证；固定标识头（X-AI-Client，传输层注入）除外。"""
         c = _transport()
         c._client.get.return_value = _Resp({"fieldTypes": []})
         ModelerAPI(c).get_guide()
-        sent = c._client.get.call_args.kwargs.get("headers")
-        assert sent is None or all(k.startswith("X-AI-Demo") for k in sent)
+        sent = c._client.get.call_args.kwargs.get("headers") or {}
+        assert "Authorization" not in sent          # 无透传凭证
+        assert sent.get("X-AI-Client", "").startswith("llm-modeler/")  # 固定标识头
 
     def test_all_endpoints_anonymous(self):
         """全端点匿名（部署事实：mcp 端点族带用户身份反而 403）。"""
@@ -97,9 +98,9 @@ class TestModelerCredentialsPolicy:
         set_forward_headers({"Authorization": "Bearer x"})
         c._client.post.return_value = _Resp({"pass": True, "errors": []})
         ModelerAPI(c).validate_artifact({"formName": "t"}, mode="CREATE")
-        sent = c._client.post.call_args.kwargs.get("headers")
-        # 匿名 = 不带透传凭证；演示头（TEMP-DEMO-HEADER，验证日志链路用）除外
-        assert sent is None or all(k.startswith("X-AI-Demo") for k in sent)
+        sent = c._client.post.call_args.kwargs.get("headers") or {}
+        assert "Authorization" not in sent          # 匿名:无透传凭证
+        assert sent.get("X-AI-Client", "").startswith("llm-modeler/")
 
     def test_validate_envelope_fail_closed(self):
         """validate 收信封：校验未执行，Fail-Closed 且指引用户刷新。"""
