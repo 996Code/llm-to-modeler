@@ -113,6 +113,7 @@ async function fitAll() {
 const loading = ref(false)
 const dirty = ref(false)
 const expanding = ref(false)
+let clickTimer: number | undefined   // 单击/双击消歧(见 node:click 注释)
 const filterQ = ref('')
 const filterTypes = ref<string[]>([])
 const nodes = ref<KgGraphNode[]>([])
@@ -298,20 +299,33 @@ async function render(fit: boolean) {
       ],
     })
 
+    // 单击/双击消歧:单击延迟 260ms 开抽屉;双击的第二击会先到(清掉挂起
+    // 的开抽屉定时器),让 node:dblclick 接管展开。否则第一次单击立即挂上
+    // 详情抽屉的全屏 mask,双击的第二击落在 mask 上把抽屉关掉——
+    // node:dblclick 永远收不到,画布双击展开形同虚设。
     graph.on('node:click', (e: any) => {
       const id = e.target?.id
       const n = nodes.value.find((x) => x.id === id)
-      if (n) { nodeDetail.value = n; edgeDetail.value = null; detailOpen.value = true }
+      if (!n) return
+      if (clickTimer) { window.clearTimeout(clickTimer); clickTimer = undefined; return }
+      clickTimer = window.setTimeout(() => {
+        clickTimer = undefined
+        nodeDetail.value = n; edgeDetail.value = null; detailOpen.value = true
+      }, 260)
     })
     graph.on('node:dblclick', (e: any) => {
+      if (clickTimer) { window.clearTimeout(clickTimer); clickTimer = undefined }
       const id = e.target?.id
       const n = nodes.value.find((x) => x.id === id)
-      if (n) expandNode(n)
+      if (n) { detailOpen.value = false; expandNode(n) }
     })
     graph.on('edge:click', (e: any) => {
       const id = e.target?.id
       const edge = edges.value.find((x) => x.id === id)
-      if (edge) { edgeDetail.value = edge; nodeDetail.value = null; detailOpen.value = true }
+      if (edge) {
+        if (clickTimer) { window.clearTimeout(clickTimer); clickTimer = undefined }
+        edgeDetail.value = edge; nodeDetail.value = null; detailOpen.value = true
+      }
     })
 
     await graph.render()
@@ -333,9 +347,10 @@ async function render(fit: boolean) {
 }
 
 watch(() => props.kbId, () => { filterQ.value = ''; filterTypes.value = []; reload() })
-watch(() => props.refreshTick, () => reload())
+watch(() => props.refreshTick, () => { reload() })
 onMounted(reload)
 onBeforeUnmount(() => {
+  if (clickTimer) { window.clearTimeout(clickTimer); clickTimer = undefined }
   resizeObserver?.disconnect()
   graph?.destroy()
   graph = null
