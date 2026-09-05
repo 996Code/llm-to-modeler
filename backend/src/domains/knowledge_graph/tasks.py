@@ -357,19 +357,38 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             for fut in futures:
                 chunk = futures[fut]
                 try:
-                    entities, relations = fut.result()
-                except Exception as e:
+                    entities, relations, stats = fut.result()
+                except _ExtractionError as e:
+                    stats = e.stats or {}
                     batch_failed += 1
                     store.mark_chunk(chunk["id"], "failed")
-                    handle.log(f"块 {chunk['seq']} 抽取失败: {e}", level="warn",
-                               chunk=chunk["seq"], chars=len(chunk["text"]))
+                    handle.log(
+                        f"块 {chunk['seq']} 抽取失败(第{stats.get('attempt', '?')}次尝试,"
+                        f"{stats.get('duration_ms', '?')}ms,prompt {stats.get('prompt_chars', '?')} 字): {e}",
+                        level="warn",
+                        chunk=chunk["seq"], chars=len(chunk["text"]),
+                        attempt=stats.get("attempt"), duration_ms=stats.get("duration_ms"),
+                        prompt_chars=stats.get("prompt_chars"),
+                        glossary_size=stats.get("glossary_size"),
+                        error=str(e)[:200])
                     continue
                 store.mark_chunk(chunk["id"], "done")
+                # 请求级明细:prompt 规模/词表注入量/原始与归一化后条数
+                # (raw vs 规范化后的差值 = 非法/重复/超限被丢弃的量)
                 handle.log(
                     f"块 {chunk['seq']} 抽取完成: {len(entities)} 实体 / {len(relations)} 关系"
-                    f"({len(chunk['text'])} 字)",
+                    f"({len(chunk['text'])} 字,prompt {stats.get('prompt_chars', '?')} 字"
+                    f",词表 {stats.get('glossary_size', 0)} 条,LLM {stats.get('duration_ms', '?')}ms)",
                     chunk=chunk['seq'], chars=len(chunk["text"]),
-                    entities=len(entities), relations=len(relations))
+                    entities=len(entities), relations=len(relations),
+                    prompt_chars=stats.get("prompt_chars"),
+                    glossary_size=stats.get("glossary_size"),
+                    duration_ms=stats.get("duration_ms"),
+                    raw_entities=stats.get("raw_entities"),
+                    raw_relations=stats.get("raw_relations"),
+                    dropped_entities=max(0, (stats.get("raw_entities") or 0) - len(entities)),
+                    dropped_relations=max(0, (stats.get("raw_relations") or 0) - len(relations)),
+                    attempt=stats.get("attempt"))
                 for ent in entities:
                     key = ent["normalized_name"]
                     if key in batch_entities:  # 批内合并(别名/描述合并)
@@ -535,13 +554,21 @@ def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], co
         return 0
 
 
+class _ExtractionError(RuntimeError):
+    """块抽取失败(带最后一次 LLM 调用的请求级明细,供日志留痕)。"""
+    def __init__(self, msg: str, stats: Optional[Dict] = None):
+        super().__init__(msg)
+        self.stats = stats or {}
+
+
 def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
                    glossary_top_k: int, temperature: float,
                    max_retries: int, conv_id: str) -> Tuple[List[Dict], List[Dict]]:
     """单块抽取(在批内工作线程执行):渲染 prompt → chat_json → 规范化。
 
     Returns:
-        (entities, relations) — 已归一化、已剔除自环与空名。
+        (entities, relations, stats) — 已归一化、已剔除自环与空名;
+        stats 是本次 LLM 调用的请求级明细(prompt规模/耗时/原始条数/词表量)。
     Raises:
         重试耗尽后的最后一次异常。
     """
@@ -569,17 +596,37 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
 
     last_error: Optional[Exception] = None
     for attempt in range(max_retries + 1):
+        t0 = time.monotonic()
         try:
             data = llm.chat_json(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature, conv_id=conv_id, stage="kg.extract",
             )
-            return _normalize_extraction(data)
+            entities, relations = _normalize_extraction(data)
+            # 请求级留痕(对标 call_logs 的粒度):一次 LLM 调用一份明细,
+            # 含输入输出规模与耗时——任务日志能逐行对上调用日志
+            stats = {
+                "attempt": attempt + 1, "prompt_chars": len(prompt),
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+                "raw_entities": len((data or {}).get("entities") or []) if isinstance(data, dict) else 0,
+                "raw_relations": len((data or {}).get("relations") or []) if isinstance(data, dict) else 0,
+                "glossary_size": len(glossary_lines),
+                "error": "",
+            }
+            return entities, relations, stats
         except Exception as e:
             last_error = e
+            failed_stats = {
+                "attempt": attempt + 1, "prompt_chars": len(prompt),
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+                "raw_entities": 0, "raw_relations": 0,
+                "glossary_size": len(glossary_lines),
+                "error": str(e)[:200],
+            }
             if attempt < max_retries:
                 time.sleep(0.5 * (attempt + 1))
-    raise last_error or RuntimeError("extract failed")
+    # 把最后一次失败的 stats 带出去(调用方记 warn 日志用)
+    raise _ExtractionError(str(last_error), failed_stats) if last_error else RuntimeError("extract failed")
 
 
 def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
