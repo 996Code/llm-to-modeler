@@ -160,7 +160,10 @@ function typeLabel(t: TaskTypeItem): string {
 
 // ── 列表 ──────────────────────────────────────────────
 
+let listSeq = 0   // 请求序号守卫:5s 自动刷新与手动翻页并发时,晚到的旧页响应不得覆盖新页
+
 async function load() {
+  const seq = ++listSeq
   loading.value = true
   await loadSafely(async () => {
     const data = await fetchTasks({
@@ -169,6 +172,7 @@ async function load() {
       status: filterStatus.value || undefined,
       type: filterType.value || undefined,
     })
+    if (seq !== listSeq) return   // 已有更新请求在途/完成,丢弃本次过期结果
     rows.value = data.items
     total.value = data.total
     // 抽屉打开且当前任务在列表里时,顺带刷新抽屉头部状态
@@ -177,7 +181,7 @@ async function load() {
       if (fresh) activeTask.value = fresh
     }
   })
-  loading.value = false
+  if (seq === listSeq) loading.value = false
 }
 
 function search() {
