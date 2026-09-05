@@ -81,8 +81,8 @@ class MilvusVectorStore:
         if not is_scope_id_safe(scope_id):
             raise ValueError(f"非法 scope_id(必须为服务端签发的 UUID): {scope_id!r}")
 
-    def _name(self, kb_id: str) -> str:
-        return collection_name(self._prefix, kb_id)
+    def _name(self, scope: str) -> str:
+        return collection_name(self._prefix, scope)
 
     # ── 生命周期 ───────────────────────────────────────────
 
@@ -97,10 +97,10 @@ class MilvusVectorStore:
 
     # ── collection 管理 ────────────────────────────────────
 
-    def ensure_collection(self, kb_id: str, dim: int) -> None:
+    def ensure_collection(self, scope: str, dim: int) -> None:
         """建库 collection(幂等)。dim 来自建库时的一次 embedding 探测。"""
-        self._check_scope(kb_id)
-        name = self._name(kb_id)
+        self._check_scope(scope)
+        name = self._name(scope)
         if self._client.has_collection(name):
             return
         from pymilvus import DataType
@@ -120,21 +120,21 @@ class MilvusVectorStore:
         )
         logger.info(f"milvus collection created: {name} (dim={dim})")
 
-    def drop_collection(self, kb_id: str) -> None:
-        self._check_scope(kb_id)
-        name = self._name(kb_id)
+    def drop_collection(self, scope: str) -> None:
+        self._check_scope(scope)
+        name = self._name(scope)
         if self._client.has_collection(name):
             self._client.drop_collection(name)
             logger.info(f"milvus collection dropped: {name}")
 
     # ── 数据操作 ───────────────────────────────────────────
 
-    def upsert_chunks(self, kb_id: str, items: List[Dict[str, Any]]) -> int:
+    def upsert_chunks(self, scope: str, items: List[Dict[str, Any]]) -> int:
         """写入/覆盖 chunk 向量。items: [{chunk_id, doc_id, seq, text, vector}]。"""
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         if not items:
             return 0
-        name = self._name(kb_id)
+        name = self._name(scope)
         # pymilvus MilvusClient.upsert 的参数名是 data(2.4/2.5 一致)
         rows = [{
             _ID_FIELD: it["chunk_id"],
@@ -151,10 +151,10 @@ class MilvusVectorStore:
             logger.warning("milvus flush failed(数据最终一致,不影响导入)", exc_info=True)
         return len(rows)
 
-    def delete_by_doc(self, kb_id: str, doc_id: str) -> None:
+    def delete_by_doc(self, scope: str, doc_id: str) -> None:
         """删除某文档的全部向量(重导入清理路径)。删除后 flush,防旧数据复现。"""
-        self._check_scope(kb_id)
-        name = self._name(kb_id)
+        self._check_scope(scope)
+        name = self._name(scope)
         self._client.delete(collection_name=name, filter=f'doc_id == "{doc_id}"')
         try:
             self._client.flush(collection_name=name)
@@ -162,14 +162,14 @@ class MilvusVectorStore:
             logger.warning("milvus flush failed after delete", exc_info=True)
 
     def search(
-        self, kb_id: str, query_vector: List[float], top_k: int = 5,
+        self, scope: str, query_vector: List[float], top_k: int = 5,
         doc_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """相似度检索(COSINE,分数越高越相似)。"""
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         expr = f'doc_id == "{doc_id}"' if doc_id else None
         results = self._client.search(
-            collection_name=self._name(kb_id),
+            collection_name=self._name(scope),
             data=[query_vector],
             limit=top_k,
             filter=expr,
@@ -189,9 +189,9 @@ class MilvusVectorStore:
                 })
         return hits
 
-    def count(self, kb_id: str) -> int:
-        self._check_scope(kb_id)
-        name = self._name(kb_id)
+    def count(self, scope: str) -> int:
+        self._check_scope(scope)
+        name = self._name(scope)
         if not self._client.has_collection(name):
             return 0
         stats = self._client.get_collection_stats(name)

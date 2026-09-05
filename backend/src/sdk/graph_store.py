@@ -92,8 +92,8 @@ def normalize_name(name: str) -> str:
     return "".join(out).lower()
 
 
-def entity_node_id(kb_id: str, normalized_name: str) -> str:
-    return f"{kb_id}:{normalized_name}"
+def entity_node_id(scope: str, normalized_name: str) -> str:
+    return f"{scope}:{normalized_name}"
 
 
 class Neo4jGraphStore:
@@ -162,7 +162,7 @@ class Neo4jGraphStore:
 
     def upsert_batch(
         self,
-        kb_id: str,
+        scope: str,
         doc_id: str,
         entities: List[Dict[str, Any]],
         relations: List[Dict[str, Any]],
@@ -176,7 +176,7 @@ class Neo4jGraphStore:
         Returns: {"entities": 本批实体数, "relations": 本批关系数}
         (按批次计数;管理端统计以 counts() 实时查询为准)
         """
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         now = _now()
         with self._session() as s:
             def _tx(tx):
@@ -198,10 +198,10 @@ class Neo4jGraphStore:
                             e.type_status = ent.type_status,
                             e.updated_at = $now
                         """,
-                        kb=kb_id, now=now,
+                        kb=scope, now=now,
                         rows=[{
                             "normalized_name": e["normalized_name"],
-                            "id": entity_node_id(kb_id, e["normalized_name"]),
+                            "id": entity_node_id(scope, e["normalized_name"]),
                             "name": e.get("name") or e["normalized_name"],
                             "type": e.get("type") or "concept",
                             "description": e.get("description") or "",
@@ -223,14 +223,14 @@ class Neo4jGraphStore:
                         SET rel.doc_id = $doc, rel.description = r.description,
                             rel.evidence = r.evidence, rel.updated_at = $now
                         """,
-                        kb=kb_id, doc=doc_id, now=now,
+                        kb=scope, doc=doc_id, now=now,
                         rows=[{
                             "source": r["source"], "target": r["target"],
                             "type": r.get("type") or "相关",
                             "description": r.get("description") or "",
                             "evidence": (r.get("evidence") or "")[:500],
                             "chunk_id": r.get("chunk_id") or "",
-                            "id": f"{kb_id}:{r['source']}>{r.get('type')}>{r['target']}:{r.get('chunk_id')}",
+                            "id": f"{scope}:{r['source']}>{r.get('type')}>{r['target']}:{r.get('chunk_id')}",
                         } for r in relations],
                     ).consume()
 
@@ -239,15 +239,15 @@ class Neo4jGraphStore:
         # execute_write 返回回调返回值;这里再查一次计数(轻量,管理端/流水线统计用)
         return {"entities": len(entities), "relations": len(relations)}
 
-    def delete_document(self, kb_id: str, doc_id: str) -> Dict[str, int]:
+    def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]:
         """删除某文档的全部图谱贡献:边按 doc_id 删,实体去引用,孤立实体删。"""
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         with self._session() as s:
             def _tx(tx):
                 edges = tx.run(
                     f"MATCH (:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb, doc_id: $doc}}]->(:{self._label}) "
                     f"DELETE r RETURN count(r) AS c",
-                    kb=kb_id, doc=doc_id,
+                    kb=scope, doc=doc_id,
                 ).single()["c"]
                 nodes = tx.run(
                     f"""
@@ -257,48 +257,48 @@ class Neo4jGraphStore:
                     WITH e WHERE size(e.source_docs) = 0
                     DETACH DELETE e RETURN count(e) AS c
                     """,
-                    kb=kb_id, doc=doc_id,
+                    kb=scope, doc=doc_id,
                 ).single()["c"]
                 return {"edges": int(edges), "orphanEntities": int(nodes)}
             return s.execute_write(_tx)
 
-    def delete_scope(self, kb_id: str) -> Dict[str, int]:
+    def delete_scope(self, scope: str) -> Dict[str, int]:
         """整库删除(一句子图清除)。"""
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         with self._session() as s:
             def _tx(tx):
                 nodes = tx.run(
                     f"MATCH (e:{self._label} {{{self._sp}: $kb}}) DETACH DELETE e RETURN count(e) AS c",
-                    kb=kb_id,
+                    kb=scope,
                 ).single()["c"]
                 return {"entities": int(nodes)}
             return s.execute_write(_tx)
 
     # ── 查询(在线浏览 + 检索) ─────────────────────────────
 
-    def counts(self, kb_id: str) -> Dict[str, int]:
-        self._check_scope(kb_id)
+    def counts(self, scope: str) -> Dict[str, int]:
+        self._check_scope(scope)
         with self._session() as s:
             entities = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) RETURN count(e) AS c", kb=kb_id
+                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) RETURN count(e) AS c", kb=scope
             ).single()["c"]
             relations = s.run(
                 f"MATCH (:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb}}]->(:{self._label}) "
-                f"RETURN count(r) AS c", kb=kb_id,
+                f"RETURN count(r) AS c", kb=scope,
             ).single()["c"]
         return {"entities": int(entities), "relations": int(relations)}
 
-    def document_counts(self, kb_id: str, doc_id: str) -> Dict[str, int]:
+    def document_counts(self, scope: str, doc_id: str) -> Dict[str, int]:
         """某文档在图谱中的贡献数(实体按 source_docs 引用,关系按 doc_id 归属)。"""
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         with self._session() as s:
             entities = s.run(
                 f"MATCH (e:{self._label} {{{self._sp}: $kb}}) WHERE $doc IN e.source_docs "
-                f"RETURN count(e) AS c", kb=kb_id, doc=doc_id,
+                f"RETURN count(e) AS c", kb=scope, doc=doc_id,
             ).single()["c"]
             relations = s.run(
                 f"MATCH (:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb, doc_id: $doc}}]->(:{self._label}) "
-                f"RETURN count(r) AS c", kb=kb_id, doc=doc_id,
+                f"RETURN count(r) AS c", kb=scope, doc=doc_id,
             ).single()["c"]
         return {"entities": int(entities), "relations": int(relations)}
 
@@ -320,16 +320,16 @@ class Neo4jGraphStore:
 
     def get_graph(
         self,
-        kb_id: str,
+        scope: str,
         q: str = "",
         node_types: Optional[List[str]] = None,
         limit_nodes: int = 80,
         limit_edges: int = 150,
     ) -> Dict[str, Any]:
         """图谱浏览首页数据:限量节点(可按名称/类型过滤)+ 其邻接边。"""
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         clauses = [f"e.{self._sp} = $kb"]
-        params: Dict[str, Any] = {"kb": kb_id}
+        params: Dict[str, Any] = {"kb": scope}
         if q:
             clauses.append("(toLower(e.name) CONTAINS toLower($q) OR toLower(e.description) CONTAINS toLower($q))")
             params["q"] = q
@@ -351,7 +351,7 @@ class Neo4jGraphStore:
                 f"WHERE a.id IN $ids AND b.id IN $ids "
                 f"RETURN a.id AS source, b.id AS target, properties(r) AS r "
                 f"LIMIT $m",
-                kb=kb_id, ids=ids, m=limit_edges,
+                kb=scope, ids=ids, m=limit_edges,
             ).data()
 
         edges = [{
@@ -365,10 +365,10 @@ class Neo4jGraphStore:
         return {"nodes": nodes, "edges": edges}
 
     def expand_node(
-        self, kb_id: str, node_id: str, limit_nodes: int = 40, limit_edges: int = 80,
+        self, scope: str, node_id: str, limit_nodes: int = 40, limit_edges: int = 80,
     ) -> Dict[str, Any]:
         """点击节点增量展开:1 跳邻域(双向)。"""
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         with self._session() as s:
             rows = s.run(
                 f"MATCH (a:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb}}]-(b:{self._label}) "
@@ -376,7 +376,7 @@ class Neo4jGraphStore:
                 f"RETURN a AS center, b AS neighbor, type(r) AS ignored, "
                 f"       startNode(r).id AS sid, endNode(r).id AS tid, properties(r) AS props "
                 f"LIMIT $m",
-                kb=kb_id, nid=node_id, m=limit_edges,
+                kb=scope, nid=node_id, m=limit_edges,
             ).data()
         center = self._node_dict(rows[0]["center"]) if rows else None
         nodes = [center] if center else []
@@ -398,10 +398,10 @@ class Neo4jGraphStore:
         return {"nodes": nodes, "edges": edges}
 
     def find_entities(
-        self, kb_id: str, terms: List[str], limit: int = 20,
+        self, scope: str, terms: List[str], limit: int = 20,
     ) -> List[Dict[str, Any]]:
         """按名称词找种子实体:精确(normalized)优先,包含匹配兜底。"""
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         if not terms:
             return []
         normalized = [normalize_name(t) for t in terms if t.strip()]
@@ -414,10 +414,10 @@ class Neo4jGraphStore:
                 WHERE e.normalized_name IN $terms
                 RETURN e LIMIT $n
                 """,
-                kb=kb_id, terms=normalized, n=limit,
+                kb=scope, terms=normalized, n=limit,
             ).data()
             if not rows:
-                # 前缀匹配先试:能吃 (kb_id, name) 上的 range 索引
+                # 前缀匹配先试:能吃 (scope, name) 上的 range 索引
                 # (kg_entity_name),不用全表扫
                 rows = s.run(
                     f"""
@@ -426,7 +426,7 @@ class Neo4jGraphStore:
                     WHERE e.normalized_name STARTS WITH t
                     RETURN DISTINCT e LIMIT $n
                     """,
-                    kb=kb_id, terms=normalized, n=limit,
+                    kb=scope, terms=normalized, n=limit,
                 ).data()
             if not rows:
                 # 子串兜底:CONTAINS 无法用索引,按 kb 限定扫描(仅当前库,
@@ -438,13 +438,13 @@ class Neo4jGraphStore:
                     WHERE e.normalized_name CONTAINS t
                     RETURN DISTINCT e LIMIT $n
                     """,
-                    kb=kb_id, terms=normalized, n=limit,
+                    kb=scope, terms=normalized, n=limit,
                 ).data()
         return [self._node_dict(r["e"]) for r in rows]
 
     def subgraph_around(
         self,
-        kb_id: str,
+        scope: str,
         seed_names: List[str],
         hops: int = 2,
         max_nodes: int = 80,
@@ -454,7 +454,7 @@ class Neo4jGraphStore:
 
         seed_names 传 normalized_name 列表。
         """
-        self._check_scope(kb_id)
+        self._check_scope(scope)
         visited: Dict[str, Dict[str, Any]] = {}
         edges: List[Dict[str, Any]] = []
         edge_keys = set()
@@ -464,13 +464,13 @@ class Neo4jGraphStore:
             with self._session() as s:
                 rows = s.run(
                     f"MATCH (e:{self._label} {{{self._sp}: $kb}}) WHERE e.normalized_name IN $names RETURN e",
-                    kb=kb_id, names=frontier,
+                    kb=scope, names=frontier,
                 ).data()
             for r in rows:
                 node = self._node_dict(r["e"])
                 visited[node["id"]] = node
             frontier = [n for n in frontier
-                        if entity_node_id(kb_id, n) in visited]
+                        if entity_node_id(scope, n) in visited]
 
         for _hop in range(max(1, hops)):
             if not frontier or len(visited) >= max_nodes or len(edges) >= max_edges:
@@ -484,7 +484,7 @@ class Neo4jGraphStore:
                            properties(r) AS props
                     LIMIT $m
                     """,
-                    kb=kb_id, frontier=frontier,
+                    kb=scope, frontier=frontier,
                     m=max_edges - len(edges),
                 ).data()
             next_frontier = []
