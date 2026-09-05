@@ -372,6 +372,16 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                         glossary_size=stats.get("glossary_size"),
                         error=str(e)[:200])
                     continue
+                except Exception as e:
+                    # 非 LLM 调用本身的异常(如 prompt 模板渲染)——同样按
+                    # 块级失败处理,保持"块失败→熔断→可续跑"语义,而不是
+                    # 裸异常终止整个任务
+                    batch_failed += 1
+                    store.mark_chunk(chunk["id"], "failed")
+                    handle.log(f"块 {chunk['seq']} 处理异常: {e}", level="warn",
+                               chunk=chunk["seq"], chars=len(chunk["text"]),
+                               error=str(e)[:200])
+                    continue
                 store.mark_chunk(chunk["id"], "done")
                 # 请求级明细:prompt 规模/词表注入量/原始与归一化后条数
                 # (raw vs 规范化后的差值 = 非法/重复/超限被丢弃的量)
@@ -414,10 +424,13 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             kept_e, kept_r, dropped, proposals = _enforce_schema(kb, list(batch_entities.values()), batch_relations)
             pending_proposals.extend(proposals)
 
-            # 关系端点必须在已知实体集内(本批 ∪ 词表),悬空关系丢弃
+            # 关系端点必须在已知实体集内(本批 ∪ 词表),悬空关系丢弃。
+            # dropped 含实体+关系两类 strict 丢弃,悬空数不能拿它减——
+            # 按端点重数一遍(strict 丢弃实体会连带其关系悬空,属正常)
             known = set(batch_entities.keys()) | set(glossary.keys())
+            dangling = sum(1 for r in batch_relations
+                           if r["source"] not in known or r["target"] not in known)
             kept_r = [r for r in kept_r if r["source"] in known and r["target"] in known]
-            dangling = len(batch_relations) - len(kept_r) - dropped
 
             if kept_e or kept_r:
                 t_graph = time.monotonic()
@@ -563,7 +576,7 @@ class _ExtractionError(RuntimeError):
 
 def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
                    glossary_top_k: int, temperature: float,
-                   max_retries: int, conv_id: str) -> Tuple[List[Dict], List[Dict]]:
+                   max_retries: int, conv_id: str) -> Tuple[List[Dict], List[Dict], Dict]:
     """单块抽取(在批内工作线程执行):渲染 prompt → chat_json → 规范化。
 
     Returns:

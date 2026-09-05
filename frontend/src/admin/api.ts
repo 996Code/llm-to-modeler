@@ -426,6 +426,7 @@ export function streamTaskEvents(
     onProgress?: (d: { taskId: string; progress: number; message: string }) => void
     onLog?: (d: TaskLogItem) => void
     onStatus?: (d: { taskId: string; status: TaskStatus; error?: string }) => void
+    onEnd?: () => void
   },
 ): () => void {
   const controller = new AbortController()
@@ -465,6 +466,7 @@ export function streamTaskEvents(
       }
     })
     .catch(() => { /* 断流:调用方用轮询兜底 */ })
+    .finally(() => handlers.onEnd?.())
   return () => controller.abort()
 }
 
