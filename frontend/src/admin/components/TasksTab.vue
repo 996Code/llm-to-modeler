@@ -84,16 +84,28 @@
           v-if="activeTask.error" type="error" show-icon style="margin-bottom: 10px"
           :message="activeTask.error"
         />
+        <div class="tk-logs-toolbar">
+          <a-radio-group v-model:value="levelFilter" size="small" button-style="solid">
+            <a-radio-button value="">全部</a-radio-button>
+            <a-radio-button value="info">info</a-radio-button>
+            <a-radio-button value="warn">warn</a-radio-button>
+            <a-radio-button value="error">error</a-radio-button>
+          </a-radio-group>
+          <span class="tk-logs-count">{{ filteredLogs.length }} 条</span>
+        </div>
         <div class="tk-logs" ref="logsBox">
-          <div v-for="lg in logs" :key="lg.id" class="tk-log-line">
+          <div v-for="lg in filteredLogs" :key="lg.id" class="tk-log-line">
             <span class="tk-log-time">{{ fmtTime(lg.createdAt).slice(11) }}</span>
             <a-tag
               class="tk-log-level" :color="lg.level === 'error' ? 'red' : lg.level === 'warn' ? 'orange' : 'blue'"
               style="margin-inline-end: 6px"
             >{{ lg.level }}</a-tag>
-            <span class="tk-log-msg">{{ lg.message }}</span>
+            <span class="tk-log-msg">
+              {{ lg.message }}
+              <span v-if="fmtData(lg)" class="tk-log-data">{{ fmtData(lg) }}</span>
+            </span>
           </div>
-          <a-empty v-if="!logs.length" description="暂无日志" style="padding: 40px 0" />
+          <a-empty v-if="!filteredLogs.length" description="暂无日志" style="padding: 40px 0" />
         </div>
       </template>
     </a-drawer>
@@ -234,6 +246,25 @@ const logsBox = ref<HTMLElement | null>(null)
 let abortStream: (() => void) | null = null
 let pollTimer: number | undefined
 let lastLogId = 0
+const levelFilter = ref('')
+
+const filteredLogs = computed(() =>
+  levelFilter.value ? logs.value.filter((l) => l.level === levelFilter.value) : logs.value)
+
+/** 结构化附加字段 → 「k=v · k=v」小字串(长数组截断,别喧宾夺主) */
+function fmtData(lg: TaskLogItem): string {
+  const d = lg.data
+  if (!d || typeof d !== 'object') return ''
+  return Object.entries(d as Record<string, unknown>)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .slice(0, 8)
+    .map(([k, v]) => {
+      let s = String(v)
+      if (Array.isArray(v)) s = v.length > 4 ? `[${v.slice(0, 4).join(',')}…×${v.length}]` : `[${v.join(',')}]`
+      return `${k}=${s.length > 42 ? s.slice(0, 42) + '…' : s}`
+    })
+    .join(' · ')
+}
 
 // 关抽屉即停监听:SSE 流 + 轮询只为抽屉服务,抽屉关了继续跑是纯浪费
 watch(logsOpen, (open) => {
@@ -331,12 +362,18 @@ function openLogs(record: TaskItem) {
 .tk-done { color: #16a34a; font-weight: 600; font-size: 12px; }
 .tk-drawer-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .tk-msg { color: #6b7280; font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tk-logs-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.tk-logs-count { color: #9ca3af; font-size: 12px; margin-left: auto; }
 .tk-logs {
   background: #0f172a; border-radius: 10px; padding: 12px 14px;
-  max-height: calc(100vh - 220px); overflow-y: auto; font-size: 12.5px;
+  max-height: calc(100vh - 260px); overflow-y: auto; font-size: 12.5px;
 }
 .tk-log-line { display: flex; align-items: baseline; padding: 2px 0; color: #cbd5e1; }
 .tk-log-time { color: #64748b; font-family: 'SF Mono', Menlo, Consolas, monospace; margin-right: 8px; flex-shrink: 0; }
 .tk-log-msg { white-space: pre-wrap; word-break: break-all; }
+.tk-log-data {
+  color: #7c8aa5; font-size: 11px; font-family: 'SF Mono', Menlo, Consolas, monospace;
+  margin-left: 8px; opacity: 0.85;
+}
 .tk-log-line:has(.tk-log-level) { align-items: center; }
 </style>

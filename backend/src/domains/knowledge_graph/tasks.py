@@ -218,7 +218,10 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
 
     conv_id = task_conv_id(handle.task_id)
     started = time.monotonic()
-    handle.log(f"开始导入: {doc['filename']}({doc['sizeBytes']}B,库「{kb['name']}」)")
+    handle.log(f"开始导入: {doc['filename']}({doc['sizeBytes']}B,库「{kb['name']}」)",
+               filename=doc["filename"], size_bytes=doc["sizeBytes"],
+               kb=kb["name"], force=force,
+               previous_status=doc["importStatus"])
     store.update_document(doc_id, import_status="importing", error="")
 
     # 2) 解析 + 切块(结构感知)——先于清理:清理是否执行取决于是否存在
@@ -232,9 +235,12 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     )
     if existing_chunks and not force:
         chunks = existing_chunks
-        handle.set_progress(_W_PARSE, f"复用已有切块: {len(chunks)} 块"
-                                       f"({sum(1 for c in chunks if c['status'] == 'done')} 块已完成)")
-        handle.log(f"复用已有 {len(chunks)} 块(断点续跑,已完成块将跳过)")
+        done_n = sum(1 for c in chunks if c["status"] == "done")
+        failed_n = sum(1 for c in chunks if c["status"] == "failed")
+        handle.set_progress(_W_PARSE, f"复用已有切块: {len(chunks)} 块({done_n} 块已完成)")
+        handle.log(f"复用已有 {len(chunks)} 块(断点续跑,已完成块将跳过)",
+                   chunks=len(chunks), done=done_n, failed=failed_n,
+                   pending=len(chunks) - done_n - failed_n)
     else:
         handle.set_progress(_W_PARSE, "解析文档")
         try:
@@ -244,6 +250,8 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             raise RuntimeError("原始文件已不存在,请重新上传")
         except ValueError as e:
             raise RuntimeError(f"文档解析失败: {e}")
+        handle.log(f"文档解析: {len(data)}B → {len(text)} 字符({doc['filename'].rsplit('.', 1)[-1]} 格式)",
+                   raw_bytes=len(data), text_chars=len(text))
 
         chunks = chunk_text(
             text,
@@ -255,8 +263,12 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             store.update_document(doc_id, import_status="failed", error="文档无有效文本")
             raise RuntimeError("文档解析后无有效文本(空文档/扫描件?)")
         store.replace_chunks(doc_id, kb_id, chunks)
-        handle.log(f"切块完成: {len(chunks)} 块(目标 "
-                   f"{_cfg(app_state, 'chunk_target_chars', 1200)} 字/块)")
+        lens = [len(c["text"]) for c in chunks]
+        handle.log(f"结构感知切块: {len(chunks)} 块(每块 {min(lens)}~{max(lens)} 字,平均 {sum(lens) // len(lens)})",
+                   chunks=len(chunks), min_chars=min(lens), max_chars=max(lens),
+                   avg_chars=sum(lens) // len(lens),
+                   target=_cfg(app_state, "chunk_target_chars", 1200),
+                   overlap=_cfg(app_state, "chunk_overlap_chars", 100))
         handle.set_progress(_W_PARSE, f"切块完成: {len(chunks)} 块")
 
     # 1) 清理旧贡献。
@@ -302,11 +314,20 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     done_before = total - len(pending)
     if done_before:
         handle.log(f"断点续跑: 跳过已完成的 {done_before} 块")
+    handle.log(
+        f"抽取配置: 批大小 {batch_size} / 批内并行 {concurrency} / 单块重试 {max_retries} "
+        f"/ 熔断阈值 {threshold} / 词表 top-{glossary_top_k} / 温度 {temperature:.2f}"
+        f" / 向量{'开' if vector_ready else '关'}",
+        batch_size=batch_size, concurrency=concurrency, max_retries=max_retries,
+        failure_threshold=threshold, glossary_top_k=glossary_top_k,
+        temperature=temperature, vector=vector_ready, todo_chunks=len(pending),
+        llm_model=llm.config.model if getattr(llm, "config", None) else "")
 
     glossary: Dict[str, str] = {}   # normalized_name -> type(本轮抽取累积)
     pending_proposals: List[Dict] = []
     total_entities = total_relations = failed_chunks = 0
     consecutive_failures = 0
+    batch_index = 0
 
     executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="kg-extract")
     try:
@@ -317,7 +338,11 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                 raise RuntimeError("文档在导入过程中被删除,任务中止")
 
             batch = pending[batch_start:batch_start + batch_size]
+            batch_index += 1
             batch_started = time.monotonic()
+            seqs = [c["seq"] for c in batch]
+            handle.log(f"批次 {batch_index} 开始: 块 {seqs}(共 {len(batch)} 块)",
+                       batch=batch_index, chunks=seqs)
 
             futures = {
                 executor.submit(
@@ -336,9 +361,15 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                 except Exception as e:
                     batch_failed += 1
                     store.mark_chunk(chunk["id"], "failed")
-                    handle.log(f"块 {chunk['seq']} 抽取失败: {e}", level="warn")
+                    handle.log(f"块 {chunk['seq']} 抽取失败: {e}", level="warn",
+                               chunk=chunk["seq"], chars=len(chunk["text"]))
                     continue
                 store.mark_chunk(chunk["id"], "done")
+                handle.log(
+                    f"块 {chunk['seq']} 抽取完成: {len(entities)} 实体 / {len(relations)} 关系"
+                    f"({len(chunk['text'])} 字)",
+                    chunk=chunk['seq'], chars=len(chunk["text"]),
+                    entities=len(entities), relations=len(relations))
                 for ent in entities:
                     key = ent["normalized_name"]
                     if key in batch_entities:  # 批内合并(别名/描述合并)
@@ -367,9 +398,14 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             # 关系端点必须在已知实体集内(本批 ∪ 词表),悬空关系丢弃
             known = set(batch_entities.keys()) | set(glossary.keys())
             kept_r = [r for r in kept_r if r["source"] in known and r["target"] in known]
+            dangling = len(batch_relations) - len(kept_r) - dropped
 
             if kept_e or kept_r:
+                t_graph = time.monotonic()
                 graph.upsert_batch(kb_id, doc_id, kept_e, kept_r)
+                graph_ms = int((time.monotonic() - t_graph) * 1000)
+            else:
+                graph_ms = 0
             total_entities += len(kept_e)
             total_relations += len(kept_r)
 
@@ -378,16 +414,23 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                 glossary[ent["normalized_name"]] = ent.get("type") or ""
 
             # 向量补写(chunk 原文向量化,与抽取结果无关;失败只告警)
+            vec_rows = 0
             if vector_ready:
-                _vectorize_chunks(handle, app_state, store, kb, batch, conv_id)
+                vec_rows = _vectorize_chunks(handle, app_state, store, kb, batch, conv_id)
 
             done_count = done_before + (batch_start + len(batch))
             pct = _W_PARSE + _W_VECTOR + int(_W_EXTRACT * done_count / max(1, total))
             handle.set_progress(min(99, pct), f"已处理 {done_count}/{total} 块")
             handle.log(
-                f"批次完成: {len(batch)} 块 → {len(kept_e)} 实体 / {len(kept_r)} 关系"
+                f"批次 {batch_index} 完成: {len(batch)} 块 → {len(kept_e)} 实体 / {len(kept_r)} 关系"
+                f"(累计 {total_entities}/{total_relations})"
                 f"{'(丢弃 ' + str(dropped) + ' 条类型外数据)' if dropped else ''}"
-                f",耗时 {time.monotonic() - batch_started:.1f}s")
+                f",耗时 {time.monotonic() - batch_started:.1f}s",
+                batch=batch_index, entities=len(kept_e), relations=len(kept_r),
+                cumulative_entities=total_entities, cumulative_relations=total_relations,
+                schema_dropped=dropped or 0, dangling_dropped=max(0, dangling),
+                graph_ms=graph_ms, vector_rows=vec_rows,
+                seconds=round(time.monotonic() - batch_started, 1))
     finally:
         executor.shutdown(wait=False)
 
@@ -407,8 +450,13 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     )
     duration = time.monotonic() - started
     handle.set_progress(100, "导入完成")
-    handle.log(f"导入完成({final_status}): {entity_total} 实体 / {relation_total} 关系"
-               f"/ {total} 块,总耗时 {duration:.1f}s")
+    handle.log(
+        f"导入完成({final_status}): {entity_total} 实体 / {relation_total} 关系"
+        f"/ {total} 块(其中 {failed_chunks} 块失败),总耗时 {duration:.1f}s"
+        f"(平均 {duration / max(1, total) / 60:.1f} 分钟/块)",
+        status=final_status, entities=entity_total, relations=relation_total,
+        chunks=total, failed_chunks=failed_chunks, resumed_chunks=done_before,
+        vector=vector_ready, seconds=round(duration, 1))
     return {
         "status": final_status, "chunks": total, "failedChunks": failed_chunks,
         "entities": entity_total, "relations": relation_total,
@@ -435,9 +483,12 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
                 handle.log(
                     f"embedding 模型已变更(库建立时 {stored_model},当前 {current_model}),"
                     f"向量不兼容——本库降级纯图谱模式。如需向量检索,请清空重建该库"
-                    f"或在设置中切回原模型", level="warn")
+                    f"或在设置中切回原模型", level="warn",
+                    stored_model=stored_model, current_model=current_model)
                 store.set_kb_vector_info(kb["id"], stored_model, kb.get("vectorDim"), False)
                 return False
+            handle.log(f"向量模式: 沿用库配置 dim={kb.get('vectorDim')}(模型 {stored_model or '未记录'})",
+                       dim=kb.get("vectorDim"), model=stored_model or "")
             runtime.get_vector(app_state).ensure_collection(kb["id"], kb["vectorDim"] or 1024)
             return True
         # 未决:探测 embedding 模型
@@ -452,7 +503,8 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
         dim = len(probe[0])
         store.set_kb_vector_info(kb["id"], os.getenv("LLM_EMBED_MODEL"), dim, True)
         runtime.get_vector(app_state).ensure_collection(kb["id"], dim)
-        handle.log(f"向量模式开启: dim={dim}")
+        handle.log(f"向量模式开启: 模型 {os.getenv('LLM_EMBED_MODEL')},dim={dim}",
+                   model=os.getenv("LLM_EMBED_MODEL"), dim=dim)
         return True
     except Exception as e:
         handle.log(f"向量准备失败,降级纯图谱模式: {e}", level="warn")
@@ -463,21 +515,24 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
         return False
 
 
-def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], conv_id: str) -> None:
-    """把一批 chunk 向量化并 upsert(失败只告警,不阻断导入)。"""
+def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], conv_id: str) -> int:
+    """把一批 chunk 向量化并 upsert(失败只告警,不阻断导入)。返回写入条数。"""
     try:
         embed_batch = max(1, int(_cfg(app_state, "embed_batch_size", 16)))
         vector_store = runtime.get_vector(app_state)
+        n = 0
         for i in range(0, len(chunks), embed_batch):
             part = chunks[i:i + embed_batch]
             vectors = app_state.llm_client.embeddings(
                 [c["text"] for c in part], conv_id=conv_id, stage="kg.embed")
-            vector_store.upsert_chunks(kb["id"], [{
+            n += vector_store.upsert_chunks(kb["id"], [{
                 "chunk_id": c["id"], "doc_id": c["docId"], "seq": c["seq"],
                 "text": c["text"], "vector": vec,
             } for c, vec in zip(part, vectors)])
+        return n
     except Exception as e:
-        handle.log(f"向量写入失败(图谱不受影响): {e}", level="warn")
+        handle.log(f"向量写入失败(图谱不受影响): {e}", level="warn", rows=len(chunks))
+        return 0
 
 
 def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
@@ -649,6 +704,9 @@ def run_induce_schema(handle) -> Dict[str, Any]:
     samples = _collect_samples(store, kb_id, sample_target, limit_chars=1500)
     if not samples:
         raise RuntimeError("库内没有可用文本(先上传并导入文档,或直接用模板本体)")
+    handle.log(f"样本收集: {len(samples)} 段 / 共 {sum(len(s) for s in samples)} 字"
+               f"(目标 {sample_target} 段,单段上限 1500 字)",
+               samples=len(samples), total_chars=sum(len(s) for s in samples))
 
     handle.set_progress(40, f"LLM 归纳本体({len(samples)} 段样本)")
     from engine.prompt_loader import PromptLoader
@@ -683,7 +741,10 @@ def run_induce_schema(handle) -> Dict[str, Any]:
     store.update_kb(kb_id, schema_json=schema)
     handle.set_progress(100, "归纳完成,待审核")
     handle.log(f"本体归纳完成: {len(entity_types)} 实体类型 / "
-               f"{len(relation_types)} 关系类型,已存为待审提案(本体页可一键应用)")
+               f"{len(relation_types)} 关系类型,已存为待审提案(本体页可一键应用)",
+               entity_types=[t.get("key") for t in entity_types],
+               relation_types=[r.get("key") for r in relation_types],
+               samples=len(samples))
     return {"entityTypes": len(entity_types), "relationTypes": len(relation_types),
             "samples": len(samples)}
 
