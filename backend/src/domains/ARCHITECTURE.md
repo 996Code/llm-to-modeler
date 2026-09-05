@@ -426,3 +426,64 @@ def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
 - 创建独立工具包目录
 - 实现 `pack.py` 和工具类
 - 系统自动发现和加载
+
+## SDK 存储设施(graph_store / vector_store / doc_parser / scope_registry)
+
+知识图谱插件孵化出的通用存储能力已下沉 `sdk/`,供后续插件(NL2BI 报表、
+RAG、记忆库…)复用。**SDK 零领域知识**:不认识 LLM/embedding/知识库/
+本体——图存储只认"节点+边",向量存储只收"文本+向量"对,文档解析只出
+纯文本与切块。
+
+### 模块一览
+
+| 模块 | 能力 | 关键约束 |
+|---|---|---|
+| `sdk/scope_registry.py` | 前缀登记 + scope 签发(隔离机制核心) | 撞前缀装配期 fail-fast |
+| `sdk/graph_store.py` | Neo4j 图存储(`GraphStore` Protocol) | 标签/属性/约束名参数化 |
+| `sdk/vector_store.py` | Milvus 向量存储(`VectorStore` Protocol) | collection 前缀参数化 |
+| `sdk/doc_parser.py` | md/txt/pdf/docx 解析 + 结构感知切块 | 纯函数,零存储概念 |
+
+### 数据隔离契约(所有使用方必须遵守)
+
+1. **前缀先登记后使用**:插件声明自己的前缀并 `register_prefix("bi", owner=pack名)`;
+   两个插件撞前缀在装配期抛 `PrefixConflictError`(fail-fast,防互相读写对方数据)。
+2. **scope_id 必须服务端签发**:传给 store 的 scope 用 `new_scope_id()`(或调用方
+   自己的 UUID 生成),**禁止用户输入直传**——store 入口按 UUID 形态防御拒收。
+   业务键(如"报表名")存调用方自己的元数据表,与物理 scope_id 做映射。
+3. **embedding 归调用方**:SDK 向量存储只收向量;模型选择/维度探测/降级策略
+   是插件的事(SDK 不依赖任何 LLM 配置)。
+
+### 新插件接入示例(以 NL2BI 报表为例)
+
+```python
+# domains/bi_report/stores.py —— 插件自己的适配层(参考 knowledge_graph/stores.py)
+from sdk import graph_store as sdk_graph, vector_store as sdk_vector
+from sdk.scope_registry import register_prefix, new_scope_id
+
+register_prefix("bi", owner="bi_report")          # ① 声明前缀(撞名即炸)
+
+def get_graph(app_state):
+    settings = _my_settings(app_state)            # 插件自己的连接配置解析
+    return sdk_graph.get_graph_store(settings, prefix="bi_",
+                                     node_label="ReportNode",   # 可定制图模型
+                                     rel_type="DERIVES", scope_prop="report_id")
+
+def get_vector(app_state):
+    return sdk_vector.get_vector_store(_my_settings(app_state), collection_prefix="bi")
+
+# 建报表库时:
+scope_id = new_scope_id()                         # ② 服务端签发
+graph.upsert_batch(scope_id, doc_id, nodes, edges)
+vector.ensure_collection(scope_id, dim=embedding_dim)
+# scope_id 存进插件元数据表,业务名 ↔ 物理 ID 的映射归插件管
+```
+
+三个 SDK 调用 + 两条契约 = 完整的隔离存储设施;Protocol(`GraphStore`/
+`VectorStore`)声明了替身需实现的最小方法集,单测用内存 Fake 即可
+(参考 tests/sdk/test_graph_vector_sdk.py 与 knowledge_graph 的测试替身)。
+
+### 边界(明确不放进 SDK 的)
+
+- SQLite 元数据层(kg_ 三表)——领域模型本身,各插件自管;
+- 检索编排(意图解析/双路融合)——含 LLM 调用,违反零领域知识;
+- 抽取流水线(批次/熔断/checkpoint)——知识图谱领域逻辑。
