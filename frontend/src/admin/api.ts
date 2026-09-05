@@ -33,6 +33,8 @@ export interface AdminStats {
 export interface AdminConversation {
   id: string
   userId: string
+  /** 最近一次路由到的插件名(无路由记录为空串=其他) */
+  pack?: string
   contextKey: string
   title: string
   /** 展示标题:真实 title > 首条用户消息截断 > "新对话"(后端推导) */
@@ -223,6 +225,8 @@ export async function fetchConversations(params: {
   offset: number
   userId?: string
   q?: string
+  /** 插件多选过滤(逗号分隔;空串元素=其他) */
+  packs?: string
 }): Promise<Paged<AdminConversation>> {
   const { data } = await adminApi.get('/conversations', { params })
   return data

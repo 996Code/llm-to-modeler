@@ -10,6 +10,10 @@
         @pressEnter="search">
         <template #prefix><SearchOutlined style="color: #bbb" /></template>
       </a-input>
+      <!-- 插件多选筛选:选项=已发现插件 + 「其他」(无路由记录的会话) -->
+      <a-select v-model:value="filterPacks" mode="multiple" allow-clear
+        placeholder="按插件筛选" style="min-width: 200px" :options="packOptions"
+        @change="search" />
       <a-button type="primary" @click="search">查询</a-button>
       <span class="cv-count">共 {{ total }} 个会话</span>
     </div>
@@ -34,6 +38,10 @@
               {{ truncate(record.contextKey, 8) }}
             </a-tag>
           </div>
+        </template>
+        <template v-else-if="column.key === 'pack'">
+          <a-tag v-if="record.pack" :color="packColor(record.pack)" class="cv-pack">{{ record.pack }}</a-tag>
+          <span v-else class="cv-pack-other">其他</span>
         </template>
         <template v-else-if="column.key === 'userId'">
           <a-tooltip :title="record.userId" placement="topLeft">
@@ -72,7 +80,7 @@
 import { computed, inject, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { UserOutlined, SearchOutlined } from '@ant-design/icons-vue'
-import { AdminConversation, deleteConversation, fetchConversations, fmtTime } from '../api'
+import { AdminConversation, deleteConversation, fetchConversations, fetchPacks, fmtTime } from '../api'
 import type { LoadSafely } from './loadSafely'
 import ConversationTrace from './ConversationTrace.vue'
 
@@ -83,6 +91,29 @@ const total = ref(0)
 const loading = ref(false)
 const filterUserId = ref('')
 const filterQ = ref('')
+const filterPacks = ref<string[]>([])
+// 筛选选项:已发现插件 + 「其他」(__other__ 占位,请求时转空串元素)
+const packOptions = ref<{ label: string; value: string }[]>([])
+
+// 已知插件配色(与调用日志类型色系一致);未列出的插件给中性色
+const PACK_COLORS: Record<string, string> = {
+  njmind_form: 'blue',
+  leave_application: 'gold',
+  knowledge_graph: 'geekblue',
+}
+function packColor(p: string): string {
+  return PACK_COLORS[p] || 'default'
+}
+
+async function loadPackOptions() {
+  try {
+    const data = await fetchPacks()
+    const opts = data.items.map((p) => ({ label: p.name, value: p.name }))
+    packOptions.value = [...opts, { label: '其他', value: '__other__' }]
+  } catch {
+    packOptions.value = [{ label: '其他', value: '__other__' }]
+  }
+}
 
 const page = reactive({ current: 1, pageSize: 20 })
 const pagination = computed(() => ({
@@ -96,6 +127,7 @@ const pagination = computed(() => ({
 
 const columns = [
   { title: '会话', key: 'title' },  // 不设宽:占满剩余空间(主信息列)
+  { title: '插件', key: 'pack', width: 130, ellipsis: true },
   { title: '用户', key: 'userId', width: 120, ellipsis: true },
   { title: '消息', key: 'messageCount', width: 64 },
   { title: '更新时间', key: 'updatedAt', width: 165 },
@@ -118,6 +150,10 @@ async function load() {
       offset: (page.current - 1) * page.pageSize,
       userId: filterUserId.value.trim() || undefined,
       q: filterQ.value.trim() || undefined,
+      // __other__ → 空串元素(后端语义:无路由记录的会话)
+      packs: filterPacks.value.length
+        ? filterPacks.value.map((p) => (p === '__other__' ? '' : p)).join(',')
+        : undefined,
     })
     rows.value = data.items
     total.value = data.total
@@ -154,7 +190,7 @@ async function remove(record: AdminConversation) {
   })
 }
 
-onMounted(load)
+onMounted(() => { loadPackOptions(); load() })
 </script>
 
 <style scoped>
@@ -173,6 +209,9 @@ onMounted(load)
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: #4b5563; font-size: 13px;
 }
+.cv-pack { font-size: 11.5px; max-width: 110px; }
+.cv-pack :deep(.ant-tag) { overflow: hidden; text-overflow: ellipsis; }
+.cv-pack-other { color: #9ca3af; font-size: 12px; }
 .cv-count-tag { min-width: 30px; text-align: center; }
 .cv-time { font-size: 12.5px; color: #374151; white-space: nowrap; }
 .cv-danger { color: #ef4444; }

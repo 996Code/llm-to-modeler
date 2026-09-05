@@ -349,6 +349,7 @@ class ConversationStore:
         offset: int = 0,
         user_id: Optional[str] = None,
         q: Optional[str] = None,
+        packs: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """列出全部会话(管理后台用,不限用户,支持分页与过滤)。
 
@@ -364,7 +365,7 @@ class ConversationStore:
             闲聊/追问/失败的会话永远是"新对话"(对管理端毫无辨识度),
             故按「真实 title > 首条用户消息截断 > 新对话」推导,不动存量数据。
         """
-        where, params = self._admin_conversation_where(user_id, q)
+        where, params = self._admin_conversation_where(user_id, q, packs)
         sql = f"""
             SELECT m.*,
                    (SELECT COUNT(*) FROM events e
@@ -372,7 +373,11 @@ class ConversationStore:
                        AND e.kind IN ('user', 'assistant', 'tool_result')) AS message_count,
                    (SELECT payload FROM events e
                      WHERE e.conv_id = m.conv_id AND e.kind = 'user'
-                     ORDER BY e.created_at ASC LIMIT 1) AS first_user_payload
+                     ORDER BY e.created_at ASC LIMIT 1) AS first_user_payload,
+                   (SELECT json_extract(e.payload, '$.detail.pack') FROM events e
+                     WHERE e.conv_id = m.conv_id AND e.kind = 'trace'
+                       AND json_extract(e.payload, '$.detail.pack') IS NOT NULL
+                     ORDER BY e.created_at DESC LIMIT 1) AS last_pack
               FROM session_meta m {where}
              ORDER BY m.updated_at DESC
              LIMIT ? OFFSET ?
@@ -393,6 +398,7 @@ class ConversationStore:
             result.append({
                 "id": item["conv_id"],
                 "userId": item["user_id"],
+                "pack": item.get("last_pack") or "",
                 "contextKey": item["context_key"] or "",
                 "title": item["title"] or "新对话",
                 "displayTitle": self._derive_display_title(item["title"], first_user),
@@ -420,18 +426,30 @@ class ConversationStore:
         self,
         user_id: Optional[str] = None,
         q: Optional[str] = None,
+        packs: Optional[List[str]] = None,
     ) -> int:
         """统计满足管理端过滤条件的会话总数(分页用,过滤条件与 list_all 一致)。"""
-        where, params = self._admin_conversation_where(user_id, q)
+        where, params = self._admin_conversation_where(user_id, q, packs)
         with self._get_conn() as conn:
             row = conn.execute(
                 f"SELECT COUNT(*) AS c FROM session_meta m {where}", params
             ).fetchone()
         return int(row["c"])
 
+    # 会话的 pack 判定子查询:最近一次 intent_route trace 的 pack(无则 NULL)
+    _PACK_EXPR = ("(SELECT json_extract(e.payload, '$.detail.pack') FROM events e "
+                  "WHERE e.conv_id = m.conv_id AND e.kind = 'trace' "
+                  "AND json_extract(e.payload, '$.detail.pack') IS NOT NULL "
+                  "ORDER BY e.created_at DESC LIMIT 1)")
+
     @staticmethod
-    def _admin_conversation_where(user_id: Optional[str], q: Optional[str]) -> tuple:
-        """拼装管理端会话列表的 WHERE 子句与参数(动态 SQL,参数化防注入)。"""
+    def _admin_conversation_where(user_id: Optional[str], q: Optional[str],
+                                   packs: Optional[List[str]] = None) -> tuple:
+        """拼装管理端会话列表的 WHERE 子句与参数(动态 SQL,参数化防注入)。
+
+        packs: 插件多选过滤。元素为 pack 名;空串元素表示"其他"
+        (没有任何路由 trace 的会话,如纯闲聊/失败请求)。
+        """
         clauses, params = [], []
         if user_id:
             clauses.append("m.user_id = ?")
@@ -440,6 +458,20 @@ class ConversationStore:
             clauses.append("(m.title LIKE ? OR m.conv_id IN ("
                            "SELECT e.conv_id FROM events e WHERE e.kind = 'user' AND e.payload LIKE ?))")
             params.extend([f"%{q}%", f"%{q}%"])
+        if packs:
+            expr = ConversationStore._PACK_EXPR
+            named = [p for p in packs if p]
+            wants_other = any(not p for p in packs)
+            parts = []
+            if named:
+                marks = ",".join("?" * len(named))
+                parts.append(f"COALESCE({expr}, '') IN ({marks})")
+                params.extend(named)
+            if wants_other:
+                # "其他" = 没路由记录(last_pack 为 NULL → COALESCE 空)
+                parts.append(f"COALESCE({expr}, '') = ''")
+            if parts:
+                clauses.append("(" + " OR ".join(parts) + ")")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return where, params
 

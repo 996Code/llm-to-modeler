@@ -118,6 +118,40 @@ def test_admin_lists_all_users_conversations(client):
     assert by_user["bob"]["messageCount"] == 0
 
 
+def test_admin_conversation_pack_column_and_filter(client):
+    """插件类型列(最近一次路由 trace 的 pack)+ packs 多选过滤(含「其他」)。"""
+    store = client.app.state.conversation_store
+    conv_a, conv_b = _seed(store)
+    # alice 的会话路由到了 njmind_form;bob 的没有路由记录(=其他)
+    store.append_event(conv_a["id"], "trace", {
+        "stage": "intent_route", "title": "意图路由", "status": "ok",
+        "detail": {"pack": "njmind_form", "tool": "create_form",
+                   "reason": "pack=njmind_form", "fallback": False},
+    })
+    body = client.get("/api/admin/conversations", headers=_auth_headers()).json()
+    by_user = {i["userId"]: i for i in body["items"]}
+    assert by_user["alice"]["pack"] == "njmind_form"
+    assert by_user["bob"]["pack"] == ""
+
+    # packs=njmind_form → 只有 alice
+    body = client.get("/api/admin/conversations", params={"packs": "njmind_form"},
+                      headers=_auth_headers()).json()
+    assert body["total"] == 1 and body["items"][0]["userId"] == "alice"
+    # packs=__other__ → 只有 bob(无路由记录)
+    body = client.get("/api/admin/conversations", params={"packs": "__other__"},
+                      headers=_auth_headers()).json()
+    assert body["total"] == 1 and body["items"][0]["userId"] == "bob"
+    # 多选 = OR:njmind_form + 其他 → 两条都在
+    body = client.get("/api/admin/conversations", params={"packs": "njmind_form,__other__"},
+                      headers=_auth_headers()).json()
+    assert body["total"] == 2
+    # 与 userId 过滤可叠加
+    body = client.get("/api/admin/conversations",
+                      params={"packs": "njmind_form,__other__", "userId": "bob"},
+                      headers=_auth_headers()).json()
+    assert body["total"] == 1 and body["items"][0]["userId"] == "bob"
+
+
 def test_admin_conversation_filters_and_pagination(client):
     store = client.app.state.conversation_store
     _seed(store)
