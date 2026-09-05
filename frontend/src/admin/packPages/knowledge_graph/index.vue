@@ -127,10 +127,15 @@ function refreshAll() {
   loadKbs()
 }
 
+let loadKbsSeq = 0   // 请求序号守卫:旧响应晚到不得清掉刚选中的库(如新建后)
+
 async function loadKbs() {
+  const seq = ++loadKbsSeq
   loadingKbs.value = true
   await loadSafely(async () => {
-    kbs.value = await fetchKgKbs()
+    const items = await fetchKgKbs()
+    if (seq !== loadKbsSeq) return   // 已有更新请求,丢弃过期结果
+    kbs.value = items
     if (currentKbId.value && !kbs.value.some((k) => k.id === currentKbId.value)) {
       currentKbId.value = ''
     }
@@ -138,7 +143,7 @@ async function loadKbs() {
       currentKbId.value = kbs.value[0].id
     }
   })
-  loadingKbs.value = false
+  if (seq === loadKbsSeq) loadingKbs.value = false
 }
 
 function onKbChange() {

@@ -108,7 +108,7 @@
             </div>
             <!-- 逐块抽取组:进度条式行 -->
             <div v-for="lg in g.logs" :key="lg.id" class="tk-row" :class="`tk-row-${lg.level}`">
-              <template v-if="g.key === 'chunks'">
+              <template v-if="g.key.startsWith('chunks')">
                 <div class="tk-chunk-row">
                   <span class="tk-chunk-id">块{{ chunkData(lg).chunk ?? '?' }}</span>
                   <a-progress
@@ -298,7 +298,7 @@ const filteredLogs = computed(() =>
 const viewMode = ref<'structured' | 'raw'>('structured')
 
 // ── 结构化视图:按 message 前缀把日志切成事件组 ─────────────
-interface LogGroup { key: string; title: string; badge?: string; logs: TaskLogItem[] }
+interface LogGroup { key: string; title: string; badge?: string; logs: TaskLogItem[]; maxDurationMs?: number }
 
 const structuredGroups = computed<LogGroup[]>(() => {
   const groups: LogGroup[] = []
@@ -308,12 +308,18 @@ const structuredGroups = computed<LogGroup[]>(() => {
     if (!cur || cur.key !== g.key) { cur = { ...g, logs: [] }; groups.push(cur) }
     cur.logs.push(lg)
   }
-  // 逐块组徽章 = n块·Ne/Nr;其他组取首条时间戳
-  for (const g of groups) {
-    if (g.key === 'chunks') {
+  for (let i = 0; i < groups.length; i++) {
+    const g = groups[i]
+    // v-for key 必须同级唯一:同一阶段 key 会被其他组隔开再出现(多批次
+    // 必然 batch/chunks/batchsum 各出现多次),拼上组序号
+    g.key = `${g.key}#${i}`
+    if (g.key.startsWith('chunks')) {
       const ents = g.logs.reduce((s, l) => s + (Number(chunkData(l).entities) || 0), 0)
       const rels = g.logs.reduce((s, l) => s + (Number(chunkData(l).relations) || 0), 0)
       g.badge = `${g.logs.length} 块 · ${ents}e/${rels}r`
+      // 基线存组内:chunkPct 用各自组的 max(词表增大后批次普遍更慢,
+      // 用全局第一个组当基线会让后续批次全部顶格 100%)
+      g.maxDurationMs = Math.max(1, ...g.logs.map((l) => Number(chunkData(l).duration_ms) || 1))
     }
   }
   return groups
@@ -336,15 +342,16 @@ function groupOf(lg: TaskLogItem): { key: string; title: string } {
   return { key: `misc-${m.slice(0, 6)}`, title: '其他' }
 }
 
-/** 逐块进度:LLM 耗时占该组最大耗时的比例(相对耗时可视化,不是完成度) */
+/** 逐块进度:LLM 耗时占所在组最大耗时的比例(相对耗时可视化,不是完成度) */
 function chunkData(lg: TaskLogItem): LogData {
   return (lg.data && typeof lg.data === 'object' ? lg.data : {}) as LogData
 }
 
 function chunkPct(lg: TaskLogItem): number {
   const d = Number(chunkData(lg).duration_ms) || 0
-  const max = Math.max(...(structuredGroups.value.find((g) => g.key === 'chunks')?.logs
-    .map((l) => Number(chunkData(l).duration_ms) || 1) || [1]), 1)
+  // 找 lg 所在的 chunks 组(组 key 已拼序号,按 logs 包含判断)
+  const g = structuredGroups.value.find((x) => x.key.startsWith('chunks') && x.logs.includes(lg))
+  const max = g?.maxDurationMs || 1
   return Math.max(6, Math.round((d / max) * 100))
 }
 
@@ -408,12 +415,19 @@ function mergeLog(lg: TaskLogItem) {
 function stopWatching() {
   abortStream?.()
   abortStream = null
+  sseAlive = false
+  watchSeq++          // 使在途的轮询回调全部过期(世代守卫)
   if (pollTimer) window.clearInterval(pollTimer)
   pollTimer = undefined
 }
 
+let watchSeq = 0       // 监听世代:每次 startWatching/stopWatching 自增
+let sseAlive = false   // SSE 是否存活(终态提示只走一条通道的判据)
+
 function startWatching(task: TaskItem) {
   stopWatching()
+  const mySeq = ++watchSeq
+  const isCurrent = () => mySeq === watchSeq
   // 终态提示纪律:只在抽屉可见且页面在前台时提示;成功用 success 静默一闪,
   // 失败/取消才用 warning 拉注意力。后台(切Tab/最小化)不弹——回来时
   // 抽屉/列表的状态本身就是结果,别打断用户正在做的事
@@ -426,8 +440,10 @@ function startWatching(task: TaskItem) {
     }
   }
   // SSE 主通道:快照 + 增量
+  sseAlive = true
   abortStream = streamTaskEvents(task.id, {
     onSnapshot: (d) => {
+      if (!isCurrent()) return
       activeTask.value = d.task
       lastLogId = 0
       logs.value = []
@@ -441,6 +457,7 @@ function startWatching(task: TaskItem) {
     },
     onLog: mergeLog,
     onStatus: (d) => {
+      if (!isCurrent()) return
       if (activeTask.value) activeTask.value.status = d.status
       if (FINAL.includes(d.status)) {
         notifyFinal(d.status)
@@ -448,25 +465,33 @@ function startWatching(task: TaskItem) {
         load()
       }
     },
+    // SSE 断流(网络抖动/代理断连):标记死亡,终态提示与状态补齐交给轮询
+    onEnd: () => { sseAlive = false },
   })
   // 轮询降级:SSE 断了(或环境不支持)也能持续看到进度/日志。
   // 同时补任务状态(不只补日志)——SSE 断流期间进度条/状态会冻结,
   // 任务到终态时也靠这里停表,轮询才有自然的终点。
-  // 提示去重:SSE 在途时轮询不弹(终态提示只走一条通道)
+  // 世代守卫:openLogs 切到别的任务后,本轮回调直接作废——既不污染
+  // 新任务的日志列表,也不会 stopWatching 误杀新任务的 SSE/轮询。
+  // 终态提示判据用显式 sseAlive(SSE 静默死亡时 abortStream 仍是函数,
+  // 用它判断方向是反的);SSE 已提示过终态时 stopWatching 已把 sseAlive
+  // 置 false,轮询不会二弹
   pollTimer = window.setInterval(async () => {
-    if (document.hidden) return
+    if (!isCurrent() || document.hidden) return
     try {
       const t = await fetchTask(task.id)
+      if (!isCurrent()) return
       if (activeTask.value?.id === task.id) {
         activeTask.value = { ...activeTask.value, ...t }
       }
       if (FINAL.includes(t.status)) {
-        if (!abortStream) notifyFinal(t.status)   // SSE 已断才由轮询提示
+        if (!sseAlive) notifyFinal(t.status)   // SSE 已死/已提示,才由轮询兜
         stopWatching()
         load()
         return
       }
       const { items } = await fetchTaskLogs(task.id, lastLogId)
+      if (!isCurrent()) return
       items.forEach(mergeLog)
     } catch { /* 静默:下一轮再试 */ }
   }, 3000)
