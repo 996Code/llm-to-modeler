@@ -465,9 +465,12 @@ async def search(request: Request, payload: Dict[str, Any]):
     from domains.knowledge_graph import retrieval
     from sdk.pack_api import user_id
     user = user_id(request)
+    # conv_id 可选:传入则检索调用日志(意图/图/向量/回答)关联该会话,
+    # 管理端链路视图里能看到完整检索链;不传保持无会话归属
+    conv_id = str((payload or {}).get("conv_id") or "").strip() or None
     try:
         return retrieval.answer_question(
-            request.app.state, kb, query, conv_id=None, top_k=top_k,
+            request.app.state, kb, query, conv_id=conv_id, top_k=top_k,
         ) | {"user": user}
     except Exception as e:
         # 异常详情只进服务端日志;用户级端点不回显内部错误串(可能带

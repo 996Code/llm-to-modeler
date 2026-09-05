@@ -106,8 +106,17 @@ async def admin_list_conversations(request: Request):
     offset = max(0, _int_param(request, "offset", 0))
     user_id = (request.query_params.get("userId") or "").strip() or None
     q = (request.query_params.get("q") or "").strip() or None
-    items = store.list_all_conversations(limit=limit, offset=offset, user_id=user_id, q=q)
-    total = store.count_all_conversations(user_id=user_id, q=q)
+    # packs:插件多选过滤(逗号分隔;空串元素=「其他」,即无路由记录的会话)
+    packs_raw = (request.query_params.get("packs") or "").strip()
+    packs = [p.strip() for p in packs_raw.split(",") if p.strip() != ""] if packs_raw else None
+    # 显式传 packs= (空值但存在) 或含 "__other__" → 只要"其他"
+    if packs_raw and not packs:
+        packs = [""]
+    if packs and "__other__" in packs:
+        packs = [p if p != "__other__" else "" for p in packs]
+    items = store.list_all_conversations(
+        limit=limit, offset=offset, user_id=user_id, q=q, packs=packs)
+    total = store.count_all_conversations(user_id=user_id, q=q, packs=packs)
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
@@ -243,6 +252,8 @@ def _build_trace(conv: Dict[str, Any], events: List[Dict[str, Any]], calls: List
 
     llm_calls = [i for i in timeline if i["type"] == "call" and i["callType"] == "llm"]
     upstream_calls = [i for i in timeline if i["type"] == "call" and i["callType"] == "upstream"]
+    graph_calls = [i for i in timeline if i["type"] == "call" and i["callType"] == "graph"]
+    vector_calls = [i for i in timeline if i["type"] == "call" and i["callType"] == "vector"]
     trace_events = [e for e in events if e["kind"] == "trace"]
     user_turns = [t for t in turns if t["userContent"] is not None]
     return {
@@ -255,6 +266,8 @@ def _build_trace(conv: Dict[str, Any], events: List[Dict[str, Any]], calls: List
             "llmMs": sum(i["durationMs"] or 0 for i in llm_calls),
             "upstreamCalls": len(upstream_calls),
             "upstreamMs": sum(i["durationMs"] or 0 for i in upstream_calls),
+            "graphCalls": len(graph_calls),
+            "vectorCalls": len(vector_calls),
             "firstAt": timeline[0]["at"] if timeline else None,
             "lastAt": timeline[-1]["at"] if timeline else None,
         },
@@ -274,6 +287,8 @@ def _new_turn() -> Dict[str, Any]:
         "llmMs": 0,
         "upstreamCount": 0,
         "upstreamMs": 0,
+        "graphCount": 0,
+        "vectorCount": 0,
         "items": [],
     }
 
@@ -288,6 +303,10 @@ def _accumulate(turn: Dict[str, Any], item: Dict[str, Any]) -> None:
     elif item["callType"] == "upstream":
         turn["upstreamCount"] += 1
         turn["upstreamMs"] += item["durationMs"] or 0
+    elif item["callType"] == "graph":
+        turn["graphCount"] += 1
+    elif item["callType"] == "vector":
+        turn["vectorCount"] += 1
 
 
 @router.delete("/conversations/{conv_id}")

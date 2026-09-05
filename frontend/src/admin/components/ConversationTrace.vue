@@ -56,9 +56,11 @@
               <!-- LLM / 上游调用 -->
               <template v-else-if="item.type === 'call'">
                 <div class="tr-item-head">
-                  <span class="tr-tag" :class="item.callType === 'llm' ? 'tg-llm' : 'tg-up'">
-                    {{ item.callType === 'llm' ? 'LLM' : '上游' }} · {{ stageLabel(item.stage, item.endpoint) }}
+                  <span class="tr-tag" :class="CALL_TYPE_META[item.callType || '']?.cls || 'tg-sys'">
+                    {{ CALL_TYPE_META[item.callType || '']?.label || item.callType }} · {{ stageLabel(item.stage, item.endpoint) }}
                   </span>
+                  <!-- 检索调用摘要:召回量/匹配度一眼可见,不用展开 JSON -->
+                  <span v-if="recallSummary(item)" class="tr-recall">{{ recallSummary(item) }}</span>
                   <span class="tr-dur" :class="durClass(item.durationMs)">{{ item.durationMs ?? '-' }}ms</span>
                   <a-tag v-if="item.statusCode != null" :color="item.statusCode < 400 ? 'green' : 'red'" class="tr-code">
                     {{ item.statusCode }}
@@ -124,6 +126,37 @@ const STAGE_LABELS: Record<string, string> = {
   'clone_form.parse': '克隆解析',
   'chat.reply': '闲聊回复',
   'submit_leave.parse': '请假信息提取',
+  // 知识图谱检索链路(LLM 三步 + 图/向量库两路)
+  'kg.query': 'LLM·检索意图解析',
+  'kg.query_embed': 'LLM·查询向量化',
+  'kg.answer': 'LLM·组织回答',
+  'kg.find_entities': '图谱·种子实体匹配',
+  'kg.subgraph': '图谱·子图召回',
+  'kg.vector_search': '向量·相似检索',
+}
+
+/** 调用类型元数据(与调用日志 Tab 一致的四分类) */
+const CALL_TYPE_META: Record<string, { label: string; cls: string }> = {
+  llm: { label: 'LLM', cls: 'tg-llm' },
+  upstream: { label: '上游', cls: 'tg-up' },
+  graph: { label: '图谱', cls: 'tg-graph' },
+  vector: { label: '向量', cls: 'tg-vector' },
+}
+
+/** 图/向量检索的召回摘要(图谱=种子/节点/边,向量=命中数+top 分数) */
+function recallSummary(item: { callType?: string; responseData?: unknown }): string {
+  if (item.callType !== 'graph' && item.callType !== 'vector') return ''
+  const r = item.responseData as
+    | { hits?: number; nodes?: number; edges?: number; topScore?: number | null; termDetail?: unknown[] } | null
+  if (!r) return ''
+  if (item.callType === 'graph') {
+    if (r.hits != null) return `种子命中 ${r.hits}/${(r.termDetail || []).length} 词`
+    if (r.nodes != null) return `召回 ${r.nodes} 节点 / ${r.edges ?? 0} 边`
+  }
+  if (item.callType === 'vector' && r.hits != null) {
+    return `召回 ${r.hits} 条${r.topScore != null ? ` · top ${r.topScore}` : ''}`
+  }
+  return ''
 }
 
 function stageLabel(stage: string | null | undefined, fallback: string | undefined): string {
@@ -139,7 +172,12 @@ function eventLabel(kind: string | undefined): string {
 }
 
 function itemLineClass(item: { type: string; kind?: string; callType?: string }): string {
-  if (item.type === 'call') return item.callType === 'upstream' ? 'upcall' : 'call'
+  if (item.type === 'call') {
+    if (item.callType === 'upstream') return 'upcall'
+    if (item.callType === 'graph') return 'graphcall'
+    if (item.callType === 'vector') return 'vectorcall'
+    return 'call'
+  }
   switch (item.kind) {
     case 'user': return 'user'
     case 'assistant': return 'assistant'
@@ -233,6 +271,14 @@ watch(() => props.convId, load)
 .tr-trace .tr-rail { background: #f59e0b; }
 .tr-call .tr-rail { background: #8b5cf6; }
 .tr-upcall .tr-rail { background: #06b6d4; }
+.tr-graphcall .tr-rail { background: #3b82f6; }
+.tr-vectorcall .tr-rail { background: #22c55e; }
+.tg-graph { background: #eff6ff; color: #1d4ed8; }
+.tg-vector { background: #f0fdf4; color: #15803d; }
+.tr-recall {
+  font-size: 11px; color: #2563eb; background: #f0f5ff;
+  border-radius: 6px; padding: 1px 8px; font-variant-numeric: tabular-nums;
+}
 .tr-sys .tr-rail { background: #cbd5e1; }
 
 .tr-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
