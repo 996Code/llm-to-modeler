@@ -12,8 +12,6 @@ SDK 图/向量存储(graph_store/vector_store)的调用参数由调用方注入;
 前缀登记是幂等的(同 owner 重复登记合法),装配/热切换反复经过这里
 不会炸;撞前缀(别的插件声明了 kg)会在装配期 fail-fast。
 """
-from typing import Any, Dict
-
 from sdk import graph_store as sdk_graph
 from sdk import vector_store as sdk_vector
 from sdk.scope_registry import register_prefix, unregister_prefix
@@ -61,11 +59,12 @@ def reset_caches() -> None:
     with kg_tasks._inflight_lock:
         busy = len(kg_tasks._inflight)
     if busy:
-        # 只清前缀登记(防别人占用 kg),连接留给在途任务
-        unregister_prefix("kg", owner=PACK_NAME)
+        # 连接与前缀登记都留给在途任务:在途任务仍持有 prefix="kg_" 的
+        # store 在写数据,此刻注销前缀会打开抢注窗口(另一插件登记 kg,
+        # 两边共用命名空间直到冲突在数据互踩后才暴露)。下次 unload 再清。
         import logging
         logging.getLogger(__name__).warning(
-            f"unload 跳过连接释放:{busy} 个导入任务在途(连接随任务结束/进程退出回收)")
+            f"unload 跳过连接释放与前缀注销:{busy} 个导入任务在途(随任务结束/进程退出回收)")
         return
     sdk_graph.reset_graph_store_cache()
     sdk_vector.reset_vector_store_cache()

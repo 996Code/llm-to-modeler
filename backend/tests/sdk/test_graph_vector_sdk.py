@@ -193,3 +193,66 @@ class TestCypherRendering:
                 cy = str(c.args[0]) if c.args else ""
                 assert "{self._" not in cy, cy[:80]
                 assert "{{" not in cy and "}}" not in cy, cy[:80]  # 转义残留
+
+
+class TestFactoryPrefix:
+    """工厂级前缀回归(H1):get_*_store 必须把前缀透传进构造——
+    漏传时两个前缀的插件拿到不同对象但 _prefix 全是默认值,静默互踩
+    命名空间(KG 因恰好等于默认值而幸免,NL2BI 按文档示例接入即中招)。
+    """
+
+    def test_vector_factory_passes_prefix(self, monkeypatch):
+        import sdk.vector_store as vs_mod
+        vs_mod._cached_store, vs_mod._cached_fp = None, ()
+        calls = []
+
+        real_cls = vs_mod.MilvusVectorStore
+
+        def fake_ctor(uri, user="", password="", collection_prefix="kg"):
+            calls.append(collection_prefix)
+            s = real_cls.__new__(real_cls)
+            s._client = MagicMock()
+            s._prefix = collection_prefix
+            return s
+
+        monkeypatch.setattr(vs_mod, "MilvusVectorStore", fake_ctor)
+        try:
+            s1 = vs_mod.get_vector_store({"milvus_uri": "u"}, collection_prefix="kg")
+            s2 = vs_mod.get_vector_store({"milvus_uri": "u"}, collection_prefix="bi")
+            assert s1._prefix == "kg"
+            assert s2._prefix == "bi", "工厂必须把 collection_prefix 透传进构造(H1)"
+            assert s1 is not s2
+            assert calls == ["kg", "bi"]   # 两个前缀各构造一次(指纹区分)
+        finally:
+            vs_mod._cached_store, vs_mod._cached_fp = None, ()
+
+    def test_graph_factory_passes_prefix(self, monkeypatch):
+        import sdk.graph_store as gs_mod
+        gs_mod._cached_store, gs_mod._cached_fp = None, ()
+        calls = []
+
+        real_cls = gs_mod.Neo4jGraphStore
+
+        def fake_ctor(uri, user="", password="", database="neo4j", **kw):
+            calls.append(kw)
+            s = real_cls.__new__(real_cls)
+            s._database = database
+            s._driver = MagicMock()
+            s._prefix = kw.get("prefix", "kg_")
+            s._label = kw.get("node_label", "Entity")
+            s._rel = kw.get("rel_type", "RELATES")
+            s._sp = kw.get("scope_prop", "kb_id")
+            s.ensure_constraints = lambda: None
+            return s
+
+        monkeypatch.setattr(gs_mod, "Neo4jGraphStore", fake_ctor)
+        try:
+            s1 = gs_mod.get_graph_store({"neo4j_uri": "u"})
+            s2 = gs_mod.get_graph_store({"neo4j_uri": "u"}, prefix="bi_", node_label="R")
+            assert s1._prefix == "kg_"
+            assert s2._prefix == "bi_"
+            assert s2._label == "R"
+            assert s1 is not s2
+            assert calls[1].get("prefix") == "bi_"
+        finally:
+            gs_mod._cached_store, gs_mod._cached_fp = None, ()

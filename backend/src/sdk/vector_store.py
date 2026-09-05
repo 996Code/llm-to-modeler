@@ -225,7 +225,8 @@ def get_vector_store(settings: Dict[str, Any],
             if _cached_store is not None and _cached_fp == fp:
                 return _cached_store
         try:
-            store = MilvusVectorStore(uri=fp[0], user=fp[1] or "", password=fp[2] or "")
+            store = MilvusVectorStore(uri=fp[0], user=fp[1] or "", password=fp[2] or "",
+                                      collection_prefix=collection_prefix)
         except Exception:
             with _cache_lock:
                 if _cached_store is not None:
