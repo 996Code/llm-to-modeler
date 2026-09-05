@@ -181,6 +181,8 @@ class ToolResult:
 6. **底层调用走 ctx**: LLM/上游/打点必须走 ctx 通道（可观测是平台能力,见插件指南 §2.2）
 7. **长活走任务框架**: 分钟级操作用 `register_tasks` + `queue_key` 串行,不要占请求线程
 8. **外部存储走 SDK**: 图/向量/文档解析用 `sdk/graph_store` 等设施,前缀先登记后使用
+9. **自有设施调用自记日志**: 图/向量库等调用写 `call_logs`(call_type 自定义如 graph/vector),
+   与 llm/upstream 同表同视图(参考 `knowledge_graph/retrieval.py` 的 `_log_retrieval_call`)
 
 ## 测试工具包
 

@@ -372,6 +372,11 @@ def create_registry() -> ToolRegistry:
 - **依赖门控**：manifest `dependencies` 声明外部设施（neo4j/milvus）+ 探针,
   未配置 fail-closed 不可启用;配置解析链 设置页 > env > 默认,补配后热加载
   （`services/pack_dependency.py`）
+- **检索可观测**：插件对图/向量库的每次调用自行写 `call_logs`
+  （call_type=graph/vector,与 llm/upstream 同表同视图）——请求含参数
+  （种子词/hops/topK）,响应含结果与质量指标（逐词命中/召回量/截断水位/
+  逐条相似度分数）。参考 `knowledge_graph/retrieval.py` 的
+  `_log_retrieval_call`;SDK 存储层不记日志（零领域知识,观测归插件）
 - **后台任务框架**：`mgr.submit(..., queue_key=...)` 提交——同 key FIFO 串行
   （如同库导入不并发写图）、协作式取消、进度/结构化日志推送、SSE 事件流、
   SQLite 持久化（`services/task_manager.py` / `task_store.py` / `api/tasks.py`）

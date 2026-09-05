@@ -31,6 +31,9 @@
 >   问答 + G6 图谱浏览管理页
 > - **SDK 存储设施下沉**：graph_store/vector_store/doc_parser/scope_registry，
 >   前缀登记 + scope 签发的命名空间隔离契约（NL2BI 等后续插件复用）
+> - **检索链路可观测**：图/向量库调用入 call_logs（graph/vector 类型），
+>   逐词命中/召回量/截断水位/逐条相似度分数；管理端四类调用筛选 +
+>   会话链路中文环节名与召回摘要行
 
 ---
 
