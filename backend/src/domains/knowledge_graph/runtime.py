@@ -45,15 +45,15 @@ def get_kg_store(app_state) -> KGStore:
 
 
 def get_graph(app_state):
-    """Neo4j 图存储(连接由设置解析链决定,指纹缓存)。"""
-    from domains.knowledge_graph.graph_store import get_graph_store
-    return get_graph_store(settings_reader(app_state).all())
+    """Neo4j 图存储(SDK 单例,经 stores 适配层注入 kg 前缀)。"""
+    from domains.knowledge_graph import stores
+    return stores.get_graph(app_state)
 
 
 def get_vector(app_state):
     """Milvus 向量存储(同上)。"""
-    from domains.knowledge_graph.vector_store import get_vector_store
-    return get_vector_store(settings_reader(app_state).all())
+    from domains.knowledge_graph import stores
+    return stores.get_vector(app_state)
 
 
 def files_root() -> Path:

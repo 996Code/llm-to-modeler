@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 
 from sdk.pack_api import admin_required
 from domains.knowledge_graph import runtime
-from domains.knowledge_graph.doc_parser import (
+from sdk.doc_parser import (
     allowed_extension, mime_for, parse_to_text,
 )
 from domains.knowledge_graph.schema_templates import (
@@ -148,7 +148,7 @@ async def delete_kb(kb_id: str, request: Request):
     # 三存储 + 文件联动清理(单点失败不阻断:后续残留可再删一次)
     errors: List[str] = []
     try:
-        _graph(request).delete_kb(kb_id)
+        _graph(request).delete_scope(kb_id)
     except Exception as e:
         errors.append(f"neo4j: {e}")
     kb = store.get_kb(kb_id)

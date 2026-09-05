@@ -1,22 +1,35 @@
-"""MilvusVectorStore - 知识图谱插件的向量存储(每知识库一个 collection)。
+"""MilvusVectorStore —— SDK 通用向量存储(Milvus 2.4/2.5,pymilvus)。
 
-【隔离模型】
-  collection 名 = kg_{kb_id}_v1 —— 删库即 drop,库与库之间物理隔离;
-  维度建库时探测一次记入 kg_knowledge_bases(换 embedding 模型 = 换维度,
-  重建库或重新导入)。
+【模块定位】
+从 knowledge_graph 插件下沉的通用向量设施:按 scope 物理隔离的
+collection 管理 + 向量写入/删除/相似度检索。零领域知识——只收
+"文本 + 向量"对,不认识 embedding 模型/知识库/文档(embedding 由
+调用方生成后传入;SDK 不依赖任何 LLM 配置,测试可用 Fake 向量)。
 
-【与 embedder 的关系】
-  本类只管向量存取,不负责向量化;构造时注入 embedder(可调用对象
-  texts -> List[List[float]],M4 接 LLMClient.embeddings)。
-  vector_enabled=False 的库(未配置 embedding 模型)完全跳过本层,
-  降级为纯图谱检索。
+【数据模型】(每 scope 一个 collection,物理隔离)
+  collection 名 = {collection_prefix}_{scope 转下划线}_v1
+  字段: chunk_id VARCHAR(64) PK / doc_id VARCHAR / seq INT64 /
+        text VARCHAR(65535) / vector FLOAT_VECTOR(dim)
+  索引: HNSW(metric=COSINE, M=16, efConstruction=200)
+  写后 flush——读己之写(检索立刻可见)。
 
-【pymilvus 版本】本机 Milvus 2.4 服务端 → pymilvus 2.4/2.5 系客户端
-  (MilvusClient quick-setup API:create_collection/upsert/search/delete)。
+【命名空间隔离(与 scope_registry 契约配套)】
+  - collection_prefix:每个使用方插件声明自己的前缀并 register_prefix
+    登记("kg"/"bi"/"rag"...),collection 名天然不撞;
+  - scope_id 契约:所有方法首参必须是服务端签发的 UUID
+    (scope_registry.new_scope_id() 或调用方自签),入口防御拒收
+    用户输入直传。
+
+【连接管理】进程级单例 + 指纹缓存(含前缀),双检锁纪律同 graph_store。
+
+【测试替身】VectorStore Protocol 声明了替身需实现的完整方法集;
+单测用内存 Fake,不要求真实 Milvus。
 """
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
+
+from sdk.scope_registry import is_scope_id_safe
 
 logger = logging.getLogger(__name__)
 
@@ -26,18 +39,50 @@ _ID_FIELD = "chunk_id"
 _MAX_TEXT_LEN = 65535  # VARCHAR 上限(Milvus 2.4)
 
 
-def collection_name(kb_id: str) -> str:
-    return f"kg_{kb_id.replace('-', '_')}_v1"
+class VectorStore(Protocol):
+    """向量存储协议(鸭子类型)。方法集由 FakeVector 测试替身证明充分。
+
+    scope_id 契约见模块 docstring——实现方应在入口校验。
+    """
+
+    def ensure_collection(self, scope: str, dim: int) -> None: ...
+    def drop_collection(self, scope: str) -> None: ...
+    def upsert_chunks(self, scope: str, items: List[Dict[str, Any]]) -> int: ...
+    def delete_by_doc(self, scope: str, doc_id: str) -> None: ...
+    def search(self, scope: str, query_vector: List[float], top_k: int = 5,
+               doc_id: Optional[str] = None) -> List[Dict[str, Any]]: ...
+    def count(self, scope: str) -> int: ...
+    def close(self) -> None: ...
+
+
+def collection_name(collection_prefix: str, scope_id: str) -> str:
+    """collection 名:{prefix}_{scope 的 - 转 _}_v1(与存量 kg_* 规则一致)。"""
+    return f"{collection_prefix}_{scope_id.replace('-', '_')}_v1"
 
 
 class MilvusVectorStore:
-    """每库一个 collection 的向量存取。"""
+    """每 scope 一个 collection 的向量存取。
 
-    def __init__(self, uri: str, user: str = "", password: str = ""):
+    Args:
+        collection_prefix: collection 名前缀(命名空间边界;调用方需先
+            在 scope_registry 登记该前缀)。
+    """
+
+    def __init__(self, uri: str, user: str = "", password: str = "",
+                 collection_prefix: str = "kg"):
         from pymilvus import MilvusClient
         self._client = MilvusClient(
             uri=uri, user=user or None, password=password or None,
         )
+        self._prefix = collection_prefix
+
+    def _check_scope(self, scope_id: str) -> None:
+        """scope_id 契约入口防御(同 graph_store,详见 scope_registry)。"""
+        if not is_scope_id_safe(scope_id):
+            raise ValueError(f"非法 scope_id(必须为服务端签发的 UUID): {scope_id!r}")
+
+    def _name(self, kb_id: str) -> str:
+        return collection_name(self._prefix, kb_id)
 
     # ── 生命周期 ───────────────────────────────────────────
 
@@ -52,12 +97,10 @@ class MilvusVectorStore:
 
     # ── collection 管理 ────────────────────────────────────
 
-    def has_collection(self, kb_id: str) -> bool:
-        return self._client.has_collection(collection_name(kb_id))
-
     def ensure_collection(self, kb_id: str, dim: int) -> None:
         """建库 collection(幂等)。dim 来自建库时的一次 embedding 探测。"""
-        name = collection_name(kb_id)
+        self._check_scope(kb_id)
+        name = self._name(kb_id)
         if self._client.has_collection(name):
             return
         from pymilvus import DataType
@@ -78,7 +121,8 @@ class MilvusVectorStore:
         logger.info(f"milvus collection created: {name} (dim={dim})")
 
     def drop_collection(self, kb_id: str) -> None:
-        name = collection_name(kb_id)
+        self._check_scope(kb_id)
+        name = self._name(kb_id)
         if self._client.has_collection(name):
             self._client.drop_collection(name)
             logger.info(f"milvus collection dropped: {name}")
@@ -87,9 +131,10 @@ class MilvusVectorStore:
 
     def upsert_chunks(self, kb_id: str, items: List[Dict[str, Any]]) -> int:
         """写入/覆盖 chunk 向量。items: [{chunk_id, doc_id, seq, text, vector}]。"""
+        self._check_scope(kb_id)
         if not items:
             return 0
-        name = collection_name(kb_id)
+        name = self._name(kb_id)
         # pymilvus MilvusClient.upsert 的参数名是 data(2.4/2.5 一致)
         rows = [{
             _ID_FIELD: it["chunk_id"],
@@ -108,30 +153,23 @@ class MilvusVectorStore:
 
     def delete_by_doc(self, kb_id: str, doc_id: str) -> None:
         """删除某文档的全部向量(重导入清理路径)。删除后 flush,防旧数据复现。"""
-        name = collection_name(kb_id)
+        self._check_scope(kb_id)
+        name = self._name(kb_id)
         self._client.delete(collection_name=name, filter=f'doc_id == "{doc_id}"')
         try:
             self._client.flush(collection_name=name)
         except Exception:
             logger.warning("milvus flush failed after delete", exc_info=True)
 
-    def delete_by_chunks(self, kb_id: str, chunk_ids: List[str]) -> None:
-        if not chunk_ids:
-            return
-        ids = ",".join(f'"{c}"' for c in chunk_ids)
-        self._client.delete(
-            collection_name=collection_name(kb_id),
-            filter=f"{_ID_FIELD} in [{ids}]",
-        )
-
     def search(
         self, kb_id: str, query_vector: List[float], top_k: int = 5,
         doc_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """相似度检索(COSINE,分数越高越相似)。"""
+        self._check_scope(kb_id)
         expr = f'doc_id == "{doc_id}"' if doc_id else None
         results = self._client.search(
-            collection_name=collection_name(kb_id),
+            collection_name=self._name(kb_id),
             data=[query_vector],
             limit=top_k,
             filter=expr,
@@ -152,7 +190,8 @@ class MilvusVectorStore:
         return hits
 
     def count(self, kb_id: str) -> int:
-        name = collection_name(kb_id)
+        self._check_scope(kb_id)
+        name = self._name(kb_id)
         if not self._client.has_collection(name):
             return 0
         stats = self._client.get_collection_stats(name)
@@ -167,14 +206,16 @@ _cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络
 _build_lock = threading.Lock()     # 串行化连接构建
 
 
-def get_vector_store(settings: Dict[str, Any]) -> MilvusVectorStore:
-    """按解析后的插件配置取/建向量存储单例(指纹 = 连接三元组)。
+def get_vector_store(settings: Dict[str, Any],
+                     collection_prefix: str = "kg") -> MilvusVectorStore:
+    """按解析后的配置取/建向量存储单例(指纹 = 连接三元组 + 前缀)。
 
     锁纪律/失败纪律同 graph_store.get_graph_store:命中路径轻锁,构建
     在锁外,构建失败清缓存不留坏连接。
     """
     global _cached_store, _cached_fp
-    fp = (settings.get("milvus_uri"), settings.get("milvus_user"), settings.get("milvus_password"))
+    fp = (settings.get("milvus_uri"), settings.get("milvus_user"),
+          settings.get("milvus_password"), collection_prefix)
     with _cache_lock:
         if _cached_store is not None and _cached_fp == fp:
             return _cached_store

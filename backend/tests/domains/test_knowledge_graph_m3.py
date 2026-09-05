@@ -95,6 +95,9 @@ class FakeGraph:
                     del self.nodes[key]
         return {"edges": 0, "orphanEntities": before_e - len(self.nodes)}
 
+    def delete_scope(self, kb_id):
+        return self.delete_kb(kb_id)
+
     def delete_kb(self, kb_id):
         self.nodes = {k: v for k, v in self.nodes.items() if k[0] != kb_id}
         self.edges = [e for e in self.edges if e["kb"] != kb_id]

@@ -27,8 +27,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from domains.knowledge_graph import runtime
-from domains.knowledge_graph.doc_parser import chunk_text, parse_to_text
-from domains.knowledge_graph.graph_store import normalize_name
+from sdk.doc_parser import chunk_text, parse_to_text
+from sdk.graph_store import normalize_name
 from sdk.pack_api import task_conv_id
 
 logger = logging.getLogger(__name__)
@@ -354,6 +354,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             batch_entities: Dict[str, Dict] = {}
             batch_relations: List[Dict] = []
             batch_failed = 0
+            failed_ids: set = set()
             for fut in futures:
                 chunk = futures[fut]
                 try:
@@ -361,6 +362,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                 except _ExtractionError as e:
                     stats = e.stats or {}
                     batch_failed += 1
+                    failed_ids.add(chunk["id"])
                     store.mark_chunk(chunk["id"], "failed")
                     handle.log(
                         f"块 {chunk['seq']} 抽取失败(第{stats.get('attempt', '?')}次尝试,"
@@ -377,12 +379,14 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                     # 块级失败处理,保持"块失败→熔断→可续跑"语义,而不是
                     # 裸异常终止整个任务
                     batch_failed += 1
+                    failed_ids.add(chunk["id"])
                     store.mark_chunk(chunk["id"], "failed")
                     handle.log(f"块 {chunk['seq']} 处理异常: {e}", level="warn",
                                chunk=chunk["seq"], chars=len(chunk["text"]),
                                error=str(e)[:200])
                     continue
-                store.mark_chunk(chunk["id"], "done")
+                # 注意:这里不标 done——checkpoint 语义是"图谱已写入",
+                # 标早了会在 upsert 失败时让续跑跳过该块(静默丢数据)
                 # 请求级明细:prompt 规模/词表注入量/原始与归一化后条数
                 # (raw vs 规范化后的差值 = 非法/重复/超限被丢弃的量)
                 handle.log(
@@ -438,6 +442,12 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                 graph_ms = int((time.monotonic() - t_graph) * 1000)
             else:
                 graph_ms = 0
+            # checkpoint 在图谱写入成功后落:done = "贡献已在图里",
+            # upsert 抛异常时本批块保持原状态(pending/failed),续跑会重抽。
+            # 抽取失败的块已在上面标 failed,这里只落成功的
+            for c in batch:
+                if c["id"] not in failed_ids:
+                    store.mark_chunk(c["id"], "done")
             total_entities += len(kept_e)
             total_relations += len(kept_r)
 

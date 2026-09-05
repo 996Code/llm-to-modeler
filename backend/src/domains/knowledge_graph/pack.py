@@ -42,8 +42,6 @@ def unload() -> None:
     没有这个钩子的话,禁用插件后 driver/gRPC channel 会一直挂到进程
     退出;重新启用时按设置指纹复用或重建,不影响正确性。
     """
-    from domains.knowledge_graph.graph_store import reset_graph_store_cache
-    from domains.knowledge_graph.vector_store import reset_vector_store_cache
-    reset_graph_store_cache()
-    reset_vector_store_cache()
+    from domains.knowledge_graph.stores import reset_caches
+    reset_caches()
     logger.info("knowledge_graph unloaded: graph/vector connections released")
