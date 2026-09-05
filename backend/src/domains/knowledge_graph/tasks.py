@@ -343,6 +343,14 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             seqs = [c["seq"] for c in batch]
             handle.log(f"批次 {batch_index} 开始: 块 {seqs}(共 {len(batch)} 块)",
                        batch=batch_index, chunks=seqs)
+            # 批内进度心跳:LLM 单块抽取分钟级,进度只在批次边界跳变的话
+            # 用户侧感知"卡死"(E2E 实测 8 分钟停在 3%)。批开始即按
+            # "已提交到 LLM"推进到本批起点,块完成再逐块推进
+            base_done = done_before + batch_start
+            handle.set_progress(
+                min(99, _W_PARSE + _W_VECTOR + int(_W_EXTRACT * base_done / max(1, total))),
+                f"批次 {batch_index}/{(len(pending) + batch_size - 1) // batch_size}: "
+                f"LLM 抽取块 {seqs}…")
 
             futures = {
                 executor.submit(
@@ -355,6 +363,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             batch_relations: List[Dict] = []
             batch_failed = 0
             failed_ids: set = set()
+            completed_in_batch = 0
             for fut in futures:
                 chunk = futures[fut]
                 try:
@@ -413,6 +422,13 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                     else:
                         batch_entities[key] = ent
                 batch_relations.extend(relations)
+                # 块粒度进度心跳:批内每完成一块推进一次(批内并行,完成
+                # 顺序不定——按"已完成块数"推,单调不回退)
+                completed_in_batch += 1
+                handle.set_progress(
+                    min(99, _W_PARSE + _W_VECTOR
+                        + int(_W_EXTRACT * (base_done + completed_in_batch) / max(1, total))),
+                    f"批次 {batch_index}: 已抽取 {completed_in_batch}/{len(batch)} 块")
 
             if batch_failed:
                 consecutive_failures += batch_failed

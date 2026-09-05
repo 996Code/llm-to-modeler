@@ -68,7 +68,8 @@
     </a-tabs>
 
     <!-- 建库弹窗:选本体模板起步(自原库管理页并入) -->
-    <a-modal v-model:open="createOpen" title="新建知识库" :confirm-loading="creating" @ok="doCreate">
+    <a-modal v-model:open="createOpen" title="新建知识库" :confirm-loading="creating"
+             ok-text="创建" cancel-text="取消" @ok="doCreate">
       <a-form layout="vertical" style="margin-top: 8px">
         <a-form-item label="名称" required>
           <a-input v-model:value="form.name" placeholder="如:产品手册、组织人事库" :maxlength="60" />

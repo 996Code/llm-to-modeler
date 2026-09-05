@@ -96,6 +96,12 @@
             <a-radio-button value="raw"><BarsOutlined /> 原始</a-radio-button>
           </a-radio-group>
           <span class="tk-logs-count">{{ filteredLogs.length }} 条</span>
+          <!-- 心跳指示:running 任务长时间无新日志(单块 LLM 分钟级)时
+               给"仍在进行"的感知,替代干等 -->
+          <span
+            v-if="activeTask && !FINAL.includes(activeTask.status)"
+            class="tk-live-dot" :title="`最后日志 ${secondsSinceLastLog}s 前`"
+          ><span class="tk-live-pulse"></span>{{ secondsSinceLastLog > 15 ? `${secondsSinceLastLog}s 无新日志 · LLM 处理中` : '实时' }}</span>
         </div>
 
         <!-- 结构化视图:按事件阶段分组,逐块进度条 + 关键指标徽章 -->
@@ -270,6 +276,7 @@ onMounted(async () => {
 // 3s 轮询和 fetch 流在组件销毁后永久空转(登出场景),内存+网络双泄漏
 onBeforeUnmount(() => {
   window.clearInterval(timer)
+  if (nowTimer) window.clearInterval(nowTimer)
   stopWatching()
 })
 
@@ -296,6 +303,19 @@ const levelFilter = ref('')
 const filteredLogs = computed(() =>
   levelFilter.value ? logs.value.filter((l) => l.level === levelFilter.value) : logs.value)
 const viewMode = ref<'structured' | 'raw'>('structured')
+
+// 心跳指示:距最后一条日志的秒数(1s 节流刷新;running 时才计时)
+const nowTick = ref(Date.now())
+let nowTimer: number | undefined
+const secondsSinceLastLog = computed(() => {
+  const last = logs.value[logs.value.length - 1]
+  if (!last?.createdAt) return 0
+  return Math.max(0, Math.round((nowTick.value - new Date(last.createdAt).getTime()) / 1000))
+})
+watch(logsOpen, (open) => {
+  if (nowTimer) { window.clearInterval(nowTimer); nowTimer = undefined }
+  if (open) nowTimer = window.setInterval(() => { nowTick.value = Date.now() }, 1000)
+})
 
 // ── 结构化视图:按 message 前缀把日志切成事件组 ─────────────
 interface LogGroup { key: string; title: string; badge?: string; logs: TaskLogItem[]; maxDurationMs?: number }
@@ -524,6 +544,18 @@ function openLogs(record: TaskItem) {
 .tk-msg { color: #6b7280; font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tk-logs-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .tk-logs-count { color: #9ca3af; font-size: 12px; margin-left: auto; }
+.tk-live-dot {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: #16a34a; font-size: 12px;
+}
+.tk-live-pulse {
+  width: 7px; height: 7px; border-radius: 50%; background: #16a34a;
+  animation: tk-pulse 1.6s ease-in-out infinite;
+}
+@keyframes tk-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.75); }
+}
 .tk-logs {
   background: #0f172a; border-radius: 10px; padding: 12px 14px;
   max-height: calc(100vh - 260px); overflow-y: auto; font-size: 12.5px;

@@ -26,6 +26,8 @@
       <span class="gv-tip">
         {{ nodes.length }} 节点 / {{ edges.length }} 边 · 单击看详情,双击展开邻居,悬停高亮一阶邻域
       </span>
+      <!-- 展开进行中提示:画布上双击没有按钮 loading 态,这里给"正在展开"感知 -->
+      <span v-if="expanding" class="gv-expanding"><LoadingOutlined spin /> 正在展开邻居…</span>
     </div>
 
     <!-- 画布:G6 v5。加载态用 visibility 而非 v-if/display:none ——
@@ -78,7 +80,7 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  ExpandOutlined, SyncOutlined, UndoOutlined, ZoomInOutlined, ZoomOutOutlined,
+  ExpandOutlined, LoadingOutlined, SyncOutlined, UndoOutlined, ZoomInOutlined, ZoomOutOutlined,
 } from '@ant-design/icons-vue'
 import {
   KgGraphData, KgGraphNode, KgGraphEdge, KgSchema,
@@ -362,6 +364,7 @@ onBeforeUnmount(() => {
 .gv-page { display: flex; flex-direction: column; }
 .gv-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
 .gv-tip { color: #9ca3af; font-size: 12px; margin-left: auto; }
+.gv-expanding { color: #2563eb; font-size: 12px; white-space: nowrap; }
 /* 显式高度(不用 flex:1):G6 canvas 会反向撑大容器,flex 高度构成
    "canvas 变大 → 容器变大 → resize 更大" 的失控反馈(实测打满 2^24) */
 .gv-chart {
