@@ -1,18 +1,20 @@
 # LLM Form Modeler
 
-**LLM 驱动的多插件智能助手引擎** — 通过 LangGraph StateGraph 编排意图识别、工具执行与追问恢复，支持自然语言驱动多种业务能力（表单配置、请假申请、审批查询等），Engine 层零领域知识。
+**LLM 驱动的多插件智能助手引擎** — 通过 LangGraph StateGraph 编排意图识别、工具执行与追问恢复，支持自然语言驱动多种业务能力（表单配置、请假申请、知识图谱检索问答等），Engine 层零领域知识。
 
 > 📖 **新入手必读**：`doc/插件开发与嵌入指南.md` —— 系统全景 / 从零写一个插件（请假为例）/
 > manifest 声明逐项 / 交互模式 / 嵌入契约协议（含完整消息往返举例）/ 增量修改协议 / FAQ。
+> 进阶：`backend/src/domains/ARCHITECTURE.md` —— pack 全部钩子（工具/HTTP API/后台任务/
+> 依赖门控/管理页）+ SDK 存储设施（图/向量/文档解析 + 命名空间隔离契约）。
 
 ## 技术栈
 
 | 层 | 技术 |
 |----|------|
-| 前端 | Vue 3 + TypeScript + Vite + Ant Design Vue + Pinia |
+| 前端 | Vue 3 + TypeScript + Vite + Ant Design Vue + Pinia + AntV G6（图谱可视化） |
 | 后端 | Python 3.12 + FastAPI + LangGraph StateGraph |
-| LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型） |
-| 存储 | SQLite（对话历史 + LangGraph Checkpoint） |
+| LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型；embedding 同协议） |
+| 存储 | SQLite（对话/审计/任务）+ Neo4j（图谱，可选）+ Milvus（向量，可选） |
 | 上游 | AssetClient 抽象（HTTP 适配；地址请求级解析：宿主 services 表按请求下发） |
 
 ---
@@ -69,13 +71,20 @@
 │  └──────────────────────────┬───────────────────────────────────┘   │
 │                              │                                       │
 │  ┌──────────────────────────▼───────────────────────────────────┐   │
-│  │  ★ SDK 层 (sdk/) — 协议定义                                  │   │
+│  │  ★ SDK 层 (sdk/) — 协议定义 + 通用存储设施                   │   │
 │  │                                                              │   │
 │  │  ├── tool.py        Tool / CompositeTool / ToolResult        │   │
 │  │  │                  ToolContext / AskSpec / AskQuestion       │   │
 │  │  ├── registry.py    ToolRegistry (自动发现 + 注册)           │   │
+│  │  ├── pack_router.py PackRouter 协议 (一级/二级路由)          │   │
+│  │  ├── pack_api.py    插件 HTTP API 鉴权/身份辅助              │   │
 │  │  ├── asset_client.py AssetClient ABC (submit/query)          │   │
-│  │  └── sanitize.py    Unicode 隐写清洗                         │   │
+│  │  ├── sanitize.py    Unicode 隐写清洗                         │   │
+│  │  │                                                            │   │
+│  │  ├── scope_registry.py  ★ 存储命名空间隔离(前缀登记+scope签发)│   │
+│  │  ├── graph_store.py     ★ Neo4j 图存储(GraphStore Protocol)  │   │
+│  │  ├── vector_store.py    ★ Milvus 向量存储(VectorStore Protocol)│   │
+│  │  └── doc_parser.py      ★ md/txt/pdf/docx 解析+切块          │   │
 │  └──────────────────────────┬───────────────────────────────────┘   │
 │                              │                                       │
 │  ┌──────────────────────────▼───────────────────────────────────┐   │
@@ -129,8 +138,11 @@
 
 ```bash
 # Engine 层不能包含任何领域知识
-grep -rE "form|formCode|template|field|leave|请假" backend/src/engine/
+grep -rE "form|formCode|template|field|leave|请假|知识库|knowledge" backend/src/engine/
 # → 必须返回空
+# SDK 层零领域知识(存储设施不认识 LLM/本体/知识库)
+grep -rn "kg_" backend/src/sdk/graph_store.py backend/src/sdk/vector_store.py
+# → 仅默认参数值命中(存量数据兼容)
 ```
 
 ---
@@ -243,8 +255,34 @@ domains/
 │       ├── generate.j2
 │       └── ...
 │
-└── (新插件只需创建目录 + pack.py + tools/)
+├── leave_application/    ← 请假申请插件(演示域)
+│
+├── knowledge_graph/      ← 知识图谱插件(全能力形态示例)
+│   ├── pack.py           ← 四钩子齐备: create_registry + create_api_router
+│   │                        + register_tasks + unload
+│   ├── config.yaml       ← manifest: 依赖声明(neo4j/milvus)+管理页+设置页
+│   ├── settings.schema.yaml ← 声明式设置页 schema(管理端自动渲染)
+│   ├── api.py            ← 插件自有 HTTP API(挂 /api/packs/knowledge_graph)
+│   ├── tasks.py          ← 后台任务: 导入流水线(断点续跑/熔断/进度心跳)
+│   ├── store.py          ← 领域元数据(kg_ 三表, SQLite)
+│   ├── stores.py         ← SDK 存储适配层(前缀登记+工厂单例)
+│   ├── retrieval.py      ← 混合检索问答(图谱+向量双路)
+│   ├── probes.py         ← 依赖连通性探针(装配期)
+│   └── tools/kb_search.py
+│
+└── (新插件只需创建目录 + pack.py + tools/ → 自动发现, 零配置上线)
 ```
+
+**pack.py 可选钩子**（全部由平台在装配/卸载期调用）:
+
+| 钩子 | 必须 | 作用 |
+|------|------|------|
+| `create_registry()` | ✓ | 返回本插件 ToolRegistry |
+| `create_api_router()` | 可选 | 插件自有 HTTP API,挂 `/api/packs/{name}` 前缀,启停随插件热挂卸 |
+| `register_tasks(mgr, app_state)` | 可选 | 注册后台任务 handler(任务中心可见/可取消) |
+| `unload()` | 可选 | 释放连接/注销前缀等清理 |
+
+manifest（config.yaml）还可声明: `dependencies`(基础设施依赖+探针,未配置 fail-closed 不可启用)、`admin.settings`(声明式设置页)、`admin.page`(自定义管理页组件)。
 
 ### 3.2 Tool 协议
 
@@ -304,6 +342,17 @@ def _build_capabilities(self, ctx):
 
 ---
 
+### 3.5 通用后台任务框架（任务中心）
+
+插件经 `register_tasks(mgr)` 注册 handler 后即可 `mgr.submit(...)` 提交后台任务:
+
+- **queue_key 串行**:同 key 任务 FIFO 串行（如 `queue_key=kb_id` → 同库导入不并发写图）
+- **生命周期**:pending → running → succeeded/failed/cancelled;协作式取消（handler 周期检查 `cancelled`）
+- **可观测**:进度/消息推送（`handle.set_progress/log`）、请求级结构化日志（对齐 call_logs 粒度）、SSE 事件流（`GET /api/tasks/{id}/events`）、管理端任务中心实时视图（结构化日志分组/逐块进度条/活点心跳）
+- **持久化**:任务与日志落 SQLite,重启后可查历史
+
+---
+
 ## 四、当前插件能力
 
 ### 4.1 njmind_form — 表单配置
@@ -351,6 +400,25 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 ```
 
 **关键设计：信息不足时通过 `ToolResult.ask` + `AskSpec` 声明式追问，不填默认值。**
+
+### 4.3 knowledge_graph — 知识图谱 + 向量检索（全能力插件）
+
+自然语言驱动的知识库：上传文档 → LLM 抽取实体/关系入 Neo4j、切块向量化入 Milvus →
+对话里"查一下知识库里""张伟向谁汇报"直接命中（`kb_search` 工具），答案带三元组证据
+与原文引用。
+
+| 组成 | 说明 |
+|------|------|
+| 导入流水线（后台任务） | 解析→切块→批内并行 LLM 抽取→本体约束→图+向量双写;**断点续跑**（块级 checkpoint,done = 已入图）、连续失败熔断、进度心跳（批次 N/M + 已抽取 X/Y 块） |
+| 混合检索问答 | 意图解析→图谱子图 + 向量双路召回→LLM 组织答案（带证据链）;embedding 未配置时自动降级纯图谱 |
+| 插件 HTTP API | `/api/packs/knowledge_graph/*`:知识库 CRUD/文档上传/导入/图谱查询/增量展开/检索问答（管理页与宿主直调） |
+| 管理页 | 管理端动态 Tab:知识库工作条（选库/建库/删库）+ 文档导入 + G6 图谱浏览（单击详情/双击展开邻居/悬停高亮一阶邻域）+ 本体设置（模板起步/LLM 归纳/类型审核） |
+| 依赖门控 | manifest 声明 neo4j/milvus 依赖与探针;未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
+
+**SDK 存储下沉**：图/向量/文档解析能力已下沉 `sdk/`（`graph_store` / `vector_store` /
+`doc_parser` / `scope_registry`）,带命名空间隔离契约（前缀登记 fail-fast + scope_id
+服务端签发）。后续插件（NL2BI 报表、RAG、记忆库…）三行代码接入全套隔离存储设施,
+详见 `backend/src/domains/ARCHITECTURE.md`「SDK 存储设施」。
 
 ---
 
@@ -443,7 +511,7 @@ designer（field-edit 页右下角悬浮球）走**信封协议**：
 
 ### 配置
 
-编辑 `.env`：
+编辑 `.env`（完整示例见 `.env.example`）：
 
 ```env
 # ── 上游业务 API（地址由宿主 services 按请求下发，无 env 地址配置）──
@@ -460,6 +528,16 @@ LLM_TIMEOUT=300
 # ── 服务端口 ──
 BACKEND_PORT=18080
 FRONTEND_PORT=13080
+
+# ── 知识图谱插件（可选；不配则插件中心显示"依赖未配置"不可启用）──
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=your-password
+MILVUS_URI=http://localhost:19530
+LLM_EMBED_MODEL=text-embedding-v3   # OpenAI 兼容 /v1/embeddings
+
+# ── 管理端口令（可选加固；不配=开放访问，公网部署必须配置）──
+# ADMIN_TOKEN=
 ```
 
 健康检查：根路径 `GET /health`（运维/K8s 探针）与 `GET /api/health`
@@ -520,7 +598,12 @@ npm install && npm run dev
 | GET/DELETE | `/api/admin/conversations` | **管理端**：全量会话分页/详情/删除（需 `X-Admin-Token`） |
 | GET | `/api/admin/call-logs` | **管理端**：LLM/上游调用审计日志分页查询 |
 | GET/POST | `/api/admin/packs`、`/api/admin/packs/:name/enable\|disable` | **管理端**：插件清单与启停（热生效） |
+| GET/PUT | `/api/admin/packs/:name/settings` | **管理端**：插件设置读写（声明式设置页） |
 | GET | `/api/admin/stats` | **管理端**：概览统计 |
+| GET | `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | **任务中心**：任务列表/详情/结构化日志 |
+| POST | `/api/tasks/:id/cancel` | **任务中心**：取消运行中任务 |
+| GET | `/api/tasks/:id/events` | **任务中心**：任务 SSE 实时事件流 |
+| * | `/api/packs/{name}/*` | **插件自有 API**（如 `/api/packs/knowledge_graph/search`）,启停随插件热挂卸 |
 
 **ChatRequest 格式：**
 
@@ -557,7 +640,8 @@ npm install && npm run dev
 | 概览 | 会话/用户/消息/事件计数、LLM 与上游调用量、平均耗时、插件启用数 |
 | 会话 | 跨用户全量会话（分页/按用户/按标题过滤）、**链路追踪**（见下）、删除 |
 | 调用日志 | `call_logs` 审计流水（LLM/上游），按会话/类型过滤，抽屉查看请求/响应全文 |
-| 插件 | 全部已发现 pack 的启停开关 |
+| 任务中心 | 后台任务列表（状态/进度/耗时）、SSE 实时刷新、**结构化日志抽屉**（按事件阶段分组、逐块进度条、指标徽章、运行中活点心跳） |
+| 插件 | 全部已发现 pack 的启停开关、依赖状态（探针实测）、声明式设置抽屉、**插件自定义管理页**（动态 Tab,如知识图谱的文档导入/图谱浏览/本体设置） |
 
 ### 会话链路追踪
 
@@ -574,6 +658,7 @@ npm install && npm run dev
 | 上游 API 调用（请求/响应全文、状态码、耗时） | `call_logs`（会话归属经线程上下文自动绑定，插件零改动） |
 | 工具执行（工具名、耗时、ok/ask/error 结论） | 引擎自动 trace 打点 |
 | 插件内部业务步骤 | pack 调 `ctx.trace()` 写入（见插件指南 §2.2） |
+| 后台任务（导入流水线批次/块级明细） | 任务日志（请求级结构化，任务中心抽屉查看） |
 | 历史压缩（压缩点/轨迹/压缩 LLM 调用） | compacted/compact_trace 事件 + call_logs |
 | 快照 / 追问现场 | checkpoint / ask 事件 |
 
@@ -613,12 +698,17 @@ llm-to-modler/
 │       │   │   ├── log_config.py      # 日志配置 (loguru: 控制台 + logs/app.log 轮转)
 │       │   │   └── logging_filter.py  # 日志脱敏
 │       │
-│       ├── sdk/                   # ★ SDK 层 (协议定义)
+│       ├── sdk/                   # ★ SDK 层 (协议定义 + 通用存储设施)
 │       │   ├── tool.py            # Tool/CompositeTool/ToolResult/AskSpec
 │       │   ├── registry.py        # ToolRegistry (自动发现)
 │       │   ├── pack_router.py     # PackRouter 协议 (一级/二级路由)
+│       │   ├── pack_api.py        # 插件 HTTP API 鉴权/身份辅助
 │       │   ├── asset_client.py    # AssetClient ABC
-│       │   └── sanitize.py        # Unicode 隐写清洗
+│       │   ├── sanitize.py        # Unicode 隐写清洗
+│       │   ├── scope_registry.py  # ★ 存储命名空间隔离(前缀登记+scope签发)
+│       │   ├── graph_store.py     # ★ Neo4j 图存储(GraphStore Protocol)
+│       │   ├── vector_store.py    # ★ Milvus 向量存储(VectorStore Protocol)
+│       │   └── doc_parser.py      # ★ md/txt/pdf/docx 解析+切块
 │       │
 │       ├── domains/               # ★ Domain Packs (领域知识全部在此)
 │       │   ├── njmind_form/       # 表单配置插件
@@ -629,6 +719,21 @@ llm-to-modler/
 │       │   │   ├── models.py      # ParsedField 等数据模型
 │       │   │   ├── tools/         # create/modify/get/clone/image/chat
 │       │   │   └── prompts/       # Jinja2 模板
+│       │   │
+│       │   ├── leave_application/ # 请假申请插件 (演示域)
+│       │   │
+│       │   └── knowledge_graph/   # ★ 知识图谱插件 (全能力形态)
+│       │       ├── pack.py        # 四钩子: registry/api_router/tasks/unload
+│       │       ├── config.yaml    # manifest(依赖声明/管理页/设置页)
+│       │       ├── settings.schema.yaml  # 声明式设置页
+│       │       ├── api.py         # 插件 HTTP API(/api/packs/knowledge_graph)
+│       │       ├── tasks.py       # 导入流水线(断点续跑/熔断/心跳)
+│       │       ├── store.py       # 领域元数据(kg_ 三表)
+│       │       ├── stores.py      # SDK 存储适配层
+│       │       ├── retrieval.py   # 混合检索问答
+│       │       ├── probes.py      # 依赖探针
+│       │       ├── tools/kb_search.py
+│       │       └── prompts/
 │       │
 │       ├── adapters/              # 适配器
 │       │   └── http_asset_client.py  # HTTP 上游实现
@@ -636,6 +741,9 @@ llm-to-modler/
 │       ├── api/                   # 路由层
 │       │   ├── config.py          # /api/config/chat
 │       │   ├── conversations.py   # /api/conversations
+│       │   ├── admin.py           # 管理端(会话/调用日志/插件/设置/统计)
+│       │   ├── tasks.py           # 任务中心(列表/日志/取消/SSE)
+│       │   ├── meta.py            # /api/meta/packs
 │       │   ├── health.py          # /health
 │       │   └── sse.py             # SSE 工具类
 │       │
@@ -643,14 +751,26 @@ llm-to-modler/
 │       │   └── client.py          # LLM 客户端 (OpenAI 兼容, 支持多模态)
 │       │
 │       └── services/
-│           ├── conversation_store.py  # SQLite 存储
-│           └── upstream_client.py     # 上游客户端
+│           ├── conversation_store.py  # SQLite 会话存储
+│           ├── upstream_client.py     # 上游客户端
+│           ├── task_manager.py        # ★ 后台任务框架(队列串行/取消/SSE)
+│           ├── task_store.py          # ★ 任务+日志 SQLite 持久化
+│           ├── pack_manager.py        # 插件启停热生效
+│           ├── pack_api_mount.py      # 插件 HTTP API 挂载/卸载
+│           ├── pack_dependency.py     # 依赖门控装配
+│           ├── pack_settings.py       # 插件设置(设置页>env>默认)
+│           ├── pack_state.py          # 启停状态持久化
+│           └── call_context.py        # 调用上下文(会话归属绑定)
 │
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── chat/              # 聊天组件 (ChatPanel/ChatInput/ClarificationCard)
+│   │   │   ├── chat/              # 聊天组件 (ChatPanel/ChatInput/ClarificationCard/KgGraphCard)
 │   │   │   └── json/              # JSON 查看器
+│   │   ├── admin/                 # ★ 管理端(独立多页入口)
+│   │   │   ├── components/        # 概览/会话/调用日志/任务中心/插件/设置抽屉
+│   │   │   └── packPages/         # 插件自定义管理页(注册表动态 Tab)
+│   │   │       └── knowledge_graph/  # 文档导入/G6 图谱浏览/本体设置
 │   │   ├── layouts/               # 独立/嵌入布局
 │   │   ├── stores/                # Pinia 状态管理
 │   │   ├── services/              # API 调用 + SSE
@@ -694,6 +814,13 @@ ChatTool 通过 `ctx.registry.all()` 动态查询所有已注册工具的能力�
 ### 7. 两级路由
 
 一级路由（引擎）按 `config.yaml` 的领域描述选领域包（pack），单包场景零 LLM 调用直通；二级路由（pack）选具体工具，领域规则（如"画布有内容+增量话术=修改类"）写在 pack 的 router 里，不泄漏进引擎。真正的安全防线是路由数据铁律（如"无制品必创建"）+ 各工具 `validate_input` 语义自检，而非声明式标记位。
+
+### 8. 插件即平台公民（全能力插件形态）
+
+插件不只是"几个工具"：manifest 声明依赖（探针实测、fail-closed 装配）、声明式设置页、
+自定义管理页（前端注册表动态 Tab）、自有 HTTP API（热挂卸）、后台任务（队列串行/断点
+续跑/取消/结构化日志）——知识图谱插件是首个全能力示范，后续 NL2BI 等插件照此形态复用
+SDK 存储设施（前缀登记 + scope 签发隔离契约）。
 
 ---
 

@@ -1,5 +1,11 @@
 # 工具包架构设计文档
 
+> 本文档覆盖 pack 的运行机制（工具/链路/路由/追问）与 SDK 存储设施。
+> 新插件上手速览见同目录 `README.md`;完整开发指南（manifest/依赖门控/
+> 插件 HTTP API/后台任务/管理页）见 `doc/插件开发与嵌入指南.md`。
+> pack.py 可选钩子（`create_api_router` / `register_tasks` / `unload`）、
+> manifest 依赖声明、任务框架的说明在文末「进阶」节。
+
 ## 核心概念
 
 ### 1. 工具（Tool）
@@ -348,6 +354,30 @@ def create_registry() -> ToolRegistry:
 ### 步骤 4：自动加载
 
 系统启动时自动发现并加载 `calendar_pack`，无需修改 `main.py`。
+
+## 进阶：全能力插件形态
+
+工具注册是最小形态。pack.py 还可以实现三个**可选钩子**（平台在装配/卸载期调用），
+知识图谱插件（`knowledge_graph/`）是四钩子齐备的全能力示范：
+
+| 钩子 | 作用 | 参考实现 |
+|------|------|---------|
+| `create_registry()` | 必须:工具注册 | `knowledge_graph/pack.py` |
+| `create_api_router()` | 插件自有 HTTP API,挂 `/api/packs/{name}` 前缀,启停热挂卸 | `knowledge_graph/api.py` |
+| `register_tasks(mgr, app_state)` | 注册后台任务 handler | `knowledge_graph/tasks.py` |
+| `unload()` | 释放连接/注销 SDK 前缀等清理 | `knowledge_graph/pack.py` |
+
+配套机制：
+
+- **依赖门控**：manifest `dependencies` 声明外部设施（neo4j/milvus）+ 探针,
+  未配置 fail-closed 不可启用;配置解析链 设置页 > env > 默认,补配后热加载
+  （`services/pack_dependency.py`）
+- **后台任务框架**：`mgr.submit(..., queue_key=...)` 提交——同 key FIFO 串行
+  （如同库导入不并发写图）、协作式取消、进度/结构化日志推送、SSE 事件流、
+  SQLite 持久化（`services/task_manager.py` / `task_store.py` / `api/tasks.py`）
+- **管理页**：manifest `admin.page` 声明组件 key,管理端注册表动态挂 Tab
+  （前端 `admin/packPages/registry.ts`）;`admin.settings` 声明设置页 schema
+- **SDK 存储**：见下节「SDK 存储设施」——外部图/向量存储不要自己写连接管理
 
 ## 高级特性
 

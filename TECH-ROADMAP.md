@@ -2,7 +2,7 @@
 
 > 自然语言 → 低码配置生成引擎
 >
-> 版本：v0.6 | 日期：2026-07-22
+> 版本：v0.7 | 日期：2026-09-05
 >
 > ⚠ 本文是演进路径的历史记录，正文按当期时间戳保留、不再同步维护。
 > 以下文中出现过的机制**均已废弃**，阅读时不要照抄：
@@ -13,12 +13,24 @@
 > | env `UPSTREAM_BASE_URL`（上游地址兜底） | 上游地址**唯一来源**是宿主 services 表按请求下发，未下发 fail-closed（README「上游地址请求级解析」） |
 > | 三级解析 / `UPSTREAM_ALLOWED_BASES` 白名单 | 同上，单一来源、无白名单 |
 > | `GET /api/skills/*` 上游代理路由 | 已删除；上游访问统一走 chat 链路内的 AssetClient |
-> | `mcp_server.py`（`/mcp` 对外协议面） | 已删除；对外唯一集成面是嵌入契约（iframe + chat SSE） |
+> | `mcp_server.py`（`/mcp` 对外协议面） | 已删除；对外集成面是嵌入契约（iframe + chat SSE）+ 插件自有 HTTP API（`/api/packs/{name}`） |
 > | `/api/health` 的 `upstream` 字段 | 已删除；健康检查只回答本服务存活 |
 >
 > SDK 消息（MODELER_*→已演进为嵌入契约信封协议）、modify 管线（全量→已改
 > 增量指令集两相式）等其余演进同此处理。
 > §4/§6/§7/§9/§10/§11 中与 README 重复的"当期形态"段落以 README 为准。
+>
+> v0.7 补记（本文档停更后新增的架构演进，详见 README 与
+> `backend/src/domains/ARCHITECTURE.md`）：
+> - **通用后台任务框架**（任务中心）：queue_key 串行/协作式取消/断点续跑/
+>   SSE 实时事件/请求级结构化日志（`services/task_manager.py`）
+> - **插件自有 HTTP API**：`/api/packs/{name}` 前缀热挂卸
+>   （`services/pack_api_mount.py`）
+> - **依赖门控装配**：manifest 声明依赖+探针，fail-closed，补配热加载
+> - **知识图谱插件**：导入流水线（LLM 批量抽取/断点续跑/熔断）+ 混合检索
+>   问答 + G6 图谱浏览管理页
+> - **SDK 存储设施下沉**：graph_store/vector_store/doc_parser/scope_registry，
+>   前缀登记 + scope 签发的命名空间隔离契约（NL2BI 等后续插件复用）
 
 ---
 

@@ -4,6 +4,10 @@
 
 系统采用自动发现机制，自动加载 `domains/` 目录下的所有工具包。每个工具包都是独立的，只需遵循约定的接口即可被系统识别和加载。
 
+> 本文档是最小插件形态（工具注册）的速览。完整开发指南（manifest 声明/依赖门控/
+> 插件 HTTP API/后台任务/SDK 存储设施/管理页）见 `doc/插件开发与嵌入指南.md`
+> 与 `ARCHITECTURE.md`（本目录）;全能力插件参考 `knowledge_graph/`。
+
 ## 快速开始
 
 ### 1. 创建工具包目录结构
@@ -34,6 +38,14 @@ def create_prompt_loader() -> PromptLoader:
     return PromptLoader()
 ```
 
+pack.py 还可以实现这些**可选钩子**（平台在装配/卸载期调用）:
+
+| 钩子 | 作用 |
+|------|------|
+| `create_api_router()` | 插件自有 HTTP API（挂 `/api/packs/{name}` 前缀,启停热挂卸） |
+| `register_tasks(mgr, app_state)` | 注册后台任务 handler（任务中心可见/可取消） |
+| `unload()` | 清理（释放连接/注销 SDK 前缀等） |
+
 ### 3. 实现工具类
 
 创建 `tools/my_tool.py`：
@@ -45,7 +57,7 @@ class MyTool(Tool):
     name = "my_tool"
     description = "工具描述"
     when = "何时使用此工具"
-    
+
     def input_schema(self) -> dict:
         return {
             "type": "object",
@@ -54,12 +66,12 @@ class MyTool(Tool):
             },
             "required": ["user_input"]
         }
-    
+
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         user_input = state.get("user_input", "")
         # 实现工具逻辑
         result = f"处理结果: {user_input}"
-        
+
         return ToolResult(
             artifact={"result": result},
             summary=result,
@@ -76,22 +88,27 @@ class MyTool(Tool):
 ```
 domains/
 ├── __init__.py              # 自动发现机制（已实现）
-├── njmind_form/            # 示例：表单工具包
+├── njmind_form/             # 表单工具包
 │   ├── __init__.py
-│   ├── pack.py             # 必需：导出 create_registry()
+│   ├── pack.py              # 必需：导出 create_registry()
+│   ├── router.py            # 领域二级路由
+│   ├── config.yaml          # manifest
 │   ├── tools/
-│   │   ├── __init__.py
-│   │   ├── create_form.py
-│   │   ├── modify_form.py
-│   │   └── chat.py
 │   └── prompts/
-│       └── ...
-└── my_pack/                # 你的工具包
+├── leave_application/       # 请假申请插件（演示域）
+├── knowledge_graph/         # 知识图谱插件（全能力形态示例）
+│   ├── pack.py              # 四钩子齐备
+│   ├── config.yaml          # manifest（依赖声明/管理页/设置页）
+│   ├── settings.schema.yaml # 声明式设置页
+│   ├── api.py               # 插件 HTTP API
+│   ├── tasks.py             # 后台任务（导入流水线）
+│   ├── store.py / stores.py # 领域元数据 + SDK 存储适配层
+│   ├── retrieval.py         # 混合检索问答
+│   └── probes.py            # 依赖探针
+└── my_pack/                 # 你的工具包
     ├── __init__.py
-    ├── pack.py             # 必需
+    ├── pack.py              # 必需
     └── tools/
-        ├── __init__.py
-        └── my_tool.py
 ```
 
 ## 核心接口
@@ -102,10 +119,10 @@ domains/
 class ToolRegistry:
     def register(self, tool: Tool) -> None:
         """注册工具"""
-    
+
     def get(self, name: str) -> Optional[Tool]:
         """获取工具"""
-    
+
     def all(self) -> List[Tool]:
         """获取所有工具"""
 ```
@@ -117,11 +134,11 @@ class Tool(ABC):
     name: str                    # 工具名称（唯一）
     description: str             # 工具描述
     when: str                    # 使用场景
-    
+
     @abstractmethod
     def input_schema(self) -> dict:
         """定义输入参数 schema"""
-    
+
     @abstractmethod
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行工具逻辑"""
@@ -151,11 +168,8 @@ class ToolResult:
 
 ## 完整示例
 
-参考 `domains/njmind_form/` 实现：
-
-- **pack.py**: 注册 3 个工具（create_form, modify_form, chat）
-- **tools/**: 每个工具独立文件
-- **prompts/**: Jinja2 提示词模板
+参考 `domains/knowledge_graph/`（全能力形态：工具+HTTP API+后台任务+依赖门控+
+管理页+SDK 存储）或 `domains/njmind_form/`（工具形态）。
 
 ## 最佳实践
 
@@ -164,10 +178,17 @@ class ToolResult:
 3. **错误处理**: 在 execute 中捕获异常并返回友好错误
 4. **进度反馈**: 使用 `ctx.emit()` 报告执行进度
 5. **日志记录**: 使用 `logger` 记录关键操作
+6. **底层调用走 ctx**: LLM/上游/打点必须走 ctx 通道（可观测是平台能力,见插件指南 §2.2）
+7. **长活走任务框架**: 分钟级操作用 `register_tasks` + `queue_key` 串行,不要占请求线程
+8. **外部存储走 SDK**: 图/向量/文档解析用 `sdk/graph_store` 等设施,前缀先登记后使用
 
 ## 测试工具包
 
 ```bash
+# 后端测试(425 条全量)
+cd backend
+./venv/bin/python -m pytest tests/ -q
+
 # 重启后端
 cd backend
 pkill -f "uvicorn src.main:app"
@@ -190,6 +211,10 @@ A: 检查：
 1. 工具类正确继承 `Tool`
 2. 实现了所有必需方法
 3. 工具名称唯一
+
+**Q: 插件显示"依赖未配置"？**
+A: manifest 声明了 `dependencies` 的插件（如 knowledge_graph 需要 Neo4j/Milvus）,
+配好 env 或管理端→插件→设置里补配,再点"重新检测"热加载。
 
 **Q: 如何使用 LLM？**
 A: 在 execute 中使用 `ctx.llm_client`：
