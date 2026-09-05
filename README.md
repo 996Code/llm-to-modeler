@@ -599,6 +599,8 @@ npm install && npm run dev
 | GET | `/api/admin/call-logs` | **管理端**：LLM/上游调用审计日志分页查询 |
 | GET/POST | `/api/admin/packs`、`/api/admin/packs/:name/enable\|disable` | **管理端**：插件清单与启停（热生效） |
 | GET/PUT | `/api/admin/packs/:name/settings` | **管理端**：插件设置读写（声明式设置页） |
+| POST | `/api/admin/packs/:name/recheck` | **管理端**：依赖重新检测（补配后热加载，无需重启） |
+| GET | `/api/admin/conversations/:id/trace` | **管理端**：会话链路追踪（事件流+调用日志统一时间线） |
 | GET | `/api/admin/stats` | **管理端**：概览统计 |
 | GET | `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | **任务中心**：任务列表/详情/结构化日志 |
 | POST | `/api/tasks/:id/cancel` | **任务中心**：取消运行中任务 |
@@ -622,7 +624,7 @@ npm install && npm run dev
 
 ---
 
-## 八.五、管理端（Admin Console）
+## 九、管理端（Admin Console）
 
 运维/客服视角的独立页面：**`/ai-modeler/admin.html`**（与主聊天应用平行的 vite 多页入口，不经嵌入 SDK）。
 
@@ -678,7 +680,7 @@ npm install && npm run dev
 ---
 
 
-## 九、目录结构
+## 十、目录结构
 
 ```
 llm-to-modler/
@@ -785,7 +787,7 @@ llm-to-modler/
 
 ---
 
-## 十、设计亮点
+## 十一、设计亮点
 
 ### 1. Engine 零领域知识
 
@@ -824,7 +826,7 @@ SDK 存储设施（前缀登记 + scope 签发隔离契约）。
 
 ---
 
-## 十一、Docker 部署
+## 十二、Docker 部署
 
 ```yaml
 # docker-compose.yml
