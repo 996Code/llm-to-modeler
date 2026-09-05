@@ -499,12 +499,16 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
         items = list(glossary.items())[-glossary_top_k:]
         glossary_lines = [f"- {name}({typ})" if typ else f"- {name}" for name, typ in items]
 
+    # 围栏 defang:文档内容是不可信输入,原文里的 ``` 能闭合 extract.j2
+    # 的代码围栏并注入抽取指令;统一换成无害的 ~~~ 再进 prompt
+    safe_text = chunk["text"].replace("```", "~~~")
+
     prompt = loader.render(
         "knowledge_graph", "extract",
         entity_types=schema.get("entity_types") or [],
         relation_types=schema.get("relation_types") or [],
         glossary="\n".join(glossary_lines),
-        chunk_text=chunk["text"],
+        chunk_text=safe_text,
         allow_new_types=semi_open,
     )
 
@@ -524,13 +528,20 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
 
 
 def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
-    """LLM 输出 → 规范化实体/关系(归一化锚点、剔空名/自环/非字符串)。"""
+    """LLM 输出 → 规范化实体/关系(归一化锚点、剔空名/自环/非字符串)。
+
+    条数上限是代码级强制(prompt 里的数量约束对 LLM 只是建议):恶意/
+    跑飞的输出灌入海量伪实体会污染图谱,这里掐断在入口。
+    """
+    MAX_ENTITIES, MAX_RELATIONS = 60, 120
     raw_entities = data.get("entities") if isinstance(data, dict) else None
     raw_relations = data.get("relations") if isinstance(data, dict) else None
 
     entities: List[Dict] = []
     seen = set()
     for e in (raw_entities or []):
+        if len(entities) >= MAX_ENTITIES:
+            break
         if not isinstance(e, dict):
             continue
         name = str(e.get("name") or "").strip()
@@ -551,6 +562,8 @@ def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
 
     relations: List[Dict] = []
     for r in (raw_relations or []):
+        if len(relations) >= MAX_RELATIONS:
+            break
         if not isinstance(r, dict):
             continue
         source = normalize_name(str(r.get("source") or ""))

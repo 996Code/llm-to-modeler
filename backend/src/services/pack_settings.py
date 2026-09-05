@@ -161,10 +161,12 @@ def validate_values(
             continue
         ftype = str(field.get("type") or "string")
         v: Any = raw
+        # 哨兵先判(非空值,原写法放在空值分支里永不可达):secret 字段的
+        # "__SET__" = "前端没改,保持旧值",调用方合并时跳过
+        if ftype in ("secret", "string") and isinstance(raw, str) and raw.strip() == SECRET_SET:
+            continue
         if raw is None or (isinstance(raw, str) and raw.strip() == ""):
-            # 空值 = 清除该项(回落到 env/默认),secret 的哨兵除外
-            if raw == SECRET_SET:
-                continue  # 保持旧值,由调用方跳过
+            # 空值 = 清除该项(回落到 env/默认)
             clean[key] = None
             continue
         try:
@@ -186,8 +188,6 @@ def validate_values(
                     raise ValueError(f"必须是 {options} 之一")
             else:  # string / secret
                 v = str(raw).strip()
-                if v == SECRET_SET:
-                    continue  # 哨兵:保持旧值
         except (TypeError, ValueError) as e:
             errors.append({"field": key, "message": str(e)})
             continue
@@ -196,8 +196,13 @@ def validate_values(
 
 
 def mask_secrets(schema: Optional[Dict[str, Any]], values: Dict[str, Any]) -> Dict[str, Any]:
-    """secret 字段替换为掩码哨兵(GET 响应用,永不回显明文)。"""
-    masked = dict(values or {})
+    """secret 字段替换为掩码哨兵(GET 响应用,永不回显明文)。
+
+    schema 外的遗留键直接丢弃:schema 演进(改名/删除)后,旧保存值不在
+    当前 schema 里,无从判断是否 secret——按最坏情况不回显。
+    """
+    schema_keys = {field["key"] for field in iter_fields(schema)}
+    masked = {k: v for k, v in (values or {}).items() if k in schema_keys}
     for field in iter_fields(schema):
         if str(field.get("type") or "") == "secret":
             key = field["key"]
@@ -306,7 +311,7 @@ class PackSettingsReader:
 
     def get(self, key: str, default: Any = None) -> Any:
         """读单字段最终值(保存值 > env > schema default);都没有返回 default。"""
-        schema = read_settings_schema(self._pack_name)
+        schema = _schema_cached(self._pack_name)
         field = find_field(schema, key)
         if field is None:
             # schema 没声明的键:只剩 env 兜底(约定 env 名 = 键大写)
@@ -319,3 +324,30 @@ class PackSettingsReader:
         """全字段最终值(给探针 / client 构造整包传递)。"""
         resolved, _ = resolve_with_saved(self._pack_name, self._store)
         return resolved
+
+
+# schema 文件解析缓存:{pack_name: (mtime, size, parsed)}。读取方(如 KG
+# 导入循环按批按键取配置)高频调 get,每次重读+yaml 解析是纯浪费;
+# 按 (mtime, size) 失效,设置文件改动立即反映。
+_schema_cache: Dict[str, tuple] = {}
+_schema_cache_lock = threading.Lock()
+
+
+def _schema_cached(pack_name: str) -> Optional[Dict[str, Any]]:
+    path = _DOMAINS_DIR / pack_name / "settings.schema.yaml"
+    try:
+        st = path.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        with _schema_cache_lock:
+            _schema_cache.pop(pack_name, None)
+        return None if not path.exists() else read_settings_schema(pack_name)
+    with _schema_cache_lock:
+        hit = _schema_cache.get(pack_name)
+        if hit and hit[0] == stamp:
+            return hit[1]
+    parsed = read_settings_schema(pack_name)
+    if parsed is not None:
+        with _schema_cache_lock:
+            _schema_cache[pack_name] = (stamp, parsed)
+    return parsed

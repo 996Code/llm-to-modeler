@@ -62,6 +62,24 @@ def assemble_packs(
     registry, prompt_loader, pack_routers, pack_tools, dep_status = load_all_packs(
         pack_names=pack_names, settings_store=settings_store, app_state=app_state
     )
+
+    # pack 可选钩子 unload():上次在载、本次不在载(禁用/依赖失联)的
+    # pack 释放自持资源(如数据库连接)。钩子异常只记日志——卸载清理
+    # 失败不能阻断装配(资源最终随进程退出回收)。
+    prev_loaded = set(getattr(app_state, "_loaded_packs", None) or [])
+    import importlib
+    for name in sorted(prev_loaded - set(pack_routers or {})):
+        try:
+            mod = importlib.import_module(f"domains.{name}.pack")
+            hook = getattr(mod, "unload", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception:
+                    logger.exception(f"pack unload hook failed: {name}")
+        except ImportError:
+            pass
+    app_state._loaded_packs = sorted(pack_routers or {})
     # manifest 只保留"实际加载成功"的 pack:依赖被跳过的 pack 工具并不存在,
     # 若把它的 manifest 留在 pack_configs,/api/meta/packs 会把它暴露给
     # 前端欢迎页(声明了却不存在的工具集)。管理端插件中心走 load_pack_configs

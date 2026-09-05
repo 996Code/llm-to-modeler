@@ -34,3 +34,16 @@ def register_tasks(manager, app_state=None) -> None:
     """后台任务类型注册(平台装配时调用;app_state 供 handler 运行期取依赖)。"""
     from domains.knowledge_graph import tasks
     tasks.register_tasks(manager, app_state)
+
+
+def unload() -> None:
+    """卸载钩子(平台热切换/停机时调用):释放 Neo4j/Milvus 连接单例。
+
+    没有这个钩子的话,禁用插件后 driver/gRPC channel 会一直挂到进程
+    退出;重新启用时按设置指纹复用或重建,不影响正确性。
+    """
+    from domains.knowledge_graph.graph_store import reset_graph_store_cache
+    from domains.knowledge_graph.vector_store import reset_vector_store_cache
+    reset_graph_store_cache()
+    reset_vector_store_cache()
+    logger.info("knowledge_graph unloaded: graph/vector connections released")

@@ -132,7 +132,8 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
     chunk_texts: List[str] = []
     for i, c in enumerate(retrieved.get("chunks") or []):
         src = c.get("docName") or "文档"
-        text = (c.get("text") or "").strip().replace("\n", " ")
+        # 文档原文是不可信输入:反引号 defang,防片段内容干扰 answer 模板
+        text = (c.get("text") or "").strip().replace("\n", " ").replace("```", "~~~")
         chunk_texts.append(f"〔{src}〕{text[:600]}")
 
     return {"triples": triples, "node_details": node_details, "chunk_texts": chunk_texts}

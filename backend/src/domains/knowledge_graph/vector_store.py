@@ -163,21 +163,47 @@ class MilvusVectorStore:
 
 _cached_store: Optional[MilvusVectorStore] = None
 _cached_fp: tuple = ()
-_cache_lock = threading.Lock()
+_cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络 IO)
+_build_lock = threading.Lock()     # 串行化连接构建
 
 
 def get_vector_store(settings: Dict[str, Any]) -> MilvusVectorStore:
-    """按解析后的插件配置取/建向量存储单例(指纹 = 连接三元组)。"""
+    """按解析后的插件配置取/建向量存储单例(指纹 = 连接三元组)。
+
+    锁纪律/失败纪律同 graph_store.get_graph_store:命中路径轻锁,构建
+    在锁外,构建失败清缓存不留坏连接。
+    """
     global _cached_store, _cached_fp
     fp = (settings.get("milvus_uri"), settings.get("milvus_user"), settings.get("milvus_password"))
     with _cache_lock:
         if _cached_store is not None and _cached_fp == fp:
             return _cached_store
-        if _cached_store is not None:
-            _cached_store.close()
-        _cached_store = MilvusVectorStore(uri=fp[0], user=fp[1] or "", password=fp[2] or "")
-        _cached_fp = fp
-        return _cached_store
+
+    with _build_lock:
+        with _cache_lock:
+            if _cached_store is not None and _cached_fp == fp:
+                return _cached_store
+        try:
+            store = MilvusVectorStore(uri=fp[0], user=fp[1] or "", password=fp[2] or "")
+        except Exception:
+            with _cache_lock:
+                if _cached_store is not None:
+                    try:
+                        _cached_store.close()
+                    except Exception:
+                        pass
+                _cached_store, _cached_fp = None, ()
+            raise
+        old = None
+        with _cache_lock:
+            old = _cached_store
+            _cached_store, _cached_fp = store, fp
+        if old is not None and old is not store:
+            try:
+                old.close()
+            except Exception:
+                pass
+        return store
 
 
 def reset_vector_store_cache() -> None:

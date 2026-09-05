@@ -60,7 +60,19 @@ def _graph(request: Request):
 
 @router.get("/kbs", dependencies=[Depends(admin_required)])
 async def list_kbs(request: Request):
-    return {"items": runtime.get_kg_store(request.app.state).list_kbs()}
+    items = runtime.get_kg_store(request.app.state).list_kbs()
+    # 库列表的实体/关系总数用图谱真实去重计数覆盖(store 的 SUM 是文档级
+    # 抽取量之和,跨文档共享实体会被重复计——卡片数字虚高)。图不可达
+    # 时回退到求和口径,不让列表接口因依赖失联而 500。
+    try:
+        graph = _graph(request)
+        for kb in items:
+            counts = graph.counts(kb["id"])
+            kb["entityTotal"] = counts.get("entities", kb.get("entityTotal", 0))
+            kb["relationTotal"] = counts.get("relations", kb.get("relationTotal", 0))
+    except Exception as e:
+        logger.warning(f"库列表图谱计数失败,回退文档求和口径: {e}")
+    return {"items": items}
 
 
 @router.get("/kbs/templates", dependencies=[Depends(admin_required)])

@@ -448,11 +448,19 @@ class Neo4jGraphStore:
 
 _cached_store: Optional[Neo4jGraphStore] = None
 _cached_fp: tuple = ()
-_cache_lock = threading.Lock()
+_cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络 IO)
+_build_lock = threading.Lock()     # 串行化连接构建(网络 IO 在锁外做)
 
 
 def get_graph_store(settings: Dict[str, Any]) -> Neo4jGraphStore:
-    """按解析后的插件配置取/建图存储单例(指纹 = 连接四元组)。"""
+    """按解析后的插件配置取/建图存储单例(指纹 = 连接四元组)。
+
+    锁纪律:缓存命中路径只拿 _cache_lock(微秒级);连接构建(含
+    ensure_constraints 的网络往返,Neo4j 慢时秒级)在锁外做——否则一个
+    重建动作会让所有并发 /search 与导入线程在锁上排队。
+    失败纪律:构建失败清空缓存,绝不留下"已 close 却仍被缓存"的 driver
+    (否则配置回退到旧指纹时会持续返回坏连接)。
+    """
     global _cached_store, _cached_fp
     fp = (
         settings.get("neo4j_uri"), settings.get("neo4j_user"),
@@ -461,14 +469,35 @@ def get_graph_store(settings: Dict[str, Any]) -> Neo4jGraphStore:
     with _cache_lock:
         if _cached_store is not None and _cached_fp == fp:
             return _cached_store
-        if _cached_store is not None:
-            _cached_store.close()
-        store = Neo4jGraphStore(
-            uri=fp[0], user=fp[1] or "neo4j", password=fp[2] or "",
-            database=fp[3] or "neo4j",
-        )
-        store.ensure_constraints()
-        _cached_store, _cached_fp = store, fp
+
+    with _build_lock:
+        with _cache_lock:   # 双检:排队期间可能已被同指纹线程建好
+            if _cached_store is not None and _cached_fp == fp:
+                return _cached_store
+        try:
+            store = Neo4jGraphStore(
+                uri=fp[0], user=fp[1] or "neo4j", password=fp[2] or "",
+                database=fp[3] or "neo4j",
+            )
+            store.ensure_constraints()
+        except Exception:
+            with _cache_lock:
+                if _cached_store is not None:
+                    try:
+                        _cached_store.close()
+                    except Exception:
+                        pass
+                _cached_store, _cached_fp = None, ()
+            raise
+        old = None
+        with _cache_lock:
+            old = _cached_store
+            _cached_store, _cached_fp = store, fp
+        if old is not None and old is not store:
+            try:
+                old.close()
+            except Exception:
+                pass
         return store
 
 

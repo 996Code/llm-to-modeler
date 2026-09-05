@@ -210,6 +210,20 @@ async def lifespan(app: FastAPI):
         task_manager.close()  # 关闭后台任务线程池(在跑任务下次启动标 interrupted)
     except Exception:
         logger.warning("task manager close failed", exc_info=True)
+    # pack 卸载钩子:释放各插件自持的连接(Neo4j/Milvus 等)——与热切换
+    # 禁用 pack 走同一个 unload() 契约
+    try:
+        import importlib
+        for _name in sorted(getattr(app.state, "_loaded_packs", None) or []):
+            try:
+                _mod = importlib.import_module(f"domains.{_name}.pack")
+                _hook = getattr(_mod, "unload", None)
+                if callable(_hook):
+                    _hook()
+            except Exception:
+                logger.warning(f"pack unload failed: {_name}", exc_info=True)
+    except Exception:
+        logger.warning("pack unload sweep failed", exc_info=True)
     try:
         compressor.close()  # 关闭压缩后台线程(不等待排队任务)
     except Exception:

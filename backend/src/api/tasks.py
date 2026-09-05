@@ -101,14 +101,16 @@ async def task_events(task_id: str, request: Request):
     的小窗口可能重复投递)。
     """
     manager = request.app.state.task_manager
-    snapshot_task, snapshot_logs, q = manager.subscribe(task_id)
-    if snapshot_task is None:
-        manager.unsubscribe(task_id, q)
+    # 存在性预检在外(404 判定),订阅在生成器体内——StreamingResponse 在
+    # 客户端立即断开时可能从不迭代生成器,在外面 subscribe 会留下永不
+    # 清理的监听队列(每个事件都触发"队列满丢帧"告警直到上限)。
+    task = manager.store.get_task(task_id)
+    if task is None:
         raise HTTPException(404, "Task not found")
 
-    max_log_id = max((lg["id"] for lg in snapshot_logs), default=0)
-
     async def event_stream():
+        snapshot_task, snapshot_logs, q = manager.subscribe(task_id)
+        max_log_id = max((lg["id"] for lg in snapshot_logs), default=0)
         loop = asyncio.get_running_loop()
         aq: asyncio.Queue = asyncio.Queue()
         closed = threading.Event()
