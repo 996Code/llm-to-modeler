@@ -10,10 +10,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from domains.knowledge_graph.doc_parser import (
+from sdk.doc_parser import (
     allowed_extension, chunk_text, mime_for, parse_to_text,
 )
-from domains.knowledge_graph.graph_store import normalize_name
+from sdk.graph_store import normalize_name
 from domains.knowledge_graph.schema_templates import TEMPLATES, get_template_schema, list_templates
 from domains.knowledge_graph.store import KGStore
 
@@ -214,6 +214,9 @@ class FakeGraphStore:
     def delete_document(self, kb_id, doc_id):
         self.edges = [e for e in self.edges if e[0] != kb_id or e[3].get("doc_id") != doc_id]
         return {}
+
+    def delete_scope(self, kb_id):
+        return self.delete_kb(kb_id)
 
     def delete_kb(self, kb_id):
         self.entities.pop(kb_id, None)
