@@ -196,6 +196,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 [query], conv_id=conv_id, stage="kg.query_embed")[0]
             _t0 = time.monotonic()
             _err = None
+            hits: List[Dict[str, Any]] = []
             # doc 名映射提前(日志里直接给文档名而不是裸 ID)
             _doc_names = {d["id"]: d["filename"] for d in store.list_documents(kb["id"])}
             try:
