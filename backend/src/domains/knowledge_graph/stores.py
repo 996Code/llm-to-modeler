@@ -56,8 +56,9 @@ def reset_caches() -> None:
     不受影响。
     """
     from domains.knowledge_graph import tasks as kg_tasks
-    with kg_tasks._inflight_lock:
-        busy = len(kg_tasks._inflight)
+    # 在途导入数:框架 dedupe 表只读聚合(kg.import:* 前缀的任务数)
+    mgr = getattr(kg_tasks._app_state, "task_manager", None)
+    busy = mgr.active_dedupe_count("kg.import:") if mgr else 0
     if busy:
         # 连接与前缀登记都留给在途任务:在途任务仍持有 prefix="kg_" 的
         # store 在写数据,此刻注销前缀会打开抢注窗口(另一插件登记 kg,

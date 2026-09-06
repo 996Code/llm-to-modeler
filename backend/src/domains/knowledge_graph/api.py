@@ -139,8 +139,7 @@ async def delete_kb(kb_id: str, request: Request):
     # upsert 在清理之后回写,产出再也触达不了的孤儿子图。等任务结束再删。
     from domains.knowledge_graph import tasks as kg_tasks
     for doc in store.list_documents(kb_id):
-        with kg_tasks._inflight_lock:
-            task_id = kg_tasks._inflight.get(doc["id"])
+        task_id = kg_tasks._inflight_task_id(request.app.state, doc["id"])
         if task_id:
             raise HTTPException(
                 409, f"库内有正在导入的文档(任务 {task_id[:8]}…),请等任务结束后再删除")
@@ -274,8 +273,7 @@ async def delete_document(kb_id: str, doc_id: str, request: Request):
     # 删除守卫:导入进行中拒绝——否则任务后续批次的 upsert 会在清理之后
     # 回写,留下 source_docs 指向已删文档的孤儿实体(取消/等待后重删即可)
     from domains.knowledge_graph import tasks as kg_tasks
-    with kg_tasks._inflight_lock:
-        inflight_task = kg_tasks._inflight.get(doc_id)
+    inflight_task = kg_tasks._inflight_task_id(request.app.state, doc_id)
     if inflight_task:
         raise HTTPException(
             409, f"该文档正在导入中(任务 {inflight_task[:8]}…),请等任务结束或先取消任务")

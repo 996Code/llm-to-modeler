@@ -326,11 +326,11 @@ class TestImportPipeline:
         t2 = tasks.submit_import(env.app_state, kb["id"], doc["id"])
         assert _wait(env.manager, t2["id"])["status"] == "succeeded"
 
-    def test_pending_cancel_releases_inflight(self, env):
-        """【H2 回归锚】排队期取消的任务也必须释放防重登记。
+    def test_pending_cancel_releases_dedupe(self, env):
+        """【H2 回归锚】排队期取消的任务也必须释放防重占位(框架 dedupe)。
 
-        handler 不执行 → finally 不生效;不挂终态回调的话该文档会
-        永久报"已有进行中的导入任务"直到重启。
+        handler 不执行 → finally 不生效;框架在 cancel 的 pending 路径
+        直接释放 dedupe 占位,否则该文档会永久报"已有进行中的导入任务"。
         """
         # 占满并发额度,让后续任务停留在 pending
         kb1, doc1 = _make_doc(env, "占位1", [f"[E:甲{i}]" for i in range(30)])
@@ -346,17 +346,16 @@ class TestImportPipeline:
         env.manager.submit("kg.import_document",
                            payload={"kb_id": kb2["id"], "doc_id": doc2["id"]},
                            title="占位2", queue_key=f"kg:{kb2['id']}")
-        # 构造 pending 任务占住 doc1 的防重表(模拟提交后排队)
+        # pending 任务带 dedupe_key 占住 doc1(模拟提交后排队)
         pending_task = env.manager.submit(
             "kg.import_document",
             payload={"kb_id": kb1["id"], "doc_id": doc1["id"], "force": False},
-            title="pending取消案", queue_key=f"kg:{kb1['id']}x")
-        with tasks._inflight_lock:
-            tasks._inflight[doc1["id"]] = pending_task["id"]
+            title="pending取消案", queue_key=f"kg:{kb1['id']}x",
+            dedupe_key=f"kg.import:{doc1['id']}")
         # 取消 pending 任务(不执行 handler)
         cancelled = env.manager.cancel(pending_task["id"])
         assert cancelled["status"] == "cancelled"
-        # 终态回调必须已释放防重登记 → 可以再次提交该文档
+        # 框架已释放占位 → 可以再次提交该文档
         t = tasks.submit_import(env.app_state, kb1["id"], doc1["id"])
         assert _wait(env.manager, t["id"])["status"] == "succeeded"
 

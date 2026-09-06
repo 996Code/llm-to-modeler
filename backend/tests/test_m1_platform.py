@@ -443,6 +443,15 @@ class TestAuditFixes:
         t1 = m.submit("zz.dup", dedupe_key="doc:1")
         with pytest.raises(DuplicateTaskError):
             m.submit("zz.dup", dedupe_key="doc:1")
+        # 被拒绝的提交不得落库(先落库再拒绝 = 永不调度的僵尸 pending 任务)。
+        # 断言库中任务数:此刻只有 t1 一个合法提交(拒绝的不算)
+        import sqlite3
+        conn = sqlite3.connect(str(m.store.db_path))
+        try:
+            n = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        finally:
+            conn.close()
+        assert n == 1, f"拒绝的提交也落库了(库里 {n} 个任务,应只有 1 个合法提交)"
         # 不同 key 不受影响
         t2 = m.submit("zz.dup", dedupe_key="doc:2")
         wait_for(lambda: m.store.get_task(t1["id"])["status"] == "succeeded")

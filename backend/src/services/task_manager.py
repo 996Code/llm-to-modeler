@@ -164,6 +164,18 @@ class TaskManager:
         """
         self._terminal_listeners.clear()
 
+    def get_active_dedupe(self, dedupe_key: str) -> Optional[str]:
+        """查询 dedupe_key 当前占位的活任务 id(无则 None;只读,供守卫类检查)。"""
+        with self._lock:
+            return self._dedupe_keys.get(dedupe_key)
+
+    def active_dedupe_count(self, prefix: str = "") -> int:
+        """前缀匹配的活 dedupe 占位数(如 unload 前的"有无在途任务"检查)。"""
+        with self._lock:
+            if not prefix:
+                return len(self._dedupe_keys)
+            return sum(1 for k in self._dedupe_keys if k.startswith(prefix))
+
     def _notify_terminal(self, task_id: str) -> None:
         """通知终态监听者(锁外调用;任务收尾的最后一环)。"""
         if not self._terminal_listeners:
@@ -201,30 +213,26 @@ class TaskManager:
         """
         if task_type not in self._handlers:
             raise KeyError(f"未注册的任务类型: {task_type}")
+        # dedupe 检查必须在 create_task 之前:先落库再拒绝会留下
+        # 永不调度的僵尸 pending 任务(重启才被 recover 收敛)
+        with self._lock:
+            if dedupe_key:
+                existing = self._dedupe_keys.get(dedupe_key)
+                if existing:
+                    raise DuplicateTaskError(
+                        f"该操作已有进行中的任务(任务 {existing[:8]}…),请等待完成")
         task = self._store.create_task(
             task_type, pack_name=pack_name, title=title,
             payload=payload, queue_key=queue_key,
         )
         with self._lock:
             if dedupe_key:
-                existing = self._dedupe_keys.get(dedupe_key)
-                if existing and self._pending_state(existing):
-                    raise DuplicateTaskError(
-                        f"该操作已有进行中的任务(任务 {existing[:8]}…),请等待完成")
                 self._dedupe_keys[dedupe_key] = task["id"]
             self._pending.append(task["id"])
             # 无 queue_key 的任务用专属键:永不与其他任务互斥
             self._task_keys[task["id"]] = queue_key or f"__solo__{task['id']}"
             self._dispatch_locked()
         return task
-
-    def _pending_state(self, task_id: str) -> bool:
-        """任务是否仍占着 dedupe 位(pending/running;调用方须持锁)。
-
-        终态释放走 _finish(同锁),这里读内存表即可——表项只在
-        _finish 里删除,存在即视为活。
-        """
-        return task_id in self._dedupe_keys.values()
 
     def _dispatch_locked(self) -> None:
         """把等待队列头的任务尽可能派发给线程池(调用方须持锁)。

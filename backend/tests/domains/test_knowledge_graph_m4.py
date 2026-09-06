@@ -133,6 +133,25 @@ def _ctx(env):
 
 class TestRetrieval:
 
+    def test_vector_failure_single_degraded_log(self, env, monkeypatch):
+        """【回归锚】向量路失败只落一条降级日志(search 失败与前置失败均单条)。"""
+        from domains.knowledge_graph import retrieval
+
+        class BoomVector:
+            def search(self, *a, **k):
+                raise RuntimeError("milvus down")
+
+        monkeypatch.setattr(env, "vector", BoomVector())
+        monkeypatch.setattr(retrieval.runtime, "get_vector", lambda state: BoomVector())
+        monkeypatch.setattr(retrieval, "parse_query_intent",
+                            lambda *a, **k: {"entities": ["x"], "keywords": [], "hop": 1})
+        kb = dict(KB1)
+        result = retrieval.hybrid_retrieve(env.app_state, kb, "q", conv_id="c1")
+        vec_logs = [c for c in env.obs_calls if c["call_type"] == "vector"]
+        assert len(vec_logs) == 1, f"search 失败应只落 1 条,实际 {len(vec_logs)}"
+        assert vec_logs[0]["error_message"]
+        assert result["chunks"] == []
+
     def test_retrieval_calls_logged(self, env):
         """【观测回归锚】混合检索的图/向量调用入 call_logs:
         类型/stage/请求参数/响应指标(命中/召回量/分数)全量可查。"""

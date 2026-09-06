@@ -200,6 +200,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     if kb.get("vectorEnabled"):
         _t0 = time.monotonic()
         _err = None
+        _search_failed = False
         hits: List[Dict[str, Any]] = []
         try:
             k = top_k or int(_cfg(app_state, "vector_top_k", 5))
@@ -214,6 +215,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     h["docName"] = _doc_names.get(h.get("docId") or "", "")
             except Exception as e:
                 _err = str(e)
+                _search_failed = True  # 内层已落日志,外层降级记录跳过(防双条)
                 raise
             finally:
                 _scores = [float(h.get("score") or 0.0) for h in hits]
@@ -241,7 +243,11 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             chunks.extend(hits)
         except Exception as e:
             # 降级事件本身也入观测:连接建不起来/元数据读失败时,
-            # 调用日志里留一条 degraded 记录(否则"为什么只走了图谱路"不可查)
+            # 调用日志里留一条 degraded 记录(否则"为什么只走了图谱路"不可查)。
+            # search 本身的失败内层 finally 已记,这里跳过防同一次失败落两条
+            if _search_failed:
+                logger.warning(f"向量检索失败,降级纯图谱: {e}")
+                return {"intent": intent, "seeds": seeds, "subgraph": subgraph, "chunks": []}
             _log_retrieval_call(
                 app_state, "vector", "milvus:search",
                 request_data={"stage": "kg.vector_search", "kbId": kb["id"],

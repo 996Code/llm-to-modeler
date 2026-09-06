@@ -20,7 +20,6 @@
   命名一致性(合并质量的根本保障)。
 """
 import logging
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -36,9 +35,13 @@ logger = logging.getLogger(__name__)
 # 进度权重:解析切块 2% / 向量准备 10% / 抽取批 88%
 _W_PARSE, _W_VECTOR, _W_EXTRACT = 2, 10, 88
 
-# 进行中的导入(doc_id -> task_id):防同一文档并发重复导入
-_inflight: Dict[str, str] = {}
-_inflight_lock = threading.Lock()
+# 在途导入查询:防重已下沉任务框架(submit 的 dedupe_key——占位/检查/
+# 终态释放由框架统一保证,含 pending 期取消路径)。这里只保留只读视图
+# 供删除守卫等场景使用。
+def _inflight_task_id(app_state, doc_id: str):
+    """该文档是否有进行中的导入任务(框架 dedupe 表只读查询)。"""
+    mgr = getattr(app_state, "task_manager", None)
+    return mgr.get_active_dedupe(f"kg.import:{doc_id}") if mgr else None
 
 # register_tasks 注入的 app.state(取 llm_client / settings_store)
 _app_state: Any = None
@@ -52,10 +55,7 @@ def register_tasks(manager, app_state=None) -> None:
                      pack_name=runtime.PACK_NAME)
     manager.register("kg.induce_schema", run_induce_schema,
                      pack_name=runtime.PACK_NAME)
-    # 终态兜底:_inflight 只靠 handler finally 释放会漏(pending 期被取消/
-    # handler 被热切换清掉时 handler 根本不执行)。挂到任务管理器的终态
-    # 回调上——任何路径到达终态都释放,防重表不再永久卡死该文档。
-    manager.add_terminal_listener(_release_inflight_on_terminal)
+    # 防重占位/释放已下沉框架(dedupe_key),插件不再挂终态监听器。
     # 启动收敛:进程重启后遗留 importing 状态的文档,其任务已被标
     # interrupted,不会再有 handler 去收敛它——不处理就永远显示"导入中"。
     # 只在首次装配(=启动)时执行,且排除当前确实在跑/排队的导入任务,
@@ -96,42 +96,21 @@ def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False) -> Di
     doc = store.get_document(doc_id)
     if not doc or doc["kbId"] != kb_id:
         raise ValueError("文档不存在")
-    # 占位先入表再提交:占位与检查在同一临界区,双击/并发提交只有一个能过;
-    # 若先提交后登记,任务可能已在另一线程跑完并 release(此时表还没登记,
-    # release 落空)→ 我们再登记 = 永久泄漏。
-    with _inflight_lock:
-        if doc_id in _inflight:
-            raise ValueError(f"该文档已有进行中的导入任务(任务 {_inflight[doc_id][:8]}…)")
-        _inflight[doc_id] = "(提交中)"
-
     kb = store.get_kb(kb_id)
+    # 同文档防重(dedupe_key)与同库串行(queue_key)都是框架语义:
+    # 占位/检查同临界区、终态统一释放(含 pending 期取消),插件零样板
+    from services.task_manager import DuplicateTaskError
     try:
-        task = app_state.task_manager.submit(
+        return app_state.task_manager.submit(
             "kg.import_document",
             payload={"kb_id": kb_id, "doc_id": doc_id, "force": bool(force)},
             title=f"导入文档: {doc['filename']} → {kb['name'] if kb else kb_id[:8]}",
             pack_name=runtime.PACK_NAME,
-            queue_key=f"kg:{kb_id}",  # 同库串行:不并发写图
+            queue_key=f"kg:{kb_id}",           # 同库串行:不并发写图
+            dedupe_key=f"kg.import:{doc_id}",  # 同文档至多一个活任务
         )
-    except Exception:
-        _release_inflight(doc_id)
-        raise
-    with _inflight_lock:
-        # 终态回调按 task id 精确释放;若极端时序下任务已瞬终态并按占位
-        # 释放过(值不匹配未释放),这里登记后由下面再补一次释放判定
-        _inflight[doc_id] = task["id"]
-        if _task_is_terminal(app_state, task["id"]):
-            _inflight.pop(doc_id, None)
-    return task
-
-
-def _task_is_terminal(app_state, task_id: str) -> bool:
-    """轻查任务是否已到终态(极端快任务场景兜底,失败视为未终态)。"""
-    try:
-        t = app_state.task_manager.store.get_task(task_id)
-        return bool(t and t.get("status") in ("succeeded", "failed", "cancelled", "interrupted"))
-    except Exception:
-        return False
+    except DuplicateTaskError as e:
+        raise ValueError(str(e))  # api 层已有 ValueError→409 的映射
 
 
 def submit_induce_schema(app_state, kb_id: str, sample_chunks: int = 8) -> Dict[str, Any]:
@@ -147,28 +126,6 @@ def submit_induce_schema(app_state, kb_id: str, sample_chunks: int = 8) -> Dict[
         pack_name=runtime.PACK_NAME,
         queue_key=f"kg:{kb_id}",
     )
-
-
-def _release_inflight(doc_id: str) -> None:
-    with _inflight_lock:
-        _inflight.pop(doc_id, None)
-
-
-def _release_inflight_on_terminal(task: Dict[str, Any]) -> None:
-    """TaskManager 终态回调:kg.import_document 到终态即释放防重登记。
-
-    按 task id 精确匹配(而不是盲目 pop doc_id)——防止旧任务的迟到终态
-    误删新一次提交刚登记的防重项。
-    """
-    if task.get("taskType") != "kg.import_document":
-        return
-    payload = task.get("payload") or {}
-    doc_id = str(payload.get("doc_id") or "")
-    if not doc_id:
-        return
-    with _inflight_lock:
-        if _inflight.get(doc_id) == task.get("id"):
-            _inflight.pop(doc_id, None)
 
 
 # ── 配置取值 ─────────────────────────────────────────────────
@@ -199,8 +156,6 @@ def run_import_document(handle) -> Dict[str, Any]:
         except Exception:
             logger.warning("标记文档导入失败时出错", exc_info=True)
         raise
-    finally:
-        _release_inflight(doc_id)
 
 
 def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) -> Dict[str, Any]:
