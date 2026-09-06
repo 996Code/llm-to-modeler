@@ -150,10 +150,9 @@ async function load() {
       offset: (page.current - 1) * page.pageSize,
       userId: filterUserId.value.trim() || undefined,
       q: filterQ.value.trim() || undefined,
-      // __other__ → 空串元素(后端语义:无路由记录的会话)
-      packs: filterPacks.value.length
-        ? filterPacks.value.map((p) => (p === '__other__' ? '' : p)).join(',')
-        : undefined,
+      // 哨兵原样发送(__other__=其他);空串元素在逗号 join 里会坍缩丢失,
+      // 翻译统一由后端 API 层做(见 admin.py packs 解析)
+      packs: filterPacks.value.length ? filterPacks.value.join(',') : undefined,
     })
     rows.value = data.items
     total.value = data.total

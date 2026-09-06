@@ -178,7 +178,7 @@ class ConversationStore:
                 CREATE TABLE IF NOT EXISTS call_logs (
                     id TEXT PRIMARY KEY,
                     conv_id TEXT,                -- 可空:有些调用不属于特定会话
-                    call_type TEXT NOT NULL,     -- 'llm' or 'upstream'
+                    call_type TEXT NOT NULL,     -- 'llm'/'upstream'/'graph'/'vector'(开放枚举,插件可扩展)
                     endpoint TEXT NOT NULL,      -- 调用的接口地址
                     request_data TEXT,           -- 请求体 JSON
                     response_data TEXT,          -- 响应体 JSON
@@ -374,10 +374,10 @@ class ConversationStore:
                    (SELECT payload FROM events e
                      WHERE e.conv_id = m.conv_id AND e.kind = 'user'
                      ORDER BY e.created_at ASC LIMIT 1) AS first_user_payload,
-                   (SELECT json_extract(e.payload, '$.detail.pack') FROM events e
-                     WHERE e.conv_id = m.conv_id AND e.kind = 'trace'
-                       AND json_extract(e.payload, '$.detail.pack') IS NOT NULL
-                     ORDER BY e.created_at DESC LIMIT 1) AS last_pack
+                   -- 会话归属插件:最近一次路由 trace 的 pack(与 packs 过滤
+                   -- 共用 _PACK_EXPR 单一事实源;M2:限定 intent_route 防其他
+                   -- trace 携带 pack 键时污染归属)
+                   {self._PACK_EXPR} AS last_pack
               FROM session_meta m {where}
              ORDER BY m.updated_at DESC
              LIMIT ? OFFSET ?
@@ -436,10 +436,12 @@ class ConversationStore:
             ).fetchone()
         return int(row["c"])
 
-    # 会话的 pack 判定子查询:最近一次 intent_route trace 的 pack(无则 NULL)
+    # 会话的 pack 判定子查询:最近一次 intent_route trace 的 pack(无则 NULL)。
+    # 限定 stage=intent_route:ctx.trace 允许任意 detail 结构,不限定的话
+    # 任何带 pack 键的业务打点都会污染"会话归属插件"判定
     _PACK_EXPR = ("(SELECT json_extract(e.payload, '$.detail.pack') FROM events e "
                   "WHERE e.conv_id = m.conv_id AND e.kind = 'trace' "
-                  "AND json_extract(e.payload, '$.detail.pack') IS NOT NULL "
+                  "AND json_extract(e.payload, '$.stage') = 'intent_route' "
                   "ORDER BY e.created_at DESC LIMIT 1)")
 
     @staticmethod
@@ -892,9 +894,12 @@ class ConversationStore:
                 "SELECT AVG(duration_ms) AS d FROM call_logs WHERE duration_ms IS NOT NULL"
             ).fetchone()["d"]
 
-        by_type = {r["call_type"]: r for r in call_agg}
-        llm_row = by_type.get("llm")
-        up_row = by_type.get("upstream")
+        # 按 call_type 全量透出(llm/upstream/graph/vector/未来插件自定义类型):
+        # 前端照类型元数据渲染,新增调用类型不需要改这处 SQL
+        calls_by_type = {
+            r["call_type"]: {"count": int(r["c"]), "totalMs": int(r["ms"])}
+            for r in call_agg
+        }
 
         return {
             "conversations": int(conv_count),
@@ -906,11 +911,14 @@ class ConversationStore:
             "lastAt": span["hi"] if span else None,
             "calls": {
                 "total": int(call_total),
-                "llm": int(llm_row["c"]) if llm_row else 0,
-                "llmMs": int(llm_row["ms"]) if llm_row else 0,
-                "upstream": int(up_row["c"]) if up_row else 0,
-                "upstreamMs": int(up_row["ms"]) if up_row else 0,
+                # 兼容旧字段(概览卡片用)
+                "llm": calls_by_type.get("llm", {}).get("count", 0),
+                "llmMs": calls_by_type.get("llm", {}).get("totalMs", 0),
+                "upstream": calls_by_type.get("upstream", {}).get("count", 0),
+                "upstreamMs": calls_by_type.get("upstream", {}).get("totalMs", 0),
                 "avgDurationMs": round(float(avg_duration)) if avg_duration is not None else None,
+                # 全量分类型计数(graph/vector 等新类型自动进概览)
+                "byType": calls_by_type,
             },
         }
 

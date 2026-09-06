@@ -145,6 +145,11 @@ def test_admin_conversation_pack_column_and_filter(client):
     body = client.get("/api/admin/conversations", params={"packs": "njmind_form,__other__"},
                       headers=_auth_headers()).json()
     assert body["total"] == 2
+    # 契约:前端真实 wire format——只选「其他」时发 __other__ 哨兵(不转空串,
+    # 空串在逗号 join 中会坍缩丢失;曾因前端转空串导致「其他」筛选静默失效)
+    body = client.get("/api/admin/conversations", params={"packs": "__other__"},
+                      headers=_auth_headers()).json()
+    assert body["total"] == 1 and body["items"][0]["userId"] == "bob"
     # 与 userId 过滤可叠加
     body = client.get("/api/admin/conversations",
                       params={"packs": "njmind_form,__other__", "userId": "bob"},
