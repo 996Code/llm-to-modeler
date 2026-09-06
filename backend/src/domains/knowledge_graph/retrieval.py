@@ -51,11 +51,16 @@ def _log_retrieval_call(app_state, call_type: str, endpoint: str,
 
     call_type 用 'graph'/'vector' 与 llm/upstream 并列;stage 并入
     request_data(与 llm/client.py 的约定一致,管理端据此区分环节)。
+    conv_id 解析与 llm/upstream 同规则:显式参数优先,thread-local 兜底
+    (graph 工作线程绑定了会话上下文,调用方漏传也能关联,链路不断)。
     """
     try:
         cs = getattr(app_state, "conversation_store", None)
         if cs is None:
             return
+        if not conv_id:
+            from services.call_context import current_conversation_id
+            conv_id = current_conversation_id()
         cs.save_call_log(
             call_type=call_type,
             endpoint=endpoint,
@@ -123,14 +128,18 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             raise
         finally:
             # 逐词匹配明细:哪个词命中了哪个实体(含归一化名/类型)——
-            # "为什么没召回某实体"在调用日志里直接可答
-            _norm_hits = {str(s.get("normalized") or "").lower(): s for s in seeds}
+            # "为什么没召回某实体"在调用日志里直接可答。
+            # 归一化必须与 find_entities 同源(sdk.normalize_name 含全角→半角),
+            # 用朴素 .lower() 会在全角 query 上记出 matched=null 的假阴性
+            from sdk.graph_store import normalize_name as _norm
+            _norm_hits = {_norm(str(s.get("normalized") or "")): s for s in seeds}
             _term_detail = []
             for t in terms:
-                _hit = _norm_hits.get(str(t).strip().lower())
+                _nt = _norm(t)
+                _hit = _norm_hits.get(_nt)
                 if _hit is None:  # 包含匹配兜底:找 normalized 包含该词的种子
                     _hit = next((s for s in seeds
-                                 if str(t).strip().lower() in str(s.get("normalized") or "").lower()), None)
+                                 if _nt in _norm(str(s.get("normalized") or ""))), None)
                 _term_detail.append({
                     "term": t,
                     "matched": _hit.get("name") if _hit else None,
@@ -189,14 +198,14 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     # 记为 call_type='llm';这里记向量检索的召回量与匹配度)
     chunks: List[Dict[str, Any]] = []
     if kb.get("vectorEnabled"):
+        _t0 = time.monotonic()
+        _err = None
+        hits: List[Dict[str, Any]] = []
         try:
             k = top_k or int(_cfg(app_state, "vector_top_k", 5))
             vector = runtime.get_vector(app_state)
             qvec = app_state.llm_client.embeddings(
                 [query], conv_id=conv_id, stage="kg.query_embed")[0]
-            _t0 = time.monotonic()
-            _err = None
-            hits: List[Dict[str, Any]] = []
             # doc 名映射提前(日志里直接给文档名而不是裸 ID)
             _doc_names = {d["id"]: d["filename"] for d in store.list_documents(kb["id"])}
             try:
@@ -231,6 +240,15 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             # chunk 文本进上下文(docName 已在日志前映射好)
             chunks.extend(hits)
         except Exception as e:
+            # 降级事件本身也入观测:连接建不起来/元数据读失败时,
+            # 调用日志里留一条 degraded 记录(否则"为什么只走了图谱路"不可查)
+            _log_retrieval_call(
+                app_state, "vector", "milvus:search",
+                request_data={"stage": "kg.vector_search", "kbId": kb["id"],
+                              "kb": kb.get("name"), "degraded": True},
+                response_data={"hits": 0, "degraded": True},
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                error=str(e), conv_id=conv_id)
             logger.warning(f"向量检索失败,降级纯图谱: {e}")
 
     return {"intent": intent, "seeds": seeds, "subgraph": subgraph, "chunks": chunks}

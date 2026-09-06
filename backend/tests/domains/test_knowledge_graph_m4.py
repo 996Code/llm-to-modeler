@@ -106,11 +106,17 @@ def env(tmp_path, monkeypatch):
     graph, vector = RetrievalFakeGraph(), RetrievalFakeVector()
     monkeypatch.setattr(runtime, "get_graph", lambda state: graph)
     monkeypatch.setattr(runtime, "get_vector", lambda state: vector)
-    app_state = SimpleNamespace(llm_client=llm, settings_store=None)
+    # 检索观测的 fake sink:收集 save_call_log 调用(真实库在 test_admin_api 覆盖,
+    # 这里只验证检索侧写入的 call_type/stage/结构)
+    calls: list = []
+    fake_cs = SimpleNamespace(
+        save_call_log=lambda **kw: calls.append(kw) or "log-id")
+    app_state = SimpleNamespace(llm_client=llm, settings_store=None,
+                                conversation_store=fake_cs)
 
     store = runtime.get_kg_store(app_state)
     yield SimpleNamespace(store=store, llm=llm, graph=graph, vector=vector,
-                          app_state=app_state)
+                          app_state=app_state, obs_calls=calls)
     runtime.reset_runtime_cache()
 
 
@@ -126,6 +132,35 @@ def _ctx(env):
 # ── 检索编排 ─────────────────────────────────────────────────
 
 class TestRetrieval:
+
+    def test_retrieval_calls_logged(self, env):
+        """【观测回归锚】混合检索的图/向量调用入 call_logs:
+        类型/stage/请求参数/响应指标(命中/召回量/分数)全量可查。"""
+        from domains.knowledge_graph import retrieval
+        kb = dict(KB1)
+        retrieval.hybrid_retrieve(env.app_state, kb, "张三负责什么?", conv_id="conv-obs")
+        by_stage = {c["request_data"].get("stage"): c for c in env.obs_calls
+                    if c["call_type"] in ("graph", "vector")}
+        # 图谱两步
+        assert "kg.find_entities" in by_stage
+        fe = by_stage["kg.find_entities"]
+        assert fe["request_data"]["terms"] and fe["conv_id"] == "conv-obs"
+        assert fe["response_data"]["hits"] >= 1
+        assert fe["response_data"]["termDetail"], "逐词命中明细缺失"
+        assert "kg.subgraph" in by_stage
+        sub = by_stage["kg.subgraph"]
+        assert "nodes" in sub["response_data"] and "triples" in sub["response_data"]
+        assert "nodesTruncated" in sub["response_data"], "截断水位缺失"
+        # 向量一步
+        assert "kg.vector_search" in by_stage
+        vec = by_stage["kg.vector_search"]
+        assert vec["response_data"]["hits"] >= 1
+        assert vec["response_data"]["topScore"] is not None
+        assert vec["response_data"]["results"], "逐条命中明细缺失"
+        # 计时与错误字段存在
+        for c in env.obs_calls:
+            assert c["duration_ms"] >= 0 and c["error_message"] is None
+
 
     def test_hybrid_retrieve_graph_and_vector(self, env):
         env.store.create_document("d1-doc", "handbook.md", "text/markdown", 10, "", "h1")

@@ -469,9 +469,15 @@ async def search(request: Request, payload: Dict[str, Any]):
     # 管理端链路视图里能看到完整检索链;不传保持无会话归属
     conv_id = str((payload or {}).get("conv_id") or "").strip() or None
     try:
-        return retrieval.answer_question(
+        # 检索链含多次 LLM/图/向量同步调用(LLM_TIMEOUT 默认 300s),
+        # 直接在 async 端点里跑会阻塞整个事件循环(其他会话的 SSE 心跳
+        # 一起冻结)——丢线程池执行
+        import asyncio
+        result = await asyncio.to_thread(
+            retrieval.answer_question,
             request.app.state, kb, query, conv_id=conv_id, top_k=top_k,
-        ) | {"user": user}
+        )
+        return result | {"user": user}
     except Exception as e:
         # 异常详情只进服务端日志;用户级端点不回显内部错误串(可能带
         # 中间件地址等内部拓扑)
