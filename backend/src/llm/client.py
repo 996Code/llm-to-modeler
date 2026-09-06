@@ -64,6 +64,11 @@ def _sanitize_messages_for_log(messages: List[Dict[str, Any]]) -> List[Dict[str,
 
 logger = logging.getLogger(__name__)
 
+# 全局限速器(RPM/TPM 令牌桶 + 429 退避):所有 LLM 调用唯一出口处收敛
+from llm.rate_limit import (  # noqa: E402
+    estimate_tokens, get_rate_limiter, is_rate_limit_error,
+)
+
 
 class LLMConfig(BaseModel):
     """LLM 配置（Pydantic 模型，从环境变量加载）。
@@ -239,6 +244,9 @@ class LLMClient:
         """
         start_time = time.time()  # 计时起点，用于算 duration_ms
         endpoint = f"{self.config.base_url}/chat/completions"
+        # 全局限速:RPM/TPM 配额等待(未配置限额时零开销直通)
+        _est = estimate_tokens("".join(m.get("content") or "" for m in messages)) + 200
+        _rate_wait = get_rate_limiter().acquire(_est)
         # 构造请求参数快照（用于日志）：参数为 None 时回落到配置默认值
         # 类比 Java：Optional.ofNullable(temperature).orElse(config.temperature)
         request_data = {
@@ -281,6 +289,7 @@ class LLMClient:
 
             result = content or ""  # 兜底空串，避免 None 传给调用方
 
+            get_rate_limiter().on_success()  # 成功即清 429 退避闸门
             # 记录成功日志
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
@@ -289,6 +298,8 @@ class LLMClient:
                 "finish_reason": choice.finish_reason,  # stop=正常结束, length=截断
                 # model_dump() 是 Pydantic 转 dict，类比 Jackson 序列化对象为 Map
                 "usage": response.usage.model_dump() if response.usage else None,  # token 用量
+                # 限速等待耗时(观测:调用慢是限流排队还是模型本身)
+                **({"rateLimitWaitMs": int(_rate_wait * 1000)} if _rate_wait > 0.5 else {}),
             }
             # prompt 总字符数（体积指标）：慢调用排查一眼定位是不是大 prompt
             messages_chars = sum(
@@ -314,6 +325,10 @@ class LLMClient:
             return result
 
         except Exception as e:
+            if is_rate_limit_error(e):
+                # 429 限流:登记全局退避窗口(后续所有 LLM 调用统一等待),
+                # 错误标记 rate_limit 供上层区分(不算业务失败,不烧熔断)
+                get_rate_limiter().on_rate_limited()
             # 记录失败日志(完整模式下带上 prompt——失败排查最需要的就是当时发了什么)
             duration_ms = int((time.time() - start_time) * 1000)
             self._log_call(
@@ -324,7 +339,7 @@ class LLMClient:
                     **{k: v for k, v in request_data.items() if k != "messages"},
                     **({"messages": _sanitize_messages_for_log(messages)} if self._log_full else {}),
                 },
-                status_code=500,
+                status_code=429 if is_rate_limit_error(e) else 500,
                 duration_ms=duration_ms,
                 error_message=str(e),
                 conv_id=conv_id,
@@ -385,6 +400,12 @@ class LLMClient:
         # Try json_object mode first (only for text-only messages)
         start_time = time.time()
         endpoint = f"{self.config.base_url}/chat/completions"
+        # 全局限速:json_object 直连路径与 self.chat 同样出站,必须同样取配额
+        # (曾漏:该路径绕过 chat 的 acquire,导致 chat_json 类调用不限速)
+        _est = estimate_tokens("".join(
+            m.get("content") if isinstance(m.get("content"), str) else ""
+            for m in guided_messages)) + 200
+        _rate_wait = get_rate_limiter().acquire(_est)
         request_data = {
             "model": self.config.model,
             "messages": guided_messages,
@@ -409,6 +430,7 @@ class LLMClient:
 
             response = self.client.chat.completions.create(**create_kwargs)  # ** 展开字典为关键字参数
             result = self._extract_json(response)  # 提取并解析 JSON，可能抛异常
+            get_rate_limiter().on_success()
 
             # 记录成功日志
             duration_ms = int((time.time() - start_time) * 1000)
@@ -434,8 +456,12 @@ class LLMClient:
             )
 
             return result
-        except Exception:
-            # 第一级失败（json_object 模式不支持或解析失败）：静默降级
+        except Exception as _e:
+            # 429 限流要登记退避(全局闸门);其他异常(json_object 不支持/
+            # 解析失败)是预期内降级,静默走纯文本路径
+            if is_rate_limit_error(_e):
+                get_rate_limiter().on_rate_limited()
+                raise  # 限流不降级——纯文本路径同样会撞限,直接上抛让上层等退避
             # 注意这里 pass 不记日志，因为降级是预期内的正常路径
             pass
 
@@ -474,6 +500,9 @@ class LLMClient:
         start = time.monotonic()
         error = None
         vectors: List[List[float]] = []
+        # 全局限速(嵌入调用也占 TPM 配额;RPM 已在 chat 出口收敛)
+        _est = estimate_tokens(" ".join(texts))
+        _rate_wait = get_rate_limiter().acquire(_est)
         try:
             resp = self.client.embeddings.create(model=model, input=texts)
             # 按 index 归位(SDK 不保证返回有序)
@@ -481,9 +510,12 @@ class LLMClient:
             vectors = [list(item.embedding) for item in ordered]
             if len(vectors) != len(texts):
                 raise ValueError(f"embeddings 数量不符: {len(vectors)} != {len(texts)}")
+            get_rate_limiter().on_success()
             return vectors
         except Exception as e:
             error = str(e)
+            if is_rate_limit_error(e):
+                get_rate_limiter().on_rate_limited()
             raise
         finally:
             # 与 chat 同款观测:入 call_logs(文本量大时只记条数/字符量,不记全文)
