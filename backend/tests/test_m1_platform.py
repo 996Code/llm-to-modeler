@@ -435,6 +435,52 @@ class TestAuditFixes:
         wait_for(lambda: m.store.get_task(t2["id"])["status"]
                  in ("succeeded", "failed", "cancelled", "interrupted"))
 
+    def test_dedupe_key_rejects_duplicate_and_releases(self, task_manager, wait_for):
+        """【H2 回归锚】dedupe_key:同 key 活任务拒绝,终态后可重提。"""
+        from services.task_manager import DuplicateTaskError
+        m = task_manager
+        m.register("zz.dup", lambda h: {"ok": 1}, pack_name="test")
+        t1 = m.submit("zz.dup", dedupe_key="doc:1")
+        with pytest.raises(DuplicateTaskError):
+            m.submit("zz.dup", dedupe_key="doc:1")
+        # 不同 key 不受影响
+        t2 = m.submit("zz.dup", dedupe_key="doc:2")
+        wait_for(lambda: m.store.get_task(t1["id"])["status"] == "succeeded")
+        wait_for(lambda: m.store.get_task(t2["id"])["status"] == "succeeded")
+        # 终态释放后同 key 可重提
+        t3 = m.submit("zz.dup", dedupe_key="doc:1")
+        wait_for(lambda: m.store.get_task(t3["id"])["status"] == "succeeded")
+
+    def test_dedupe_key_released_on_cancel_pending(self, task_manager):
+        """【H2 回归锚】pending 期取消也释放 dedupe 占位(不走 _run finally)。"""
+        from services.task_manager import DuplicateTaskError
+        import threading
+        m = task_manager
+        barrier = threading.Event()
+        m.register("zz.block", lambda h: barrier.wait(timeout=5), pack_name="test")
+        m.register("zz.dup", lambda h: None, pack_name="test")
+        # 占满 2 个 worker,让 zz.dup 停在 pending(走 pending 取消路径)
+        m.submit("zz.block", queue_key="q1")
+        m.submit("zz.block", queue_key="q1b")
+        tp = m.submit("zz.dup", queue_key="q2", dedupe_key="doc:x")
+        m.cancel(tp["id"])
+        # 取消后占位已释放——同 key 重提应成功
+        t2 = m.submit("zz.dup", queue_key="q2", dedupe_key="doc:x")
+        assert t2["id"] != tp["id"]
+        barrier.set()
+        m.close()
+
+    def test_reset_terminal_listeners(self, task_manager, wait_for):
+        """【H1 回归锚】reset_terminal_listeners 清空监听者(热切换防累积)。"""
+        m = task_manager
+        seen = []
+        m.add_terminal_listener(lambda task: seen.append(task["id"]))
+        m.reset_terminal_listeners()
+        m.register("zz.ok", lambda h: None, pack_name="test")
+        t1 = m.submit("zz.ok")
+        wait_for(lambda: m.store.get_task(t1["id"])["status"] == "succeeded")
+        assert seen == []  # 监听者已被清空,不再触发
+
     def test_terminal_listener_fires_on_all_paths(self, task_manager, wait_for):
         """终态回调覆盖 succeeded / pending 取消 / handler 缺失路径。"""
         m = task_manager

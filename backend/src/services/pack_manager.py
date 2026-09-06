@@ -133,6 +133,9 @@ def assemble_packs(
     task_manager = getattr(app_state, "task_manager", None)
     if task_manager is not None:
         task_manager.reset_handlers()
+        # 监听者与 handler 同生命周期:register_tasks 重调前清空,
+        # 防热切换 N 次后同一终态回调挂 N 份
+        task_manager.reset_terminal_listeners()
         import importlib
         for pack_name in (pack_routers or {}):
             try:

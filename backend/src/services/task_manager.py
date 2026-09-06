@@ -83,6 +83,10 @@ class TaskHandle:
             raise TaskCancelled(f"task {self.task_id} cancelled")
 
 
+class DuplicateTaskError(RuntimeError):
+    """dedupe_key 已有活任务时 submit 抛出(插件转 409 给前端)。"""
+
+
 class TaskManager:
     """后台任务的调度与生命周期管理。"""
 
@@ -112,6 +116,10 @@ class TaskManager:
         # pack 用它释放"提交期登记、但 handler 可能根本没执行"的资源
         # (如 pending 期被取消的任务——finally 不生效,只能靠这里兜底)。
         self._terminal_listeners: List[Callable[[Dict[str, Any]], None]] = []
+        # dedupe_key → 活任务 id(pending/running)。终态统一释放,
+        # "同 key 至多一个活任务"由框架保证(与 queue_key 串行是姊妹语义:
+        # 串行管顺序,防重管存在性)
+        self._dedupe_keys: Dict[str, str] = {}
 
     # ── handler 注册(装配期调用) ───────────────────────────
 
@@ -147,6 +155,15 @@ class TaskManager:
         """
         self._terminal_listeners.append(callback)
 
+    def reset_terminal_listeners(self) -> None:
+        """清空终态监听者(装配期调用,与 reset_handlers 同点)。
+
+        pack 热切换时 register_tasks 会被重调——若 pack 每次都
+        add_terminal_listener 而框架不清理,同一回调挂 N 份、每个任务
+        终态执行 N 次(当前监听器恰好幂等所以无感,非幂等监听器会静默出错)。
+        """
+        self._terminal_listeners.clear()
+
     def _notify_terminal(self, task_id: str) -> None:
         """通知终态监听者(锁外调用;任务收尾的最后一环)。"""
         if not self._terminal_listeners:
@@ -169,11 +186,18 @@ class TaskManager:
         title: str = "",
         pack_name: str = "",
         queue_key: Optional[str] = None,
+        dedupe_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """提交任务:落库 pending → 入队 → 尝试调度。返回任务 dict。
 
+        Args:
+            dedupe_key: 非空时,同 key 已有活任务(pending/running)则拒绝
+                (DuplicateTaskError)。占位与检查在同一临界区,终态统一释放
+                ——插件侧"同文档不并发重复导入"类需求不再自写防重样板。
+
         Raises:
             KeyError: 任务类型未注册(pack 被禁用/拼错名)。
+            DuplicateTaskError: dedupe_key 已有活任务。
         """
         if task_type not in self._handlers:
             raise KeyError(f"未注册的任务类型: {task_type}")
@@ -182,11 +206,25 @@ class TaskManager:
             payload=payload, queue_key=queue_key,
         )
         with self._lock:
+            if dedupe_key:
+                existing = self._dedupe_keys.get(dedupe_key)
+                if existing and self._pending_state(existing):
+                    raise DuplicateTaskError(
+                        f"该操作已有进行中的任务(任务 {existing[:8]}…),请等待完成")
+                self._dedupe_keys[dedupe_key] = task["id"]
             self._pending.append(task["id"])
             # 无 queue_key 的任务用专属键:永不与其他任务互斥
             self._task_keys[task["id"]] = queue_key or f"__solo__{task['id']}"
             self._dispatch_locked()
         return task
+
+    def _pending_state(self, task_id: str) -> bool:
+        """任务是否仍占着 dedupe 位(pending/running;调用方须持锁)。
+
+        终态释放走 _finish(同锁),这里读内存表即可——表项只在
+        _finish 里删除,存在即视为活。
+        """
+        return task_id in self._dedupe_keys.values()
 
     def _dispatch_locked(self) -> None:
         """把等待队列头的任务尽可能派发给线程池(调用方须持锁)。
@@ -260,10 +298,14 @@ class TaskManager:
             self._notify_terminal(task_id)
 
     def _finish(self, task_id: str, effective_key: str) -> None:
-        """收尾:释放串行键/并发额度,派发下一个等待任务。"""
+        """收尾:释放串行键/并发额度/dedupe 占位,派发下一个等待任务。"""
         with self._lock:
             self._active_keys.discard(effective_key)
             self._running_count = max(0, self._running_count - 1)
+            # dedupe 释放:只删本任务自己的占位(防迟到终态误删新登记)
+            for dk, tid in list(self._dedupe_keys.items()):
+                if tid == task_id:
+                    del self._dedupe_keys[dk]
             self._task_keys.pop(task_id, None)
             self._dispatch_locked()
 
@@ -291,6 +333,10 @@ class TaskManager:
                 # 还没起跑:直接收尾为 cancelled
                 self._pending.remove(task_id)
                 self._task_keys.pop(task_id, None)
+                # pending 期取消不走 _run 的 finally,dedupe 占位须在此释放
+                for dk, tid in list(self._dedupe_keys.items()):
+                    if tid == task_id:
+                        del self._dedupe_keys[dk]
                 was_pending = True
             else:
                 # running:置标志,等 handler 到检查点自杀
