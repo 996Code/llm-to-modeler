@@ -56,7 +56,7 @@
               <!-- LLM / 上游调用 -->
               <template v-else-if="item.type === 'call'">
                 <div class="tr-item-head">
-                  <span class="tr-tag" :class="CALL_TYPE_META[item.callType || '']?.cls || 'tg-sys'">
+                  <span class="tr-tag" :class="CALL_TYPE_CLS[item.callType || ''] || 'tg-sys'">
                     {{ CALL_TYPE_META[item.callType || '']?.label || item.callType }} · {{ stageLabel(item.stage, item.endpoint) }}
                   </span>
                   <!-- 检索调用摘要:召回量/匹配度一眼可见,不用展开 JSON -->
@@ -106,42 +106,7 @@ import {
 import { ConversationTrace as TraceType, fetchConversationTrace, fmtTime } from '../api'
 import type { LoadSafely } from './loadSafely'
 import JsonViewer from './JsonViewer.vue'
-
-const props = defineProps<{ convId: string }>()
-
-const loadSafely = inject<LoadSafely>('loadSafely')!
-const trace = ref<TraceType | null>(null)
-const loading = ref(false)
-const openTurns = ref<number[]>([])
-
-const STAGE_LABELS: Record<string, string> = {
-  route_pack: '意图路由·选领域',
-  route_tool: '意图路由·选工具',
-  compress_history: '历史压缩',
-  'create_form.parse': '表单解析',
-  'create_form.generate': '表单生成',
-  'get_form.parse': '表单码解析',
-  'image_form.analyze': '图片识别',
-  'image_form.generate': '图片转配置',
-  'clone_form.parse': '克隆解析',
-  'chat.reply': '闲聊回复',
-  'submit_leave.parse': '请假信息提取',
-  // 知识图谱检索链路(LLM 三步 + 图/向量库两路)
-  'kg.query': 'LLM·检索意图解析',
-  'kg.query_embed': 'LLM·查询向量化',
-  'kg.answer': 'LLM·组织回答',
-  'kg.find_entities': '图谱·种子实体匹配',
-  'kg.subgraph': '图谱·子图召回',
-  'kg.vector_search': '向量·相似检索',
-}
-
-/** 调用类型元数据(与调用日志 Tab 一致的四分类) */
-const CALL_TYPE_META: Record<string, { label: string; cls: string }> = {
-  llm: { label: 'LLM', cls: 'tg-llm' },
-  upstream: { label: '上游', cls: 'tg-up' },
-  graph: { label: '图谱', cls: 'tg-graph' },
-  vector: { label: '向量', cls: 'tg-vector' },
-}
+import { CALL_TYPE_META, CALL_TYPE_CLS, stageLabel } from '../labels'
 
 /** 图/向量检索的召回摘要(图谱=种子/节点/边,向量=命中数+top 分数) */
 function recallSummary(item: { callType?: string; responseData?: unknown }): string {
@@ -159,10 +124,13 @@ function recallSummary(item: { callType?: string; responseData?: unknown }): str
   return ''
 }
 
-function stageLabel(stage: string | null | undefined, fallback: string | undefined): string {
-  if (stage && STAGE_LABELS[stage]) return STAGE_LABELS[stage]
-  return stage || fallback || '调用'
-}
+const props = defineProps<{ convId: string }>()
+
+const loadSafely = inject<LoadSafely>('loadSafely')!
+const trace = ref<TraceType | null>(null)
+const loading = ref(false)
+const openTurns = ref<number[]>([])
+
 
 function eventLabel(kind: string | undefined): string {
   const map: Record<string, string> = {

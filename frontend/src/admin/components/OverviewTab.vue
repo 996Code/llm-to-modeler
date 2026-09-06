@@ -39,6 +39,22 @@
           <div class="ov-extra">合计 {{ stats?.calls.upstreamMs ?? 0 }} ms</div>
         </div>
       </div>
+      <div class="ov-card" v-if="(stats?.calls?.byType?.graph?.count ?? 0) > 0">
+        <div class="ov-icon" style="background: #eff6ff; color: #2563eb"><NodeIndexOutlined /></div>
+        <div class="ov-body">
+          <div class="ov-value">{{ stats?.calls.byType?.graph?.count ?? 0 }}</div>
+          <div class="ov-label">图谱检索</div>
+          <div class="ov-extra">合计 {{ stats?.calls.byType?.graph?.totalMs ?? 0 }} ms</div>
+        </div>
+      </div>
+      <div class="ov-card" v-if="(stats?.calls?.byType?.vector?.count ?? 0) > 0">
+        <div class="ov-icon" style="background: #f0fdf4; color: #16a34a"><DatabaseOutlined /></div>
+        <div class="ov-body">
+          <div class="ov-value">{{ stats?.calls.byType?.vector?.count ?? 0 }}</div>
+          <div class="ov-label">向量检索</div>
+          <div class="ov-extra">合计 {{ stats?.calls.byType?.vector?.totalMs ?? 0 }} ms</div>
+        </div>
+      </div>
       <div class="ov-card">
         <div class="ov-icon" style="background: #fff7ed; color: #ea580c"><AppstoreOutlined /></div>
         <div class="ov-body">
@@ -64,7 +80,7 @@
 import { inject, onMounted, ref } from 'vue'
 import {
   MessageOutlined, CommentOutlined, RobotOutlined, CloudServerOutlined,
-  AppstoreOutlined, NodeIndexOutlined,
+  AppstoreOutlined, NodeIndexOutlined, DatabaseOutlined,
 } from '@ant-design/icons-vue'
 import { AdminStats, fetchStats, fmtTime } from '../api'
 import type { LoadSafely } from './loadSafely'

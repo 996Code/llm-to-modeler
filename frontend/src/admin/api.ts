@@ -26,6 +26,8 @@ export interface AdminStats {
     upstream: number
     upstreamMs: number
     avgDurationMs: number | null
+    /** 按 call_type 全量计数(llm/upstream/graph/vector/插件自定义) */
+    byType?: Record<string, { count: number; totalMs: number }>
   }
   packs?: { discovered: number; enabled: number }
 }

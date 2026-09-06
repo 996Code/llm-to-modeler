@@ -124,23 +124,7 @@ const columns = computed(() => {
 const detail = ref<CallLogItem | null>(null)
 const detailOpen = ref(false)
 
-/** 调用类型元数据:标签 + 颜色(graph/vector 是知识图谱检索两路) */
-const TYPE_META: Record<string, { label: string; color: string }> = {
-  llm: { label: 'LLM', color: 'purple' },
-  upstream: { label: '上游', color: 'cyan' },
-  graph: { label: '图谱', color: 'geekblue' },
-  vector: { label: '向量', color: 'green' },
-}
-
-/** kg.* 环节中文名(与链路视图一致) */
-const STAGE_LABELS: Record<string, string> = {
-  'kg.query': 'LLM·检索意图解析',
-  'kg.query_embed': 'LLM·查询向量化',
-  'kg.answer': 'LLM·组织回答',
-  'kg.find_entities': '图谱·种子实体匹配',
-  'kg.subgraph': '图谱·子图召回',
-  'kg.vector_search': '向量·相似检索',
-}
+import { CALL_TYPE_META as TYPE_META, STAGE_LABELS, stageLabel } from '../labels'
 
 /** 地址列:LLM/检索显示中文环节名,上游显示接口路径(截掉域名前缀) */
 function endpointLabel(r: CallLogItem): string {
