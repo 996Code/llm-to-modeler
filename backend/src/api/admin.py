@@ -539,6 +539,20 @@ async def admin_put_pack_settings(name: str, request: Request, payload: Dict[str
     # 命中旧的失败缓存,把"配置已改对"的插件继续拒载(设置页救活主路径)。
     from services.pack_dependency import clear_probe_cache
     clear_probe_cache(name)
+    # LLM 限速参数(kg 插件的 llm_rpm_limit/llm_tpm_limit)保存即热生效:
+    # 全局限速器是进程级单例,configure 重建桶——下一个 LLM 调用即按新限额
+    if name == "knowledge_graph" and {"llm_rpm_limit", "llm_tpm_limit"} & set(clean):
+        try:
+            from llm.rate_limit import get_rate_limiter
+            merged = store.get_values(name)
+            get_rate_limiter().configure(
+                rpm=int(merged.get("llm_rpm_limit") or 0),
+                tpm=int(merged.get("llm_tpm_limit") or 0),
+            )
+            logger.info(f"rate limiter reconfigured: rpm={merged.get('llm_rpm_limit') or 0} "
+                        f"tpm={merged.get('llm_tpm_limit') or 0}")
+        except Exception:
+            logger.exception("rate limiter reconfigure failed")
     # 审计留痕:配置变更是管理端敏感操作(依赖判定/连接凭据都可能随它改变),
     # 必须能在服务日志里追溯"谁在什么时候改了哪个插件的哪些项"。
     # 只记字段名不记值——secret 类字段的明文永不进日志。

@@ -180,7 +180,33 @@ async function onFilesPicked(info: UploadChangeParam) {
   emit('changed')
 }
 
+/** 导入预估:按文档大小估块数与耗时(1 块≈1200 字,LLM 单块约 45s)。
+ * 大文档(>30 分钟)先弹确认——用户上传 100 万字小说前心里有数。 */
+function importEstimate(doc: KgDocument): { chunks: number; etaMin: number; etaText: string } {
+  // sizeBytes 对中文 UTF-8 ≈ 3 字节/字;已切块的用真实块数
+  const estChars = doc.chunkCount ? doc.chunkCount * 1200 : Math.ceil((doc.sizeBytes || 0) / 3)
+  const chunks = Math.max(1, Math.ceil(estChars / 1200))
+  const etaMin = Math.round(chunks * 45 / 2) // 批内并发 2
+  const etaText = etaMin >= 60 ? `${(etaMin / 60).toFixed(1)} 小时` : `${etaMax(etaMin, 1)} 分钟`
+  return { chunks, etaMin, etaText }
+}
+const etaMax = (v: number, lo: number) => Math.max(v, lo)
+
 async function doImport(doc: KgDocument, force: boolean) {
+  const est = importEstimate(doc)
+  if (est.etaMin >= 30) {
+    const { Modal } = await import('ant-design-vue')
+    const ok = await new Promise<boolean>((resolve) => {
+      Modal.confirm({
+        title: '大文档导入预估',
+        content: `该文档约 ${est.chunks} 块,预计耗时约 ${est.etaText}。` +
+          '导入为后台任务,失败会自动续跑(块级断点,只跑剩余部分),期间可离开页面。',
+        okText: '开始导入', cancelText: '取消',
+        onOk: () => resolve(true), onCancel: () => resolve(false),
+      })
+    })
+    if (!ok) return
+  }
   await loadSafely(async () => {
     const task = await importKgDocument(props.kbId, doc.id, force)
     taskByDoc.value[doc.id] = task

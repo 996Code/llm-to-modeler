@@ -144,7 +144,10 @@
 
         <!-- 原始视图:纯文本流(时间/级别/消息/data) -->
         <div v-else class="tk-logs" ref="logsBox">
-          <div v-for="lg in filteredLogs" :key="lg.id" class="tk-log-line">
+          <div v-if="filteredLogs.length > RENDER_CAP" class="tk-truncate-note">
+            日志共 {{ filteredLogs.length }} 条,仅渲染最近 {{ RENDER_CAP }} 条(可加筛选缩小范围)
+          </div>
+          <div v-for="lg in renderableLogs" :key="lg.id" class="tk-log-line">
             <span class="tk-log-time">{{ fmtTime(lg.createdAt).slice(11) }}</span>
             <a-tag
               class="tk-log-level" :color="lg.level === 'error' ? 'red' : lg.level === 'warn' ? 'orange' : 'blue'"
@@ -303,6 +306,14 @@ const levelFilter = ref('')
 const filteredLogs = computed(() =>
   levelFilter.value ? logs.value.filter((l) => l.level === levelFilter.value) : logs.value)
 const viewMode = ref<'structured' | 'raw'>('structured')
+
+// 渲染窗口保护:万级块的长文档任务,原始视图全量 v-for 会卡死浏览器——
+// 只渲染尾部 2000 行;结构化视图有分组聚合天然收敛,不受此限
+const RENDER_CAP = 2000
+const renderableLogs = computed(() =>
+  filteredLogs.value.length > RENDER_CAP
+    ? filteredLogs.value.slice(-RENDER_CAP)
+    : filteredLogs.value)
 
 // 心跳指示:距最后一条日志的秒数(1s 节流刷新;running 时才计时)
 const nowTick = ref(Date.now())
@@ -544,6 +555,10 @@ function openLogs(record: TaskItem) {
 .tk-msg { color: #6b7280; font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tk-logs-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .tk-logs-count { color: #9ca3af; font-size: 12px; margin-left: auto; }
+.tk-truncate-note {
+  padding: 6px 10px; margin-bottom: 6px;
+  background: #fffbeb; color: #b45309; font-size: 12px; border-radius: 6px;
+}
 .tk-live-dot {
   display: inline-flex; align-items: center; gap: 5px;
   color: #16a34a; font-size: 12px;

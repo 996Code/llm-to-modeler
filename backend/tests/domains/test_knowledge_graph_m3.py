@@ -158,6 +158,9 @@ def env(tmp_path, monkeypatch):
         "chunk_target_chars": 100, "chunk_overlap_chars": 0, "chunk_max_chars": 300,
         "llm_batch_size": 2, "llm_concurrency": 2, "llm_max_retries": 0,
         "failure_threshold": 5, "glossary_top_k": 100,
+        # 测试默认关闭失败自动续跑:续跑有 5 分钟退避,会让失败类测试
+        # 停在 retry_scheduled 而非终态(续跑语义由框架层测试单独覆盖)
+        "import_max_auto_retry": 0,
     })
 
     fake_graph, fake_vector, llm = FakeGraph(), FakeVector(), MockLLM()

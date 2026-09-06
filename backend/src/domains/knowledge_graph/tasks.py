@@ -38,6 +38,15 @@ _W_PARSE, _W_VECTOR, _W_EXTRACT = 2, 10, 88
 # 在途导入查询:防重已下沉任务框架(submit 的 dedupe_key——占位/检查/
 # 终态释放由框架统一保证,含 pending 期取消路径)。这里只保留只读视图
 # 供删除守卫等场景使用。
+def _fmt_eta(minutes: float) -> str:
+    """预计剩余时间格式化:<1h 用分钟,否则小时+分钟。"""
+    if minutes < 1:
+        return "<1 分钟"
+    if minutes < 60:
+        return f"{minutes:.0f} 分钟"
+    return f"{minutes / 60:.1f} 小时"
+
+
 def _inflight_task_id(app_state, doc_id: str):
     """该文档是否有进行中的导入任务(框架 dedupe 表只读查询)。"""
     mgr = getattr(app_state, "task_manager", None)
@@ -98,8 +107,11 @@ def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False) -> Di
         raise ValueError("文档不存在")
     kb = store.get_kb(kb_id)
     # 同文档防重(dedupe_key)与同库串行(queue_key)都是框架语义:
-    # 占位/检查同临界区、终态统一释放(含 pending 期取消),插件零样板
+    # 占位/检查同临界区、终态统一释放(含 pending 期取消),插件零样板。
+    # 失败自动续跑(设置页 import_max_auto_retry):LLM 抖动/限流导致的失败
+    # 由框架延迟重入队,块级 checkpoint 保证只跑剩余部分
     from services.task_manager import DuplicateTaskError
+    max_retry = max(0, int(_cfg(app_state, "import_max_auto_retry", 3)))
     try:
         return app_state.task_manager.submit(
             "kg.import_document",
@@ -108,6 +120,7 @@ def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False) -> Di
             pack_name=runtime.PACK_NAME,
             queue_key=f"kg:{kb_id}",           # 同库串行:不并发写图
             dedupe_key=f"kg.import:{doc_id}",  # 同文档至多一个活任务
+            max_auto_retry=max_retry,          # 失败自动续跑(致命错误除外)
         )
     except DuplicateTaskError as e:
         raise ValueError(str(e))  # api 层已有 ValueError→409 的映射
@@ -282,9 +295,15 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     pending_proposals: List[Dict] = []
     total_entities = total_relations = failed_chunks = 0
     consecutive_failures = 0
+    # 预计剩余时间:最近 10 块的滑动平均耗时 × 剩余块 ÷ 并发
+    # (LLM 耗时随词表膨胀/限流波动,滑动窗口比全程平均更贴近当前速率)
+    _recent_durations: list = []
     batch_index = 0
 
     executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="kg-extract")
+    # 预计剩余时间:最近 10 块的滑动平均耗时 × 剩余块 ÷ 并发
+    # (LLM 耗时随词表膨胀/限流波动,滑动窗口比全程平均更贴近当前速率)
+    _recent_durations: list = []
     try:
         for batch_start in range(0, len(pending), batch_size):
             handle.check_cancel()
@@ -380,10 +399,19 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
                 # 块粒度进度心跳:批内每完成一块推进一次(批内并行,完成
                 # 顺序不定——按"已完成块数"推,单调不回退)
                 completed_in_batch += 1
+                if stats.get("duration_ms"):
+                    _recent_durations.append(float(stats["duration_ms"]))
+                    del _recent_durations[:-10]  # 滑动窗口 10 块
+                _eta = ""
+                if len(_recent_durations) >= 2:
+                    _avg = sum(_recent_durations) / len(_recent_durations)
+                    _remain = total - (done_before + batch_start + completed_in_batch)
+                    _eta_min = _avg * _remain / max(1, concurrency) / 60000.0
+                    _eta = f", 预计剩余 {_fmt_eta(_eta_min)}" if _remain > 0 else ""
                 handle.set_progress(
                     min(99, _W_PARSE + _W_VECTOR
                         + int(_W_EXTRACT * (base_done + completed_in_batch) / max(1, total))),
-                    f"批次 {batch_index}: 已抽取 {completed_in_batch}/{len(batch)} 块")
+                    f"批次 {batch_index}: 已抽取 {completed_in_batch}/{len(batch)} 块{_eta}")
 
             if batch_failed:
                 consecutive_failures += batch_failed

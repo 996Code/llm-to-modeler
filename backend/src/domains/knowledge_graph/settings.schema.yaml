@@ -114,6 +114,27 @@ groups:
         default: 16
         min: 1
         max: 64
+      - key: llm_rpm_limit
+        type: int
+        label: LLM 请求限速(每分钟)
+        default: 0
+        min: 0
+        max: 10000
+        help: 全局令牌桶(0=不限)。撞服务商 RPM 限额时配置;429 会自动全局退避
+      - key: llm_tpm_limit
+        type: int
+        label: LLM Token 限速(每分钟)
+        default: 0
+        min: 0
+        max: 10000000
+        help: 按估算 token 扣桶(0=不限)。长文档导入必配,防 TPM 撞限
+      - key: import_max_auto_retry
+        type: int
+        label: 导入失败自动续跑次数
+        default: 3
+        min: 0
+        max: 10
+        help: 失败(非欠费/鉴权类)后 5 分钟自动重新入队;块级断点保证只跑剩余部分
 
   - key: retrieval
     title: 检索与问答
