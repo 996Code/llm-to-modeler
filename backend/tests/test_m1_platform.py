@@ -479,6 +479,52 @@ class TestAuditFixes:
         barrier.set()
         m.close()
 
+    def test_auto_retry_scenarios(self, task_manager):
+        """【长文档支持回归锚】失败自动续跑四态:普通失败重试/致命不重试/
+        取消撤销续跑/续跑收敛 resumed。"""
+        m = task_manager
+
+        # 1) 普通失败 → retry_scheduled(状态/计数/消息)
+        def flaky(h):
+            raise RuntimeError("LLM timeout")
+        m.register("zz.flaky", flaky, pack_name="test")
+        t1 = m.submit("zz.flaky", max_auto_retry=3)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and m.store.get_task(t1["id"])["status"] not in ("retry_scheduled", "failed"):
+            time.sleep(0.05)
+        st = m.store.get_task(t1["id"])
+        assert st["status"] == "retry_scheduled", st
+        assert st["retryCount"] == 1 and "自动续跑" in st["progressMessage"]
+
+        # 2) 取消撤销续跑
+        c = m.cancel(t1["id"])
+        assert c["status"] == "cancelled"
+
+        # 3) 致命错误(鉴权)不重试
+        def auth_fail(h):
+            raise RuntimeError("Error code: 401 - invalid api key")
+        m.register("zz.auth", auth_fail, pack_name="test")
+        t2 = m.submit("zz.auth", max_auto_retry=3)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and m.store.get_task(t2["id"])["status"] not in ("failed", "retry_scheduled"):
+            time.sleep(0.05)
+        assert m.store.get_task(t2["id"])["status"] == "failed"
+
+        # 4) 续跑收敛:手动触发 resubmit(跳过 5 分钟退避)
+        def ok_handler(h):
+            return {"done": True}
+        m.register("zz.ok", ok_handler, pack_name="test")
+        t4 = m.submit("zz.ok", max_auto_retry=3)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and m.store.get_task(t4["id"])["status"] != "succeeded":
+            time.sleep(0.05)
+        m.store.update_task(t4["id"], status="retry_scheduled")
+        m._resubmit_after_retry(t4["id"])
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and m.store.get_task(t4["id"])["status"] != "resumed":
+            time.sleep(0.05)
+        assert m.store.get_task(t4["id"])["status"] == "resumed"
+
     def test_reset_terminal_listeners(self, task_manager, wait_for):
         """【H1 回归锚】reset_terminal_listeners 清空监听者(热切换防累积)。"""
         m = task_manager

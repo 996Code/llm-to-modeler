@@ -29,7 +29,8 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # 终态集合(SSE 流据此判断"可以收尾断流")
-FINAL_STATUSES = {"succeeded", "failed", "cancelled", "interrupted"}
+# resumed:任务失败后已自动续跑为新任务(终态;历史轨迹指向新任务)
+FINAL_STATUSES = {"succeeded", "failed", "cancelled", "interrupted", "resumed"}
 
 # 活动态集合(重启恢复时需要被打成 interrupted 的范围)
 ACTIVE_STATUSES = {"pending", "running"}
@@ -54,6 +55,9 @@ def _row_to_task(row: sqlite3.Row) -> Dict[str, Any]:
         "payload": json.loads(d["payload"]) if d.get("payload") else None,
         "result": json.loads(d["result"]) if d.get("result") else None,
         "error": d["error"] or "",
+        "retryCount": int(d.get("retry_count") or 0),
+        "maxAutoRetry": int(d.get("max_auto_retry") or 0),
+        "autoRetryAt": d.get("auto_retry_at"),
         "createdAt": d["created_at"],
         "startedAt": d.get("started_at"),
         "finishedAt": d.get("finished_at"),
@@ -91,6 +95,13 @@ class TaskStore:
     def _init_db(self):
         """幂等建表。"""
         with self._get_conn() as conn:
+            # 存量库列迁移(幂等:新库/列已存在时静默跳过)
+            try:
+                conn.execute("ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
+                conn.execute("ALTER TABLE tasks ADD COLUMN max_auto_retry INTEGER DEFAULT 0")
+                conn.execute("ALTER TABLE tasks ADD COLUMN auto_retry_at TEXT")
+            except sqlite3.OperationalError:
+                pass
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,            -- 任务 ID(UUID)
@@ -104,6 +115,9 @@ class TaskStore:
                     payload TEXT,                   -- 输入参数 JSON
                     result TEXT,                    -- 成功产物 JSON
                     error TEXT,                     -- 失败原因
+                    retry_count INTEGER DEFAULT 0,  -- 已自动续跑次数
+                    max_auto_retry INTEGER DEFAULT 0, -- 自动续跑上限(0=不重试)
+                    auto_retry_at TEXT,             -- 下次自动续跑时间(ISO)
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT
@@ -132,6 +146,7 @@ class TaskStore:
         title: str = "",
         payload: Optional[Dict[str, Any]] = None,
         queue_key: Optional[str] = None,
+        max_auto_retry: int = 0,
     ) -> Dict[str, Any]:
         """创建 pending 任务并返回任务 dict(submit 落库 + 调度入队用)。"""
         task_id = str(uuid.uuid4())
@@ -140,13 +155,13 @@ class TaskStore:
             conn.execute(
                 """INSERT INTO tasks
                    (id, task_type, pack_name, title, status, progress, progress_message,
-                    queue_key, payload, created_at)
-                   VALUES (?, ?, ?, ?, 'pending', 0, '', ?, ?, ?)""",
+                    queue_key, payload, created_at, retry_count, max_auto_retry)
+                   VALUES (?, ?, ?, ?, 'pending', 0, '', ?, ?, ?, 0, ?)""",
                 (
                     task_id, task_type, pack_name, title,
                     queue_key,
                     json.dumps(payload, ensure_ascii=False) if payload else None,
-                    now,
+                    now, max(0, int(max_auto_retry)),
                 ),
             )
         return {
@@ -154,6 +169,8 @@ class TaskStore:
             "title": title, "status": "pending", "progress": 0,
             "progressMessage": "", "queueKey": queue_key or "",
             "payload": payload, "result": None, "error": "",
+            "retryCount": 0, "maxAutoRetry": max(0, int(max_auto_retry)),
+            "autoRetryAt": None,
             "createdAt": now, "startedAt": None, "finishedAt": None,
         }
 
@@ -168,6 +185,7 @@ class TaskStore:
         allowed = {
             "status", "progress", "progress_message", "result",
             "error", "started_at", "finished_at",
+            "retry_count", "auto_retry_at",  # 自动续跑状态列
         }
         cols, params = [], []
         for k, v in fields.items():

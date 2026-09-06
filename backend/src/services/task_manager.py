@@ -25,6 +25,7 @@ import logging
 import os
 import queue
 import threading
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional
 
@@ -199,6 +200,7 @@ class TaskManager:
         pack_name: str = "",
         queue_key: Optional[str] = None,
         dedupe_key: Optional[str] = None,
+        max_auto_retry: int = 0,
     ) -> Dict[str, Any]:
         """提交任务:落库 pending → 入队 → 尝试调度。返回任务 dict。
 
@@ -206,6 +208,9 @@ class TaskManager:
             dedupe_key: 非空时,同 key 已有活任务(pending/running)则拒绝
                 (DuplicateTaskError)。占位与检查在同一临界区,终态统一释放
                 ——插件侧"同文档不并发重复导入"类需求不再自写防重样板。
+            max_auto_retry: 失败自动续跑上限(默认 0=不重试)。失败且非致命
+                错误(欠费/鉴权——重试无意义)时,框架延迟重新入队;
+                块级 checkpoint 由 handler 保证,续跑只跑剩余部分。
 
         Raises:
             KeyError: 任务类型未注册(pack 被禁用/拼错名)。
@@ -224,6 +229,7 @@ class TaskManager:
         task = self._store.create_task(
             task_type, pack_name=pack_name, title=title,
             payload=payload, queue_key=queue_key,
+            max_auto_retry=max_auto_retry,
         )
         with self._lock:
             if dedupe_key:
@@ -292,13 +298,17 @@ class TaskManager:
                 )
                 self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "cancelled"}})
             except Exception as e:
+                from llm.rate_limit import is_fatal_llm_error
                 logger.exception(f"task {task_id} ({task['taskType']}) failed")
-                self._store.update_task(
-                    task_id, status="failed", error=str(e),
-                    finished_at=datetime.now(timezone.utc).isoformat(),
-                )
-                self._store.append_log(task_id, level="error", message=f"任务失败: {e}")
-                self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "failed", "error": str(e)}})
+                # 自动续跑:未超上限且非致命错误(欠费/鉴权重试无意义)时,
+                # 延迟重新入队——checkpoint 语义由 handler 保证,续跑只跑剩余
+                if not self._maybe_auto_retry(task_id, task, e):
+                    self._store.update_task(
+                        task_id, status="failed", error=str(e),
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    self._store.append_log(task_id, level="error", message=f"任务失败: {e}")
+                    self._publish(task_id, {"event": "status", "data": {"taskId": task_id, "status": "failed", "error": str(e)}})
         finally:
             with self._lock:
                 self._cancel_flags.discard(task_id)
@@ -319,6 +329,110 @@ class TaskManager:
 
     # ── 取消 ───────────────────────────────────────────────
 
+    def _maybe_auto_retry(self, task_id: str, task: Dict, error: Exception) -> bool:
+        """失败后按策略自动续跑。Returns: True=已安排重试(调用方不再标 failed)。
+
+        整体 fail-open 到 False:任何内部异常(白名单/磁盘)都回落到
+        "正常标 failed"路径——续跑是增强,不能因自身故障让任务卡在中间态。
+
+        策略:
+        - retry_count >= max_auto_retry → 不重试
+        - 致命错误(欠费/鉴权/配额)→ 不重试(重试无意义,空转烧日志)
+        - 退避 5 分钟(固定;LLM 恢复通常分钟级)后重新入队
+        - handler 热切换已移除 → 不重试(任务类型没了)
+        checkpoint 语义由 handler 保证:续跑任务从剩余块继续,已完成块跳过。
+        """
+        try:
+            return self._maybe_auto_retry_impl(task_id, task, error)
+        except Exception:
+            logger.exception(f"auto retry scheduling failed for {task_id}, fallback to failed")
+            return False
+
+    def _maybe_auto_retry_impl(self, task_id: str, task: Dict, error: Exception) -> bool:
+        from datetime import datetime, timezone
+        from llm.rate_limit import is_fatal_llm_error
+        max_retry = int(task.get("maxAutoRetry") or 0)
+        retry_count = int(task.get("retryCount") or 0)
+        if max_retry <= 0 or retry_count >= max_retry:
+            return False
+        if is_fatal_llm_error(error):
+            self._store.append_log(
+                task_id, level="warn",
+                message=f"错误为致命类(鉴权/欠费/配额),不自动续跑: {str(error)[:200]}")
+            return False
+        if task.get("taskType") not in self._handlers:
+            return False  # 任务类型已下线
+
+        now = datetime.now(timezone.utc)
+        delay_sec = 300
+        retry_at = datetime.fromtimestamp(
+            now.timestamp() + delay_sec, tz=timezone.utc).isoformat()
+        self._store.update_task(
+            task_id,
+            status='retry_scheduled',
+            retry_count=retry_count + 1,
+            auto_retry_at=retry_at,
+            progress_message=f"任务失败,将于 5 分钟后自动续跑(第 {retry_count + 1}/{max_retry} 次)",
+        )
+        self._store.append_log(
+            task_id, level="warn",
+            message=f"任务失败将自动续跑(第 {retry_count + 1}/{max_retry} 次,5 分钟后): {str(error)[:200]}",
+            data={"autoRetry": True, "retryAt": retry_at})
+        self._publish(task_id, {"event": "status",
+                                "data": {"taskId": task_id, "status": "retry_scheduled",
+                                         "retryAt": retry_at,
+                                         "retryCount": retry_count + 1}})
+        # 定时重入队:独立线程睡到点后重新提交同 payload(新任务实例,
+        # 保留 dedupe/queue_key 语义;retry_count 已在库中累加)
+        timer = threading.Timer(
+            delay_sec,
+            lambda: self._resubmit_after_retry(task_id))
+        timer.daemon = True
+        timer.start()
+        return True
+
+    def _resubmit_after_retry(self, old_task_id: str) -> None:
+        """续跑:取旧任务 payload 重新提交(dedupe 占位在 _finish 已释放)。"""
+        try:
+            old = self._store.get_task(old_task_id)
+            if not old or old["status"] in FINAL_STATUSES:
+                return  # 旧任务已被手动处理(取消等),续跑作废
+            if old["taskType"] not in self._handlers:
+                self._store.update_task(
+                    old_task_id, status="failed",
+                    error="任务类型已下线,自动续跑中止",
+                    finished_at=datetime.now(timezone.utc).isoformat())
+                return
+            new_task = self.submit(
+                old["taskType"], payload=old.get("payload"),
+                title=old.get("title") or "", pack_name=old.get("packName") or "",
+                queue_key=old.get("queueKey") or None,
+                max_auto_retry=int(old.get("maxAutoRetry") or 0))
+            # 注:续跑不重传 dedupe_key(框架内存表已随旧任务终态释放;
+            # 5 分钟退避窗口内同 key 手动提交会成功一次,属可接受竞态——
+            # 新任务开跑后占位恢复,后续提交照常被挡
+            # 旧任务收敛为 resumed 终态(轨迹保留;retry_count 不带入新任务——
+            # 新任务自带完整 max_auto_retry 额度,由其自身失败时重新计数)
+            self._store.update_task(
+                old_task_id, status="resumed",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                progress_message=f"已自动续跑 → 新任务 {new_task['id'][:8]}…",
+            )
+            self._store.append_log(
+                old_task_id, level="info",
+                message=f"自动续跑已重新入队 → 新任务 {new_task['id'][:8]}…",
+                data={"resumedAs": new_task["id"]})
+            self._publish(old_task_id, {"event": "status",
+                                        "data": {"taskId": old_task_id, "status": "resumed",
+                                                 "newTaskId": new_task["id"]}})
+        except Exception:
+            logger.exception(f"auto retry resubmit failed for {old_task_id}")
+            # 续跑失败兜底:标 failed(否则卡在 retry_scheduled 中间态)
+            self._store.update_task(
+                old_task_id, status="failed",
+                error="自动续跑重入队失败(见服务端日志)",
+                finished_at=datetime.now(timezone.utc).isoformat())
+
     def cancel(self, task_id: str) -> Optional[Dict[str, Any]]:
         """请求取消。pending → 直接 cancelled;running → 置协作标志。
 
@@ -334,6 +448,19 @@ class TaskManager:
             return None
         if task["status"] in FINAL_STATUSES:
             return task  # 已终态,幂等返回
+
+        # retry_scheduled(等待自动续跑):取消 = 撤销续跑计划,直接 cancelled
+        if task["status"] == "retry_scheduled":
+            from datetime import datetime, timezone
+            self._store.update_task(
+                task_id, status="cancelled",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                progress_message="已取消(自动续跑计划已撤销)",
+            )
+            self._publish(task_id, {"event": "status",
+                                    "data": {"taskId": task_id, "status": "cancelled"}})
+            self._notify_terminal(task_id)
+            return self._store.get_task(task_id)
 
         was_pending = False
         with self._lock:
