@@ -220,6 +220,7 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         conv_id: Optional[str] = None,
         stage: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> str:
         """发送对话请求，返回纯文本响应（同步）。
 
@@ -238,6 +239,8 @@ class LLMClient:
             temperature: 采样温度，None 用配置默认值（0.1）
             max_tokens: 最大输出 token，None 用配置默认值（200000）
             conv_id: 会话 ID（用于日志关联）
+            model: 模型名覆盖，None 用配置默认值。批量任务(如知识图谱
+                抽取)可用更快/更便宜的模型，对话链路不受影响
 
         Returns:
             LLM 响应文本
@@ -247,19 +250,21 @@ class LLMClient:
         # 全局限速:RPM/TPM 配额等待(未配置限额时零开销直通)
         _est = estimate_tokens("".join(m.get("content") or "" for m in messages)) + 200
         _rate_wait = get_rate_limiter().acquire(_est)
+        # 单次调用级模型覆盖(None = 配置默认)
+        use_model = model or self.config.model
         # 构造请求参数快照（用于日志）：参数为 None 时回落到配置默认值
         # 类比 Java：Optional.ofNullable(temperature).orElse(config.temperature)
         request_data = {
-            "model": self.config.model,
+            "model": use_model,
             "messages": messages,
             "temperature": self.config.temperature if temperature is None else temperature,
             "max_tokens": self.config.max_tokens if max_tokens is None else max_tokens,
         }
 
         try:
-            # 调用 OpenAI 兼容 API，类比 Java openai-java 的 service.createChatCompletion()
+            # 调 OpenAI 兼容 API，类比 Java openai-java 的 service.createChatCompletion()
             response = self.client.chat.completions.create(
-                model=self.config.model,
+                model=use_model,
                 messages=messages,
                 temperature=self.config.temperature if temperature is None else temperature,
                 max_tokens=self.config.max_tokens if max_tokens is None else max_tokens,
@@ -354,6 +359,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         conv_id: Optional[str] = None,
         stage: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """发送对话请求并解析 JSON 响应。
 
@@ -370,6 +376,7 @@ class LLMClient:
             messages: 消息列表（支持多模态 content）
             temperature: 采样温度
             conv_id: 会话 ID
+            model: 模型名覆盖，None 用配置默认值(降级纯文本路径同样透传)
 
         Returns:
             解析后的 JSON 字典
@@ -406,8 +413,10 @@ class LLMClient:
             m.get("content") if isinstance(m.get("content"), str) else ""
             for m in guided_messages)) + 200
         _rate_wait = get_rate_limiter().acquire(_est)
+        # 单次调用级模型覆盖(None = 配置默认)
+        use_model = model or self.config.model
         request_data = {
-            "model": self.config.model,
+            "model": use_model,
             "messages": guided_messages,
             "temperature": temp,
             "max_tokens": self.config.max_tokens,
@@ -419,7 +428,7 @@ class LLMClient:
             # 动态构造 create 参数：多模态时不带 response_format
             # 类比 Java Builder 模式按条件加参数
             create_kwargs = {
-                "model": self.config.model,
+                "model": use_model,
                 "messages": guided_messages,
                 "temperature": temp,
                 "max_tokens": self.config.max_tokens,
@@ -469,7 +478,8 @@ class LLMClient:
         # 中文说明：第二级降级——纯文本模式 + 手动 JSON 提取
         # 适用于不支持 response_format 的模型（如老版本 Qwen、本地 LM Studio）
         logger.info("json_object mode not supported, using plain text")
-        raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id, stage=stage)  # 复用 chat 走 Qwen3 回退
+        raw = self.chat(guided_messages, temperature=temp, conv_id=conv_id,
+                        stage=stage, model=model)  # 复用 chat 走 Qwen3 回退;模型覆盖同样透传
         return self._parse_json_from_text(raw)  # 三级容错解析
 
     # ── Embeddings(知识图谱插件的向量检索用;通用能力,任何 pack 可用) ──

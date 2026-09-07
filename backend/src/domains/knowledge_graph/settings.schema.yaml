@@ -74,6 +74,11 @@ groups:
         min: 1
         max: 16
         help: 批次 = 并行与断点单位(批次间串行更新实体词表 + 落 checkpoint)
+      - key: extraction_model
+        type: string
+        label: 抽取模型覆盖
+        placeholder: 留空用全局模型
+        help: 长文档导入建议配更快的模型(如 qwen-plus),对话/检索链路仍用全局模型;留空 = 不覆盖
       - key: llm_concurrency
         type: int
         label: 批内并行度

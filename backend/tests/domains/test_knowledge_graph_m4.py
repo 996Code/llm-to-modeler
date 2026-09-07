@@ -25,7 +25,7 @@ class MockLLM:
         self.query_result = {"entities": ["甲"], "keywords": [], "hop": 1}
         self.chat_calls: list = []
 
-    def chat_json(self, messages, temperature=None, conv_id=None, stage=None):
+    def chat_json(self, messages, temperature=None, conv_id=None, stage=None, model=None):
         if stage == "kg.query":
             return self.query_result
         return {}

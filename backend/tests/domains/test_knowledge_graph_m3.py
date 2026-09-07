@@ -36,7 +36,10 @@ class MockLLM:
                                 "domain": ["widget"], "range": ["widget"]}],
         }
 
-    def chat_json(self, messages, temperature=None, conv_id=None, stage=None):
+    def chat_json(self, messages, temperature=None, conv_id=None, stage=None, model=None):
+        self.models_seen = getattr(self, "models_seen", [])
+        if stage == "kg.extract" and model:
+            self.models_seen.append(model)
         content = messages[0]["content"]
         if stage == "kg.extract":
             for marker in self.fail_markers:
@@ -242,6 +245,28 @@ class TestImportPipeline:
         t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t2["result"].get("skipped") is True
         assert env.llm.extract_calls == calls_before  # 没有重复烧 LLM
+
+    def test_extraction_model_override(self, env):
+        """extraction_model 设置 → kg.extract 调用带模型覆盖;不设 = 不传。"""
+        kb, doc = _make_doc(env, "模型覆盖", ["[E:甲] [E:乙]", "[E:丙] [E:丁]"])
+        env.settings.save_values("knowledge_graph", {"extraction_model": "qwen-plus"})
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        # 每次抽取调用都带了覆盖模型
+        assert env.llm.models_seen == ["qwen-plus"] * env.llm.extract_calls
+        # 任务日志的抽取配置行留痕了覆盖模型
+        logs = env.manager.store.list_logs(t["id"])
+        cfg_log = next(l for l in logs if "抽取配置" in l["message"])
+        assert "qwen-plus(覆盖)" in cfg_log["message"]
+        assert cfg_log["data"].get("model_override") == "qwen-plus"
+
+        # 清掉设置再导:不再传覆盖
+        env.llm.models_seen = []
+        env.settings.save_values("knowledge_graph", {"extraction_model": ""})
+        kb2, doc2 = _make_doc(env, "默认模型", ["[E:戊] [E:己]"])
+        t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb2["id"], doc2["id"])["id"])
+        assert t2["status"] == "succeeded", t2["error"]
+        assert env.llm.models_seen == []
 
     def test_force_reimport_cleans_and_redoes(self, env):
         kb, doc = _make_doc(env, "重导", ["[E:甲] [E:乙]", "[E:丙]"])

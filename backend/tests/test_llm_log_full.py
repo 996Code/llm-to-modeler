@@ -117,6 +117,69 @@ def test_chat_json_logs_full_and_failure_carries_prompt(store, monkeypatch):
     assert fail["request_data"]["messages"] == messages
 
 
+# ── 单次调用级模型覆盖(model 参数)────────────────────────
+
+def test_chat_model_override_reaches_request_and_log(store, monkeypatch):
+    """chat(model=...) 覆盖请求体;日志 request_data.model 记实际模型。"""
+    client = _make_client(store, monkeypatch, "1")
+    sent: dict = {}
+
+    def _capture(**kwargs):
+        sent.update(kwargs)
+        return _fake_response("ok")
+
+    with patch.object(client.client.chat.completions, "create", side_effect=_capture):
+        client.chat([{"role": "user", "content": "hi"}],
+                    conv_id="c-ov1", stage="kg.extract", model="qwen-plus")
+
+    assert sent["model"] == "qwen-plus"
+    log = store.get_call_logs(conv_id="c-ov1")[0]
+    assert log["request_data"]["model"] == "qwen-plus"
+
+    # 不传 model:回落配置默认
+    with patch.object(client.client.chat.completions, "create", side_effect=_capture):
+        client.chat([{"role": "user", "content": "hi"}], conv_id="c-ov2")
+    assert sent["model"] == client.config.model
+    assert store.get_call_logs(conv_id="c-ov2")[0]["request_data"]["model"] == client.config.model
+
+
+def test_chat_json_model_override_direct_path(store, monkeypatch):
+    """chat_json(model=...) json_object 直连路径同样覆盖。"""
+    client = _make_client(store, monkeypatch, "1")
+    sent: dict = {}
+
+    def _capture(**kwargs):
+        sent.update(kwargs)
+        return _fake_response('{"entities": []}')
+
+    with patch.object(client.client.chat.completions, "create", side_effect=_capture):
+        parsed = client.chat_json([{"role": "user", "content": "输出JSON"}],
+                                  conv_id="c-ov3", stage="kg.extract", model="qwen-plus")
+    assert parsed == {"entities": []}
+    assert sent["model"] == "qwen-plus"
+    log = store.get_call_logs(conv_id="c-ov3")[0]
+    assert log["request_data"]["model"] == "qwen-plus"
+
+
+def test_chat_json_model_override_fallback_path(store, monkeypatch):
+    """json_object 不支持降级纯文本路径时,model 覆盖同样透传到 chat。"""
+    client = _make_client(store, monkeypatch, "1")
+    sent: dict = {}
+
+    def _fail_json_mode(**kwargs):
+        if kwargs.get("response_format"):
+            raise RuntimeError("json_object not supported")
+        sent.update(kwargs)
+        return _fake_response('{"entities": []}')
+
+    with patch.object(client.client.chat.completions, "create", side_effect=_fail_json_mode):
+        parsed = client.chat_json([{"role": "user", "content": "输出JSON"}],
+                                  conv_id="c-ov4", stage="kg.extract", model="qwen-turbo")
+    assert parsed == {"entities": []}
+    # 降级路径的请求也用了覆盖模型
+    assert sent["model"] == "qwen-turbo"
+
+
 # ── 会话上下文 thread-local 兜底(call_context)──────────────
 
 def test_call_context_binds_upstream_logs(store):

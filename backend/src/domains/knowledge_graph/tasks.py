@@ -274,6 +274,9 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     threshold = max(1, int(_cfg(app_state, "failure_threshold", 5)))
     glossary_top_k = max(0, int(_cfg(app_state, "glossary_top_k", 100)))
     temperature = int(_cfg(app_state, "extraction_temperature", 10)) / 100.0
+    # 抽取模型覆盖(空 = 全局模型):长文档导入换快模型的开关,
+    # 只影响 kg.extract 调用,对话/检索链路不变
+    extraction_model = str(_cfg(app_state, "extraction_model", "") or "").strip()
 
     # 待处理 = pending + failed(失败块重跑时必须重抽;done 块跳过 = 断点)
     pending = [c for c in store.list_chunks(doc_id)
@@ -282,14 +285,17 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     done_before = total - len(pending)
     if done_before:
         handle.log(f"断点续跑: 跳过已完成的 {done_before} 块")
+    _eff_model = extraction_model or (
+        llm.config.model if getattr(llm, "config", None) else "")
     handle.log(
         f"抽取配置: 批大小 {batch_size} / 批内并行 {concurrency} / 单块重试 {max_retries} "
         f"/ 熔断阈值 {threshold} / 词表 top-{glossary_top_k} / 温度 {temperature:.2f}"
-        f" / 向量{'开' if vector_ready else '关'}",
+        f" / 向量{'开' if vector_ready else '关'} / 模型 {_eff_model}"
+        + ("(覆盖)" if extraction_model else ""),
         batch_size=batch_size, concurrency=concurrency, max_retries=max_retries,
         failure_threshold=threshold, glossary_top_k=glossary_top_k,
         temperature=temperature, vector=vector_ready, todo_chunks=len(pending),
-        llm_model=llm.config.model if getattr(llm, "config", None) else "")
+        llm_model=_eff_model, model_override=extraction_model or None)
 
     glossary: Dict[str, str] = {}   # normalized_name -> type(本轮抽取累积)
     pending_proposals: List[Dict] = []
@@ -329,7 +335,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             futures = {
                 executor.submit(
                     _extract_chunk, loader, llm, kb, chunk, glossary, glossary_top_k,
-                    temperature, max_retries, conv_id,
+                    temperature, max_retries, conv_id, extraction_model,
                 ): chunk
                 for chunk in batch
             }
@@ -585,8 +591,12 @@ class _ExtractionError(RuntimeError):
 
 def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
                    glossary_top_k: int, temperature: float,
-                   max_retries: int, conv_id: str) -> Tuple[List[Dict], List[Dict], Dict]:
+                   max_retries: int, conv_id: str,
+                   model_override: str = "") -> Tuple[List[Dict], List[Dict], Dict]:
     """单块抽取(在批内工作线程执行):渲染 prompt → chat_json → 规范化。
+
+    model_override: 抽取模型覆盖(空 = 客户端配置默认)。长文档导入
+    换快模型,不影响对话/检索链路。
 
     Returns:
         (entities, relations, stats) — 已归一化、已剔除自环与空名;
@@ -623,6 +633,7 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
             data = llm.chat_json(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature, conv_id=conv_id, stage="kg.extract",
+                model=model_override or None,
             )
             entities, relations = _normalize_extraction(data)
             # 请求级留痕(对标 call_logs 的粒度):一次 LLM 调用一份明细,
@@ -783,9 +794,12 @@ def run_induce_schema(handle) -> Dict[str, Any]:
     loader = PromptLoader(packs_root=packs_root)
     prompt = loader.render("knowledge_graph", "induce_schema",
                            samples=samples, sample_count=len(samples))
+    # 归纳与抽取同为批量离线链路,共用模型覆盖设置
+    model_override = str(_cfg(app_state, "extraction_model", "") or "").strip()
     data = app_state.llm_client.chat_json(
         [{"role": "user", "content": prompt}],
         temperature=0.2, conv_id=conv_id, stage="kg.induce_schema",
+        model=model_override or None,
     )
     if not isinstance(data, dict):
         # chat_json 的三级容错可能返回 list/str——与 _normalize_extraction
