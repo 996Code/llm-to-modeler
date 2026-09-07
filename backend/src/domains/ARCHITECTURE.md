@@ -534,7 +534,7 @@ vector.ensure_collection(scope_id, dim=embedding_dim)
 |---|---|---|
 | 吞吐 | 批内并行 LLM 调用;批次 = 并行与断点单位 | `llm_concurrency`(默认2)/ `llm_batch_size`(默认4) |
 | 模型分层 | 导入抽取可单独用快/便宜模型,对话与检索链路不受影响;`LLMClient.chat/chat_json` 的 `model` 参数为单次调用级覆盖 | `extraction_model`(留空 = 全局模型) |
-| 服务商限额 | 全局 RPM/TPM 双令牌桶(所有 LLM 出站路径统一取配额,含 json_object 直连路径);429 触发全局指数退避(30s→60s→120s→240s,上限600s),成功即清 | `llm_rpm_limit` / `llm_tpm_limit`(0 = 不限) |
+| 服务商限额 | 全局 RPM/TPM 双令牌桶(所有 LLM 出站路径统一取配额,含 json_object 直连路径);429 触发全局指数退避(30s→60s→120s→240s,上限600s),成功即清;TPM 估算系数按响应真实 usage EMA 校准——换模型(不同 tokenizer)后自动收敛,无需手动留余量 | `llm_rpm_limit` / `llm_tpm_limit`(0 = 不限) |
 | 失败恢复 | 块级 checkpoint(done = 已入图,续跑只补剩余块);任务级自动续跑(非欠费/鉴权类致命错误,5 分钟退避后重新入队,可取消) | `import_max_auto_retry`(默认3) |
 | 进度可观测 | 滑窗 ETA(最近10块平均耗时×剩余÷并发);逐块日志(实体/关系数、prompt 规模、词表命中、LLM 耗时);调用日志记 `rateLimitWaitMs` 区分"排队慢"与"模型慢" | — |
 

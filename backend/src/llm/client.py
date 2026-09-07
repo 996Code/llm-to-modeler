@@ -297,7 +297,11 @@ class LLMClient:
 
             result = content or ""  # 兜底空串，避免 None 传给调用方
 
-            get_rate_limiter().on_success()  # 成功即清 429 退避闸门
+            # 成功即清 429 退避闸门;带真实 usage 时顺带校准 TPM 估算系数
+            # (换模型后系数自动收敛,TPM 无需手动留余量)
+            get_rate_limiter().on_success(
+                usage=response.usage.model_dump() if response.usage else None,
+                est_tokens=_est)
             # 记录成功日志
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
@@ -442,7 +446,11 @@ class LLMClient:
 
             response = self.client.chat.completions.create(**create_kwargs)  # ** 展开字典为关键字参数
             result = self._extract_json(response)  # 提取并解析 JSON，可能抛异常
-            get_rate_limiter().on_success()
+            # 成功清退避闸门;usage 校准(chat_json 的估算含追加的 JSON
+            # 指令与 est 一致,校准口径统一)
+            get_rate_limiter().on_success(
+                usage=response.usage.model_dump() if response.usage else None,
+                est_tokens=_est)
 
             # 记录成功日志
             duration_ms = int((time.time() - start_time) * 1000)
@@ -531,7 +539,14 @@ class LLMClient:
             vectors = [list(item.embedding) for item in ordered]
             if len(vectors) != len(texts):
                 raise ValueError(f"embeddings 数量不符: {len(vectors)} != {len(texts)}")
-            get_rate_limiter().on_success()
+            get_rate_limiter().on_success(
+                # embeddings 响应多数网关带 usage;没有就只清退避不校准
+                usage=getattr(resp, "usage", None) and {
+                    "prompt_tokens": getattr(resp.usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": 0,
+                    "total_tokens": getattr(resp.usage, "total_tokens", 0) or 0,
+                } or None,
+                est_tokens=_est)
             return vectors
         except Exception as e:
             error = str(e)

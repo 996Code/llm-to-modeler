@@ -1,4 +1,4 @@
-"""LLM 全局限速器 —— 令牌桶 RPM/TPM 双桶 + 429 指数退避。
+"""LLM 全局限速器 —— 令牌桶 RPM/TPM 双桶 + 429 指数退避 + usage 校准。
 
 【为什么在 client 层做】
 服务商限额(TPM/RPM)按账号计,不按调用方计——聊天、检索、导入任务
@@ -9,7 +9,8 @@
 - rpm 桶:每 60/rpm 秒补 1 个请求令牌; acquire(1) 取不到就睡到有
 - tpm 桶:每 60/tpm 秒补 1 个 token 令牌; acquire(估算token) 同理
 - 估算 token:中文按 chars×0.6、英文按 words 粗估(限速是防撞限额,
-  不是计费,±20% 误差可接受;真实用量从响应 usage 回填修正下一轮估算)
+  不是计费);每次成功响应后用真实 usage 校准估算系数(见 on_usage),
+  换模型(不同 tokenizer)后 1~2 分钟内自动收敛,无需手动留余量
 - 两桶串行获取(先请求后 token),任一不足则等待
 
 【429 退避】
@@ -27,7 +28,7 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +36,40 @@ logger = logging.getLogger(__name__)
 _BACKOFF_BASE_SECONDS = 30.0
 _BACKOFF_MAX_SECONDS = 600.0
 
+# acquire 时 client 侧的固定加成(client.py 估算后 +200 兜底输出/格式开销),
+# 校准回剥同一常量,保证估算口径一致
+_ACQUIRE_FIXED_PAD = 200
+
+# usage 校准的 EMA 平滑系数与置信区间:只用"可信样本"(prompt 可估部分
+# 占比高的纯文本调用)更新系数,置信区间外不收敛——防个别离群响应
+# (如缓存命中/极短输出)把系数带偏
+_CALIBRATION_ALPHA = 0.3
+_CALIBRATION_MIN_RATIO = 0.2   # 估算/真实 比值下限(超出视为离群,丢弃)
+_CALIBRATION_MAX_RATIO = 5.0   # 上限
+# 系数夹取范围:真实 tokenizer 不会比这更极端(纯中文 ~1.5 token/字
+# 上界、纯 ASCII ~0.2 token/字符下界),防校准值漂出物理合理区间
+_TOKENS_PER_CJK_MIN, _TOKENS_PER_CJK_MAX = 0.3, 2.0
+_TOKENS_PER_OTHER_MIN, _TOKENS_PER_OTHER_MAX = 0.1, 0.8
+
 
 def estimate_tokens(text: str) -> int:
-    """粗估 token 数:中文 ~0.6 token/字,英文 ~1.3 token/词,取混合模型。
+    """粗估 token 数:按当前校准系数计算(初始值 ≈ 中文 0.6/字、
+    ASCII 0.25/字符;随真实 usage 收敛)。
 
-    用于 TPM 桶的预扣;真实 usage 在响应后回填(当前未做负反馈,
-    误差 ±20% 对"防撞限额"目标足够)。
+    系数是进程级状态(get_rate_limiter 持有),这里读模块级快照——
+    校准更新频率低(每次成功响应),读写竞态最坏只差一代系数,无害。
     """
     if not text:
         return 0
     cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
     other = len(text) - cjk
-    return int(cjk * 0.6 + other / 4.0) + 1
+    return int(cjk * _CJK_COEFF[0] + other * _OTHER_COEFF[0]) + 1
+
+
+# 校准系数的模块级存储 [当前值](列表包装使模块内函数可读写;
+# RateLimiter.on_usage 持锁更新,estimate_tokens 无锁读——见上,竞态无害)
+_CJK_COEFF = [0.6]
+_OTHER_COEFF = [0.25]
 
 
 class _TokenBucket:
@@ -147,10 +170,59 @@ class RateLimiter:
             logger.warning(f"LLM 429 rate limited — 全局退避 {new_wait:.0f}s")
             return new_wait
 
-    def on_success(self) -> None:
-        """成功响应:清退避窗口(服务商已恢复,不必等满窗口)。"""
+    def on_success(self, usage: Optional[Dict[str, int]] = None,
+                   est_tokens: Optional[int] = None) -> None:
+        """成功响应:清退避窗口(服务商已恢复,不必等满窗口)。
+
+        usage 校准(可选,两个参数都给才生效):用响应的真实 token 用量
+        修正估算系数——总用量 = prompt_tokens + completion_tokens,
+        completion 部分是"估算不可见"的增量(输出长度调用前未知),按
+        历史平均输出占比折算回 prompt 侧再校准,否则系数会被系统性
+        抬高。换模型(不同 tokenizer)后系数自动收敛,TPM 不再需要
+        手动留余量。
+        """
         with self._lock:
             self._backoff_until = 0.0
+            if usage and est_tokens and est_tokens > 0:
+                self._calibrate(usage, est_tokens)
+
+    def _calibrate(self, usage: Dict[str, int], est_tokens: int) -> None:
+        """EMA 校准估算系数(持 self._lock 调用)。
+
+        - 只信"输出占比稳定"的样本:completion 占总量 >60% 的响应
+          (极短 prompt 跑飞长输出)估算意义弱,跳过
+        - 比值落在置信区间外(估算/真实 离群)丢弃,防个别异常带偏
+        - 系数夹取在物理合理区间,EMA 平滑(α=0.3)渐进收敛
+        """
+        try:
+            total = int(usage.get("total_tokens") or 0)
+            prompt = int(usage.get("prompt_tokens") or 0)
+            completion = int(usage.get("completion_tokens") or 0)
+            if total <= 0 or prompt <= 0:
+                return
+            if completion > total * 0.6:  # 输出主导,估算参考价值低
+                return
+            est_prompt_est = est_tokens - _ACQUIRE_FIXED_PAD  # 剥掉 acquire 固定加成
+            if est_prompt_est <= 0:
+                return
+            ratio = est_prompt_est / prompt
+            if not (_CALIBRATION_MIN_RATIO <= ratio <= _CALIBRATION_MAX_RATIO):
+                return
+            # 校准目标:让 estimate_tokens(prompt) ≈ prompt 真实 token 数
+            # → 系数按 1/ratio 修正(估算偏高则调低,反之调高)
+            adjust = 1.0 / ratio
+            new_cjk = _CJK_COEFF[0] * adjust
+            new_other = _OTHER_COEFF[0] * adjust
+            _CJK_COEFF[0] = min(_TOKENS_PER_CJK_MAX,
+                                max(_TOKENS_PER_CJK_MIN,
+                                    _CJK_COEFF[0] * (1 - _CALIBRATION_ALPHA)
+                                    + new_cjk * _CALIBRATION_ALPHA))
+            _OTHER_COEFF[0] = min(_TOKENS_PER_OTHER_MAX,
+                                  max(_TOKENS_PER_OTHER_MIN,
+                                      _OTHER_COEFF[0] * (1 - _CALIBRATION_ALPHA)
+                                      + new_other * _CALIBRATION_ALPHA))
+        except (TypeError, ValueError):
+            pass  # usage 结构异常不影响主流程(校准是尽力而为)
 
     def refund(self, est_tokens: int = 1) -> None:
         """返还配额:同一次逻辑调用的内部重试/降级重复出站时调用。

@@ -127,6 +127,96 @@ class TestRefund:
         rl.refund(100)  # 不抛异常即可
 
 
+class TestUsageCalibration:
+    """TPM 估算系数的 usage 校准(换模型自动收敛,无需手动留余量)。
+
+    闭环语义:每次调用用当前系数算 est → 服务商返回真实 prompt_tokens →
+    系数向真实值 EMA 收敛。测试模拟该闭环(est 每轮重算)。
+    """
+
+    def _reset_coeffs(self):
+        import llm.rate_limit as m
+        m._CJK_COEFF[0] = 0.6
+        m._OTHER_COEFF[0] = 0.25
+
+    def test_calibration_converges_to_real_tokenizer(self):
+        """真实 tokenizer 比初始估算高 50%:系数在 ~10 次调用内收敛。"""
+        import llm.rate_limit as m
+        self._reset_coeffs()
+        rl = RateLimiter(rpm=0, tpm=0)
+        text = "中" * 1000
+        for _ in range(10):
+            est = m.estimate_tokens(text) + m._ACQUIRE_FIXED_PAD
+            rl.on_success(usage={"prompt_tokens": 900, "completion_tokens": 50,
+                                 "total_tokens": 950}, est_tokens=est)
+        # 收敛判据:估算与真实偏差 <5%(初始偏差 50%)
+        assert abs(m.estimate_tokens(text) - 900) / 900 < 0.05
+        self._reset_coeffs()
+
+    def test_calibration_converges_downward(self):
+        """真实 tokenizer 比初始估算低(如换到更省 token 的模型):同样收敛。"""
+        import llm.rate_limit as m
+        self._reset_coeffs()
+        rl = RateLimiter(rpm=0, tpm=0)
+        text = "中" * 1000
+        for _ in range(10):
+            est = m.estimate_tokens(text) + m._ACQUIRE_FIXED_PAD
+            rl.on_success(usage={"prompt_tokens": 400, "completion_tokens": 30,
+                                 "total_tokens": 430}, est_tokens=est)
+        assert abs(m.estimate_tokens(text) - 400) / 400 < 0.05
+        self._reset_coeffs()
+
+    def test_calibration_skips_completion_heavy(self):
+        """输出主导的响应(短 prompt 长输出)不参与校准。"""
+        import llm.rate_limit as m
+        self._reset_coeffs()
+        rl = RateLimiter(rpm=0, tpm=0)
+        for _ in range(20):
+            rl.on_success(usage={"prompt_tokens": 10, "completion_tokens": 500,
+                                 "total_tokens": 510}, est_tokens=300)
+        assert m._CJK_COEFF[0] == 0.6  # 未被带偏
+        self._reset_coeffs()
+
+    def test_calibration_skips_outliers(self):
+        """估算/真实比值离群(>5x)的样本丢弃。"""
+        import llm.rate_limit as m
+        self._reset_coeffs()
+        rl = RateLimiter(rpm=0, tpm=0)
+        # est=1000, prompt=10 → est_prompt_est=800, ratio=80(>5)离群
+        for _ in range(10):
+            rl.on_success(usage={"prompt_tokens": 10, "completion_tokens": 5,
+                                 "total_tokens": 15}, est_tokens=1000)
+        assert m._CJK_COEFF[0] == 0.6
+        self._reset_coeffs()
+
+    def test_calibration_clamped_to_physical_range(self):
+        """系数夹取在物理合理区间:持续强推也不越过边界。"""
+        import llm.rate_limit as m
+        self._reset_coeffs()
+        rl = RateLimiter(rpm=0, tpm=0)
+        text = "中" * 1000
+        # 真实 5000 tokens/千字 = 5.0/字(物理上不可能,越界压力测试)
+        for _ in range(100):
+            est = m.estimate_tokens(text) + m._ACQUIRE_FIXED_PAD
+            rl.on_success(usage={"prompt_tokens": 5000, "completion_tokens": 50,
+                                 "total_tokens": 5050}, est_tokens=est)
+        assert m._CJK_COEFF[0] <= m._TOKENS_PER_CJK_MAX
+        self._reset_coeffs()
+
+    def test_on_success_without_usage_still_clears_backoff(self):
+        """不带 usage 的调用(旧签名)只清退避,不校准、不报错。"""
+        import llm.rate_limit as m
+        self._reset_coeffs()
+        rl = RateLimiter(rpm=0, tpm=0)
+        rl.on_rate_limited()
+        rl.on_success()
+        t0 = time.monotonic()
+        rl.acquire(1)
+        assert time.monotonic() - t0 < 0.1
+        assert m._CJK_COEFF[0] == 0.6
+        self._reset_coeffs()
+
+
 class TestTokenEstimation:
 
     def test_cjk_vs_ascii(self):
@@ -135,3 +225,6 @@ class TestTokenEstimation:
         assert 0 < cjk < 10
         assert 0 < ascii_ < 10
         assert estimate_tokens("") == 0
+
+
+
