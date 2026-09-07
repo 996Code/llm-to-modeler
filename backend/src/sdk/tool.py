@@ -27,6 +27,14 @@ class SessionStateHandle:
     """
 
     def __init__(self, store, conv_id: str, scope: str):
+        # 协议校验 fail-fast:接线错误(门面缺方法/传错对象)在构造时就炸,
+        # 不留给 fail-open 静默吞——曾发生 ConversationManager 缺委托方法,
+        # 记忆功能静默失效只剩 warning 日志的事故。运行期存储故障(锁/超限)
+        # 才是 fail-open 该吞的,已在各方法内区分。
+        for m in ("get_pack_state", "set_pack_state"):
+            if not callable(getattr(store, m, None)):
+                raise TypeError(
+                    f"SessionStateHandle 需要 store.{m}(收到 {type(store).__name__})")
         self._store = store
         self._conv_id = conv_id
         self._scope = scope

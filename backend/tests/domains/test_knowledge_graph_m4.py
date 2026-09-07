@@ -328,13 +328,48 @@ class TestKbSearchTool:
         assert result2.artifact is not None or result2.error_for_llm is None
 
     def test_pack_params_unknown_kb(self, env):
-        """宿主默认库不存在:明确报错(不静默降级到追问)。"""
+        """宿主默认库不存在:静默降级继续解析流(单库自动/多库追问),不报错。"""
         env.store.create_kb("库一")
         tool = KbSearchTool(env.app_state)
         result = tool.execute(
             {"user_input": "x", "pack_params": {"knowledge_graph": {"kb": "已删除的库"}}},
             _ctx(env))
-        assert result.error_for_llm and "已删除的库" in result.error_for_llm
+        # 唯一库存在 → 自动选中(宿主配置过期不打断用户)
+        assert result.artifact and result.artifact["kb"]["name"] == "库一"
+
+    def test_memory_beats_pack_params(self, env):
+        """【回归锚·审查 H1】会话记忆优先于宿主默认:用户在会话里选过的库
+        不能被宿主注入的 pack_params 劫持,也不能被其覆盖写回记忆。"""
+        env.store.create_kb("宿主指定库"); env.store.create_kb("用户选的库")
+        tool = KbSearchTool(env.app_state)
+        ctx = _ctx(env, with_memory=True)
+        ctx.session_state.set("kb", "用户选的库")
+        result = tool.execute(
+            {"user_input": "甲在哪?",
+             "pack_params": {"knowledge_graph": {"kb": "宿主指定库"}}}, ctx)
+        assert result.artifact and result.artifact["kb"]["name"] == "用户选的库"
+        assert ctx.session_state.get("kb") == "用户选的库"  # 记忆未被宿主默认覆盖
+
+    def test_pack_params_invalid_falls_back_to_memory(self, env):
+        """宿主默认指向已删库 + 记忆有效:降级用记忆,不报错。"""
+        env.store.create_kb("记忆库"); env.store.create_kb("陪衬库")
+        tool = KbSearchTool(env.app_state)
+        ctx = _ctx(env, with_memory=True)
+        ctx.session_state.set("kb", "记忆库")
+        result = tool.execute(
+            {"user_input": "甲在哪?",
+             "pack_params": {"knowledge_graph": {"kb": "已被删除的库"}}}, ctx)
+        assert result.artifact and result.artifact["kb"]["name"] == "记忆库"
+
+    def test_explicit_unknown_kb_keeps_memory(self, env):
+        """显式指定不存在的库:报错(用户当下错误),且不动会话记忆。"""
+        env.store.create_kb("库一")
+        tool = KbSearchTool(env.app_state)
+        ctx = _ctx(env, with_memory=True)
+        ctx.session_state.set("kb", "库一")
+        result = tool.execute({"user_input": "x", "kb": "不存在"}, ctx)
+        assert result.error_for_llm and "不存在" in result.error_for_llm
+        assert ctx.session_state.get("kb") == "库一"  # 记忆原封不动
 
     def test_session_memory_remembers_kb_across_turns(self, env):
         """多轮记忆:首轮选定后写入会话记忆;下一轮无任何提示直接沿用,不再追问。"""
@@ -393,6 +428,32 @@ class TestKbSearchTool:
         assert h.get("kb", "默认库") == "默认库"  # 不抛
         h.set("kb", "x")  # 不抛
         h.pop("kb")  # 不抛
+
+    def test_session_state_handle_protocol_fail_fast(self, env):
+        """【回归锚·审查 M1】接线错误(缺方法)构造时即抛:不留给 fail-open 吞。"""
+        import pytest
+        from sdk.tool import SessionStateHandle
+        # 上次事故形态:ConversationManager 门面缺委托方法
+        no_methods = SimpleNamespace()
+        with pytest.raises(TypeError, match="get_pack_state"):
+            SessionStateHandle(no_methods, "conv", "knowledge_graph")
+        partial = SimpleNamespace(get_pack_state=lambda *a: {})
+        with pytest.raises(TypeError, match="set_pack_state"):
+            SessionStateHandle(partial, "conv", "knowledge_graph")
+
+    def test_session_state_via_conversation_manager_facade(self, env):
+        """【回归锚·审查 M1】真实链路形态:经 ConversationManager 门面委托读写
+        (上次事故:门面缺方法被 fail-open 吞,单测直传裸 store 全绿)。"""
+        from engine.conversation import ConversationManager
+        from sdk.tool import SessionStateHandle
+        from services.conversation_store import ConversationStore
+        cs = ConversationStore(str(env.tmp_path / "facade.db"))
+        cm = ConversationManager(store=cs)
+        conv_id = cm and cs.create_conversation("tester")["id"]
+        h = SessionStateHandle(cm, conv_id, "knowledge_graph")  # 门面可作 store
+        assert h.get("kb") is None
+        h.set("kb", "诛仙测试库")
+        assert h.get("kb") == "诛仙测试库"
 
     def test_kb_hint_resolves_by_name(self, env):
         env.store.create_kb("指定库")

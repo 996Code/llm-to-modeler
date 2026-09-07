@@ -609,11 +609,13 @@ class ConversationStore:
                 "DELETE FROM session_meta WHERE conv_id = ? AND user_id = ?",
                 (conv_id, user_id),
             )
-            # events 也删除(级联)
-            conn.execute("DELETE FROM events WHERE conv_id = ?", (conv_id,))
-            # 插件会话记忆级联清理(不留僵尸绑定)
-            conn.execute("DELETE FROM session_pack_state WHERE conv_id = ?", (conv_id,))
-            # rowcount 是受影响行数,> 0 表示确实删了
+            # 级联删除以权限校验通过为前提:meta 删 0 行(会话不存在/非本人)
+            # 时绝不动 events/记忆——否则未授权请求能把别人的消息和
+            # 插件记忆毁掉,meta 残留成空壳僵尸会话
+            if cursor.rowcount > 0:
+                conn.execute("DELETE FROM events WHERE conv_id = ?", (conv_id,))
+                conn.execute(
+                    "DELETE FROM session_pack_state WHERE conv_id = ?", (conv_id,))
             return cursor.rowcount > 0
 
     def delete_conversation_any_user(self, conv_id: str) -> bool:

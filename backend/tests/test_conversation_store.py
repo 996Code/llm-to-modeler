@@ -166,3 +166,23 @@ class TestPackState:
         with pytest.raises(ValueError):
             store.set_pack_state(conv_id, "knowledge_graph",
                                  {"blob": "x" * (store.PACK_STATE_MAX_BYTES + 1)})
+
+    def test_delete_wrong_user_leaves_data_intact(self, store):
+        """【回归锚·审查 H2】非 owner 删除:返回 False 且 events/记忆分毫不动。
+
+        曾有缺陷:meta 删除带 user 过滤但 events/pack_state 级联无条件执行,
+        未授权请求能把别人的消息和记忆毁掉,meta 残留成空壳僵尸会话。
+        """
+        conv_id = store.create_conversation("owner")["id"]
+        store.add_message(conv_id, "user", "hi")
+        store.set_pack_state(conv_id, "knowledge_graph", {"kb": "库一"})
+
+        # 另一个用户来删:必须失败且不动数据
+        assert store.delete_conversation(conv_id, "attacker") is False
+        assert len(store.get_messages(conv_id)) == 1
+        assert store.get_pack_state(conv_id, "knowledge_graph") == {"kb": "库一"}
+        assert store.get_conversation(conv_id, "owner") is not None  # 原会话完好
+
+        # 本人删除:正常级联
+        assert store.delete_conversation(conv_id, "owner") is True
+        assert store.get_pack_state(conv_id, "knowledge_graph") == {}

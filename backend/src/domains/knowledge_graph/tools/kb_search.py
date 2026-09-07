@@ -21,6 +21,12 @@ from sdk.tool import AskOption, AskQuestion, AskSpec, Tool, ToolContext, ToolRes
 logger = logging.getLogger(__name__)
 
 
+def _trace_invalidate(ctx) -> None:
+    """记忆失效就地入链:追问/无库返回路径上也要能看到"绑定被清理了"。"""
+    ctx.trace("kb_search.resolve_kb", "会话记忆的知识库绑定已失效,清理",
+              "warn", detail={"memoryEvent": "invalidate"})
+
+
 class KbSearchTool(Tool):
     """知识库检索问答。"""
 
@@ -72,32 +78,33 @@ class KbSearchTool(Tool):
         # 优先级:本轮显式指定 > 追问答案 > 会话记忆 > 宿主默认 > 唯一库自动 > 多库追问。
         # 会话记忆(ctx.session_state,scope=knowledge_graph):一个对话绑定
         # 一个库——首次选定后跨轮沿用,用户显式说"换到XX库"才更新绑定;
-        # 绑定的库被删除则清掉记忆回到追问。排在宿主默认(pack_params)之前:
-        # 用户在会话里的显式选择比宿主注入的默认更新、更强。
-        kb_hint = (state.get("kb") or "").strip()
-        kb_source = "explicit" if kb_hint else ""   # 选库来源(链路观测)
-        if not kb_hint:
-            kb_hint = str(
-                (state.get("pack_params") or {}).get("knowledge_graph", {}).get("kb") or ""
-            ).strip()
-            if kb_hint:
-                kb_source = "pack_params"
+        # 绑定的库被删除则清掉记忆回到追问。记忆排在宿主默认(pack_params)
+        # 之前:用户在会话里的显式选择比宿主注入的默认更新、更强。
+        # 宿主默认与显式指定分开处理:显式指定错库 = 用户当下错误,报错;
+        # 宿主默认失效(配置过期/库被删) = 静默降级继续解析流,不打断用户。
         kb = None
-        # 会话记忆兜底候选(暂存,显式/追问都没解析到才启用)
+        kb_source = ""             # 选库来源(链路观测)
+        mem_event = ""             # 记忆变更事件(链路观测):bind/switch/invalidate
+        explicit_hint = (state.get("kb") or "").strip()
+        host_hint = str(
+            (state.get("pack_params") or {}).get("knowledge_graph", {}).get("kb") or ""
+        ).strip()
+        # 会话记忆候选(显式/追问都没解析到才启用)
         mem_kb_name = str(mem.get("kb") or "").strip() if mem else ""
-        mem_event = ""   # 记忆变更事件(链路观测):bind/switch/invalidate
-        if kb_hint:
-            kb = store.get_kb_by_name(kb_hint)
+
+        if explicit_hint:
+            kb = store.get_kb_by_name(explicit_hint)
+            kb_source = "explicit"
             if not kb:
-                return ToolResult(error_for_llm=f"知识库「{kb_hint}」不存在")
+                return ToolResult(error_for_llm=f"知识库「{explicit_hint}」不存在")
         else:
-            # 追问恢复:interrupt 后引擎把用户回答注入 tool_state["clarify_answers"]
+            kbs = store.list_kbs()
+            # 追问答案:interrupt 后引擎把用户回答注入 tool_state["clarify_answers"]
             # (见 engine/nodes.py 的追问恢复注入,与 njmind_form 同一约定)。
             # 两种形态:①前端追问卡片点选项 → {header: label} 结构化;
             # ②用户直接打字 → {text: 原话}。都按"精确名 > 唯一包含匹配"解析。
             answers = state.get("clarify_answers") or {}
             chosen = str(answers.get("kb") or answers.get("知识库") or "").strip()
-            kbs = store.list_kbs()
             if not chosen:
                 raw = str(answers.get("text") or "").strip()
                 if raw:
@@ -121,10 +128,17 @@ class KbSearchTool(Tool):
                 elif mem:
                     mem.pop("kb")  # 绑定的库已删除,清记忆回到正常解析流
                     mem_event = "invalidate"
+            if kb is None and host_hint:
+                # 宿主默认兜底(记忆优先于它;指向的库失效则继续往下走)
+                kb = next((k for k in kbs if k["name"] == host_hint), None)
+                if kb is not None:
+                    kb_source = "pack_params"
             if kb is None and len(kbs) == 1:
                 kb = kbs[0]
                 kb_source = "single-auto"
-            elif kb is None and kbs:
+            if kb is None and kbs:
+                if mem_event:
+                    _trace_invalidate(ctx)
                 return ToolResult(ask=AskSpec(questions=[AskQuestion(
                     question="要在哪个知识库里检索?",
                     header="知识库",
@@ -132,7 +146,9 @@ class KbSearchTool(Tool):
                                        description=(k.get("description") or "")[:60])
                              for k in kbs],
                 )]))
-            elif kb is None:
+            if kb is None:
+                if mem_event:
+                    _trace_invalidate(ctx)
                 return ToolResult(
                     reply="当前还没有任何知识库。请先在「知识图谱」管理页创建知识库并导入文档。",
                     summary="无可用知识库")
