@@ -178,8 +178,11 @@ export const useConversationStore = defineStore('conversation', () => {
    *
    * @param text         用户输入文本
    * @param imageBase64  可选图片 base64（用于图片识别场景）
+   * @param structuredAnswers 追问卡片点选项的结构化回答 {header: label}——
+   *                     与打字回传的 {text} 是同一 answers 契约;后端工具
+   *                     按 header(问题分类)取结构化答案,兼容自由文本
    */
-  async function sendMessage(text: string, imageBase64?: string) {
+  async function sendMessage(text: string, imageBase64?: string, structuredAnswers?: Record<string, string>) {
     // 空消息或正在流式生成中，直接忽略
     if ((!text.trim() && !imageBase64) || streaming.value) return
 
@@ -226,8 +229,12 @@ export const useConversationStore = defineStore('conversation', () => {
 
     try {
       // 追问恢复:如果当前有 pendingClarification,把用户消息作为 answers 传给后端
-      // 后端走 LangGraph Command(resume=answers) 从断点继续
-      const clarifyAnswers = pendingClarification.value ? { text: text } : undefined
+      // 后端走 LangGraph Command(resume=answers) 从断点继续。
+      // 两种形态:点选项 → {header: label, text}(结构化+原文,后端按 header 取);
+      // 直接打字 → {text: 原话}(后端做文本解析)
+      const clarifyAnswers = pendingClarification.value
+        ? { ...(structuredAnswers || {}), text }
+        : undefined
 
       // 调用 chat，注册各类 SSE 事件回调（回调内根据事件更新状态/UI）
       // 嵌入模式：附加上下文（宿主最新配置 + 服务地址表），后端据此覆盖会话旧配置

@@ -76,13 +76,39 @@
                 <QuestionCircleOutlined class="clarification-icon" />
                 <span>需要确认以下信息</span>
               </div>
-              <ul class="clarification-questions">
-                <li v-for="(q, idx) in msg.clarificationQuestions" :key="idx">
+              <div v-for="(q, idx) in msg.clarificationQuestions" :key="idx" class="clarification-question">
+                <div class="clarification-question-text">
                   {{ typeof q === 'string' ? q : q.question }}
-                </li>
-              </ul>
+                </div>
+                <!-- 选项可点：点击即作为该问题的回答发送（结构化 {header: label} 回传后端）。
+                     少量选项平铺按钮;超过阈值折叠成下拉选择(选项多时平铺会撑爆卡片) -->
+                <template v-if="typeof q !== 'string' && q.options?.length">
+                  <div v-if="q.options.length <= 6" class="clarification-options">
+                    <button
+                      v-for="opt in q.options"
+                      :key="opt.label"
+                      class="clarification-option"
+                      :disabled="store.streaming"
+                      :title="opt.description"
+                      @click="answerClarification(q, opt)"
+                    >
+                      {{ opt.label }}
+                    </button>
+                  </div>
+                  <a-select
+                    v-else
+                    class="clarification-select"
+                    :placeholder="`共 ${q.options.length} 个选项，搜索或选择`"
+                    show-search
+                    :filter-option="(input: string, option: any) => option.label.includes(input.trim())"
+                    :options="q.options.map((o: any) => ({ value: o.label, label: o.label }))"
+                    :disabled="store.streaming"
+                    @change="(val: string) => answerClarification(q, { label: val, description: '' })"
+                  />
+                </template>
+              </div>
               <div class="clarification-hint">
-                请补充以上信息后，我会继续为您生成配置
+                点击选项，或直接输入回答
               </div>
             </div>
             
@@ -259,7 +285,7 @@ import { Modal, message as antdMessage } from 'ant-design-vue'
 import { useConversationStore } from '../../stores/conversation'
 import { copyText } from '../../utils/clipboard'
 // 仅引入类型（编译期检查，运行时不打包）
-import type { FormConfig } from '../../types'
+import type { FormConfig, ClarificationQuestion, ClarificationOption } from '../../types'
 // 子组件：输入框
 import ChatInput from './ChatInput.vue'
 import KgGraphCard from './KgGraphCard.vue'
@@ -437,6 +463,15 @@ const pipelineSteps = computed(() => {
 /** 点击欢迎页示例卡片：把示例 prompt 直接作为消息发送 */
 function quickFill(text: string) {
   store.sendMessage(text)
+}
+
+/**
+ * 追问卡片点选项：把该问题的回答作为一条消息发出。
+ * 结构化回传 {header: label}——后端工具按 header(问题分类)取结构化答案,
+ * 与打字回传的 {text: 原话} 是同一 answers 契约的两种形态。
+ */
+function answerClarification(q: ClarificationQuestion, opt: ClarificationOption) {
+  store.sendMessage(opt.label, undefined, { [q.header]: opt.label })
 }
 
 /** ChatInput 子组件 emit 的 send 事件处理：统一转发给 store。 */
@@ -817,14 +852,43 @@ watch(() => store.stageMessage, () => {
   color: var(--color-warning, #faad14);
   font-size: 18px;
 }
-.clarification-questions {
-  margin: 0;
-  padding-left: 20px;
-  color: var(--text-regular);
-  line-height: 1.8;
+.clarification-question {
+  margin-bottom: 10px;
 }
-.clarification-questions li {
-  margin-bottom: 4px;
+.clarification-question-text {
+  color: var(--text-regular);
+  line-height: 1.7;
+  margin-bottom: 6px;
+}
+.clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* 选项按钮:通用追问交互(任何插件的 AskSpec 选项都走这里渲染) */
+.clarification-option {
+  padding: 4px 14px;
+  border: 1px solid rgba(250, 173, 20, 0.45);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.clarification-option:hover:not(:disabled) {
+  background: #faad14;
+  border-color: #faad14;
+  color: #fff;
+}
+.clarification-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* 选项多时的下拉形态(a-select):宽度贴卡片,与按钮形态同一交互契约 */
+.clarification-select {
+  width: 100%;
+  max-width: 360px;
 }
 .clarification-hint {
   margin-top: 12px;

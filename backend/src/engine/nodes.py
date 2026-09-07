@@ -189,6 +189,9 @@ def classify_intent_node(state: GraphState) -> dict:
             "source_artifact": state.get(CONTEXT_ARTIFACT),  # 已有配置（修改类工具需要）
             "conversation_id": state.get("conversation_id", ""),
             "forward_headers": state.get("forward_headers", {}),  # 透传鉴权头
+            # 插件默认参数(宿主注入):{pack: {参数: 值}}——工具按所属 pack
+            # 自取(如 kb_search 读 knowledge_graph.kb 做默认库);引擎不解析
+            "pack_params": state.get("pack_params", {}),
             # 图片识别:stream.py 放进初始 tool_state 的图片在此透传。
             # 修复前的断链:classify 重建 tool_state 时丢掉该键,
             # 图片类工具收到"未提供图片"(LangGraph 重构遗留回归)。
@@ -350,15 +353,30 @@ def execute_tool_node(state: GraphState) -> dict:
     # 链路追踪:工具执行耗时与结论入链。状态三态:
     #   ok=正常完成 / ask=挂起追问(中断不是失败,resume 重跑会再写一条) /
     #   error=执行异常
+    # detail 带结论概要:ask 时是问题列表(管理端不用翻 LLM 调用就能看到
+    # 工具在问什么),ok 时是 summary(工具产出的一句话结论)。
+    _trace_status = (
+        "error" if result.error_for_llm
+        else ("ask" if result.ask is not None else "ok")
+    )
+    _trace_detail: Dict[str, Any] = {"tool": tool_name}
+    if _trace_status == "ask":
+        _trace_detail["questions"] = [
+            q.question for q in (result.ask.questions or [])
+        ]
+    elif _trace_status == "ok":
+        if result.summary:
+            _trace_detail["summary"] = result.summary[:200]
+        if result.artifact is not None:
+            _trace_detail["artifactType"] = result.artifact_type
+    else:
+        _trace_detail["error"] = (result.error_for_llm or "")[:200]
     _append_trace(state, {
         "stage": "tool_execute",
         "title": f"执行工具 {tool_name}",
-        "status": (
-            "error" if result.error_for_llm
-            else ("ask" if result.ask is not None else "ok")
-        ),
+        "status": _trace_status,
         "duration_ms": int((time.time() - _tool_start) * 1000),
-        "detail": {"tool": tool_name},
+        "detail": _trace_detail,
     })
 
     # ── 处理追问:interrupt! ──

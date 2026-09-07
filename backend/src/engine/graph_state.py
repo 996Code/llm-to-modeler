@@ -71,6 +71,8 @@ class GraphState(TypedDict, total=False):
     - forward_headers:      嵌入(embed)模式透传的请求头(如上游租户、trace id)
     - context_artifact:     对话的上下文制品(宿主下发的画布,pack 路由判断画布状态,
                             增量修改类工具读它做增量基线;存储层字段名仍叫 current_config)
+    - pack_params:          插件默认参数(宿主/会话注入),{pack: {参数: 值}},
+                            经 tool_state 透传给工具(如 KG 的默认知识库)
 
     ── 意图识别(classify_intent 节点产出) ──
     - tool_name:            选中的工具名(决定路由到哪个工具)
@@ -102,6 +104,11 @@ class GraphState(TypedDict, total=False):
     # 对话的上下文参数(宿主下发的当前制品)——pack 路由据此判断画布状态,
     # 修改类工具读它做增量基线。结构由 pack 各自消化(引擎不解析内部字段)。
     context_artifact: Optional[Dict[str, Any]]
+    # 插件默认参数(宿主/会话注入):{pack_name: {参数名: 值}}——如嵌入宿主
+    # 指定 knowledge_graph 的默认知识库 {"knowledge_graph": {"kb": "产品手册"}}。
+    # 优先级:用户消息显式指定 > pack_params 默认 > 工具内追问。引擎不解析
+    # 内部结构(开闭原则),经 tool_state["pack_params"] 透传给工具,工具自取。
+    pack_params: Dict[str, Dict[str, Any]]
 
     # ── 意图识别(classify_intent 节点写) ──
     # 选中的工具名;条件边 route_by_tool 据此决定走 execute_tool 还是 END

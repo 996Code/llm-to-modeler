@@ -103,6 +103,7 @@ async def stream_graph(
     context_artifact: dict = None,
     forward_headers: dict = None,
     services: dict = None,
+    pack_params: dict = None,
 ) -> AsyncGenerator[str, None]:
     """走 LangGraph StateGraph 的 SSE 流(异步生成器)。
 
@@ -128,6 +129,9 @@ async def stream_graph(
         conversation_history:历史对话(给 LLM 当上下文)
         context_artifact:     对话的上下文参数(宿主下发的当前制品)
         forward_headers:     嵌入模式下透传给上游的请求头(鉴权等)
+        pack_params:         插件默认参数(宿主注入),{pack: {参数: 值}}——
+                              如 {"knowledge_graph": {"kb": "产品手册"}};经
+                              tool_state 透传给工具,用户显式指定优先于它
 
     Yields:
         SSE 格式的字符串,直接写给 HTTP 响应体。
@@ -173,6 +177,8 @@ async def stream_graph(
             "conversation_id": conversation_id,
             "forward_headers": forward_headers or {},
             STATE_CONTEXT_ARTIFACT: context_artifact,
+            # 插件默认参数(宿主注入):{pack: {参数: 值}},经 tool_state 透传给工具
+            "pack_params": pack_params or {},
             "tool_name": "",
             "intent_reason": "",
             # 图片等工具私有状态,只在需要时填充

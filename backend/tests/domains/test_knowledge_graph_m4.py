@@ -246,17 +246,72 @@ class TestKbSearchTool:
         fmt = tool.format_result(result.artifact)
         assert fmt["nodeCount"] == 2 and fmt["edgeCount"] == 1
 
-    def test_multiple_kbs_asks(self, env):
-        env.store.create_kb("库一"); env.store.create_kb("库二")
+    def test_multiple_kbs_asks_all_options(self, env):
+        """选项不截断:5 个库全部出现在追问选项里(前端多选项自动折叠成可搜索下拉)。"""
+        names = [f"库{i}" for i in range(5)]
+        for n in names:
+            env.store.create_kb(n)
         tool = KbSearchTool(env.app_state)
         result = tool.execute({"user_input": "甲在哪?"}, _ctx(env))
         assert result.ask is not None
-        assert {o.label for o in result.ask.questions[0].options} == {"库一", "库二"}
+        assert {o.label for o in result.ask.questions[0].options} == set(names)
 
-        # 追问恢复:引擎注入 clarify_answers(与 njmind_form 同一约定)后选中库二
+        # 追问恢复:引擎注入 clarify_answers(与 njmind_form 同一约定)后选中库2
         resumed = tool.execute(
-            {"user_input": "甲在哪?", "clarify_answers": {"kb": "库二"}}, _ctx(env))
-        assert resumed.artifact and resumed.artifact["kb"]["name"] == "库二"
+            {"user_input": "甲在哪?", "clarify_answers": {"kb": "库2"}}, _ctx(env))
+        assert resumed.artifact and resumed.artifact["kb"]["name"] == "库2"
+
+    def test_clarify_text_answer_resolves_kb(self, env):
+        """用户直接打字回答(前端 {text: 原话} 形态):精确名/唯一包含匹配。"""
+        env.store.create_kb("诛仙测试库"); env.store.create_kb("产品手册库")
+        tool = KbSearchTool(env.app_state)
+        # 精确名
+        r1 = tool.execute(
+            {"user_input": "甲在哪?", "clarify_answers": {"text": "诛仙测试库"}}, _ctx(env))
+        assert r1.artifact and r1.artifact["kb"]["name"] == "诛仙测试库"
+        # 整句里的唯一包含("在诛仙测试库里查")
+        r2 = tool.execute(
+            {"user_input": "甲在哪?", "clarify_answers": {"text": "在诛仙测试库里查一下"}}, _ctx(env))
+        assert r2.artifact and r2.artifact["kb"]["name"] == "诛仙测试库"
+        # 多个包含命中(都含"库")→ 仍追问,不瞎猜
+        r3 = tool.execute(
+            {"user_input": "甲在哪?", "clarify_answers": {"text": "随便哪个库"}}, _ctx(env))
+        assert r3.ask is not None
+
+    def test_clarify_structured_answer_from_option_click(self, env):
+        """前端追问卡片点选项({header: label} 结构化形态):按 header 取答案。"""
+        env.store.create_kb("库一"); env.store.create_kb("库二")
+        tool = KbSearchTool(env.app_state)
+        resumed = tool.execute(
+            {"user_input": "甲在哪?", "clarify_answers": {"知识库": "库一", "text": "库一"}},
+            _ctx(env))
+        assert resumed.artifact and resumed.artifact["kb"]["name"] == "库一"
+
+    def test_pack_params_default_kb(self, env):
+        """宿主注入 pack_params(knowledge_graph.kb)指定默认库:免追问直接检索。"""
+        env.store.create_kb("库一"); env.store.create_kb("宿主指定库")
+        self._retarget_graph(env, [k["id"] for k in env.store.list_kbs()
+                                   if k["name"] == "宿主指定库"][0])
+        tool = KbSearchTool(env.app_state)
+        state = {"user_input": "甲在哪?",
+                 "pack_params": {"knowledge_graph": {"kb": "宿主指定库"}}}
+        result = tool.execute(state, _ctx(env))
+        assert result.artifact and result.artifact["kb"]["name"] == "宿主指定库"
+        # 用户显式指定(state.kb)优先于宿主默认
+        state2 = {"user_input": "甲在哪?", "kb": "库一",
+                  "pack_params": {"knowledge_graph": {"kb": "宿主指定库"}}}
+        result2 = tool.execute(state2, _ctx(env))
+        # 库一无数据,但解析到了"库一"而不是默认库(不报"知识库不存在"即证明)
+        assert result2.artifact is not None or result2.error_for_llm is None
+
+    def test_pack_params_unknown_kb(self, env):
+        """宿主默认库不存在:明确报错(不静默降级到追问)。"""
+        env.store.create_kb("库一")
+        tool = KbSearchTool(env.app_state)
+        result = tool.execute(
+            {"user_input": "x", "pack_params": {"knowledge_graph": {"kb": "已删除的库"}}},
+            _ctx(env))
+        assert result.error_for_llm and "已删除的库" in result.error_for_llm
 
     def test_kb_hint_resolves_by_name(self, env):
         env.store.create_kb("指定库")

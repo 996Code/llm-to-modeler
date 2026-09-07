@@ -63,10 +63,17 @@ class KbSearchTool(Tool):
         from domains.knowledge_graph import retrieval, runtime
 
         query = (state.get("user_input") or state.get("query") or "").strip()
-        kb_hint = (state.get("kb") or "").strip()
         store = runtime.get_kg_store(self._app_state)
 
-        # ── 知识库解析(指定名 > 追问答案 > 唯一库自动 > 多库追问) ──
+        # ── 知识库解析(用户指定 > 宿主默认参数 > 追问答案 > 唯一库自动 > 多库追问) ──
+        # pack_params 是宿主经 ChatRequest 注入的插件默认参数(通用机制,
+        # 引擎透传不解析):{"knowledge_graph": {"kb": "库名"}}——嵌入宿主
+        # 把 AI 入口挂在某知识库页面时用它指定默认库,用户消息显式指定优先。
+        kb_hint = (state.get("kb") or "").strip()
+        if not kb_hint:
+            kb_hint = str(
+                (state.get("pack_params") or {}).get("knowledge_graph", {}).get("kb") or ""
+            ).strip()
         kb = None
         if kb_hint:
             kb = store.get_kb_by_name(kb_hint)
@@ -74,20 +81,36 @@ class KbSearchTool(Tool):
                 return ToolResult(error_for_llm=f"知识库「{kb_hint}」不存在")
         else:
             # 追问恢复:interrupt 后引擎把用户回答注入 tool_state["clarify_answers"]
-            # (见 engine/nodes.py 的追问恢复注入,与 njmind_form 同一约定)
+            # (见 engine/nodes.py 的追问恢复注入,与 njmind_form 同一约定)。
+            # 两种形态:①前端追问卡片点选项 → {header: label} 结构化;
+            # ②用户直接打字 → {text: 原话}。都按"精确名 > 唯一包含匹配"解析。
             answers = state.get("clarify_answers") or {}
             chosen = str(answers.get("kb") or answers.get("知识库") or "").strip()
             kbs = store.list_kbs()
+            if not chosen:
+                raw = str(answers.get("text") or "").strip()
+                if raw:
+                    exact = next((k for k in kbs if k["name"] == raw), None)
+                    if exact is not None:
+                        chosen = exact["name"]
+                    else:
+                        contains = [k for k in kbs if k["name"] in raw]
+                        # 唯一包含才敢认定;多个包含(如都含"库"字)仍走追问
+                        if len(contains) == 1:
+                            chosen = contains[0]["name"]
             if chosen:
                 kb = next((k for k in kbs if k["name"] == chosen), None)
             if kb is None and len(kbs) == 1:
                 kb = kbs[0]
             elif kb is None and kbs:
+                # 选项带上描述(前端下拉可搜索);数量多时前端自动折叠成
+                # 可搜索下拉,这里不再截断——全部给出去让用户搜
                 return ToolResult(ask=AskSpec(questions=[AskQuestion(
                     question="要在哪个知识库里检索?",
                     header="知识库",
                     options=[AskOption(label=k["name"],
-                                       description=k.get("description") or "") for k in kbs[:4]],
+                                       description=(k.get("description") or "")[:60])
+                             for k in kbs],
                 )]))
             elif kb is None:
                 return ToolResult(
