@@ -33,6 +33,10 @@ export interface EmbedOptions {
   userId?: string                                  // 当前用户 ID（透传给 iframe）
   /** 透传到上游 modeler 的请求头（如 Authorization、X-Tenant-Id 等） */
   headers?: Record<string, string>                 // 要透传给 iframe 的请求头
+  /** 宿主的服务地址表(嵌入契约 capability 'services'):键为服务名(如
+   *  "njmind-modeler"),值为完整 base URL——子应用的表单类工具据此
+   *  解析上游地址,不下发则嵌入模式无法调用上游(缺地址会被 preflight 拦截) */
+  services?: Record<string, string>
   position?: 'bottom-right' | 'bottom-left'        // 浮窗位置（右下/左下）
   theme?: 'light' | 'dark'                         // 主题
   /** 宿主"设计器"当前配置的取数钩子（GET_CONTEXT/APPLY 的 artifact 来源）。
@@ -133,7 +137,11 @@ export class LLMFormModeler {
     this.postToChild('INIT', {
       userId: this.options.userId,
       headers: this.options.headers || {},
-      capabilities: ['context', 'apply', 'auth', 'resize'],
+      capabilities: ['context', 'apply', 'auth', 'resize',
+                     // 下发了服务地址表才通告该能力(子应用 chat 请求携带 services)
+                     ...(this.options.services ? ['services'] : [])],
+      // 宿主服务地址表:表单类工具的上游地址来源(不下发则嵌入模式缺地址)
+      ...(this.options.services ? { services: this.options.services } : {}),
       // 宿主"设计器"的当前配置（无则为 null，子应用首次对话走 create）
       artifact: this.currentArtifact(),
       revision: this.currentRevision(),
