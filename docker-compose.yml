@@ -81,7 +81,7 @@ services:
 
   # ── Milvus 向量库(standalone:内嵌 etcd/存储,单容器) ──
   milvus:
-    image: milvusdb/milvus:v2.4.17
+    image: milvusdb/milvus:v2.4.0
     container_name: llm-modeler-milvus
     restart: unless-stopped
     command: ["milvus", "run", "standalone"]
