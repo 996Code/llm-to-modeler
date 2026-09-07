@@ -1,0 +1,103 @@
+# llm-to-modler Docker 部署
+# 所有配置从项目根目录 .env 读取(deploy.env.example 为模板)
+# 数据全部落在项目相对目录 ./data/ 下,不交给 docker 匿名卷管理:
+#   ./data/backend   SQLite(conversations.db/kg.db) + 上传文件 + 日志
+#   ./data/neo4j     图谱数据
+#   ./data/milvus    向量数据
+
+services:
+  # ── 后端(FastAPI,容器内 18080;宿主 18081 调试用) ──
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: llm-modeler-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-18081}:18080"
+    env_file:
+      - ./.env
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONPATH=/app/src
+      - DATABASE_PATH=/app/data/conversations.db
+      - KG_FILES_DIR=/app/data/kg/files
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:?请在 .env 配置 NEO4J_PASSWORD}
+      - MILVUS_URI=http://milvus:19530
+    volumes:
+      # 数据持久化(SQLite + 上传文件 + 日志)——相对目录,不交给 docker
+      - ./data/backend:/app/data
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      milvus:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:18080/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── 前端(nginx:静态资源 + API/SSE 反代;宿主 19090) ──
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: llm-modeler-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-19090}:80"
+    environment:
+      - TZ=Asia/Shanghai
+    depends_on:
+      backend:
+        condition: service_started
+
+  # ── Neo4j 图谱(社区版) ──
+  neo4j:
+    image: neo4j:5-community
+    container_name: llm-modeler-neo4j
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:?请在 .env 配置 NEO4J_PASSWORD}
+      # 内存按需调(服务器内存充裕可加大)
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=1G
+    ports:
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+      - "${NEO4J_HTTP_PORT:-17474}:7474"
+    volumes:
+      - ./data/neo4j:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ── Milvus 向量库(standalone:内嵌 etcd/存储,单容器) ──
+  milvus:
+    image: milvusdb/milvus:v2.4.17
+    container_name: llm-modeler-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      - TZ=Asia/Shanghai
+      - ETCD_USE_EMBED=true
+      - ETCD_DATA_DIR=/var/lib/milvus/etcd
+      - ETCD_CONFIG_PATH=/milvus/configs/embedEtcd.yaml
+      - COMMON_STORAGETYPE=local
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+    volumes:
+      - ./data/milvus:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 90s
