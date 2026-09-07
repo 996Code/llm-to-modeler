@@ -254,3 +254,17 @@ class ConversationManager:
         if not self._store:
             return []
         return self._store.get_messages(conv_id)
+
+    # ── 会话级插件状态(工具跨轮记忆;委托 store,SessionStateHandle 消费) ──
+
+    def get_pack_state(self, conv_id: str, scope: str) -> Dict[str, Any]:
+        """读会话内某 scope 的插件状态(无 store/无记忆返回空 dict)。"""
+        if not self._store:
+            return {}
+        return self._store.get_pack_state(conv_id, scope)
+
+    def set_pack_state(self, conv_id: str, scope: str, state: Dict[str, Any]) -> None:
+        """整包写入某 scope 的插件状态(无 store 静默降级)。"""
+        if not self._store:
+            return
+        self._store.set_pack_state(conv_id, scope, state)

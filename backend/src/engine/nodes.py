@@ -278,6 +278,15 @@ def execute_tool_node(state: GraphState) -> dict:
 
     # 构建 ToolContext
     # 类比 Java：构造方法上下文对象，把所有依赖打包传给工具
+    # 会话级记忆句柄:工具跨轮记住用户选择(如选过的知识库)。scope 由
+    # 工具声明(默认工具名,同插件可共享);无会话/存储缺失时 None,
+    # 工具判空走无记忆路径(引擎不读记忆内容,零领域知识)
+    _mem_handle = None
+    _conv_id = tool_state.get("conversation_id")
+    if _conversation is not None and _conv_id:
+        from sdk.tool import SessionStateHandle
+        _mem_handle = SessionStateHandle(
+            _conversation, _conv_id, getattr(tool, "state_scope", "") or tool_name)
     ctx = ToolContext(
         llm_client=_llm_client,  # LLM 客户端（工具内部可能要调 LLM）
         asset_client=_asset_client,  # 资产客户端（读写上游配置）
@@ -286,6 +295,7 @@ def execute_tool_node(state: GraphState) -> dict:
         forward_headers=tool_state.get("forward_headers", {}),  # 透传鉴权头
         conv_id=tool_state.get("conversation_id"),  # 会话 ID
         registry=_registry,  # 工具注册表（工具可能要调其他工具）
+        session_state=_mem_handle,  # 会话记忆句柄(可选)
     )
     # object.__setattr__：绕过 Pydantic 的 frozen 限制，临时挂 prompt_loader
     # 类比 Java：反射注入非构造字段

@@ -5,9 +5,59 @@
 - 安全声明与执行分离:validate_input 先于 execute
 """
 from __future__ import annotations
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Optional
 from pydantic import BaseModel, Field, ConfigDict
+
+
+class SessionStateHandle:
+    """工具的会话级 KV 记忆(引擎注入到 ToolContext.session_state)。
+
+    解决"多轮对话遗忘":每轮图运行会重建 tool_state(本轮可能路由到别的
+    工具,残留是污染),但用户在会话里做过的选择(选过的知识库/数据源)
+    应该跨轮存活——与对话历史同生命周期(历史压缩/进程重启不影响,
+    会话删除级联清理)。典型语义:一个对话绑定一个知识库,显式切换才更新。
+
+    隔离:按 scope 键隔离(工具默认用工具名;同插件多工具可声明同一
+    state_scope 共享,如 KG 的检索与图谱浏览工具)。
+
+    Fail-open:存储异常只记日志返回默认值/静默放弃,记忆失败绝不阻断
+    工具主流程。并发:同会话并发请求的写是 last-write-wins(记忆场景可接受)。
+    """
+
+    def __init__(self, store, conv_id: str, scope: str):
+        self._store = store
+        self._conv_id = conv_id
+        self._scope = scope
+
+    def get(self, key: str, default=None):
+        """读一个记忆键;无记忆/存储失败返回 default。"""
+        try:
+            return self._store.get_pack_state(self._conv_id, self._scope).get(key, default)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"session_state.get failed: {e}")
+            return default
+
+    def set(self, key: str, value) -> None:
+        """写一个记忆键(读改写整包落库;失败只记日志不阻断)。"""
+        try:
+            state = self._store.get_pack_state(self._conv_id, self._scope)
+            state[key] = value
+            self._store.set_pack_state(self._conv_id, self._scope, state)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"session_state.set failed: {e}")
+
+    def pop(self, key: str, default=None):
+        """删除一个记忆键(记忆失效时清理,如绑定的知识库被删)。"""
+        try:
+            state = self._store.get_pack_state(self._conv_id, self._scope)
+            value = state.pop(key, default)
+            self._store.set_pack_state(self._conv_id, self._scope, state)
+            return value
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"session_state.pop failed: {e}")
+            return default
 
 
 class ToolContext(BaseModel):
@@ -22,6 +72,8 @@ class ToolContext(BaseModel):
     - conv_id: 会话 ID
     - registry: 工具注册表(只读),供工具查询其他工具的能力描述
       例如 ChatTool 用它动态生成"我能做什么"的能力列表
+    - session_state: 会话级记忆句柄(SessionStateHandle;无会话上下文/
+      存储缺失时为 None,工具需判空)——工具跨轮记住用户的选择
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -32,6 +84,7 @@ class ToolContext(BaseModel):
     forward_headers: dict = Field(default_factory=dict)
     conv_id: Optional[str] = None  # 会话 ID，用于日志记录
     registry: Any = None           # ToolRegistry(只读),供工具查询能力
+    session_state: Any = None      # SessionStateHandle(可选,引擎注入)
 
     def trace(
         self,
@@ -141,6 +194,10 @@ class Tool(ABC):
     name: str                     # 工具名,LLM 选择时看到
     description: str              # 工具说明
     when: str                     # "何时用"短描述(填进选择 prompt)
+    # 会话记忆隔离域:空 = 用工具名(每工具独立记忆);同插件的多个工具
+    # 声明同一个值即可共享记忆(如 KG 的 kb_search 与图谱浏览工具都写
+    # "knowledge_graph")——引擎据此构造 SessionStateHandle 的 scope
+    state_scope: str = ""
 
     @abstractmethod
     def input_schema(self) -> dict:

@@ -116,7 +116,7 @@ def env(tmp_path, monkeypatch):
 
     store = runtime.get_kg_store(app_state)
     yield SimpleNamespace(store=store, llm=llm, graph=graph, vector=vector,
-                          app_state=app_state, obs_calls=calls)
+                          app_state=app_state, obs_calls=calls, tmp_path=tmp_path)
     runtime.reset_runtime_cache()
 
 
@@ -124,9 +124,32 @@ KB1 = {"id": "kb1", "name": "一号库", "description": "", "schema": {"relation
        "vectorEnabled": True, "vectorDim": 3}
 
 
-def _ctx(env):
+def _ctx(env, with_memory=False, mem_conv=None):
+    """构造工具上下文;with_memory=True 时挂真实会话记忆(临时 SQLite)。
+
+    mem_conv:传入 (store, conv_id) 复用同一会话(模拟"同一会话的下一轮");
+    不传则新建会话。
+    """
+    session_state = None
+    if with_memory:
+        from services.conversation_store import ConversationStore
+        from sdk.tool import SessionStateHandle
+        if mem_conv is not None:
+            cs, conv_id = mem_conv
+        else:
+            cs = ConversationStore(str(env.tmp_path / "conv_mem.db"))
+            conv_id = cs.create_conversation("tester")["id"]
+        session_state = SessionStateHandle(cs, conv_id, "knowledge_graph")
     return ToolContext(llm_client=env.llm, asset_client=None, conversation=None,
-                       emit=lambda *a, **k: None, conv_id="conv-test")
+                       emit=lambda *a, **k: None, conv_id="conv-test",
+                       session_state=session_state)
+
+
+def _mem_conv(env):
+    """建一个真实会话记忆底座(store, conv_id),跨轮共享用。"""
+    from services.conversation_store import ConversationStore
+    cs = ConversationStore(str(env.tmp_path / "conv_mem.db"))
+    return cs, cs.create_conversation("tester")["id"]
 
 
 # ── 检索编排 ─────────────────────────────────────────────────
@@ -312,6 +335,64 @@ class TestKbSearchTool:
             {"user_input": "x", "pack_params": {"knowledge_graph": {"kb": "已删除的库"}}},
             _ctx(env))
         assert result.error_for_llm and "已删除的库" in result.error_for_llm
+
+    def test_session_memory_remembers_kb_across_turns(self, env):
+        """多轮记忆:首轮选定后写入会话记忆;下一轮无任何提示直接沿用,不再追问。"""
+        env.store.create_kb("库一"); env.store.create_kb("库二")
+        self._retarget_graph(env, [k["id"] for k in env.store.list_kbs()
+                                   if k["name"] == "库二"][0])
+        tool = KbSearchTool(env.app_state)
+        mc = _mem_conv(env)  # 同一会话,两轮共享
+
+        # 第 1 轮:追问 → 用户答"库二" → 检索 + 记忆写入
+        ctx1 = _ctx(env, with_memory=True, mem_conv=mc)
+        r1 = tool.execute({"user_input": "甲在哪?"}, ctx1)
+        assert r1.ask is not None  # 首轮无提示,先追问
+        r1b = tool.execute({"user_input": "甲在哪?",
+                            "clarify_answers": {"知识库": "库二"}}, ctx1)
+        assert r1b.artifact and r1b.artifact["kb"]["name"] == "库二"
+        assert ctx1.session_state.get("kb") == "库二"  # 已记住
+
+        # 第 2 轮:全新 tool_state(引擎每轮重建),同一会话记忆 → 免追问直接检索
+        ctx2 = _ctx(env, with_memory=True, mem_conv=mc)
+        assert ctx2 is not ctx1
+        r2 = tool.execute({"user_input": "甲在哪?"}, ctx2)
+        assert r2.artifact and r2.artifact["kb"]["name"] == "库二"
+        assert r2.ask is None  # 关键:不再追问
+
+    def test_session_memory_invalidated_when_kb_deleted(self, env):
+        """记忆的库被删除:清掉记忆回到正常解析流(追问),不报错不断流。"""
+        env.store.create_kb("库一")
+        tmp_kb = env.store.create_kb("临时库")
+        env.store.delete_kb(tmp_kb["id"])  # 绑定后库被删
+        env.store.create_kb("库三")  # 保持多库(避免唯一库自动选中掩盖行为)
+        tool = KbSearchTool(env.app_state)
+        ctx = _ctx(env, with_memory=True)
+        ctx.session_state.set("kb", "临时库")
+        result = tool.execute({"user_input": "甲在哪?"}, ctx)
+        assert result.ask is not None  # 记忆失效 → 重新追问
+        assert ctx.session_state.get("kb") is None  # 记忆已清理
+
+    def test_session_memory_explicit_switch_overrides(self, env):
+        """用户显式换库:本轮指定优先于记忆,且记忆更新为新库。"""
+        env.store.create_kb("库A"); env.store.create_kb("库B")
+        tool = KbSearchTool(env.app_state)
+        ctx = _ctx(env, with_memory=True)
+        ctx.session_state.set("kb", "库A")
+        result = tool.execute({"user_input": "甲在哪?", "kb": "库B"}, ctx)
+        assert result.artifact and result.artifact["kb"]["name"] == "库B"
+        assert ctx.session_state.get("kb") == "库B"  # 绑定已切换
+
+    def test_session_state_handle_fail_open(self, env):
+        """存储异常时句柄 fail-open:get 返回默认、set 静默,不阻断工具。"""
+        from sdk.tool import SessionStateHandle
+        broken = SimpleNamespace(
+            get_pack_state=lambda *a: (_ for _ in ()).throw(RuntimeError("db down")),
+            set_pack_state=lambda *a: (_ for _ in ()).throw(RuntimeError("db down")))
+        h = SessionStateHandle(broken, "conv", "knowledge_graph")
+        assert h.get("kb", "默认库") == "默认库"  # 不抛
+        h.set("kb", "x")  # 不抛
+        h.pop("kb")  # 不抛
 
     def test_kb_hint_resolves_by_name(self, env):
         env.store.create_kb("指定库")

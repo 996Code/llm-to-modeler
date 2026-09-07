@@ -189,6 +189,17 @@ class ConversationStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_call_logs_conv ON call_logs(conv_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_call_logs_type ON call_logs(call_type, created_at);
+
+                -- 会话级插件状态:工具跨轮记忆(如 KG 记住用户选过的知识库)。
+                -- scope 由工具声明(默认工具名;同插件多工具可共享同一 scope)。
+                -- 与对话历史同生命周期:会话删除级联清理;历史压缩不影响。
+                CREATE TABLE IF NOT EXISTS session_pack_state (
+                    conv_id TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    state_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (conv_id, scope)
+                );
             """)
 
     def _migrate_legacy_tables(self, conn: sqlite3.Connection):
@@ -600,6 +611,8 @@ class ConversationStore:
             )
             # events 也删除(级联)
             conn.execute("DELETE FROM events WHERE conv_id = ?", (conv_id,))
+            # 插件会话记忆级联清理(不留僵尸绑定)
+            conn.execute("DELETE FROM session_pack_state WHERE conv_id = ?", (conv_id,))
             # rowcount 是受影响行数,> 0 表示确实删了
             return cursor.rowcount > 0
 
@@ -618,7 +631,46 @@ class ConversationStore:
                 (conv_id,),
             )
             conn.execute("DELETE FROM events WHERE conv_id = ?", (conv_id,))
+            conn.execute("DELETE FROM session_pack_state WHERE conv_id = ?", (conv_id,))
             return cursor.rowcount > 0
+
+    # ── 会话级插件状态(session_pack_state 表) ──────────────────
+
+    # 状态体积上限:插件状态是轻量 KV(选过的库/数据源/偏好),不是数据存储;
+    # 超限说明插件把它当数据库用了,直接拒绝(调用方 fail-open 降级)
+    PACK_STATE_MAX_BYTES = 65536
+
+    def get_pack_state(self, conv_id: str, scope: str) -> Dict[str, Any]:
+        """读会话内某 scope 的插件状态;没有返回空 dict。"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT state_json FROM session_pack_state WHERE conv_id = ? AND scope = ?",
+                (conv_id, scope),
+            ).fetchone()
+        if not row or not row["state_json"]:
+            return {}
+        try:
+            data = json.loads(row["state_json"])
+            return data if isinstance(data, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+
+    def set_pack_state(self, conv_id: str, scope: str, state: Dict[str, Any]) -> None:
+        """整包写入某 scope 的插件状态(INSERT OR REPLACE)。
+
+        Raises:
+            ValueError: 序列化后超体积上限(防插件把状态当数据存储滥用)。
+        """
+        payload = json.dumps(state, ensure_ascii=False)
+        if len(payload.encode("utf-8")) > self.PACK_STATE_MAX_BYTES:
+            raise ValueError(
+                f"pack state 超过 {self.PACK_STATE_MAX_BYTES} 字节上限(scope={scope})")
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO session_pack_state
+                   (conv_id, scope, state_json, updated_at) VALUES (?, ?, ?, ?)""",
+                (conv_id, scope, payload, _now()),
+            )
 
     def update_conversation_config(
         self,

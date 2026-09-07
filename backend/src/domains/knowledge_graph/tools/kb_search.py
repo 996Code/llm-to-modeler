@@ -28,6 +28,8 @@ class KbSearchTool(Tool):
     description = "在知识库(知识图谱)中检索事实并回答:实体属性、关系链、制度条款、文档内容"
     when = ("用户想基于已导入的知识库/文档回答事实性问题,如'张伟向谁汇报'"
             "'XX 和 YY 是什么关系''知识库里告警怎么升级'")
+    # 同插件共享会话记忆域:未来的图谱浏览等工具同样能读"本会话绑定的库"
+    state_scope = "knowledge_graph"
 
     def __init__(self, app_state: Any = None):
         # app_state 由 create_registry(app_state) 装配时注入(平台组件入口)
@@ -64,17 +66,26 @@ class KbSearchTool(Tool):
 
         query = (state.get("user_input") or state.get("query") or "").strip()
         store = runtime.get_kg_store(self._app_state)
+        mem = getattr(ctx, "session_state", None)
 
-        # ── 知识库解析(用户指定 > 宿主默认参数 > 追问答案 > 唯一库自动 > 多库追问) ──
-        # pack_params 是宿主经 ChatRequest 注入的插件默认参数(通用机制,
-        # 引擎透传不解析):{"knowledge_graph": {"kb": "库名"}}——嵌入宿主
-        # 把 AI 入口挂在某知识库页面时用它指定默认库,用户消息显式指定优先。
+        # ── 知识库解析 ──
+        # 优先级:本轮显式指定 > 追问答案 > 会话记忆 > 宿主默认 > 唯一库自动 > 多库追问。
+        # 会话记忆(ctx.session_state,scope=knowledge_graph):一个对话绑定
+        # 一个库——首次选定后跨轮沿用,用户显式说"换到XX库"才更新绑定;
+        # 绑定的库被删除则清掉记忆回到追问。排在宿主默认(pack_params)之前:
+        # 用户在会话里的显式选择比宿主注入的默认更新、更强。
         kb_hint = (state.get("kb") or "").strip()
+        kb_source = "explicit" if kb_hint else ""   # 选库来源(链路观测)
         if not kb_hint:
             kb_hint = str(
                 (state.get("pack_params") or {}).get("knowledge_graph", {}).get("kb") or ""
             ).strip()
+            if kb_hint:
+                kb_source = "pack_params"
         kb = None
+        # 会话记忆兜底候选(暂存,显式/追问都没解析到才启用)
+        mem_kb_name = str(mem.get("kb") or "").strip() if mem else ""
+        mem_event = ""   # 记忆变更事件(链路观测):bind/switch/invalidate
         if kb_hint:
             kb = store.get_kb_by_name(kb_hint)
             if not kb:
@@ -100,11 +111,20 @@ class KbSearchTool(Tool):
                             chosen = contains[0]["name"]
             if chosen:
                 kb = next((k for k in kbs if k["name"] == chosen), None)
+                if kb is not None:
+                    kb_source = "clarify"
+            if kb is None and mem_kb_name:
+                # 会话记忆:绑定的库还在就直接沿用(多轮免追问的核心)
+                kb = next((k for k in kbs if k["name"] == mem_kb_name), None)
+                if kb is not None:
+                    kb_source = "memory"
+                elif mem:
+                    mem.pop("kb")  # 绑定的库已删除,清记忆回到正常解析流
+                    mem_event = "invalidate"
             if kb is None and len(kbs) == 1:
                 kb = kbs[0]
+                kb_source = "single-auto"
             elif kb is None and kbs:
-                # 选项带上描述(前端下拉可搜索);数量多时前端自动折叠成
-                # 可搜索下拉,这里不再截断——全部给出去让用户搜
                 return ToolResult(ask=AskSpec(questions=[AskQuestion(
                     question="要在哪个知识库里检索?",
                     header="知识库",
@@ -116,6 +136,18 @@ class KbSearchTool(Tool):
                 return ToolResult(
                     reply="当前还没有任何知识库。请先在「知识图谱」管理页创建知识库并导入文档。",
                     summary="无可用知识库")
+
+        # 选定即写回会话记忆(本轮的最终绑定,含显式切换;fail-open)
+        if mem is not None and mem.get("kb") != kb["name"]:
+            mem.set("kb", kb["name"])
+            mem_event = mem_event or ("switch" if mem_kb_name else "bind")
+
+        # 选库决策入链(链路观测):来源 + 记忆变更——"为什么没问/为什么用这个库"
+        # 在管理端链路视图一眼可答
+        ctx.trace("kb_search.resolve_kb", f"选定知识库「{kb['name']}」", "ok", detail={
+            "kb": kb["name"], "source": kb_source,
+            **({"memoryEvent": mem_event} if mem_event else {}),
+        })
 
         # ── 混合检索 + 回答 ──
         ctx.emit("stage", "kb_search.retrieve", message=f"正在检索知识库「{kb['name']}」…")

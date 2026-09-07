@@ -132,3 +132,37 @@ class TestCrashRecovery:
         assert len(messages) == 20  # 10 轮 * 2
         assert messages[0]["content"] == "问题0"
         assert messages[-1]["content"] == "回答9"
+
+
+class TestPackState:
+    """会话级插件状态(session_pack_state):工具跨轮记忆的存储底座。"""
+
+    def test_roundtrip_and_scope_isolation(self, store):
+        """读写 roundtrip + scope 隔离(同会话不同 scope 互不可见)。"""
+        conv_id = store.create_conversation("user1")["id"]
+        assert store.get_pack_state(conv_id, "knowledge_graph") == {}
+        store.set_pack_state(conv_id, "knowledge_graph", {"kb": "诛仙测试库"})
+        assert store.get_pack_state(conv_id, "knowledge_graph") == {"kb": "诛仙测试库"}
+        # scope 隔离
+        assert store.get_pack_state(conv_id, "bi_report") == {}
+        store.set_pack_state(conv_id, "bi_report", {"datasource": "mysql1"})
+        assert store.get_pack_state(conv_id, "knowledge_graph") == {"kb": "诛仙测试库"}
+
+    def test_unknown_conversation_returns_empty(self, store):
+        """不存在的会话读记忆:空 dict(不抛,fail-open 由上层句柄保证)。"""
+        assert store.get_pack_state("no-such-conv", "knowledge_graph") == {}
+
+    def test_delete_conversation_cascades(self, store):
+        """会话删除级联清理记忆(不留僵尸绑定)。"""
+        conv_id = store.create_conversation("user1")["id"]
+        store.set_pack_state(conv_id, "knowledge_graph", {"kb": "库一"})
+        store.delete_conversation(conv_id, "user1")
+        assert store.get_pack_state(conv_id, "knowledge_graph") == {}
+
+    def test_size_cap_rejects_abuse(self, store):
+        """超体积上限拒绝(防插件把记忆当数据存储滥用)。"""
+        import pytest
+        conv_id = store.create_conversation("user1")["id"]
+        with pytest.raises(ValueError):
+            store.set_pack_state(conv_id, "knowledge_graph",
+                                 {"blob": "x" * (store.PACK_STATE_MAX_BYTES + 1)})
