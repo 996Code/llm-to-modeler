@@ -219,6 +219,15 @@ export const useConversationStore = defineStore('conversation', () => {
       return
     }
 
+    // 追问态快照:必须在 push 用户消息之前读——pendingClarification 检查
+    // "最后一条是否 assistant+needsClarification",push 之后最后一条变成
+    // user,快照永远 false(真实事故:追问回答的 answers 从未发出过,
+    // 每轮都当新消息重新路由,追问死循环)
+    const wasClarifying = pendingClarification.value
+    const clarifyAnswers = wasClarifying
+      ? { ...(structuredAnswers || {}), text }
+      : undefined
+
     // Add user message
     // 先把用户消息塞进列表（乐观更新，UI 立即显示）
     messages.value.push({ role: 'user', content: text })
@@ -228,13 +237,6 @@ export const useConversationStore = defineStore('conversation', () => {
     pipelineSteps.value = []  // 重置，等待后端 pipeline_definition 事件
 
     try {
-      // 追问恢复:如果当前有 pendingClarification,把用户消息作为 answers 传给后端
-      // 后端走 LangGraph Command(resume=answers) 从断点继续。
-      // 两种形态:点选项 → {header: label, text}(结构化+原文,后端按 header 取);
-      // 直接打字 → {text: 原话}(后端做文本解析)
-      const clarifyAnswers = pendingClarification.value
-        ? { ...(structuredAnswers || {}), text }
-        : undefined
 
       // 调用 chat，注册各类 SSE 事件回调（回调内根据事件更新状态/UI）
       // 嵌入模式：附加上下文（宿主最新配置 + 服务地址表），后端据此覆盖会话旧配置
