@@ -87,9 +87,10 @@ services:
     command: ["milvus", "run", "standalone"]
     environment:
       - TZ=Asia/Shanghai
+      # v2.4.0 standalone 单容器模式:RocksMQ + 内置 etcd(默认配置),
+      # 不依赖外置 etcd/minio(2.4.17 才有 embedEtcd.yaml,本镜像没有)
       - ETCD_USE_EMBED=true
       - ETCD_DATA_DIR=/var/lib/milvus/etcd
-      - ETCD_CONFIG_PATH=/milvus/configs/embedEtcd.yaml
       - COMMON_STORAGETYPE=local
     ports:
       - "${MILVUS_PORT:-19530}:19530"
