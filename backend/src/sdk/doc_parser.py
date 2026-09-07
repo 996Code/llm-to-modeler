@@ -33,6 +33,24 @@ MIME_BY_EXT = {
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+")
 
+# 通用章节标题(纯文本书籍的软边界):"第一章 xxx"/"第 12 节"/"序章"/"尾声"等。
+# 约束:标题行须短(<40 字)且行首允许全角空格缩进——正文里"第二天"这类
+# 普通叙述不会被误判(不带"章/节/卷/部"量词单位)。
+_CHAPTER_RE = re.compile(
+    r"^[\s\u3000]*(第[一二三四五六七八九十百千零〇\d]{1,7}[章節节卷部回])"
+    r"([\s\u3000]+\S[^。!?!?\n]{0,29})?$"
+)
+_SPECIAL_CHAPTER_RE = re.compile(r"^[\s\u3000]*(序章|序言|楔子|前言|引子|尾声|後記|后记|番外)([\s\u3000:.:]\S.{0,30})?$")
+
+
+def _is_heading_line(stripped: str) -> bool:
+    """是否为结构标题(markdown # 或通用章节标题)——切块软边界判定。"""
+    if _HEADING_RE.match(stripped):
+        return True
+    if len(stripped) > 40:
+        return False
+    return bool(_CHAPTER_RE.match(stripped) or _SPECIAL_CHAPTER_RE.match(stripped))
+
 
 def allowed_extension(filename: str) -> bool:
     name = (filename or "").lower()
@@ -145,7 +163,7 @@ def _split_blocks(text: str) -> List[str]:
     current: List[str] = []
     for line in text.splitlines():
         stripped = line.strip()
-        if _HEADING_RE.match(stripped):
+        if _is_heading_line(stripped):
             if current:
                 blocks.append("\n".join(current).strip())
                 current = []
@@ -206,7 +224,7 @@ def chunk_text(
     buf = ""
     for block in _split_blocks(text):
         # 标题块 = 软边界:直接结算当前缓冲(避免跨标题粘连)
-        if _HEADING_RE.match(block) and buf:
+        if _is_heading_line(block) and buf:
             chunks.append(buf)
             buf = ""
         for piece in _hard_split(block, max_chars):
@@ -222,7 +240,10 @@ def chunk_text(
     if overlap_chars > 0:
         overlapped: List[str] = []
         for i, c in enumerate(chunks):
-            if i == 0 or _HEADING_RE.match(c):
+            # 标题开头的块不加前块尾部。判定与切块软边界同源(_is_heading_line):
+            # 曾只判 markdown #,中文章节标题块("第一章 xxx")被拼上上一章结尾,
+            # 表现为"章标题在块中间"的假跨章
+            if i == 0 or _is_heading_line(c.split("\n", 1)[0].strip()):
                 overlapped.append(c)
                 continue
             prev_tail = chunks[i - 1][-overlap_chars:]
