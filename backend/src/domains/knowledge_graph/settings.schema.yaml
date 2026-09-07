@@ -77,6 +77,7 @@ groups:
       - key: extraction_model
         type: string
         label: 抽取模型覆盖
+        env: KG_EXTRACTION_MODEL
         placeholder: 留空用全局模型
         help: 长文档导入建议配更快的模型(如 qwen-plus),对话/检索链路仍用全局模型;留空 = 不覆盖
       - key: llm_concurrency

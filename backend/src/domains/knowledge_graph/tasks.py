@@ -307,9 +307,6 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     batch_index = 0
 
     executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="kg-extract")
-    # 预计剩余时间:最近 10 块的滑动平均耗时 × 剩余块 ÷ 并发
-    # (LLM 耗时随词表膨胀/限流波动,滑动窗口比全程平均更贴近当前速率)
-    _recent_durations: list = []
     try:
         for batch_start in range(0, len(pending), batch_size):
             handle.check_cancel()

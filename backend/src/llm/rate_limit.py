@@ -59,6 +59,11 @@ class _TokenBucket:
         self._last = time.monotonic()
         self._lock = threading.Lock()
 
+    def refund(self, n: float = 1.0) -> None:
+        """返还 n 个令牌(不越容量)。调用方持 RateLimiter 锁时本方法不再
+        自取桶锁(避免死锁),因此只经 RateLimiter.refund 间接调用。"""
+        self._tokens = min(self._capacity, self._tokens + n)
+
     def acquire(self, n: float = 1.0) -> float:
         """取 n 个令牌,不足时阻塞等待。返回实际等待秒数。"""
         waited = 0.0
@@ -147,6 +152,19 @@ class RateLimiter:
         with self._lock:
             self._backoff_until = 0.0
 
+    def refund(self, est_tokens: int = 1) -> None:
+        """返还配额:同一次逻辑调用的内部重试/降级重复出站时调用。
+
+        场景:chat_json 的 json_object 直连失败降级纯文本路径,两次出站
+        只该占一次 RPM/TPM 配额——直连已扣的令牌在降级前返还,防限速
+        下的吞吐被内部重试结构腰斩(长文档导入尤其敏感)。
+        """
+        with self._lock:
+            if self._rpm_bucket is not None:
+                self._rpm_bucket.refund(1.0)
+            if self._tpm_bucket is not None:
+                self._tpm_bucket.refund(float(max(1, est_tokens)))
+
 
 # 进程级单例(client 层唯一出口;kg 插件设置页热生效走 configure 覆盖)
 _limiter: Optional[RateLimiter] = None
@@ -187,5 +205,9 @@ def is_fatal_llm_error(exc: Exception) -> bool:
         "401", "403", "invalid api key", "incorrect api key",
         "insufficient", "quota exceeded", "billing", "欠费", "余额不足",
         "unauthorized", "forbidden", "model not found", "api key",
+        # 国产网关常见的"模型不存在"文案(dashscope 等):不补的话配错
+        # extraction_model 会空转三轮自动续跑(~15 分钟)
+        "model not exist", "model doesn't exist", "no such model",
+        "invalid model", "unknown model", "模型不存在", "不存在的模型",
     )
     return any(m in msg for m in fatal_markers)

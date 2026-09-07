@@ -6,6 +6,7 @@
 """
 from types import SimpleNamespace
 from unittest.mock import patch
+import time
 
 import pytest
 
@@ -178,6 +179,62 @@ def test_chat_json_model_override_fallback_path(store, monkeypatch):
     assert parsed == {"entities": []}
     # 降级路径的请求也用了覆盖模型
     assert sent["model"] == "qwen-turbo"
+
+
+def test_chat_multimodal_messages_do_not_crash_token_estimate(store, monkeypatch):
+    """多模态消息(list content)进 chat:token 估算只取文本部分,不抛 TypeError。
+
+    回归锁:曾在 chat 的 estimate_tokens join 处抛 TypeError,把
+    chat_json→chat 降级路径炸断并掩盖真实错误。
+    """
+    client = _make_client(store, monkeypatch, "1")
+    msgs = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "识别这张图"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+        ],
+    }]
+    with patch.object(client.client.chat.completions, "create",
+                      return_value=_fake_response("识别结果")):
+        result = client.chat(msgs, conv_id="c-mm1")
+    assert result == "识别结果"
+
+
+def test_chat_json_fallback_refunds_rate_quota(store, monkeypatch):
+    """json_object 直连失败降级:直连已扣的限速配额按同量返还,双出站只占一次。
+
+    回归锁:曾双扣 RPM/TPM——对不支持 response_format 的模型,每次
+    chat_json 吞两份配额,限速下长文档导入吞吐腰斩。
+    """
+    from llm.rate_limit import get_rate_limiter
+
+    client = _make_client(store, monkeypatch, "1")
+    rl = get_rate_limiter()
+    monkeypatch.setattr(rl, "configure", lambda rpm, tpm: rl.__class__.configure(rl, 2, 0))
+    rl.configure(2, 0)
+
+    calls = {"n": 0}
+
+    def _fail_json_mode(**kwargs):
+        if kwargs.get("response_format"):
+            raise RuntimeError("json_object not supported")
+        calls["n"] += 1
+        return _fake_response('{"pack": "njmind_form"}')
+
+    t0 = time.monotonic()
+    with patch.object(client.client.chat.completions, "create", side_effect=_fail_json_mode):
+        parsed = client.chat_json([{"role": "user", "content": "输出JSON"}],
+                                  conv_id="c-rf1", stage="route_pack")
+    waited = time.monotonic() - t0
+
+    assert parsed == {"pack": "njmind_form"}
+    assert calls["n"] == 1
+    # RPM=2:两次出站(直连失败+降级)若无退费,第 2 次要等 ~30s;
+    # 退费后两次只占 1 份配额,剩余 1 个令牌直通
+    assert waited < 5.0, f"降级路径疑似双扣限速配额,等待了 {waited:.1f}s"
+    # 收尾:恢复不限速,避免污染同进程的其他测试
+    rl.configure(0, 0)
 
 
 # ── 会话上下文 thread-local 兜底(call_context)──────────────

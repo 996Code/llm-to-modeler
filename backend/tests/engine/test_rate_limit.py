@@ -79,11 +79,52 @@ class TestErrorClassification:
         assert is_fatal_llm_error(RuntimeError("403 forbidden"))
         assert is_fatal_llm_error(RuntimeError("insufficient quota / billing"))
         assert is_fatal_llm_error(RuntimeError("模型余额不足"))
+        # 国产网关"模型不存在"文案:配错 extraction_model 时不空转自动续跑
+        assert is_fatal_llm_error(RuntimeError("Model not exist!"))
+        assert is_fatal_llm_error(RuntimeError("请求的模型不存在"))
+        assert is_fatal_llm_error(RuntimeError("invalid model: qwen-pluss"))
         # 普通错误不致命(可自动续跑)
         assert not is_fatal_llm_error(RuntimeError("LLM timeout"))
         assert not is_fatal_llm_error(RuntimeError("connection reset"))
         # 429 限流不是致命(等待后可恢复)
         assert not is_fatal_llm_error(RuntimeError("429 too many requests"))
+
+
+class TestRefund:
+    """降级重复出站的配额返还(chat_json json_object→纯文本降级)。"""
+
+    def test_refund_restores_rpm_quota(self):
+        # RPM=3:取 3 个耗尽 → refund 1 → 第 4 个不再等待
+        rl = RateLimiter(rpm=3, tpm=0)
+        for _ in range(3):
+            rl.acquire(1)
+        rl.refund(1)
+        t0 = time.monotonic()
+        rl.acquire(1)
+        assert time.monotonic() - t0 < 0.5
+
+    def test_refund_restores_tpm_quota(self):
+        # TPM=1000:一次大请求耗尽 → refund → 同量请求不再等待
+        rl = RateLimiter(rpm=0, tpm=1000)
+        rl.acquire(1000)
+        rl.refund(1000)
+        t0 = time.monotonic()
+        rl.acquire(1000)
+        assert time.monotonic() - t0 < 0.5
+
+    def test_refund_caps_at_capacity(self):
+        # 返还不越容量:多退的令牌不白给(防退款刷配额)
+        rl = RateLimiter(rpm=2, tpm=0)
+        rl.refund(5)
+        for _ in range(2):
+            rl.acquire(1)
+        t0 = time.monotonic()
+        rl.acquire(1)  # 容量 2 已用完,第 3 个要等
+        assert time.monotonic() - t0 > 5.0
+
+    def test_refund_noop_when_unlimited(self):
+        rl = RateLimiter(rpm=0, tpm=0)
+        rl.refund(100)  # 不抛异常即可
 
 
 class TestTokenEstimation:

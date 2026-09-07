@@ -247,8 +247,11 @@ class LLMClient:
         """
         start_time = time.time()  # 计时起点，用于算 duration_ms
         endpoint = f"{self.config.base_url}/chat/completions"
-        # 全局限速:RPM/TPM 配额等待(未配置限额时零开销直通)
-        _est = estimate_tokens("".join(m.get("content") or "" for m in messages)) + 200
+        # 全局限速:RPM/TPM 配额等待(未配置限额时零开销直通)。
+        # 多模态 content(list)不计入估算——只按文本部分粗估已够防撞限额
+        _est = estimate_tokens("".join(
+            m.get("content") if isinstance(m.get("content"), str) else ""
+            for m in messages)) + 200
         _rate_wait = get_rate_limiter().acquire(_est)
         # 单次调用级模型覆盖(None = 配置默认)
         use_model = model or self.config.model
@@ -471,8 +474,16 @@ class LLMClient:
             if is_rate_limit_error(_e):
                 get_rate_limiter().on_rate_limited()
                 raise  # 限流不降级——纯文本路径同样会撞限,直接上抛让上层等退避
-            # 注意这里 pass 不记日志，因为降级是预期内的正常路径
-            pass
+            # 直连失败落一条 warn 观测(不计入正式调用日志的成功流;排查
+            # "为什么每次 chat_json 都两倍请求"的第一现场),然后降级
+            logger.warning(
+                f"chat_json json_object path failed, falling back to plain text "
+                f"(model={use_model}, stage={stage}): {_e}")
+            # 防重复计费:降级路径走 self.chat 会再 acquire 一次配额——
+            # 直连这次已扣的 RPM/TPM 令牌按同量返还,两次出站只占一次配额
+            get_rate_limiter().refund(_est)
+            # 注意这里不再静默:降级是预期内的正常路径,但每次双倍请求
+            # 对限速下的长文档导入是实打实的吞吐损失,必须可见
 
         # Fall back to plain text + extraction
         # 中文说明：第二级降级——纯文本模式 + 手动 JSON 提取
