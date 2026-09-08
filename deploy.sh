@@ -183,7 +183,7 @@ elif [ ! -f "$MODEL_ONNX" ]; then
 fi
 if [ "$DOWNLOAD_MODEL" -eq 1 ]; then
   log "②d 下载 embedding 模型 (bge-m3 int8 ~543MB)..."
-  [ "$FORCE_MODEL" = "1" ] && log "   FORCE_MODEL=1,强制重新下载"
+  [ "${FORCE_MODEL:-0}" = "1" ] && log "   FORCE_MODEL=1,强制重新下载"
   mkdir -p "$MODEL_DIR/onnx"
   HF_MIRROR="${HF_MIRROR:-https://hf-mirror.com}"
   MODEL_REPO="Xenova/bge-m3"
