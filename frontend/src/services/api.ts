@@ -252,12 +252,14 @@ async function streamSSE(
   body: Record<string, any>,
   callbacks: SSECallbacks,
 ): Promise<void> {
-  // 合并用户 ID + 父系统透传的 headers
+  // 合并用户 ID + 父系统透传的 headers + 认证 token
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-User-Id': getRequestUserId(),
     ...getForwardedHeaders(),
   }
+  const token = localStorage.getItem('auth_token')
+  if (token) headers['Authorization'] = `Bearer ${token}`
 
   // 发起 POST 请求（fetch 是浏览器原生 API，类似 Java 的 HttpClient）
   const resp = await fetch(url, {

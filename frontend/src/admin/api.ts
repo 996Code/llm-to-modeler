@@ -443,7 +443,7 @@ export function streamTaskEvents(
   const controller = new AbortController()
   const base = import.meta.env.BASE_URL || '/'
   fetch(`${base}api/tasks/${taskId}/events`, {
-    headers: { 'X-Admin-Token': getAdminToken() || '' },
+    headers: { 'X-Admin-Token': getAdminToken() || '', 'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}` },
     signal: controller.signal,
   })
     .then(async (resp) => {
