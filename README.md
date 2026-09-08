@@ -831,23 +831,27 @@ SDK 存储设施（前缀登记 + scope 签发隔离契约）。
 
 ## 十二、Docker 部署
 
-```yaml
-# docker-compose.yml
-services:
-  backend:
-    build: ./backend
-    ports:
-      - "18080:8000"
-    env_file: .env
-
-  frontend:
-    build: ./frontend
-    ports:
-      - "13080:80"
-    depends_on:
-      - backend
-```
+前后端合并为一个一体容器（nginx 伺服静态/反代 + uvicorn 跑 API），
+外加 Neo4j（图谱）与 Milvus（向量）两个依赖服务，共三个容器。
 
 ```bash
-docker-compose up -d
+# 1. 准备配置
+cp deploy.env.example .env
+vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD 等
+
+# 2. 一键发布（拉码 → 预构建 → 打镜像 → compose 切换 → 健康验证）
+./deploy/deploy.sh
+
+# 常用管理
+./deploy/deploy.sh --status   # 服务状态
+./deploy/deploy.sh --logs     # 跟随日志
+./deploy/deploy.sh --down     # 停止（数据保留）
+./deploy/deploy.sh --rollback # 回滚到上一个版本
 ```
+
+- 应用入口：`http://<主机>:19090/ai-modeler/`（`HOST_PORT` 可改）
+- 数据落盘：`./data/app`（SQLite+上传文件）、`./data/neo4j`、`./data/milvus`
+- embedding 模型：首次部署自动下载到 `./deploy/models/embedding/`（bge-m3，~543MB），
+  跨版本复用；`EMBEDDING_BACKEND=local` 启用本地向量化
+- 镜像构建：`deploy.sh` 在 docker run 容器内预构建（前端 dist / 后端 .deps / nginx deb），
+  `docker build` 只做纯 COPY，规避构建容器 DNS 坑

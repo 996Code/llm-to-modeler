@@ -15,7 +15,7 @@
 #   做（其网络正常）；docker build 只做纯 COPY。基础镜像缺失时自动从
 #   daocloud 公共加速源补拉。
 #
-# 容器管理：docker compose（deploy/docker-compose.yml）——版本经 TAG 切换，
+# 容器管理：docker compose（仓库根 docker-compose.yml）——版本经 TAG 切换，
 # 数据卷/健康检查声明式维护；回滚 = 旧 TAG 再 up。
 #
 # ⚠ 服务器侧拉码加速（国内服务器直连 GitHub 慢且常失败，fetch 3-4 分钟
@@ -29,7 +29,7 @@ set -euo pipefail
 
 # ── 可配置项（环境变量覆盖）──────────────────────────────────────────────
 IMAGE_NAME="${IMAGE_NAME:-llm-modeler}"
-HOST_PORT="${HOST_PORT:-28080}"
+HOST_PORT="${HOST_PORT:-19090}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
@@ -37,7 +37,7 @@ MIRROR="${MIRROR:-docker.m.daocloud.io/library}"
 NODE_IMAGE="${NODE_IMAGE:-node:20-alpine}"
 PY_IMAGE="${PY_IMAGE:-python:3.12-slim}"
 
-COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
+COMPOSE_FILE="$(cd "$(dirname "$0")/.." && pwd)/docker-compose.yml"
 
 # 工作目录 = 仓库根（.env 所在处）：脚本位于 deploy/ 子目录
 WORKDIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -169,18 +169,43 @@ done
   || { err "nginx deb 下载失败"; exit 1; }
 log "   debs 就绪（$(ls backend/debs | wc -l) 个包）"
 
+# ── ②d embedding 模型(bge-m3 int8 ~543MB;首次下载,后续复用) ──────────
+# 模型放在 deploy/models/embedding/ 下,docker-compose 挂载到容器内
+# /app/models/embedding/。跨版本复用,不随容器重建消失。仅首次/强制
+# 更新时下载;避免每次发布都拉 543MB(国内 hf-mirror 也近 1-2 分钟)。
+MODEL_DIR="$WORKDIR/deploy/models/embedding"
+MODEL_ONNX="$MODEL_DIR/onnx/model_quantized.onnx"
+DOWNLOAD_MODEL=0
+if [ "${FORCE_MODEL:-0}" = "1" ]; then
+  DOWNLOAD_MODEL=1
+elif [ ! -f "$MODEL_ONNX" ]; then
+  DOWNLOAD_MODEL=1
+fi
+if [ "$DOWNLOAD_MODEL" -eq 1 ]; then
+  log "②d 下载 embedding 模型 (bge-m3 int8 ~543MB)..."
+  [ "$FORCE_MODEL" = "1" ] && log "   FORCE_MODEL=1,强制重新下载"
+  mkdir -p "$MODEL_DIR/onnx"
+  HF_MIRROR="${HF_MIRROR:-https://hf-mirror.com}"
+  MODEL_REPO="Xenova/bge-m3"
+  for f in tokenizer.json config.json tokenizer_config.json special_tokens_map.json; do
+    curl -sL --retry 3 -m 120 -o "$MODEL_DIR/$f" \
+      "$HF_MIRROR/$MODEL_REPO/resolve/main/$f" || { err "下载 $f 失败"; exit 1; }
+  done
+  curl -sL --retry 3 -m 600 -o "$MODEL_ONNX" \
+    "$HF_MIRROR/$MODEL_REPO/resolve/main/onnx/model_quantized.onnx" || { err "下载 onnx 失败"; exit 1; }
+  log "   模型就绪（$(du -sh "$MODEL_DIR" | awk '{print $1}')）"
+else
+  log "②d embedding 模型已存在,跳过下载（FORCE_MODEL=1 强制重新下载）"
+fi
+
 # ── ③ 打镜像（纯 COPY，零联网 build）───────────────────────────────────
-log "③ 打镜像 ${IMAGE_NAME}:${GIT_TAG}（纯 COPY）..."
-# 构建上下文 = backend/（deps/src/dist/debs/Dockerfile 同处）
-# ⚠ dist 必须从 frontend/ 同步过来:Dockerfile 的 COPY dist/ 指 backend/dist。
+log "③ 打镜像 ${IMAGE_NAME}:${GIT_TAG}（纯 COPY,仓库根上下文）..."
+# ⚠ dist 必须从 frontend/ 同步过来:Dockerfile 的 COPY backend/dist/ 需要
 # 缺这步时镜像会一直打进 backend/ 下的陈旧 dist（真实事故:线上前端
 # 停在 8-21 的手工拷贝,管理页缺失、新功能两周未上线）
 rm -rf backend/dist && cp -R frontend/dist backend/dist
-cp deploy/single/Dockerfile backend/Dockerfile
-cp deploy/single/nginx.conf backend/nginx-single.conf
-cp deploy/single/start.sh backend/start-single.sh
-docker build -t "${IMAGE_NAME}:${GIT_TAG}" -t "${IMAGE_NAME}:latest" backend/
-rm -f backend/Dockerfile backend/nginx-single.conf backend/start-single.sh
+# Dockerfile 路径以仓库根为基准（COPY backend/... deploy/single/...）
+docker build -f deploy/single/Dockerfile -t "${IMAGE_NAME}:${GIT_TAG}" -t "${IMAGE_NAME}:latest" .
 
 # ── ④ compose 切换容器（记录旧 TAG 供回滚）────────────────────────────
 OLD_TAG=$(dc ps --format '{{.Image}}' 2>/dev/null | sed 's/.*://' || true)

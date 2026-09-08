@@ -509,19 +509,75 @@ class LLMClient:
         conv_id: Optional[str] = None,
         stage: Optional[str] = None,
     ) -> List[List[float]]:
-        """批量向量化(OpenAI 兼容 /v1/embeddings;同步)。
+        """批量向量化;后端由 EMBEDDING_BACKEND 决定(同步)。
 
-        模型由 env ``LLM_EMBED_MODEL`` 指定(与对话模型分离——embedding
-        通常用专用小模型);未配置直接抛 RuntimeError,由调用方降级
-        (如知识图谱的纯图谱检索模式)。
+        - api(默认): OpenAI 兼容 /v1/embeddings,模型由 ``LLM_EMBED_MODEL``
+          指定;未配置直接抛 RuntimeError,由调用方降级(纯图谱模式)
+        - local: 进程内 onnx 推理(bge-m3,见 local_embeddings),
+          零外部依赖零费用;``LLM_EMBED_MODEL`` 填 local/bge-m3 即可
+
+        注意:两种后端维度一致(云端 1024 / 本地 1024),切换后端
+        无需重建知识库向量;但 bge-m3 与 text-embedding-v3
+        语义空间不同,检索结果可能有差异,建议固定一种后端使用。
 
         Returns:
             与输入等长等序的向量列表。
 
         Failure:
-            RuntimeError: LLM_EMBED_MODEL 未配置。
+            RuntimeError: 模型未配置/本地初始化失败。
             SDK 原生异常: 网络/鉴权/模型不存在(调用方决定重试或降级)。
         """
+        backend = os.getenv("EMBEDDING_BACKEND", "api").strip().lower()
+        if backend == "local":
+            return self._embeddings_local(texts, conv_id=conv_id, stage=stage)
+        return self._embeddings_api(texts, conv_id=conv_id, stage=stage)
+
+    def _embeddings_local(
+        self,
+        texts: List[str],
+        conv_id: Optional[str] = None,
+        stage: Optional[str] = None,
+    ) -> List[List[float]]:
+        """本地 onnx 推理后端(观测与 api 后端同规格:耗时/条数入调用日志)。"""
+        from llm.local_embeddings import get_local_embedder
+        texts = [str(t) for t in texts]
+        start = time.monotonic()
+        try:
+            vectors = get_local_embedder().encode(texts)
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self._log_call(
+                endpoint="embeddings:local/bge-m3",
+                request_data={
+                    "stage": stage or "embeddings", "count": len(texts),
+                    "chars": sum(len(t) for t in texts),
+                    "backend": "local",
+                },
+                response_data={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0},
+                status_code=None,
+                duration_ms=duration_ms,
+                conv_id=conv_id,
+            )
+            return vectors
+        except Exception as e:
+            self._log_call(
+                endpoint="embeddings:local/bge-m3",
+                request_data={"stage": stage or "embeddings", "count": len(texts),
+                              "chars": sum(len(t) for t in texts), "backend": "local"},
+                response_data={},
+                status_code=500,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                error_message=str(e),
+                conv_id=conv_id,
+            )
+            raise
+
+    def _embeddings_api(
+        self,
+        texts: List[str],
+        conv_id: Optional[str] = None,
+        stage: Optional[str] = None,
+    ) -> List[List[float]]:
+        """云端 API 后端(OpenAI 兼容 /v1/embeddings)。"""
         model = os.getenv("LLM_EMBED_MODEL", "").strip()
         if not model:
             raise RuntimeError("LLM_EMBED_MODEL 未配置,向量能力不可用")

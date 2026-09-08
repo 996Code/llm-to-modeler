@@ -42,3 +42,7 @@ loguru>=0.7,<0.8                       # 集中式日志:控制台+轮转文件(
 # ── 测试 ──
 pytest>=9.1,<9.2
 pytest-asyncio>=1.4,<1.5
+
+# ── 本地 embedding(EMBEDDING_BACKEND=local;onnx 推理,无 torch) ──
+onnxruntime>=1.20,<1.22                # CPU 推理(bge-m3 int8 ~543MB)
+tokenizers>=0.21,<0.22                 # HF tokenizer(纯 Rust 实现,无重依赖)

@@ -1,0 +1,19 @@
+# Docker build 上下文排除（仓库根构建）
+.git
+.venv
+venv
+node_modules
+*.pyc
+__pycache__
+.pytest_cache
+*.db
+*.log
+data/
+logs/
+.env
+.vscode
+.idea
+.zcode
+doc/
+docs/
+*.md

@@ -1,62 +1,52 @@
-# llm-to-modler Docker 部署
-# 所有配置从项目根目录 .env 读取(deploy.env.example 为模板)
-# 数据全部落在项目相对目录 ./data/ 下,不交给 docker 匿名卷管理:
-#   ./data/backend   SQLite(conversations.db/kg.db) + 上传文件 + 日志
-#   ./data/neo4j     图谱数据
-#   ./data/milvus    向量数据
-
+# =============================================================================
+# llm-to-modeler 完整部署栈（单容器 app + Neo4j + Milvus）
+#
+# app 镜像由 deploy/deploy.sh 预构建（纯 COPY、零联网 build），compose 负责
+# 声明式管理：启停/替换/日志/数据卷。版本经 TAG 环境变量切换：
+#   TAG=a84e26a docker compose up -d
+# （deploy.sh 已自动带 TAG；手工操作时缺省 latest）
+#
+# 日常命令：
+#   docker compose ps              # 状态
+#   docker compose logs -f app     # 应用日志
+#   docker compose down            # 停止（数据保留）
+# =============================================================================
 services:
-  # ── 后端(FastAPI,容器内 18080;宿主 18081 调试用) ──
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: llm-modeler-backend
+  # ── 应用（一体容器：nginx 静态/反代 + uvicorn API） ──
+  app:
+    image: llm-modeler:${TAG:-latest}
+    container_name: llm-modeler
     restart: unless-stopped
     ports:
-      - "${BACKEND_PORT:-18081}:18080"
+      - "${HOST_PORT:-19090}:80"
     env_file:
-      - ./.env
+      - .env
     environment:
       - TZ=Asia/Shanghai
-      - PYTHONPATH=/app/src
-      - DATABASE_PATH=/app/data/conversations.db
-      - KG_FILES_DIR=/app/data/kg/files
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=${NEO4J_USER:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?请在 .env 配置 NEO4J_PASSWORD}
       - MILVUS_URI=http://milvus:19530
     volumes:
-      # 数据持久化(SQLite + 上传文件 + 日志)——相对目录,不交给 docker
-      - ./data/backend:/app/data
+      # 数据持久化（SQLite + 上传文件 + 日志）
+      - ./data/app:/app/data
+      # 日志（loguru 轮转文件；stdout 由 docker logs 消费）
+      - ./data/logs:/app/logs
+      # embedding 模型：deploy.sh 首次部署时下载到 deploy/models/embedding/
+      - ./deploy/models/embedding:/app/models/embedding
     depends_on:
       neo4j:
         condition: service_healthy
       milvus:
         condition: service_started
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:18080/api/health')"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ai-modeler/api/health | grep -q '\\\"status\\\": *\\\"healthy\\\"'"]
       interval: 30s
       timeout: 5s
-      retries: 5
+      retries: 3
       start_period: 20s
 
-  # ── 前端(nginx:静态资源 + API/SSE 反代;宿主 19090) ──
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    container_name: llm-modeler-frontend
-    restart: unless-stopped
-    ports:
-      - "${FRONTEND_PORT:-19090}:80"
-    environment:
-      - TZ=Asia/Shanghai
-    depends_on:
-      backend:
-        condition: service_started
-
-  # ── Neo4j 图谱(社区版) ──
+  # ── Neo4j 图谱（社区版） ──
   neo4j:
     image: neo4j:5-community
     container_name: llm-modeler-neo4j
@@ -64,7 +54,6 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:?请在 .env 配置 NEO4J_PASSWORD}
-      # 内存按需调(服务器内存充裕可加大)
       - NEO4J_server_memory_heap_max__size=1G
       - NEO4J_server_memory_pagecache_size=1G
     ports:
@@ -79,7 +68,7 @@ services:
       retries: 10
       start_period: 40s
 
-  # ── Milvus 向量库(standalone:内嵌 etcd/存储,单容器) ──
+  # ── Milvus 向量库（standalone：内嵌 etcd/存储，单容器） ──
   milvus:
     image: milvusdb/milvus:v2.4.0
     container_name: llm-modeler-milvus
@@ -87,8 +76,6 @@ services:
     command: ["milvus", "run", "standalone"]
     environment:
       - TZ=Asia/Shanghai
-      # v2.4.0 standalone 单容器模式:RocksMQ + 内置 etcd(默认配置),
-      # 不依赖外置 etcd/minio(2.4.17 才有 embedEtcd.yaml,本镜像没有)
       - ETCD_USE_EMBED=true
       - ETCD_DATA_DIR=/var/lib/milvus/etcd
       - COMMON_STORAGETYPE=local
