@@ -342,6 +342,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
             failed_ids: set = set()
             completed_in_batch = 0
             for fut in futures:
+                handle.check_cancel()  # 每个块处理前检查取消标志(防 LLM 慢时卡住整个批次)
                 chunk = futures[fut]
                 try:
                     entities, relations, stats = fut.result()
@@ -537,7 +538,12 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
             return True
         # 未决:探测 embedding 模型
         import os
-        if not os.getenv("LLM_EMBED_MODEL", "").strip():
+        embed_model = os.getenv("LLM_EMBED_MODEL", "").strip()
+        backend = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
+        if backend == "local":
+            # local 后端不需要 LLM_EMBED_MODEL(进程内 onnx 推理),模型名固定
+            embed_model = embed_model or "bge-m3"
+        if not embed_model:
             handle.log("LLM_EMBED_MODEL 未配置,本库以纯图谱模式运行(检索无向量路)",
                        level="warn")
             store.set_kb_vector_info(kb["id"], "", None, False)
@@ -545,10 +551,10 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
         probe = app_state.llm_client.embeddings(
             ["维度探测"], conv_id=conv_id, stage="kg.embed_probe")
         dim = len(probe[0])
-        store.set_kb_vector_info(kb["id"], os.getenv("LLM_EMBED_MODEL"), dim, True)
+        store.set_kb_vector_info(kb["id"], embed_model, dim, True)
         runtime.get_vector(app_state).ensure_collection(kb["id"], dim)
-        handle.log(f"向量模式开启: 模型 {os.getenv('LLM_EMBED_MODEL')},dim={dim}",
-                   model=os.getenv("LLM_EMBED_MODEL"), dim=dim)
+        handle.log(f"向量模式开启: 模型 {embed_model},dim={dim}",
+                   model=embed_model, dim=dim)
         return True
     except Exception as e:
         handle.log(f"向量准备失败,降级纯图谱模式: {e}", level="warn")

@@ -398,7 +398,8 @@ class TestImportPipeline:
         assert env.vector.collections.get(kb["id"]) == 3
         assert env.vector.count(kb["id"]) == len(env.store.list_chunks(doc["id"]))
 
-    def test_vector_degraded_without_model(self, env):
+    def test_vector_degraded_without_model(self, env, monkeypatch):
+        monkeypatch.setenv("EMBEDDING_BACKEND", "api")
         kb, doc = _make_doc(env, "降级", ["[E:甲]"])
         t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t["status"] == "succeeded"

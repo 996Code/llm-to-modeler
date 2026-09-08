@@ -511,10 +511,10 @@ class LLMClient:
     ) -> List[List[float]]:
         """批量向量化;后端由 EMBEDDING_BACKEND 决定(同步)。
 
-        - api(默认): OpenAI 兼容 /v1/embeddings,模型由 ``LLM_EMBED_MODEL``
+        - local(默认): 进程内 onnx 推理(bge-m3,见 local_embeddings),
+          零外部依赖零费用;``LLM_EMBED_MODEL`` 默认 bge-m3
+        - api: OpenAI 兼容 /v1/embeddings,模型由 ``LLM_EMBED_MODEL``
           指定;未配置直接抛 RuntimeError,由调用方降级(纯图谱模式)
-        - local: 进程内 onnx 推理(bge-m3,见 local_embeddings),
-          零外部依赖零费用;``LLM_EMBED_MODEL`` 填 local/bge-m3 即可
 
         注意:两种后端维度一致(云端 1024 / 本地 1024),切换后端
         无需重建知识库向量;但 bge-m3 与 text-embedding-v3
@@ -527,7 +527,7 @@ class LLMClient:
             RuntimeError: 模型未配置/本地初始化失败。
             SDK 原生异常: 网络/鉴权/模型不存在(调用方决定重试或降级)。
         """
-        backend = os.getenv("EMBEDDING_BACKEND", "api").strip().lower()
+        backend = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
         if backend == "local":
             return self._embeddings_local(texts, conv_id=conv_id, stage=stage)
         return self._embeddings_api(texts, conv_id=conv_id, stage=stage)
