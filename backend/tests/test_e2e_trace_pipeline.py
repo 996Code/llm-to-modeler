@@ -16,7 +16,6 @@ def test_chat_writes_trace_points_end_to_end(monkeypatch):
     tmp = tempfile.mkdtemp()
     monkeypatch.setenv("DATABASE_PATH", os.path.join(tmp, "t.db"))
     monkeypatch.setenv("PACK_STATE_PATH", os.path.join(tmp, "p.json"))
-    monkeypatch.setenv("ADMIN_TOKEN", "t1")
     monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:9/v1")  # 不可达:走 fallback
     monkeypatch.setenv("LLM_API_KEY", "x")
 

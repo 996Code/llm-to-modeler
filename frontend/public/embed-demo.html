@@ -213,6 +213,13 @@
 </head>
 <body>
 
+<!-- ============ 认证检查 ============ -->
+<script>
+if (!localStorage.getItem('auth_token')) {
+  window.location.replace('/ai-modeler/auth.html?page=embed-demo')
+}
+</script>
+
 <!-- 模拟主系统导航栏 -->
 <div class="topbar">
   <div class="topbar-logo">N</div>

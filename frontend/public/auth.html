@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Form Modeler · 访问认证</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+      min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .gate {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 48px 40px;
+      width: 400px;
+      max-width: 90vw;
+      box-shadow: 0 25px 60px rgba(0,0,0,0.4);
+    }
+    .brand-mark {
+      width: 56px; height: 56px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      color: #fff;
+      font-size: 24px; font-weight: 800;
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 16px;
+    }
+    .brand-name {
+      font-size: 22px; font-weight: 700; color: #f1f5f9; text-align: center;
+      margin-bottom: 4px;
+    }
+    .brand-sub {
+      font-size: 13px; color: #94a3b8; text-align: center; margin-bottom: 32px;
+    }
+    .form-group { margin-bottom: 20px; }
+    .form-label {
+      display: block; font-size: 13px; font-weight: 500; color: #cbd5e1; margin-bottom: 8px;
+    }
+    .form-input {
+      width: 100%; padding: 12px 16px;
+      background: #0f172a; border: 1px solid #334155; border-radius: 10px;
+      color: #f1f5f9; font-size: 14px; outline: none;
+      transition: border-color 0.2s;
+    }
+    .form-input:focus { border-color: #3b82f6; }
+    .form-input::placeholder { color: #475569; }
+    .btn {
+      width: 100%; padding: 12px;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      border: none; border-radius: 10px;
+      color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error {
+      background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: 10px; padding: 12px 16px;
+      color: #fca5a5; font-size: 13px; margin-bottom: 20px; display: none;
+    }
+    .error.show { display: block; }
+    .hint {
+      font-size: 12px; color: #64748b; text-align: center; margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="gate">
+    <div class="brand-mark">AI</div>
+    <h1 class="brand-name">LLM Form Modeler</h1>
+    <p class="brand-sub">请输入访问密钥以继续</p>
+
+    <div id="error" class="error"></div>
+
+    <div class="form-group">
+      <label class="form-label" for="secret">访问密钥（SECRET_KEY）</label>
+      <input
+        id="secret" type="password" class="form-input"
+        placeholder="部署时在 .env 配置的 SECRET_KEY"
+        onkeydown="if(event.key==='Enter')doLogin()"
+      />
+    </div>
+
+    <button id="submit" class="btn" onclick="doLogin()">验证并进入</button>
+
+    <p class="hint">
+      密钥由部署管理员提供，请联系管理员获取
+    </p>
+  </div>
+
+  <script>
+    const TOKEN_KEY = 'auth_token'
+    const errorEl = document.getElementById('error')
+    const submitBtn = document.getElementById('submit')
+    const secretInput = document.getElementById('secret')
+
+    // 如果已有 token，直接跳转目标页面
+    if (localStorage.getItem(TOKEN_KEY)) {
+      const target = getTargetPage()
+      window.location.replace(target)
+    }
+
+    function getTargetPage() {
+      const params = new URLSearchParams(window.location.search)
+      const page = params.get('page') || 'index'
+      const base = '/ai-modeler/'
+      if (page === 'admin') return base + 'admin.html'
+      if (page === 'embed-demo') return base + 'embed-demo.html'
+      return base  // 默认 index
+    }
+
+    function showError(msg) {
+      errorEl.textContent = msg
+      errorEl.classList.add('show')
+    }
+
+    function hideError() {
+      errorEl.classList.remove('show')
+    }
+
+    async function doLogin() {
+      const secret = secretInput.value.trim()
+      if (!secret) { showError('请输入访问密钥'); return }
+
+      hideError()
+      submitBtn.disabled = true
+      submitBtn.textContent = '验证中…'
+
+      try {
+        const resp = await fetch('/ai-modeler/api/auth/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ secret }),
+        })
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}))
+          if (resp.status === 401) showError('密钥无效，请检查后重试')
+          else if (resp.status === 503) showError('服务器未配置 SECRET_KEY，请先部署配置')
+          else showError(err.detail || `请求失败 (${resp.status})`)
+          return
+        }
+
+        const data = await resp.json()
+        localStorage.setItem(TOKEN_KEY, data.token)
+        window.location.replace(getTargetPage())
+      } catch (e) {
+        showError('网络错误，请检查服务是否正常运行')
+      } finally {
+        submitBtn.disabled = false
+        submitBtn.textContent = '验证并进入'
+      }
+    }
+  </script>
+</body>
+</html>

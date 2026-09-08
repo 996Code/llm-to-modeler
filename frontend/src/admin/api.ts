@@ -173,6 +173,9 @@ export const adminApi = axios.create({
 adminApi.interceptors.request.use((config) => {
   const token = getAdminToken()
   if (token) config.headers['X-Admin-Token'] = token
+  // 同时注入统一认证 token（auth.html 门禁页签发；后端优先认这个）
+  const authToken = localStorage.getItem('auth_token')
+  if (authToken) config.headers['Authorization'] = `Bearer ${authToken}`
   return config
 })
 
@@ -195,6 +198,8 @@ export const tasksApi = axios.create({
 tasksApi.interceptors.request.use((config) => {
   const token = getAdminToken()
   if (token) config.headers['X-Admin-Token'] = token
+  const authToken = localStorage.getItem('auth_token')
+  if (authToken) config.headers['Authorization'] = `Bearer ${authToken}`
   return config
 })
 

@@ -51,18 +51,33 @@ function getRequestUserId(): string {
   return params.get('userId') || localStorage.getItem('userId') || 'admin'
 }
 
-// 注册 axios 请求拦截器：每个请求发出前自动注入 X-User-Id 和透传 headers。
+// 注册 axios 请求拦截器：每个请求发出前自动注入 token、X-User-Id 和透传 headers。
 // 类比 Java：Spring 的 ClientHttpRequestInterceptor / Filter，统一改写请求。
 api.interceptors.request.use((config) => {
+  // 注入统一认证 token（auth.html 门禁页签发，所有 API 请求必带）
+  const token = localStorage.getItem('auth_token')
+  if (token) config.headers['Authorization'] = `Bearer ${token}`
   // 注入用户标识头（嵌入模式优先宿主下发值）
   config.headers['X-User-Id'] = getRequestUserId()
-  // 透传父系统的 headers（如 Authorization、X-Tenant-Id 等）
+  // 透传父系统的 headers（如 X-Tenant-Id 等）
   const forwarded = getForwardedHeaders()
   for (const [key, val] of Object.entries(forwarded)) {
     config.headers[key] = val
   }
   return config
 })
+
+// 注册 axios 响应拦截器：401 → 清 token → 独立模式跳 auth.html
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err.response?.status === 401 && window.parent === window) {
+      localStorage.removeItem('auth_token')
+      window.location.href = '/ai-modeler/auth.html'
+    }
+    return Promise.reject(err)
+  }
+)
 
 // ── 会话（Conversation）相关 REST 接口 ──────────────────────────
 

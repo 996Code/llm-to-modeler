@@ -61,7 +61,10 @@ def is_admin_authorized(request: Request) -> bool:
 
 
 async def require_admin(request: Request):
-    """路由级依赖:口令模式下校验失败抛 401;开放模式直接放行。"""
+    """路由级依赖：token 有效时等同于管理员；否则回退 ADMIN_TOKEN 模式。"""
+    from api.auth import is_token_authorized
+    if is_token_authorized(request):
+        return  # 新 token 认证通过
     if get_admin_token() and not is_admin_authorized(request):
         raise HTTPException(401, "Invalid admin token")
 

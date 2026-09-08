@@ -46,6 +46,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 # 业务路由模块（各模块内部定义 router，这里集中挂载）
 from api.admin import router as admin_router
+from api.auth import router as auth_router
 from api.config import router as config_router
 from api.conversations import router as conversations_router
 from api.health import router as health_router
@@ -264,8 +265,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 统一认证中间件（SECRET_KEY 配置后生效；未配置=开放模式）
+from api.auth import AuthMiddleware
+app.add_middleware(AuthMiddleware)
+
 # 注册各业务路由（顺序不影响路由匹配，FastAPI 按精确路径优先）
 app.include_router(health_router)
+app.include_router(auth_router)       # /api/auth/token（白名单，中间件放行）
 app.include_router(config_router)
 app.include_router(conversations_router)
 app.include_router(meta_router)
