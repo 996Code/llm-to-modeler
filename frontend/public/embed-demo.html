@@ -289,8 +289,9 @@
 <!-- ============ 嵌入 SDK ============ -->
 <script type="module">
   // ★★★ 修改为你实际部署的地址 ★★★
-  // 本地开发用空字符串（同源），部署时改成你的地址如 'http://192.168.99.22:13080'
-  const MODELER_BASE_URL = ''
+  // 同源部署（本示例）：用 '/ai-modeler'（vite base 前缀）；
+  // 跨域部署改成完整地址，如 'http://192.168.99.22:19090/ai-modeler'
+  const MODELER_BASE_URL = '/ai-modeler'
   const USER_ID = 'zhangsan'
 
   // dev 模式直接引入 embed.ts（Vite 原生支持 TS）
