@@ -546,6 +546,8 @@ export const kgApi = axios.create({
 kgApi.interceptors.request.use((config) => {
   const token = getAdminToken()
   if (token) config.headers['X-Admin-Token'] = token
+  const authToken = localStorage.getItem('auth_token')
+  if (authToken) config.headers['Authorization'] = `Bearer ${authToken}`
   return config
 })
 kgApi.interceptors.response.use(
