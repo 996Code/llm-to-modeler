@@ -170,10 +170,10 @@ done
 log "   debs 就绪（$(ls backend/debs | wc -l) 个包）"
 
 # ── ②d embedding 模型(bge-m3 int8 ~543MB;首次下载,后续复用) ──────────
-# 模型放在 deploy/models/embedding/ 下,docker-compose 挂载到容器内
+# 模型放在 data/models/embedding/ 下,docker-compose 挂载到容器内
 # /app/models/embedding/。跨版本复用,不随容器重建消失。仅首次/强制
 # 更新时下载;避免每次发布都拉 543MB(国内 hf-mirror 也近 1-2 分钟)。
-MODEL_DIR="$WORKDIR/deploy/models/embedding"
+MODEL_DIR="$WORKDIR/data/models/embedding"
 MODEL_ONNX="$MODEL_DIR/onnx/model_quantized.onnx"
 DOWNLOAD_MODEL=0
 if [ "${FORCE_MODEL:-0}" = "1" ]; then

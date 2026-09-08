@@ -851,7 +851,7 @@ vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD 等
 
 - 应用入口：`http://<主机>:19090/ai-modeler/`（`HOST_PORT` 可改）
 - 数据落盘：`./data/app`（SQLite+上传文件）、`./data/neo4j`、`./data/milvus`
-- embedding 模型：首次部署自动下载到 `./deploy/models/embedding/`（bge-m3，~543MB），
+- embedding 模型：首次部署自动下载到 `./data/models/embedding/`（bge-m3，~543MB），
   跨版本复用；`EMBEDDING_BACKEND=local` 启用本地向量化
 - 镜像构建：`deploy.sh` 在 docker run 容器内预构建（前端 dist / 后端 .deps / nginx deb），
   `docker build` 只做纯 COPY，规避构建容器 DNS 坑

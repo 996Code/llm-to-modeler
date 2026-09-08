@@ -32,8 +32,8 @@ services:
       - ./data/app:/app/data
       # 日志（loguru 轮转文件；stdout 由 docker logs 消费）
       - ./data/logs:/app/logs
-      # embedding 模型：deploy.sh 首次部署时下载到 deploy/models/embedding/
-      - ./deploy/models/embedding:/app/models/embedding
+      # embedding 模型：deploy.sh 首次部署时下载到 data/models/embedding/
+      - ./data/models/embedding:/app/models/embedding
     depends_on:
       neo4j:
         condition: service_healthy
