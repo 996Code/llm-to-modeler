@@ -25,8 +25,9 @@ def test_existing_store_imports():
 
 
 def test_existing_sse_imports():
-    """SSEEvent/StreamManager 仍可 import。"""
-    from src.api.sse import StreamManager as ExistingStreamManager
+    """SSEEvent/StreamManager 仍可 import(已下沉 engine,旧 api 路径兼容)。"""
+    from engine.sse import StreamManager as ExistingStreamManager
+    from src.api.sse import StreamManager as CompatStreamManager  # noqa: F401  兼容转发
     assert ExistingStreamManager is not None
 
 

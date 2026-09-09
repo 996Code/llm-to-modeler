@@ -24,9 +24,6 @@ from domains.njmind_form.keys import FIELDS
 class NjmindFormRouter(DefaultPackRouter):
     """表单领域路由：LLM 语义主判 + 数据规则复核（不抢判断，只兜矛盾）。"""
 
-    def __init__(self, registry: ToolRegistry):
-        super().__init__(registry)
-
     def route(self, user_input: str, artifact: Optional[dict],
               history: str = "", llm_client=None) -> Optional[str]:
         """LLM 主判 + 数据铁律复核。

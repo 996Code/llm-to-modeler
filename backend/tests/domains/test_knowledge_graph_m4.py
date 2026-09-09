@@ -267,7 +267,8 @@ class TestKbSearchTool:
         assert result.artifact["type"] == "kg_search_result"
         assert result.artifact["kb"]["name"] == "唯一库"
         fmt = tool.format_result(result.artifact)
-        assert fmt["nodeCount"] == 2 and fmt["edgeCount"] == 1
+        assert fmt["entityCount"] == 2 and fmt["relationCount"] == 1
+        assert fmt["kb"] == "唯一库"
 
     def test_multiple_kbs_asks_all_options(self, env):
         """选项不截断:5 个库全部出现在追问选项里(前端多选项自动折叠成可搜索下拉)。"""

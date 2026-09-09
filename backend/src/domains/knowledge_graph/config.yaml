@@ -43,7 +43,6 @@ artifact:
   display:
     # 数据结果卡片的 key→中文标签(通用组件查表展示用)
     data_labels:
-      intent: 检索意图
       kb: 知识库
       entityCount: 命中实体
       relationCount: 命中关系

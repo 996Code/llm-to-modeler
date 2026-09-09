@@ -48,7 +48,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 # 类比 Activiti 的 SignalEvent,用来"唤醒"被中断的流程
 from langgraph.types import Command
 
-from api.sse import StreamManager
+from engine.sse import StreamManager
 from engine.compression import build_compressed_history
 from engine.state_keys import STATE_CONTEXT_ARTIFACT
 from sdk.call_context import bind_conversation, clear_conversation
@@ -130,7 +130,7 @@ async def stream_graph(
         context_artifact:     对话的上下文参数(宿主下发的当前制品)
         forward_headers:     嵌入模式下透传给上游的请求头(鉴权等)
         pack_params:         插件默认参数(宿主注入),{pack: {参数: 值}}——
-                              如 {"knowledge_graph": {"kb": "产品手册"}};经
+                              如 {"<pack_name>": {"param": "value"}};经
                               tool_state 透传给工具,用户显式指定优先于它
 
     Yields:

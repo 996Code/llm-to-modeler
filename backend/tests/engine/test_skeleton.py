@@ -7,7 +7,7 @@ import pytest
 from engine.conversation import ConversationManager
 from engine.nodes import classify_intent_node
 from sdk.pack_router import DefaultPackRouter
-from api.sse import StreamManager
+from engine.sse import StreamManager
 
 
 def _langgraph_available() -> bool:

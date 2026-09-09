@@ -29,7 +29,7 @@ import logging
 import threading
 from typing import Any, Dict, List, Optional, Protocol
 
-from sdk.scope_registry import is_scope_id_safe
+from sdk.scope_registry import check_scope_id
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +79,8 @@ class MilvusVectorStore:
         self._prefix = collection_prefix
 
     def _check_scope(self, scope_id: str) -> None:
-        """scope_id 契约入口防御(同 graph_store,详见 scope_registry)。"""
-        if not is_scope_id_safe(scope_id):
-            raise ValueError(f"非法 scope_id(必须为服务端签发的 UUID): {scope_id!r}")
+        """scope_id 契约入口防御(公共实现见 scope_registry.check_scope_id)。"""
+        check_scope_id(scope_id)
 
     def _name(self, scope: str) -> str:
         return collection_name(self._prefix, scope)

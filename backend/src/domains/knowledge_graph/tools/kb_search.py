@@ -203,27 +203,31 @@ class KbSearchTool(Tool):
 
         sub = result.get("subgraph") or {}
         # 【ToolResult 三态契约】reply 与 artifact 互斥(引擎 reply 优先):
-        # data 制品的展示文本放 summary —— 气泡显示回答,下方数据卡渲染子图
+        # data 制品的展示文本放 summary —— 气泡显示回答,下方数据卡渲染子图。
+        # 前端摘要字段走 formatted 显式通道(键与 config.yaml data_labels 对齐)
+        artifact = {
+            "type": "kg_search_result",
+            "kb": result["kb"],
+            "subgraph": sub,
+            "sources": result.get("sources") or {},
+        }
         return ToolResult(
-            artifact={
-                "type": "kg_search_result",
-                "kb": result["kb"],
-                "subgraph": sub,
-                "sources": result.get("sources") or {},
-            },
+            artifact=artifact,
             artifact_type="data",
             summary=result.get("answer") or "(模型未返回回答)",
-            extra={"intent": result.get("intent"), "chunkCount": len(result.get("chunks") or [])},
+            formatted=self.format_result(artifact),
         )
 
     def format_result(self, artifact: dict) -> dict:
-        """SSE data 制品卡摘要字段(引擎试金石:不读制品内部结构)。"""
+        """SSE data 制品卡摘要字段(键与 config.yaml data_labels 对齐)。"""
         sub = (artifact or {}).get("subgraph") or {}
         sources = (artifact or {}).get("sources") or {}
+        kb = (artifact or {}).get("kb") or {}
         return {
-            "nodeCount": len(sub.get("nodes") or []),
-            "edgeCount": len(sub.get("edges") or []),
-            "chunkHits": len(sources.get("chunks") or []),
+            "kb": kb.get("name") or "",
+            "entityCount": len(sub.get("nodes") or []),
+            "relationCount": len(sub.get("edges") or []),
+            "chunkCount": len(sources.get("chunks") or []),
         }
 
     def summarize_artifact(self, artifact: dict) -> str:

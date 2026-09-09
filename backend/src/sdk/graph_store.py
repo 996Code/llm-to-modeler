@@ -38,7 +38,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol
 
-from sdk.scope_registry import is_scope_id_safe
+from sdk.scope_registry import check_scope_id
 
 logger = logging.getLogger(__name__)
 
@@ -125,10 +125,8 @@ class Neo4jGraphStore:
         self._sp = scope_prop
 
     def _check_scope(self, scope: str) -> None:
-        """scope_id 契约入口防御:非 UUID 形态直接拒收(用户输入直传
-        会带来命名碰撞/越权/字符注入三类风险,见 scope_registry)。"""
-        if not is_scope_id_safe(scope):
-            raise ValueError(f"非法 scope_id(必须为服务端签发的 UUID): {scope!r}")
+        """scope_id 契约入口防御(公共实现见 scope_registry.check_scope_id)。"""
+        check_scope_id(scope)
 
     # ── 生命周期 ───────────────────────────────────────────
 
@@ -318,7 +316,7 @@ class Neo4jGraphStore:
             "description": p.get("description") or "",
             "aliases": list(p.get("aliases") or []),
             "sourceDocs": list(p.get("source_docs") or []),
-            "typeStatus": p.get("type_status") or "approved",
+            "typeStatus": p.get("type_status") or "",
             "updatedAt": p.get("updated_at") or "",
         }
 

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from api.admin import _int_param, require_admin
-from api.sse import SSEEvent
+from engine.sse import SSEEvent
 from services.task_store import FINAL_STATUSES
 
 logger = logging.getLogger(__name__)

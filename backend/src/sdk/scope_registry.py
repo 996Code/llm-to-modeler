@@ -103,3 +103,10 @@ def is_scope_id_safe(scope_id: str) -> bool:
     破坏归一化唯一性。
     """
     return isinstance(scope_id, str) and bool(_UUID_STRICT.fullmatch(scope_id))
+
+
+def check_scope_id(scope_id: str) -> None:
+    """scope_id 契约守卫(不满足抛 ValueError)——graph/vector store 的
+    入口防御共用实现,替代各 store 内的重复 _check_scope。"""
+    if not is_scope_id_safe(scope_id):
+        raise ValueError(f"非法 scope_id(必须为服务端签发的 UUID): {scope_id!r}")
