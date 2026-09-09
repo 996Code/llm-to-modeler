@@ -17,9 +17,12 @@ pack 的 api.py 需要两类鉴权语义:管理端(X-Admin-Token)与用户级
     @router.post("/search")   # 用户级:身份由 X-User-Id 透传,读法见 user_id()
     async def search(...): ...
 """
+import logging
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import HTTPException, Request
+
+logger = logging.getLogger(__name__)
 
 # ── 管理端鉴权(依赖倒置)─────────────────────────────────────
 # SDK 定义鉴权契约,宿主装配期注入实现(main.py 启动时注册
@@ -29,8 +32,14 @@ _admin_auth_fn: Optional[Callable[[Request], Awaitable[None]]] = None
 
 
 def register_admin_auth(fn: Callable[[Request], Awaitable[None]]) -> None:
-    """宿主注册管理端鉴权实现(装配期调用一次)。"""
+    """宿主注册管理端鉴权实现(装配期调用一次)。
+
+    重复注册(漏用幂等保护)记 warning 后覆盖——测试组合根与生产
+    组合根先后加载时可见,避免静默串实现。
+    """
     global _admin_auth_fn
+    if _admin_auth_fn is not None and _admin_auth_fn is not fn:
+        logger.warning("register_admin_auth 重复注册(覆盖旧实现)")
     _admin_auth_fn = fn
 
 
@@ -56,8 +65,11 @@ def register_settings_reader(factory: Callable[[str, Any], Any]) -> None:
     """宿主注册读取器工厂 factory(pack_name, settings_store) -> reader。
 
     reader 需实现 get(key, default) / all()(鸭子协议)。
+    重复注册记 warning 后覆盖(语义同 register_admin_auth)。
     """
     global _settings_reader_factory
+    if _settings_reader_factory is not None and _settings_reader_factory is not factory:
+        logger.warning("register_settings_reader 重复注册(覆盖旧实现)")
     _settings_reader_factory = factory
 
 

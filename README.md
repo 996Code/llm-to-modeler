@@ -536,7 +536,8 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your-password
 MILVUS_URI=http://localhost:19530
-LLM_EMBED_MODEL=text-embedding-v3   # OpenAI 兼容 /v1/embeddings
+LLM_EMBED_MODEL=bge-m3              # 默认本地 ONNX(EMBEDDING_BACKEND=local,零 API 费用)
+EMBEDDING_BACKEND=local              # local(默认)/api(云端 OpenAI 兼容 /v1/embeddings)
 
 # ── 管理端口令（可选加固；不配=开放访问，公网部署必须配置）──
 # ADMIN_TOKEN=
@@ -595,6 +596,7 @@ npm install && npm run dev
 | GET | `/api/conversations/:id` | 对话详情（含消息历史） |
 | POST | `/api/conversations` | 创建对话（可带 contextKey 绑定宿主实体） |
 | DELETE | `/api/conversations/:id` | 删除对话 |
+| POST | `/api/auth/token` | **统一认证**：口令换 24h token（白名单，无需 token） |
 | GET | `/api/meta/packs` | pack manifest 声明（前端渲染 actions/展示字段/示例） |
 | GET | `/health` `/api/health` | 健康检查（嵌入探测走 /api/health 同链路，`Cache-Control: no-store`） |
 | GET/DELETE | `/api/admin/conversations` | **管理端**：全量会话分页/详情/删除（需 `X-Admin-Token`） |
@@ -632,8 +634,11 @@ npm install && npm run dev
 
 ### 访问与鉴权
 
-- **默认(未配置 `ADMIN_TOKEN`):开放访问**——打开页面直接用,无口令(内网/网关后部署的取舍;启动日志会打醒目警告)
-- 配置 `ADMIN_TOKEN` 后:页面首次输入口令(存浏览器本地),所有 `/api/admin/*` 请求带 `X-Admin-Token` 头
+- **默认(未配置 `ADMIN_TOKEN`):开放访问**——打开页面直接用,无口令(仅限内网;启动日志会打醒目警告)
+- 配置 `ADMIN_TOKEN` 后:所有页面(index/admin/embed-demo)先经 `auth.html` 门禁页输入口令
+  换取 24h token(`POST /api/auth/token`),之后全部 API 请求带 `Authorization: Bearer` 头;
+  签名密钥随进程重启随机轮换——重启/重新部署后旧 token 全部失效,需重新登录;
+  管理端兼容旧 `X-Admin-Token` 头(Bearer 优先)
 - ⚠ 开放模式下,凡能访问本服务的客户端都可查看全部会话(含完整 prompt)/删除会话/切换插件——公网部署必须配置口令
 - 普通会话接口上 `X-User-Id: admin` 的跨用户查看能力与管理端同模式(开放即放行,口令模式须带口令)
 
@@ -704,7 +709,11 @@ llm-to-modler/
 │       │   │   └── logging_filter.py  # 日志脱敏
 │       │
 │       ├── sdk/                   # ★ SDK 层 (协议定义 + 通用存储设施)
-│       │   ├── tool.py            # Tool/CompositeTool/ToolResult/AskSpec
+│       │   ├── tool.py            # Tool/CompositeTool/ToolResult(含 formatted 显式通道)
+│       │   ├── prompt_loader.py    # PromptLoader(自 engine 下沉)
+│       │   ├── call_context.py     # 请求级 conv_id thread-local(自 services 下沉)
+│       │   ├── asset_client.py     # AssetClient(通用)/ConfigAssetClient(配置类) 两层
+│       │   ├── pack_api.py         # 插件门面(admin鉴权/配置读取器/任务异常,依赖倒置)
 │       │   ├── registry.py        # ToolRegistry (自动发现)
 │       │   ├── pack_router.py     # PackRouter 协议 (一级/二级路由)
 │       │   ├── pack_api.py        # 插件 HTTP API 鉴权/身份辅助
@@ -750,10 +759,12 @@ llm-to-modler/
 │       │   ├── tasks.py           # 任务中心(列表/日志/取消/SSE)
 │       │   ├── meta.py            # /api/meta/packs
 │       │   ├── health.py          # /health
-│       │   └── sse.py             # SSE 工具类
+│       │   └── auth.py            # 统一认证(token 签发 + AuthMiddleware)
 │       │
 │       ├── llm/
-│       │   └── client.py          # LLM 客户端 (OpenAI 兼容, 支持多模态)
+│       │   ├── client.py          # LLM 客户端 (OpenAI 兼容, 支持多模态)
+│       │   ├── local_embeddings.py # 本地 ONNX 向量化(bge-m3, EMBEDDING_BACKEND=local)
+│       │   └── rate_limit.py       # 全局限速(RPM/TPM 双桶+EMA 校准)
 │       │
 │       └── services/
 │           ├── conversation_store.py  # SQLite 会话存储
@@ -840,13 +851,13 @@ cp deploy.env.example .env
 vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD 等
 
 # 2. 一键发布（拉码 → 预构建 → 打镜像 → compose 切换 → 健康验证）
-./deploy/deploy.sh
+./deploy.sh
 
 # 常用管理
-./deploy/deploy.sh --status   # 服务状态
-./deploy/deploy.sh --logs     # 跟随日志
-./deploy/deploy.sh --down     # 停止（数据保留）
-./deploy/deploy.sh --rollback # 回滚到上一个版本
+./deploy.sh --status   # 服务状态
+./deploy.sh --logs     # 跟随日志
+./deploy.sh --down     # 停止（数据保留）
+./deploy.sh --rollback # 回滚到上一个版本
 ```
 
 - 应用入口：`http://<主机>:19090/ai-modeler/`（`HOST_PORT` 可改）

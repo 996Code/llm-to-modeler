@@ -88,6 +88,10 @@ class TaskHandle:
 # 此处 re-export 维持平台内既有引用
 from sdk.pack_api import DuplicateTaskError  # noqa: F401,E402
 
+# submit 检查段与落库段之间的占位哨兵:并发提交在临界区内被拒;
+# _finish/释放逻辑只比对任务 id,哨兵不会误释放
+_DEDUPE_PLACEHOLDER = "__submitting__"
+
 
 class TaskManager:
     """后台任务的调度与生命周期管理。"""
@@ -219,19 +223,28 @@ class TaskManager:
         """
         if task_type not in self._handlers:
             raise KeyError(f"未注册的任务类型: {task_type}")
-        # dedupe 检查必须在 create_task 之前:先落库再拒绝会留下
-        # 永不调度的僵尸 pending 任务(重启才被 recover 收敛)
+        # dedupe 检查+占位必须在同一临界区:拆两段会出现 TOCTOU——两个
+        # 并发同 key 提交都通过检查、双双落库(二次走查抓出的竞态)。
+        # create_task(磁盘 IO)在锁外做,失败回滚占位不留死锁
         with self._lock:
             if dedupe_key:
                 existing = self._dedupe_keys.get(dedupe_key)
                 if existing:
                     raise DuplicateTaskError(
                         f"该操作已有进行中的任务(任务 {existing[:8]}…),请等待完成")
-        task = self._store.create_task(
-            task_type, pack_name=pack_name, title=title,
-            payload=payload, queue_key=queue_key,
-            max_auto_retry=max_auto_retry,
-        )
+                self._dedupe_keys[dedupe_key] = _DEDUPE_PLACEHOLDER
+        try:
+            task = self._store.create_task(
+                task_type, pack_name=pack_name, title=title,
+                payload=payload, queue_key=queue_key,
+                max_auto_retry=max_auto_retry,
+            )
+        except Exception:
+            if dedupe_key:  # 落库失败回滚占位
+                with self._lock:
+                    if self._dedupe_keys.get(dedupe_key) is _DEDUPE_PLACEHOLDER:
+                        del self._dedupe_keys[dedupe_key]
+            raise
         with self._lock:
             if dedupe_key:
                 self._dedupe_keys[dedupe_key] = task["id"]

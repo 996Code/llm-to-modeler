@@ -24,7 +24,7 @@ touch __init__.py pack.py
 ```python
 """My Pack - 工具包描述"""
 from sdk.registry import ToolRegistry
-from engine.prompt_loader import PromptLoader
+from sdk.prompt_loader import PromptLoader
 from .tools.my_tool import MyTool
 
 def create_registry() -> ToolRegistry:
@@ -187,7 +187,7 @@ class ToolResult:
 ## 测试工具包
 
 ```bash
-# 后端测试(425 条全量)
+# 后端测试(490+ 条全量)
 cd backend
 ./venv/bin/python -m pytest tests/ -q
 

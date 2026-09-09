@@ -76,10 +76,15 @@ class ToolContext:
 ```python
 class ToolResult:
     artifact: dict      # 结构化结果（存入对话历史）
+    artifact_type: str  # "config"（配置类）| "data"（数据类，决定前端渲染方式）
     summary: str        # 摘要（用于对话历史）
     reply: str          # 回复消息（显示给用户）
     ask: AskSpec        # 追问规格（如果需要用户确认）
-    extra: dict         # 额外数据（给前端用）
+    extra: dict         # 领域自由扩展（不进历史）
+    formatted: dict     # 前端展示字段（format_result 钩子产出，引擎合并进 SSE result）
+    valid: bool         # 上游校验结论（前端保存按钮显隐依据）
+    validation_errors: list  # 校验错误（引擎透传给前端）
+    error_for_llm: str  # 给 LLM 的错误说明（重试/降级判定用）
 ```
 
 ## 链路定义

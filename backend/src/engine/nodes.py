@@ -533,7 +533,9 @@ def handle_result_node(state: GraphState) -> dict:
                 "summary": result.summary,
                 **({"title": title} if title else {}),
             }
-            payload.update(formatted)
+            # 空 title 不覆盖钩子兜底(工具声明 "" 视为未声明)
+            payload.update({k: v for k, v in formatted.items()
+                            if k != "title" or v})
             sse_events.append({"type": "result", "data": payload})
 
     else:

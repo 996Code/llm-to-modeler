@@ -69,6 +69,7 @@ class SubmitLeaveTool(CompositeTool):
         # ── 取消分支:用户在确认步回答了"取消" ──
         if state.get("_cancelled"):
             state.pop("_cancelled", None)
+            state.pop("_need_clarify", None)  # cancel 路径的断流标记一并清
             return ToolResult(
                 reply="已取消提交，本次未向上游发送任何数据。",
                 summary="已取消请假提交",

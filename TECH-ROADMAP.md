@@ -2,9 +2,11 @@
 
 > 自然语言 → 低码配置生成引擎
 >
-> 版本：v0.7 | 日期：2026-09-05
+> 版本：v0.8 | 日期：2026-09-09
 >
 > ⚠ 本文是演进路径的历史记录，正文按当期时间戳保留、不再同步维护。
+> 当前权威文档是 README.md;2026-09-08 后的架构大变化(统一认证/本地 embedding/
+> 单容器部署/SDK 依赖倒置)本文未逐一回填,以代码与 README 为准。
 > 以下文中出现过的机制**均已废弃**，阅读时不要照抄：
 >
 > | 文中旧机制 | 现行机制（以 README.md / doc/嵌入模式总体设计.md 为准） |
@@ -733,6 +735,9 @@ class GraphState(TypedDict):
 
 ## 7. API 设计
 
+> ⚠ 下表为历史快照:/api/skills、/mcp、/api/config/generate|modify|validate 已删除;
+> 现行端点(admin/tasks/meta/packs/auth)以 README §八 API 一览为准。
+
 ### 7.1 路由总表
 
 ```
@@ -851,7 +856,10 @@ Response (SSE):
 
 ---
 
-## 8. MCP 协议层
+## 8. MCP 协议层(已移除)
+
+> **本章机制已于 2026-09 前后删除**(mcp_server.py 与 /api/skills 均不存在),
+> 以下为历史记录,不要照抄。
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -901,6 +909,10 @@ Response (SSE):
 ---
 
 ## 9. 用户身份 & 对话历史
+
+> ⚠ 补记:2026-09-08 起平台有统一认证(ADMIN_TOKEN 全站门禁 + auth.html
+> + Bearer token);本章的"不做登录"描述为当期历史,X-User-Id 透传身份
+> 语义不变(上游身份传递),但平台访问前置了口令门禁。
 
 ### 9.1 用户身份：无登录，透传上层身份
 
@@ -1695,7 +1707,14 @@ App.vue
 
 ## 11. 部署
 
-### 11.1 Docker Compose
+> **⚠ 本章为历史拓扑,已过时。** 当前部署形态(2026-09-09):
+> - 单容器 app(nginx 静态/反代 + uvicorn API,HOST_PORT 19090)+ Neo4j + Milvus 三服务 compose
+> - 一键发布:仓库根 `./deploy.sh`(git pull → 前端 pnpm build → 后端 pip → 纯 COPY 打镜像 → compose 切换 → 健康探测,失败自动回滚)
+> - 数据统一 `./data/` 下(app/neo4j/milvus/logs);embedding 模型自动下载到 `data/models/embedding/`(bge-m3 ONNX)
+> - 统一认证:ADMIN_TOKEN 兼作全站口令,auth.html 门禁页换 24h token,签名密钥随重启轮换
+> 以下原始记录仅作演进参考。
+
+### 11.1 Docker Compose(历史)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
