@@ -564,17 +564,7 @@ class ConversationStore:
 
         meta = dict(meta)
         current_config = json.loads(meta["current_config"]) if meta.get("current_config") else None
-        messages = []
-        for r in event_rows:
-            r = dict(r)
-            payload = json.loads(r["payload"])
-            messages.append({
-                "id": r["id"],
-                "role": payload.get("role", r["kind"]),
-                "content": payload.get("content", ""),
-                "configSnapshot": payload.get("config_snapshot"),
-                "createdAt": r["created_at"],
-            })
+        messages = [self._row_to_message(dict(r)) for r in event_rows]
 
         first_user = next((m["content"] for m in messages if m.get("role") == "user"), "")
         return {
@@ -772,6 +762,25 @@ class ConversationStore:
             "createdAt": now,
         }
 
+    @staticmethod
+    def _row_to_message(row: Dict[str, Any]) -> Dict[str, Any]:
+        """event 行 → 前端消息字典(唯一映射,两条加载路径共用)。
+
+        【事故记忆】这段映射曾存在两份(_get_conversation 与 get_messages
+        各自内联),add_message 新增 data_artifact 字段时只改了一份——
+        历史会话恢复(走 _get_conversation)拿不到制品,图谱卡消失。
+        收敛到单一函数后,加字段只改这里。
+        """
+        payload = json.loads(row["payload"])
+        return {
+            "id": row["id"],
+            "role": payload.get("role", row["kind"]),
+            "content": payload.get("content", ""),
+            "configSnapshot": payload.get("config_snapshot"),
+            "dataArtifact": payload.get("data_artifact"),
+            "createdAt": row["created_at"],
+        }
+
     def get_messages(self, conv_id: str) -> List[Dict[str, Any]]:
         """获取会话全部消息(只取 user / assistant)。从 events 表重建。
 
@@ -788,19 +797,7 @@ class ConversationStore:
                 (conv_id,),
             ).fetchall()
 
-        result = []
-        for r in rows:
-            r = dict(r)
-            payload = json.loads(r["payload"])
-            result.append({
-                "id": r["id"],
-                "role": payload.get("role", r["kind"]),
-                "content": payload.get("content", ""),
-                "configSnapshot": payload.get("config_snapshot"),
-                "dataArtifact": payload.get("data_artifact"),
-                "createdAt": r["created_at"],
-            })
-        return result
+        return [self._row_to_message(dict(r)) for r in rows]
 
     # ── Call Logs (LLM/Upstream 调用日志) ─────────────────────
 
