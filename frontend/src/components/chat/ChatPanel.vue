@@ -199,6 +199,7 @@
                 <KgGraphCard
                   v-if="msg.dataResult?.type === 'kg_search_result'"
                   :result="msg.dataResult"
+                  :cited-chunks="citedChunkNums(msg.content)"
                 />
                 <!-- 遍历「提取后的可显示字段」（getDataDisplayFields 已做中文化与过滤） -->
                 <div v-else v-for="(value, key) in getDataDisplayFields(msg.dataResult)" :key="key" class="data-field">
@@ -307,16 +308,39 @@ import DOMPurify from 'dompurify'
 marked.setOptions({ breaks: true, gfm: true })
 
 /** 助手消息 Markdown → 安全 HTML(空内容返回空串防 v-html 报错)。
- *  后处理:[片段N] 引用(KG 回答的来源标注)包装成徽标 span——与下方
+ *  后处理 1:[片段N] 引用(KG 回答的来源标注)包装成徽标 span——与下方
  *  图谱卡手风琴的"片段N" chip 编号体系一致,用户可对照定位原文。
- *  编号语义:prompt 的 loop.index 从 1 起,与 sources.chunks 顺序一致。 */
+ *  编号语义:prompt 的 loop.index 从 1 起,与 sources.chunks 顺序一致。
+ *  后处理 2:非 URL href 的链接降级为纯文本——LLM 偶发把关系描述写成
+ *  markdown 链接 `→[相关](描述文字)→`,中文 href 点击会跳相对路径(跳首页
+ *  事故)。合法协议(http/https/#/mailto)放行,其余降级保文本。 */
 function renderMarkdown(text: string): string {
   if (!text) return ''
   const html = marked.parse(text) as string
-  const linked = html.replace(
+  const chunkLinked = html.replace(
     /\[片段(\d+)\]/g,
     '<span class="md-chunk-ref">片段 $1</span>')
-  return DOMPurify.sanitize(linked, { ADD_ATTR: ['class'] })
+  // 非 URL href 降级: <a href="中文描述"> → <span class="md-fake-link">文字</span>
+  const safe = chunkLinked.replace(
+    /<a\s+href="([^"]*)"[^>]*>(.*?)<\/a>/gs,
+    (m, href: string, label: string) => {
+      if (/^(https?:|\/|#|mailto:)/i.test(href)) return m
+      return `<span class="md-fake-link">${label}</span>`
+    })
+  return DOMPurify.sanitize(safe, { ADD_ATTR: ['class'] })
+}
+
+/** 从回答文本提取被引用的片段编号([片段N] 徽标;KG 回答专用)。
+ *  手风琴据此区分"已引用/已召回未引用"——回答只引相关片段是设计
+ *  行为(其余召回未用),标注后用户不再困惑"少的去哪了"。 */
+function citedChunkNums(content?: string): number[] {
+  if (!content) return []
+  const nums: number[] = []
+  for (const m of content.matchAll(/\[片段(\d+)\]/g)) {
+    const n = Number(m[1])
+    if (!nums.includes(n)) nums.push(n)
+  }
+  return nums
 }
 
 // ===== 组件入参（props）声明 =====
@@ -855,6 +879,13 @@ watch(() => store.stageMessage, () => {
   font-weight: 500;
   line-height: 1.6;
   vertical-align: baseline;
+}
+/* LLM 误写的关系链接降级样式:不可点,视觉上接近行内代码 */
+.md-content :deep(.md-fake-link) {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
 }
 
 /* ===== 数据卡片样式（非配置类结果） ===== */

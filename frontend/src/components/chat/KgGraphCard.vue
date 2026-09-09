@@ -25,13 +25,19 @@
     </div>
     <!-- 文档片段:手风琴列表——每条 chip 下方紧贴原文面板(展开/收起) -->
     <div v-if="result.sources?.chunks?.length" class="kgc-chunks">
-      <span class="kgc-src-label"><FileTextOutlined /> 文档片段(点击查看原文)</span>
+      <span class="kgc-src-label">
+        <FileTextOutlined /> 文档片段(点击查看原文;
+        回答引用 {{ (citedChunks || []).length }}/{{ result.sources.chunks.length }},
+        未引用为召回备用)
+      </span>
       <div v-for="(c, i) in result.sources.chunks" :key="i" class="kgc-chunk-item">
         <!-- 片段 chip(点击切换展开;手风琴:同一时间只展开一条)。
              编号"片段N"与回答文本里的 [片段N] 引用同源(sources.chunks
-             顺序 = prompt loop.index),用户凭编号对照定位原文 -->
+             顺序 = prompt loop.index),用户凭编号对照定位原文;
+             回答未引用的片段正常展示但标注"未引用"(召回相关度够、
+             LLM 未采用——不是丢了) -->
         <button class="kgc-chunk-trigger"
-                :class="{ active: expandedChunk === i }"
+                :class="{ active: expandedChunk === i, cited: isCited(i) }"
                 :disabled="!c.text"
                 :title="c.text ? '点击查看片段原文' : '无原文'"
                 @click="toggleChunk(i)">
@@ -39,6 +45,7 @@
           <span class="kgc-chunk-trigger-text">
             {{ c.docName || '文档' }}{{ c.seq != null ? ` #${c.seq}` : '' }}
           </span>
+          <span v-if="!isCited(i)" class="kgc-chunk-uncited">未引用</span>
           <span v-if="c.score != null" class="kgc-score">{{ (Number(c.score)).toFixed(2) }}</span>
           <DownOutlined class="kgc-chunk-arrow" :class="{ expanded: expandedChunk === i }" />
         </button>
@@ -75,6 +82,8 @@ const props = defineProps<{
     subgraph?: { nodes?: KgNode[]; edges?: KgEdge[] }
     sources?: { entities?: string[]; chunks?: KgChunk[] }
   }
+  /** 回答文本里被引用的片段编号([片段N]);空数组=回答未引任何片段 */
+  citedChunks?: number[]
 }>()
 
 const nodes = computed<KgNode[]>(() => props.result.subgraph?.nodes || [])
@@ -85,6 +94,11 @@ const chunkHits = computed(() => props.result.sources?.chunks?.length || 0)
 const expandedChunk = ref<number | null>(null)
 function toggleChunk(i: number) {
   expandedChunk.value = expandedChunk.value === i ? null : i
+}
+
+// 该片段是否被回答引用([片段N] 编号从 1 起,数组下标从 0 起)
+function isCited(i: number): boolean {
+  return (props.citedChunks || []).includes(i + 1)
 }
 
 const box = ref<HTMLElement | null>(null)
@@ -248,6 +262,17 @@ onBeforeUnmount(() => {
   font-weight: 500;
 }
 .kgc-chunk-trigger.active .kgc-chunk-num { background: #2f54eb; color: #fff; }
+/* 被回答引用的片段:左侧细边条标识 */
+.kgc-chunk-trigger.cited { border-left: 3px solid #2f54eb; }
+/* 未引用标识(召回但 LLM 未采用) */
+.kgc-chunk-uncited {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #f2f3f5;
+  color: #9ca3af;
+  font-size: 10px;
+}
 .kgc-chunk-trigger-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kgc-chunk-arrow { font-size: 10px; color: #9ca3af; transition: transform 0.2s; }
 .kgc-chunk-arrow.expanded { transform: rotate(180deg); color: #2f54eb; }
