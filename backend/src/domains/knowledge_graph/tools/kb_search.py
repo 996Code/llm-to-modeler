@@ -76,12 +76,18 @@ class KbSearchTool(Tool):
 
         # ── pipeline 进度定义(前端分步进度条) ──
         # 与 CompositeTool.pipeline_definition 同一事件契约:工具开始时下发
-        # 步骤集,后续每个 stage 事件按 key 前缀匹配推进进度条
+        # 步骤集,后续每个 stage 事件按 key 前缀匹配推进进度条。
+        # 步骤粒度对齐检索链路的真实阶段(retrieval.hybrid_retrieve 内部
+        # 逐段回调 on_stage):意图→图谱匹配→子图扩展→向量检索→组装→回答
         ctx.emit("pipeline_definition", {
             "tool": self.name,
             "steps": [
                 {"key": "kb_search.resolve", "label": "解析问题与知识库"},
-                {"key": "kb_search.retrieve", "label": "图谱与向量检索"},
+                {"key": "kb_search.intent", "label": "解析检索意图"},
+                {"key": "kb_search.graph", "label": "图谱实体匹配"},
+                {"key": "kb_search.subgraph", "label": "扩展关联子图"},
+                {"key": "kb_search.vector", "label": "向量检索文档"},
+                {"key": "kb_search.assemble", "label": "整理检索依据"},
                 {"key": "kb_search.answer", "label": "综合回答"},
             ],
         })
@@ -179,17 +185,20 @@ class KbSearchTool(Tool):
         })
 
         # ── 混合检索 + 回答 ──
-        ctx.emit("stage", "kb_search.retrieve", message=f"正在检索知识库「{kb['name']}」(图谱+向量)…")
+        # on_stage 把 retrieval 内部各阶段(意图/图谱/子图/向量/组装/回答)
+        # 透传成 SSE stage 事件,前端 pipeline 进度条逐步推进
+        def _on_stage(key: str, message: str) -> None:
+            ctx.emit("stage", key, message=message)
+
         ctx.trace("kb_search.retrieve", f"检索 {kb['name']}", "info")
         try:
             result = retrieval.answer_question(
-                self._app_state, kb, query, conv_id=ctx.conv_id)
+                self._app_state, kb, query, conv_id=ctx.conv_id,
+                on_stage=_on_stage)
         except Exception as e:
             logger.exception("kb_search 检索失败")
             return ToolResult(error_for_llm=f"知识库检索失败: {e}")
 
-        ctx.emit("stage", "kb_search.answer", message="正在综合回答…")
-        ctx.trace("kb_search.answer", "生成回答", "ok")
         sub = result.get("subgraph") or {}
         # 【ToolResult 三态契约】reply 与 artifact 互斥(引擎 reply 优先):
         # data 制品的展示文本放 summary —— 气泡显示回答,下方数据卡渲染子图

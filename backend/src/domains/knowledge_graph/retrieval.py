@@ -102,14 +102,24 @@ def parse_query_intent(app_state, query: str, relation_types: List[Dict],
 
 def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     conv_id: Optional[str] = None,
-                    top_k: Optional[int] = None) -> Dict[str, Any]:
+                    top_k: Optional[int] = None,
+                    on_stage=None) -> Dict[str, Any]:
     """混合检索:返回 {intent, seeds, subgraph, chunks}。
 
     图谱路始终执行;向量路仅 kb.vector_enabled 时执行(失败降级为空)。
+    on_stage(stage_key, message): 各阶段进度回调(可选)。
     """
+    def _stage(key: str, message: str) -> None:
+        if on_stage is not None:
+            try:
+                on_stage(key, message)
+            except Exception:
+                pass
+
     store = runtime.get_kg_store(app_state)
     graph = runtime.get_graph(app_state)
     schema = kb.get("schema") or {}
+    _stage("kb_search.intent", "解析检索意图(实体/关键词/跳数)…")
     intent = parse_query_intent(
         app_state, query, schema.get("relation_types") or [], conv_id=conv_id)
 
@@ -119,6 +129,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     seeds: List[Dict[str, Any]] = []
     subgraph = {"nodes": [], "edges": []}
     if terms:
+        _stage("kb_search.graph", f"图谱实体匹配({len(terms)} 个种子词)…")
         _t0 = time.monotonic()
         _err = None
         try:
@@ -155,6 +166,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 duration_ms=int((time.monotonic() - _t0) * 1000),
                 error=_err, conv_id=conv_id)
     if seeds:
+        _stage("kb_search.subgraph", f"扩展关联子图({len(seeds)} 个种子,BFS 邻域)…")
         _t0 = time.monotonic()
         _err = None
         _hops = int(intent["hop"])
@@ -198,6 +210,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     # 记为 call_type='llm';这里记向量检索的召回量与匹配度)
     chunks: List[Dict[str, Any]] = []
     if kb.get("vectorEnabled"):
+        _stage("kb_search.vector", "向量检索相似文档片段…")
         _t0 = time.monotonic()
         _err = None
         _search_failed = False
@@ -296,14 +309,29 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
 def answer_question(app_state, kb: Dict[str, Any], query: str,
                     conv_id: Optional[str] = None,
                     retrieved: Optional[Dict[str, Any]] = None,
-                    top_k: Optional[int] = None) -> Dict[str, Any]:
+                    top_k: Optional[int] = None,
+                    on_stage=None) -> Dict[str, Any]:
     """混合检索 + LLM 综合回答。Returns:
     {answer, subgraph, chunks, intent, sources}
+
+    on_stage(stage_key, message): 检索各阶段的进度回调(kb_search 透传给
+    ctx.emit → 前端 pipeline 进度条)。None 时无副作用(REST /search 直调)。
     """
+    def _stage(key: str, message: str) -> None:
+        if on_stage is not None:
+            try:
+                on_stage(key, message)
+            except Exception:
+                pass  # 进度回调失败不拖垮检索
+
     if retrieved is None:
-        retrieved = hybrid_retrieve(app_state, kb, query, conv_id=conv_id, top_k=top_k)
+        retrieved = hybrid_retrieve(app_state, kb, query, conv_id=conv_id,
+                                    top_k=top_k, on_stage=_stage)
+    _stage("kb_search.assemble", "整理三元组与文档片段…")
     ctx = linearize_context(retrieved)
 
+    _stage("kb_search.answer", f"综合回答(依据 {len(ctx['triples'])} 条三元组 / "
+                               f"{len(ctx['chunk_texts'])} 个文档片段)…")
     prompt = _prompt_loader().render(
         "knowledge_graph", "answer",
         kb_name=kb.get("name") or "", query=query,
@@ -316,12 +344,19 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
         temperature=temperature, conv_id=conv_id, stage="kg.answer",
     ).strip()
 
-    # 来源汇总(前端引用展示)
+    # 来源汇总(前端引用展示;chunk 带 text 摘要供点击查看)
     sub = retrieved.get("subgraph") or {}
     sources = {
         "entities": [n["name"] for n in sub.get("nodes") or []][:20],
         "chunks": [
-            {"docName": c.get("docName"), "score": c.get("score"), "seq": c.get("seq")}
+            {
+                "docId": c.get("docId"),
+                "docName": c.get("docName"),
+                "score": c.get("score"),
+                "seq": c.get("seq"),
+                # 片段原文摘要(前端点击展开看内容;600 字与进 prompt 的截断一致)
+                "text": (c.get("text") or "").strip()[:600],
+            }
             for c in retrieved.get("chunks") or []
         ],
     }

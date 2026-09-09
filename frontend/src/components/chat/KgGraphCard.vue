@@ -23,12 +23,33 @@
         +{{ result.sources.entities.length - 12 }}
       </a-tag>
     </div>
+    <!-- 文档片段:可点击展开看原文(带相似度分数) -->
     <div v-if="result.sources?.chunks?.length" class="kgc-sources">
       <span class="kgc-src-label"><FileTextOutlined /> 文档片段</span>
-      <a-tag v-for="(c, i) in result.sources.chunks.slice(0, 6)" :key="i" class="kgc-chip">
+      <a-tag v-for="(c, i) in result.sources.chunks.slice(0, 6)" :key="i"
+             class="kgc-chip kgc-chip-click"
+             :title="c.text ? '点击查看片段原文' : '无原文'"
+             @click="toggleChunk(i)">
         {{ c.docName || '文档' }}{{ c.seq != null ? `#${c.seq}` : '' }}
+        <span v-if="c.score != null" class="kgc-score">{{ (Number(c.score)).toFixed(2) }}</span>
+      </a-tag>
+      <a-tag v-if="result.sources.chunks.length > 6" class="kgc-chip">
+        +{{ result.sources.chunks.length - 6 }}
       </a-tag>
     </div>
+    <!-- 展开的片段原文 -->
+    <template v-if="result.sources?.chunks?.length">
+      <div v-for="(c, i) in result.sources.chunks" :key="'t' + i">
+        <div v-if="expandedChunk === i && c.text" class="kgc-chunk-text">
+          <div class="kgc-chunk-head">
+            <span>{{ c.docName || '文档' }}{{ c.seq != null ? ` · 块 ${c.seq}` : '' }}</span>
+            <span v-if="c.score != null" class="kgc-score">相似度 {{ (Number(c.score)).toFixed(4) }}</span>
+            <a-button size="small" type="text" class="kgc-chunk-close" @click="toggleChunk(i)">收起</a-button>
+          </div>
+          <div class="kgc-chunk-body">{{ c.text }}</div>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -41,19 +62,26 @@ import { FileTextOutlined, LinkOutlined, PartitionOutlined } from '@ant-design/i
 
 interface KgNode { id: string; name: string; type?: string; description?: string }
 interface KgEdge { id?: string; source: string; target: string; type?: string; description?: string; evidence?: string }
+interface KgChunk { docId?: string; docName?: string; seq?: number | null; score?: number | null; text?: string }
 
 const props = defineProps<{
   result: {
     type?: string
     kb?: { name?: string }
     subgraph?: { nodes?: KgNode[]; edges?: KgEdge[] }
-    sources?: { entities?: string[]; chunks?: { docName?: string; seq?: number | null }[] }
+    sources?: { entities?: string[]; chunks?: KgChunk[] }
   }
 }>()
 
 const nodes = computed<KgNode[]>(() => props.result.subgraph?.nodes || [])
 const edges = computed<KgEdge[]>(() => props.result.subgraph?.edges || [])
 const chunkHits = computed(() => props.result.sources?.chunks?.length || 0)
+
+// 展开的片段下标(null=全收起);点击 chip 切换
+const expandedChunk = ref<number | null>(null)
+function toggleChunk(i: number) {
+  expandedChunk.value = expandedChunk.value === i ? null : i
+}
 
 const box = ref<HTMLElement | null>(null)
 let graph: import('@antv/g6').Graph | null = null
@@ -179,4 +207,35 @@ onBeforeUnmount(() => {
 .kgc-sources { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .kgc-src-label { font-size: 12px; color: #6b7280; display: inline-flex; align-items: center; gap: 4px; }
 .kgc-chip { font-size: 11px; }
+/* 可点击的片段 chip(有原文时) */
+.kgc-chip-click { cursor: pointer; user-select: none; }
+.kgc-chip-click:hover { border-color: #2f54eb; color: #2f54eb; }
+/* 片段分数(相似度) */
+.kgc-score { margin-left: 4px; opacity: 0.65; font-size: 10px; }
+/* 展开的片段原文卡片 */
+.kgc-chunk-text {
+  margin-top: 8px;
+  border: 1px solid #eef1f6;
+  border-radius: 10px;
+  background: #fafbfc;
+  overflow: hidden;
+}
+.kgc-chunk-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #eef1f6;
+  font-size: 12px; color: #6b7280;
+}
+.kgc-chunk-head > span:first-child { font-weight: 500; color: #374151; }
+.kgc-chunk-close { margin-left: auto; font-size: 12px; }
+.kgc-chunk-body {
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: #374151;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+}
 </style>

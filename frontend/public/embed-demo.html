@@ -20,7 +20,7 @@
       display: flex;
       align-items: center;
       padding: 0 24px;
-      gap: 16px;
+      gap: 12px;
       box-shadow: 0 1px 4px rgba(0,0,0,0.04);
     }
     .topbar-logo {
@@ -80,7 +80,7 @@
     }
     .menu-icon { font-size: 16px; }
 
-    /* 右侧表单设计器模拟区 */
+    /* 右侧工作区 */
     .content {
       flex: 1;
       padding: 24px;
@@ -112,37 +112,70 @@
     }
     .btn-primary:hover { background: #2860e6; color: #fff; }
 
-    /* 表单设计器卡片 */
-    .designer-card {
+    /* 场景卡片 */
+    .scene-card {
       background: #fff;
       border-radius: 12px;
       border: 1px solid #e5e6eb;
       padding: 24px;
       min-height: 400px;
     }
-    .designer-empty {
+    .scene-empty {
       text-align: center;
       padding: 60px 20px;
       color: #c9cdd4;
     }
-    .designer-empty-icon { font-size: 48px; margin-bottom: 12px; }
+    .scene-empty-icon { font-size: 48px; margin-bottom: 12px; }
 
-    /* 接收到的配置展示 */
-    .config-preview {
-      margin-top: 16px;
-    }
-    .config-form-name {
+    /* AI 产出的结果展示 */
+    .result-preview { margin-top: 16px; }
+    .result-title {
       font-size: 16px;
       font-weight: 600;
       color: #1f2329;
       margin-bottom: 4px;
     }
-    .config-form-code {
+    .result-subtitle {
       font-size: 12px;
       color: #86909c;
       font-family: 'SF Mono', monospace;
       margin-bottom: 16px;
     }
+
+    /* 数据卡(知识图谱检索结果) */
+    .data-card {
+      border: 1px solid #e5e6eb;
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-bottom: 16px;
+    }
+    .data-card-header {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 12px;
+      font-size: 14px; font-weight: 600;
+    }
+    .data-card-icon {
+      width: 28px; height: 28px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px;
+    }
+    .data-stats { display: flex; gap: 32px; }
+    .data-stat { display: flex; flex-direction: column; gap: 2px; }
+    .data-stat-num { font-size: 22px; font-weight: 700; color: #3370ff; }
+    .data-stat-label { font-size: 12px; color: #86909c; }
+    .data-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .data-chip {
+      padding: 2px 10px;
+      background: #f2f3f5;
+      border-radius: 12px;
+      font-size: 12px;
+      color: #4e5969;
+    }
+
+    /* 表格(表单配置结果,兼容旧场景) */
     .field-table {
       width: 100%;
       border-collapse: collapse;
@@ -223,7 +256,7 @@ if (!localStorage.getItem('auth_token')) {
 <!-- 模拟主系统导航栏 -->
 <div class="topbar">
   <div class="topbar-logo">N</div>
-  <span class="topbar-title">njmind 低代码平台</span>
+  <span class="topbar-title">njmind 业务平台</span>
   <div class="topbar-user">
     <div class="topbar-avatar">张</div>
     <span>张三 (zhangsan)</span>
@@ -234,45 +267,73 @@ if (!localStorage.getItem('auth_token')) {
   <!-- 左侧菜单 -->
   <div class="sidebar">
     <div class="menu-item"><span class="menu-icon">🏠</span> 工作台</div>
-    <div class="menu-item active"><span class="menu-icon">📋</span> 表单管理</div>
-    <div class="menu-item"><span class="menu-icon">🔄</span> 流程管理</div>
-    <div class="menu-item"><span class="menu-icon">📊</span> 列表管理</div>
+    <div class="menu-item active"><span class="menu-icon">🤖</span> 智能助手</div>
+    <div class="menu-item"><span class="menu-icon">📊</span> 数据报表</div>
+    <div class="menu-item"><span class="menu-icon">📁</span> 文档中心</div>
     <div class="menu-item"><span class="menu-icon">⚙️</span> 系统设置</div>
   </div>
 
-  <!-- 主内容区：模拟表单设计器 -->
+  <!-- 主内容区：模拟业务工作区 -->
   <div class="content">
     <div class="page-header">
-      <div class="page-title">表单设计器</div>
+      <div class="page-title">智能助手工作区</div>
       <div class="page-actions">
-        <button class="btn" onclick="clearConfig()">清空</button>
-        <button class="btn btn-primary" onclick="applyToDesigner()">写入设计器</button>
+        <button class="btn" onclick="clearResult()">清空</button>
       </div>
     </div>
 
-    <div class="designer-card">
-      <div id="empty-state" class="designer-empty">
-        <div class="designer-empty-icon">📋</div>
-        <p>暂无表单配置</p>
+    <div class="scene-card">
+      <div id="empty-state" class="scene-empty">
+        <div class="scene-empty-icon">🤖</div>
+        <p>暂无 AI 产出结果</p>
         <p style="font-size: 13px; margin-top: 4px;">
-          点击右下角 <strong>💬</strong> 按钮，通过自然语言生成表单配置
+          点击右下角 <strong>💬</strong> 按钮，通过自然语言与智能助手对话——<br>
+          知识库问答、表单生成、业务查询等能力即问即答
         </p>
       </div>
 
-      <div id="config-preview" class="config-preview" style="display: none;">
-        <div class="config-form-name" id="form-name"></div>
-        <div class="config-form-code" id="form-code"></div>
-        <table class="field-table">
-          <thead>
-            <tr>
-              <th width="40">#</th>
-              <th>字段名称</th>
-              <th>字段标识</th>
-              <th>类型</th>
-            </tr>
-          </thead>
-          <tbody id="field-tbody"></tbody>
-        </table>
+      <!-- AI 产出结果(通用数据卡:KG 检索/表单配置等) -->
+      <div id="result-preview" class="result-preview" style="display: none;">
+        <div class="result-title" id="result-title">AI 结果</div>
+        <div class="result-subtitle" id="result-subtitle"></div>
+
+        <!-- 数据卡(知识图谱检索结果) -->
+        <div class="data-card" id="data-card" style="display: none;">
+          <div class="data-card-header">
+            <div class="data-card-icon">🔍</div>
+            <span id="data-card-title">知识图谱检索</span>
+          </div>
+          <div class="data-stats">
+            <div class="data-stat">
+              <span class="data-stat-num" id="stat-entities">0</span>
+              <span class="data-stat-label">命中实体</span>
+            </div>
+            <div class="data-stat">
+              <span class="data-stat-num" id="stat-relations">0</span>
+              <span class="data-stat-label">命中关系</span>
+            </div>
+            <div class="data-stat">
+              <span class="data-stat-num" id="stat-chunks">0</span>
+              <span class="data-stat-label">文档片段</span>
+            </div>
+          </div>
+          <div class="data-chips" id="data-chips"></div>
+        </div>
+
+        <!-- 表单配置表格(表单场景,兼容旧展示) -->
+        <div id="config-preview" style="display: none;">
+          <table class="field-table">
+            <thead>
+              <tr>
+                <th width="40">#</th>
+                <th>字段名称</th>
+                <th>字段标识</th>
+                <th>类型</th>
+              </tr>
+            </thead>
+            <tbody id="field-tbody"></tbody>
+          </table>
+        </div>
 
         <details style="margin-top: 16px;">
           <summary style="cursor: pointer; font-size: 13px; color: #3370ff;">
@@ -324,20 +385,20 @@ if (!localStorage.getItem('auth_token')) {
     // 调 /api/auth/token 获取后下发的场景；同源 demo 直接复用 localStorage）
     headers: { 'Authorization': 'Bearer ' + (localStorage.getItem('auth_token') || '') },
 
-    // 宿主"设计器"的当前配置（GET_CONTEXT/APPLY 的 artifact 来源）——
+    // 宿主"工作区"的当前配置（GET_CONTEXT/APPLY 的 artifact 来源）——
     // 与 mind-designer 的 currentVo() 同角色，AI 据此做增量修改的基线
     getArtifact: () => currentConfig,
 
     // 配置生成成功（每次 LLM 生成后触发）
     onConfigGenerated: (config) => {
-      log('收到配置: ' + (config.formName || '未命名'), 'info')
+      log('收到产出: ' + (config.formName || config.kb?.name || '结果'), 'info')
     },
 
-    // 用户在 iframe 内点"应用配置"（契约 APPLY：渲染回调 + SDK 自动回执）
+    // 用户在 iframe 内点"应用"（契约 APPLY：渲染回调 + SDK 自动回执）
     onConfigApply: (config) => {
-      log('应用配置到设计器: ' + (config.formName || ''), 'apply')
-      renderConfig(config)
-      highlightDesigner()
+      log('应用结果到工作区: ' + (config.formName || config.kb?.name || ''), 'apply')
+      renderResult(config)
+      highlightCard()
     },
 
     onClose: () => {
@@ -363,51 +424,69 @@ if (!localStorage.getItem('auth_token')) {
     12: ['SEG', '#fff3e8', '#ff7d00'],
   }
 
-  function renderConfig(config) {
-    if (!config) return
-    currentConfig = config
+  /** 渲染 AI 产出:按制品类型分流(知识图谱数据卡 / 表单配置表格) */
+  function renderResult(artifact) {
+    if (!artifact) return
+    currentConfig = artifact
 
     document.getElementById('empty-state').style.display = 'none'
-    const preview = document.getElementById('config-preview')
+    const preview = document.getElementById('result-preview')
     preview.style.display = 'block'
 
-    document.getElementById('form-name').textContent = config.formName || '未命名表单'
-    document.getElementById('form-code').textContent = 'formCode: ' + (config.formCode || '')
+    // 知识图谱检索结果(kg_search_result):数据卡展示命中统计
+    const isKg = artifact.type === 'kg_search_result'
+    document.getElementById('data-card').style.display = isKg ? 'block' : 'none'
+    document.getElementById('config-preview').style.display = isKg ? 'none' : 'block'
 
-    const fields = config.formFieldConfigVos || []
-    const tbody = document.getElementById('field-tbody')
-    tbody.innerHTML = fields.map((f, i) => {
-      const [name, bg, color] = TYPE_NAMES[f.formFieldType] || ['?', '#f7f8fa', '#86909c']
-      return `<tr>
-        <td>${i + 1}</td>
-        <td>${f.fieldTitleText || ''}</td>
-        <td style="font-family: monospace; color: #86909c;">${f.fieldTitleKey || ''}</td>
-        <td><span class="field-type-tag" style="background:${bg};color:${color};">${name}</span></td>
-      </tr>`
-    }).join('')
+    if (isKg) {
+      const kb = artifact.kb || {}
+      const sub = artifact.subgraph || {}
+      const sources = artifact.sources || {}
+      document.getElementById('result-title').textContent = '知识库检索结果'
+      document.getElementById('result-subtitle').textContent = 'kb: ' + (kb.name || '')
+      document.getElementById('data-card-title').textContent = '「' + (kb.name || '知识库') + '」检索命中'
+      document.getElementById('stat-entities').textContent = (sub.nodes || []).length
+      document.getElementById('stat-relations').textContent = (sub.edges || []).length
+      document.getElementById('stat-chunks').textContent = (sources.chunks || []).length
+      // 实体 chips(前 12 个)
+      const chips = (sources.entities || []).slice(0, 12)
+        .map(e => `<span class="data-chip">${escapeHtml(e)}</span>`).join('')
+      document.getElementById('data-chips').innerHTML = chips
+    } else {
+      // 表单配置:沿用字段表格展示
+      document.getElementById('result-title').textContent = artifact.formName || '配置结果'
+      document.getElementById('result-subtitle').textContent = 'formCode: ' + (artifact.formCode || '')
+      const fields = artifact.formFieldConfigVos || []
+      const tbody = document.getElementById('field-tbody')
+      tbody.innerHTML = fields.map((f, i) => {
+        const [name, bg, color] = TYPE_NAMES[f.formFieldType] || ['?', '#f7f8fa', '#86909c']
+        return `<tr>
+          <td>${i + 1}</td>
+          <td>${escapeHtml(f.fieldTitleText || '')}</td>
+          <td style="font-family: monospace; color: #86909c;">${escapeHtml(f.fieldTitleKey || '')}</td>
+          <td><span class="field-type-tag" style="background:${bg};color:${color};">${name}</span></td>
+        </tr>`
+      }).join('')
+    }
 
     document.getElementById('json-display').textContent =
-      JSON.stringify(config, null, 2)
+      JSON.stringify(artifact, null, 2)
   }
 
-  function clearConfig() {
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c =>
+      ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+  }
+
+  function clearResult() {
     currentConfig = null
     document.getElementById('empty-state').style.display = 'block'
-    document.getElementById('config-preview').style.display = 'none'
+    document.getElementById('result-preview').style.display = 'none'
     log('已清空', 'info')
   }
 
-  function applyToDesigner() {
-    if (!currentConfig) {
-      alert('请先通过对话生成配置')
-      return
-    }
-    log('配置已写入设计器: ' + currentConfig.formName, 'success')
-    highlightDesigner()
-  }
-
-  function highlightDesigner() {
-    const card = document.querySelector('.designer-card')
+  function highlightCard() {
+    const card = document.querySelector('.scene-card')
     card.style.borderColor = '#3370ff'
     card.style.boxShadow = '0 0 0 3px rgba(51,112,255,0.1)'
     setTimeout(() => {
@@ -422,7 +501,7 @@ if (!localStorage.getItem('auth_token')) {
     const panel = document.getElementById('log-panel')
     const entry = document.createElement('div')
     entry.className = 'log-entry'
-    entry.innerHTML = `<span class="log-time">${time}</span><span class="log-type log-type-${type}">${type.toUpperCase()}</span>${msg}`
+    entry.innerHTML = `<span class="log-time">${time}</span><span class="log-type log-type-${type}">${type.toUpperCase()}</span>${escapeHtml(msg)}`
     panel.appendChild(entry)
     panel.scrollTop = panel.scrollHeight
   }
