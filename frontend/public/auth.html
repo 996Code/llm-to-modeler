@@ -101,9 +101,22 @@
 
     // 如果已有 token，直接跳转目标页面
     if (localStorage.getItem(TOKEN_KEY)) {
-      const target = getTargetPage()
-      window.location.replace(target)
+      window.location.replace(getTargetPage())
     }
+
+    // 开放模式兜底:后端未配置 ADMIN_TOKEN 时中间件全放行,认证页不该拦人
+    // (历史缺陷:无 token 又换不到 token,页面死锁)。探测到开放模式直接放行。
+    ;(async () => {
+      if (localStorage.getItem(TOKEN_KEY)) return
+      try {
+        const resp = await fetch('/ai-modeler/api/auth/config')
+        const cfg = await resp.json()
+        if (cfg && cfg.secret_configured === false) {
+          document.querySelector('.brand-sub').textContent = '本服务未启用访问认证，正在进入…'
+          window.location.replace(getTargetPage())
+        }
+      } catch (e) { /* 探测失败维持认证页 */ }
+    })()
 
     function getTargetPage() {
       const params = new URLSearchParams(window.location.search)

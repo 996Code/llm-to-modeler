@@ -103,6 +103,19 @@ async def issue_token(request: Request):
     })
 
 
+# ── 门禁模式探测端点 ───────────────────────────────────────────
+
+@router.get("/auth/config")
+async def auth_config():
+    """告诉前端门禁页当前认证模式(白名单路径,免 token)。
+
+    前端 admin.html/index.html 的本地门禁依赖它:未配置 ADMIN_TOKEN
+    (开放模式)时不拦截、不跳认证页——否则会出现"开放模式却卡在
+    认证页"的死锁(中间件全放行,token 签发却 503,页面进不去)。
+    """
+    return {"secret_configured": bool(_get_admin_token())}
+
+
 # ── 全局中间件 ─────────────────────────────────────────────────
 
 # 白名单路径（不校验 token）
