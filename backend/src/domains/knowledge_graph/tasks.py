@@ -823,6 +823,58 @@ def _merge_pending_proposals(store, kb: Dict, proposals: List[Dict]) -> None:
 
 # ── 本体归纳任务 ─────────────────────────────────────────────
 
+# 采样块的章节标题行占比上限:超过视为目录/结构页(标题行高度密集是
+# 目录页的特征),不能代表正文的知识本体
+_MAX_SAMPLE_HEADING_DENSITY = 0.3
+# 采样块至少需要的非标题行数:纯几行标题 + 零星文字的块没有归纳价值
+_MIN_SAMPLE_CONTENT_LINES = 3
+_HEADING_LINE_RE = re.compile(
+    r"^\s*(第\s*[0-9〇零一二两三四五六七八九十百千万]+\s*[章回节卷场幕篇部集]"
+    r"|序章|序幕|序言|楔子|引子|尾声|终章|后记|跋|番外|附录)"
+)
+
+
+def _heading_density(text: str) -> float:
+    """章节标题行占比(0~1)——目录页的特征信号。空文本视为全标题。"""
+    lines = [l for l in text.splitlines() if l.strip()]
+    if not lines:
+        return 1.0
+    return sum(1 for l in lines if _HEADING_LINE_RE.match(l)) / len(lines)
+
+
+def _pick_samples(texts: List[str], target: int, limit_chars: int) -> List[str]:
+    """从候选块中挑选归纳样本(纯函数,便于测试)。
+
+    - 中间块优先(目录在头部、结尾常是套话),从中间向两头扫描;
+    - 目录密度过滤:标题行占比超限或正文行数不足的块跳过;
+    - 全部被过滤时退化为密度最低的 target 块——带目录噪声归纳好过硬
+      失败,调用方会看到 sample_count 与提示。
+    """
+    scored = []
+    for idx, t in enumerate(texts):
+        head = t[:limit_chars]
+        density = _heading_density(head)
+        lines = [l for l in head.splitlines() if l.strip()]
+        scored.append((density, len(lines) >= _MIN_SAMPLE_CONTENT_LINES, idx, t))
+    mid = len(scored) // 2
+    order = sorted(range(len(scored)), key=lambda i: abs(i - mid))
+
+    samples: List[str] = []
+    fallback: List[Tuple[float, int, str]] = []
+    for i in order:
+        if len(samples) >= target:
+            break
+        density, rich, _idx, t = scored[i]
+        if rich and density <= _MAX_SAMPLE_HEADING_DENSITY:
+            samples.append(t[:limit_chars])
+        else:
+            fallback.append((density, _idx, t))
+    if len(samples) < target and fallback:
+        fallback.sort(key=lambda x: (x[0], x[1]))
+        samples.extend(t[:limit_chars] for _d, _i, t in fallback[:target - len(samples)])
+    return samples[:target]
+
+
 def run_induce_schema(handle) -> Dict[str, Any]:
     payload = handle.payload or {}
     kb_id = str(payload.get("kb_id") or "")
@@ -889,30 +941,32 @@ def run_induce_schema(handle) -> Dict[str, Any]:
 
 
 def _collect_samples(store, kb_id: str, target: int, limit_chars: int) -> List[str]:
-    """抽样:优先已切块的中间 chunk(信息密度高),无 chunk 则现解析。"""
-    samples: List[str] = []
+    """抽样:与抽取同视角——优先已切块的 chunk,无 chunk 则用同一条切块器
+    现切全书,再跨全书均匀取样(中间优先,不从文件头顺取)。
+
+    两条路径都过"目录密度"过滤:标题行占比过高的块是目录/结构页,只见
+    目录的归纳会产出 book/chapter 结构本体而非业务实体(真实事故:诛仙
+    全书开头是目录页,归纳结果全是书籍结构)。全部候选被过滤时退化为
+    取密度最低的块——带噪声归纳好过硬失败,提示语会说明样本质量。
+    """
+    texts: List[str] = []
     for doc in store.list_documents(kb_id):
         chunks = store.list_chunks(doc["id"], status="done") or store.list_chunks(doc["id"])
-        if chunks:
-            mid = len(chunks) // 2
-            order = sorted(range(len(chunks)),
-                           key=lambda i: abs(i - mid))  # 中间块优先(避开目录/结尾套话)
-            for i in order:
-                text = chunks[i]["text"].strip()
-                if text:
-                    samples.append(text[:limit_chars])
-                if len(samples) >= target:
-                    return samples
-        elif doc["filePath"]:
+        if not chunks and doc["filePath"]:
             try:
                 text = parse_to_text(doc["filename"], Path(doc["filePath"]).read_bytes())
-                for c in chunk_text(text):
-                    samples.append(c["text"].strip()[:limit_chars])
-                    if len(samples) >= target:
-                        return samples
+                chunks = chunk_text(text)  # 与导入同一切块器,采样/抽取同粒度
             except Exception:
                 continue
-    return samples
+        for c in chunks or []:
+            t = (c.get("text") if isinstance(c, dict) else getattr(c, "text", "")) or ""
+            if t.strip():
+                texts.append(t.strip())
+            if len(texts) >= target * 8:  # 候选池上限,防超大文档全量驻内存
+                break
+        if len(texts) >= target * 8:
+            break
+    return _pick_samples(texts, target, limit_chars)
 
 
 def _clean_induced(items, is_relation: bool) -> List[Dict]:
