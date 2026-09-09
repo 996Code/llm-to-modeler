@@ -308,20 +308,39 @@ import DOMPurify from 'dompurify'
 marked.setOptions({ breaks: true, gfm: true })
 
 /** 助手消息 Markdown → 安全 HTML(空内容返回空串防 v-html 报错)。
- *  后处理 1:[片段N] 引用(KG 回答的来源标注)包装成徽标 span——与下方
- *  图谱卡手风琴的"片段N" chip 编号体系一致,用户可对照定位原文。
- *  编号语义:prompt 的 loop.index 从 1 起,与 sources.chunks 顺序一致。
+ *  后处理 1:KG 来源标注按类型着色徽标化——用户一眼区分证据来源:
+ *    [实体:x] 蓝(图谱实体) / [片段N] 紫(向量召回原文,与手风琴编号
+ *    对照) / [三元组:A-[r]->B] 青(图谱边) / →[关系名]→ 橙(关系链路)。
  *  后处理 2:非 URL href 的链接降级为纯文本——LLM 偶发把关系描述写成
  *  markdown 链接 `→[相关](描述文字)→`,中文 href 点击会跳相对路径(跳首页
- *  事故)。合法协议(http/https/#/mailto)放行,其余降级保文本。 */
+ *  事故)。合法协议(http/https/#/mailto)放行,其余降级保文本。
+ *  顺序:先转义文本再匹配方括号(marked 可能把 [x] 渲染进 <code> 等,
+ *  在原始 html 上全局替换即可——来源标注是纯文本形态,不会进属性)。 */
 function renderMarkdown(text: string): string {
   if (!text) return ''
-  const html = marked.parse(text) as string
-  const chunkLinked = html.replace(
+  let html = marked.parse(text) as string
+  // 片段编号(兼容 [片段3]/[片段:3]/[片段：3]) → 紫色徽标
+  html = html.replace(
     /\[片段[:：]?\s*(\d+)\]/g,
-    '<span class="md-chunk-ref">片段 $1</span>')
+    '<span class="md-ref md-ref-chunk">片段 $1</span>')
+  // 实体引用 [实体:x] → 蓝色徽标(x 保留)
+  html = html.replace(
+    /\[实体[:：]?\s*([^\]<]+)\]/g,
+    '<span class="md-ref md-ref-entity">$1</span>')
+  // 三元组引用 [三元组:...] → 青色徽标(内容可含嵌套方括号 A-[r]->B,
+  // 锚定"后面跟分隔符/结尾"的 ] 为终止,避免在嵌套 ] 截断)
+  html = html.replace(
+    /\[三元组[:：]?\s*(.+?)\](?=[、,，;；)\s]|$)/g,
+    '<span class="md-ref md-ref-triple">$1</span>')
+  // 关系链路箭头标签 →[位于]→ / ←[位于]← / →相关→(双向) → 橙色
+  html = html.replace(
+    /([→←])\s*\[([^\]<]{1,12})\]\s*([→←])/g,
+    '$1<span class="md-ref md-ref-rel">$2</span>$3')
+  html = html.replace(
+    /→\s*(相关|位于|属于|包含|使用|参与|任职于)\s*→/g,
+    '→<span class="md-ref md-ref-rel">$1</span>→')
   // 非 URL href 降级: <a href="中文描述"> → <span class="md-fake-link">文字</span>
-  const safe = chunkLinked.replace(
+  const safe = html.replace(
     /<a\s+href="([^"]*)"[^>]*>(.*?)<\/a>/gs,
     (m, href: string, label: string) => {
       if (/^(https?:|\/|#|mailto:)/i.test(href)) return m
@@ -867,19 +886,26 @@ watch(() => store.stageMessage, () => {
 .md-content :deep(th) { background: rgba(0, 0, 0, 0.03); font-weight: 500; }
 .md-content :deep(a) { color: var(--color-primary); text-decoration: none; }
 .md-content :deep(strong) { font-weight: 600; }
-/* KG 回答的 [片段N] 来源引用徽标——与图谱卡手风琴 chip 的编号对应 */
-.md-content :deep(.md-chunk-ref) {
+/* KG 回答的来源引用徽标——按证据类型配色,与图谱卡手风琴对照 */
+.md-content :deep(.md-ref) {
   display: inline-block;
   padding: 0 6px;
   margin: 0 1px;
   border-radius: 4px;
-  background: rgba(47, 84, 235, 0.08);
-  color: #2f54eb;
   font-size: 12px;
   font-weight: 500;
   line-height: 1.6;
   vertical-align: baseline;
+  white-space: nowrap;
 }
+/* 片段(向量召回原文)→ 紫,与图谱卡手风琴 chip 同族 */
+.md-content :deep(.md-ref-chunk) { background: rgba(114, 46, 209, 0.1); color: #722ed1; }
+/* 实体(图谱节点)→ 蓝 */
+.md-content :deep(.md-ref-entity) { background: rgba(47, 84, 235, 0.1); color: #2f54eb; }
+/* 三元组(图谱边)→ 青 */
+.md-content :deep(.md-ref-triple) { background: rgba(19, 194, 194, 0.12); color: #08979c; }
+/* 关系链路箭头标签 →[位于]→ 橙 */
+.md-content :deep(.md-ref-rel) { background: rgba(250, 140, 22, 0.14); color: #d46b08; }
 /* LLM 误写的关系链接降级样式:不可点,视觉上接近行内代码 */
 .md-content :deep(.md-fake-link) {
   background: rgba(0, 0, 0, 0.06);
