@@ -36,3 +36,19 @@ dependencies:
 artifact:
   type: data
   actions: [view_json]
+  display:
+    # 数据结果卡片的 key→中文标签(通用组件查表展示用)
+    data_labels:
+      intent: 检索意图
+      kb: 知识库
+      entityCount: 命中实体
+      relationCount: 命中关系
+      chunkCount: 命中文档片段
+    # 欢迎页大图标(前端通用图标集里的名字,未知名字回退默认)
+    welcome_icon: search
+    # 欢迎页示例卡(点击直接发送 prompt)
+    welcome_examples:
+      - {title: 实体查询, desc: 查人物、组织、地点的属性, prompt: 张小凡的师父是谁？, icon: search}
+      - {title: 关系追问, desc: 两个实体之间的关联, prompt: 青云门和天音寺是什么关系？, icon: share-alt}
+      - {title: 文档检索, desc: 基于导入文档的事实问答, prompt: 知识库里关于入职流程是怎么规定的？, icon: file-text}
+      - {title: 图谱浏览, desc: 查看实体关联的子图, prompt: 帮我看看和碧瑶相关的所有人物关系, icon: apartment}

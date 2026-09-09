@@ -64,10 +64,13 @@
         <!-- Assistant message (left-aligned, no bubble) -->
         <div v-else class="message-row assistant-row">
           <div class="msg-avatar assistant-avatar">
-            <FormOutlined />
+            <RobotOutlined />
           </div>
           <div class="msg-body">
-            <div class="msg-text">{{ msg.content }}</div>
+            <!-- 助手消息按 Markdown 渲染(知识图谱回答含列表/加粗/代码等);
+                 用户消息保持纯文本插值(防 v-html 注入) -->
+            <div v-if="msg.role === 'assistant'" class="msg-text md-content" v-html="renderMarkdown(msg.content)"></div>
+            <div v-else class="msg-text">{{ msg.content }}</div>
             
             <!-- ===== 追问卡片：当消息需要用户补充信息时显示 ===== -->
             <!-- v-if 双条件：needsClarification 标记 + 有问题列表 -->
@@ -278,6 +281,7 @@ import {
   CheckCircleOutlined, EyeOutlined, QuestionCircleOutlined,
   CopyOutlined, RollbackOutlined,
   SolutionOutlined, TeamOutlined, ContactsOutlined,
+  SearchOutlined, ShareAltOutlined, FileTextOutlined, ApartmentOutlined, RobotOutlined,
 } from '@ant-design/icons-vue'
 // Modal：ant-design-vue 的弹窗组件（模板里的 JSON 查看器）
 import { Modal, message as antdMessage } from 'ant-design-vue'
@@ -296,6 +300,17 @@ import { getHostPort } from '../../composables/hostPort'
 // 通用 diff（快照摘要的变更数统计）
 import { diffJson } from '../../utils/diff'
 import { getPackManifests } from '../../services/api'
+// Markdown 渲染(marked 解析 + DOMPurify 消毒防 XSS)
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
+
+marked.setOptions({ breaks: true, gfm: true })
+
+/** 助手消息 Markdown → 安全 HTML(空内容返回空串防 v-html 报错) */
+function renderMarkdown(text: string): string {
+  if (!text) return ''
+  return DOMPurify.sanitize(marked.parse(text) as string)
+}
 
 // ===== 组件入参（props）声明 =====
 // defineProps<{ embedded?: boolean }>() —— 编译宏，声明本组件接收一个可选的 embedded 标记。
@@ -318,14 +333,21 @@ const packActions = ref<string[]>(['view_json'])
 onMounted(async () => {
   try {
     const manifests = await getPackManifests()
-    // 不能取 manifests[0]：pack 顺序是文件系统发现序（多 pack 时不稳定，
-    // 曾把无 artifact 声明的示例 pack 排前——标题回退"智能助手"、apply
-    // 按钮消失）。优先选声明了 artifact 的主交互 pack，全都没有才回退第一个
+    // 主交互 pack：优先声明了 artifact.display 的（制品卡标签/动作取自它）
     const primary = manifests.find((m: any) => m.artifact?.display) || manifests[0]
     packDisplay.value = primary?.artifact?.display || null
     packArtifactType.value = primary?.artifact?.type
     const acts = primary?.artifact?.actions
     if (Array.isArray(acts) && acts.length) packActions.value = acts
+    // 欢迎页示例：聚合全部 pack 的示例卡（每 pack 最多取 4 条，避免刷屏）
+    const allExamples: any[] = []
+    for (const m of manifests) {
+      const exs = m?.artifact?.display?.welcome_examples
+      if (Array.isArray(exs)) allExamples.push(...exs.slice(0, 4))
+    }
+    if (allExamples.length) {
+      packDisplay.value = { ...(packDisplay.value || {}), welcome_examples: allExamples }
+    }
   } catch {
     packDisplay.value = null
   }
@@ -393,7 +415,11 @@ function getDataDisplayFields(data: Record<string, any>): Record<string, string>
 
 // 欢迎页示例卡：内容来自 pack manifest（display.welcome_examples），
 // 本组件只提供通用图标集（名字→组件）；manifest 未提供则不显示示例区
-const ICON_SET: Record<string, any> = { form: FormOutlined, contacts: ContactsOutlined }
+const ICON_SET: Record<string, any> = {
+  form: FormOutlined, contacts: ContactsOutlined,
+  search: SearchOutlined, 'share-alt': ShareAltOutlined,
+  'file-text': FileTextOutlined, apartment: ApartmentOutlined,
+}
 const examples = computed(() =>
   ((packDisplay.value?.welcome_examples || []) as any[])
     .map((ex: any) => ({ ...ex, icon: ICON_SET[ex.icon] || FormOutlined }))
@@ -402,7 +428,7 @@ const examples = computed(() =>
 // 欢迎页大图标：manifest 的 welcome_icon 名字 → 通用图标集组件（缺省回退默认）
 const welcomeIcon = computed(() => {
   const name = packDisplay.value?.welcome_icon
-  return (name && ICON_SET[name]) || FormOutlined
+  return (name && ICON_SET[name]) || RobotOutlined
 })
 
 // ===== Pipeline 步骤状态计算 =====
@@ -770,6 +796,46 @@ watch(() => store.stageMessage, () => {
   border-top-left-radius: var(--radius-sm);
   border: 1px solid var(--border-color-lighter);
 }
+
+/* ===== Markdown 内容排版(助手消息) ===== */
+.md-content :deep(p) { margin: 0 0 8px; }
+.md-content :deep(p:last-child) { margin-bottom: 0; }
+.md-content :deep(ul), .md-content :deep(ol) { margin: 4px 0 8px; padding-left: 20px; }
+.md-content :deep(li) { margin: 2px 0; }
+.md-content :deep(h1), .md-content :deep(h2), .md-content :deep(h3),
+.md-content :deep(h4) { margin: 12px 0 6px; font-size: 15px; font-weight: 600; }
+.md-content :deep(code) {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+}
+.md-content :deep(pre) {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.md-content :deep(pre code) { background: none; padding: 0; color: inherit; }
+.md-content :deep(blockquote) {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--color-primary);
+  background: rgba(51, 112, 255, 0.05);
+  border-radius: 0 6px 6px 0;
+}
+.md-content :deep(table) { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.md-content :deep(th), .md-content :deep(td) {
+  border: 1px solid var(--border-color-light);
+  padding: 6px 12px;
+  text-align: left;
+}
+.md-content :deep(th) { background: rgba(0, 0, 0, 0.03); font-weight: 500; }
+.md-content :deep(a) { color: var(--color-primary); text-decoration: none; }
+.md-content :deep(strong) { font-weight: 600; }
 
 /* ===== 数据卡片样式（非配置类结果） ===== */
 .data-card {

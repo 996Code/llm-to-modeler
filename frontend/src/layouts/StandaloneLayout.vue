@@ -18,8 +18,7 @@
       <div class="sider-header">
         <div class="brand">
           <div class="brand-logo">
-            <!-- FormOutlined 是一个图标组件（来自 @ant-design/icons-vue） -->
-            <FormOutlined />
+            <RobotOutlined />
           </div>
           <span class="brand-name">智能助手</span>
         </div>
@@ -72,7 +71,7 @@
 
 <script setup lang="ts">
 // 从图标库导入用到的图标组件（每个图标是一个 Vue 组件）
-import { PlusOutlined, MessageOutlined, DeleteOutlined, FormOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, MessageOutlined, DeleteOutlined, RobotOutlined } from '@ant-design/icons-vue'
 // 导入全局 store（单例，与 App.vue 中拿到的是同一份）
 import { useConversationStore } from '../stores/conversation'
 // 导入两个子组件（.vue 后缀可省略）

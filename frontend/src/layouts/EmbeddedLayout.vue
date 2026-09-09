@@ -18,7 +18,7 @@
     <div class="embedded-header">
       <div class="header-brand">
         <div class="brand-logo">
-          <FormOutlined />
+          <RobotOutlined />
         </div>
         <div class="header-text">
           <span class="title">智能助手</span>
@@ -90,7 +90,7 @@
 // =============================================================================
 
 // 图标组件（表单图标 / 新对话加号 / 历史对话）
-import { FormOutlined, PlusOutlined, HistoryOutlined } from '@ant-design/icons-vue'
+import { RobotOutlined, PlusOutlined, HistoryOutlined } from '@ant-design/icons-vue'
 import { message as antdMessage, Modal } from 'ant-design-vue'
 import { ref } from 'vue'
 // HostPort 单例：关闭走新协议

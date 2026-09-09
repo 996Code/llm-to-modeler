@@ -74,6 +74,19 @@ class KbSearchTool(Tool):
         store = runtime.get_kg_store(self._app_state)
         mem = getattr(ctx, "session_state", None)
 
+        # ── pipeline 进度定义(前端分步进度条) ──
+        # 与 CompositeTool.pipeline_definition 同一事件契约:工具开始时下发
+        # 步骤集,后续每个 stage 事件按 key 前缀匹配推进进度条
+        ctx.emit("pipeline_definition", {
+            "tool": self.name,
+            "steps": [
+                {"key": "kb_search.resolve", "label": "解析问题与知识库"},
+                {"key": "kb_search.retrieve", "label": "图谱与向量检索"},
+                {"key": "kb_search.answer", "label": "综合回答"},
+            ],
+        })
+        ctx.emit("stage", "kb_search.resolve", message="正在解析问题与选定知识库…")
+
         # ── 知识库解析 ──
         # 优先级:本轮显式指定 > 追问答案 > 会话记忆 > 宿主默认 > 唯一库自动 > 多库追问。
         # 会话记忆(ctx.session_state,scope=knowledge_graph):一个对话绑定
@@ -166,7 +179,7 @@ class KbSearchTool(Tool):
         })
 
         # ── 混合检索 + 回答 ──
-        ctx.emit("stage", "kb_search.retrieve", message=f"正在检索知识库「{kb['name']}」…")
+        ctx.emit("stage", "kb_search.retrieve", message=f"正在检索知识库「{kb['name']}」(图谱+向量)…")
         ctx.trace("kb_search.retrieve", f"检索 {kb['name']}", "info")
         try:
             result = retrieval.answer_question(
