@@ -86,6 +86,7 @@
 <script setup lang="ts">
 // ref：响应式基本值；computed：派生值；watch：监听变化（类比 PropertyChangeListener）
 import { ref, computed, watch } from 'vue'
+import { message } from 'ant-design-vue'
 import { SendOutlined, LoadingOutlined, PaperClipOutlined } from '@ant-design/icons-vue'
 
 // defineProps：声明父组件传入的属性（接口契约，类比 Java 方法入参）。
@@ -149,15 +150,20 @@ function onFileSelected(e: Event) {
   const input = e.target as HTMLInputElement
   // input.files?.[0]：可选链取第一个文件（?. 防 null）
   const file = input.files?.[0]
+  // 无论后续结果如何都要清空 value：不清空的话再次选择同一个文件
+  // 时 value 不变、不触发 change——表现为"传过一次之后再选就没反应"
+  input.value = ''
   if (!file) return
 
-  // 验证文件类型：必须是 image/* 开头（非图片直接忽略）
+  // 验证文件类型：必须是 image/* 开头（非图片给出提示,不再静默忽略）
   if (!file.type.startsWith('image/')) {
+    message.warning('仅支持图片文件')
     return
   }
 
-  // 限制文件大小 (10MB)，超过直接忽略
+  // 限制文件大小 (10MB)，超过给出提示（此前静默忽略,用户以为没点上）
   if (file.size > 10 * 1024 * 1024) {
+    message.warning('图片不能超过 10MB')
     return
   }
 

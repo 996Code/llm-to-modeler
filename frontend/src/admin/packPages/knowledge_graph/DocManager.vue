@@ -175,6 +175,11 @@ async function onFilesPicked(info: UploadChangeParam) {
     })
   } finally {
     uploading.value = false
+    // 签名无论成败都要复位:失败(如网关 413/网络错误)后重选同一批文件
+    // 必须能重试——不复位会命中上面的签名去重被静默吞掉,表现为
+    // "报错之后再上传没反应"。多文件并发去重由 uploading 标志兜底
+    // (antd 同批选择的事件在上传期间同步触发,全部被 in-flight 挡住)。
+    lastUploadKey = ''
   }
   await load()
   emit('changed')
