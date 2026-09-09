@@ -91,7 +91,9 @@ class KbSearchTool(Tool):
                 {"key": "kb_search.answer", "label": "综合回答"},
             ],
         })
-        ctx.emit("stage", "kb_search.resolve", message="正在解析问题与选定知识库…")
+        # 注意 message 必须位置传参:nodes.py 的 emit 按位置参数个数分发,
+        # kwargs 里的 message 会被丢弃(表单工具同款约定)
+        ctx.emit("stage", "kb_search.resolve", "正在解析问题与选定知识库…")
 
         # ── 知识库解析 ──
         # 优先级:本轮显式指定 > 追问答案 > 会话记忆 > 宿主默认 > 唯一库自动 > 多库追问。
@@ -188,7 +190,7 @@ class KbSearchTool(Tool):
         # on_stage 把 retrieval 内部各阶段(意图/图谱/子图/向量/组装/回答)
         # 透传成 SSE stage 事件,前端 pipeline 进度条逐步推进
         def _on_stage(key: str, message: str) -> None:
-            ctx.emit("stage", key, message=message)
+            ctx.emit("stage", key, message)
 
         ctx.trace("kb_search.retrieve", f"检索 {kb['name']}", "info")
         try:

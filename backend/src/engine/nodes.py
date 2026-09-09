@@ -240,11 +240,15 @@ def execute_tool_node(state: GraphState) -> dict:
 
     def emit(*args, **kwargs):
         """emit(event_type, stage_name, message, **extra)"""
+        # message 兼容位置/关键字两种传法(工具两种风格都存在:
+        # 表单系位置参数,KG 系曾用 message= 关键字——按位置数分发会
+        # 静默丢弃 kwargs 里的 message,这里归一后统一分发)
+        _msg = args[2] if len(args) >= 3 else kwargs.get("message", "")
         rt = getattr(_realtime_emitter, "fn", None)
         if rt is not None:
             # 实时通道：直接推给 StreamManager（内部 call_soon_threadsafe 回事件循环）
-            if len(args) >= 3:
-                rt("stage", args[1], args[2])
+            if len(args) >= 3 or (len(args) == 2 and args[0] == "stage"):
+                rt("stage", args[1], _msg)
             elif len(args) == 2:
                 if args[0] == "pipeline_definition":
                     rt("pipeline_definition", args[1], None)
@@ -253,12 +257,12 @@ def execute_tool_node(state: GraphState) -> dict:
             return  # 已实时推送，不再入列表（避免 chunk 阶段重复推）
 
         # 列表通道（兜底）
-        if len(args) >= 3:
+        if len(args) >= 3 or (len(args) == 2 and args[0] == "stage"):
             # 3参签名：emit(type, stage, message) —— 标准阶段进度事件
             sse_events.append({
                 "type": "stage",
                 "stage": args[1],
-                "message": args[2],
+                "message": _msg,
             })
         elif len(args) == 2:
             event_type = args[0]
