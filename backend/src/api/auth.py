@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import logging
 import os
+import secrets
 import time
 from typing import Optional
 
@@ -74,7 +75,7 @@ def decode_token(secret: str, token: str) -> Optional[int]:
 
 @router.post("/auth/token")
 async def issue_token(request: Request):
-    """用 SECRET_KEY 换取访问 token。"""
+    """用 ADMIN_TOKEN 换取访问 token。"""
     try:
         body = await request.json()
     except Exception:
@@ -84,15 +85,15 @@ async def issue_token(request: Request):
     if not secret_input:
         raise HTTPException(400, "缺少 secret 字段")
 
-    configured = _get_secret()
+    configured = _get_admin_token()
     if not configured:
-        raise HTTPException(503, "服务器未配置 SECRET_KEY，token 签发不可用")
+        raise HTTPException(503, "服务器未配置 ADMIN_TOKEN，token 签发不可用")
 
     # 常量时间比对防时序攻击
     if not hmac.compare_digest(secret_input, configured):
         raise HTTPException(401, "密钥无效")
 
-    token = encode_token(configured)
+    token = encode_token(_signing_key())
     expire_at = int(time.time()) + _TOKEN_TTL
 
     return JSONResponse({
@@ -111,29 +112,39 @@ _AUTH_WHITELIST = frozenset([
 ])
 
 
-def _get_secret() -> str:
-    """取签名密钥：复用 ADMIN_TOKEN（与旧管理端同一把密钥）。"""
+def _get_admin_token() -> str:
+    """访问口令(用户在 auth.html 输入的):来自 ADMIN_TOKEN 配置。"""
     return os.getenv("ADMIN_TOKEN", "").strip()
+
+
+# 签名密钥:进程启动时随机生成。与口令分离——口令是长期配置(部署方管理),
+# 签名密钥是短期凭证材料,每次重启/重新部署自动轮换,旧 token 全部失效
+# (用户需重新登录)。无状态校验不受影响:密钥活在本进程内,签发与校验同源。
+_signing_key_value = secrets.token_hex(32)
+
+
+def _signing_key() -> str:
+    return _signing_key_value
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """全局 token 校验中间件。
 
-    未配 SECRET_KEY → 全部放行（开放模式）。
+    未配 ADMIN_TOKEN → 全部放行（开放模式）。
     已配 → 白名单以外的路径必须带 Authorization: Bearer <token>。
+    签名密钥为进程启动时随机生成,重启/重新部署自动轮换(旧 token 全失效)。
     """
 
     def __init__(self, app: ASGIApp):
         super().__init__(app)
-        if _get_secret():
-            logger.info("AuthMiddleware: token 模式已启用（SECRET_KEY 已配置）")
+        if _get_admin_token():
+            logger.info("AuthMiddleware: token 模式已启用（ADMIN_TOKEN 已配置,签名密钥随启动轮换）")
         else:
-            logger.info("AuthMiddleware: 开放模式（SECRET_KEY 未配置）")
+            logger.info("AuthMiddleware: 开放模式（ADMIN_TOKEN 未配置）")
 
     async def dispatch(self, request: Request, call_next):
-        secret = _get_secret()
         # 开放模式：全部放行
-        if not secret:
+        if not _get_admin_token():
             return await call_next(request)
 
         # 白名单放行
@@ -150,7 +161,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
 
         token = auth_header[7:].strip()
-        expire_at = decode_token(secret, token)
+        expire_at = decode_token(_signing_key(), token)
         if expire_at is None:
             return JSONResponse(
                 {"error": "invalid_token", "detail": "token 无效或已过期"},
@@ -167,9 +178,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 def is_token_authorized(request: Request) -> bool:
     """检查当前请求的 token 是否有效（供 require_admin 等依赖使用）。
 
-    SECRET_KEY 未配置 → 返回 False（回退到 ADMIN_TOKEN 检查）。
-    SECRET_KEY 已配置 → 返回 True 仅当 token 有效。
+    ADMIN_TOKEN 未配置（开放模式）→ 返回 False（回退到旧 X-Admin-Token
+    或直接放行语义,由调用方决定）;已配置 → True 仅当 token 已过中间件校验。
     """
-    if not _get_secret():
-        return False  # 开放模式，不做 token 校验，回退到旧 ADMIN_TOKEN
+    if not _get_admin_token():
+        return False  # 开放模式，无 token 可言
     return getattr(request.state, "auth_expire_at", None) is not None

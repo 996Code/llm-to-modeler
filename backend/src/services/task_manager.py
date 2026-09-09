@@ -84,8 +84,9 @@ class TaskHandle:
             raise TaskCancelled(f"task {self.task_id} cancelled")
 
 
-class DuplicateTaskError(RuntimeError):
-    """dedupe_key 已有活任务时 submit 抛出(插件转 409 给前端)。"""
+# 任务提交契约异常:定义权在 SDK(插件可见契约,见 sdk.pack_api),
+# 此处 re-export 维持平台内既有引用
+from sdk.pack_api import DuplicateTaskError  # noqa: F401,E402
 
 
 class TaskManager:

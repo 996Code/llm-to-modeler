@@ -28,7 +28,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 # 会话上下文:日志层读线程绑定的 conv_id 兜底(call_context 无任何依赖,无循环)
-from services.call_context import current_conversation_id
+from sdk.call_context import current_conversation_id
 
 from openai import OpenAI
 from pydantic import BaseModel

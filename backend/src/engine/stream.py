@@ -51,7 +51,7 @@ from langgraph.types import Command
 from api.sse import StreamManager
 from engine.compression import build_compressed_history
 from engine.state_keys import STATE_CONTEXT_ARTIFACT
-from services.call_context import bind_conversation, clear_conversation
+from sdk.call_context import bind_conversation, clear_conversation
 from services.upstream_client import set_forward_headers, set_request_services
 
 # 模块级 logger

@@ -17,19 +17,76 @@ pack 的 api.py 需要两类鉴权语义:管理端(X-Admin-Token)与用户级
     @router.post("/search")   # 用户级:身份由 X-User-Id 透传,读法见 user_id()
     async def search(...): ...
 """
-from typing import Optional
+from typing import Any, Awaitable, Callable, Optional
 
-from fastapi import Request
+from fastapi import HTTPException, Request
+
+# ── 管理端鉴权(依赖倒置)─────────────────────────────────────
+# SDK 定义鉴权契约,宿主装配期注入实现(main.py 启动时注册
+# api.admin.require_admin)。pack 经 sdk.pack_api.admin_required
+# 使用——SDK 不反向 import 宿主 api 层。
+_admin_auth_fn: Optional[Callable[[Request], Awaitable[None]]] = None
+
+
+def register_admin_auth(fn: Callable[[Request], Awaitable[None]]) -> None:
+    """宿主注册管理端鉴权实现(装配期调用一次)。"""
+    global _admin_auth_fn
+    _admin_auth_fn = fn
 
 
 async def admin_required(request: Request) -> None:
-    """管理端鉴权依赖:与 /api/admin 同一把口令(X-Admin-Token)。
+    """管理端鉴权依赖:转发到宿主注册的鉴权实现。
 
-    开放模式(未配置 ADMIN_TOKEN)直接放行——语义与 api.admin.require_admin
-    完全一致,只是转发入口在 sdk(pack 侧使用)。
+    未注册(宿主装配缺漏)时 503 fail-closed——比静默放行安全:
+    管理端点宁可拒绝服务也不能无鉴权裸奔。
     """
-    from api.admin import require_admin  # 延迟导入:避免 sdk → api 顶层依赖
-    await require_admin(request)
+    if _admin_auth_fn is None:
+        raise HTTPException(503, "管理端鉴权未装配(宿主未注册)")
+    await _admin_auth_fn(request)
+
+
+# ── 插件配置读取器(依赖倒置)─────────────────────────────────
+# pack 运行时要读自己的声明式配置(设置页保存值 > env > schema 默认)。
+# 读取器由平台实现,SDK 只持有工厂契约——插件经 settings_reader()
+# 取用,不 import 平台 services 层。
+_settings_reader_factory: Optional[Callable[[str, Any], Any]] = None
+
+
+def register_settings_reader(factory: Callable[[str, Any], Any]) -> None:
+    """宿主注册读取器工厂 factory(pack_name, settings_store) -> reader。
+
+    reader 需实现 get(key, default) / all()(鸭子协议)。
+    """
+    global _settings_reader_factory
+    _settings_reader_factory = factory
+
+
+def settings_reader(app_state: Any, pack_name: str) -> Any:
+    """取本 pack 的配置读取器(get/all 鸭子协议)。
+
+    未注册工厂(装配缺漏)时返回空读取器:所有键走调用方 default,
+    插件以默认配置运行(fail-open——配置读不到不该崩掉整条业务链)。
+    """
+    if _settings_reader_factory is None:
+        class _EmptyReader:
+            def get(self, key, default=None):
+                return default
+
+            def all(self):
+                return {}
+
+        return _EmptyReader()
+    return _settings_reader_factory(pack_name, getattr(app_state, "settings_store", None))
+
+
+# ── 任务提交契约异常 ────────────────────────────────────────
+
+class DuplicateTaskError(RuntimeError):
+    """重复任务被拒(submit 的 dedupe_key 已有活任务)。
+
+    定义在 SDK(任务提交是插件经 app_state.task_manager 发起的通用
+    操作,异常属插件可见契约);平台 TaskManager 抛出本类型。"""
+
 
 
 def user_id(request: Request, default: str = "anonymous") -> str:

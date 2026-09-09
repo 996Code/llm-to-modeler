@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from sdk.registry import ToolRegistry
-from engine.prompt_loader import PromptLoader
+from sdk.prompt_loader import PromptLoader
 
 # 模块级 logger。Python 用 logging.getLogger(__name__),name 形如 "domains"。
 # 等价 Java 的 private static final Logger log = LoggerFactory.getLogger(...)。

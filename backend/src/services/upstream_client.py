@@ -38,7 +38,7 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 # 会话上下文(同包,无循环依赖):日志层读线程绑定的 conv_id 兜底
-from services.call_context import current_conversation_id
+from sdk.call_context import current_conversation_id
 
 import httpx
 

@@ -269,6 +269,18 @@ app.add_middleware(
 from api.auth import AuthMiddleware
 app.add_middleware(AuthMiddleware)
 
+# 管理端鉴权实现注册进 SDK(依赖倒置:pack 经 sdk.pack_api.admin_required
+# 使用,SDK 不反向 import api 层;装配期注册一次)
+from api.admin import require_admin as _require_admin
+from sdk.pack_api import register_admin_auth
+register_admin_auth(_require_admin)
+
+# 插件配置读取器工厂注册进 SDK(同款依赖倒置:插件经
+# sdk.pack_api.settings_reader 取 reader,不 import services 层)
+from services.pack_settings import PackSettingsReader as _PSR
+from sdk.pack_api import register_settings_reader
+register_settings_reader(lambda pack, store: _PSR(pack, store))
+
 # 注册各业务路由（顺序不影响路由匹配，FastAPI 按精确路径优先）
 app.include_router(health_router)
 app.include_router(auth_router)       # /api/auth/token（白名单，中间件放行）

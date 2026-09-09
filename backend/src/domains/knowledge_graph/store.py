@@ -35,9 +35,10 @@ def _now() -> str:
 class KGStore:
     """kg_* 三表的 DAO。"""
 
-    def __init__(self, db_path: str):
-        from services.conversation_store import DEFAULT_DB_PATH
-        self.db_path = Path(db_path or DEFAULT_DB_PATH)
+    def __init__(self, db_path: str = ""):
+        import os
+        # 平台库路径:env 直读(与 runtime.get_kg_store 同口径),不 import 平台层
+        self.db_path = Path(db_path or os.getenv("DATABASE_PATH", "data/conversations.db"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
         logger.info(f"KGStore initialized: {self.db_path}")

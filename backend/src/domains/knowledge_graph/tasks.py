@@ -110,7 +110,7 @@ def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False) -> Di
     # 占位/检查同临界区、终态统一释放(含 pending 期取消),插件零样板。
     # 失败自动续跑(设置页 import_max_auto_retry):LLM 抖动/限流导致的失败
     # 由框架延迟重入队,块级 checkpoint 保证只跑剩余部分
-    from services.task_manager import DuplicateTaskError
+    from sdk.pack_api import DuplicateTaskError
     max_retry = max(0, int(_cfg(app_state, "import_max_auto_retry", 3)))
     try:
         return app_state.task_manager.submit(
@@ -263,7 +263,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     vector_ready = _prepare_vector(handle, app_state, store, kb, conv_id)
 
     # 4) 逐批抽取(批间串行:词表 + checkpoint;批内并行:LLM 调用)
-    from engine.prompt_loader import PromptLoader
+    from sdk.prompt_loader import PromptLoader
     packs_root = Path(__file__).resolve().parent.parent
     loader = PromptLoader(packs_root=packs_root)
     llm = app_state.llm_client
@@ -792,7 +792,7 @@ def run_induce_schema(handle) -> Dict[str, Any]:
                samples=len(samples), total_chars=sum(len(s) for s in samples))
 
     handle.set_progress(40, f"LLM 归纳本体({len(samples)} 段样本)")
-    from engine.prompt_loader import PromptLoader
+    from sdk.prompt_loader import PromptLoader
     packs_root = Path(__file__).resolve().parent.parent
     loader = PromptLoader(packs_root=packs_root)
     prompt = loader.render("knowledge_graph", "induce_schema",

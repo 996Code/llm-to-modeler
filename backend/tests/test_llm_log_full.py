@@ -241,7 +241,7 @@ def test_chat_json_fallback_refunds_rate_quota(store, monkeypatch):
 
 def test_call_context_binds_upstream_logs(store):
     """上游调用未显式传 conv_id 时,从线程绑定的会话上下文兜底入链。"""
-    from services.call_context import bind_conversation, clear_conversation
+    from sdk.call_context import bind_conversation, clear_conversation
     from src.services.upstream_client import UpstreamClient
 
     up = UpstreamClient(conversation_store=store)
@@ -259,7 +259,7 @@ def test_call_context_binds_upstream_logs(store):
 
 def test_call_context_fallback_llm_logs(store, monkeypatch):
     """LLM 调用忘传 conv_id 时同样兜底;清理后不再关联。"""
-    from services.call_context import bind_conversation, clear_conversation
+    from sdk.call_context import bind_conversation, clear_conversation
 
     monkeypatch.setenv("LLM_LOG_FULL", "1")
     client = LLMClient(config=LLMConfig(base_url="http://x/v1", api_key="k"), conversation_store=store)

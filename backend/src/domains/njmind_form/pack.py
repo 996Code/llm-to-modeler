@@ -83,7 +83,7 @@ def create_prompt_loader():
     类似 Java 里把依赖获取放进方法内(JIT 解析),而非构造器字段 ——
     用于打破类初始化期的循环依赖。
     """
-    from engine.prompt_loader import PromptLoader
+    from sdk.prompt_loader import PromptLoader
     # Path(__file__) 是本 pack.py 的路径;.resolve() 转绝对路径;
     # .parent 是 njmind_form 目录;.parent.parent 上溯到 domains 目录。
     # 即 packs_root = backend/src/domains

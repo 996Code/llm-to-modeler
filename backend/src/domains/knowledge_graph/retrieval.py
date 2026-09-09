@@ -34,7 +34,7 @@ _loader = None
 def _prompt_loader():
     global _loader
     if _loader is None:
-        from engine.prompt_loader import PromptLoader
+        from sdk.prompt_loader import PromptLoader
         _loader = PromptLoader(packs_root=Path(__file__).resolve().parent.parent)
     return _loader
 
@@ -59,7 +59,7 @@ def _log_retrieval_call(app_state, call_type: str, endpoint: str,
         if cs is None:
             return
         if not conv_id:
-            from services.call_context import current_conversation_id
+            from sdk.call_context import current_conversation_id
             conv_id = current_conversation_id()
         cs.save_call_log(
             call_type=call_type,

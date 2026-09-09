@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from domains.knowledge_graph.store import KGStore
-from services.pack_settings import PackSettingsReader
 
 PACK_NAME = "knowledge_graph"
 
@@ -27,9 +26,14 @@ _kg_store_fp: str = ""
 _kg_store_lock = threading.Lock()
 
 
-def settings_reader(app_state) -> PackSettingsReader:
-    """插件配置读取器(每次读实时解析:设置页热改即时生效)。"""
-    return PackSettingsReader(PACK_NAME, getattr(app_state, "settings_store", None))
+def settings_reader(app_state):
+    """插件配置读取器(每次读实时解析:设置页热改即时生效)。
+
+    经 sdk.pack_api 门面取用(get/all 鸭子协议)——插件不 import
+    平台 services 层。
+    """
+    from sdk.pack_api import settings_reader as _sdk_reader
+    return _sdk_reader(app_state, PACK_NAME)
 
 
 def get_kg_store(app_state) -> KGStore:
