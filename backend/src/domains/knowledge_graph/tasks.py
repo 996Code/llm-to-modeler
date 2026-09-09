@@ -20,6 +20,7 @@
   命名一致性(合并质量的根本保障)。
 """
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -639,6 +640,10 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
                 model=model_override or None,
             )
             entities, relations = _normalize_extraction(data)
+            # 原文锚定过滤(prompt 规则的代码强制):示例词幻觉(类型表
+            # examples 被 LLM 照抄)、章节标题、整句引文都在这里掐掉,
+            # 不让它们污染图谱。真实事故:通用模板示例"张三"被逐字抽进图
+            entities, anchor_dropped = _anchor_filter(entities, chunk["text"])
             # 请求级留痕(对标 call_logs 的粒度):一次 LLM 调用一份明细,
             # 含输入输出规模与耗时——任务日志能逐行对上调用日志
             stats = {
@@ -647,6 +652,7 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
                 "raw_entities": len((data or {}).get("entities") or []) if isinstance(data, dict) else 0,
                 "raw_relations": len((data or {}).get("relations") or []) if isinstance(data, dict) else 0,
                 "glossary_size": len(glossary_lines),
+                "anchor_dropped": anchor_dropped,
                 "error": "",
             }
             return entities, relations, stats
@@ -663,6 +669,53 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
                 time.sleep(0.5 * (attempt + 1))
     # 把最后一次失败的 stats 带出去(调用方记 warn 日志用)
     raise _ExtractionError(str(last_error), failed_stats) if last_error else RuntimeError("extract failed")
+
+
+# ── 原文锚定过滤 ─────────────────────────────────────────────
+
+# 章节标题/结构行:"第X章/回/节/卷/场/幕/篇"及常见首尾标记——是文档结构,
+# 不是实体(真实事故:小说导入后"第三章 宏愿"成了图谱节点)
+_HEADING_RE = re.compile(
+    r"^(第\s*[0-9〇零一二两三四五六七八九十百千万]+\s*[章回节卷场幕篇部集]"
+    r"|序章|序幕|序言|楔子|引子|尾声|终章|后记|跋|番外|附录|目录|正文)"
+)
+# 实体名不该含的标点:句读/分句符——含它基本是整句话被当成了实体
+# (真实事故:"九天玄刹,化为神雷。煌煌天威,以剑引之"整句入图)
+_NAME_PUNCT_RE = re.compile(r"[。,，!?！?;;\n\r…\"“”'‘’《》]")
+# 超过这个长度的"name"几乎不可能是实体(30 字 ≈ 一整句)
+_MAX_NAME_LEN = 30
+
+
+def _anchor_filter(entities: List[Dict], chunk_text: str) -> Tuple[List[Dict], int]:
+    """原文锚定过滤(post-LLM 代码强制,prompt 规则只是建议):
+
+    1. 实体 name 或任一 alias 必须出现在 chunk 原文中——类型表 examples
+       被 LLM 照抄(通用模板 person 示例"张三"逐字进图)、凭空幻觉都在
+       这一层掐掉;
+    2. 章节标题模式、含句读标点、超长的 name 直接丢弃——它们是文档结构
+       或句子,不是实体。
+
+    关系不在本层处理:关系端点可能指向词表里的跨块实体,批次层的
+    known(本批 ∪ 词表)悬空过滤已覆盖;被本层丢弃的实体不进批次实体集,
+    引用它的关系会被悬空过滤连带剔除,行为一致。
+
+    Returns:
+        (保留的实体, 丢弃计数)
+    """
+    kept: List[Dict] = []
+    dropped = 0
+    for e in entities:
+        name = str(e.get("name") or "").strip()
+        if not name or _HEADING_RE.match(name) or _NAME_PUNCT_RE.search(name) \
+                or len(name) > _MAX_NAME_LEN:
+            dropped += 1
+            continue
+        candidates = [name] + [str(a).strip() for a in (e.get("aliases") or [])]
+        if any(c and c in chunk_text for c in candidates):
+            kept.append(e)
+        else:
+            dropped += 1
+    return kept, dropped
 
 
 def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
