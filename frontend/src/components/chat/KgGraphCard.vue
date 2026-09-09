@@ -23,33 +23,34 @@
         +{{ result.sources.entities.length - 12 }}
       </a-tag>
     </div>
-    <!-- 文档片段:可点击展开看原文(带相似度分数) -->
-    <div v-if="result.sources?.chunks?.length" class="kgc-sources">
-      <span class="kgc-src-label"><FileTextOutlined /> 文档片段</span>
-      <a-tag v-for="(c, i) in result.sources.chunks.slice(0, 6)" :key="i"
-             class="kgc-chip kgc-chip-click"
-             :title="c.text ? '点击查看片段原文' : '无原文'"
-             @click="toggleChunk(i)">
-        {{ c.docName || '文档' }}{{ c.seq != null ? `#${c.seq}` : '' }}
-        <span v-if="c.score != null" class="kgc-score">{{ (Number(c.score)).toFixed(2) }}</span>
-      </a-tag>
-      <a-tag v-if="result.sources.chunks.length > 6" class="kgc-chip">
-        +{{ result.sources.chunks.length - 6 }}
-      </a-tag>
-    </div>
-    <!-- 展开的片段原文 -->
-    <template v-if="result.sources?.chunks?.length">
-      <div v-for="(c, i) in result.sources.chunks" :key="'t' + i">
-        <div v-if="expandedChunk === i && c.text" class="kgc-chunk-text">
-          <div class="kgc-chunk-head">
-            <span>{{ c.docName || '文档' }}{{ c.seq != null ? ` · 块 ${c.seq}` : '' }}</span>
-            <span v-if="c.score != null" class="kgc-score">相似度 {{ (Number(c.score)).toFixed(4) }}</span>
-            <a-button size="small" type="text" class="kgc-chunk-close" @click="toggleChunk(i)">收起</a-button>
+    <!-- 文档片段:手风琴列表——每条 chip 下方紧贴原文面板(展开/收起) -->
+    <div v-if="result.sources?.chunks?.length" class="kgc-chunks">
+      <span class="kgc-src-label"><FileTextOutlined /> 文档片段(点击查看原文)</span>
+      <div v-for="(c, i) in result.sources.chunks" :key="i" class="kgc-chunk-item">
+        <!-- 片段 chip(点击切换展开;手风琴:同一时间只展开一条) -->
+        <button class="kgc-chunk-trigger"
+                :class="{ active: expandedChunk === i }"
+                :disabled="!c.text"
+                :title="c.text ? '点击查看片段原文' : '无原文'"
+                @click="toggleChunk(i)">
+          <span class="kgc-chunk-trigger-text">
+            {{ c.docName || '文档' }}{{ c.seq != null ? ` #${c.seq}` : '' }}
+          </span>
+          <span v-if="c.score != null" class="kgc-score">{{ (Number(c.score)).toFixed(2) }}</span>
+          <DownOutlined class="kgc-chunk-arrow" :class="{ expanded: expandedChunk === i }" />
+        </button>
+        <!-- 原文面板:紧贴 chip 下方,展开动画 -->
+        <transition name="kgc-collapse">
+          <div v-if="expandedChunk === i && c.text" class="kgc-chunk-text">
+            <div class="kgc-chunk-head">
+              <span>{{ c.docName || '文档' }}{{ c.seq != null ? ` · 块 ${c.seq}` : '' }}</span>
+              <span v-if="c.score != null" class="kgc-score">相似度 {{ (Number(c.score)).toFixed(4) }}</span>
+            </div>
+            <div class="kgc-chunk-body">{{ c.text }}</div>
           </div>
-          <div class="kgc-chunk-body">{{ c.text }}</div>
-        </div>
+        </transition>
       </div>
-    </template>
+    </div>
   </div>
 </template>
 
@@ -58,7 +59,7 @@
 // G6 v5 按需动态导入(参考 chat-bi SchemaGraph 的成熟用法)——只有出现
 // 图谱结果时才加载 G6 chunk,主包零增量。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { FileTextOutlined, LinkOutlined, PartitionOutlined } from '@ant-design/icons-vue'
+import { DownOutlined, FileTextOutlined, LinkOutlined, PartitionOutlined } from '@ant-design/icons-vue'
 
 interface KgNode { id: string; name: string; type?: string; description?: string }
 interface KgEdge { id?: string; source: string; target: string; type?: string; description?: string; evidence?: string }
@@ -77,7 +78,7 @@ const nodes = computed<KgNode[]>(() => props.result.subgraph?.nodes || [])
 const edges = computed<KgEdge[]>(() => props.result.subgraph?.edges || [])
 const chunkHits = computed(() => props.result.sources?.chunks?.length || 0)
 
-// 展开的片段下标(null=全收起);点击 chip 切换
+// 展开的片段下标(null=全收起);手风琴语义:点击已展开的收起,点击另一条切换
 const expandedChunk = ref<number | null>(null)
 function toggleChunk(i: number) {
   expandedChunk.value = expandedChunk.value === i ? null : i
@@ -207,27 +208,54 @@ onBeforeUnmount(() => {
 .kgc-sources { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .kgc-src-label { font-size: 12px; color: #6b7280; display: inline-flex; align-items: center; gap: 4px; }
 .kgc-chip { font-size: 11px; }
-/* 可点击的片段 chip(有原文时) */
-.kgc-chip-click { cursor: pointer; user-select: none; }
-.kgc-chip-click:hover { border-color: #2f54eb; color: #2f54eb; }
+
+/* ===== 文档片段手风琴 ===== */
+.kgc-chunks { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.kgc-chunk-item { display: flex; flex-direction: column; }
+.kgc-chunk-trigger {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fafbfc;
+  cursor: pointer;
+  font-size: 12px;
+  color: #4b5563;
+  transition: all 0.15s;
+  text-align: left;
+  width: 100%;
+}
+.kgc-chunk-trigger:hover:not(:disabled) { border-color: #c3d0f5; background: #f0f4ff; }
+.kgc-chunk-trigger:disabled { cursor: default; opacity: 0.55; }
+.kgc-chunk-trigger.active {
+  border-color: #2f54eb;
+  background: #eef2ff;
+  color: #2f54eb;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.kgc-chunk-trigger-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kgc-chunk-arrow { font-size: 10px; color: #9ca3af; transition: transform 0.2s; }
+.kgc-chunk-arrow.expanded { transform: rotate(180deg); color: #2f54eb; }
+
 /* 片段分数(相似度) */
 .kgc-score { margin-left: 4px; opacity: 0.65; font-size: 10px; }
-/* 展开的片段原文卡片 */
+
+/* 展开的片段原文面板(紧贴 chip 下方) */
 .kgc-chunk-text {
-  margin-top: 8px;
-  border: 1px solid #eef1f6;
-  border-radius: 10px;
-  background: #fafbfc;
+  border: 1px solid #2f54eb;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+  background: #fff;
   overflow: hidden;
 }
 .kgc-chunk-head {
   display: flex; align-items: center; gap: 12px;
-  padding: 8px 12px;
+  padding: 6px 12px;
   border-bottom: 1px solid #eef1f6;
   font-size: 12px; color: #6b7280;
 }
 .kgc-chunk-head > span:first-child { font-weight: 500; color: #374151; }
-.kgc-chunk-close { margin-left: auto; font-size: 12px; }
 .kgc-chunk-body {
   padding: 10px 12px;
   font-size: 12.5px;
@@ -237,5 +265,16 @@ onBeforeUnmount(() => {
   word-break: break-word;
   max-height: 220px;
   overflow-y: auto;
+}
+
+/* 手风琴展开/收起过渡 */
+.kgc-collapse-enter-active, .kgc-collapse-leave-active {
+  transition: all 0.2s ease;
+  max-height: 260px;
+  overflow: hidden;
+}
+.kgc-collapse-enter-from, .kgc-collapse-leave-to {
+  max-height: 0;
+  opacity: 0;
 }
 </style>

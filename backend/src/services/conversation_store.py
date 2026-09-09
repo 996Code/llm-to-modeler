@@ -722,6 +722,7 @@ class ConversationStore:
         role: str,
         content: str,
         config_snapshot: Optional[Dict[str, Any]] = None,
+        data_artifact: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """向会话追加一条消息。只 INSERT,不 UPDATE(严格遵守 append-only)。
 
@@ -735,9 +736,11 @@ class ConversationStore:
             role:           角色('user' / 'assistant' / 'tool' 等)
             content:        消息正文
             config_snapshot:当时的配置快照(可选,用于审计"用户当时配的什么")
+            data_artifact:  数据型制品快照(可选,KG 检索子图等——历史恢复时
+                            前端据此重渲染数据卡/图谱卡)
 
         Returns:
-            包含 id / role / content / configSnapshot / createdAt 的字典。
+            包含 id / role / content / configSnapshot / dataArtifact / createdAt 的字典。
         """
         msg_id = str(uuid.uuid4())
         now = _now()
@@ -749,6 +752,7 @@ class ConversationStore:
             "role": role,
             "content": content,
             "config_snapshot": config_snapshot,
+            "data_artifact": data_artifact,
         }
 
         with self._get_conn() as conn:
@@ -764,6 +768,7 @@ class ConversationStore:
             "role": role,
             "content": content,
             "configSnapshot": config_snapshot,
+            "dataArtifact": data_artifact,
             "createdAt": now,
         }
 
@@ -792,6 +797,7 @@ class ConversationStore:
                 "role": payload.get("role", r["kind"]),
                 "content": payload.get("content", ""),
                 "configSnapshot": payload.get("config_snapshot"),
+                "dataArtifact": payload.get("data_artifact"),
                 "createdAt": r["created_at"],
             })
         return result

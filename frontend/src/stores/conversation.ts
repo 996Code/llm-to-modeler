@@ -137,7 +137,12 @@ export const useConversationStore = defineStore('conversation', () => {
     try {
       const conv = await api.getConversation(id)
       currentConversation.value = conv
-      messages.value = conv.messages || []
+      // 历史消息里的 dataArtifact(数据型制品快照,如 KG 检索子图)映射到
+      // dataResult——前端渲染分支复用 SSE 实时路径的同一条(图谱卡/数据卡)
+      messages.value = (conv.messages || []).map((m: any) => ({
+        ...m,
+        dataResult: m.dataResult ?? m.dataArtifact ?? undefined,
+      }))
       currentConfig.value = conv.currentConfig || null
       baselineConfig.value = null  // 切会话：diff 基线随下一轮交互重建
     } finally {

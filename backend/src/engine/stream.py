@@ -463,7 +463,12 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
         summary = result_data.get("summary", "")
 
         store.add_message(conv_id=conv_id, role="user", content=user_input)
-        store.add_message(conv_id=conv_id, role="assistant", content=summary)
+
+        # 数据型制品(KG 检索子图/查询结果):随 assistant 消息一起落库,
+        # 历史恢复时前端用 dataArtifact 重渲染图谱卡/数据卡
+        data_artifact = result_data.get("data") if result_data.get("artifactType") == "data" else None
+        store.add_message(conv_id=conv_id, role="assistant", content=summary,
+                          data_artifact=data_artifact)
 
         # 配置结果:存 config_snapshot + 更新对话配置
         config = result_data.get("config")
