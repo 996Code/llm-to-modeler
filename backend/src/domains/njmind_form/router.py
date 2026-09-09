@@ -56,22 +56,21 @@ class NjmindFormRouter(DefaultPackRouter):
         return super().route(user_input, artifact if has_fields else None,
                              history=history, llm_client=llm_client)
 
-    def build_prompt(self, has_artifact: bool) -> str:
-        # 复用父类的候选工具清单拼装，替换规则段为表单领域规则
-        base = super().build_prompt(has_artifact)
-        tools_section = base[base.find("候选工具:"):]
+    def candidate_tools(self, has_artifact: bool) -> list:
+        """数据铁律在候选集层面执行:画布为空时 modify_form 不进候选。
 
-        # 数据铁律在候选集层面执行：画布为空时 modify_form 不进候选——
-        # LLM 在此场景选 modify 是幻觉（没有基线可改），从集合里排除比在
-        # 规则里"劝阻"可靠（概率系统永远 <100% 遵循指令）。同时保留
-        # image_form/get_form/chat 等空画布下的合法选项（曾因直通 create_form
-        # 把"识别这张图片生成表单"也吞了）。
+        LLM 在此场景选 modify 是幻觉(没有基线可改),从集合里排除比在
+        规则里"劝阻"可靠(概率系统永远 <100% 遵循指令)。同时保留
+        image_form/get_form/chat 等空画布下的合法选项(曾因直通
+        create_form 把"识别这张图片生成表单"也吞了)。
+        """
+        tools = super().candidate_tools(has_artifact)
         if not has_artifact:
-            tools_section = "\n".join(
-                line for line in tools_section.split("\n")
-                if not line.startswith("- modify_form:")
-            )
+            tools = [t for t in tools if t.name != "modify_form"]
+        return tools
 
+    def build_prompt(self, has_artifact: bool) -> str:
+        # 领域规则段自持,候选清单段复用父类结构化渲染(含候选集铁律过滤)
         return (
             "你是表单领域的工具路由器。根据用户消息与画布状态选工具，只返回 JSON。\n\n"
             "规则（按优先级）：\n"
@@ -89,5 +88,5 @@ class NjmindFormRouter(DefaultPackRouter):
             "5. 闲聊、询问能力、无关话题 → chat。\n"
             "6. 标注 (仅当 has_artifact=true) 的工具仅在画布有内容时可选。\n"
             "7. 只返回 JSON，不要解释。\n\n"
-            f"{tools_section}"
+            f"{self.build_tools_section(has_artifact)}"
         )

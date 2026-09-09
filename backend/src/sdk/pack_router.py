@@ -47,20 +47,33 @@ class DefaultPackRouter:
         """保存本 pack 的工具集（build_prompt 遍历它拼候选清单）。"""
         self._registry = registry
 
-    def build_prompt(self, has_artifact: bool) -> str:
-        """构建二级路由 prompt（protected：领域路由子类可复用骨架换规则）。
+    def candidate_tools(self, has_artifact: bool) -> list:
+        """本场景的候选工具集(子类覆写点:按数据铁律过滤候选)。
 
-        工具是否需要画布等适用条件由各工具的 when 描述自行表达（领域语言），
-        框架不做属性级标注——需要精细规则的 pack 覆写本方法（见领域 pack 的 router）。
+        默认全量返回;需要精细规则的 pack 覆写本方法(如画布为空时
+        排除修改类工具)——返回结构化工具列表,build_tools_section
+        统一渲染,子类不解析父类 prompt 字符串。
         """
-        tools_list = "\n".join(f"- {t.name}: {t.when}" for t in self._registry.all())
+        return self._registry.all()
 
+    def build_tools_section(self, has_artifact: bool) -> str:
+        """候选清单段渲染(protected:子类复用,格式变更只改一处)。"""
+        tools_list = "\n".join(f"- {t.name}: {t.when}" for t in self.candidate_tools(has_artifact))
+        return f"候选工具:\n{tools_list}"
+
+    def build_prompt(self, has_artifact: bool) -> str:
+        """构建二级路由 prompt(protected:领域路由子类可复用骨架换规则)。
+
+        工具是否需要画布等适用条件由各工具的 when 描述自行表达(领域语言),
+        框架不做属性级标注——需要精细规则的 pack 覆写
+        candidate_tools/build_tools_section(见领域 pack 的 router)。
+        """
         return (
             "你是工具路由器。根据用户消息从本领域的候选工具中选择最合适的，只返回 JSON。\n\n"
             "规则：\n"
             "1. 没有可匹配工具时返回 null。\n"
             "2. 只返回 JSON，不要解释。\n\n"
-            f"候选工具:\n{tools_list}\n\n"
+            f"{self.build_tools_section(has_artifact)}\n\n"
             f"当前 has_artifact={str(has_artifact).lower()}\n"
             '输出格式: {"tool": "tool_name"} （无合适工具则 {"tool": null}）'
         )

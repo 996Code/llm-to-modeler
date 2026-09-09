@@ -12,13 +12,13 @@
 import logging
 from typing import Optional
 
-from sdk.asset_client import AssetClient
+from sdk.asset_client import ConfigAssetClient
 from sdk.sanitize import sanitize_obj
 
 logger = logging.getLogger(__name__)
 
 
-class HttpAssetClient(AssetClient):
+class HttpAssetClient(ConfigAssetClient):
     """通用 HTTP 资产适配器：领域实现注入 + 通用数据收发。"""
 
     def __init__(self, upstream):

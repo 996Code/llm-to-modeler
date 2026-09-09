@@ -42,135 +42,22 @@ from typing import Any, Optional
 
 
 class AssetClient(ABC):
-    """资产来源的抽象基类。
+    """资产/数据来源的统一契约基类(SDK 通用层)。
 
-    【职责】
-    定义 pack 与上游系统交互的统一契约:取模板、取 schema、取 guide、
-    校验制品、持久化制品,以及通用的数据提交/查询。
+    【两层拆分】
+    - AssetClient(本类):通用数据契约——submit_data/query_data/
+      has_service,任何插件(配置类/数据类)都只用得上这三个;
+      其余方法为"未实现即抛"的钩子,不强制。
+    - ConfigAssetClient(子类):配置制品业务契约——模板/schema/guide/
+      校验/持久化六件事,abstractmethod 强制。配置类插件
+      (njmind_form 等)的上游实现继承它;数据类插件(如 leave_application)
+      只依赖本类,不必为六个用不到的方法背空壳实现。
 
-    【设计模式】
-    - 抽象基类(ABC):Python 用 abc.ABC + @abstractmethod 强制子类实现,
-      等价 Java 的 abstract class + abstract 方法;未实现的抽象方法被实例化
-      时会直接抛 TypeError(类似 Java 不允许 new 抽象类)。
-    - 模板方法 + 钩子:部分方法(get_artifact / submit_data / query_data)
-      提供默认"未实现"实现,子类选择性覆写,而不是强制全部实现。
-
-    【Java 类比】
-    相当于:
-        public abstract class AssetClient {
-            public abstract Map<String,Object> getTemplate(String name);
-            ... // 强制实现的抽象方法
-            public Map<String,Object> submitData(...) {
-                throw new UnsupportedOperationException("...");
-            }
-        }
+    工具侧一律经 ctx.asset_client(鸭子类型)访问,标注哪个层
+    由插件自行决定(数据类插件不该声明配置契约)。
     """
 
-    # ── 制品配置类操作(抽象方法强制实现) ──
-
-    @abstractmethod
-    def get_template(self, name: str) -> dict:
-        """取模板 JSON。
-
-        Args:
-            name: 模板标识名。
-
-        Returns:
-            模板内容(dict,直接来自上游 JSON 解析结果)。
-
-        Note:
-            子类必须实现(abstract)。返回内容进入 prompt 前需经 sanitize_obj 清洗。
-        """
-
-    @abstractmethod
-    def list_templates(self) -> list[str]:
-        """列出所有可用模板名。
-
-        Returns:
-            模板名字符串列表。供 LLM 或前端展示"可选模板"。
-        """
-
-    @abstractmethod
-    def get_schema(self, name: str) -> dict:
-        """取 JSON Schema(用于校验制品结构)。
-
-        Args:
-            name: schema 标识名。
-
-        Returns:
-            JSON Schema(dict 形式)。
-        """
-
-    @abstractmethod
-    def get_guide(self) -> Optional[dict]:
-        """取 guide.json(生成指引、条目说明等辅助生成的内容)。
-
-        Returns:
-            guide 内容(dict)。该内容会拼进 prompt 辅助 LLM 生成合规制品。
-        """
-
-
-    def get_artifact(self, entry_id: str) -> Optional[dict]:
-        """根据标识(entry_id)查询已有制品配置。
-
-        用于增量修改/复制类工具:先查回现有配置,再在其基础上修改,
-        避免让 LLM 从零重建整个制品。
-
-        Args:
-            entry_id: 制品唯一标识(上游系统的主键)。
-
-        Returns:
-            制品配置 dict;不存在时返回 None(由调用方决定是否追问用户)。
-
-        Note:
-            默认实现抛 NotImplementedError —— 这是一个"钩子"方法,非强制实现:
-            纯数据类 pack 用不到,配置类 pack 用 HttpAssetClient 提供的实现。
-            子类按需覆写。
-
-        【Java 类比】
-        等价 Java interface 里的 default 方法抛 UnsupportedOperationException:
-        子类不实现也能编译通过,只有真调用到才报错。
-        """
-        # self.__class__.__name__ 取运行时子类类名,放进错误信息便于定位。
-        raise NotImplementedError(
-            f"{self.__class__.__name__} 未实现 get_artifact; "
-            "如需查询制品请覆写此方法或使用 HttpAssetClient"
-        )
-
-    @abstractmethod
-    def validate_artifact(self, artifact: dict, mode: str) -> dict:
-        """校验制品(生成的制品配置)是否符合上游规则。
-
-        Args:
-            artifact: 待校验的制品(配置 dict)。
-            mode: 校验模式,"create"(新建)或 "update"(更新),
-                  两者可能走不同校验规则(如 update 要求制品已存在)。
-
-        Returns:
-            dict,固定结构 {valid: bool, errors: list, warnings: list}。
-            - valid: 是否通过
-            - errors: 阻断性错误列表(不通过则不能持久化)
-            - warnings: 非阻断警告(可继续但提示用户)
-
-        Note:
-            abstract 方法,子类必须实现。
-        """
-
-    @abstractmethod
-    def persist_artifact(self, artifact: dict, mode: str) -> dict:
-        """持久化制品到上游(真正写入上游存储)。
-
-        Args:
-            artifact: 待持久化的制品(配置 dict)。
-            mode: "create"(新建)或 "update"(更新),决定走 POST 还是 PUT 语义。
-
-        Returns:
-            dict,至少包含 {success: bool, ...},上游会带回 ID 等附加信息。
-
-        Note:
-            abstract 方法,子类必须实现。这是写操作,上游应有幂等/事务保护。
-        """
-
+    # ── 通用数据契约(数据类插件的核心依赖;默认钩子) ──
 
     def has_service(self, service_name: str) -> bool:
         """该上游服务当前是否可解析出地址(宿主 services 表有该服务)。
@@ -179,8 +66,6 @@ class AssetClient(ABC):
         默认 True(非 HTTP 实现或测试桩不限制;HTTP 实现覆写为真实判定)。
         """
         return True
-
-    # ── 通用数据操作(插件化扩展,钩子方法) ──
 
     def submit_data(self, path: str, data: dict, service_name: str,
                     headers: dict = None) -> dict:
@@ -203,9 +88,6 @@ class AssetClient(ABC):
 
         Raises:
             NotImplementedError: 默认实现抛出。子类(HttpAssetClient)按需覆写。
-
-        Note:
-            默认实现抛 NotImplementedError,纯配置类 pack 无需实现此方法。
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} 未实现 submit_data; "
@@ -231,10 +113,120 @@ class AssetClient(ABC):
             NotImplementedError: 默认实现抛出。子类(HttpAssetClient)按需覆写。
 
         Note:
-            默认实现抛 NotImplementedError,纯配置类 pack 无需实现此方法。
             返回内容进入 prompt 前仍需经 sanitize_obj 清洗。
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} 未实现 query_data; "
             "如需查询数据请覆写此方法或使用 HttpAssetClient"
         )
+
+    # ── 配置制品契约(钩子形态;强制形态见 ConfigAssetClient) ──
+
+    def get_template(self, name: str) -> dict:
+        """取模板 JSON(配置类插件用;返回内容进 prompt 前需 sanitize)。"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 get_template; "
+            "配置类插件请继承 ConfigAssetClient 或使用 HttpAssetClient"
+        )
+
+    def list_templates(self) -> list[str]:
+        """列出所有可用模板名(配置类插件用)。"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 list_templates; "
+            "配置类插件请继承 ConfigAssetClient 或使用 HttpAssetClient"
+        )
+
+    def get_schema(self, name: str) -> dict:
+        """取 JSON Schema(配置类插件用,用于校验制品结构)。"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 get_schema; "
+            "配置类插件请继承 ConfigAssetClient 或使用 HttpAssetClient"
+        )
+
+    def get_guide(self) -> Optional[dict]:
+        """取 guide.json(生成指引;拼进 prompt 辅助 LLM 生成合规制品)。"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 get_guide; "
+            "配置类插件请继承 ConfigAssetClient 或使用 HttpAssetClient"
+        )
+
+    def get_artifact(self, entry_id: str) -> Optional[dict]:
+        """按标识查询已有制品配置(增量修改/复制类工具的基线来源)。
+
+        Args:
+            entry_id: 制品唯一标识(上游系统的主键)。
+
+        Returns:
+            制品配置 dict;不存在时返回 None(由调用方决定是否追问用户)。
+
+        Note:
+            钩子方法,非强制:纯数据类 pack 用不到。
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 get_artifact; "
+            "如需查询制品请覆写此方法或使用 HttpAssetClient"
+        )
+
+    def validate_artifact(self, artifact: dict, mode: str) -> dict:
+        """校验制品是否符合上游规则。
+
+        Args:
+            artifact: 待校验的制品(配置 dict)。
+            mode: "create"(新建)或 "update"(更新),两者可能走不同校验规则。
+
+        Returns:
+            dict,固定结构 {valid: bool, errors: list, warnings: list}。
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 validate_artifact; "
+            "配置类插件请继承 ConfigAssetClient 或使用 HttpAssetClient"
+        )
+
+    def persist_artifact(self, artifact: dict, mode: str) -> dict:
+        """持久化制品到上游(写操作,上游应有幂等/事务保护)。
+
+        Args:
+            artifact: 待持久化的制品(配置 dict)。
+            mode: "create"(新建)或 "update"(更新)。
+
+        Returns:
+            dict,至少包含 {success: bool, ...},上游会带回 ID 等附加信息。
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 未实现 persist_artifact; "
+            "配置类插件请继承 ConfigAssetClient 或使用 HttpAssetClient"
+        )
+
+
+class ConfigAssetClient(AssetClient):
+    """配置制品类插件的上游契约(强制形态)。
+
+    在通用 AssetClient 之上把模板/schema/guide/校验/持久化五件事
+    升为 abstractmethod——配置类插件的上游实现(如 HttpAssetClient)
+    继承本类,忘实现任何一个都会在实例化时报 TypeError(fail-fast)。
+    get_artifact 保持钩子(并非所有配置流都需要按标识回查)。
+    """
+
+    @abstractmethod
+    def get_template(self, name: str) -> dict:
+        """取模板 JSON(继承 AssetClient 契约说明;此处升为强制)。"""
+
+    @abstractmethod
+    def list_templates(self) -> list[str]:
+        """列出所有可用模板名(此处升为强制)。"""
+
+    @abstractmethod
+    def get_schema(self, name: str) -> dict:
+        """取 JSON Schema(此处升为强制)。"""
+
+    @abstractmethod
+    def get_guide(self) -> Optional[dict]:
+        """取 guide.json(此处升为强制)。"""
+
+    @abstractmethod
+    def validate_artifact(self, artifact: dict, mode: str) -> dict:
+        """校验制品(此处升为强制;返回 {valid, errors, warnings})。"""
+
+    @abstractmethod
+    def persist_artifact(self, artifact: dict, mode: str) -> dict:
+        """持久化制品(此处升为强制;返回 {success, ...})。"""
