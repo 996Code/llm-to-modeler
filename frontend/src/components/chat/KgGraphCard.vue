@@ -26,9 +26,8 @@
     <!-- 文档片段:手风琴列表——每条 chip 下方紧贴原文面板(展开/收起) -->
     <div v-if="result.sources?.chunks?.length" class="kgc-chunks">
       <span class="kgc-src-label">
-        <FileTextOutlined /> 文档片段(点击查看原文;
-        回答引用 {{ (citedChunks || []).length }}/{{ result.sources.chunks.length }},
-        未引用为召回备用)
+        <FileTextOutlined /> 文档片段 · 回答引用了 {{ (citedChunks || []).length }}/{{ result.sources.chunks.length }} 个
+        <span class="kgc-src-hint">(灰色"未引用"= 检索到但回答未采用)</span>
       </span>
       <div v-for="(c, i) in result.sources.chunks" :key="i" class="kgc-chunk-item">
         <!-- 片段 chip(点击切换展开;手风琴:同一时间只展开一条)。
@@ -223,7 +222,8 @@ onBeforeUnmount(() => {
 .kgc-chart { width: 100%; height: 240px; margin-top: 8px; border: 1px solid #eef1f6; border-radius: 10px; background: #fff; }
 .kgc-empty { margin-top: 8px; font-size: 12px; color: #9ca3af; }
 .kgc-sources { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-.kgc-src-label { font-size: 12px; color: #6b7280; display: inline-flex; align-items: center; gap: 4px; }
+.kgc-src-label { font-size: 12px; color: #6b7280; display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.kgc-src-hint { color: #9ca3af; font-size: 11px; }
 .kgc-chip { font-size: 11px; }
 
 /* ===== 文档片段手风琴 ===== */

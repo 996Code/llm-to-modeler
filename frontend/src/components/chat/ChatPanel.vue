@@ -318,7 +318,7 @@ function renderMarkdown(text: string): string {
   if (!text) return ''
   const html = marked.parse(text) as string
   const chunkLinked = html.replace(
-    /\[片段(\d+)\]/g,
+    /\[片段[:：]?\s*(\d+)\]/g,
     '<span class="md-chunk-ref">片段 $1</span>')
   // 非 URL href 降级: <a href="中文描述"> → <span class="md-fake-link">文字</span>
   const safe = chunkLinked.replace(
@@ -336,7 +336,7 @@ function renderMarkdown(text: string): string {
 function citedChunkNums(content?: string): number[] {
   if (!content) return []
   const nums: number[] = []
-  for (const m of content.matchAll(/\[片段(\d+)\]/g)) {
+  for (const m of content.matchAll(/\[片段[:：]?\s*(\d+)\]/g)) {
     const n = Number(m[1])
     if (!nums.includes(n)) nums.push(n)
   }
