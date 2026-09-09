@@ -306,10 +306,17 @@ import DOMPurify from 'dompurify'
 
 marked.setOptions({ breaks: true, gfm: true })
 
-/** 助手消息 Markdown → 安全 HTML(空内容返回空串防 v-html 报错) */
+/** 助手消息 Markdown → 安全 HTML(空内容返回空串防 v-html 报错)。
+ *  后处理:[片段N] 引用(KG 回答的来源标注)包装成徽标 span——与下方
+ *  图谱卡手风琴的"片段N" chip 编号体系一致,用户可对照定位原文。
+ *  编号语义:prompt 的 loop.index 从 1 起,与 sources.chunks 顺序一致。 */
 function renderMarkdown(text: string): string {
   if (!text) return ''
-  return DOMPurify.sanitize(marked.parse(text) as string)
+  const html = marked.parse(text) as string
+  const linked = html.replace(
+    /\[片段(\d+)\]/g,
+    '<span class="md-chunk-ref">片段 $1</span>')
+  return DOMPurify.sanitize(linked, { ADD_ATTR: ['class'] })
 }
 
 // ===== 组件入参（props）声明 =====
@@ -836,6 +843,19 @@ watch(() => store.stageMessage, () => {
 .md-content :deep(th) { background: rgba(0, 0, 0, 0.03); font-weight: 500; }
 .md-content :deep(a) { color: var(--color-primary); text-decoration: none; }
 .md-content :deep(strong) { font-weight: 600; }
+/* KG 回答的 [片段N] 来源引用徽标——与图谱卡手风琴 chip 的编号对应 */
+.md-content :deep(.md-chunk-ref) {
+  display: inline-block;
+  padding: 0 6px;
+  margin: 0 1px;
+  border-radius: 4px;
+  background: rgba(47, 84, 235, 0.08);
+  color: #2f54eb;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+  vertical-align: baseline;
+}
 
 /* ===== 数据卡片样式（非配置类结果） ===== */
 .data-card {

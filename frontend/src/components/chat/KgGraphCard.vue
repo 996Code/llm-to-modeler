@@ -27,12 +27,15 @@
     <div v-if="result.sources?.chunks?.length" class="kgc-chunks">
       <span class="kgc-src-label"><FileTextOutlined /> 文档片段(点击查看原文)</span>
       <div v-for="(c, i) in result.sources.chunks" :key="i" class="kgc-chunk-item">
-        <!-- 片段 chip(点击切换展开;手风琴:同一时间只展开一条) -->
+        <!-- 片段 chip(点击切换展开;手风琴:同一时间只展开一条)。
+             编号"片段N"与回答文本里的 [片段N] 引用同源(sources.chunks
+             顺序 = prompt loop.index),用户凭编号对照定位原文 -->
         <button class="kgc-chunk-trigger"
                 :class="{ active: expandedChunk === i }"
                 :disabled="!c.text"
                 :title="c.text ? '点击查看片段原文' : '无原文'"
                 @click="toggleChunk(i)">
+          <span class="kgc-chunk-num">片段 {{ i + 1 }}</span>
           <span class="kgc-chunk-trigger-text">
             {{ c.docName || '文档' }}{{ c.seq != null ? ` #${c.seq}` : '' }}
           </span>
@@ -234,6 +237,17 @@ onBeforeUnmount(() => {
   border-bottom-left-radius: 0;
   border-bottom-right-radius: 0;
 }
+/* 片段编号徽标(与回答文本里的 [片段N] 引用同色系,视觉对应) */
+.kgc-chunk-num {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: rgba(47, 84, 235, 0.1);
+  color: #2f54eb;
+  font-size: 11px;
+  font-weight: 500;
+}
+.kgc-chunk-trigger.active .kgc-chunk-num { background: #2f54eb; color: #fff; }
 .kgc-chunk-trigger-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kgc-chunk-arrow { font-size: 10px; color: #9ca3af; transition: transform 0.2s; }
 .kgc-chunk-arrow.expanded { transform: rotate(180deg); color: #2f54eb; }
