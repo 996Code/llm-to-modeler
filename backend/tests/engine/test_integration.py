@@ -50,8 +50,8 @@ class TestFormatResultHook:
         tool = ChatTool()
         assert tool.format_result({}) == {}
 
-    def test_execute_includes_formatted_in_extra(self):
-        """CreateFormTool.execute 把 format_result 结果放进 extra.formatted。"""
+    def test_execute_includes_formatted(self):
+        """CreateFormTool.execute 把 format_result 结果放进 formatted 显式字段。"""
         tool = CreateFormTool()
         llm = MagicMock()
         llm.chat_json.return_value = {
@@ -75,5 +75,5 @@ class TestFormatResultHook:
         object.__setattr__(ctx, "prompt_loader", None)
 
         result = tool.execute({"user_input": "创建测试表"}, ctx)
-        assert "formatted" in result.extra
-        assert result.extra["formatted"]["formName"] == "测试表"
+        assert result.formatted, "formatted 显式字段应有内容"
+        assert result.formatted.get("formName") == "测试表"

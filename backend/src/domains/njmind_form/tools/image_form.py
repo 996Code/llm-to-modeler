@@ -86,9 +86,7 @@ class ImageFormTool(Tool):
                 summary=f"已生成配置,但校验失败: {'; '.join(error_msgs)}",
                 valid=False,
                 validation_errors=errors,
-                extra={
-                    "formatted": self.format_result(form_config),
-                },
+                formatted=self.format_result(form_config),
             )
         
         # Step 4: 返回结果
@@ -100,9 +98,7 @@ class ImageFormTool(Tool):
         return ToolResult(
             artifact=form_config,
             summary=f"已根据图片生成表单「{form_name}」,共 {field_count} 个字段",
-            extra={
-                "formatted": self.format_result(form_config),
-            },
+            formatted=self.format_result(form_config),
         )
 
     def _analyze_image(

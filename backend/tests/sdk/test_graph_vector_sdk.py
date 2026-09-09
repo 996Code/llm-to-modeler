@@ -73,13 +73,28 @@ class TestParameterizedNaming:
         assert any("bi_entity_name" in t for t in run_texts)
         assert not any("kg_entity_key" in t for t in run_texts)
 
-    def test_default_params_backward_compatible(self):
-        # 构造参数默认值与 KG 存量数据完全兼容(源码级断言)
+    def test_no_domain_defaults_in_sdk(self):
+        # SDK 零领域默认值:源码级断言不含 KG 图模型字面量;
+        # 缺参构造必须 fail-fast(防止新插件静默共享 KG 命名空间)
         src = inspect.getsource(gs.Neo4jGraphStore.__init__)
-        assert 'prefix: str = "kg_"' in src
-        assert 'node_label: str = "Entity"' in src
-        assert 'rel_type: str = "RELATES"' in src
-        assert 'scope_prop: str = "kb_id"' in src
+        assert 'prefix: str = "kg_"' not in src
+        assert '"Entity"' not in src
+        assert '"kb_id"' not in src
+        with pytest.raises(ValueError, match="必传"):
+            gs.Neo4jGraphStore("bolt://x", "u", "p")  # type: ignore[call-arg]
+        vsrc = inspect.getsource(vs.MilvusVectorStore.__init__)
+        assert 'collection_prefix: str = "kg"' not in vsrc
+        with pytest.raises(ValueError, match="必传"):
+            vs.MilvusVectorStore("http://x")  # type: ignore[call-arg]
+
+    def test_kg_adapter_declares_graph_model(self):
+        # KG 插件适配层显式声明图模型(领域默认值住领域侧)
+        from domains.knowledge_graph import stores as kg_stores
+        src = inspect.getsource(kg_stores)
+        assert 'NODE_LABEL = "Entity"' in src
+        assert 'REL_TYPE = "RELATES"' in src
+        assert 'SCOPE_PROP = "kb_id"' in src
+        assert 'node_label=NODE_LABEL' in src
 
     def test_vector_name_uses_prefix(self):
         store = _vector(prefix="bi")

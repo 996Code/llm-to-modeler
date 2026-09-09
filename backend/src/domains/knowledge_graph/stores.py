@@ -19,6 +19,10 @@ from sdk.scope_registry import register_prefix, unregister_prefix
 PACK_NAME = "knowledge_graph"
 GRAPH_PREFIX = "kg_"     # Neo4j 约束/索引名前缀(与存量数据一致)
 VECTOR_PREFIX = "kg"     # Milvus collection 名前缀(与存量数据一致)
+# KG 图模型(SDK 已无领域默认值,这里显式声明)
+NODE_LABEL = "Entity"
+REL_TYPE = "RELATES"
+SCOPE_PROP = "kb_id"
 
 
 def _ensure_prefix_registered() -> None:
@@ -33,6 +37,9 @@ def get_graph(app_state) -> sdk_graph.Neo4jGraphStore:
     return sdk_graph.get_graph_store(
         settings,
         prefix=GRAPH_PREFIX,
+        node_label=NODE_LABEL,
+        rel_type=REL_TYPE,
+        scope_prop=SCOPE_PROP,
     )
 
 

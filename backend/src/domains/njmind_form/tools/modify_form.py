@@ -215,9 +215,7 @@ class ModifyFormTool(CompositeTool):
             # 校验结论走显式字段（引擎/前端消费），不再塞 extra 魔法键
             valid=(not state.get("validation_errors")) if artifact else None,
             validation_errors=state.get("validation_errors", []) or None,
-            extra={
-                "formatted": self.format_result(artifact) if artifact else {},
-            },
+            formatted=self.format_result(artifact) if artifact else {},
         )
 
     def summarize_artifact(self, artifact: dict) -> str:

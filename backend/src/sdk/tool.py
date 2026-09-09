@@ -168,6 +168,8 @@ class ToolResult(BaseModel):
       - "config": 配置类制品(存 config_snapshot,显示应用按钮)
       - "data": 数据结果(只存消息,不存 config,显示摘要卡片)
     - summary: 标准化摘要,进 ConversationManager 历史
+    - formatted: 前端展示字段(format_result 钩子产出,引擎合并进
+      SSE result 事件)——显式通道,引擎不再从 extra 取
     - extra: 领域自由扩展,不进历史
     - valid: 制品是否通过上游校验(前端保存按钮显隐依据;默认 None=
       工具未声明——前端按"可保存"处理)
@@ -186,6 +188,8 @@ class ToolResult(BaseModel):
     # ── 校验结果显式通道(从 extra 魔法键升格,引擎不再伸手进领域扩展区) ──
     valid: Optional[bool] = None
     validation_errors: Optional[list] = None
+    # ── 前端展示字段显式通道(同为 extra 魔法键升格) ──
+    formatted: dict = Field(default_factory=dict)
 
 
 class ClarificationRaised(Exception):
@@ -279,14 +283,21 @@ class CompositeTool(Tool):
         step 可通过设置 state["_need_clarify"]=True 中断后续步骤,
         execute 方法检查此标记后返回 ToolResult.ask 而非继续执行。
         每个 step 内部自行 emit stage 事件(含详细描述)。
+
+        resume 语义:追问恢复(resume)后引擎把答案注入 clarify_answers
+        重跑工具——上次中断留下的 _need_clarify 若不清理,第一步前就
+        break,答案永远没人消费。清理动作归 SDK 契约层(引擎不认识
+        插件私有键,只透传 tool_state)。
         """
+        # resume 后自清中断标记(首轮执行时这些 key 不存在,pop 无副作用)
+        state.pop("_need_clarify", None)
         # 发送 pipeline 定义给前端
         if self.pipeline_steps:
             ctx.emit("pipeline_definition", {
                 "tool": self.name,
                 "steps": self.pipeline_steps
             })
-        
+
         for step_name in self.steps:
             # 检查前序 step 是否请求中断
             if state.get("_need_clarify"):

@@ -11,6 +11,10 @@ admin:
   settings: settings.schema.yaml   # 声明式配置页(连接/抽取/检索参数)
   page: knowledge_graph            # 自定义管理页组件 key(前端注册表解析)
   title: 知识图谱
+  # 设置保存后的热生效副作用(平台按声明执行,api 层零 pack 分支):
+  # rate_limit = 限速参数保存即重配全局限速器,rpm/tpm 指向设置 key
+  settings_side_effects:
+    - {type: rate_limit, rpm: llm_rpm_limit, tpm: llm_tpm_limit}
 
 # 基础设施依赖:字段引用 settings.schema.yaml 的 key(解析链 设置页 > env > 默认)。
 # 未配置 → 插件中心"依赖未配置"不可加载;配好 env 或设置页补配后"重新检测"热加载。

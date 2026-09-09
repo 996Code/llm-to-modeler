@@ -58,11 +58,17 @@ class SubmitLeaveTool(CompositeTool):
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         """执行管线。parse_info 可能设置 _need_clarify 标记,
         此时跳过后续步骤,直接返回追问。confirm 步骤取消时设置
-        _cancelled 标记，跳过后续并返回取消回复。"""
+        _cancelled 标记，跳过后续并返回取消回复。
+
+        resume 清理:_need_clarify 由 run_pipeline 统一自清(SDK 契约);
+        _clarify_spec/_clarify_summary 是本插件私有键,追问现场在
+        execute 出口消费完毕,一并自清——引擎只透传 tool_state,
+        不认识插件的私有键。"""
         self.run_pipeline(state, ctx)
 
         # ── 取消分支:用户在确认步回答了"取消" ──
         if state.get("_cancelled"):
+            state.pop("_cancelled", None)
             return ToolResult(
                 reply="已取消提交，本次未向上游发送任何数据。",
                 summary="已取消请假提交",
@@ -70,10 +76,9 @@ class SubmitLeaveTool(CompositeTool):
 
         # ── 追问分支:信息不足,需要用户补充 ──
         if state.get("_need_clarify"):
-            return ToolResult(
-                ask=state["_clarify_spec"],
-                summary=state.get("_clarify_summary", "需要补充请假信息"),
-            )
+            spec = state.pop("_clarify_spec")
+            summary = state.pop("_clarify_summary", "需要补充请假信息")
+            return ToolResult(ask=spec, summary=summary)
 
         # ── 正常完成:返回数据结果 ──
         leave_data = state.get("leave_data", {})
@@ -83,14 +88,12 @@ class SubmitLeaveTool(CompositeTool):
             artifact=leave_data,
             artifact_type="data",  # ← 关键：数据结果，不是配置
             summary=summary,
-            extra={
-                "formatted": {
-                    "title": f"请假申请 - {leave_data.get('applicant', '')}",
-                    "formName": "请假申请",
-                    # fieldCount 排除内部字段(status/approvalId)
-                    "fieldCount": len([k for k, v in leave_data.items()
-                                       if k not in ("status", "approvalId")]),
-                }
+            formatted={
+                "title": f"请假申请 - {leave_data.get('applicant', '')}",
+                "formName": "请假申请",
+                # fieldCount 排除内部字段(status/approvalId)
+                "fieldCount": len([k for k, v in leave_data.items()
+                                   if k not in ("status", "approvalId")]),
             },
         )
 

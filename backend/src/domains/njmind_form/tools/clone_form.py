@@ -95,9 +95,7 @@ class CloneFormTool(Tool):
         return ToolResult(
             artifact=new_config,
             summary=f"已复制表单「{final_form_name}」,共 {field_count} 个字段",
-            extra={
-                "formatted": self.format_result(new_config),
-            },
+            formatted=self.format_result(new_config),
         )
 
     def _extract_clone_info(self, user_input: str, ctx: ToolContext) -> Optional[dict]:

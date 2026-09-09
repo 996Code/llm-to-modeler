@@ -430,13 +430,9 @@ def execute_tool_node(state: GraphState) -> dict:
         logger.info(f"Resumed with answer: {answer}")
         # answer 可能是 dict（结构化回答）或字符串，统一成 dict 结构
         tool_state["clarify_answers"] = answer if isinstance(answer, dict) else {"text": str(answer)}
-
-        # ★ 关键:清除上一轮的中断标记,否则 run_pipeline 会在第一步前就 break,
-        #   导致 _step_parse_info 永远不会消费 clarify_answers
-        # pop 第二参 None：key 不存在不报错，类比 Java map.remove + null check
-        tool_state.pop("_need_clarify", None)
-        tool_state.pop("_clarify_spec", None)
-        tool_state.pop("_clarify_summary", None)
+        # 上轮中断标记的清理归工具侧:CompositeTool.run_pipeline 开头自清
+        # _need_clarify(SDK 契约),私有键由插件自行消费——引擎只透传
+        # tool_state,不认识插件的内部键
 
         # 清空 tool_result 和 pending_questions,触发重跑
         # 返回 None 的 tool_result 会被 route_after_result 识别为"需要重跑"
@@ -498,11 +494,17 @@ def handle_result_node(state: GraphState) -> dict:
         # 状态三：制品结果 —— 生成了制品配置或数据
         artifact_type = getattr(result, 'artifact_type', 'config')  # config 或 data
         config = result.artifact  # 制品内容（配置 JSON 或查询数据）
-        formatted = result.extra.get("formatted", {})  # 格式化字段(钩子产出,经 extra 自由通道)
+        formatted = result.formatted  # 前端展示字段(显式通道,format_result 钩子产出)
         # 校验无错误才算 valid：影响前端是否显示"保存"按钮
         # (显式 ToolResult 字段,从 extra 魔法键升格——引擎不再伸手进领域扩展区)
         is_valid = (result.valid is not False and
                     not (result.validation_errors or []))
+        # 会话标题:调 Tool.title_for 钩子(引擎不读制品内部结构);
+        # 工具在 formatted 里自带 title 时以工具声明优先
+        title = formatted.get("title") or ""
+        if not title and artifact_type != "data":
+            tool = _registry.get(state.get("tool_name", "")) if _registry else None
+            title = tool.title_for(config) if tool else ""
 
         if artifact_type == "data":
             # 数据型制品（如查询结果表格）
@@ -512,6 +514,8 @@ def handle_result_node(state: GraphState) -> dict:
                 "summary": result.summary,
             }
             payload.update(formatted)  # 合并格式化字段
+            if title:
+                payload["title"] = title
             sse_events.append({"type": "result", "data": payload})
         else:
             # 配置型制品 —— 需要带校验错误给前端
@@ -527,6 +531,7 @@ def handle_result_node(state: GraphState) -> dict:
                 "valid": is_valid,  # 是否通过校验
                 "validationErrors": normalized_errors,  # 校验错误列表
                 "summary": result.summary,
+                **({"title": title} if title else {}),
             }
             payload.update(formatted)
             sse_events.append({"type": "result", "data": payload})
@@ -703,4 +708,7 @@ def _get_fallback_tool_name() -> str:
                 return tool.name
     # 优先级 3：全局第一个工具（聊胜于无；工具自身 validate_input 会再挡）
     tools = _registry.all()
-    return tools[0].name if tools else "chat"
+    if not tools:
+        logger.warning("兜底工具解析:注册表为空,本次请求走 end")
+        return ""
+    return tools[0].name

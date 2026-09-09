@@ -56,7 +56,7 @@ class VectorStore(Protocol):
 
 
 def collection_name(collection_prefix: str, scope_id: str) -> str:
-    """collection 名:{prefix}_{scope 的 - 转 _}_v1(与存量 kg_* 规则一致)。"""
+    """collection 名:{prefix}_{scope 的 - 转 _}_v1。"""
     return f"{collection_prefix}_{scope_id.replace('-', '_')}_v1"
 
 
@@ -65,11 +65,13 @@ class MilvusVectorStore:
 
     Args:
         collection_prefix: collection 名前缀(命名空间边界;调用方需先
-            在 scope_registry 登记该前缀)。
+            在 scope_registry 登记该前缀),必传——由使用方声明。
     """
 
     def __init__(self, uri: str, user: str = "", password: str = "",
-                 collection_prefix: str = "kg"):
+                 collection_prefix: str = ""):
+        if not collection_prefix:
+            raise ValueError("collection_prefix 必传,由使用方声明命名空间")
         from pymilvus import MilvusClient
         self._client = MilvusClient(
             uri=uri, user=user or None, password=password or None,
@@ -207,7 +209,7 @@ _build_lock = threading.Lock()     # 串行化连接构建
 
 
 def get_vector_store(settings: Dict[str, Any],
-                     collection_prefix: str = "kg") -> MilvusVectorStore:
+                     collection_prefix: str = "") -> MilvusVectorStore:
     """按解析后的配置取/建向量存储单例(指纹 = 连接三元组 + 前缀)。
 
     锁纪律/失败纪律同 graph_store.get_graph_store:命中路径轻锁,构建

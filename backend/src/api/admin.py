@@ -480,6 +480,33 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
 
 # ── 插件设置(声明式配置页) ─────────────────────────────────────
 
+def _apply_settings_side_effect(pack_name: str, eff: Dict[str, Any],
+                                changed: Dict[str, Any], store) -> None:
+    """执行 manifest 声明的设置保存副作用(admin.settings_side_effects)。
+
+    平台内置副作用类型在此分发;未知类型记 warning 忽略(声明笔误不崩
+    保存主流程)。副作用失败只记日志——保存本身已成功,不因副作用回滚。
+    """
+    etype = str((eff or {}).get("type") or "")
+    if etype == "rate_limit":
+        # 全局限速器是进程级单例,configure 重建桶——下一个 LLM 调用
+        # 即按新限额。仅当声明的限速键在本次变更集内才触发。
+        watch = {k for k in ("rpm", "tpm") if eff.get(k)} & set(changed)
+        if not watch:
+            return
+        try:
+            from llm.rate_limit import get_rate_limiter
+            merged = store.get_values(pack_name)
+            rpm = int(merged.get(eff.get("rpm")) or 0)
+            tpm = int(merged.get(eff.get("tpm")) or 0)
+            get_rate_limiter().configure(rpm=rpm, tpm=tpm)
+            logger.info(f"rate limiter reconfigured ({pack_name}): rpm={rpm} tpm={tpm}")
+        except Exception:
+            logger.exception(f"rate limiter reconfigure failed ({pack_name})")
+    else:
+        logger.warning(f"未知设置副作用类型「{etype}」({pack_name}),已忽略")
+
+
 def _pack_or_404(request: Request, name: str):
     pack_state = request.app.state.pack_state
     if not pack_state.is_discovered(name):
@@ -542,20 +569,12 @@ async def admin_put_pack_settings(name: str, request: Request, payload: Dict[str
     # 命中旧的失败缓存,把"配置已改对"的插件继续拒载(设置页救活主路径)。
     from services.pack_dependency import clear_probe_cache
     clear_probe_cache(name)
-    # LLM 限速参数(kg 插件的 llm_rpm_limit/llm_tpm_limit)保存即热生效:
-    # 全局限速器是进程级单例,configure 重建桶——下一个 LLM 调用即按新限额
-    if name == "knowledge_graph" and {"llm_rpm_limit", "llm_tpm_limit"} & set(clean):
-        try:
-            from llm.rate_limit import get_rate_limiter
-            merged = store.get_values(name)
-            get_rate_limiter().configure(
-                rpm=int(merged.get("llm_rpm_limit") or 0),
-                tpm=int(merged.get("llm_tpm_limit") or 0),
-            )
-            logger.info(f"rate limiter reconfigured: rpm={merged.get('llm_rpm_limit') or 0} "
-                        f"tpm={merged.get('llm_tpm_limit') or 0}")
-        except Exception:
-            logger.exception("rate limiter reconfigure failed")
+    # 热生效副作用:按 manifest 的 admin.settings_side_effects 声明执行,
+    # 平台在此分发内置副作用类型——api 层不认识任何具体插件
+    from domains import load_pack_configs
+    _cfg = load_pack_configs(pack_names=[name]).get(name) or {}
+    for _eff in ((_cfg.get("admin") or {}).get("settings_side_effects")) or []:
+        _apply_settings_side_effect(name, _eff, clean, store)
     # 审计留痕:配置变更是管理端敏感操作(依赖判定/连接凭据都可能随它改变),
     # 必须能在服务日志里追溯"谁在什么时候改了哪个插件的哪些项"。
     # 只记字段名不记值——secret 类字段的明文永不进日志。

@@ -102,13 +102,17 @@ class Neo4jGraphStore:
     Args:
         prefix: 约束/索引名前缀(命名空间边界;调用方需先在
             scope_registry 登记该前缀)。
-        node_label / rel_type / scope_prop: 图模型元素名,默认 Entity/
-            RELATES/kb_id(与 knowledge_graph 插件存量数据完全兼容)。
+        node_label / rel_type / scope_prop: 图模型元素名,必传——
+            使用方声明自己的图模型。
     """
 
     def __init__(self, uri: str, user: str, password: str, database: str = "neo4j",
-                 prefix: str = "kg_", node_label: str = "Entity",
-                 rel_type: str = "RELATES", scope_prop: str = "kb_id"):
+                 prefix: str = "", node_label: str = "",
+                 rel_type: str = "", scope_prop: str = ""):
+        if not (prefix and node_label and rel_type and scope_prop):
+            raise ValueError(
+                "prefix/node_label/rel_type/scope_prop 均为必传,"
+                "由使用方声明自己的图模型")
         from neo4j import GraphDatabase
         self._database = database or "neo4j"
         self._driver = GraphDatabase.driver(
@@ -203,10 +207,10 @@ class Neo4jGraphStore:
                             "normalized_name": e["normalized_name"],
                             "id": entity_node_id(scope, e["normalized_name"]),
                             "name": e.get("name") or e["normalized_name"],
-                            "type": e.get("type") or "concept",
+                            "type": e.get("type") or "",
                             "description": e.get("description") or "",
                             "aliases": list(dict.fromkeys(e.get("aliases") or [])),
-                            "type_status": e.get("type_status") or "approved",
+                            "type_status": e.get("type_status") or "",
                             "doc_id": doc_id,
                         } for e in entities],
                     ).consume()
@@ -226,7 +230,7 @@ class Neo4jGraphStore:
                         kb=scope, doc=doc_id, now=now,
                         rows=[{
                             "source": r["source"], "target": r["target"],
-                            "type": r.get("type") or "相关",
+                            "type": r.get("type") or "",
                             "description": r.get("description") or "",
                             "evidence": (r.get("evidence") or "")[:500],
                             "chunk_id": r.get("chunk_id") or "",

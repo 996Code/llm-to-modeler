@@ -105,9 +105,7 @@ class GetFormTool(Tool):
                 artifact=current,
                 summary=f"当前表单「{form_name}」（{current.get('formCode', '')}），"
                         f"共 {len(fields)} 个字段：{names_desc}",
-                extra={
-                    "formatted": self.format_result(current),
-                },
+                formatted=self.format_result(current),
             )
 
         # ── 路径 B：无当前上下文 → LLM 提取 formCode 查上游（原逻辑）──
@@ -146,9 +144,7 @@ class GetFormTool(Tool):
         return ToolResult(
             artifact=form_config,
             summary=f"已查询到表单「{form_name}」,共 {field_count} 个字段",
-            extra={
-                "formatted": self.format_result(form_config),
-            },
+            formatted=self.format_result(form_config),
         )
 
     def _extract_form_code(self, user_input: str, ctx: ToolContext) -> Optional[str]:
