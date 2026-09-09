@@ -58,6 +58,53 @@ def set_realtime_emitter(fn):
     _realtime_emitter.fn = fn
 
 
+def dispatch_emit(sse_events: list, *args, **kwargs) -> None:
+    """工具进度事件的分发核心（execute_tool 的 emit 闭包委托到这里）。
+
+    契约:全项目仅两种事件,按第一参数的类型标签分发——不按参数个数
+    猜语义。工具侧两种传参风格并存(表单系位置参数 / KG 系 message=
+    关键字),分发对两种风格等价:
+
+        emit("stage", stage_name, message)      进度文案
+        emit("stage", stage_name, message=...)
+        emit("stage", stage_name)               message 默认空串
+        emit("pipeline_definition", payload)    管线定义 {tool, steps}
+
+    通道:线程绑定了实时 emitter → 直推 StreamManager(前端即时看到);
+    否则入 sse_events 列表(节点结束时 flush)。
+
+    【事故记忆】曾按 len(args)>=3 判定"有无 message",kwargs 传的
+    message 被静默丢弃——KG 检索进度文案在前端只剩步骤名。契约测试
+    tests/engine/test_emit_contract.py 固化全部合法形态。
+    """
+    if not args:
+        return
+    kind = str(args[0])
+    rt = getattr(_realtime_emitter, "fn", None)
+
+    if kind == "pipeline_definition":
+        payload = args[1] if len(args) > 1 else (kwargs.get("data") or {})
+        if rt is not None:
+            rt("pipeline_definition", payload, None)
+        else:
+            sse_events.append({"type": "pipeline_definition", "data": payload})
+        return
+
+    if kind == "stage":
+        stage = str(args[1]) if len(args) > 1 else ""
+        message = str(args[2]) if len(args) > 2 else str(kwargs.get("message", ""))
+    else:
+        # 防御:未知事件类型按 stage 兜底(不崩,留 warning 可查)
+        logger.warning(f"tool emit 未知事件类型「{kind}」,按 stage 处理")
+        stage = kind
+        message = str(args[1]) if len(args) > 1 else str(kwargs.get("message", ""))
+
+    if rt is not None:
+        rt("stage", stage, message)
+    else:
+        sse_events.append({"type": "stage", "stage": stage, "message": message})
+
+
 _registry: Optional[ToolRegistry] = None
 # pack → 二级路由（两级路由架构：引擎选领域、pack 选工具）
 _pack_routers: dict = {}
@@ -239,46 +286,8 @@ def execute_tool_node(state: GraphState) -> dict:
     sse_events = []
 
     def emit(*args, **kwargs):
-        """emit(event_type, stage_name, message, **extra)"""
-        # message 兼容位置/关键字两种传法(工具两种风格都存在:
-        # 表单系位置参数,KG 系曾用 message= 关键字——按位置数分发会
-        # 静默丢弃 kwargs 里的 message,这里归一后统一分发)
-        _msg = args[2] if len(args) >= 3 else kwargs.get("message", "")
-        rt = getattr(_realtime_emitter, "fn", None)
-        if rt is not None:
-            # 实时通道：直接推给 StreamManager（内部 call_soon_threadsafe 回事件循环）
-            if len(args) >= 3 or (len(args) == 2 and args[0] == "stage"):
-                rt("stage", args[1], _msg)
-            elif len(args) == 2:
-                if args[0] == "pipeline_definition":
-                    rt("pipeline_definition", args[1], None)
-                else:
-                    rt("stage", args[1], "")
-            return  # 已实时推送，不再入列表（避免 chunk 阶段重复推）
-
-        # 列表通道（兜底）
-        if len(args) >= 3 or (len(args) == 2 and args[0] == "stage"):
-            # 3参签名：emit(type, stage, message) —— 标准阶段进度事件
-            sse_events.append({
-                "type": "stage",
-                "stage": args[1],
-                "message": _msg,
-            })
-        elif len(args) == 2:
-            event_type = args[0]
-            if event_type == "pipeline_definition":
-                # pipeline_definition：特殊的结构化事件，传整个管线定义给前端渲染
-                sse_events.append({
-                    "type": "pipeline_definition",
-                    "data": args[1],
-                })
-            else:
-                # 2参但非 pipeline_definition：只有阶段名，消息留空
-                sse_events.append({
-                    "type": "stage",
-                    "stage": args[1],
-                    "message": "",
-                })
+        """工具进度推送 → dispatch_emit(模块级,契约与测试见彼处注释)。"""
+        dispatch_emit(sse_events, *args, **kwargs)
 
     # 构建 ToolContext
     # 类比 Java：构造方法上下文对象，把所有依赖打包传给工具

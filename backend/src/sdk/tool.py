@@ -75,7 +75,7 @@ class ToolContext(BaseModel):
     - llm_client: LLM 调用(chat / chat_json)
     - asset_client: 上游资产/数据操作抽象
     - conversation: ConversationStore
-    - emit: SSE 事件回调
+    - emit: SSE 进度回调(契约见下方 emit 字段注释)
     - forward_headers: 嵌入模式透传的请求头
     - conv_id: 会话 ID
     - registry: 工具注册表(只读),供工具查询其他工具的能力描述
@@ -88,7 +88,10 @@ class ToolContext(BaseModel):
     llm_client: Any              # LLMClient(chat / chat_json)
     asset_client: Any            # AssetClient
     conversation: Any            # ConversationStore
-    emit: Callable[..., None]    # emit(event_type, message, **extra)
+    # SSE 进度回调。仅两种事件,按第一参数的类型标签分发(引擎不猜参数个数):
+    #   emit("stage", stage_name, message)   进度文案;message 位置/关键字皆可
+    #   emit("pipeline_definition", payload) 管线步骤定义 {tool, steps}
+    emit: Callable[..., None]
     forward_headers: dict = Field(default_factory=dict)
     conv_id: Optional[str] = None  # 会话 ID，用于日志记录
     registry: Any = None           # ToolRegistry(只读),供工具查询能力
