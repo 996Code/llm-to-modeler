@@ -124,11 +124,45 @@ REGULATION = _build(
     ],
 )
 
+NOVEL = _build(
+    entity_types=[
+        _entity("person", "人物", "书中的角色人物(含仙凡妖魔、正邪配角)",
+                ["张小凡", "碧瑶", "道玄真人"]),
+        _entity("sect", "门派", "修真门派/宗门/帮会/组织势力",
+                ["青云门", "天音寺", "鬼王宗"]),
+        _entity("artifact", "法宝", "法宝/法器/灵器/异宝/兵器",
+                ["噬血珠", "诛仙古剑", "玄火鉴"]),
+        _entity("skill", "功法", "功法/法诀/神通/咒术/武学",
+                ["大梵般若", "神剑御雷真诀"]),
+        _entity("location", "地点", "地理场所:山川/城池/村寨/秘境",
+                ["青云山", "河阳城", "草庙村"]),
+        _entity("creature", "妖兽", "妖兽/灵兽/异种生物",
+                ["三尾灵狐", "黑水玄蛇"]),
+        _entity("event", "事件", "重要事件/变故/大战/机缘",
+                ["草庙村惨案", "正魔大战"]),
+        _entity("concept", "概念", "特殊概念/信物/传说/规矩",
+                ["长生", "天书五卷"]),
+    ],
+    relation_types=[
+        _relation("师徒", "师徒", "师父对弟子的传艺关系", ["person"], ["person"]),
+        _relation("同门", "同门", "同一门派的同修关系", ["person"], ["person"]),
+        _relation("隶属", "隶属", "人物隶属某门派/组织", ["person"], ["sect"]),
+        _relation("持有", "持有", "人物持有/使用某法宝或功法", ["person"], ["artifact", "skill"]),
+        _relation("修炼", "修炼", "人物修炼某功法", ["person"], ["skill"]),
+        _relation("位于", "位于", "地理位置上的坐落/包含", ["sect", "location", "creature"], ["location"]),
+        _relation("敌对", "敌对", "正邪对立/仇敌关系", ["person", "sect"], ["person", "sect"]),
+        _relation("亲属", "亲属", "血缘或姻亲关系", ["person"], ["person"]),
+        _relation("参与", "参与", "人物/门派参与某事件", ["person", "sect"], ["event"]),
+        _relation("相关", "相关", "其他语义关联(兜底)", [], []),
+    ],
+)
+
 TEMPLATES = {
     "general": {"title": "通用", "description": "人物/组织/地点/产品/事件/概念", "schema": GENERAL},
     "org_people": {"title": "组织人事", "description": "人员/部门/汇报线/项目", "schema": ORG_PEOPLE},
     "product_doc": {"title": "产品文档", "description": "模块/接口/配置/流程/约束", "schema": PRODUCT_DOC},
     "regulation": {"title": "规章制度", "description": "条款/角色/行为/条件/后果", "schema": REGULATION},
+    "novel": {"title": "小说/文学", "description": "人物/门派/法宝/功法/地点/妖兽/事件", "schema": NOVEL},
 }
 
 

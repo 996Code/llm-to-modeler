@@ -167,7 +167,22 @@ class TestSchemaTemplates:
 
     def test_templates_registered(self):
         keys = {t["key"] for t in list_templates()}
-        assert {"general", "org_people", "product_doc", "regulation"} <= keys
+        assert {"general", "org_people", "product_doc", "regulation", "novel"} <= keys
+
+    def test_novel_template_sanity(self):
+        """小说模板:核心类型齐全、关系约束指向存在的实体类型
+        (小说导入质量事故的沉淀——此前只有办公向模板,小说建库无起步本体)。"""
+        s = get_template_schema("novel")
+        ekeys = {t["key"] for t in s["entity_types"]}
+        assert {"person", "sect", "artifact", "skill", "location",
+                "creature", "event", "concept"} <= ekeys
+        rkeys = {r["key"] for r in s["relation_types"]}
+        assert {"师徒", "隶属", "持有", "修炼", "敌对", "相关"} <= rkeys
+        # 关系 domain/range 引用的类型必须真实存在(抽取 prompt 会注入该约束)
+        for r in s["relation_types"]:
+            for side in ("domain", "range"):
+                bad = set(r.get(side) or []) - ekeys
+                assert not bad, f"关系 {r['key']} 的 {side} 引用未知类型: {bad}"
 
     def test_deep_copy_independence(self):
         s1 = get_template_schema("general")
