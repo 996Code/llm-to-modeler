@@ -416,8 +416,11 @@ class Neo4jGraphStore:
             edge_rows = s.run(
                 f"MATCH (a:{self._label})-[r:{self._rel} {{{self._sp}: $kb}}]->(b:{self._label}) "
                 f"WHERE a.id IN $ids AND b.id IN $ids "
+                # collect(properties(r)) 而非 collect(r):关系对象经 .data()
+                # 序列化后不是 dict,下游 .get() 直接 TypeError(get_graph
+                # 线上 500 的根因;expand_node 返回的是 Node 走 _node_dict 无此问题)
                 f"WITH a.id AS source, b.id AS target, r.type AS rtype, "
-                f"collect(r) AS rs "
+                f"collect(properties(r)) AS rs "
                 f"RETURN source, target, rtype, rs, size(rs) AS cnt "
                 f"ORDER BY cnt DESC LIMIT $m",
                 kb=scope, ids=ids, m=limit_edges,
@@ -453,7 +456,7 @@ class Neo4jGraphStore:
                 f"WHERE a.id = $nid "
                 f"WITH a AS center, b AS neighbor, "
                 f"     startNode(r).id AS sid, endNode(r).id AS tid, r.type AS rtype, "
-                f"     collect(r) AS rs "
+                f"     collect(properties(r)) AS rs "
                 f"RETURN center, neighbor, sid, tid, rtype, rs, size(rs) AS cnt "
                 f"LIMIT $m",
                 kb=scope, nid=node_id, m=limit_edges,
