@@ -49,6 +49,7 @@ class VectorStore(Protocol):
     def drop_collection(self, scope: str) -> None: ...
     def upsert_chunks(self, scope: str, items: List[Dict[str, Any]]) -> int: ...
     def delete_by_doc(self, scope: str, doc_id: str) -> None: ...
+    def existing_chunk_ids(self, scope: str, doc_id: str) -> set: ...
     def search(self, scope: str, query_vector: List[float], top_k: int = 5,
                doc_id: Optional[str] = None) -> List[Dict[str, Any]]: ...
     def count(self, scope: str) -> int: ...
@@ -161,6 +162,27 @@ class MilvusVectorStore:
             self._client.flush(collection_name=name)
         except Exception:
             logger.warning("milvus flush failed after delete", exc_info=True)
+
+    def existing_chunk_ids(self, scope: str, doc_id: str) -> set:
+        """查某文档已存在向量的 chunk_id 集合(向量缺口补偿的判定依据)。
+
+        只取主键:大批量文档也只回 id 列表,Milvus query 默认上限 1000 行/
+        次,这里按游标翻页取全量。
+        """
+        self._check_scope(scope)
+        name = self._name(scope)
+        expr = f'doc_id == "{doc_id}"'
+        ids: set = set()
+        offset = 0
+        while True:
+            rows = self._client.query(
+                collection_name=name, filter=expr,
+                output_fields=[_ID_FIELD], limit=1000, offset=offset,
+            ) or []
+            ids.update(r[_ID_FIELD] for r in rows if r.get(_ID_FIELD) is not None)
+            if len(rows) < 1000:
+                return ids
+            offset += 1000
 
     def search(
         self, scope: str, query_vector: List[float], top_k: int = 5,

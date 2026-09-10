@@ -180,7 +180,7 @@ class TestSchemaTemplates:
         # 不应再有仙侠特化类型(泛化为 item/ability/organization)
         assert not ({"sect", "artifact", "skill"} & ekeys)
         rkeys = {r["key"] for r in s["relation_types"]}
-        assert {"师徒", "隶属", "持有", "习得", "敌对", "相关"} <= rkeys
+        assert {"师徒", "隶属", "持有", "习得", "敌对", "挚友", "相关"} <= rkeys
         # 关系 domain/range 引用的类型必须真实存在(抽取 prompt 会注入该约束)
         for r in s["relation_types"]:
             for side in ("domain", "range"):

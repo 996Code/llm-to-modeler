@@ -74,12 +74,65 @@
           <a-tooltip title="忽略已有 checkpoint 与内容判断,全部重抽(本体变更后用)">
             <a style="margin-left: 12px" @click="doImport(record, true)"><RedoOutlined /> 强制</a>
           </a-tooltip>
+          <a-tooltip title="逐块查看导入状态,定向重试失败块">
+            <a style="margin-left: 12px" @click="openChunks(record)"><UnorderedListOutlined /> 块明细</a>
+          </a-tooltip>
           <a-popconfirm title="删除文档将清除其图谱贡献与向量,确认?" @confirm="doDelete(record)">
             <a class="dm-danger" style="margin-left: 12px"><DeleteOutlined /> 删除</a>
           </a-popconfirm>
         </template>
       </template>
     </a-table>
+
+    <!-- 块明细抽屉:逐块导入状态 + 定向重试(批次是执行时的动态分组,持久状态在块级) -->
+    <a-drawer v-model:open="chunksDrawer.open" width="720" :title="`块明细 · ${chunksDrawer.doc?.filename || ''}`">
+      <div v-if="chunksDrawer.payload" class="dm-chunks">
+        <div class="dm-chunks__summary">
+          <a-tag>共 {{ chunksDrawer.payload.summary.total }} 块</a-tag>
+          <a-tag color="green">完成 {{ chunksDrawer.payload.summary.done }}</a-tag>
+          <a-tag color="red">失败 {{ chunksDrawer.payload.summary.failed }}</a-tag>
+          <a-tag color="orange">待处理 {{ chunksDrawer.payload.summary.pending }}</a-tag>
+          <span class="dm-chunks__spacer" />
+          <a-button
+            size="small" type="primary" ghost
+            :disabled="!chunksDrawer.payload.summary.failed"
+            @click="retryFailedChunks()"
+          ><RedoOutlined /> 重试全部失败块</a-button>
+          <a-button size="small" @click="openChunks(chunksDrawer.doc!)">刷新</a-button>
+        </div>
+        <a-table
+          :columns="chunkColumns" :data-source="chunksDrawer.payload.items"
+          :loading="chunksDrawer.loading" row-key="id" size="small"
+          :pagination="{ pageSize: 50, showTotal: (t: number) => `共 ${t} 块` }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'seq'">
+              <span class="dm-mono">#{{ record.seq }}</span>
+            </template>
+            <template v-else-if="column.key === 'status'">
+              <a-tag :color="chunkStatusColor(record.status)" class="dm-chunks__st">
+                {{ chunkStatusLabel(record.status) }}
+              </a-tag>
+            </template>
+            <template v-else-if="column.key === 'charCount'">
+              <span class="dm-mono">{{ record.charCount }}</span>
+            </template>
+            <template v-else-if="column.key === 'preview'">
+              <span class="dm-chunks__preview" :title="record.preview">{{ record.preview }}</span>
+            </template>
+            <template v-else-if="column.key === 'actions'">
+              <a v-if="record.status !== 'done'" @click="retryOneChunk(record)">
+                <RedoOutlined /> 重试
+              </a>
+              <span v-else class="dm-chunks__dim">—</span>
+            </template>
+          </template>
+        </a-table>
+        <p class="dm-chunks__hint">
+          重试只补选中块(已完成块跳过,图谱不受影响);失败块也会在整文档重导时自动续跑。
+        </p>
+      </div>
+    </a-drawer>
   </div>
 </template>
 
@@ -90,12 +143,13 @@ import { message } from 'ant-design-vue'
 import type { UploadChangeParam } from 'ant-design-vue'
 import {
   CheckCircleOutlined, CloudUploadOutlined, CloseCircleOutlined, DeleteOutlined,
-  FileTextOutlined, InboxOutlined, RedoOutlined,
+  FileTextOutlined, InboxOutlined, RedoOutlined, UnorderedListOutlined,
 } from '@ant-design/icons-vue'
 import {
-  KgDocument, TaskItem, TaskStatus, deleteKgDocument, fetchKgDocuments,
-  fetchTask, importKgAll, importKgDocument, uploadKgDocuments,
+  KgDocument, TaskItem, TaskStatus, deleteKgDocument, fetchKgChunks, fetchKgDocuments,
+  fetchTask, importKgAll, importKgDocument, retryKgChunks, uploadKgDocuments,
 } from '../../api'
+import type { KgChunkItem, KgChunksPayload } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
 
 const props = defineProps<{ kbId: string; refreshTick?: number }>()
@@ -234,8 +288,71 @@ async function doImportAll() {
   await load()
 }
 
-async function doDelete(doc: KgDocument) {
+// ── 块明细抽屉:状态可视 + 定向重试 ───────────────────────────
+
+const chunkColumns = [
+  { title: '序号', key: 'seq', width: 70 },
+  { title: '状态', key: 'status', width: 90 },
+  { title: '字数', key: 'charCount', width: 80 },
+  { title: '内容预览', key: 'preview' },
+  { title: '操作', key: 'actions', width: 80 },
+]
+
+const chunksDrawer = ref<{
+  open: boolean
+  doc: KgDocument | null
+  loading: boolean
+  payload: KgChunksPayload | null
+}>({ open: false, doc: null, loading: false, payload: null })
+
+function chunkStatusLabel(s: string): string {
+  return s === 'done' ? '完成' : s === 'failed' ? '失败' : '待处理'
+}
+function chunkStatusColor(s: string): string {
+  return s === 'done' ? 'green' : s === 'failed' ? 'red' : 'orange'
+}
+
+async function openChunks(doc: KgDocument) {
+  chunksDrawer.value.open = true
+  chunksDrawer.value.doc = doc
+  chunksDrawer.value.loading = true
   await loadSafely(async () => {
+    chunksDrawer.value.payload = await fetchKgChunks(props.kbId, doc.id)
+  })
+  chunksDrawer.value.loading = false
+}
+
+/** 定向重试提交后的公共收尾:关抽屉、挂行内任务、刷新列表。 */
+async function afterRetrySubmitted(task: TaskItem, docId: string) {
+  taskByDoc.value[docId] = task
+  message.info(`重试任务已提交(任务 ${task.id.slice(0, 8)}…),只补指定块`)
+  chunksDrawer.value.open = false
+  await load()
+  emit('changed')
+}
+
+async function retryOneChunk(chunk: KgChunkItem) {
+  const doc = chunksDrawer.value.doc
+  if (!doc) return
+  await loadSafely(async () => {
+    const task = await retryKgChunks(props.kbId, doc.id, [chunk.id])
+    await afterRetrySubmitted(task, doc.id)
+  })
+}
+
+async function retryFailedChunks() {
+  const doc = chunksDrawer.value.doc
+  const payload = chunksDrawer.value.payload
+  if (!doc || !payload) return
+  const failedIds = payload.items.filter((c) => c.status !== 'done').map((c) => c.id)
+  if (!failedIds.length) return
+  await loadSafely(async () => {
+    const task = await retryKgChunks(props.kbId, doc.id, failedIds)
+    await afterRetrySubmitted(task, doc.id)
+  })
+}
+
+async function doDelete(doc: KgDocument) {  await loadSafely(async () => {
     await deleteKgDocument(props.kbId, doc.id)
     message.success(`文档「${doc.filename}」已删除`)
   })
@@ -294,4 +411,13 @@ onBeforeUnmount(() => window.clearInterval(timer))
 .dm-counts { font-size: 12px; color: #6b7280; }
 .dm-done { color: #16a34a; font-size: 12px; font-weight: 600; }
 .dm-danger { color: #dc2626; }
+.dm-chunks__summary { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.dm-chunks__spacer { flex: 1; }
+.dm-chunks__preview {
+  display: inline-block; max-width: 340px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
+  color: #6b7280; font-size: 12px;
+}
+.dm-chunks__dim { color: #d1d5db; }
+.dm-chunks__hint { color: #9ca3af; font-size: 12px; margin-top: 10px; }
 </style>

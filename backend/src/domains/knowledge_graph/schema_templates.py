@@ -151,6 +151,8 @@ NOVEL = _build(
     relation_types=[
         _relation("师徒", "师徒", "师父对弟子的传艺关系", ["person"], ["person"]),
         _relation("同门", "同门", "同一组织的同修/同僚关系", ["person"], ["person"]),
+        _relation("挚友", "挚友", "亲密关系:恋人/知己/结伴同行/生死之交(具体形态写进 description)",
+                  ["person"], ["person"]),
         _relation("隶属", "隶属", "人物隶属某组织/势力", ["person"], ["organization"]),
         _relation("持有", "持有", "人物持有/使用某物品", ["person"], ["item"]),
         _relation("习得", "习得", "人物习得/掌握某能力技艺", ["person"], ["ability"]),

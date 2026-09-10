@@ -96,8 +96,13 @@ def _recover_stale_importing(manager) -> None:
 
 # ── 提交入口(api 调用) ───────────────────────────────────────
 
-def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False) -> Dict[str, Any]:
+def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False,
+                  chunk_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     """提交单文档导入任务(同库串行 queue_key;同文档并发去重)。
+
+    chunk_ids: 定向重抽——只补这些块(且仅其状态非 done;done 块的图谱
+    贡献在库,重抽会破坏一致性,需换本体时走 force 全量)。定向路径绝不
+    清理图谱(等同续跑语义)。
 
     Raises:
         ValueError: 文档不存在/不属于该库,或该文档已有进行中的导入。
@@ -116,7 +121,8 @@ def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False) -> Di
     try:
         return app_state.task_manager.submit(
             "kg.import_document",
-            payload={"kb_id": kb_id, "doc_id": doc_id, "force": bool(force)},
+            payload={"kb_id": kb_id, "doc_id": doc_id, "force": bool(force),
+                     "chunk_ids": list(chunk_ids or [])},
             title=f"导入文档: {doc['filename']} → {kb['name'] if kb else kb_id[:8]}",
             pack_name=runtime.PACK_NAME,
             queue_key=f"kg:{kb_id}",           # 同库串行:不并发写图
@@ -155,13 +161,15 @@ def run_import_document(handle) -> Dict[str, Any]:
     kb_id = str(payload.get("kb_id") or "")
     doc_id = str(payload.get("doc_id") or "")
     force = bool(payload.get("force"))
+    chunk_ids = [str(c) for c in (payload.get("chunk_ids") or []) if str(c).strip()]
     if not _app_state:
         raise RuntimeError("任务未正确注册(register_tasks 未注入 app_state)")
 
     app_state = _app_state
     store = runtime.get_kg_store(app_state)
     try:
-        return _run_import(handle, app_state, store, kb_id, doc_id, force)
+        return _run_import(handle, app_state, store, kb_id, doc_id, force,
+                           chunk_ids=chunk_ids or None)
     except Exception as e:
         # 任务失败/取消:文档状态从 importing 收敛为 failed(可重跑续传),
         # 已完成块保留(下次免重跑)——不留悬空的 importing 态
@@ -172,18 +180,26 @@ def run_import_document(handle) -> Dict[str, Any]:
         raise
 
 
-def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) -> Dict[str, Any]:
+def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
+                chunk_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     kb = store.get_kb(kb_id)
     doc = store.get_document(doc_id)
     if not kb or not doc or doc["kbId"] != kb_id:
         raise RuntimeError("知识库或文档不存在(可能已被删除)")
-
-    # 幂等跳过:已成功且未强制重导
-    if doc["importStatus"] == "succeeded" and not force:
-        handle.set_progress(100, "内容未变化,已导入过,跳过")
-        handle.log("文档此前已成功导入且未要求强制重导,直接跳过(幂等)")
-        return {"skipped": True, "entities": doc["entityCount"],
-                "relations": doc["relationCount"], "chunks": doc["chunkCount"]}
+    targeted = [cid for cid in (chunk_ids or []) if str(cid).strip()]
+    # 幂等跳过:已成功且未强制重导(定向重抽不受此限——它就是补漏动作)。
+    # 向量缺口例外:done 块的向量当批写入失败只告警,不查缺口直接跳过的话
+    # 缺口永久留存(重跑永远到不了补偿段)——有缺口则放行走补偿路径。
+    if doc["importStatus"] == "succeeded" and not force and not targeted:
+        holes = _missing_vector_chunks(app_state, store, kb, doc_id) \
+            if kb.get("vectorEnabled") else []
+        if not holes:
+            handle.set_progress(100, "内容未变化,已导入过,跳过")
+            handle.log("文档此前已成功导入且未要求强制重导,直接跳过(幂等)")
+            return {"skipped": True, "entities": doc["entityCount"],
+                    "relations": doc["relationCount"], "chunks": doc["chunkCount"]}
+        handle.log(f"文档已导入,但存在 {len(holes)} 块向量缺口,进入补偿路径"
+                   "(不重抽,只补向量)", level="warn", holes=len(holes))
 
     conv_id = task_conv_id(handle.task_id)
     started = time.monotonic()
@@ -199,9 +215,9 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     #    因 hash 查重生成新文档行),重跑时复用已有 chunk(保留 done 状态);
     #    force=True 才整体重建(全部重抽)。
     existing_chunks = store.list_chunks(doc_id)
-    resume = bool(existing_chunks) and not force and any(
+    resume = (bool(existing_chunks) and not force and any(
         c["status"] == "done" for c in existing_chunks
-    )
+    )) or bool(targeted)
     if existing_chunks and not force:
         chunks = existing_chunks
         done_n = sum(1 for c in chunks if c["status"] == "done")
@@ -283,7 +299,18 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
     pending = [c for c in store.list_chunks(doc_id)
                if c["status"] in ("pending", "failed")]
     total = len(store.list_chunks(doc_id))
-    done_before = total - len(pending)
+    if targeted:
+        # 定向重抽:只跑指定块里非 done 的(状态过滤见 submit_import 注释)。
+        # 指定全为 done 时 pending 为空——记录后按空跑收尾,不动图谱。
+        want = set(targeted)
+        unknown = want - {c["id"] for c in store.list_chunks(doc_id)}
+        if unknown:
+            raise RuntimeError(f"定向重抽的块不存在: {sorted(unknown)[:3]}…")
+        pending = [c for c in pending if c["id"] in want]
+        handle.log(f"定向重抽: 指定 {len(want)} 块,待处理 {len(pending)} 块"
+                   f"(其余为已完成,跳过)", targeted=len(want), to_run=len(pending))
+    total = total if not targeted else len(pending)
+    done_before = total - len(pending) if not targeted else 0
     if done_before:
         handle.log(f"断点续跑: 跳过已完成的 {done_before} 块")
     _eff_model = extraction_model or (
@@ -485,6 +512,12 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool) 
         _merge_pending_proposals(store, kb, pending_proposals)
         handle.log(f"新增类型提案 {len(pending_proposals)} 项,待本体页审核", level="warn")
 
+    # 5.5) 向量缺口补偿:done 块的向量在当批写入失败时只告警,而重跑会
+    # 跳过 done 块——缺口因此永久留存(该块不参与向量召回)。这里按
+    # Milvus 实存反向核对补齐,幂等(无缺口时一次 query 零成本返回)。
+    if vector_ready:
+        _backfill_vectors(handle, app_state, store, kb, doc_id, conv_id)
+
     # 6) 收尾统计
     final_status = "partial" if failed_chunks else "succeeded"
     doc_counts = graph.document_counts(kb_id, doc_id)
@@ -583,6 +616,36 @@ def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], co
         return n
     except Exception as e:
         handle.log(f"向量写入失败(图谱不受影响): {e}", level="warn", rows=len(chunks))
+        return 0
+
+
+def _missing_vector_chunks(app_state, store, kb: Dict, doc_id: str) -> List[Dict]:
+    """done 但向量库缺失的块(向量缺口补偿的统一判定)。
+
+    以向量库实存为准,不依赖本地"已写"标记——幂等可重入;向量库不可达
+    返回 [](无法判定时不动作,保持原有跳过/降级行为)。
+    """
+    try:
+        vector_store = runtime.get_vector(app_state)
+        existing = vector_store.existing_chunk_ids(kb["id"], doc_id)
+        return [c for c in store.list_chunks(doc_id, status="done")
+                if c["id"] not in existing]
+    except Exception:
+        return []
+
+
+def _backfill_vectors(handle, app_state, store, kb: Dict, doc_id: str,
+                      conv_id: str) -> int:
+    """向量缺口补偿:图已入(done)但向量缺失的块补写(判定见 _missing_vector_chunks)。"""
+    try:
+        missing = _missing_vector_chunks(app_state, store, kb, doc_id)
+        if not missing:
+            return 0
+        handle.log(f"向量缺口补偿: {len(missing)} 块已入图但缺向量,补写中",
+                   level="warn", rows=len(missing))
+        return _vectorize_chunks(handle, app_state, store, kb, missing, conv_id)
+    except Exception as e:
+        handle.log(f"向量缺口补偿失败(图谱不受影响,下次重跑再补): {e}", level="warn")
         return 0
 
 

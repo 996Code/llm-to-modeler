@@ -603,6 +603,28 @@ export async function importKgDocument(kbId: string, docId: string, force = fals
   const { data } = await kgApi.post(`/kbs/${kbId}/documents/${docId}/import`, { force })
   return data
 }
+
+/** 文档块明细(导入状态可视 + 定向重试依据)。 */
+export interface KgChunkItem {
+  id: string
+  seq: number
+  status: 'done' | 'failed' | 'pending'
+  charCount: number
+  preview: string
+}
+export interface KgChunksPayload {
+  items: KgChunkItem[]
+  summary: { total: number; done: number; failed: number; pending: number }
+}
+export async function fetchKgChunks(kbId: string, docId: string): Promise<KgChunksPayload> {
+  const { data } = await kgApi.get(`/kbs/${kbId}/documents/${docId}/chunks`)
+  return data
+}
+/** 定向重抽:只补指定块(非 done 生效)。 */
+export async function retryKgChunks(kbId: string, docId: string, chunkIds: string[]): Promise<TaskItem> {
+  const { data } = await kgApi.post(`/kbs/${kbId}/documents/${docId}/import`, { chunk_ids: chunkIds })
+  return data
+}
 export async function importKgAll(kbId: string, force = false): Promise<{ tasks: TaskItem[]; skipped: { docId: string; reason: string }[] }> {
   const { data } = await kgApi.post(`/kbs/${kbId}/import`, { force })
   return data

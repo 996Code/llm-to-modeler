@@ -140,6 +140,10 @@ class FakeVector:
         self.rows[kb_id] = {k: v for k, v in self.rows.get(kb_id, {}).items()
                             if v["doc_id"] != doc_id}
 
+    def existing_chunk_ids(self, kb_id, doc_id):
+        return {cid for cid, r in self.rows.get(kb_id, {}).items()
+                if r["doc_id"] == doc_id}
+
     def count(self, kb_id):
         return len(self.rows.get(kb_id, {}))
 
@@ -397,6 +401,55 @@ class TestImportPipeline:
         assert kb_after["vectorEnabled"] and kb_after["vectorDim"] == 3
         assert env.vector.collections.get(kb["id"]) == 3
         assert env.vector.count(kb["id"]) == len(env.store.list_chunks(doc["id"]))
+
+    def test_vector_backfill_on_rerun(self, env, monkeypatch):
+        """向量缺口补偿:done 块缺向量时,重跑不得被幂等跳过挡住,须补写。
+
+        场景:向量当批写入失败只告警(done 块重跑会被跳过)→ 缺口原本
+        永久留存;修复后重跑已成功文档应走补偿路径(不重抽,只补向量)。
+        """
+        monkeypatch.setenv("LLM_EMBED_MODEL", "mock-embed")
+        kb, doc = _make_doc(env, "向量补偿", ["[E:甲] [E:乙]", "[E:丙]"])
+        _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        chunk_ids = [c["id"] for c in env.store.list_chunks(doc["id"])]
+        assert env.vector.count(kb["id"]) == len(chunk_ids)
+
+        # 制造缺口:抽掉一块的向量(模拟当批写入失败)
+        env.vector.rows[kb["id"]].pop(chunk_ids[0])
+        assert len(env.vector.existing_chunk_ids(kb["id"], doc["id"])) == len(chunk_ids) - 1
+
+        # 重跑(文档已 succeeded 且未 force):不得幂等跳过,应补齐缺口
+        calls_before = env.llm.extract_calls
+        t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t2["status"] == "succeeded"
+        assert env.vector.count(kb["id"]) == len(chunk_ids)          # 缺口补齐
+        assert env.llm.extract_calls == calls_before                 # 没有重抽
+        # 再跑一次:无缺口 → 幂等跳过
+        t3 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t3["result"].get("skipped") is True
+
+    def test_targeted_chunk_retry(self, env):
+        """定向重抽:chunk_ids 只补指定块(非 done),不动图谱、不重抽其他块。"""
+        pad = "背景铺垫文字。" * 12
+        kb, doc = _make_doc(env, "定向", [
+            f"{pad}[E:甲] [E:乙]",
+            f"{pad}坏块标记XYZ [E:丙]",
+            f"{pad}[E:丁] 结尾",
+        ])
+        env.llm.fail_markers = ["坏块标记XYZ"]
+        _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        failed = [c for c in env.store.list_chunks(doc["id"]) if c["status"] == "failed"]
+        assert len(failed) == 1
+
+        env.llm.fail_markers = []
+        calls_before = env.llm.extract_calls
+        deletes_before = len(env.graph.delete_calls)
+        t = _wait(env.manager, tasks.submit_import(
+            env.app_state, kb["id"], doc["id"], chunk_ids=[failed[0]["id"]])["id"])
+        assert t["status"] == "succeeded" and t["result"]["status"] == "succeeded"
+        assert env.llm.extract_calls == calls_before + 1        # 只重抽了指定块
+        assert len(env.graph.delete_calls) == deletes_before    # 未清理图谱
+        assert all(c["status"] == "done" for c in env.store.list_chunks(doc["id"]))
 
     def test_vector_degraded_without_model(self, env, monkeypatch):
         monkeypatch.setenv("EMBEDDING_BACKEND", "api")

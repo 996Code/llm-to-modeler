@@ -361,9 +361,40 @@ def _task_manager_or_503(request):
     return manager
 
 
+@router.get("/kbs/{kb_id}/documents/{doc_id}/chunks", dependencies=[Depends(admin_required)])
+async def list_chunks(kb_id: str, doc_id: str, request: Request):
+    """文档块级明细(导入状态可视 + 定向重试的依据)。
+
+    返回每块 seq/status/字数/预览 + 汇总计数。批次是执行时的动态分组,
+    持久状态在块级——前端可按 batch_size 分组展示,但重试以块为单位。
+    """
+    _kb_or_404(request, kb_id)
+    store = runtime.get_kg_store(request.app.state)
+    doc = store.get_document(doc_id)
+    if not doc or doc["kbId"] != kb_id:
+        raise HTTPException(404, "文档不存在")
+    chunks = store.list_chunks(doc_id)
+    items = [{
+        "id": c["id"], "seq": c["seq"], "status": c["status"],
+        "charCount": c["charCount"],
+        "preview": (c["text"] or "").strip().replace("\n", " ")[:80],
+    } for c in chunks]
+    summary = {
+        "total": len(items),
+        "done": sum(1 for c in items if c["status"] == "done"),
+        "failed": sum(1 for c in items if c["status"] == "failed"),
+        "pending": sum(1 for c in items if c["status"] == "pending"),
+    }
+    return {"items": items, "summary": summary}
+
+
 @router.post("/kbs/{kb_id}/documents/{doc_id}/import", dependencies=[Depends(admin_required)])
 async def import_document(kb_id: str, doc_id: str, request: Request, payload: Dict[str, Any] = None):
-    """发起单文档导入(后台任务;同库串行,返回任务 ID 供任务中心/页面跟踪)。"""
+    """发起单文档导入(后台任务;同库串行,返回任务 ID 供任务中心/页面跟踪)。
+
+    body 可选 chunk_ids: 定向重抽指定块(仅非 done 块生效;done 块的图谱
+    贡献在库,重抽破坏一致性,换本体请走 force 全量)。
+    """
     _kb_or_404(request, kb_id)
     _task_manager_or_503(request)
     payload = payload or {}
@@ -371,6 +402,7 @@ async def import_document(kb_id: str, doc_id: str, request: Request, payload: Di
     try:
         task = tasks.submit_import(
             request.app.state, kb_id, doc_id, force=bool(payload.get("force")),
+            chunk_ids=[str(c) for c in (payload.get("chunk_ids") or [])],
         )
     except ValueError as e:
         raise HTTPException(409, str(e))
