@@ -352,6 +352,11 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             seqs = [c["seq"] for c in batch]
             handle.log(f"批次 {batch_index} 开始: 块 {seqs}(共 {len(batch)} 块)",
                        batch=batch_index, chunks=seqs)
+            # 块级"进行中"事件:块行从启动起就可见(加载态),完成时另发
+            # 终态行——此前只有完成行,进行中的块在前端完全不可见
+            for c in batch:
+                handle.log(f"块 {c['seq']} 抽取中…", chunk=c["seq"],
+                           chunk_state="started", chunk_id=c["id"])
             # 批内进度心跳:LLM 单块抽取分钟级,进度只在批次边界跳变的话
             # 用户侧感知"卡死"(E2E 实测 8 分钟停在 3%)。批开始即按
             # "已提交到 LLM"推进到本批起点,块完成再逐块推进
@@ -388,6 +393,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                         f"{stats.get('duration_ms', '?')}ms,prompt {stats.get('prompt_chars', '?')} 字): {e}",
                         level="warn",
                         chunk=chunk["seq"], chars=len(chunk["text"]),
+                        chunk_state="failed", chunk_id=chunk["id"],
                         attempt=stats.get("attempt"), duration_ms=stats.get("duration_ms"),
                         prompt_chars=stats.get("prompt_chars"),
                         glossary_size=stats.get("glossary_size"),
@@ -402,6 +408,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                     store.mark_chunk(chunk["id"], "failed")
                     handle.log(f"块 {chunk['seq']} 处理异常: {e}", level="warn",
                                chunk=chunk["seq"], chars=len(chunk["text"]),
+                               chunk_state="failed", chunk_id=chunk["id"],
                                error=str(e)[:200])
                     continue
                 # 注意:这里不标 done——checkpoint 语义是"图谱已写入",
@@ -413,6 +420,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                     f"({len(chunk['text'])} 字,prompt {stats.get('prompt_chars', '?')} 字"
                     f",词表 {stats.get('glossary_size', 0)} 条,LLM {stats.get('duration_ms', '?')}ms)",
                     chunk=chunk['seq'], chars=len(chunk["text"]),
+                    chunk_state="done", chunk_id=chunk["id"],
                     entities=len(entities), relations=len(relations),
                     prompt_chars=stats.get("prompt_chars"),
                     glossary_size=stats.get("glossary_size"),

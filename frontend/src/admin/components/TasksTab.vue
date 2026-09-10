@@ -115,14 +115,26 @@
             <!-- 逐块抽取组:进度条式行 -->
             <div v-for="lg in g.logs" :key="lg.id" class="tk-row" :class="`tk-row-${lg.level}`">
               <template v-if="g.key.startsWith('chunks')">
-                <div class="tk-chunk-row">
+                <div class="tk-chunk-row" :class="`tk-chunk-${chunkStateOf(lg)}`">
                   <span class="tk-chunk-id">块{{ chunkData(lg).chunk ?? '?' }}</span>
-                  <!-- 耗时徽章:完成即满(不是进度条;批内偏慢标红,便于定位慢块) -->
-                  <span
-                    class="tk-chunk-dur-badge"
-                    :class="{ 'tk-chunk-dur-slow': isSlowChunk(lg, g) }"
-                  >{{ fmtMs(chunkData(lg).duration_ms) }}</span>
-                  <span class="tk-chunk-metric">{{ chunkData(lg).entities ?? 0 }}e / {{ chunkData(lg).relations ?? 0 }}r</span>
+                  <!-- 块行三态:started=转圈(进行中) done=勾+耗时 failed=红叉;
+                       完成即终态,不再有任何"进度形状" -->
+                  <span v-if="chunkStateOf(lg) === 'started'" class="tk-chunk-running">
+                    <LoadingOutlined spin /> 抽取中…
+                  </span>
+                  <template v-else>
+                    <span class="tk-chunk-state">
+                      <CheckCircleOutlined v-if="chunkStateOf(lg) === 'done'" class="tk-chunk-ok" />
+                      <CloseCircleOutlined v-else class="tk-chunk-bad" />
+                    </span>
+                    <span class="tk-chunk-dur-badge" :class="{ 'tk-chunk-dur-slow': isSlowChunk(lg, g) }">
+                      {{ fmtMs(chunkData(lg).duration_ms) }}
+                    </span>
+                    <span v-if="chunkStateOf(lg) === 'failed'" class="tk-chunk-err">
+                      {{ (lg.message || '').slice(0, 60) }}
+                    </span>
+                    <span v-else class="tk-chunk-metric">{{ chunkData(lg).entities ?? 0 }}e / {{ chunkData(lg).relations ?? 0 }}r</span>
+                  </template>
                 </div>
               </template>
               <!-- 其余组:标题行 + 指标徽章 -->
@@ -169,7 +181,10 @@
 // 任务中心:任务表格(进度条/状态) + 日志抽屉(SSE 实时 + 断流降级轮询)。
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { AppstoreOutlined, BarsOutlined } from '@ant-design/icons-vue'
+import {
+  AppstoreOutlined, BarsOutlined, CheckCircleOutlined,
+  CloseCircleOutlined, LoadingOutlined,
+} from '@ant-design/icons-vue'
 import {
   TaskItem, TaskLogItem, TaskStatus, TaskTypeItem,
   cancelTask, fetchTask, fetchTaskLogs, fetchTasks, fetchTaskTypes, fmtTime, streamTaskEvents,
@@ -337,6 +352,14 @@ const structuredGroups = computed<LogGroup[]>(() => {
   for (const lg of filteredLogs.value) {
     const g = groupOf(lg)
     if (!cur || cur.key !== g.key) { cur = { ...g, logs: [] }; groups.push(cur) }
+    // 同一块的 started 行让位给终态行(完成/失败后不再显示"抽取中")
+    if (g.key.startsWith('chunks')) {
+      const st = chunkData(lg)
+      if (st.chunk_state === 'done' || st.chunk_state === 'failed') {
+        cur.logs = cur.logs.filter(
+          (l) => !(chunkData(l).chunk_state === 'started' && chunkData(l).chunk_id === st.chunk_id))
+      }
+    }
     cur.logs.push(lg)
   }
   for (let i = 0; i < groups.length; i++) {
@@ -347,9 +370,12 @@ const structuredGroups = computed<LogGroup[]>(() => {
     if (g.key.startsWith('chunks')) {
       const ents = g.logs.reduce((s, l) => s + (Number(chunkData(l).entities) || 0), 0)
       const rels = g.logs.reduce((s, l) => s + (Number(chunkData(l).relations) || 0), 0)
-      g.badge = `${g.logs.length} 块 · ${ents}e/${rels}r`
-      // 基线存组内:chunkPct 用各自组的 max(词表增大后批次普遍更慢,
-      // 用全局第一个组当基线会让后续批次全部顶格 100%)
+      const doneN = g.logs.filter((l) => chunkStateOf(l) !== 'started').length
+      g.badge = `${doneN}/${g.logs.length} 块 · ${ents}e/${rels}r`
+      // 批内并行完成顺序不定:按块序稳定排(started 行与 done 行混排会跳)
+      g.logs.sort((a, b) => (Number(chunkData(a).chunk) || 0) - (Number(chunkData(b).chunk) || 0))
+      // 基线存组内:耗时对比用各自组的 max(词表增大后批次普遍更慢,
+      // 用全局第一个组当基线会让后续批次全部顶格)
       g.maxDurationMs = Math.max(1, ...g.logs.map((l) => Number(chunkData(l).duration_ms) || 1))
     }
   }
@@ -374,6 +400,12 @@ function groupOf(lg: TaskLogItem): { key: string; title: string } {
 }
 
 /** 逐块进度:LLM 耗时占所在组最大耗时的比例(相对耗时可视化,不是完成度) */
+// 块行状态:后端 chunk_state 事件(started/done/failed);无标记的旧日志
+// 视为 done(兼容历史任务)
+function chunkStateOf(lg: TaskLogItem): string {
+  return String(chunkData(lg).chunk_state || 'done')
+}
+
 function chunkData(lg: TaskLogItem): LogData {
   return (lg.data && typeof lg.data === 'object' ? lg.data : {}) as LogData
 }
@@ -608,10 +640,14 @@ function openLogs(record: TaskItem) {
 }
 .tk-chunk-metric { color: #cbd5e1; font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace; flex-shrink: 0; }
 .tk-chunk-dur-badge {
-  color: #9ca3af; font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace;
+  color: #6b7280; font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace;
   background: #f3f4f6; border-radius: 4px; padding: 1px 8px; flex-shrink: 0;
 }
-.tk-chunk-dur-slow { color: #dc2626; background: #fef2f2; }
+.tk-chunk-dur-slow { color: #b45309; background: #fffbeb; }
+.tk-chunk-running { color: #2563eb; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
+.tk-chunk-ok { color: #16a34a; }
+.tk-chunk-bad { color: #dc2626; }
+.tk-chunk-err { color: #dc2626; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 原始视图 ── */
 .tk-log-line { display: flex; align-items: baseline; padding: 2px 0; color: #cbd5e1; }
