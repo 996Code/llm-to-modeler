@@ -342,6 +342,23 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     # 图谱已存实体名缓存(懒加载一次):悬空关系过滤把已入库实体算进
     # known——续跑任务词表从零开始,不并入会把指向已存实体的关系全丢
     graph_entities_known: set = set()
+    # 图谱已存实体别名表(normalized -> {type, aliases}),每批 upsert 后
+    # 刷新:词表渲染时带出别名(张小凡 别名:鬼厉),引导 LLM 复用既有
+    # 名称而不是另立变体——碎片的主要预防手段
+    graph_alias_table: Dict[str, Dict[str, Any]] = {}
+    # ── 词表播种(根修):续跑/定向重抽时词表从空开始,第一批 prompt
+    # 完全不知道图里已有"林惊羽"——碎片的主要来源。把图内存量实体
+    # (名+类型)作为词表初始值,重启后第一批就对齐既有命名。
+    try:
+        seeded = graph.list_entity_aliases(kb_id)
+        for _name, _meta in seeded.items():
+            glossary[_name] = _meta.get("type") or ""
+        graph_alias_table = seeded
+        if seeded:
+            handle.log(f"词表播种: 从图谱载入 {len(seeded)} 个既有实体"
+                       f"(续跑首批即可复用既有命名)", seeded=len(seeded))
+    except Exception as e:
+        logger.warning(f"词表播种失败(继续,词表从零累积): {e}")
     pending_proposals: List[Dict] = []
     total_entities = total_relations = failed_chunks = 0
     consecutive_failures = 0
@@ -380,7 +397,8 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
 
             futures = {
                 executor.submit(
-                    _extract_chunk, loader, llm, kb, chunk, glossary, glossary_top_k,
+                    _extract_chunk, loader, llm, kb, chunk, glossary,
+                    graph_alias_table, glossary_top_k,
                     temperature, max_retries, conv_id, extraction_model,
                 ): chunk
                 for chunk in batch
@@ -502,7 +520,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             if done_before and not graph_entities_known:
                 graph_entities_known = graph.list_entity_names(kb["id"])
             known |= graph_entities_known
-            dangling = sum(1 for r in batch_relations
+            dangling = sum(1 for r in kept_r
                            if r["source"] not in known or r["target"] not in known)
             kept_r = [r for r in kept_r if r["source"] in known and r["target"] in known]
 
@@ -535,6 +553,12 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                 graph_ms = int((time.monotonic() - t_graph) * 1000)
             else:
                 graph_ms = 0
+            # 别名表刷新:本批 upsert 后图里多了新别名,供后续批次词表
+            # 渲染(LLM 看到 张小凡 别名:鬼厉 → 复用既有命名,不另立变体)
+            try:
+                graph_alias_table = graph.list_entity_aliases(kb_id)
+            except Exception as e:
+                logger.warning(f"别名表刷新失败(词表退化为无别名): {e}")
             # checkpoint 在图谱写入成功后落:done = "贡献已在图里",
             # upsert 抛异常时本批块保持原状态(pending/failed),续跑会重抽。
             # 抽取失败的块已在上面标 failed,这里只落成功的
@@ -581,6 +605,18 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     # Milvus 实存反向核对补齐,幂等(无缺口时一次 query 零成本返回)。
     if vector_ready:
         _backfill_vectors(handle, app_state, store, kb, doc_id, conv_id)
+
+    # 5.7) 收尾消歧对账(幂等):即使 LLM 没在批次内对上碎片,全量扫描
+    # "同类型 + 别名互指"的高置信对合并一次——把漏网的碎片(如 惊羽)
+    # 收敛回 canonical,避免图谱残留碎片节点。
+    try:
+        merged_end = _merge_same_type_alias_pairs(graph, kb_id, doc_id)
+        if merged_end:
+            handle.log(f"收尾消歧对账: 合并 {merged_end} 组同类型别名互指实体",
+                       level="warn", merged=merged_end)
+    except Exception as e:
+        handle.log(f"收尾消歧对账失败(不影响导入结论): {e}",
+                   level="warn", error=str(e)[:200])
 
     # 6) 收尾统计
     final_status = "partial" if failed_chunks else "succeeded"
@@ -759,13 +795,18 @@ class _ExtractionError(RuntimeError):
 
 
 def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
-                   glossary_top_k: int, temperature: float,
+                   graph_aliases: Dict[str, Dict[str, Any]], glossary_top_k: int,
+                   temperature: float,
                    max_retries: int, conv_id: str,
                    model_override: str = "") -> Tuple[List[Dict], List[Dict], Dict]:
     """单块抽取(在批内工作线程执行):渲染 prompt → chat_json → 规范化。
 
     model_override: 抽取模型覆盖(空 = 客户端配置默认)。长文档导入
     换快模型,不影响对话/检索链路。
+
+    graph_aliases: 图谱已存实体的别名表(normalized -> [aliases])。词表
+    渲染时把"同一实体的其他名字"显式列出来,引导 LLM 复用到 canonical
+    名并把碎片名放进 aliases——实体消歧的代码级锚点。
 
     Returns:
         (entities, relations, stats) — 已归一化、已剔除自环与空名;
@@ -780,7 +821,11 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
     if glossary and glossary_top_k:
         # 高频优先(词表按插入序累积,取尾部 top-K 近似高频;稳定且无需计数)
         items = list(glossary.items())[-glossary_top_k:]
-        glossary_lines = [f"- {name}({typ})" if typ else f"- {name}" for name, typ in items]
+        for name, typ in items:
+            entry = graph_aliases.get(name) or {}
+            aliases = entry.get("aliases") or []
+            alias_note = f" 别名:{'/'.join(aliases[:8])}" if aliases else ""
+            glossary_lines.append(f"- {name}({typ}){alias_note}")
 
     # 围栏 defang:文档内容是不可信输入,原文里的 ``` 能闭合 extract.j2
     # 的代码围栏并注入抽取指令;统一换成无害的 ~~~ 再进 prompt
@@ -981,6 +1026,83 @@ def _enforce_schema(kb: Dict, entities: List[Dict], relations: List[Dict]):
             kept_r.append(r)
 
     return kept_e, kept_r, dropped, proposals
+
+
+def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
+    """收尾消歧对账:按"文本揭示的别名指认"合并同类型重复实体(幂等)。
+
+    知识来源 = 正文:小说后段明确写的"张小凡后来叫鬼厉""万人往即鬼王"
+    被 LLM 抽进 aliases(互指),这里按这条文本级指认把碎片并回本体。
+    文本没说的,永不并——代码不做任何名字相似度类的猜测。
+
+    合并判据(两条都满足才并):
+      - 一方的名字出现在另一方的 aliases 里(指认边);
+      - 双方类型一致(青云山 location / 青云门 organization 不碰)。
+
+    指认可以成链(鬼王宗主→鬼王→万人往):用并查集把连通块整体收敛
+    到一个节点,而不是单趟遍历(单趟会漏链尾)。canonical 选块内最早
+    入库的名字(角色首次登场的名字,张小凡之于 鬼厉);其余名字全部
+    保进 canonical 的 aliases——检索按别名匹配,不丢召回。
+
+    Returns: 成功合并的对数。
+    """
+    try:
+        entities = graph.list_entities(kb_id)
+    except Exception:
+        return 0
+    if not entities:
+        return 0
+    by_name = {e["normalized"]: e for e in entities}
+
+    # ── 并查集:别名指认边(类型兼容才 union)连成连通块 ──
+    parent: Dict[str, str] = {n: n for n in by_name}
+
+    def _find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]   # 路径减半
+            x = parent[x]
+        return x
+
+    def _types_ok(a: str, b: str) -> bool:
+        ta = (by_name.get(a) or {}).get("type") or ""
+        tb = (by_name.get(b) or {}).get("type") or ""
+        return not (ta and tb and ta != tb)
+
+    for e in entities:
+        for a in (e.get("aliases") or []):
+            if a in by_name and a != e["normalized"] and _types_ok(e["normalized"], a):
+                ra, rb = _find(e["normalized"]), _find(a)
+                if ra != rb:
+                    parent[rb] = ra
+
+    comps: Dict[str, List[str]] = {}
+    for n in by_name:
+        comps.setdefault(_find(n), []).append(n)
+
+    def _canon_key(name: str):
+        n = by_name[name]
+        return (n.get("created_at") or "9999",
+                -len(n.get("source_chunks") or []),
+                -len(name))
+
+    merged = 0
+    for members in comps.values():
+        if len(members) < 2:
+            continue
+        canon = min(members, key=_canon_key)
+        for other in members:
+            if other == canon:
+                continue
+            # 落库前再校验一次(canonical 可能吸收了异型节点,这里不跟)
+            if not _types_ok(canon, other):
+                continue
+            res = graph.merge_entities(kb_id, doc_id,
+                                       [{"canonical": canon, "fragment": other}])
+            n = int((res or {}).get("merged") or 0)
+            merged += n
+            if n:
+                by_name.pop(other, None)
+    return merged
 
 
 def _merge_pending_proposals(store, kb: Dict, proposals: List[Dict]) -> None:

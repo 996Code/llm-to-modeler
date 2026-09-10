@@ -66,6 +66,18 @@ class RetrievalFakeGraph:
                     out.append(n)
         return out[:limit]
 
+    def list_entity_names(self, kb_id):
+        return {nn for (kb, nn) in self.nodes if kb == kb_id}
+
+    def list_entity_aliases(self, kb_id):
+        return {}
+
+    def list_entities(self, kb_id):
+        return []
+
+    def merge_entities(self, kb_id, doc_id, pairs):
+        return {"merged": 0}
+
     def subgraph_around(self, kb_id, seed_names, hops=2, max_nodes=80, max_edges=150):
         seeds = [n for (kb, nn), n in self.nodes.items()
                  if kb == kb_id and nn in seed_names]

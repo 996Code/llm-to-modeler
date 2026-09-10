@@ -76,14 +76,20 @@ class FakeGraph:
         self.delete_calls = []
 
     def upsert_batch(self, kb_id, doc_id, entities, relations):
+        import datetime
+        now = datetime.datetime.utcnow().isoformat()
         for e in entities:
             key = (kb_id, e["normalized_name"])
             node = self.nodes.setdefault(key, {
                 "id": f"{kb_id}:{e['normalized_name']}", "name": e["name"],
                 "normalized_name": e["normalized_name"], "type": e.get("type"),
                 "source_docs": [], "source_chunks": [],
+                "aliases": list(e.get("aliases", [])),
+                "created_at": now,
                 "type_status": e.get("type_status", "approved"),
             })
+            if e.get("aliases"):
+                node["aliases"] = list(dict.fromkeys(node.get("aliases", []) + e["aliases"]))
             if doc_id not in node["source_docs"]:
                 node["source_docs"].append(doc_id)
             for cid in (e.get("chunk_ids") or [e.get("chunk_id") or ""]):
@@ -95,6 +101,56 @@ class FakeGraph:
 
     def list_entity_names(self, kb_id):
         return {k[1] for k in self.nodes if k[0] == kb_id}
+
+    def list_entity_aliases(self, kb_id):
+        out = {}
+        for (kbid, norm), n in self.nodes.items():
+            if kbid == kb_id:
+                out[norm] = {"type": n.get("type") or "",
+                             "aliases": list(n.get("aliases", []))}
+        return out
+
+    def list_entities(self, kb_id):
+        out = []
+        for (kbid, norm), n in self.nodes.items():
+            if kbid == kb_id:
+                out.append({"normalized": norm, "name": n.get("name", norm),
+                            "type": n.get("type") or "",
+                            "aliases": list(n.get("aliases", [])),
+                            "source_chunks": list(n.get("source_chunks", [])),
+                            "created_at": n.get("created_at", "")})
+        return out
+
+    def merge_entities(self, kb_id, doc_id, pairs):
+        merged = 0
+        for p in pairs:
+            canon = p["canonical"]; frag = p["fragment"]
+            ck, fk = (kb_id, canon), (kb_id, frag)
+            if ck not in self.nodes or fk not in self.nodes:
+                continue
+            c = self.nodes[ck]; f = self.nodes[fk]
+            # 碎片名 + 碎片别名都并入 canonical(碎片名不保留,检索就丢了)
+            c["aliases"] = list(dict.fromkeys(
+                [a for a in ([frag] + f.get("aliases", []) + c.get("aliases", []))
+                 if a != canon]))
+            c["source_docs"] = list(dict.fromkeys(
+                c.get("source_docs", []) + f.get("source_docs", [])))
+            c["source_chunks"] = list(dict.fromkeys(
+                c.get("source_chunks", []) + f.get("source_chunks", [])))
+            # canonical↔fragment 间边是合并后的自环,删;其余重定向
+            self.edges = [e for e in self.edges
+                          if not (e["kb"] == kb_id
+                                  and {e.get("source"), e.get("target")} == {frag, canon})]
+            for e in self.edges:
+                if e["kb"] != kb_id:
+                    continue
+                if e.get("source") == frag:
+                    e["source"] = canon
+                if e.get("target") == frag:
+                    e["target"] = canon
+            del self.nodes[fk]
+            merged += 1
+        return {"merged": merged}
 
     def chunk_output(self, kb_id, chunk_id):
         ents = [{"name": n["name"], "type": n["type"]}
@@ -241,6 +297,34 @@ def _make_doc(env, name: str, paragraphs: list):
 
 # ── 用例 ─────────────────────────────────────────────────────
 
+def _extract_alias_llm(fake_llm, alias_map: dict):
+    """把 MockLLM 改造成支持 alias 输出的脚本:name 若在 alias_map 中,
+    返回该 name 且 aliases 带其别名;用于构造"张小凡/鬼厉 分块抽取"。
+    """
+    orig = fake_llm.chat_json
+
+    def chat_json(self, messages, temperature=None, conv_id=None, stage=None, model=None):
+        content = messages[0]["content"]
+        if stage != "kg.extract":
+            return orig(messages, temperature=temperature, conv_id=conv_id,
+                        stage=stage, model=model)
+        import re
+        names = re.findall(r"\[E:([^\]]+)\]", content)
+        entities = []
+        for n in names:
+            aliases = alias_map.get(n, [])
+            entities.append({"name": n, "type": "person", "description": "",
+                             "aliases": aliases})
+        relations = []
+        if len(names) >= 2:
+            relations.append({"source": names[0], "target": names[1],
+                              "type": "相关", "description": "", "evidence": ""})
+        return {"entities": entities, "relations": relations}
+
+    fake_llm.chat_json = chat_json.__get__(fake_llm, type(fake_llm))
+    return fake_llm
+
+
 class TestImportPipeline:
 
     def test_success_flow(self, env):
@@ -262,6 +346,144 @@ class TestImportPipeline:
         assert env.graph.delete_calls == [doc["id"]]
         # 词表生效:后续批次的 prompt 应含前批实体名(通过抽取调用数间接验证)
         assert env.llm.extract_calls == len(env.store.list_chunks(doc["id"]))
+
+    def test_cross_batch_entity_disambiguation(self, env):
+        """批次间实体消歧:张小凡 先被抽出(带别名 鬼厉),后续批次又抽出
+        鬼厉 为独立实体——应并回张小凡,而不是另立节点。"""
+
+        def chat_json(self, messages, temperature=None, conv_id=None, stage=None, model=None):
+            content = messages[0]["content"]
+            if stage != "kg.extract":
+                return {}
+            import re
+            names = re.findall(r"\[E:([^\]]+)\]", content)
+            entities = []
+            for n in names:
+                # 第一章:张小凡 带别名 鬼厉;第二章:鬼厉(碎片);
+                # 第三章:林惊羽 带别名 惊羽;第四章:惊羽(碎片)
+                if n == "张小凡":
+                    aliases = ["鬼厉"]
+                elif n == "林惊羽":
+                    aliases = ["惊羽"]
+                else:
+                    aliases = []
+                entities.append({"name": n, "type": "person", "description": "",
+                                 "aliases": aliases})
+            relations = []
+            if len(names) >= 2:
+                relations.append({"source": names[0], "target": names[1],
+                                  "type": "相关", "description": "", "evidence": ""})
+            return {"entities": entities, "relations": relations}
+
+        env.llm.chat_json = chat_json.__get__(env.llm, type(env.llm))
+        # 每章垫长到 > chunk_target(100):确保各章独立成块——否则相邻短章
+        # 打包进同一块,鬼厉/曾书书 与 张小凡 同块,关系会变成合并后的自环
+        pad = "夜色沉沉,山风掠过竹林。" * 12
+        kb, doc = _make_doc(env, "消歧", [
+            f"# 第一章\n[E:张小凡] 在青云门修行。{pad}",
+            f"# 第二章\n[E:鬼厉] 与 [E:曾书书] 对饮。{pad}",
+            f"# 第三章\n[E:林惊羽] 与张小凡并肩。{pad}",
+            f"# 第四章\n[E:惊羽] 持剑而立。{pad}",
+        ])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        # 鬼厉 被并回张小凡(别名合并,不是新节点)
+        nodes = env.graph.nodes
+        keys = [k[1] for k in nodes if k[0] == kb["id"]]
+        assert "张小凡" in keys and "鬼厉" not in keys, keys
+        # 惊羽 也被收尾对账并回 林惊羽(同 person + 别名互指)
+        assert "林惊羽" in keys and "惊羽" not in keys, keys
+        # 张小凡 的别名已含 鬼厉
+        zxf = nodes[(kb["id"], "张小凡")]
+        assert "鬼厉" in zxf.get("aliases", []), zxf
+        # 关系边重定向:鬼厉-曾书书 的关系现在挂到 张小凡-曾书书;
+        # canonical↔碎片 之间的边(合并后是自环)被删除
+        edges = [e for e in env.graph.edges if e["kb"] == kb["id"]]
+        assert all(e["source"] != "鬼厉" and e["target"] != "鬼厉" for e in edges)
+        assert any(e["source"] == "张小凡" and e["target"] == "曾书书" for e in edges), edges
+        assert all(e["source"] != e["target"] for e in edges), edges
+        # 收尾对账日志有"消歧"标记
+        logs = env.manager.store.list_logs(t["id"])
+        assert any("消歧" in (l.get("message") or "") for l in logs)
+
+    def test_same_batch_alias_merge(self):
+        """收尾对账纯函数:同类型+别名指认 → 合并;canonical 取最早入库;
+        不同类型(青云山/青云门)绝不并。"""
+        class MiniGraph:
+            def __init__(self):
+                self.nodes = {}
+                self.edges = []
+            def list_entities(self, kb):
+                return [{"normalized": k, "name": k, "type": v["type"],
+                         "aliases": list(v["aliases"]),
+                         "source_chunks": [], "created_at": v["created_at"]}
+                        for k, v in self.nodes.items()]
+            def merge_entities(self, kb, doc, pairs):
+                m = 0
+                for p in pairs:
+                    c, f = p["canonical"], p["fragment"]
+                    if c not in self.nodes or f not in self.nodes:
+                        continue
+                    self.nodes[c]["aliases"] = list(dict.fromkeys(
+                        self.nodes[c]["aliases"] + self.nodes[f]["aliases"] + [f]))
+                    del self.nodes[f]
+                    for e in self.edges:
+                        if e[0] == f: e[0] = c
+                        if e[1] == f: e[1] = c
+                    m += 1
+                return {"merged": m}
+
+        g = MiniGraph()
+        # 张小凡(t1 入库,别名鬼厉)↔ 鬼厉(t2 入库,别名张小凡):互指同型,
+        # canonical 取最早入库的张小凡
+        g.nodes = {
+            "张小凡": {"type": "person", "aliases": ["鬼厉"], "created_at": "t1"},
+            "鬼厉": {"type": "person", "aliases": ["张小凡"], "created_at": "t2"},
+            "林惊羽": {"type": "person", "aliases": ["惊羽"], "created_at": "t3"},
+            "惊羽": {"type": "person", "aliases": [], "created_at": "t4"},
+            # 不同类型:互为别名也不并(山 vs 门)
+            "青云山": {"type": "location", "aliases": ["青云门"], "created_at": "t5"},
+            "青云门": {"type": "organization", "aliases": ["青云山"], "created_at": "t6"},
+        }
+        g.edges = [["鬼厉", "林惊羽"]]
+        n = tasks._merge_same_type_alias_pairs(g, "kb", "d1")
+        assert n == 2  # 鬼厉→张小凡、惊羽→林惊羽(青云山/青云门 类型不同,不并)
+        assert set(g.nodes) == {"张小凡", "林惊羽", "青云山", "青云门"}
+        # canonical 方向:保留最早入库的张小凡,鬼厉 进别名
+        assert "鬼厉" in g.nodes["张小凡"]["aliases"]
+        # 关系边重定向
+        assert g.edges == [["张小凡", "林惊羽"]]
+        # 幂等:再跑一遍无新合并
+        assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 0
+
+    def test_resume_glossary_seeded_from_graph(self, env):
+        """词表播种(根修):续跑任务的词表从图播种,第一批 prompt 就含
+        既有实体名——此前续跑词表从零开始,是碎片的主要来源。"""
+        kb, doc = _make_doc(env, "播种", ["[E:甲] [E:乙] 首段。", "[E:丙] 次段。"])
+        store = env.store
+        store.replace_chunks(doc["id"], kb["id"], [{"seq": 0, "text": "[E:甲] [E:乙] 首段。"},
+                                                   {"seq": 1, "text": "[E:丙] 次段。"}])
+        chunks = store.list_chunks(doc["id"])
+        store.mark_chunk(chunks[0]["id"], "done")
+        env.graph.upsert_batch(kb["id"], doc["id"], [
+            {"name": "甲", "normalized_name": "甲", "type": "person",
+             "description": "", "aliases": [], "chunk_ids": [chunks[0]["id"]]},
+        ], [])
+        store.update_document(doc["id"], import_status="partial", error="中断")
+
+        prompts = []
+        orig = env.llm.chat_json
+        def capture(self, messages, **kw):
+            prompts.append(messages[0]["content"])
+            return orig(messages, **kw)
+        env.llm.chat_json = capture.__get__(env.llm, type(env.llm))
+
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        # 续跑第一批(块1)的 prompt 里就有既有实体 甲(词表播种生效)
+        assert prompts and "- 甲(person)" in prompts[0]
+        logs = env.manager.store.list_logs(t["id"])
+        assert any("词表播种" in (l.get("message") or "") for l in logs)
 
     def test_idempotent_skip(self, env):
         kb, doc = _make_doc(env, "跳过", ["[E:甲] [E:乙]"])

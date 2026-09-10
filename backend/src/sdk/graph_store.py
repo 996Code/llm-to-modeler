@@ -55,6 +55,10 @@ class GraphStore(Protocol):
                      entities: List[Dict], relations: List[Dict]) -> Dict[str, int]: ...
     def chunk_output(self, scope: str, chunk_id: str) -> Dict[str, List[Dict]]: ...
     def list_entity_names(self, scope: str) -> set: ...
+    def list_entity_aliases(self, scope: str) -> Dict[str, Dict[str, Any]]: ...
+    def list_entities(self, scope: str) -> List[Dict]: ...
+    def merge_entities(self, scope: str, doc_id: str,
+                       pairs: List[Dict]) -> Dict[str, int]: ...
     def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]: ...
     def delete_scope(self, scope: str) -> Dict[str, int]: ...
     def counts(self, scope: str) -> Dict[str, int]: ...
@@ -289,6 +293,169 @@ class Neo4jGraphStore:
                 kb=scope,
             ).data()
         return {r["n"] for r in rows if r.get("n")}
+
+    def list_entity_aliases(self, scope: str) -> Dict[str, Dict[str, Any]]:
+        """库内全部实体的别名+类型表:normalized_name -> {type, aliases[]}。
+
+        导入流水线批次间用它做实体消歧:图里某实体已经积累了别名(如
+        张小凡 的别名含"鬼厉"),后续批次抽到"鬼厉"时就有据可依地把
+        它并回张小凡,而不是另立节点。type 随附,合并前做同类型校验。
+        """
+        self._check_scope(scope)
+        with self._session() as s:
+            rows = s.run(
+                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
+                f"RETURN e.normalized_name AS n, coalesce(e.type, '') AS t, "
+                f"       coalesce(e.aliases, []) AS a",
+                kb=scope,
+            ).data()
+        out: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            if r.get("n"):
+                out[r["n"]] = {
+                    "type": r.get("t") or "",
+                    "aliases": list(dict.fromkeys(x for x in (r.get("a") or []) if x)),
+                }
+        return out
+
+    def list_entities(self, scope: str) -> List[Dict]:
+        """库内全部实体(含 type/aliases/块溯源量/创建时间;收尾对账合并用)。
+
+        created_at 供消歧时选 canonical:最早入库 = 角色首次登场的名字
+        (张小凡 先于 鬼厉 入库,合并后保留张小凡)。
+        """
+        self._check_scope(scope)
+        with self._session() as s:
+            rows = s.run(
+                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
+                f"RETURN e.normalized_name AS n, e.name AS name, e.type AS type, "
+                f"       coalesce(e.aliases, []) AS a, e.source_chunks AS sc, "
+                f"       coalesce(e.created_at, '') AS cat",
+                kb=scope,
+            ).data()
+        out = []
+        for r in rows:
+            if not r.get("n"):
+                continue
+            out.append({
+                "normalized": r["n"], "name": r.get("name") or r["n"],
+                "type": r.get("type") or "",
+                "aliases": list(dict.fromkeys(x for x in (r.get("a") or []) if x)),
+                "source_chunks": list(r.get("sc") or []),
+                "created_at": r.get("cat") or "",
+            })
+        return out
+
+    def merge_entities(self, scope: str, doc_id: str,
+                       pairs: List[Dict]) -> Dict[str, int]:
+        """实体消歧合并(单事务):把碎片实体并进 canonical 实体。
+
+        pairs: [{"canonical": 标准名(normalized), "fragment": 碎片名(normalized)}]
+        只处理 pairs 明确声明的对——绝不启发式猜测,避免误并(如
+        "青云山/青云门"这种真·不同实体)。合并语义:
+          1. 碎片 aliases + 碎片名 并入 canonical 的 aliases(去重)——
+             碎片名必须保留,否则碎片节点删除后按别名检索就丢了;
+          2. canonical 并集碎片的 source_docs / source_chunks(溯源不丢);
+          3. 碎片的进出边**迁移**到 canonical(按 upsert 同款 MERGE 键
+             (source_key,target_key,type,chunk_id) 落新边,证据补齐后删
+             旧边——只改关系属性不移端点,DETACH DELETE 会连边一起删,
+             那是丢关系不是合并);
+          4. canonical↔碎片 之间的直连边是合并后的自环,直接删;
+          5. DETACH DELETE 碎片节点。
+
+        Returns: {"merged": 成功合并的对数}
+        """
+        self._check_scope(scope)
+        if not pairs:
+            return {"merged": 0}
+        now = _now()
+        with self._session() as s:
+            def _tx(tx):
+                n = 0
+                for p in pairs:
+                    canon = str((p or {}).get("canonical") or "").strip()
+                    frag = str((p or {}).get("fragment") or "").strip()
+                    if not canon or not frag or canon == frag:
+                        continue
+                    # ── 0) canonical↔碎片 直连边 = 合并后自环,删 ──
+                    tx.run(
+                        f"MATCH (c:{self._label} {{{self._sp}: $kb, normalized_name: $canon}})"
+                        f"-[self_r:{self._rel} {{{self._sp}: $kb}}]-"
+                        f"(f:{self._label} {{{self._sp}: $kb, normalized_name: $frag}}) "
+                        f"DELETE self_r",
+                        kb=scope, canon=canon, frag=frag,
+                    ).consume()
+                    # ── 1) 出边迁移:f→x 落成 c→x(MERGE 键同 upsert,幂等) ──
+                    tx.run(
+                        f"""
+                        MATCH (f:{self._label} {{{self._sp}: $kb, normalized_name: $frag}})
+                        MATCH (f)-[r:{self._rel} {{{self._sp}: $kb}}]->(x:{self._label})
+                        MATCH (c:{self._label} {{{self._sp}: $kb, normalized_name: $canon}})
+                        MERGE (c)-[r2:{self._rel} {{
+                            {self._sp}: $kb, source_key: $canon,
+                            target_key: x.normalized_name, type: r.type,
+                            chunk_id: r.chunk_id}}]->(x)
+                        ON CREATE SET r2.created_at = r.created_at,
+                                      r2.id = $kb + ':' + $canon + '>' + r.type
+                                              + '>' + x.normalized_name + ':' + r.chunk_id
+                        SET r2.doc_id = coalesce(r2.doc_id, r.doc_id),
+                            r2.description = CASE WHEN coalesce(r2.description,'') = ''
+                                                  THEN r.description ELSE r2.description END,
+                            r2.evidence = CASE WHEN coalesce(r2.evidence,'') = ''
+                                               THEN r.evidence ELSE r2.evidence END,
+                            r2.updated_at = $now
+                        DELETE r
+                        """,
+                        kb=scope, canon=canon, frag=frag, now=now,
+                    ).consume()
+                    # ── 2) 入边迁移:x→f 落成 x→c ──
+                    tx.run(
+                        f"""
+                        MATCH (f:{self._label} {{{self._sp}: $kb, normalized_name: $frag}})
+                        MATCH (x:{self._label})-[r:{self._rel} {{{self._sp}: $kb}}]->(f)
+                        MATCH (c:{self._label} {{{self._sp}: $kb, normalized_name: $canon}})
+                        MERGE (x)-[r2:{self._rel} {{
+                            {self._sp}: $kb, source_key: x.normalized_name,
+                            target_key: $canon, type: r.type,
+                            chunk_id: r.chunk_id}}]->(c)
+                        ON CREATE SET r2.created_at = r.created_at,
+                                      r2.id = $kb + ':' + x.normalized_name + '>' + r.type
+                                              + '>' + $canon + ':' + r.chunk_id
+                        SET r2.doc_id = coalesce(r2.doc_id, r.doc_id),
+                            r2.description = CASE WHEN coalesce(r2.description,'') = ''
+                                                  THEN r.description ELSE r2.description END,
+                            r2.evidence = CASE WHEN coalesce(r2.evidence,'') = ''
+                                               THEN r.evidence ELSE r2.evidence END,
+                            r2.updated_at = $now
+                        DELETE r
+                        """,
+                        kb=scope, canon=canon, frag=frag, now=now,
+                    ).consume()
+                    # ── 3) 属性并集:别名(含碎片名)+ 溯源 ──
+                    ok = tx.run(
+                        f"""
+                        MATCH (c:{self._label} {{{self._sp}: $kb, normalized_name: $canon}})
+                        MATCH (f:{self._label} {{{self._sp}: $kb, normalized_name: $frag}})
+                        SET c.aliases = reduce(acc = coalesce(c.aliases, []),
+                                               a IN coalesce(f.aliases, []) + [$frag] |
+                                               CASE WHEN a = $canon OR a IN acc THEN acc
+                                                    ELSE acc + a END),
+                            c.source_docs = reduce(acc = coalesce(c.source_docs, []),
+                                                   d IN coalesce(f.source_docs, []) |
+                                                   CASE WHEN d IN acc THEN acc ELSE acc + d END),
+                            c.source_chunks = reduce(acc = coalesce(c.source_chunks, []),
+                                                     ch IN coalesce(f.source_chunks, []) |
+                                                     CASE WHEN ch IN acc THEN acc ELSE acc + ch END),
+                            c.updated_at = $now
+                        DETACH DELETE f
+                        RETURN count(c) AS ok
+                        """,
+                        kb=scope, canon=canon, frag=frag, now=now,
+                    ).single()
+                    n += int((ok or {}).get("ok") or 0)
+                return n
+            merged = s.execute_write(_tx)
+        return {"merged": int(merged)}
 
     def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]:
         """删除某文档的全部图谱贡献:边按 doc_id 删,实体去引用,孤立实体删。"""
