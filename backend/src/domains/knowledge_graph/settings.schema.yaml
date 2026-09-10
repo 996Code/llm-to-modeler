@@ -131,9 +131,9 @@ groups:
       - key: embed_batch_size
         type: int
         label: 向量化批大小
-        default: 8
+        default: 4
         min: 1
-        max: 32
+        max: 16
         help: 每批向量化的段数;bge-m3 CPU 推理内存与批大小线性相关,16 段曾撞 4G 容器上限 OOM(两次线上实锤),调大队列前先确认容器内存余量
       - key: llm_rpm_limit
         type: int
