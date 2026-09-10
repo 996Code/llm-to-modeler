@@ -117,13 +117,12 @@
               <template v-if="g.key.startsWith('chunks')">
                 <div class="tk-chunk-row">
                   <span class="tk-chunk-id">块{{ chunkData(lg).chunk ?? '?' }}</span>
-                  <a-progress
-                    :percent="chunkPct(lg)" size="small" style="flex: 1; min-width: 60px"
-                    :show-info="false" :status="lg.level === 'warn' ? 'exception' : undefined"
-                    title="块耗时(条形长度为批内相对耗时,非完成度)"
-                  />
+                  <!-- 耗时徽章:完成即满(不是进度条;批内偏慢标红,便于定位慢块) -->
+                  <span
+                    class="tk-chunk-dur-badge"
+                    :class="{ 'tk-chunk-dur-slow': isSlowChunk(lg, g) }"
+                  >{{ fmtMs(chunkData(lg).duration_ms) }}</span>
                   <span class="tk-chunk-metric">{{ chunkData(lg).entities ?? 0 }}e / {{ chunkData(lg).relations ?? 0 }}r</span>
-                  <span class="tk-chunk-dur">{{ fmtMs(chunkData(lg).duration_ms) }}</span>
                 </div>
               </template>
               <!-- 其余组:标题行 + 指标徽章 -->
@@ -379,12 +378,12 @@ function chunkData(lg: TaskLogItem): LogData {
   return (lg.data && typeof lg.data === 'object' ? lg.data : {}) as LogData
 }
 
-function chunkPct(lg: TaskLogItem): number {
+// 批内相对耗时 ≥80% 的块标红(定位慢块;这不是完成度)
+function isSlowChunk(lg: TaskLogItem, g?: LogGroup): boolean {
   const d = Number(chunkData(lg).duration_ms) || 0
-  // 找 lg 所在的 chunks 组(组 key 已拼序号,按 logs 包含判断)
-  const g = structuredGroups.value.find((x) => x.key.startsWith('chunks') && x.logs.includes(lg))
-  const max = g?.maxDurationMs || 1
-  return Math.max(6, Math.round((d / max) * 100))
+  const logs = g?.logs?.length ? g.logs : (structuredGroups.value.find((x) => x.key.startsWith('chunks') && x.logs.includes(lg))?.logs || [])
+  const max = Math.max(1, ...logs.map((l) => Number(chunkData(l).duration_ms) || 1))
+  return d / max >= 0.8
 }
 
 function fmtMs(ms: unknown): string {
@@ -608,7 +607,11 @@ function openLogs(record: TaskItem) {
   font-family: 'SF Mono', Menlo, Consolas, monospace;
 }
 .tk-chunk-metric { color: #cbd5e1; font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace; flex-shrink: 0; }
-.tk-chunk-dur { color: #fbbf24; font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace; width: 52px; text-align: right; flex-shrink: 0; }
+.tk-chunk-dur-badge {
+  color: #9ca3af; font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace;
+  background: #f3f4f6; border-radius: 4px; padding: 1px 8px; flex-shrink: 0;
+}
+.tk-chunk-dur-slow { color: #dc2626; background: #fef2f2; }
 
 /* ── 原始视图 ── */
 .tk-log-line { display: flex; align-items: baseline; padding: 2px 0; color: #cbd5e1; }
