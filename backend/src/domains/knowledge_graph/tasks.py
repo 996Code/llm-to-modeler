@@ -672,7 +672,10 @@ def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], co
     父块(f"{chunk_id}#i")。抽取按章,召回按段。
     """
     try:
-        embed_batch = max(1, int(_cfg(app_state, "embed_batch_size", 16)))
+        # 默认 8 段/批(原 16):bge-m3 CPU 推理的 ONNX Arena 峰值与批大小
+        # 线性相关,16 段×~1000tok 曾撞 4G cgroup 上限被 OOM kill(线上
+        # 两次实锤);8 段峰值减半,CPU 推理吞吐几乎不受影响
+        embed_batch = max(1, int(_cfg(app_state, "embed_batch_size", 8)))
         sub_size = max(300, int(_cfg(app_state, "vector_subchunk_chars", 1200)))
         vector_store = runtime.get_vector(app_state)
         rows = []
