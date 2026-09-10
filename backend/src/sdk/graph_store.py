@@ -54,6 +54,7 @@ class GraphStore(Protocol):
     def upsert_batch(self, scope: str, doc_id: str,
                      entities: List[Dict], relations: List[Dict]) -> Dict[str, int]: ...
     def chunk_output(self, scope: str, chunk_id: str) -> Dict[str, List[Dict]]: ...
+    def list_entity_names(self, scope: str) -> set: ...
     def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]: ...
     def delete_scope(self, scope: str) -> Dict[str, int]: ...
     def counts(self, scope: str) -> Dict[str, int]: ...
@@ -277,6 +278,17 @@ class Neo4jGraphStore:
             "evidence": (r["rel"].get("evidence") or "")[:200],
         } for r in rel_rows]
         return {"entities": entities, "relations": relations}
+
+    def list_entity_names(self, scope: str) -> set:
+        """库内全部实体 normalized_name(悬空关系过滤的 known 集合扩充用)。"""
+        self._check_scope(scope)
+        with self._session() as s:
+            rows = s.run(
+                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
+                f"RETURN e.normalized_name AS n",
+                kb=scope,
+            ).data()
+        return {r["n"] for r in rows if r.get("n")}
 
     def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]:
         """删除某文档的全部图谱贡献:边按 doc_id 删,实体去引用,孤立实体删。"""

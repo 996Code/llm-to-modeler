@@ -330,6 +330,9 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     # 关系类型约束表(key → {domain, range}),端点类型校验用(prompt 建议的代码强制)
     rel_specs = {r.get("key"): r for r in
                  ((kb.get("schema") or {}).get("relation_types") or []) if r.get("key")}
+    # 图谱已存实体名缓存(懒加载一次):悬空关系过滤把已入库实体算进
+    # known——续跑任务词表从零开始,不并入会把指向已存实体的关系全丢
+    graph_entities_known: set = set()
     pending_proposals: List[Dict] = []
     total_entities = total_relations = failed_chunks = 0
     consecutive_failures = 0
@@ -481,10 +484,15 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             kept_e, kept_r, dropped, proposals = _enforce_schema(kb, list(batch_entities.values()), batch_relations)
             pending_proposals.extend(proposals)
 
-            # 关系端点必须在已知实体集内(本批 ∪ 词表),悬空关系丢弃。
-            # dropped 含实体+关系两类 strict 丢弃,悬空数不能拿它减——
-            # 按端点重数一遍(strict 丢弃实体会连带其关系悬空,属正常)
+            # 关系端点必须在已知实体集内(本批 ∪ 词表 ∪ 图谱已存),悬空关系丢弃。
+            # 图谱已存实体必须并入:续跑/自动重跑任务的词表从零开始(块级
+            # checkpoint 只存块状态),而前次运行抽的实体已在图里——只认
+            # 本批∪词表会把"新块关系指向已入库实体"全部当悬空丢弃
+            # (线上实测:续跑批次关系数为 0 的根因之一)。
             known = set(batch_entities.keys()) | set(glossary.keys())
+            if done_before and not graph_entities_known:
+                graph_entities_known = graph.list_entity_names(kb["id"])
+            known |= graph_entities_known
             dangling = sum(1 for r in batch_relations
                            if r["source"] not in known or r["target"] not in known)
             kept_r = [r for r in kept_r if r["source"] in known and r["target"] in known]
@@ -666,12 +674,23 @@ def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], co
                     "seq": c["seq"], "text": sub,
                 })
         n = 0
+        t_all = time.monotonic()
         for i in range(0, len(rows), embed_batch):
             part = rows[i:i + embed_batch]
+            t0 = time.monotonic()
             vectors = app_state.llm_client.embeddings(
                 [r["text"] for r in part], conv_id=conv_id, stage="kg.embed")
             n += vector_store.upsert_chunks(kb["id"], [
                 {**r, "vector": vec} for r, vec in zip(part, vectors)])
+            dt = time.monotonic() - t0
+            # 向量化可观测:本地 CPU 推理分钟级是常态,无日志时表现为
+            # "批次收尾长时间无输出"(线上被误判卡死/无法定位卡点)
+            if dt > 3:
+                handle.log(f"向量写入: {len(part)} 段 {dt:.1f}s(累计 {n}/{len(rows)})",
+                           rows=len(part), seconds=round(dt, 1))
+        if rows:
+            handle.log(f"向量写入完成: {n} 段,耗时 {time.monotonic() - t_all:.1f}s",
+                       rows=n, seconds=round(time.monotonic() - t_all, 1))
         return n
     except Exception as e:
         handle.log(f"向量写入失败(图谱不受影响): {e}", level="warn", rows=len(chunks))

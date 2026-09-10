@@ -93,6 +93,9 @@ class FakeGraph:
             self.edges.append({**r, "kb": kb_id, "doc_id": doc_id})
         return {"entities": len(entities), "relations": len(relations)}
 
+    def list_entity_names(self, kb_id):
+        return {k[1] for k in self.nodes if k[0] == kb_id}
+
     def chunk_output(self, kb_id, chunk_id):
         ents = [{"name": n["name"], "type": n["type"]}
                 for (kb, _), n in self.nodes.items()

@@ -78,7 +78,11 @@ class _LocalEmbedder:
 
     @staticmethod
     def _download_model() -> str:
-        """从 HF 镜像拉模型(仅首次;构建期预下载的部署不会走到这)。"""
+        """从 HF 镜像拉模型(仅首次;构建期预下载的部署不会走到这)。
+
+        带超时与进度日志:urllib 默认无超时,镜像限速时 543MB 能挂几十
+        分钟且无任何输出——表现即"导入批次收尾卡死"(线上事故)。
+        """
         cache = os.path.expanduser(
             os.getenv("EMBEDDING_CACHE_DIR", "~/.cache/llm-embeddings/bge-m3"))
         os.makedirs(cache, exist_ok=True)
@@ -91,7 +95,14 @@ class _LocalEmbedder:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             url = f"{base}/{_MODEL_REPO}/resolve/main/{rel}"
             logger.info(f"downloading embedding model: {rel}")
-            urllib.request.urlretrieve(url, dest)
+
+            def _progress(blocks, bs, total):
+                if blocks % 200 == 0 and total > 0:
+                    logger.info(f"  {rel}: {blocks * bs // 1024 // 1024}MB / {total // 1024 // 1024}MB")
+
+            tmp = dest + ".part"
+            urllib.request.urlretrieve(url, tmp, reporthook=_progress)
+            os.replace(tmp, dest)
         return cache
 
     # ── 推理 ─────────────────────────────────────────────
@@ -104,8 +115,11 @@ class _LocalEmbedder:
         官方 sentence-transformers 用 CLS pooling;这里按官方对齐。
         """
         np = self._np
+        import time as _time
+        _t0 = _time.monotonic()
         encodings = self._tokenizer.encode_batch(
             [t[:12000] for t in texts])  # 超长文本粗截(防 tokenize 慢;12000 字→~9000 tokens)
+        _t_tok = _time.monotonic()
         input_ids = np.zeros((len(texts), self._max_len), dtype=np.int64)
         attention = np.zeros((len(texts), self._max_len), dtype=np.int64)
         for i, enc in enumerate(encodings):
@@ -116,6 +130,13 @@ class _LocalEmbedder:
         out = self._session.run(None, {
             "input_ids": input_ids, "attention_mask": attention,
         })
+        # 慢推理可观测:批耗时/条数/tokenize 占比——CPU 推理是向量写入
+        # 的主要耗时,无日志时表现为"批次收尾长时间无输出"(线上误判卡死)
+        _t_all = _time.monotonic() - _t0
+        if _t_all > 3:
+            logger.info(f"embed slow: {len(texts)} 段 {_t_all:.1f}s"
+                        f"(tokenize {_t_tok - _t0:.1f}s, infer {_t_all - (_t_tok - _t0):.1f}s,"
+                        f"max_len={self._max_len})")
         hidden = out[0]  # (B, L, H)
         # CLS pooling(第 0 个 token)+ L2 归一化
         cls_vec = hidden[:, 0, :]
