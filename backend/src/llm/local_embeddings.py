@@ -120,10 +120,17 @@ class _LocalEmbedder:
         encodings = self._tokenizer.encode_batch(
             [t[:12000] for t in texts])  # 超长文本粗截(防 tokenize 慢;12000 字→~9000 tokens)
         _t_tok = _time.monotonic()
-        input_ids = np.zeros((len(texts), self._max_len), dtype=np.int64)
-        attention = np.zeros((len(texts), self._max_len), dtype=np.int64)
+        # 【动态长度分配】按本批实际最大 token 数分配矩阵,而不是固定
+        # _max_len——transformer 注意力内存是 O(B·heads·L²):B=16、L=4096
+        # 时仅分数张量就 ~17GB,32G 主机直接 OOM/整机卡死(线上事故,
+        # 表现为"批次收尾假卡死 + cancel 无响应")。1200 字段 ≈1500 token,
+        # 动态分配后单批峰值降到 ~2.7GB(16 段)乃至百 MB 级(8 段)。
+        batch_len = min(self._max_len,
+                        max((min(len(e.ids), self._max_len) for e in encodings), default=1))
+        input_ids = np.zeros((len(texts), batch_len), dtype=np.int64)
+        attention = np.zeros((len(texts), batch_len), dtype=np.int64)
         for i, enc in enumerate(encodings):
-            ids = enc.ids[:self._max_len]
+            ids = enc.ids[:batch_len]
             input_ids[i, :len(ids)] = ids
             attention[i, :len(ids)] = 1
 
@@ -136,7 +143,7 @@ class _LocalEmbedder:
         if _t_all > 3:
             logger.info(f"embed slow: {len(texts)} 段 {_t_all:.1f}s"
                         f"(tokenize {_t_tok - _t0:.1f}s, infer {_t_all - (_t_tok - _t0):.1f}s,"
-                        f"max_len={self._max_len})")
+                        f"batch_len={batch_len})")
         hidden = out[0]  # (B, L, H)
         # CLS pooling(第 0 个 token)+ L2 归一化
         cls_vec = hidden[:, 0, :]
