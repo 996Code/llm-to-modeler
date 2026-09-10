@@ -269,22 +269,24 @@ class TaskStore:
     # ── 重启恢复 ────────────────────────────────────────────
 
     def mark_interrupted_on_startup(self) -> List[str]:
-        """把上次进程遗留的 pending/running 任务标记为 interrupted。
+        """把上次进程遗留的 pending/running/retry_scheduled 任务标记为 interrupted。
 
         第一期不自动续跑(handler 的进程内状态已丢失,续跑语义交由各 pack
         用"幂等重跑"实现——如知识图谱导入按 chunk checkpoint 跳过已完成块)。
+        retry_scheduled 一并收敛:它的续跑定时器是进程内线程,重启即失,
+        不收敛会永远卡在中间态(无任何机制再推动它)。
         返回被打断的任务 id 列表(日志可见)。
         """
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT id FROM tasks WHERE status IN ('pending', 'running')",
+                "SELECT id FROM tasks WHERE status IN ('pending', 'running', 'retry_scheduled')",
             ).fetchall()
             ids = [r["id"] for r in rows]
             if ids:
                 conn.execute(
                     "UPDATE tasks SET status = 'interrupted',"
                     " error = COALESCE(NULLIF(error, ''), '服务重启,任务被中断'),"
-                    " finished_at = ? WHERE status IN ('pending', 'running')",
+                    " finished_at = ? WHERE status IN ('pending', 'running', 'retry_scheduled')",
                     (_now(),),
                 )
         if ids:

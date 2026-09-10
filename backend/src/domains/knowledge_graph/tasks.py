@@ -306,7 +306,10 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         want = set(targeted)
         unknown = want - {c["id"] for c in store.list_chunks(doc_id)}
         if unknown:
-            raise RuntimeError(f"定向重抽的块不存在: {sorted(unknown)[:3]}…")
+            # 永久性校验错误:块 ID 写错重跑也恒定失败,标 Permanent 让
+            # 框架跳过自动续跑(否则 5 分钟一轮无限空转,线上实证 3 小时)
+            from services.task_manager import PermanentTaskError
+            raise PermanentTaskError(f"定向重抽的块不存在: {sorted(unknown)[:3]}…")
         pending = [c for c in pending if c["id"] in want]
         handle.log(f"定向重抽: 指定 {len(want)} 块,待处理 {len(pending)} 块"
                    f"(其余为已完成,跳过)", targeted=len(want), to_run=len(pending))

@@ -525,6 +525,51 @@ class TestAuditFixes:
             time.sleep(0.05)
         assert m.store.get_task(t4["id"])["status"] == "resumed"
 
+    def test_auto_retry_permanent_error_and_budget_inheritance(self, task_manager):
+        """永久性错误(PermanentTaskError)不续跑直接 failed——写错的定向
+        重抽请求重跑恒定失败,续跑只会无限空转(线上实证 3 小时 10+ 轮);
+        续跑预算继承——新任务 retryCount 接旧值,链上总重试封顶。"""
+        m = task_manager
+        from services.task_manager import PermanentTaskError
+
+        # 1) 永久性错误 → 直接 failed(不进 retry_scheduled)
+        def bad_target(h):
+            raise PermanentTaskError("定向重抽的块不存在: ['abc']…")
+        m.register("zz.permanent", bad_target, pack_name="test")
+        t1 = m.submit("zz.permanent", max_auto_retry=3)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and m.store.get_task(t1["id"])["status"] not in ("failed", "retry_scheduled"):
+            time.sleep(0.05)
+        st = m.store.get_task(t1["id"])
+        assert st["status"] == "failed" and "不存在" in (st["error"] or ""), st
+
+        # 2) 续跑预算继承:旧任务 retryCount=2 → 续跑新任务 retryCount 也是 2
+        def ok_handler(h):
+            return {"done": True}
+        m.register("zz.ok2", ok_handler, pack_name="test")
+        t2 = m.submit("zz.ok2", max_auto_retry=3)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and m.store.get_task(t2["id"])["status"] != "succeeded":
+            time.sleep(0.05)
+        # 模拟已重试两轮后调度续跑
+        m.store.update_task(t2["id"], status="retry_scheduled", retry_count=2)
+        m._resubmit_after_retry(t2["id"])
+        # 新任务以"继承的 retryCount=2"为标识(库里只有它带这个值),
+        # 轮询等它出现——不按状态过滤(pending/succeeded 都算续跑成功)
+        deadline = time.monotonic() + 5
+        new_st = None
+        while time.monotonic() < deadline:
+            tasks, _total = m.store.list_tasks(limit=50)
+            candidates = [t for t in tasks
+                          if t["id"] != t2["id"] and int(t.get("retryCount") or 0) == 2]
+            if candidates:
+                new_st = candidates[0]
+                break
+            time.sleep(0.05)
+        assert new_st, "续跑未产生新任务(或预算未继承)"
+        assert new_st["retryCount"] == 2  # 预算继承,不再从 0 重计
+        assert new_st["status"] in ("succeeded", "pending", "running")
+
     def test_reset_terminal_listeners(self, task_manager, wait_for):
         """【H1 回归锚】reset_terminal_listeners 清空监听者(热切换防累积)。"""
         m = task_manager

@@ -38,6 +38,15 @@ class TaskCancelled(Exception):
     """任务被取消(handler 在检查点抛出,由 _run 统一收尾为 cancelled)。"""
 
 
+class PermanentTaskError(RuntimeError):
+    """永久性任务错误(参数/校验类,重跑结果恒定失败)。
+
+    handler 对"重试也无意义"的失败抛本类型,任务框架据此跳过自动续跑
+    直接落 failed——否则一个写错的定向重抽请求会让续跑链无限空转
+    (线上实证:截短的 chunk id 触发校验错误,每 5 分钟续跑一次循环 3 小时)。
+    """
+
+
 class TaskHandle:
     """handler 与框架交互的句柄(进度上报 / 日志 / 取消检查)。"""
 
@@ -351,6 +360,8 @@ class TaskManager:
 
         策略:
         - retry_count >= max_auto_retry → 不重试
+        - 永久性错误(PermanentTaskError,如校验失败)→ 不重试(重跑结果
+          恒定失败,续跑只会无限空转)
         - 致命错误(欠费/鉴权/配额)→ 不重试(重试无意义,空转烧日志)
         - 退避 5 分钟(固定;LLM 恢复通常分钟级)后重新入队
         - handler 热切换已移除 → 不重试(任务类型没了)
@@ -368,6 +379,11 @@ class TaskManager:
         max_retry = int(task.get("maxAutoRetry") or 0)
         retry_count = int(task.get("retryCount") or 0)
         if max_retry <= 0 or retry_count >= max_retry:
+            return False
+        if isinstance(error, PermanentTaskError):
+            self._store.append_log(
+                task_id, level="warn",
+                message=f"永久性错误(重跑结果恒定失败),不自动续跑: {str(error)[:200]}")
             return False
         if is_fatal_llm_error(error):
             self._store.append_log(
@@ -422,6 +438,16 @@ class TaskManager:
                 title=old.get("title") or "", pack_name=old.get("packName") or "",
                 queue_key=old.get("queueKey") or None,
                 max_auto_retry=int(old.get("maxAutoRetry") or 0))
+            # 续跑预算继承:旧任务 fail 时 retry_count 已 +1(retry_scheduled
+            # 落库),新任务继承该值——链上总重试次数封顶 max_auto_retry。
+            # 不继承的话每个续跑任务自带完整额度,同 payload 恒定失败时会
+            # 无限续跑(线上实证:校验错误 + 每轮重置 = 3 小时空转 10+ 轮)
+            try:
+                self._store.update_task(
+                    new_task["id"], retry_count=int(old.get("retryCount") or 0))
+            except Exception:
+                logger.warning(f"retry budget inheritance failed for {new_task['id']}",
+                               exc_info=True)
             # 注:续跑不重传 dedupe_key(框架内存表已随旧任务终态释放;
             # 5 分钟退避窗口内同 key 手动提交会成功一次,属可接受竞态——
             # 新任务开跑后占位恢复,后续提交照常被挡
