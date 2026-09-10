@@ -414,6 +414,7 @@ class Neo4jGraphStore:
                 f"""
                 MATCH (e:{self._label} {{{self._sp}: $kb}})
                 WHERE e.normalized_name IN $terms
+                   OR any(a IN coalesce(e.aliases, []) WHERE toLower(a) IN $terms)
                 RETURN e LIMIT $n
                 """,
                 kb=scope, terms=normalized, n=limit,
@@ -426,6 +427,7 @@ class Neo4jGraphStore:
                     UNWIND $terms AS t
                     MATCH (e:{self._label} {{{self._sp}: $kb}})
                     WHERE e.normalized_name STARTS WITH t
+                       OR any(a IN coalesce(e.aliases, []) WHERE toLower(a) STARTS WITH t)
                     RETURN DISTINCT e LIMIT $n
                     """,
                     kb=scope, terms=normalized, n=limit,
@@ -438,6 +440,7 @@ class Neo4jGraphStore:
                     UNWIND $terms AS t
                     MATCH (e:{self._label} {{{self._sp}: $kb}})
                     WHERE e.normalized_name CONTAINS t
+                       OR any(a IN coalesce(e.aliases, []) WHERE toLower(a) CONTAINS t)
                     RETURN DISTINCT e LIMIT $n
                     """,
                     kb=scope, terms=normalized, n=limit,

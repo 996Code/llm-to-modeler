@@ -285,7 +285,12 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
         return str(s).replace("```", "~~~")
 
     triples: List[str] = []
+    seen_triples = set()   # 同一 (source,type,target) 跨多块被抽到会存多条
     for e in (sub.get("edges") or []):
+        key = (id_short(e["source"]), e.get("type"), id_short(e["target"]))
+        if key in seen_triples:
+            continue        # 块级留痕在图里,答案资料里重复列出只会稀释注意力
+        seen_triples.add(key)
         desc = f"({_defang(e.get('description'))})" if e.get("description") else ""
         ev = f" 证据:「{_defang(e['evidence'])}」" if e.get("evidence") else ""
         triples.append(

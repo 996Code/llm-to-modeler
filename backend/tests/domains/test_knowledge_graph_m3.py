@@ -29,6 +29,9 @@ class MockLLM:
         self.fail_markers: list = []
         self.extract_calls = 0
         self.embed_calls = 0
+        # 默认"相关"(general 模板里无 domain/range 约束);测试端点约束
+        # 校验时把 rel_type 改成带约束的类型制造违例(如 person→person 任职于)
+        self.rel_type = "相关"
         self.induce_result = {
             "entity_types": [{"key": "widget", "label": "部件", "description": "d",
                               "examples": ["w1"]}],
@@ -53,7 +56,7 @@ class MockLLM:
             relations = []
             if len(names) >= 2:
                 relations.append({"source": names[0], "target": names[1],
-                                  "type": "任职于", "description": "", "evidence": ""})
+                                  "type": self.rel_type, "description": "", "evidence": ""})
             return {"entities": entities, "relations": relations}
         if stage == "kg.induce_schema":
             return self.induce_result
@@ -327,6 +330,35 @@ class TestImportPipeline:
         t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t2["status"] == "succeeded"
         assert env.graph.counts(kb["id"])["entities"] == 3
+
+    def test_relation_endpoint_constraint_enforced(self, env):
+        """端点类型约束(代码强制):任职于要求目标 ∈ organization,
+        person→person 违例被丢弃;无约束类型(相关)不受影响。"""
+        kb, doc = _make_doc(env, "约束", ["# 章节\n[E:甲] 和 [E:乙] 是同事。"])
+        env.llm.rel_type = "任职于"   # general 模板: 任职于 person→organization
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded"
+        assert t["result"]["entities"] == 2          # 实体不受影响
+        assert t["result"]["relations"] == 0          # 违例关系被代码丢弃
+
+        kb2, doc2 = _make_doc(env, "约束2", ["[E:丙] 和 [E:丁] 是同事。"])
+        env.llm.rel_type = "相关"                     # 无 domain/range 约束
+        t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb2["id"], doc2["id"])["id"])
+        assert t2["result"]["relations"] == 1
+
+    def test_glossary_touch_recency(self):
+        """词表 LRU:重复出现的实体挪到尾部(渲染取尾 top-K)——主力角色
+        不因"最早入库"被截出词表(同一人物分裂成多节点的温床)。"""
+        from domains.knowledge_graph.tasks import _glossary_touch
+        g: dict = {}
+        _glossary_touch(g, [{"normalized_name": f"配角{i}", "type": "person"} for i in range(5)])
+        _glossary_touch(g, [{"normalized_name": "配角0", "type": "person"}])   # 主力再出现
+        _glossary_touch(g, [{"normalized_name": "新角色", "type": "person"}])
+        order = list(g.keys())
+        # 首位是未再出现的最早实体;最近触达的两个排在尾部(渲染取尾 top-K 命中它们)
+        assert order[0] == "配角1"
+        assert order[-2:] == ["配角0", "新角色"]
+        assert order.index("配角0") > order.index("配角1")   # 重触达者后于未触达者
 
     def test_circuit_breaker(self, env):
         env.settings.save_values("knowledge_graph", {"failure_threshold": 2})

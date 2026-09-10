@@ -226,11 +226,18 @@ class TestRetrieval:
         assert out["keywords"] == ["任意问题?"] and out["hop"] == 1
 
     def test_linearize_context(self, env):
+        edges = list(env.graph.edges)
+        # 同一 (source,type,target) 跨块重复:块级 MERGE 键含 chunk_id,
+        # 多块抽到同一关系会存多条——答案资料里应去重(重复只会稀释注意力)
+        dup = dict(edges[0])
+        dup["id"] = "e1-dup"
+        edges.append(dup)
         retrieved = {"subgraph": {"nodes": list(env.graph.nodes.values()),
-                                  "edges": env.graph.edges}, "chunks": [
+                                  "edges": edges}, "chunks": [
             {"docName": "handbook.md", "text": "甲担任A部门经理。", "score": 0.9}]}
         ctx = retrieval.linearize_context(retrieved)
         assert any("任职于" in t for t in ctx["triples"])
+        assert len(ctx["triples"]) == 1          # 重复边被合并
         assert any("甲" in n for n in ctx["node_details"])
         assert any("handbook.md" in c for c in ctx["chunk_texts"])
 

@@ -326,6 +326,9 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         llm_model=_eff_model, model_override=extraction_model or None)
 
     glossary: Dict[str, str] = {}   # normalized_name -> type(本轮抽取累积)
+    # 关系类型约束表(key → {domain, range}),端点类型校验用(prompt 建议的代码强制)
+    rel_specs = {r.get("key"): r for r in
+                 ((kb.get("schema") or {}).get("relation_types") or []) if r.get("key")}
     pending_proposals: List[Dict] = []
     total_entities = total_relations = failed_chunks = 0
     consecutive_failures = 0
@@ -467,6 +470,29 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                            if r["source"] not in known or r["target"] not in known)
             kept_r = [r for r in kept_r if r["source"] in known and r["target"] in known]
 
+            # 端点类型约束(代码强制,prompt 里的 domain/range 只是建议):
+            # 关系类型声明了 domain/range 时,两端实体类型必须落在约束内,
+            # 违者丢弃并计数——典型违例如 师徒(person→organization)。
+            # 端点类型查本批实体;词表实体只有 type 字符串,一并并入。
+            # 未声明约束的关系类型(含 semi_open 新提案)不拦。
+            type_of = {name: (e.get("type") or "") for name, e in batch_entities.items()}
+            type_of.update({k: v for k, v in glossary.items() if v})
+
+            def _endpoints_ok(r: Dict) -> bool:
+                spec = rel_specs.get(r["type"])
+                if not spec:
+                    return True
+                dom, rng = spec.get("domain") or [], spec.get("range") or []
+                if dom and type_of.get(r["source"]) not in dom:
+                    return False
+                if rng and type_of.get(r["target"]) not in rng:
+                    return False
+                return True
+
+            constraint_violating = sum(1 for r in kept_r if not _endpoints_ok(r))
+            if constraint_violating:
+                kept_r = [r for r in kept_r if _endpoints_ok(r)]
+
             if kept_e or kept_r:
                 t_graph = time.monotonic()
                 graph.upsert_batch(kb_id, doc_id, kept_e, kept_r)
@@ -482,9 +508,11 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             total_entities += len(kept_e)
             total_relations += len(kept_r)
 
-            # 词表更新(top-K 截断在渲染时做,这里只累积)
-            for ent in kept_e:
-                glossary[ent["normalized_name"]] = ent.get("type") or ""
+            # 词表更新(top-K 截断在渲染时做,这里只累积)。
+            # pop+reinsert = 最近被抽到排尾(渲染取尾):普通 dict 赋值对
+            # 已存在 key 不挪位,最早入库的主力角色会永远停在头部被截出
+            # 词表——后续块丢失"复用既有名称"的锚点,同一人物分裂成多节点
+            _glossary_touch(glossary, kept_e)
 
             # 向量补写(chunk 原文向量化,与抽取结果无关;失败只告警)
             vec_rows = 0
@@ -779,6 +807,21 @@ def _anchor_filter(entities: List[Dict], chunk_text: str) -> Tuple[List[Dict], i
         else:
             dropped += 1
     return kept, dropped
+
+
+def _glossary_touch(glossary: Dict[str, str], entities: List[Dict]) -> None:
+    """把本批实体并入词表,最近被抽到的挪到尾部(渲染取尾 top-K)。
+
+    词表语义是"给后续块的 LLM 提供复用锚点"——主力角色高频出现,pop+reinsert
+    保证它们始终占据词表窗口;若用普通赋值,首批入库的名字固定在头部,大文档
+    读到中段就被截出窗口,同一人物以别名另立节点(图碎裂的温床)。
+    """
+    for ent in entities:
+        name = ent.get("normalized_name")
+        if not name:
+            continue
+        glossary.pop(name, None)
+        glossary[name] = ent.get("type") or ""
 
 
 def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
