@@ -87,7 +87,10 @@ class TestChatToolExecute:
         ctx = _make_ctx(llm_client=llm, prompt_loader=loader)
         tool.execute({"user_input": "你好"}, ctx)
 
-        loader.render.assert_called_once_with("njmind_form", "chat")
+        # render 收到动态能力清单(模板不写死能力,由 registry 实时注入)
+        render_args = loader.render.call_args
+        assert render_args.args[:2] == ("njmind_form", "chat")
+        assert "capabilities" in (render_args.kwargs or {})
         call_args = llm.chat.call_args
         messages = call_args[0][0]
         system_msg = next(m for m in messages if m["role"] == "system")

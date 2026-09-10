@@ -279,19 +279,26 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
     nodes = {n["id"]: n for n in sub.get("nodes") or []}
     id_short = lambda nid: nodes.get(nid, {}).get("name", str(nid).rsplit(":", 1)[-1])  # noqa: E731
 
+    def _defang(s) -> str:
+        # 图谱字段(描述/别名/证据)源自不可信文档的 LLM 抽取,与 chunk 同款
+        # defang,防内容里的 ``` 拆 answer 模板的围栏
+        return str(s).replace("```", "~~~")
+
     triples: List[str] = []
     for e in (sub.get("edges") or []):
-        desc = f"({e.get('description')})" if e.get("description") else ""
-        ev = f" 证据:「{e['evidence']}」" if e.get("evidence") else ""
-        triples.append(f"{id_short(e['source'])} -[{e.get('type')}]{desc}-> {id_short(e['target'])}{ev}")
+        desc = f"({_defang(e.get('description'))})" if e.get("description") else ""
+        ev = f" 证据:「{_defang(e['evidence'])}」" if e.get("evidence") else ""
+        triples.append(
+            f"{_defang(id_short(e['source']))} -[{_defang(e.get('type'))}]{desc}-> "
+            f"{_defang(id_short(e['target']))}{ev}")
 
     node_details: List[str] = []
     for n in (sub.get("nodes") or [])[:40]:
-        parts = [f"{n['name']}({n.get('type') or '未知类型'})"]
+        parts = [f"{_defang(n['name'])}({n.get('type') or '未知类型'})"]
         if n.get("description"):
-            parts.append(n["description"])
+            parts.append(_defang(n["description"]))
         if n.get("aliases"):
-            parts.append(f"别名: {'、'.join(n['aliases'][:5])}")
+            parts.append(f"别名: {'、'.join(_defang(a) for a in n['aliases'][:5])}")
         node_details.append(":".join(parts))
 
     chunk_texts: List[str] = []

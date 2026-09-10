@@ -59,9 +59,14 @@ class ChatTool(Tool):
         3. 兜底:通用 prompt
         """
         # 尝试用 prompt_loader 渲染自定义 prompt
+        # capabilities 由 registry 实时构建后注入模板——模板不写死能力清单
+        # (插件增减后静态清单会漂移;未提供 loader/渲染失败时才走纯动态路径)
         if hasattr(ctx, "prompt_loader") and ctx.prompt_loader:
             try:
-                return ctx.prompt_loader.render("njmind_form", "chat")
+                return ctx.prompt_loader.render(
+                    "njmind_form", "chat",
+                    capabilities=self._build_capabilities(ctx) or None,
+                )
             except Exception:
                 pass  # 渲染失败则降级到动态生成
 
