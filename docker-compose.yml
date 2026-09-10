@@ -20,8 +20,8 @@ services:
     # 内存护栏:本地 ONNX embedding 推理是内存大户(修复前单批曾需
     # 17GB,把 32G 主机打满)。设硬上限——超限时本容器被 OOM kill
     # (docker 事件可见)而不是拖垮整机;上限要容得下模型+并发批峰值,
-    # 默认 8g(4g 实测会被推理峰值撞破,线上两次 OOM kill),经 .env 的 APP_MEM_LIMIT 调整。
-    mem_limit: ${APP_MEM_LIMIT:-8g}
+    # 默认 6g(4g 实测会被推理峰值撞破,线上两次 OOM kill;向量批已降至 4 段,常态峰值 ~2g,留 3 倍余量),经 .env 的 APP_MEM_LIMIT 调整。
+    mem_limit: ${APP_MEM_LIMIT:-6g}
     mem_reservation: ${APP_MEM_RESERVATION:-1g}
     ports:
       - "${HOST_PORT:-19090}:80"
