@@ -170,19 +170,29 @@ class TestSchemaTemplates:
         assert {"general", "org_people", "product_doc", "regulation", "novel"} <= keys
 
     def test_novel_template_sanity(self):
-        """小说模板:核心类型齐全、关系约束指向存在的实体类型
-        (小说导入质量事故的沉淀——此前只有办公向模板,小说建库无起步本体)。"""
+        """小说模板:题材通用(类型泛化 + 示例原型化)、关系约束指向存在的实体类型。
+        沉淀两次教训:①只有办公向模板时小说无起步本体;②首版把诛仙的专名
+        写进 examples、类型做成仙侠特化(法宝/功法/门派),对其他题材是噪声。"""
         s = get_template_schema("novel")
         ekeys = {t["key"] for t in s["entity_types"]}
-        assert {"person", "sect", "artifact", "skill", "location",
+        assert {"person", "organization", "item", "ability", "location",
                 "creature", "event", "concept"} <= ekeys
+        # 不应再有仙侠特化类型(泛化为 item/ability/organization)
+        assert not ({"sect", "artifact", "skill"} & ekeys)
         rkeys = {r["key"] for r in s["relation_types"]}
-        assert {"师徒", "隶属", "持有", "修炼", "敌对", "相关"} <= rkeys
+        assert {"师徒", "隶属", "持有", "习得", "敌对", "相关"} <= rkeys
         # 关系 domain/range 引用的类型必须真实存在(抽取 prompt 会注入该约束)
         for r in s["relation_types"]:
             for side in ("domain", "range"):
                 bad = set(r.get(side) or []) - ekeys
                 assert not bad, f"关系 {r['key']} 的 {side} 引用未知类型: {bad}"
+        # 示例必须是原型化描述词:不得绑定具体作品专名(诛仙人物/地名等)
+        _zhuxian_words = {"张小凡", "碧瑶", "道玄真人", "青云门", "天音寺", "鬼王宗",
+                          "噬血珠", "诛仙古剑", "玄火鉴", "大梵般若", "青云山",
+                          "河阳城", "草庙村", "三尾灵狐", "草庙村惨案", "天书五卷"}
+        for t in s["entity_types"]:
+            assert not (_zhuxian_words & set(t.get("examples") or [])), \
+                f"类型 {t['key']} 的示例含具体作品专名: {t['examples']}"
 
     def test_deep_copy_independence(self):
         s1 = get_template_schema("general")
