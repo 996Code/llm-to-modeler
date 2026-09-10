@@ -506,6 +506,35 @@ class TestImportPipeline:
         t3 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t3["result"].get("skipped") is True
 
+    def test_startup_backfill_before_new_chunks(self, env, monkeypatch):
+        """启动期对账:续跑任务先补历史向量缺口,再跑新块(用户诉求:
+        重启时先检查已处理的是否正确、不正确补全,而不是最后才弄)。
+        场景:首次跑到中途被杀(块0 done 但向量缺失,块1 pending)→
+        重跑时块0 的向量在批循环之前就被补上。"""
+        monkeypatch.setenv("LLM_EMBED_MODEL", "mock-embed")
+        kb, doc = _make_doc(env, "启动对账", ["[E:甲] [E:乙]", "[E:丙] [E:丁]"])
+        # 手工制造"中途被杀"状态:块0 done 且图谱有贡献,但向量全缺;块1 pending
+        store = env.store
+        store.replace_chunks(doc["id"], kb["id"], [{"seq": 0, "text": "[E:甲] [E:乙]"},
+                                                   {"seq": 1, "text": "[E:丙] [E:丁]"}])
+        chunks = store.list_chunks(doc["id"])
+        store.mark_chunk(chunks[0]["id"], "done")
+        env.graph.upsert_batch(kb["id"], doc["id"],
+            [{"name": "甲", "normalized_name": "甲", "type": "person",
+              "description": "", "aliases": [], "chunk_ids": [chunks[0]["id"]]}], [])
+        store.update_document(doc["id"], import_status="partial", error="中途被杀")
+        assert env.vector.count(kb["id"]) == 0    # 向量全缺
+
+        embeds_before_gapfill = None
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded"
+        # 两块向量都齐了:块0 由启动期对账补,块1 由正常批处理写
+        assert env.vector.count(kb["id"]) >= 2
+        assert all(c["status"] == "done" for c in store.list_chunks(doc["id"]))
+        # 日志里有"启动期对账"标记(而非只在收尾)
+        logs = env.manager._store.list_logs(t["id"]) if hasattr(env.manager, "_store") else []
+        assert any("启动期对账" in (l.get("message") or "") for l in logs)
+
     def test_vector_subchunked_for_long_chapter(self, env, monkeypatch):
         """长章块按段子切后入库:抽取按章(一块),向量按段(多子段)——
         本地 bge-m3 实际 4096 token 截断,长块尾部对向量是隐形的。"""

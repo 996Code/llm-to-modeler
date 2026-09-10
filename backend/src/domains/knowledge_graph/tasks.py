@@ -314,6 +314,15 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     done_before = total - len(pending) if not targeted else 0
     if done_before:
         handle.log(f"断点续跑: 跳过已完成的 {done_before} 块")
+
+    # ── 启动期向量对账:先还欠账,再跑新块 ──
+    # 此前缺口补偿只在任务收尾跑:中途失败/取消的轮次,已 done 块的向量
+    # 缺口要等"下一次完整跑完"才补——每轮都在累积欠账。挪到任务开头:
+    # 每次启动先按向量库实存反查补齐历史缺口(幂等,无缺口时零成本),
+    # 用户诉求"重启时先检查已处理的是否正确,不正确补全"。
+    if vector_ready and done_before and not targeted:
+        _backfill_vectors(handle, app_state, store, kb, doc_id, conv_id,
+                          stage_label="启动期对账")
     _eff_model = extraction_model or (
         llm.config.model if getattr(llm, "config", None) else "")
     handle.log(
@@ -716,17 +725,24 @@ def _missing_vector_chunks(app_state, store, kb: Dict, doc_id: str) -> List[Dict
 
 
 def _backfill_vectors(handle, app_state, store, kb: Dict, doc_id: str,
-                      conv_id: str) -> int:
-    """向量缺口补偿:图已入(done)但向量缺失的块补写(判定见 _missing_vector_chunks)。"""
+                      conv_id: str, stage_label: str = "向量缺口补偿") -> int:
+    """向量缺口补偿:图已入(done)但向量缺失的块补写(判定见 _missing_vector_chunks)。
+
+    stage_label: 日志措辞——启动期对账(任务开头还欠账)或收尾补偿
+    (当批写入失败的兜底)。
+    """
     try:
         missing = _missing_vector_chunks(app_state, store, kb, doc_id)
         if not missing:
             return 0
-        handle.log(f"向量缺口补偿: {len(missing)} 块已入图但缺向量,补写中",
+        handle.log(f"{stage_label}: {len(missing)} 块已入图但缺向量,补写中",
                    level="warn", rows=len(missing))
-        return _vectorize_chunks(handle, app_state, store, kb, missing, conv_id)
+        n = _vectorize_chunks(handle, app_state, store, kb, missing, conv_id)
+        if n:
+            handle.log(f"{stage_label}完成: 补写 {n} 段向量", rows=n)
+        return n
     except Exception as e:
-        handle.log(f"向量缺口补偿失败(图谱不受影响,下次重跑再补): {e}", level="warn")
+        handle.log(f"{stage_label}失败(图谱不受影响,下次重跑再补): {e}", level="warn")
         return 0
 
 
