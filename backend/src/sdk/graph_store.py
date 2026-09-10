@@ -328,19 +328,28 @@ class Neo4jGraphStore:
     # ── 查询(在线浏览 + 检索) ─────────────────────────────
 
     def counts(self, scope: str) -> Dict[str, int]:
+        """库级统计。关系数按 (source,type,target) 去重(平行边=块级留痕,
+        不去重会虚增数倍,与 document_counts 同语义)。"""
         self._check_scope(scope)
         with self._session() as s:
             entities = s.run(
                 f"MATCH (e:{self._label} {{{self._sp}: $kb}}) RETURN count(e) AS c", kb=scope
             ).single()["c"]
             relations = s.run(
-                f"MATCH (:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb}}]->(:{self._label}) "
-                f"RETURN count(r) AS c", kb=scope,
+                f"MATCH (a:{self._label} {{{self._sp}: $kb}})"
+                f"-[r:{self._rel} {{{self._sp}: $kb}}]->"
+                f"(b:{self._label} {{{self._sp}: $kb}}) "
+                f"RETURN count(DISTINCT [a.id, r.type, b.id]) AS c",
+                kb=scope,
             ).single()["c"]
         return {"entities": int(entities), "relations": int(relations)}
 
     def document_counts(self, scope: str, doc_id: str) -> Dict[str, int]:
-        """某文档在图谱中的贡献数(实体按 source_docs 引用,关系按 doc_id 归属)。"""
+        """某文档在图谱中的贡献数(实体按 source_docs 引用,关系按 doc_id 归属)。
+
+        关系计数按 (source,type,target) 去重——平行边是块级留痕(每块一条),
+        重复计入会让文档的 relation_count 虚增数倍,与用户直觉的"关系数"不符。
+        """
         self._check_scope(scope)
         with self._session() as s:
             entities = s.run(
@@ -348,8 +357,11 @@ class Neo4jGraphStore:
                 f"RETURN count(e) AS c", kb=scope, doc=doc_id,
             ).single()["c"]
             relations = s.run(
-                f"MATCH (:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb, doc_id: $doc}}]->(:{self._label}) "
-                f"RETURN count(r) AS c", kb=scope, doc=doc_id,
+                f"MATCH (a:{self._label} {{{self._sp}: $kb}})"
+                f"-[r:{self._rel} {{{self._sp}: $kb, doc_id: $doc}}]->"
+                f"(b:{self._label} {{{self._sp}: $kb}}) "
+                f"RETURN count(DISTINCT [a.id, r.type, b.id]) AS c",
+                kb=scope, doc=doc_id,
             ).single()["c"]
         return {"entities": int(entities), "relations": int(relations)}
 
@@ -397,35 +409,52 @@ class Neo4jGraphStore:
             ).data()
             nodes = [self._node_dict(r["e"]) for r in node_rows]
             ids = [n["id"] for n in nodes]
+            # 同一对节点的同类型关系跨块会存多条(块级留痕:MERGE 键含
+            # chunk_id)。浏览视图按 (source,type,target) 聚合为一条:
+            # evidence 收集全部、count 记录被多少块支持——图里块级数据
+            # 原样保留,只是不再平行画 N 条
             edge_rows = s.run(
                 f"MATCH (a:{self._label})-[r:{self._rel} {{{self._sp}: $kb}}]->(b:{self._label}) "
                 f"WHERE a.id IN $ids AND b.id IN $ids "
-                f"RETURN a.id AS source, b.id AS target, properties(r) AS r "
-                f"LIMIT $m",
+                f"WITH a.id AS source, b.id AS target, r.type AS rtype, "
+                f"collect(r) AS rs "
+                f"RETURN source, target, rtype, rs, size(rs) AS cnt "
+                f"ORDER BY cnt DESC LIMIT $m",
                 kb=scope, ids=ids, m=limit_edges,
             ).data()
 
-        edges = [{
-            "id": e["r"].get("id") or "",
-            "source": e["source"], "target": e["target"],
-            "type": e["r"].get("type") or "",
-            "description": e["r"].get("description") or "",
-            "evidence": e["r"].get("evidence") or "",
-            "docId": e["r"].get("doc_id") or "",
-        } for e in edge_rows]
+        edges = []
+        for e in edge_rows:
+            rs = e["rs"]
+            # 展示字段取"证据最全"的那条(有 evidence 的优先),其余证据并入列表
+            best = next((r for r in rs if r.get("evidence")), rs[0])
+            evidences = [r.get("evidence") for r in rs if r.get("evidence")]
+            edges.append({
+                "id": best.get("id") or "",
+                "source": e["source"], "target": e["target"],
+                "type": e["rtype"],
+                "description": best.get("description") or "",
+                "evidence": best.get("evidence") or "",
+                "evidences": evidences[:5],   # 跨块支持的全部证据(截前 5 条)
+                "supportChunks": e["cnt"],    # 被多少个块抽出——关系强度的天然信号
+                "docId": best.get("doc_id") or "",
+            })
         return {"nodes": nodes, "edges": edges}
 
     def expand_node(
         self, scope: str, node_id: str, limit_nodes: int = 40, limit_edges: int = 80,
     ) -> Dict[str, Any]:
-        """点击节点增量展开:1 跳邻域(双向)。"""
+        """点击节点增量展开:1 跳邻域(双向)。边按 (source,type,target)
+        聚合(跨块平行边合并,与 get_graph 同语义)。"""
         self._check_scope(scope)
         with self._session() as s:
             rows = s.run(
                 f"MATCH (a:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb}}]-(b:{self._label}) "
                 f"WHERE a.id = $nid "
-                f"RETURN a AS center, b AS neighbor, type(r) AS ignored, "
-                f"       startNode(r).id AS sid, endNode(r).id AS tid, properties(r) AS props "
+                f"WITH a AS center, b AS neighbor, "
+                f"     startNode(r).id AS sid, endNode(r).id AS tid, r.type AS rtype, "
+                f"     collect(r) AS rs "
+                f"RETURN center, neighbor, sid, tid, rtype, rs, size(rs) AS cnt "
                 f"LIMIT $m",
                 kb=scope, nid=node_id, m=limit_edges,
             ).data()
@@ -438,13 +467,17 @@ class Neo4jGraphStore:
             if neighbor["id"] not in seen and len(nodes) < limit_nodes + 1:
                 nodes.append(neighbor)
                 seen.add(neighbor["id"])
+            rs = r["rs"]
+            best = next((x for x in rs if x.get("evidence")), rs[0])
             edges.append({
-                "id": r["props"].get("id") or "",
+                "id": best.get("id") or "",
                 "source": r["sid"], "target": r["tid"],
-                "type": r["props"].get("type") or "",
-                "description": r["props"].get("description") or "",
-                "evidence": r["props"].get("evidence") or "",
-                "docId": r["props"].get("doc_id") or "",
+                "type": r["rtype"],
+                "description": best.get("description") or "",
+                "evidence": best.get("evidence") or "",
+                "evidences": [x.get("evidence") for x in rs if x.get("evidence")][:5],
+                "supportChunks": r["cnt"],
+                "docId": best.get("doc_id") or "",
             })
         return {"nodes": nodes, "edges": edges}
 
@@ -534,8 +567,9 @@ class Neo4jGraphStore:
                     f"""
                     MATCH (a:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb}}]-(b:{self._label} {{{self._sp}: $kb}})
                     WHERE a.normalized_name IN $frontier
-                    RETURN b AS nb, startNode(r).id AS sid, endNode(r).id AS tid,
-                           properties(r) AS props
+                    WITH b AS nb, startNode(r).id AS sid, endNode(r).id AS tid,
+                         r.type AS rtype, collect(properties(r)) AS rs
+                    RETURN nb, sid, tid, rtype, rs
                     LIMIT $m
                     """,
                     kb=scope, frontier=frontier,
@@ -551,15 +585,20 @@ class Neo4jGraphStore:
                         # normalized_name;用原始 name 会让大写/全角实体在
                         # hop≥2 时静默匹配落空,多跳检索被截断成一跳)
                         next_frontier.append(node["normalized"])
-                eid = r["props"].get("id") or f"{r['sid']}->{r['tid']}"
-                if eid not in edge_keys:
-                    edge_keys.add(eid)
+                # 平行边聚合键 = (source,type,target):跨块的块级留痕边
+                # 不聚合的话会占满 max_edges 限额,把真正的多跳关系挤出去
+                ekey = (r["sid"], r["rtype"], r["tid"])
+                if ekey not in edge_keys:
+                    edge_keys.add(ekey)
+                    rs = r["rs"]
+                    best = next((x for x in rs if x.get("evidence")), rs[0] if rs else {})
                     edges.append({
-                        "id": eid, "source": r["sid"], "target": r["tid"],
-                        "type": r["props"].get("type") or "",
-                        "description": r["props"].get("description") or "",
-                        "evidence": r["props"].get("evidence") or "",
-                        "docId": r["props"].get("doc_id") or "",
+                        "id": best.get("id") or f"{r['sid']}->{r['tid']}",
+                        "source": r["sid"], "target": r["tid"],
+                        "type": r["rtype"],
+                        "description": best.get("description") or "",
+                        "evidence": best.get("evidence") or "",
+                        "docId": best.get("doc_id") or "",
                     })
             frontier = next_frontier
 

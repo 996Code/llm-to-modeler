@@ -522,6 +522,10 @@ export interface KgGraphNode {
 export interface KgGraphEdge {
   id: string; source: string; target: string; type: string
   description: string; evidence: string; docId: string
+  /** 聚合边:被多少个块独立抽出(跨章支持度,关系强度信号) */
+  supportChunks?: number
+  /** 跨块的全部证据原文(聚合保留,截前 5 条) */
+  evidences?: string[]
 }
 export interface KgGraphData { nodes: KgGraphNode[]; edges: KgGraphEdge[] }
 

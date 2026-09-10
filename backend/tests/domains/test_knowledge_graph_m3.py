@@ -126,8 +126,11 @@ class FakeGraph:
         return {}
 
     def counts(self, kb_id):
+        # 关系按 (source,type,target) 去重(平行边=块级留痕,与 Neo4j 实现同语义)
+        uniq = {(e["source"], e.get("type"), e["target"])
+                for e in self.edges if e["kb"] == kb_id}
         return {"entities": sum(1 for k in self.nodes if k[0] == kb_id),
-                "relations": sum(1 for e in self.edges if e["kb"] == kb_id)}
+                "relations": len(uniq)}
 
     def document_counts(self, kb_id, doc_id):
         return {

@@ -62,8 +62,15 @@
           <a-descriptions-item label="源 → 目标">
             {{ nodeName(edgeDetail.source) }} → {{ nodeName(edgeDetail.target) }}
           </a-descriptions-item>
+          <a-descriptions-item label="支持块数">
+            {{ edgeDetail.supportChunks || 1 }}
+            <span class="gv-support-hint">{{ (edgeDetail.supportChunks || 1) > 1 ? '(跨多个章节被独立抽出,关系可信度高)' : '' }}</span>
+          </a-descriptions-item>
           <a-descriptions-item v-if="edgeDetail.description" label="说明">{{ edgeDetail.description }}</a-descriptions-item>
-          <a-descriptions-item v-if="edgeDetail.evidence" label="原文证据">
+          <a-descriptions-item v-if="edgeDetail.evidences && edgeDetail.evidences.length > 1" label="各章证据">
+            <div v-for="(ev, i) in edgeDetail.evidences" :key="i" class="gv-evidence">「{{ ev }}」</div>
+          </a-descriptions-item>
+          <a-descriptions-item v-else-if="edgeDetail.evidence" label="原文证据">
             <span class="gv-evidence">「{{ edgeDetail.evidence }}」</span>
           </a-descriptions-item>
         </a-descriptions>
@@ -225,7 +232,12 @@ async function render(fit: boolean) {
     })),
     edges: edges.value.map((e, i) => ({
       id: e.id || `e-${i}`, source: e.source, target: e.target,
-      data: { type: e.type || '', desc: e.description || '', evidence: e.evidence || '' },
+      data: {
+        type: e.type || '', desc: e.description || '', evidence: e.evidence || '',
+        // 聚合边:跨块平行边已合并,support=被多少块抽出(关系强度信号)
+        support: e.supportChunks || 1,
+        evidences: e.evidences || [],
+      },
     })),
   }
 
@@ -286,7 +298,7 @@ async function render(fit: boolean) {
             if (!it) return '<div></div>'
             const d = it.data || {}
             const body = it.source !== undefined
-              ? `<div><b>${_esc(d.type || '关系')}</b></div>${d.desc ? `<div>${_esc(d.desc)}</div>` : ''}${d.evidence ? `<div>「${_esc(d.evidence)}」</div>` : ''}`
+              ? `<div><b>${_esc(d.type || '关系')}</b>${Number(d.support) > 1 ? ` <span style="opacity:.65">·${_esc(d.support)} 块支持</span>` : ''}</div>${d.desc ? `<div>${_esc(d.desc)}</div>` : ''}${d.evidence ? `<div>「${_esc(d.evidence)}」</div>` : ''}`
               : `<div><b>${_esc(d.name)}</b> <span style="opacity:.7">${_esc(d.type)}</span></div>${d.desc ? `<div>${_esc(d.desc)}</div>` : ''}<div style="opacity:.7">连接 ${_esc(d.deg)} · 双击展开邻居</div>`
             return `<div style="background:rgba(0,0,0,0.78);color:#fff;padding:8px 12px;border-radius:6px;font-size:12px;line-height:1.6;max-width:300px;word-break:break-all">${body}</div>`
           },
@@ -374,5 +386,6 @@ onBeforeUnmount(() => {
 .gv-hidden { visibility: hidden; }
 .gv-empty { height: 420px; display: flex; align-items: center; justify-content: center; }
 .gv-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.gv-evidence { color: #2f54eb; }
+.gv-evidence { color: #2f54eb; margin-bottom: 2px; }
+.gv-support-hint { color: #9ca3af; font-size: 12px; margin-left: 4px; }
 </style>
