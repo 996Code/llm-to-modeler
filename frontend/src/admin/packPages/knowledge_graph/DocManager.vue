@@ -124,13 +124,45 @@
               <a v-if="record.status !== 'done'" @click="retryOneChunk(record)">
                 <RedoOutlined /> 重试
               </a>
-              <span v-else class="dm-chunks__dim">—</span>
+              <a v-if="record.status === 'done'" style="margin-left: 0" @click="showExtraction(record)">
+                <EyeOutlined /> 产出
+              </a>
+              <span v-if="record.status !== 'done'" class="dm-chunks__dim">—</span>
             </template>
           </template>
         </a-table>
         <p class="dm-chunks__hint">
           重试只补选中块(已完成块跳过,图谱不受影响);失败块也会在整文档重导时自动续跑。
         </p>
+
+        <!-- 单块产出抽屉:该块实际抽出的实体与关系(块级溯源) -->
+        <a-drawer
+          v-model:open="extractionDrawer.open" width="560" placement="left"
+          :title="`块 #${extractionDrawer.seq} 的抽取产出`"
+        >
+          <div v-if="extractionDrawer.loading">加载中…</div>
+          <div v-else-if="extractionDrawer.data" class="dm-ext">
+            <div class="dm-ext__section">
+              <div class="dm-ext__title">实体({{ extractionDrawer.data.entities.length }})</div>
+              <div v-if="!extractionDrawer.data.entities.length" class="dm-chunks__dim">
+                无实体(内容被锚定过滤/目录块)
+              </div>
+              <div v-for="(e, i) in extractionDrawer.data.entities" :key="i" class="dm-ext__row">
+                <a-tag color="blue">{{ e.type || '?' }}</a-tag>
+                <span class="dm-ext__name">{{ e.name }}</span>
+                <span class="dm-ext__desc">{{ e.description }}</span>
+              </div>
+            </div>
+            <div class="dm-ext__section">
+              <div class="dm-ext__title">关系({{ extractionDrawer.data.relations.length }})</div>
+              <div v-if="!extractionDrawer.data.relations.length" class="dm-chunks__dim">无关系</div>
+              <div v-for="(r, i) in extractionDrawer.data.relations" :key="i" class="dm-ext__row">
+                <code class="dm-ext__rel">{{ r.source }} →[{{ r.type }}]→ {{ r.target }}</code>
+                <div v-if="r.evidence" class="dm-ext__evidence">证据:{{ r.evidence }}</div>
+              </div>
+            </div>
+          </div>
+        </a-drawer>
       </div>
     </a-drawer>
   </div>
@@ -143,13 +175,13 @@ import { message } from 'ant-design-vue'
 import type { UploadChangeParam } from 'ant-design-vue'
 import {
   CheckCircleOutlined, CloudUploadOutlined, CloseCircleOutlined, DeleteOutlined,
-  FileTextOutlined, InboxOutlined, RedoOutlined, UnorderedListOutlined,
+  EyeOutlined, FileTextOutlined, InboxOutlined, RedoOutlined, UnorderedListOutlined,
 } from '@ant-design/icons-vue'
 import {
-  KgDocument, TaskItem, TaskStatus, deleteKgDocument, fetchKgChunks, fetchKgDocuments,
-  fetchTask, importKgAll, importKgDocument, retryKgChunks, uploadKgDocuments,
+  KgDocument, TaskItem, TaskStatus, deleteKgDocument, fetchKgChunkExtraction, fetchKgChunks,
+  fetchKgDocuments, fetchTask, importKgAll, importKgDocument, retryKgChunks, uploadKgDocuments,
 } from '../../api'
-import type { KgChunkItem, KgChunksPayload } from '../../api'
+import type { KgChunkExtraction, KgChunkItem, KgChunksPayload } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
 
 const props = defineProps<{ kbId: string; refreshTick?: number }>()
@@ -352,6 +384,24 @@ async function retryFailedChunks() {
   })
 }
 
+// 单块产出(块级溯源:该块实际抽出的实体与关系)
+const extractionDrawer = ref<{
+  open: boolean
+  loading: boolean
+  seq: number
+  data: KgChunkExtraction | null
+}>({ open: false, loading: false, seq: -1, data: null })
+
+async function showExtraction(chunk: KgChunkItem) {
+  const doc = chunksDrawer.value.doc
+  if (!doc) return
+  extractionDrawer.value = { open: true, loading: true, seq: chunk.seq, data: null }
+  await loadSafely(async () => {
+    extractionDrawer.value.data = await fetchKgChunkExtraction(props.kbId, doc.id, chunk.id)
+  })
+  extractionDrawer.value.loading = false
+}
+
 async function doDelete(doc: KgDocument) {  await loadSafely(async () => {
     await deleteKgDocument(props.kbId, doc.id)
     message.success(`文档「${doc.filename}」已删除`)
@@ -420,4 +470,11 @@ onBeforeUnmount(() => window.clearInterval(timer))
 }
 .dm-chunks__dim { color: #d1d5db; }
 .dm-chunks__hint { color: #9ca3af; font-size: 12px; margin-top: 10px; }
+.dm-ext__section { margin-bottom: 18px; }
+.dm-ext__title { font-weight: 600; font-size: 13px; color: #374151; margin-bottom: 8px; }
+.dm-ext__row { margin-bottom: 6px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.dm-ext__name { font-weight: 600; color: #111827; }
+.dm-ext__desc { color: #9ca3af; font-size: 12px; flex-basis: 100%; }
+.dm-ext__rel { background: #f3f4f6; border-radius: 4px; padding: 2px 6px; font-size: 12px; }
+.dm-ext__evidence { color: #9ca3af; font-size: 12px; flex-basis: 100%; }
 </style>

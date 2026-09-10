@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from domains.knowledge_graph import runtime
-from sdk.doc_parser import chunk_text, parse_to_text
+from sdk.doc_parser import chunk_text, parse_to_text, sub_chunks_for_embedding
 from sdk.graph_store import normalize_name
 from sdk.pack_api import task_conv_id
 
@@ -243,6 +243,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             target_chars=_cfg(app_state, "chunk_target_chars", 1200),
             overlap_chars=_cfg(app_state, "chunk_overlap_chars", 100),
             max_chars=_cfg(app_state, "chunk_max_chars", 3000),
+            structural_max_chars=_cfg(app_state, "chunk_structural_max_chars", 10000),
         )
         if not chunks:
             store.update_document(doc_id, import_status="failed", error="文档无有效文本")
@@ -421,13 +422,23 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                     dropped_entities=max(0, (stats.get("raw_entities") or 0) - len(entities)),
                     dropped_relations=max(0, (stats.get("raw_relations") or 0) - len(relations)),
                     attempt=stats.get("attempt"))
+                # 块级溯源:实体/关系标注来源块 id(块产出查询/关系 MERGE
+                # 键都依赖它;此前一直为空串,跨块关系被错误合并覆盖)。
+                # 实体带 chunk_ids 列表:批内同名实体的多块溯源并集保留
+                for ent in entities:
+                    ent["chunk_id"] = chunk["id"]
+                    ent["chunk_ids"] = [chunk["id"]]
+                for r in relations:
+                    r["chunk_id"] = chunk["id"]
                 for ent in entities:
                     key = ent["normalized_name"]
-                    if key in batch_entities:  # 批内合并(别名/描述合并)
+                    if key in batch_entities:  # 批内合并(别名/描述/块溯源并集)
                         batch_entities[key]["aliases"] = list(dict.fromkeys(
                             batch_entities[key]["aliases"] + ent.get("aliases", [])))
                         if not batch_entities[key].get("description"):
                             batch_entities[key]["description"] = ent.get("description", "")
+                        batch_entities[key]["chunk_ids"] = list(dict.fromkeys(
+                            batch_entities[key].get("chunk_ids", []) + ent["chunk_ids"]))
                     else:
                         batch_entities[key] = ent
                 batch_relations.extend(relations)
@@ -628,19 +639,31 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
 
 
 def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], conv_id: str) -> int:
-    """把一批 chunk 向量化并 upsert(失败只告警,不阻断导入)。返回写入条数。"""
+    """把一批 chunk 向量化并 upsert(失败只告警,不阻断导入)。返回写入条数。
+
+    子块粒度:抽取块可以是整章(万级字符),而 embedding 输入有限(本地
+    bge-m3 实际 4096 token 截断,长块尾部对向量隐形 + 单向量长文语义稀释)
+    ——按 vector_subchunk_chars(默认 1200)子切后逐段 embed,子块 id 挂
+    父块(f"{chunk_id}#i")。抽取按章,召回按段。
+    """
     try:
         embed_batch = max(1, int(_cfg(app_state, "embed_batch_size", 16)))
+        sub_size = max(300, int(_cfg(app_state, "vector_subchunk_chars", 1200)))
         vector_store = runtime.get_vector(app_state)
+        rows = []
+        for c in chunks:
+            for i, sub in enumerate(sub_chunks_for_embedding(c["text"], sub_size)):
+                rows.append({
+                    "chunk_id": f"{c['id']}#{i}", "doc_id": c["docId"],
+                    "seq": c["seq"], "text": sub,
+                })
         n = 0
-        for i in range(0, len(chunks), embed_batch):
-            part = chunks[i:i + embed_batch]
+        for i in range(0, len(rows), embed_batch):
+            part = rows[i:i + embed_batch]
             vectors = app_state.llm_client.embeddings(
-                [c["text"] for c in part], conv_id=conv_id, stage="kg.embed")
-            n += vector_store.upsert_chunks(kb["id"], [{
-                "chunk_id": c["id"], "doc_id": c["docId"], "seq": c["seq"],
-                "text": c["text"], "vector": vec,
-            } for c, vec in zip(part, vectors)])
+                [r["text"] for r in part], conv_id=conv_id, stage="kg.embed")
+            n += vector_store.upsert_chunks(kb["id"], [
+                {**r, "vector": vec} for r, vec in zip(part, vectors)])
         return n
     except Exception as e:
         handle.log(f"向量写入失败(图谱不受影响): {e}", level="warn", rows=len(chunks))
@@ -655,9 +678,12 @@ def _missing_vector_chunks(app_state, store, kb: Dict, doc_id: str) -> List[Dict
     """
     try:
         vector_store = runtime.get_vector(app_state)
+        # 向量按子块存(id = {chunk_id}#i):缺口判定以首个子块为准
+        # (子块同批写入,首块在即视为整块已写;全缺则整块补)
         existing = vector_store.existing_chunk_ids(kb["id"], doc_id)
-        return [c for c in store.list_chunks(doc_id, status="done")
-                if c["id"] not in existing]
+        missing = [c for c in store.list_chunks(doc_id, status="done")
+                   if f"{c['id']}#0" not in existing]
+        return missing
     except Exception:
         return []
 

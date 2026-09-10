@@ -67,6 +67,20 @@ groups:
         default: 3000
         min: 500
         max: 16000
+      - key: chunk_structural_max_chars
+        type: int
+        label: 章节块上限
+        default: 10000
+        min: 1000
+        max: 50000
+        help: 识别到章节标题时整章一块的上限(超长章才切);抽取按章、向量按段
+      - key: vector_subchunk_chars
+        type: int
+        label: 向量子切块字数
+        default: 1200
+        min: 300
+        max: 4000
+        help: 向量入库时把块按句读子切的段长(本地 bge-m3 有效输入约 4096 token)
       - key: llm_batch_size
         type: int
         label: 每批 chunk 数

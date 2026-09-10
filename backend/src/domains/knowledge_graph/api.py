@@ -388,6 +388,24 @@ async def list_chunks(kb_id: str, doc_id: str, request: Request):
     return {"items": items, "summary": summary}
 
 
+@router.get("/kbs/{kb_id}/documents/{doc_id}/chunks/{chunk_id}/extraction",
+            dependencies=[Depends(admin_required)])
+async def chunk_extraction(kb_id: str, doc_id: str, chunk_id: str, request: Request):
+    """单块的抽取产出(实体 + 关系)——块明细"查看产出"用。
+
+    实体经锚定过滤与本体制约后入库、带块级溯源(source_chunks);空产出
+    = 该块未抽取/内容被过滤(如目录块)。
+    """
+    _kb_or_404(request, kb_id)
+    store = runtime.get_kg_store(request.app.state)
+    doc = store.get_document(doc_id)
+    if not doc or doc["kbId"] != kb_id:
+        raise HTTPException(404, "文档不存在")
+    if not any(c["id"] == chunk_id for c in store.list_chunks(doc_id)):
+        raise HTTPException(404, "块不存在或不属于该文档")
+    return _graph(request).chunk_output(kb_id, chunk_id)
+
+
 @router.post("/kbs/{kb_id}/documents/{doc_id}/import", dependencies=[Depends(admin_required)])
 async def import_document(kb_id: str, doc_id: str, request: Request, payload: Dict[str, Any] = None):
     """发起单文档导入(后台任务;同库串行,返回任务 ID 供任务中心/页面跟踪)。

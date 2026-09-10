@@ -55,6 +55,41 @@ class TestChunkText:
         assert chunks[0]["text"].startswith("# 甲")
         assert any(c["text"].startswith("# 乙") for c in chunks)
 
+    def test_toc_is_single_chunk(self):
+        """目录页(连续标题行)合并为一块——逐行碎块曾让诛仙前 60+ 批
+        LLM 调用全为 0 实体(每行标题一个 6~15 字碎块,各烧一次调用)。"""
+        toc = "\n".join(["主目录", "第一部", "第二部"] + [f"第{i}章 标题{i}" for i in range(1, 61)])
+        text = toc + "\n\n" + "正文段落。" * 60
+        chunks = chunk_text(text, target_chars=300, overlap_chars=0, max_chars=1000)
+        toc_chunks = [c for c in chunks if "主目录" in c["text"]]
+        assert len(toc_chunks) == 1, "目录应恰好一块"
+        assert all("第60章" in toc_chunks[0]["text"] for _ in [0])   # 全部目录行在同一块
+        assert any("正文段落" in c["text"] and "主目录" not in c["text"] for c in chunks)
+        assert not [c for c in chunks if c["char_count"] < 20]
+
+    def test_chapter_whole_one_chunk(self):
+        """识别到章节就不切:一章一块(≤structural_max),章内实体/关系
+        上下文完整;超长章才在句读处兜底切。"""
+        chapter = "第一章 青云\n" + "张小凡走在青云山的山道上。" * 300   # ~4500 字
+        text = chapter + "\n第二章 通天\n" + "碧瑶在滴血洞中醒来。" * 200
+        chunks = chunk_text(text, target_chars=500, overlap_chars=0, max_chars=1000)
+        ch1 = [c for c in chunks if c["text"].startswith("第一章")]
+        assert len(ch1) == 1 and "张小凡" in ch1[0]["text"]   # 整章一块(>max_chars 也不切)
+        ch2 = [c for c in chunks if c["text"].startswith("第二章")]
+        assert len(ch2) >= 1 and "碧瑶" in ch2[0]["text"]
+        # 超过 structural_max 的章才兜底切
+        huge = "第三章 巨章\n" + "内容句子。" * 2600   # ~13000 字 > 10000
+        chunks2 = chunk_text(huge, target_chars=500, overlap_chars=0, max_chars=1000)
+        assert all(c["char_count"] <= 10001 for c in chunks2)
+        assert len(chunks2) == 2   # 13000/10000 → 两块
+
+    def test_unstructured_keeps_target(self):
+        """无结构文本行为不变:按 target 软目标、max 硬上限。"""
+        text = "一句话。" * 2000
+        chunks = chunk_text(text, target_chars=400, overlap_chars=0, max_chars=500)
+        assert len(chunks) > 1
+        assert all(len(c["text"]) <= 500 for c in chunks)
+
     def test_seq_continuous_and_counts(self):
         text = "\n\n".join(f"第{i}段。" + "内容" * 50 for i in range(20))
         chunks = chunk_text(text, target_chars=300, overlap_chars=0, max_chars=600)

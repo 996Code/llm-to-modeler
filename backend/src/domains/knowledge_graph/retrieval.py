@@ -252,8 +252,17 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     },
                     duration_ms=int((time.monotonic() - _t0) * 1000),
                     error=_err, conv_id=conv_id)
-            # chunk 文本进上下文(docName 已在日志前映射好)
-            chunks.extend(hits)
+            # chunk 文本进上下文(docName 已在日志前映射好)。
+            # 父块去重:向量子块 id 形如 {chunk_id}#i,同一父块(一章)的
+            # 多个段可能同时命中 top_k——按父块保留得分最高的一段,
+            # 否则答案资料里同一章反复出现,挤占召回名额
+            seen_parent = set()
+            for h in hits:
+                parent = str(h.get("chunkId") or "").split("#", 1)[0]
+                if parent in seen_parent:
+                    continue
+                seen_parent.add(parent)
+                chunks.append(h)
         except Exception as e:
             # 降级事件本身也入观测:连接建不起来/元数据读失败时,
             # 调用日志里留一条 degraded 记录(否则"为什么只走了图谱路"不可查)。

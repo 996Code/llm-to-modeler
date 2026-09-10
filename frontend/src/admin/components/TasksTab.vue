@@ -119,7 +119,8 @@
                   <span class="tk-chunk-id">块{{ chunkData(lg).chunk ?? '?' }}</span>
                   <a-progress
                     :percent="chunkPct(lg)" size="small" style="flex: 1; min-width: 60px"
-                    :status="lg.level === 'warn' ? 'exception' : undefined"
+                    :show-info="false" :status="lg.level === 'warn' ? 'exception' : undefined"
+                    title="块耗时(条形长度为批内相对耗时,非完成度)"
                   />
                   <span class="tk-chunk-metric">{{ chunkData(lg).entities ?? 0 }}e / {{ chunkData(lg).relations ?? 0 }}r</span>
                   <span class="tk-chunk-dur">{{ fmtMs(chunkData(lg).duration_ms) }}</span>

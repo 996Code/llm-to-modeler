@@ -33,6 +33,10 @@ MIME_BY_EXT = {
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+")
 
+# 纯标题缓冲(目录区)被正文到达触发结算的最小长度:低于此值的标题串
+# (如单独一行"目录")不值得独立成块,并入后续正文
+_HEADING_FLUSH_MIN = 40
+
 # 通用章节标题(纯文本书籍的软边界):"第一章 xxx"/"第 12 节"/"序章"/"尾声"等。
 # 约束:标题行须短(<40 字)且行首允许全角空格缩进——正文里"第二天"这类
 # 普通叙述不会被误判(不带"章/节/卷/部"量词单位)。
@@ -40,7 +44,9 @@ _CHAPTER_RE = re.compile(
     r"^[\s\u3000]*(第[一二三四五六七八九十百千零〇\d]{1,7}[章節节卷部回])"
     r"([\s\u3000]+\S[^。!?!?\n]{0,29})?$"
 )
-_SPECIAL_CHAPTER_RE = re.compile(r"^[\s\u3000]*(序章|序言|楔子|前言|引子|尾声|後記|后记|番外)([\s\u3000:.:]\S.{0,30})?$")
+_SPECIAL_CHAPTER_RE = re.compile(
+    r"^[\s\u3000]*(序章|序言|楔子|前言|引子|尾声|後記|后记|番外|主目录|目录|正文|附录)"
+    r"([\s\u3000:.:]\S.{0,30})?$")
 
 
 def _is_heading_line(stripped: str) -> bool:
@@ -205,34 +211,87 @@ def _hard_split(block: str, max_chars: int) -> List[str]:
     return parts
 
 
+def sub_chunks_for_embedding(text: str, size: int = 1200) -> List[str]:
+    """向量化子切:按句读边界切成 ≤size 的段。
+
+    抽取块可以是整章(structural_max 上限万级),而 embedding 输入有限
+    (本地 bge-m3 实际按 4096 token 截断,超长部分对向量是隐形的;且单
+    向量表达长文会语义稀释)。抽取按章、召回按段——子块 id 由调用方
+    挂父块(f"{chunk_id}#i"),引用与去重按父块聚合。
+    """
+    size = max(300, int(size or 1200))
+    return [p for p in _hard_split(text or "", size) if p.strip()]
+
+
 def chunk_text(
     text: str,
     target_chars: int = 1200,
     overlap_chars: int = 100,
     max_chars: int = 3000,
+    structural_max_chars: int = 10000,
 ) -> List[Dict[str, Any]]:
-    """结构感知切块。Returns: [{seq, text, char_count}](seq 从 0 连续)。"""
+    """结构感知切块。Returns: [{seq, text, char_count}](seq 从 0 连续)。
+
+    粒度策略(抽取与检索解耦的前提):
+    - 结构块(标题开头:一章/一节)按 structural_max_chars 上限——能识别
+      章节就不切,整章一块,超长章才在句读处兜底切;
+    - 无结构纯文本维持 target_chars 软目标,max_chars 为其硬上限;
+    - 向量化侧按需把结构块再子切(local_embeddings 实际仅 4096 token,
+      长块尾部对向量是隐形的——抽取大块 + 向量小块,两头都最优)。
+    """
     if not text or not text.strip():
         return []
 
-    # 归一参数(防呆:target/overlap/max 的非法配置不至于炸掉导入)
+    # 归一参数(防呆:非法配置不至于炸掉导入)
     target_chars = max(200, int(target_chars or 1200))
     max_chars = max(target_chars, int(max_chars or 3000))
+    structural_max = max(max_chars, int(structural_max_chars or 10000))
     overlap_chars = max(0, min(int(overlap_chars or 0), target_chars // 2))
 
     chunks: List[str] = []
     buf = ""
+    buf_structural = False   # 缓冲是否以标题开头(结构块:目录区/一章)
+    buf_has_content = False  # 缓冲里是否混入过非标题正文(纯标题=目录行)
     for block in _split_blocks(text):
-        # 标题块 = 软边界:直接结算当前缓冲(避免跨标题粘连)
-        if _is_heading_line(block) and buf:
+        is_head = _is_heading_line(block)
+        # 标题 = 章节边界:上一缓冲含实质内容时结算,新章从标题重新起块。
+        # 短于 _HEADING_FLUSH_MIN 的缓冲(孤立短行/单独"目录"两字)不值得
+        # 独立成块,并入下一章。纯标题缓冲(目录页)不结算——目录行合并
+        # 成尽量少的大块,而不是每行一个碎块(诛仙实测:逐行碎块让前 60+
+        # 批 LLM 调用全为 0 实体)。
+        if (is_head and buf and buf_has_content
+                and len(buf) >= _HEADING_FLUSH_MIN):
             chunks.append(buf)
             buf = ""
+            buf_structural = False
+            buf_has_content = False
+        if not is_head:
+            # 正文到达而缓冲还是纯标题(目录区结束) → 目录自成一块结算,
+            # 不与第一章正文粘连;短标题串(<40 字)并入正文。
+            # 【坑位记录】标记必须在 pieces 循环前置位:放在循环后的话,
+            # 章内第二个分段会把"标题+首段"误判成纯目录缓冲冲掉(实测踩过)
+            if buf and not buf_has_content and len(buf) >= _HEADING_FLUSH_MIN:
+                chunks.append(buf)
+                buf = ""
+                buf_structural = False
+            buf_has_content = True
         for piece in _hard_split(block, max_chars):
-            if len(buf) + len(piece) + 1 > target_chars and buf:
+            # 预切粒度 = max_chars:无结构路径的块硬上限不被突破;
+            # 结构路径靠缓冲合并到 structural_max(碎件重组,不影响)
+            # 结构块(标题开头)按 structural_max 上限:一章尽量一块——章内
+            # 上下文完整,实体/关系不被章内切块打断;无结构纯文本维持
+            # target_chars 软目标。超上限仍按句读细切兜底。
+            ceiling = structural_max if (buf_structural or is_head) else target_chars
+            if len(buf) + len(piece) + 1 > ceiling and buf:
                 chunks.append(buf)
                 buf = piece
+                # 超限续段仍属同一章(结构上下文延续,标题在首块):
+                # 保持结构标记,续段继续用 structural_max 上限,
+                # 否则一章的后半会跌回 target 粒度被切碎
+                buf_structural = buf_structural or is_head
             else:
                 buf = buf + "\n" + piece if buf else piece
+                buf_structural = buf_structural or is_head
     if buf:
         chunks.append(buf)
 
@@ -253,7 +312,9 @@ def chunk_text(
     # 硬上限最终兜底(重叠可能超)
     final: List[str] = []
     for c in chunks:
-        final.extend(_hard_split(c, max_chars))
+        # 结构块允许到 structural_max,兜底切分用同一上限(无结构块
+        # 本就 ≤ max_chars ≤ structural_max,不会被这里放大)
+        final.extend(_hard_split(c, structural_max))
 
     return [
         {"seq": i, "text": t, "char_count": len(t)}

@@ -53,6 +53,7 @@ class GraphStore(Protocol):
 
     def upsert_batch(self, scope: str, doc_id: str,
                      entities: List[Dict], relations: List[Dict]) -> Dict[str, int]: ...
+    def chunk_output(self, scope: str, chunk_id: str) -> Dict[str, List[Dict]]: ...
     def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]: ...
     def delete_scope(self, scope: str) -> Dict[str, int]: ...
     def counts(self, scope: str) -> Dict[str, int]: ...
@@ -197,10 +198,16 @@ class Neo4jGraphStore:
                                 ELSE coalesce(e.aliases, []) END,
                             e.source_docs = CASE WHEN ent.doc_id IN e.source_docs
                                                  THEN e.source_docs ELSE coalesce(e.source_docs, []) + ent.doc_id END,
+                            e.source_chunks = CASE WHEN ent.chunk_id = ''
+                                         OR ent.chunk_id IN coalesce(e.source_chunks, [])
+                                                 THEN coalesce(e.source_chunks, [])
+                                                 ELSE coalesce(e.source_chunks, []) + ent.chunk_id END,
                             e.type_status = ent.type_status,
                             e.updated_at = $now
                         """,
                         kb=scope, now=now,
+                        # 实体带 chunk_ids 列表(批内同名实体的多块溯源并集):
+                        # 按来源块爆炸成多行,MERGE 同一节点逐块累积 source_chunks
                         rows=[{
                             "normalized_name": e["normalized_name"],
                             "id": entity_node_id(scope, e["normalized_name"]),
@@ -209,8 +216,10 @@ class Neo4jGraphStore:
                             "description": e.get("description") or "",
                             "aliases": list(dict.fromkeys(e.get("aliases") or [])),
                             "type_status": e.get("type_status") or "",
+                            "chunk_id": cid,
                             "doc_id": doc_id,
-                        } for e in entities],
+                        } for e in entities
+                          for cid in (e.get("chunk_ids") or [e.get("chunk_id") or ""])],
                     ).consume()
                 if relations:
                     tx.run(
@@ -240,6 +249,34 @@ class Neo4jGraphStore:
 
         # execute_write 返回回调返回值;这里再查一次计数(轻量,管理端/流水线统计用)
         return {"entities": len(entities), "relations": len(relations)}
+
+    def chunk_output(self, scope: str, chunk_id: str) -> Dict[str, List[Dict]]:
+        """块级抽取产出(块明细"查看产出"用)。
+
+        实体按 source_chunks 累积列表包含该块判定(实体跨块合并,溯源是
+        多对多);关系按 chunk_id 精确匹配(写入时逐条带块 id)。
+        """
+        self._check_scope(scope)
+        with self._session() as s:
+            ent_rows = s.run(
+                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
+                f"WHERE $cid IN coalesce(e.source_chunks, []) RETURN e",
+                kb=scope, cid=chunk_id,
+            ).data()
+            rel_rows = s.run(
+                f"MATCH (a:{self._label})-[r:{self._rel} {{{self._sp}: $kb, chunk_id: $cid}}]"
+                f"->(b:{self._label}) "
+                f"RETURN a.name AS source, b.name AS target, properties(r) AS rel",
+                kb=scope, cid=chunk_id,
+            ).data()
+        entities = [self._node_dict(r["e"]) for r in ent_rows]
+        relations = [{
+            "source": r["source"], "target": r["target"],
+            "type": r["rel"].get("type") or "",
+            "description": r["rel"].get("description") or "",
+            "evidence": (r["rel"].get("evidence") or "")[:200],
+        } for r in rel_rows]
+        return {"entities": entities, "relations": relations}
 
     def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]:
         """删除某文档的全部图谱贡献:边按 doc_id 删,实体去引用,孤立实体删。"""

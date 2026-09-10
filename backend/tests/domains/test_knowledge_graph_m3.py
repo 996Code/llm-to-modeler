@@ -81,13 +81,26 @@ class FakeGraph:
             node = self.nodes.setdefault(key, {
                 "id": f"{kb_id}:{e['normalized_name']}", "name": e["name"],
                 "normalized_name": e["normalized_name"], "type": e.get("type"),
-                "source_docs": [], "type_status": e.get("type_status", "approved"),
+                "source_docs": [], "source_chunks": [],
+                "type_status": e.get("type_status", "approved"),
             })
             if doc_id not in node["source_docs"]:
                 node["source_docs"].append(doc_id)
+            for cid in (e.get("chunk_ids") or [e.get("chunk_id") or ""]):
+                if cid and cid not in node["source_chunks"]:
+                    node["source_chunks"].append(cid)
         for r in relations:
             self.edges.append({**r, "kb": kb_id, "doc_id": doc_id})
         return {"entities": len(entities), "relations": len(relations)}
+
+    def chunk_output(self, kb_id, chunk_id):
+        ents = [{"name": n["name"], "type": n["type"]}
+                for (kb, _), n in self.nodes.items()
+                if kb == kb_id and chunk_id in n.get("source_chunks", [])]
+        rels = [{"source": e["source"], "target": e["target"], "type": e["type"],
+                 "description": e.get("description", ""), "evidence": e.get("evidence", "")}
+                for e in self.edges if e["kb"] == kb_id and e.get("chunk_id") == chunk_id]
+        return {"entities": ents, "relations": rels}
 
     def delete_document(self, kb_id, doc_id):
         self.delete_calls.append(doc_id)
@@ -360,6 +373,30 @@ class TestImportPipeline:
         assert order[-2:] == ["配角0", "新角色"]
         assert order.index("配角0") > order.index("配角1")   # 重触达者后于未触达者
 
+    def test_chunk_output_provenance(self, env):
+        """块级溯源:实体带 source_chunks、关系带 chunk_id,块产出查询
+        能精确回答"这一块抽出了什么"(实体跨块累积,关系逐条精确)。"""
+        pad = "背景铺垫文字。" * 12
+        kb, doc = _make_doc(env, "溯源", [
+            f"{pad}[E:甲] 和 [E:乙] 共事",
+            f"{pad}[E:甲] 与 [E:丙] 也认识",
+        ])
+        _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        chunks = env.store.list_chunks(doc["id"])
+        # 每块都有产出,且互不串扰
+        out0 = env.graph.chunk_output(kb["id"], chunks[0]["id"])
+        out1 = env.graph.chunk_output(kb["id"], chunks[1]["id"])
+        names0 = {e["name"] for e in out0["entities"]}
+        names1 = {e["name"] for e in out1["entities"]}
+        assert "乙" in names0 and "丙" in names1
+        assert "甲" in names0 and "甲" in names1      # 跨块实体两边都有溯源
+        assert out0["relations"] and out1["relations"]
+        assert all(r["source"] == "甲" for r in out0["relations"] + out1["relations"])
+        # 关系按块精确归属
+        srcs0 = {r["target"] for r in out0["relations"]}
+        srcs1 = {r["target"] for r in out1["relations"]}
+        assert "乙" in srcs0 and "丙" in srcs1 and not (srcs0 & srcs1)
+
     def test_circuit_breaker(self, env):
         env.settings.save_values("knowledge_graph", {"failure_threshold": 2})
         pad = "背景铺垫文字。" * 12
@@ -446,19 +483,35 @@ class TestImportPipeline:
         chunk_ids = [c["id"] for c in env.store.list_chunks(doc["id"])]
         assert env.vector.count(kb["id"]) == len(chunk_ids)
 
-        # 制造缺口:抽掉一块的向量(模拟当批写入失败)
-        env.vector.rows[kb["id"]].pop(chunk_ids[0])
-        assert len(env.vector.existing_chunk_ids(kb["id"], doc["id"])) == len(chunk_ids) - 1
+        # 制造缺口:删掉某块的全部子段向量(模拟当批写入失败;子块 id = cid#i)
+        cid0 = chunk_ids[0]
+        for k in [k for k in list(env.vector.rows[kb["id"]]) if k.split("#", 1)[0] == cid0]:
+            env.vector.rows[kb["id"]].pop(k)
+        assert cid0 not in {c.split("#", 1)[0] for c in env.vector.existing_chunk_ids(kb["id"], doc["id"])}
 
         # 重跑(文档已 succeeded 且未 force):不得幂等跳过,应补齐缺口
         calls_before = env.llm.extract_calls
         t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t2["status"] == "succeeded"
-        assert env.vector.count(kb["id"]) == len(chunk_ids)          # 缺口补齐
+        assert env.vector.count(kb["id"]) >= len(chunk_ids)         # 缺口补齐(子段数 ≥ 块数)
+        assert cid0 in {c.split("#", 1)[0] for c in env.vector.rows[kb["id"]]}
         assert env.llm.extract_calls == calls_before                 # 没有重抽
         # 再跑一次:无缺口 → 幂等跳过
         t3 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t3["result"].get("skipped") is True
+
+    def test_vector_subchunked_for_long_chapter(self, env, monkeypatch):
+        """长章块按段子切后入库:抽取按章(一块),向量按段(多子段)——
+        本地 bge-m3 实际 4096 token 截断,长块尾部对向量是隐形的。"""
+        monkeypatch.setenv("LLM_EMBED_MODEL", "mock-embed")
+        kb, doc = _make_doc(env, "长章向量", ["# 巨章\n" + "张小凡修行大梵般若。" * 400])
+        _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        # 抽取一块(整章),向量多子段(cid#0/cid#1/…)
+        chunks = env.store.list_chunks(doc["id"])
+        assert len(chunks) == 1
+        rows = list(env.vector.rows[kb["id"]].keys())
+        assert len(rows) >= 2 and all("#" in r for r in rows)
+        assert all(len(env.vector.rows[kb["id"]][r]["text"]) <= 1200 for r in rows)
 
     def test_targeted_chunk_retry(self, env):
         """定向重抽:chunk_ids 只补指定块(非 done),不动图谱、不重抽其他块。"""

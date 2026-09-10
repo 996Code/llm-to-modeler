@@ -625,6 +625,16 @@ export async function retryKgChunks(kbId: string, docId: string, chunkIds: strin
   const { data } = await kgApi.post(`/kbs/${kbId}/documents/${docId}/import`, { chunk_ids: chunkIds })
   return data
 }
+
+/** 单块的抽取产出(实体/关系,块级溯源)。 */
+export interface KgChunkExtraction {
+  entities: { name: string; type?: string; description?: string }[]
+  relations: { source: string; target: string; type: string; description?: string; evidence?: string }[]
+}
+export async function fetchKgChunkExtraction(kbId: string, docId: string, chunkId: string): Promise<KgChunkExtraction> {
+  const { data } = await kgApi.get(`/kbs/${kbId}/documents/${docId}/chunks/${chunkId}/extraction`)
+  return data
+}
 export async function importKgAll(kbId: string, force = false): Promise<{ tasks: TaskItem[]; skipped: { docId: string; reason: string }[] }> {
   const { data } = await kgApi.post(`/kbs/${kbId}/import`, { force })
   return data
