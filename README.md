@@ -31,7 +31,7 @@
                                 │ HTTP / SSE
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Python 后端 (FastAPI :18080)                      │
+│            Python 后端 (FastAPI;dev :18080 / 容器内 nginx 反代)      │
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │  API 层 (api/)                                               │   │
@@ -410,7 +410,7 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 | 组成 | 说明 |
 |------|------|
 | 导入流水线（后台任务） | 解析→切块→批内并行 LLM 抽取→本体约束→图+向量双写;**断点续跑**（块级 checkpoint,done = 已入图）、连续失败熔断、进度心跳（批次 N/M + 已抽取 X/Y 块） |
-| 实体消歧（别名合并） | 同一实体不同写法不再裂成多节点:任务启动把图内存量实体**播种**进抽取词表（词表行带别名,引导 LLM 复用既有命名）;导入收尾按"名字 ∈ 对方 aliases + 类型一致"的**文本指认**做并查集收敛（互指连通块整体归一,canonical 取最早入库名,关系边真迁移、碎片名保留进别名可检索）。零启发式猜测——正文没说的永不并（青云山/青云门 类型不同互为别名也不碰）。线上实证:诛仙 563 实体收敛至 397,张小凡/鬼厉 归一且问答正确 |
+| 实体消歧（别名合并） | 同一人物跨块不同写法（张小凡/鬼厉）不再裂成多节点:抽取词表播种既有实体+别名,收尾按"别名指认+类型一致"合并碎片（机制详见 `ARCHITECTURE.md`「长文档导入」）。零猜测:正文没指认的永不并。诛仙实测 563 实体收敛至 397 |
 | 长文档导入 | 全局 LLM 限速（RPM/TPM 双令牌桶 + 429 全局退避）;`extraction_model` 设置可单独给导入换更快的模型（对话/检索链路不受影响）;失败自动续跑（非欠费/鉴权/永久性校验错误,5 分钟退避,**预算跨续跑链封顶**,重启不再卡 retry_scheduled 中间态）;滑窗 ETA 预估 |
 | 混合检索问答 | 意图解析→图谱子图 + 向量双路召回→LLM 组织答案（带证据链）;embedding 未配置时自动降级纯图谱 |
 | 检索可观测 | 两路库调用入 `call_logs`（graph/vector 类型）:逐词种子命中、子图召回量+三元组明细+截断水位、向量逐条相似度分数——会话链路与调用日志页均可查 |
@@ -466,10 +466,11 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 ### 方式 A：SDK 嵌入（推荐）
 
 ```html
-<script src="http://你的部署:13080/ai-modeler/embed.js"></script>
+<!-- 部署后入口 = HOST_PORT(默认 19090);本地 dev 为 vite :13080 -->
+<script src="http://你的部署:19090/ai-modeler/embed.js"></script>
 <script>
   const assistant = new LLMFormModeler({
-    baseUrl: 'http://192.168.99.22:13080',
+    baseUrl: 'http://你的部署:19090',
     userId: 'zhangsan',
     position: 'bottom-right',
     onConfigGenerated: (config) => { /* ... */ },
@@ -482,7 +483,7 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 
 ```html
 <iframe
-  src="http://你的部署:13080/ai-modeler/?embed=true"
+  src="http://你的部署:19090/ai-modeler/?embed=true"
   style="width: 400px; height: 600px; border: none;"
 ></iframe>
 ```
@@ -517,20 +518,16 @@ designer（field-edit 页右下角悬浮球）走**信封协议**：
 编辑 `.env`（完整示例见 `.env.example`）：
 
 ```env
-# ── 上游业务 API（地址由宿主 services 按请求下发，无 env 地址配置）──
-# UPSTREAM_TIMEOUT=30
-# UPSTREAM_CACHE_TTL=300
-
-# ── LLM 推理服务 (OpenAI 兼容接口) ──
-LLM_BASE_URL=http://996code.top:18080/v1
+# ── LLM 推理服务 (必填;OpenAI 兼容接口) ──
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_API_KEY=sk-xxxx
-LLM_MODEL=glm-5.3
-LLM_MAX_TOKENS=200000
-LLM_TIMEOUT=300
+LLM_MODEL=qwen-max
+LLM_MAX_TOKENS=4096
 
-# ── 服务端口 ──
-BACKEND_PORT=18080
-FRONTEND_PORT=13080
+# ── Docker 部署(compose 变量;本地裸机开发不需要)──
+HOST_PORT=19090                # 应用入口 http://IP:19090/ai-modeler/
+NEO4J_PASSWORD=change-me       # compose 内 Neo4j 密码(必填)
+APP_MEM_LIMIT=8g               # 应用容器内存护栏
 
 # ── 知识图谱插件（可选；不配则插件中心显示"依赖未配置"不可启用）──
 NEO4J_URI=bolt://localhost:7687
@@ -575,11 +572,11 @@ cd frontend
 npm install && npm run dev
 ```
 
-### 访问
+### 访问（本地开发;生产为单容器 http://IP:HOST_PORT/ai-modeler/）
 
 | 地址 | 说明 |
 |------|------|
-| http://localhost:13080/ai-modeler/ | 独立模式（三栏布局） |
+| http://localhost:13080/ai-modeler/ | 独立模式（三栏布局,vite dev server） |
 | http://localhost:13080/ai-modeler/?embed=true | 嵌入模式（宿主 iframe） |
 | http://localhost:13080/ai-modeler/embed-demo.html | 嵌入演示页（模拟主系统） |
 | http://localhost:13080/ai-modeler/embed.js | 嵌入 SDK |
