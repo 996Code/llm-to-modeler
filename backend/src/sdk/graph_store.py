@@ -57,6 +57,8 @@ class GraphStore(Protocol):
     def list_entity_names(self, scope: str) -> set: ...
     def list_entity_aliases(self, scope: str) -> Dict[str, Dict[str, Any]]: ...
     def list_entities(self, scope: str) -> List[Dict]: ...
+    def list_connected_pairs(self, scope: str) -> set: ...
+    def prune_aliases(self, scope: str, names: List[str]) -> int: ...
     def merge_entities(self, scope: str, doc_id: str,
                        pairs: List[Dict]) -> Dict[str, int]: ...
     def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]: ...
@@ -295,18 +297,20 @@ class Neo4jGraphStore:
         return {r["n"] for r in rows if r.get("n")}
 
     def list_entity_aliases(self, scope: str) -> Dict[str, Dict[str, Any]]:
-        """库内全部实体的别名+类型表:normalized_name -> {type, aliases[]}。
+        """库内全部实体的别名+类型+描述表:normalized_name -> {type, aliases[], description}。
 
         导入流水线批次间用它做实体消歧:图里某实体已经积累了别名(如
         张小凡 的别名含"鬼厉"),后续批次抽到"鬼厉"时就有据可依地把
-        它并回张小凡,而不是另立节点。type 随附,合并前做同类型校验。
+        它并回张小凡,而不是另立节点。type 随附,合并前做同类型校验;
+        description 随附,词表渲染属性提示(指称消解的特征对卡材料)。
         """
         self._check_scope(scope)
         with self._session() as s:
             rows = s.run(
                 f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
                 f"RETURN e.normalized_name AS n, coalesce(e.type, '') AS t, "
-                f"       coalesce(e.aliases, []) AS a",
+                f"       coalesce(e.aliases, []) AS a, "
+                f"       coalesce(e.description, '') AS d",
                 kb=scope,
             ).data()
         out: Dict[str, Dict[str, Any]] = {}
@@ -315,14 +319,41 @@ class Neo4jGraphStore:
                 out[r["n"]] = {
                     "type": r.get("t") or "",
                     "aliases": list(dict.fromkeys(x for x in (r.get("a") or []) if x)),
+                    "description": r.get("d") or "",
                 }
         return out
 
+    def prune_aliases(self, scope: str, names: List[str]) -> int:
+        """从所有实体的 aliases 里移除指定名字(收尾去争议)。
+
+        入库前的独占性校验只保证"本批不扩散",历史遗留/合并吸收进来的
+        泛称别名仍在图里——词表从图渲染,它们会被持续喂给后续抽取
+        (回音室通道)。收尾时把争议别名集清掉,反馈即断。幂等。
+
+        Returns: 实际移除的别名声称条数。
+        """
+        self._check_scope(scope)
+        if not names:
+            return 0
+        now = _now()
+        with self._session() as s:
+            rows = s.run(
+                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
+                f"WHERE any(a IN coalesce(e.aliases, []) WHERE a IN $names) "
+                f"WITH e, [a IN coalesce(e.aliases, []) WHERE a IN $names] AS rm "
+                f"SET e.aliases = [a IN coalesce(e.aliases, []) WHERE NOT a IN $names], "
+                f"    e.updated_at = $now "
+                f"RETURN sum(size(rm)) AS removed",
+                kb=scope, names=names, now=now,
+            ).data()
+        return int((rows[0] or {}).get("removed") or 0) if rows else 0
+
     def list_entities(self, scope: str) -> List[Dict]:
-        """库内全部实体(含 type/aliases/块溯源量/创建时间;收尾对账合并用)。
+        """库内全部实体(含 type/aliases/description/块溯源量/创建时间)。
 
         created_at 供消歧时选 canonical:最早入库 = 角色首次登场的名字
-        (张小凡 先于 鬼厉 入库,合并后保留张小凡)。
+        (张小凡 先于 鬼厉 入库,合并后保留张小凡);description 供收尾
+        描述连边做点名匹配。
         """
         self._check_scope(scope)
         with self._session() as s:
@@ -330,6 +361,7 @@ class Neo4jGraphStore:
                 f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
                 f"RETURN e.normalized_name AS n, e.name AS name, e.type AS type, "
                 f"       coalesce(e.aliases, []) AS a, e.source_chunks AS sc, "
+                f"       coalesce(e.description, '') AS d, "
                 f"       coalesce(e.created_at, '') AS cat",
                 kb=scope,
             ).data()
@@ -342,8 +374,32 @@ class Neo4jGraphStore:
                 "type": r.get("type") or "",
                 "aliases": list(dict.fromkeys(x for x in (r.get("a") or []) if x)),
                 "source_chunks": list(r.get("sc") or []),
+                "description": r.get("d") or "",
                 "created_at": r.get("cat") or "",
             })
+        return out
+
+    def list_connected_pairs(self, scope: str) -> set:
+        """库内全部有边相连的实体对(无向 normalized_name 二元组)。
+
+        收尾描述连边去重用:两实体间已有任何关系就不再叠加兜底弱边。
+        """
+        self._check_scope(scope)
+        with self._session() as s:
+            rows = s.run(
+                f"MATCH (a:{self._label} {{{self._sp}: $kb}})"
+                f"-[:{self._rel} {{{self._sp}: $kb}}]->"
+                f"(b:{self._label} {{{self._sp}: $kb}}) "
+                f"WHERE a.normalized_name <> b.normalized_name "
+                f"RETURN DISTINCT a.normalized_name AS a, b.normalized_name AS b",
+                kb=scope,
+            ).data()
+        out = set()
+        for r in rows:
+            a, b = r.get("a"), r.get("b")
+            if a and b:
+                out.add((a, b))
+                out.add((b, a))
         return out
 
     def merge_entities(self, scope: str, doc_id: str,

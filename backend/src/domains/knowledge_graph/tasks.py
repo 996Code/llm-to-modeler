@@ -24,7 +24,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from domains.knowledge_graph import runtime
 from sdk.doc_parser import chunk_text, parse_to_text, sub_chunks_for_embedding
@@ -364,6 +364,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         logger.warning(f"词表播种失败(继续,词表从零累积): {e}")
     pending_proposals: List[Dict] = []
     total_entities = total_relations = failed_chunks = 0
+    contested_total = 0  # 别名去争议累计(质量报告;常量大 = 抽取 prompt 该调了)
     consecutive_failures = 0
     # 预计剩余时间:最近 10 块的滑动平均耗时 × 剩余块 ÷ 并发
     # (LLM 耗时随词表膨胀/限流波动,滑动窗口比全程平均更贴近当前速率)
@@ -514,6 +515,16 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             kept_e, kept_r, dropped, proposals = _enforce_schema(kb, list(batch_entities.values()), batch_relations)
             pending_proposals.extend(proposals)
 
+            # 别名独占性校验(泛称防火墙,入库前拦截):同一别名被互不
+            # 互指的多个实体声称 = 泛称/歧义称谓,从本批所有声称者丢弃
+            # ——LLM 建议代码验证的别名侧补全(名字有锚定过滤、关系有
+            # 端点校验、类型有本体强制,aliases 此前是唯一裸奔字段)。
+            contested = _drop_contested_aliases(kept_e, graph_alias_table)
+            contested_total += contested
+            if contested:
+                handle.log(f"别名去争议: 丢弃 {contested} 个被多方声称的泛称别名",
+                           level="warn", contested_aliases=contested)
+
             # 关系端点必须在已知实体集内(本批 ∪ 词表 ∪ 图谱已存),悬空关系丢弃。
             # 图谱已存实体必须并入:续跑/自动重跑任务的词表从零开始(块级
             # checkpoint 只存块状态),而前次运行抽的实体已在图里——只认
@@ -609,9 +620,34 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     if vector_ready:
         _backfill_vectors(handle, app_state, store, kb, doc_id, conv_id)
 
+    # 5.6) 收尾图谱侧别名去争议(幂等):入库前校验只拦本批,历史遗留/
+    # 旧版导入的泛称别名仍在图里——词表从图渲染,不清掉会持续回喂给
+    # 后续抽取(回音室通道)。这里统一清掉,先于合并(碎片不该经由泛称并)。
+    pruned_aliases = 0
+    try:
+        pruned_aliases = _prune_graph_aliases(graph, kb_id)
+        if pruned_aliases:
+            handle.log(f"收尾别名去争议: 清理 {pruned_aliases} 条图谱侧泛称别名",
+                       level="warn", pruned=pruned_aliases)
+    except Exception as e:
+        handle.log(f"收尾别名去争议失败(不影响导入结论): {e}",
+                   level="warn", error=str(e)[:200])
+
+    # 碎片度量(质量报告):名字被其他实体声称为别名的节点数——收尾
+    # 合并前后的差值即"安全网实际收敛了多少碎片"
+    def _fragment_count() -> int:
+        table = graph.list_entity_aliases(kb_id)
+        names = set(table)
+        return sum(1 for nm, info in table.items()
+                   if any(normalize_name(a) in names and normalize_name(a) != nm
+                          for a in (info.get("aliases") or [])))
+
+    fragments_before = _fragment_count()
+
     # 5.7) 收尾消歧对账(幂等):即使 LLM 没在批次内对上碎片,全量扫描
     # "同类型 + 别名互指"的高置信对合并一次——把漏网的碎片(如 惊羽)
     # 收敛回 canonical,避免图谱残留碎片节点。
+    merged_end = 0
     try:
         merged_end = _merge_same_type_alias_pairs(graph, kb_id, doc_id)
         if merged_end:
@@ -619,6 +655,24 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                        level="warn", merged=merged_end)
     except Exception as e:
         handle.log(f"收尾消歧对账失败(不影响导入结论): {e}",
+                   level="warn", error=str(e)[:200])
+
+    fragments_after = _fragment_count()
+
+    # 5.8) 收尾描述连边(幂等):把 LLM 写进 description 却没建边的弱事实
+    # 收回成兜底关系——孤立实体的主要来源。确定性子串匹配,零猜测;
+    # 库没配兜底类型(缺省"相关")时整步跳过。
+    linked = 0
+    try:
+        rel_keys = {t.get("key") for t in ((kb.get("schema") or {}).get("relation_types") or [])
+                    if t.get("key")}
+        if _FALLBACK_RELATION_KEY in rel_keys:
+            linked = _backfill_mention_edges(graph, kb_id, doc_id)
+            if linked:
+                handle.log(f"收尾描述连边: 补 {linked} 条孤立实体兜底关系",
+                           level="warn", linked=linked)
+    except Exception as e:
+        handle.log(f"收尾描述连边失败(不影响导入结论): {e}",
                    level="warn", error=str(e)[:200])
 
     # 6) 收尾统计
@@ -632,17 +686,30 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     )
     duration = time.monotonic() - started
     handle.set_progress(100, "导入完成")
+    # 质量报告:把"导入结果好不好"变成可比数字(实体身份子系统的
+    # 度量闭环)—— contestedDrops 常量大 = 抽取 prompt 该调;
+    # merged 高 = 抽取期消解没起作用; fragmentsAfter 残留 = 安全网
+    # 也收不掉的碎片,人工处理清单。
+    quality = {
+        "contestedDrops": contested_total,
+        "prunedAliases": pruned_aliases,
+        "merged": merged_end,
+        "fragmentsBefore": fragments_before,
+        "fragmentsAfter": fragments_after,
+        "mentionEdges": linked,
+    }
     handle.log(
         f"导入完成({final_status}): {entity_total} 实体 / {relation_total} 关系"
         f"/ {total} 块(其中 {failed_chunks} 块失败),总耗时 {duration:.1f}s"
         f"(平均 {duration / max(1, total) / 60:.1f} 分钟/块)",
         status=final_status, entities=entity_total, relations=relation_total,
         chunks=total, failed_chunks=failed_chunks, resumed_chunks=done_before,
-        vector=vector_ready, seconds=round(duration, 1))
+        vector=vector_ready, seconds=round(duration, 1), **quality)
     return {
         "status": final_status, "chunks": total, "failedChunks": failed_chunks,
         "entities": entity_total, "relations": relation_total,
         "vectorEnabled": vector_ready, "durationSec": round(duration, 1),
+        "quality": quality,
     }
 
 
@@ -828,7 +895,11 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
             entry = graph_aliases.get(name) or {}
             aliases = entry.get("aliases") or []
             alias_note = f" 别名:{'/'.join(aliases[:8])}" if aliases else ""
-            glossary_lines.append(f"- {name}({typ}){alias_note}")
+            # 属性提示(描述截断):指称消解的特征对卡材料——"毛脸雷公嘴"
+            # 之类描写靠它对到孙悟空,而不只靠名字匹配
+            desc = (entry.get("description") or "").strip()
+            attr_note = f" ·{desc[:24]}" if desc else ""
+            glossary_lines.append(f"- {name}({typ}){alias_note}{attr_note}")
 
     # 围栏 defang:文档内容是不可信输入,原文里的 ``` 能闭合 extract.j2
     # 的代码围栏并注入抽取指令;统一换成无害的 ~~~ 再进 prompt
@@ -857,6 +928,9 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
             # examples 被 LLM 照抄)、章节标题、整句引文都在这里掐掉,
             # 不让它们污染图谱。真实事故:通用模板示例"张三"被逐字抽进图
             entities, anchor_dropped = _anchor_filter(entities, chunk["text"])
+            # 证据锚定(转述即清空):evidence 是审计轨迹,必须逐字来自
+            # 原文——用 safe_text(LLM 实际看到的文本)比对
+            evidence_blank = _blank_unanchored_evidence(relations, safe_text)
             # 请求级留痕(对标 call_logs 的粒度):一次 LLM 调用一份明细,
             # 含输入输出规模与耗时——任务日志能逐行对上调用日志
             stats = {
@@ -866,6 +940,7 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
                 "raw_relations": len((data or {}).get("relations") or []) if isinstance(data, dict) else 0,
                 "glossary_size": len(glossary_lines),
                 "anchor_dropped": anchor_dropped,
+                "evidence_blank": evidence_blank,
                 "error": "",
             }
             return entities, relations, stats
@@ -1031,6 +1106,127 @@ def _enforce_schema(kb: Dict, entities: List[Dict], relations: List[Dict]):
     return kept_e, kept_r, dropped, proposals
 
 
+# 消歧对账保险阀:互指校验后的连通块仍超过该成员数,视为残余泛称粘连,
+# 整块放弃合并(宁可漏并,不可错并;超限会在任务日志告警)
+_MERGE_COMPONENT_MAX = 12
+
+
+def _contested_alias_set(claims: Dict[str, Set[str]]) -> Set[str]:
+    """别名争议判定(泛称识别)的核心:返回不能作身份锚点的别名集合。
+
+    claims: 实体名 → 其声称的别名集合(归一化,不含自身名)。
+    判定与合并守卫同语义:名字持有者是该名字的天然声称者;X 声称 Y 的
+    名字 = X 自认同 Y(文本级指认),不算争议。一个别名只有在存在
+    **两两互不指认**的声称者对时才是泛称("大王"被互不相识的精怪
+    各自声称)——此时它不能唯一指认任何实体。
+    """
+    owners: Dict[str, Set[str]] = {}
+    for nm, aliases in claims.items():
+        for a in aliases:
+            owners.setdefault(a, set()).add(nm)
+        owners.setdefault(nm, set()).add(nm)
+
+    def _identified(x: str, y: str) -> bool:
+        return y in claims.get(x, ()) or x in claims.get(y, ())
+
+    out: Set[str] = set()
+    for a, o in owners.items():
+        members = sorted(o)
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                if not _identified(members[i], members[j]):
+                    out.add(a)
+                    break
+            else:
+                continue
+            break
+    return out
+
+
+def _drop_contested_aliases(entities: List[Dict],
+                            graph_aliases: Dict[str, Dict[str, Any]]) -> int:
+    """别名独占性校验:被互不互指的多个实体共同声称的别名,从本批全部丢弃。
+
+    别名的语义前提是唯一指认:"美猴王"只指孙悟空。而"大王/老妖"这类
+    泛称会被 LLM 灌进多个互不相识实体的 aliases——进图后会在收尾对账
+    被并查集当合并锚点,链式把整片角色粘成一坨(线上西游记 289 组误并
+    事故的根因)。这是入库前的第一道拦截;图谱侧历史遗留由收尾的
+    _prune_graph_aliases 兜底(词表从图渲染,不清掉会持续回喂)。
+
+    entities 原地修改(aliases 字段收窄)。Returns: 丢弃的别名声称数。
+    """
+    claims: Dict[str, Set[str]] = {}
+    for name, info in (graph_aliases or {}).items():
+        claims[name] = {normalize_name(a) for a in (info.get("aliases") or []) if a}
+    for e in entities:
+        nm = e["normalized_name"]
+        names = {normalize_name(a) for a in (e.get("aliases") or []) if a}
+        names.discard(nm)
+        claims[nm] = claims.get(nm, set()) | names
+    for nm in claims:
+        claims[nm].discard(nm)
+
+    contested = _contested_alias_set(claims)
+    if not contested:
+        return 0
+
+    dropped = 0
+    for e in entities:
+        nm = e["normalized_name"]
+        keep = [raw for raw in (e.get("aliases") or [])
+                if normalize_name(raw) == nm or normalize_name(raw) not in contested]
+        dropped += len(e.get("aliases") or []) - len(keep)
+        e["aliases"] = keep
+    return dropped
+
+
+def _prune_graph_aliases(graph, kb_id: str) -> int:
+    """收尾图谱侧别名去争议(幂等):清掉库里残留的泛称别名,切断回音室。
+
+    词表/别名表从图渲染并注入后续抽取 prompt——争议别名留在图里就会
+    被反复"确认"。入库前校验只拦本批,历史遗留(旧版导入、合并吸收)
+    在这里统一清理。争议判定复用 _contested_alias_set(与入库同语义)。
+    移除的是"别名声称"而非实体本身;碎片合并信号(名字互指)不受影响
+    (名字持有者与声称者之间永不构成争议对)。
+
+    Returns: 移除的别名声称条数。
+    """
+    table = graph.list_entity_aliases(kb_id)
+    if not table:
+        return 0
+    claims = {nm: {normalize_name(a) for a in (info.get("aliases") or []) if a}
+              for nm, info in table.items()}
+    for nm in claims:
+        claims[nm].discard(nm)
+    contested = _contested_alias_set(claims)
+    if not contested:
+        return 0
+    # 移除名单用原始写法(Cypher 按字面匹配 aliases 列表)
+    remove = sorted({a for info in table.values() for a in (info.get("aliases") or [])
+                     if normalize_name(a) in contested})
+    if not remove:
+        return 0
+    return graph.prune_aliases(kb_id, remove)
+
+
+def _blank_unanchored_evidence(relations: List[Dict], chunk_text: str) -> int:
+    """关系证据锚定:evidence 必须逐字来自块原文,转述/编造的清空。
+
+    evidence 是消解与抽取的审计轨迹("让你确定的那句话")——转述会让
+    "可回查"变成假审计。只清空不丢关系:事实本身仍成立(LLM 已按上下文
+    判定),因转述而丢关系会误伤大量合法压缩写法。
+
+    Returns: 被清空的条数。
+    """
+    n = 0
+    for r in relations:
+        ev = (r.get("evidence") or "").strip()
+        if ev and ev not in chunk_text:
+            r["evidence"] = ""
+            n += 1
+    return n
+
+
 def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
     """收尾消歧对账:按"文本揭示的别名指认"合并同类型重复实体(幂等)。
 
@@ -1038,14 +1234,24 @@ def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
     被 LLM 抽进 aliases(互指),这里按这条文本级指认把碎片并回本体。
     文本没说的,永不并——代码不做任何名字相似度类的猜测。
 
-    合并判据(两条都满足才并):
+    合并判据(三条都满足才并):
       - 一方的名字出现在另一方的 aliases 里(指认边);
-      - 双方类型一致(青云山 location / 青云门 organization 不碰)。
+      - 双方类型一致(青云山 location / 青云门 organization 不碰);
+      - 指认名通过互指佐证校验(见下)——泛称不作合并锚点。
 
+    互指佐证(泛称防火墙,线上西游记实测教训):LLM 除了写真身份别名
+    (张小凡→鬼厉),还会把泛称(妖怪/大王/老妖…)灌进几十个精怪的
+    aliases——任何叫"大王"的实体都会被认领成锚点,并查集链式传导把
+    猪八戒/沙僧/赛太岁/蜈蚣精 并成一坨(289 组合并的实锤事故)。因此
+    一个名字只有在它的全部声称者两两互指时,才认定为"同一身份的独立
+    佐证";声称者互不相识 = 泛称 = 不作锚点。
     指认可以成链(鬼王宗主→鬼王→万人往):用并查集把连通块整体收敛
     到一个节点,而不是单趟遍历(单趟会漏链尾)。canonical 选块内最早
     入库的名字(角色首次登场的名字,张小凡之于 鬼厉);其余名字全部
     保进 canonical 的 aliases——检索按别名匹配,不丢召回。
+
+    保险阀:互指校验后的连通块若仍超大(> 成员数上限),视为残余粘连,
+    整块放弃合并——宁可漏并,不可错并。
 
     Returns: 成功合并的对数。
     """
@@ -1057,7 +1263,37 @@ def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
         return 0
     by_name = {e["normalized"]: e for e in entities}
 
-    # ── 并查集:别名指认边(类型兼容才 union)连成连通块 ──
+    # 别名→声称者 / 实体→其声称的别名(均归一化;互指校验与锚点判定共用)
+    claimed: Dict[str, Set[str]] = {}
+    claimants: Dict[str, Set[str]] = {}
+    for e in entities:
+        names = {normalize_name(a) for a in (e.get("aliases") or []) if a}
+        names.discard(e["normalized"])
+        claimed[e["normalized"]] = names
+        for a in names:
+            claimants.setdefault(a, set()).add(e["normalized"])
+
+    anchor_ok_cache: Dict[str, bool] = {}
+
+    def _anchor_ok(a: str) -> bool:
+        """名字 a 的声称者们两两互指 → 同一身份的佐证;否则视为泛称。"""
+        if a in anchor_ok_cache:
+            return anchor_ok_cache[a]
+        s = claimants.get(a) or set()
+        ok = True
+        members = sorted(s)
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                x, y = members[i], members[j]
+                if y not in claimed.get(x, ()) and x not in claimed.get(y, ()):
+                    ok = False
+                    break
+            if not ok:
+                break
+        anchor_ok_cache[a] = ok
+        return ok
+
+    # ── 并查集:别名指认边(类型兼容 + 锚点可信才 union)连成连通块 ──
     parent: Dict[str, str] = {n: n for n in by_name}
 
     def _find(x: str) -> str:
@@ -1073,8 +1309,11 @@ def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
 
     for e in entities:
         for a in (e.get("aliases") or []):
-            if a in by_name and a != e["normalized"] and _types_ok(e["normalized"], a):
-                ra, rb = _find(e["normalized"]), _find(a)
+            an = normalize_name(a)
+            if (an in by_name and an != e["normalized"]
+                    and _types_ok(e["normalized"], an)
+                    and _anchor_ok(an)):
+                ra, rb = _find(e["normalized"]), _find(an)
                 if ra != rb:
                     parent[rb] = ra
 
@@ -1092,6 +1331,11 @@ def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
     for members in comps.values():
         if len(members) < 2:
             continue
+        if len(members) > _MERGE_COMPONENT_MAX:
+            logger.warning(
+                f"收尾消歧对账: 连通块 {members[:5]}… 共 {len(members)} 成员,"
+                f"超过上限 {_MERGE_COMPONENT_MAX},疑似泛称粘连,本次不合并")
+            continue
         canon = min(members, key=_canon_key)
         for other in members:
             if other == canon:
@@ -1106,6 +1350,87 @@ def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
             if n:
                 by_name.pop(other, None)
     return merged
+
+
+# 收尾描述连边的写入借用 upsert_batch 关系通道;MERGE 键含 chunk_id,用固定
+# 哨兵值保证重跑幂等(同键 MERGE 合并),且不与任何真实块 id 相撞
+_MENTION_CHUNK_ID = "desc-mention"
+# 兜底关系类型的 key(模板约定);库没配该类型 = 该库不要弱边,整步跳过
+_FALLBACK_RELATION_KEY = "相关"
+
+
+def _backfill_mention_edges(graph, kb_id: str, doc_id: str) -> int:
+    """收尾描述连边:实体 description 点名了别的库内实体 → 补一条兜底关系。
+
+    与收尾消歧对账同哲学:知识来源 = 已落库文本,零猜测。抽取时 LLM 常把
+    弱事实写进 description("送孙悟空去御马监到任的星官")却不为它建边
+    (宁缺毋滥 + 关系类型不贴合就丢弃),实体因此孤立。这里把这些点名
+    收回来——匹配是确定性的归一化子串命中,证据就是 description 原文,
+    不经 LLM、不猜同义,跨块/跨批照样命中。
+
+    连边规则(全部满足):
+      - 被点名者名字(len>=2,canonical 名或别名)归一化后出现在点名者的
+        description 里;
+      - 两实体间当前没有任何边——已有关系不叠加弱边,防 hub 刷屏;
+      - 长名优先:描述含"齐天大圣"时,不再按其子串别名"大圣"重复连。
+    方向 = 点名者 → 被点名者;一对实体最多补一条。
+
+    Returns: 新增关系条数。
+    """
+    entities = graph.list_entities(kb_id)
+    if not entities:
+        return 0
+    connected = graph.list_connected_pairs(kb_id)
+
+    # 名字索引:canonical 名 + 别名(均归一化)。len>=2 才参与——"孙"这类
+    # 单字别名会在"孙悟空"等描述里大量误命中。
+    name_owner: Dict[str, Dict] = {}
+    for e in entities:
+        cands = [e["normalized"]] + [normalize_name(a) for a in (e.get("aliases") or [])]
+        for cand in cands:
+            if len(cand) >= 2 and cand not in name_owner:
+                name_owner[cand] = e
+
+    # 长名优先:先命中"齐天大圣",其子串别名"大圣"同处命中即跳过
+    cand_names = sorted(name_owner, key=len, reverse=True)
+
+    new_rels: List[Dict] = []
+    linked_pairs = set()
+    for src in entities:
+        desc_norm = normalize_name(src.get("description") or "")
+        if not desc_norm:
+            continue
+        src_key = src["normalized"]
+        hit_keys = set()
+        for cand in cand_names:
+            if cand not in desc_norm:
+                continue
+            owner = name_owner[cand]
+            dst_key = owner["normalized"]
+            # 自指,或已被本描述里更长的命中名覆盖(互为子串,如已命中
+            # "齐天大圣"再遇其别名"大圣")则不重复连
+            if dst_key == src_key or any(dst_key in k or k in dst_key
+                                         for k in hit_keys):
+                continue
+            pair, rpair = (src_key, dst_key), (dst_key, src_key)
+            if pair in linked_pairs or rpair in linked_pairs:
+                continue
+            if pair in connected or rpair in connected:
+                continue
+            hit_keys.add(dst_key)
+            linked_pairs.add(pair)
+            new_rels.append({
+                "source": src_key, "target": dst_key,
+                "type": _FALLBACK_RELATION_KEY,
+                "description": f"描述点名:{owner['name']}",
+                "evidence": (src.get("description") or "")[:60],
+                "chunk_id": _MENTION_CHUNK_ID,
+            })
+
+    if not new_rels:
+        return 0
+    graph.upsert_batch(kb_id, doc_id, [], new_rels)
+    return len(new_rels)
 
 
 def _merge_pending_proposals(store, kb: Dict, proposals: List[Dict]) -> None:

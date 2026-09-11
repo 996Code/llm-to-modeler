@@ -85,6 +85,7 @@ class FakeGraph:
                 "normalized_name": e["normalized_name"], "type": e.get("type"),
                 "source_docs": [], "source_chunks": [],
                 "aliases": list(e.get("aliases", [])),
+                "description": e.get("description", ""),
                 "created_at": now,
                 "type_status": e.get("type_status", "approved"),
             })
@@ -107,8 +108,19 @@ class FakeGraph:
         for (kbid, norm), n in self.nodes.items():
             if kbid == kb_id:
                 out[norm] = {"type": n.get("type") or "",
-                             "aliases": list(n.get("aliases", []))}
+                             "aliases": list(n.get("aliases", [])),
+                             "description": n.get("description", "")}
         return out
+
+    def prune_aliases(self, kb_id, names):
+        removed = 0
+        for (kbid, norm), n in self.nodes.items():
+            if kbid != kb_id:
+                continue
+            before = len(n.get("aliases", []))
+            n["aliases"] = [a for a in n.get("aliases", []) if a not in names]
+            removed += before - len(n["aliases"])
+        return removed
 
     def list_entities(self, kb_id):
         out = []
@@ -118,7 +130,17 @@ class FakeGraph:
                             "type": n.get("type") or "",
                             "aliases": list(n.get("aliases", [])),
                             "source_chunks": list(n.get("source_chunks", [])),
+                            "description": n.get("description", ""),
                             "created_at": n.get("created_at", "")})
+        return out
+
+    def list_connected_pairs(self, kb_id):
+        out = set()
+        for r in self.edges:
+            if r.get("kb") != kb_id or r["source"] == r["target"]:
+                continue
+            out.add((r["source"], r["target"]))
+            out.add((r["target"], r["source"]))
         return out
 
     def merge_entities(self, kb_id, doc_id, pairs):
@@ -455,6 +477,97 @@ class TestImportPipeline:
         assert g.edges == [["张小凡", "林惊羽"]]
         # 幂等:再跑一遍无新合并
         assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 0
+
+    def _reconcile_mini_graph(self):
+        class MiniGraph:
+            def __init__(self):
+                self.nodes = {}
+                self.merged_pairs = []
+
+            def list_entities(self, kb):
+                return [{"normalized": k, "name": k, "type": v["type"],
+                         "aliases": list(v["aliases"]),
+                         "source_chunks": list(v.get("source_chunks", [])),
+                         "created_at": v["created_at"]}
+                        for k, v in self.nodes.items()]
+
+            def merge_entities(self, kb, doc, pairs):
+                m = 0
+                for p in pairs:
+                    c, f = p["canonical"], p["fragment"]
+                    if c not in self.nodes or f not in self.nodes:
+                        continue
+                    self.nodes[c]["aliases"] = list(dict.fromkeys(
+                        self.nodes[c]["aliases"] + self.nodes[f]["aliases"] + [f]))
+                    self.nodes[c]["source_chunks"] = list(dict.fromkeys(
+                        self.nodes[c].get("source_chunks", [])
+                        + self.nodes[f].get("source_chunks", [])))
+                    del self.nodes[f]
+                    self.merged_pairs.append((c, f))
+                    m += 1
+                return {"merged": m}
+        return MiniGraph()
+
+    def test_reconcile_wukong_family_still_merges(self):
+        """互指佐证守卫不误伤:孙悟空家族(石猴/美猴王/齐天大圣/老孙)
+        通过真实指认链完整并回一名(线上西游记的合法大头)。"老孙"仅被
+        孙悟空一人声称,指认具体,合法并回。"""
+        g = self._reconcile_mini_graph()
+        g.nodes = {
+            "石猴": {"type": "person", "aliases": ["美猴王", "孙悟空"],
+                     "created_at": "t1", "source_chunks": ["c0"]},
+            "美猴王": {"type": "person", "aliases": ["孙悟空", "猴王"],
+                       "created_at": "t1", "source_chunks": ["c0", "c1"]},
+            "孙悟空": {"type": "person",
+                       "aliases": ["美猴王", "齐天大圣", "石猴", "老孙"],
+                       "created_at": "t1",
+                       "source_chunks": ["c0", "c1", "c2", "c3"]},
+            "齐天大圣": {"type": "person", "aliases": ["大圣", "猴王"],
+                         "created_at": "t2", "source_chunks": ["c3"]},
+            "老孙": {"type": "person", "aliases": [],
+                     "created_at": "t5", "source_chunks": ["c1"]},
+        }
+        n = tasks._merge_same_type_alias_pairs(g, "kb", "d1")
+        # 4 个碎片(美猴王/齐天大圣/石猴/老孙)各自并进 canonical,各计 1
+        assert n == 4
+        # canonical:同批入库(t1)时溯源块最多者胜 → 孙悟空(4 块)
+        assert set(g.nodes) == {"孙悟空"}
+        assert {"石猴", "美猴王", "齐天大圣", "老孙"} <= set(g.nodes["孙悟空"]["aliases"])
+        # 幂等
+        assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 0
+
+    def test_reconcile_generic_epithet_not_anchor(self):
+        """泛称防火墙:妖怪/大王这类被互不相识的精怪各自声称的泛称,
+        不得作为合并锚点把整片精怪链式并成一坨(线上 289 组合并事故)。"""
+        g = self._reconcile_mini_graph()
+        demons = ["赛太岁", "蜈蚣精", "白骨精", "金角", "银角"]
+        g.nodes = {
+            "赛太岁": {"type": "person", "aliases": ["大王", "老妖"], "created_at": "t1"},
+            "蜈蚣精": {"type": "person", "aliases": ["大王", "老妖"], "created_at": "t2"},
+            "白骨精": {"type": "person", "aliases": ["大王", "老妖"], "created_at": "t3"},
+            "金角": {"type": "person", "aliases": ["大王"], "created_at": "t4"},
+            "银角": {"type": "person", "aliases": ["大王"], "created_at": "t5"},
+            "大王": {"type": "person", "aliases": ["老妖"], "created_at": "t6"},
+            "老妖": {"type": "person", "aliases": [], "created_at": "t7"},
+        }
+        n = tasks._merge_same_type_alias_pairs(g, "kb", "d1")
+        # "大王"声称者 5 个互不相识 → 锚点无效;"老妖"声称者 {蜈蚣精,
+        # 白骨精, 大王} 互不相识 → 锚点无效;没有任何合法指认 → 零合并
+        assert n == 0
+        assert set(g.nodes) == set(demons) | {"大王", "老妖"}
+        assert g.merged_pairs == []
+
+    def test_reconcile_component_size_cap(self):
+        """保险阀:即便互指校验放行,连通块超过成员上限也整块放弃。"""
+        g = self._reconcile_mini_graph()
+        # 15 个实体两两互指(声称彼此名字),构成 15 成员连通块
+        names = [f"乙{i}" for i in range(15)]
+        g.nodes = {nm: {"type": "person",
+                        "aliases": [x for x in names if x != nm],
+                        "created_at": f"t{i}"} for i, nm in enumerate(names)}
+        n = tasks._merge_same_type_alias_pairs(g, "kb", "d1")
+        assert n == 0
+        assert len(g.nodes) == 15
 
     def test_resume_glossary_seeded_from_graph(self, env):
         """词表播种(根修):续跑任务的词表从图播种,第一批 prompt 就含
@@ -814,3 +927,237 @@ class TestInduceSchema:
         assert schema["pending_schema_induction"]["entity_types"][0]["key"] == "widget"
         # 原本体不被覆盖
         assert schema["entity_types"], "原实体类型应保留"
+
+
+# ── 收尾描述连边(_backfill_mention_edges) ─────────────────────
+
+class _MentionGraph:
+    """最小图桩:直接喂 list_entities 形状的数据,验证连边决策逻辑。"""
+
+    def __init__(self, entities, edges=None):
+        self._entities = entities
+        self.edges = list(edges or [])
+        self.upserted = []
+
+    def list_entities(self, kb_id):
+        return self._entities
+
+    def list_connected_pairs(self, kb_id):
+        out = set()
+        for r in self.edges:
+            if r["source"] == r["target"]:
+                continue
+            out.add((r["source"], r["target"]))
+            out.add((r["target"], r["source"]))
+        return out
+
+    def upsert_batch(self, kb_id, doc_id, entities, relations):
+        self.edges.extend(relations)
+        self.upserted.extend(relations)
+        return {"entities": len(entities), "relations": len(relations)}
+
+
+def _ent(norm, name=None, aliases=(), desc=""):
+    return {"normalized": norm, "name": name or norm, "type": "person",
+            "aliases": list(aliases), "source_chunks": ["c1"],
+            "description": desc, "created_at": "2026-01-01"}
+
+
+class TestMentionBackfill:
+
+    KB, DOC = "kb1", "doc1"
+
+    def test_mention_creates_fallback_edge(self):
+        g = _MentionGraph([
+            _ent("木德星君", desc="送孙悟空去御马监到任的星官"),
+            _ent("孙悟空"),
+        ])
+        n = tasks._backfill_mention_edges(g, self.KB, self.DOC)
+        assert n == 1
+        rel = g.upserted[0]
+        assert rel["source"] == "木德星君" and rel["target"] == "孙悟空"
+        assert rel["type"] == "相关"
+        assert "孙悟空" in rel["evidence"]
+        assert rel["chunk_id"] == "desc-mention"
+
+    def test_mention_via_alias_resolves_to_canonical(self):
+        g = _MentionGraph([
+            _ent("太白金星", desc="招安齐天大圣上天为官"),
+            _ent("孙悟空", aliases=["齐天大圣", "大圣"]),
+        ])
+        n = tasks._backfill_mention_edges(g, self.KB, self.DOC)
+        assert n == 1
+        assert g.upserted[0]["target"] == "孙悟空"
+
+    def test_alias_substring_not_double_linked(self):
+        # 描述含"齐天大圣",其子串别名"大圣"同主不再重复连
+        g = _MentionGraph([
+            _ent("太白金星", desc="奉旨招安齐天大圣"),
+            _ent("孙悟空", aliases=["齐天大圣", "大圣"]),
+        ])
+        assert tasks._backfill_mention_edges(g, self.KB, self.DOC) == 1
+
+    def test_skip_when_pair_already_connected(self):
+        g = _MentionGraph([
+            _ent("木德星君", desc="送孙悟空去御马监到任的星官"),
+            _ent("孙悟空"),
+        ], edges=[{"source": "木德星君", "target": "孙悟空",
+                   "type": "敌对", "chunk_id": "c1"}])
+        assert tasks._backfill_mention_edges(g, self.KB, self.DOC) == 0
+        assert not g.upserted
+
+    def test_mutual_mention_single_edge(self):
+        g = _MentionGraph([
+            _ent("张三", desc="与李四结义"),
+            _ent("李四", desc="受张三指点"),
+        ])
+        assert tasks._backfill_mention_edges(g, self.KB, self.DOC) == 1
+
+    def test_single_char_name_ignored(self):
+        g = _MentionGraph([
+            _ent("甲", desc="孙家仆人出身"),
+            _ent("孙"),
+        ])
+        assert tasks._backfill_mention_edges(g, self.KB, self.DOC) == 0
+
+    def test_idempotent_rerun(self):
+        g = _MentionGraph([
+            _ent("木德星君", desc="送孙悟空去御马监到任的星官"),
+            _ent("孙悟空"),
+        ])
+        assert tasks._backfill_mention_edges(g, self.KB, self.DOC) == 1
+        # 重跑:已连边进入 connected 集合,不再补
+        assert tasks._backfill_mention_edges(g, self.KB, self.DOC) == 0
+        assert len(g.upserted) == 1
+
+
+# ── 别名独占性校验(_drop_contested_aliases) ───────────────────
+
+def _aliased(nm, aliases, type_="person"):
+    return {"normalized_name": nm, "name": nm, "type": type_,
+            "aliases": list(aliases)}
+
+
+class TestAliasExclusivity:
+
+    def test_generic_epithet_dropped_from_all_claimants(self):
+        """泛称防火墙:互不相识的多方共同声称的别名("大王"),从所有
+        声称者丢弃——线上 289 组误并事故的入库前拦截。"""
+        ents = [_aliased("赛太岁", ["大王", "老妖"]),
+                _aliased("蜈蚣精", ["大王", "老妖"]),
+                _aliased("白骨精", ["大王"])]
+        n = tasks._drop_contested_aliases(ents, {})
+        assert n == 5  # 大王×3 + 老妖×2
+        assert all(e["aliases"] == [] for e in ents)
+
+    def test_unique_alias_kept(self):
+        ents = [_aliased("孙悟空", ["美猴王", "齐天大圣"]),
+                _aliased("牛魔王", ["平天大圣"])]
+        assert tasks._drop_contested_aliases(ents, {}) == 0
+        assert ents[0]["aliases"] == ["美猴王", "齐天大圣"]
+
+    def test_claim_of_name_is_identification_not_contest(self):
+        """声称别人的名字 = 认同同一身份,不算争议——碎片合并信号保留
+        (张小凡 声称 鬼厉 / 鬼厉 声称 张小凡)。"""
+        ents = [_aliased("张小凡", ["鬼厉"]),
+                _aliased("鬼厉", ["张小凡"])]
+        assert tasks._drop_contested_aliases(ents, {}) == 0
+        assert ents[0]["aliases"] == ["鬼厉"] and ents[1]["aliases"] == ["张小凡"]
+
+    def test_graph_side_contention_blocks_new_claimant(self):
+        """续跑场景:图谱已存实体已声称"老妖",新批实体与它互不指认
+        却也声称"老妖" → 从新批丢弃(图谱侧由收尾对账兜底)。"""
+        graph = {"蜘蛛精": {"type": "person", "aliases": ["老妖"]}}
+        ents = [_aliased("蜈蚣精", ["老妖", "百眼魔君"])]
+        n = tasks._drop_contested_aliases(ents, graph)
+        assert n == 1
+        assert ents[0]["aliases"] == ["百眼魔君"]
+
+    def test_graph_name_claimed_by_new_fragment_kept(self):
+        """新批碎片声称图谱已存实体的名字 = 合并信号,不拦。"""
+        graph = {"孙悟空": {"type": "person", "aliases": ["美猴王"]}}
+        ents = [_aliased("美猴王", ["孙悟空"])]
+        assert tasks._drop_contested_aliases(ents, graph) == 0
+        assert ents[0]["aliases"] == ["孙悟空"]
+
+
+# ── 图谱侧别名去争议(_prune_graph_aliases)与证据锚定 ──────────
+
+class TestGraphAliasPruning:
+
+    KB = "kb1"
+
+    def test_prune_removes_contested_and_keeps_identity(self):
+        """泛称从图里清掉,身份别名和名字互指(合并信号)不动。"""
+        g = FakeGraph()
+        g.upsert_batch(self.KB, "d1", [
+            {"name": "赛太岁", "normalized_name": "赛太岁", "type": "person",
+             "aliases": ["大王", "太岁凶妖"], "chunk_ids": ["c1"]},
+            {"name": "蜈蚣精", "normalized_name": "蜈蚣精", "type": "person",
+             "aliases": ["大王", "百眼魔君"], "chunk_ids": ["c1"]},
+            {"name": "孙悟空", "normalized_name": "孙悟空", "type": "person",
+             "aliases": ["美猴王"], "chunk_ids": ["c1"]},
+        ], [])
+        removed = tasks._prune_graph_aliases(g, self.KB)
+        assert removed == 2  # 大王 × 2
+        assert g.nodes[(self.KB, "赛太岁")]["aliases"] == ["太岁凶妖"]
+        assert g.nodes[(self.KB, "蜈蚣精")]["aliases"] == ["百眼魔君"]
+        assert g.nodes[(self.KB, "孙悟空")]["aliases"] == ["美猴王"]
+
+    def test_prune_keeps_one_way_name_claim(self):
+        """碎片声称 canonical 名字(单向指认)不是争议——合并信号保留。"""
+        g = FakeGraph()
+        g.upsert_batch(self.KB, "d1", [
+            {"name": "孙悟空", "normalized_name": "孙悟空", "type": "person",
+             "aliases": [], "chunk_ids": ["c1"]},
+            {"name": "美猴王", "normalized_name": "美猴王", "type": "person",
+             "aliases": ["孙悟空"], "chunk_ids": ["c1"]},
+        ], [])
+        assert tasks._prune_graph_aliases(g, self.KB) == 0
+        assert g.nodes[(self.KB, "美猴王")]["aliases"] == ["孙悟空"]
+
+    def test_prune_idempotent(self):
+        g = FakeGraph()
+        g.upsert_batch(self.KB, "d1", [
+            {"name": "甲妖", "normalized_name": "甲妖", "type": "person",
+             "aliases": ["大王"], "chunk_ids": ["c1"]},
+            {"name": "乙妖", "normalized_name": "乙妖", "type": "person",
+             "aliases": ["大王"], "chunk_ids": ["c1"]},
+        ], [])
+        assert tasks._prune_graph_aliases(g, self.KB) == 2
+        assert tasks._prune_graph_aliases(g, self.KB) == 0
+
+    def test_prune_then_merge_not_chained(self):
+        """剪枝后,原本经泛称可达的实体不再被误并(289 组事故防回归)。"""
+        g = FakeGraph()
+        g.upsert_batch(self.KB, "d1", [
+            {"name": "赛太岁", "normalized_name": "赛太岁", "type": "person",
+             "aliases": ["大王"], "chunk_ids": ["c1"]},
+            {"name": "蜈蚣精", "normalized_name": "蜈蚣精", "type": "person",
+             "aliases": ["大王"], "chunk_ids": ["c1"]},
+            {"name": "白骨精", "normalized_name": "白骨精", "type": "person",
+             "aliases": ["大王"], "chunk_ids": ["c1"]},
+        ], [])
+        tasks._prune_graph_aliases(g, self.KB)
+        n = tasks._merge_same_type_alias_pairs(g, self.KB, "d1")
+        assert n == 0
+        assert len([k for k in g.nodes if k[0] == self.KB]) == 3
+
+
+class TestEvidenceAnchoring:
+
+    def test_paraphrased_evidence_blank_kept_verbatim(self):
+        rels = [
+            {"source": "甲", "target": "乙", "type": "敌对",
+             "evidence": "甲把乙打败了"},       # 转述
+            {"source": "甲", "target": "丙", "type": "挚友",
+             "evidence": "甲与丙结义"},          # 逐字
+            {"source": "甲", "target": "丁", "type": "相关",
+             "evidence": ""},                    # 空证据不动
+        ]
+        text = "那一日,甲与丙结义,誓同生死。"
+        n = tasks._blank_unanchored_evidence(rels, text)
+        assert n == 1
+        assert rels[0]["evidence"] == ""
+        assert rels[1]["evidence"] == "甲与丙结义"
+        assert rels[2]["evidence"] == ""
