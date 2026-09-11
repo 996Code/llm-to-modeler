@@ -384,7 +384,11 @@ def create_registry() -> ToolRegistry:
   `_log_retrieval_call`;SDK 存储层不记日志（零领域知识,观测归插件）
 - **后台任务框架**：`mgr.submit(..., queue_key=...)` 提交——同 key FIFO 串行
   （如同库导入不并发写图）、协作式取消、进度/结构化日志推送、SSE 事件流、
-  SQLite 持久化（`services/task_manager.py` / `task_store.py` / `api/tasks.py`）
+  SQLite 持久化（`services/task_manager.py` / `task_store.py` / `api/tasks.py`）。
+  失败自动续跑的边界:致命错误(鉴权/欠费/配额)与**永久性错误**
+  （`PermanentTaskError`,校验类、重跑恒定失败,如定向重抽的块不存在）
+  都不续跑;续跑预算跨链继承封顶(max_auto_retry 是整条链的上限,不每轮重置);
+  重启时 retry_scheduled 一并收敛 interrupted(定时器线程已随进程消亡)
 - **管理页**：manifest `admin.page` 声明组件 key,管理端注册表动态挂 Tab
   （前端 `admin/packPages/registry.ts`）;`admin.settings` 声明设置页 schema
 - **SDK 存储**：见下节「SDK 存储设施」——外部图/向量存储不要自己写连接管理
@@ -540,7 +544,8 @@ vector.ensure_collection(scope_id, dim=embedding_dim)
 | 吞吐 | 批内并行 LLM 调用;批次 = 并行与断点单位 | `llm_concurrency`(默认2)/ `llm_batch_size`(默认4) |
 | 模型分层 | 导入抽取可单独用快/便宜模型,对话与检索链路不受影响;`LLMClient.chat/chat_json` 的 `model` 参数为单次调用级覆盖 | `extraction_model`(留空 = 全局模型) |
 | 服务商限额 | 全局 RPM/TPM 双令牌桶(所有 LLM 出站路径统一取配额,含 json_object 直连路径);429 触发全局指数退避(30s→60s→120s→240s,上限600s),成功即清;TPM 估算系数按响应真实 usage EMA 校准——换模型(不同 tokenizer)后自动收敛,无需手动留余量 | `llm_rpm_limit` / `llm_tpm_limit`(0 = 不限) |
-| 失败恢复 | 块级 checkpoint(done = 已入图,续跑只补剩余块);任务级自动续跑(非欠费/鉴权类致命错误,5 分钟退避后重新入队,可取消) | `import_max_auto_retry`(默认3) |
+| 失败恢复 | 块级 checkpoint(done = 已入图,续跑只补剩余块);任务级自动续跑(非欠费/鉴权/永久性校验错误,5 分钟退避后重新入队,可取消;预算跨续跑链封顶) | `import_max_auto_retry`(默认3) |
+| 命名一致性 | **实体消歧**:启动把图内存量实体(+别名)播种进抽取词表;收尾按"名字∈对方aliases+同类型"的文本指认并查集合并(关系边真迁移、碎片名保留进别名)——跨块不同写法(张小凡/鬼厉)不裂成多节点 | — |
 | 进度可观测 | 滑窗 ETA(最近10块平均耗时×剩余÷并发);逐块日志(实体/关系数、prompt 规模、词表命中、LLM 耗时);调用日志记 `rateLimitWaitMs` 区分"排队慢"与"模型慢" | — |
 
 **切块对齐**:`doc_parser` 结构感知切块带章节软边界(中文章节标题
