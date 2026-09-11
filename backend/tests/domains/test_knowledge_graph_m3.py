@@ -1228,3 +1228,35 @@ class TestBridgeHubGuard:
         assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 4
         assert set(g.nodes) == {"孙悟空"}
 
+
+
+# ── 锚定收紧:别名不参与接地(_anchor_filter) ───────────────────
+
+class TestAnchorNameOnly:
+
+    def test_alias_grounding_no_longer_passes(self):
+        """线上实锤:平顶山妖王被 LLM 安上 宝象国 的名字(黄袍怪)+
+        别名(金角大王)——名字不在原文但别名在,旧版豁免让张冠李戴
+        入图,跨章合并焊死假身份。收紧后按名字接地,整体丢弃。"""
+        ents = [{"name": "黄袍怪", "normalized_name": "黄袍怪",
+                 "type": "creature", "aliases": ["金角大王", "老魔"],
+                 "description": ""}]
+        text = "那魔道:吾乃金角大王、银角大王之兄。"
+        kept, dropped = tasks._anchor_filter(ents, text)
+        assert kept == [] and dropped == 1
+
+    def test_name_grounding_still_passes_with_aliases(self):
+        ents = [{"name": "孙悟空", "normalized_name": "孙悟空",
+                 "type": "person", "aliases": ["美猴王"], "description": ""}]
+        text = "孙悟空道:俺老孙来也!"
+        kept, dropped = tasks._anchor_filter(ents, text)
+        assert len(kept) == 1 and dropped == 0
+
+    def test_heading_and_punct_still_dropped(self):
+        ents = [{"name": "第三回 四海千山皆拱伏", "normalized_name": "x1",
+                 "type": "event", "aliases": [], "description": ""},
+                {"name": "他说,你去吧", "normalized_name": "x2",
+                 "type": "person", "aliases": [], "description": ""}]
+        text = "第三回 四海千山皆拱伏。他说,你去吧。"
+        kept, dropped = tasks._anchor_filter(ents, text)
+        assert kept == [] and dropped == 2

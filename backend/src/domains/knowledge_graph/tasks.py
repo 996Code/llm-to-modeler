@@ -977,14 +977,23 @@ _MAX_NAME_LEN = 30
 def _anchor_filter(entities: List[Dict], chunk_text: str) -> Tuple[List[Dict], int]:
     """原文锚定过滤(post-LLM 代码强制,prompt 规则只是建议):
 
-    1. 实体 name 或任一 alias 必须出现在 chunk 原文中——类型表 examples
-       被 LLM 照抄(通用模板 person 示例"张三"逐字进图)、凭空幻觉都在
-       这一层掐掉;
+    1. 实体 name 必须逐字出现在 chunk 原文中——类型表 examples 被 LLM
+       照抄(通用模板 person 示例"张三"逐字进图)、凭空幻觉都在这一层
+       掐掉;
     2. 章节标题模式、含句读标点、超长的 name 直接丢弃——它们是文档结构
        或句子,不是实体。
 
+    别名不参与锚定(线上实锤教训):LLM 会把 A 处的角色安上 B 处的名字
+    (平顶山妖王被命名"黄袍怪"+别名"金角大王")——名字不在原文但别名
+    在,旧版别名豁免让张冠李戴的实体入图,跨章名指认合并再把假身份
+    焊死进图。别名是"身份断言"而非"出场事实",身份断言的校验在别处
+    (独占性/互指佐证/枢纽防火墙),出场事实只认名字本身。代价是
+    "本块仅以别名指称"的实体会被丢弃(宁漏不错):该实体的正式登场块
+    (名字在文中)会重新建立它,词表引导后续块复用规范名。
+
     关系不在本层处理:关系端点可能指向词表里的跨块实体,批次层的
-    known(本批 ∪ 词表)悬空过滤已覆盖;被本层丢弃的实体不进批次实体集,
+    known(本批 ∪ 词表)悬空过滤已覆盖;消解到词表规范名的关系端点
+    不依赖本层(名字不必在本块原文)。被本层丢弃的实体不进批次实体集,
     引用它的关系会被悬空过滤连带剔除,行为一致。
 
     Returns:
@@ -998,8 +1007,7 @@ def _anchor_filter(entities: List[Dict], chunk_text: str) -> Tuple[List[Dict], i
                 or len(name) > _MAX_NAME_LEN:
             dropped += 1
             continue
-        candidates = [name] + [str(a).strip() for a in (e.get("aliases") or [])]
-        if any(c and c in chunk_text for c in candidates):
+        if name in chunk_text:
             kept.append(e)
         else:
             dropped += 1
