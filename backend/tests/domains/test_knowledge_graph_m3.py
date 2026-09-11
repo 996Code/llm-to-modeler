@@ -522,7 +522,7 @@ class TestImportPipeline:
                        "aliases": ["美猴王", "齐天大圣", "石猴", "老孙"],
                        "created_at": "t1",
                        "source_chunks": ["c0", "c1", "c2", "c3"]},
-            "齐天大圣": {"type": "person", "aliases": ["大圣", "猴王"],
+            "齐天大圣": {"type": "person", "aliases": ["大圣", "猴王", "美猴王"],
                          "created_at": "t2", "source_chunks": ["c3"]},
             "老孙": {"type": "person", "aliases": [],
                      "created_at": "t5", "source_chunks": ["c1"]},
@@ -1161,3 +1161,70 @@ class TestEvidenceAnchoring:
         assert rels[0]["evidence"] == ""
         assert rels[1]["evidence"] == "甲与丙结义"
         assert rels[2]["evidence"] == ""
+
+
+# ── 称谓枢纽防火墙(_bridge_hubs) ──────────────────────────────
+
+class TestBridgeHubGuard:
+    """桥接型称谓节点(老妖 认领 黄风怪/黄袍怪)拒绝经它合并;合法大家族
+    (孙悟空家族,声称对象经彼此指认传递连通)不受影响——通用判据:
+    去掉 x 的指认边后,其声称的名字散落在 ≥2 个有外部佐证的连通分量。"""
+
+    def _mini(self):
+        class MiniGraph:
+            def __init__(self):
+                self.nodes = {}
+
+            def list_entities(self, kb):
+                return [{"normalized": k, "name": k, "type": v["type"],
+                         "aliases": list(v["aliases"]),
+                         "source_chunks": list(v.get("source_chunks", [])),
+                         "created_at": v["created_at"]}
+                        for k, v in self.nodes.items()]
+
+            def merge_entities(self, kb, doc, pairs):
+                m = 0
+                for p in pairs:
+                    c, f = p["canonical"], p["fragment"]
+                    if c not in self.nodes or f not in self.nodes:
+                        continue
+                    self.nodes[c]["aliases"] = list(dict.fromkeys(
+                        self.nodes[c]["aliases"] + self.nodes[f]["aliases"] + [f]))
+                    del self.nodes[f]
+                    m += 1
+                return {"merged": m}
+        return MiniGraph()
+
+    def test_epithet_hub_blocked(self):
+        g = self._mini()
+        g.nodes = {
+            "老妖": {"type": "person", "aliases": ["黄风怪", "黄袍怪"],
+                     "created_at": "t1", "source_chunks": ["c20", "c28"]},
+            "黄风怪": {"type": "person", "aliases": ["黄风大王"],
+                       "created_at": "t2", "source_chunks": ["c20"]},
+            "黄袍怪": {"type": "person", "aliases": ["奎木狼"],
+                       "created_at": "t3", "source_chunks": ["c28"]},
+        }
+        assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 0
+        assert set(g.nodes) == {"老妖", "黄风怪", "黄袍怪"}
+
+    def test_family_with_leaf_not_hub(self):
+        """哑叶子(老孙 仅被 孙悟空 指认)不构成独立锚定分量——家族照常合并。"""
+        g = self._mini()
+        g.nodes = {
+            "石猴": {"type": "person", "aliases": ["美猴王", "孙悟空"],
+                     "created_at": "t1", "source_chunks": ["c0"]},
+            "美猴王": {"type": "person", "aliases": ["孙悟空", "猴王"],
+                       "created_at": "t1", "source_chunks": ["c0", "c1"]},
+            "孙悟空": {"type": "person",
+                       "aliases": ["美猴王", "齐天大圣", "石猴", "老孙"],
+                       "created_at": "t1",
+                       "source_chunks": ["c0", "c1", "c2", "c3"]},
+            "齐天大圣": {"type": "person", "aliases": ["大圣", "猴王", "美猴王"],
+                         "created_at": "t2", "source_chunks": ["c3"]},
+            "老孙": {"type": "person", "aliases": [],
+                     "created_at": "t5", "source_chunks": ["c1"]},
+        }
+        assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 4
+        assert set(g.nodes) == {"孙悟空"}
+

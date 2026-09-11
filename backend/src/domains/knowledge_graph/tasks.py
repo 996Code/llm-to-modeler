@@ -1293,7 +1293,63 @@ def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
         anchor_ok_cache[a] = ok
         return ok
 
-    # ── 并查集:别名指认边(类型兼容 + 锚点可信才 union)连成连通块 ──
+    # ── 枢纽防火墙:桥接型称谓节点拒绝合并 ──
+    # 通用判据(传递性连通,非两两比对):称谓节点 x 认领多个名字时,
+    # 若"去掉 x 自己的指认边"后这些名字散落在 ≥2 个**有外部佐证**的
+    # 连通分量里,x 就是横跨多个身份的桥——经由它的合并全部拒绝。
+    #   外部佐证 = 分量里存在 x 之外的指认边(别的实体声称它/它声称
+    #   别的实体)。只有 x 单向指认的哑叶子(如 老孙 仅被 孙悟空 指认)
+    #   不构成独立分量——单边认领无害,误并损失只是一条别名。
+    # 反例自检:合法大家族(孙悟空 声称 石猴/美猴王/齐天大圣/老孙)去掉
+    # 孙悟空后,前三个经彼此的指认仍连成一片 → 单锚定分量 → 不是桥;
+    # 事故场景(老妖 认领 黄风怪/黄袍怪)二者各成孤岛 → 双锚定分量
+    # → 是桥,拒绝合并。不依赖任何名单,对任意领域通用。
+    def _bridge_hubs() -> Set[str]:
+        adj: Dict[str, Set[str]] = {}
+        for nm2, al2 in claimed.items():
+            for a2 in al2:
+                adj.setdefault(nm2, set()).add(a2)
+                adj.setdefault(a2, set()).add(nm2)
+
+        hubs: Set[str] = set()
+        for x, al in claimed.items():
+            if len(al) < 2:
+                continue
+            parent: Dict[str, str] = {}
+
+            def _root(v: str) -> str:
+                parent.setdefault(v, v)
+                while parent[v] != v:
+                    parent[v] = parent[parent[v]]
+                    v = parent[v]
+                return v
+
+            for nm2, al2 in claimed.items():
+                if nm2 == x:
+                    continue
+                for a2 in al2:
+                    ra, rb = _root(nm2), _root(a2)
+                    if ra != rb:
+                        parent[rb] = ra
+            comps: Dict[str, List[str]] = {}
+            for a in al:
+                comps.setdefault(_root(a), []).append(a)
+            if len(comps) < 2:
+                continue
+
+            def _anchored(members: List[str]) -> bool:
+                return any(any(m != x for m in adj.get(c, ())) for c in members)
+
+            if sum(1 for ms in comps.values() if _anchored(ms)) >= 2:
+                hubs.add(x)
+        return hubs
+
+    hubs = _bridge_hubs()
+    if hubs:
+        logger.warning(f"收尾消歧对账: {len(hubs)} 个称谓枢纽拒绝合并"
+                       f"(桥接多个互不连通的身份,如 {sorted(hubs)[:3]})")
+
+    # ── 并查集:别名指认边(类型兼容 + 锚点可信 + 非枢纽才 union)──
     parent: Dict[str, str] = {n: n for n in by_name}
 
     def _find(x: str) -> str:
@@ -1308,6 +1364,8 @@ def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
         return not (ta and tb and ta != tb)
 
     for e in entities:
+        if e["normalized"] in hubs:
+            continue
         for a in (e.get("aliases") or []):
             an = normalize_name(a)
             if (an in by_name and an != e["normalized"]
