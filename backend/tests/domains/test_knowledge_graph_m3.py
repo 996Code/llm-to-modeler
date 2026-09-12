@@ -1492,3 +1492,58 @@ class TestLLMConsolidation:
             eligible_types={"person", "creature"})
         assert stats["applied"] == 0 and stats["rejected"] == 1
         assert {k[1] for k in graph.nodes if k[0] == kb["id"]} == {"甲山", "乙洞"}
+
+
+# ── 类型族兼容(person↔creature) ────────────────────────────────
+
+class TestTypeFamilyCompat:
+
+    def _mini(self):
+        class MiniGraph:
+            def __init__(self):
+                self.nodes = {}
+
+            def list_entities(self, kb):
+                return [{"normalized": k, "name": k, "type": v["type"],
+                         "aliases": list(v["aliases"]),
+                         "source_chunks": list(v.get("source_chunks", [])),
+                         "description": "", "created_at": v["created_at"]}
+                        for k, v in self.nodes.items()]
+
+            def merge_entities(self, kb, doc, pairs):
+                m = 0
+                for p in pairs:
+                    c, f = p["canonical"], p["fragment"]
+                    if c not in self.nodes or f not in self.nodes:
+                        continue
+                    self.nodes[c]["aliases"] = list(dict.fromkeys(
+                        self.nodes[c]["aliases"] + self.nodes[f]["aliases"] + [f]))
+                    del self.nodes[f]
+                    m += 1
+                return {"merged": m}
+        return MiniGraph()
+
+    def test_person_creature_same_family_merges(self):
+        """文学本体公理:person/creature 是同一角色的两面(国丈=白鹿精),
+        人形职务名与真身互为别名是常态——跨型碎片应并。"""
+        g = self._mini()
+        g.nodes = {
+            "国丈": {"type": "person", "aliases": ["白鹿"],
+                     "created_at": "t1", "source_chunks": ["c78"]},
+            "白鹿": {"type": "creature", "aliases": [],
+                     "created_at": "t2", "source_chunks": ["c78"]},
+        }
+        assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 1
+        assert len(g.nodes) == 1
+
+    def test_location_organization_still_separated(self):
+        """异族类型严格互斥:location/organization 互为别名永不并(原有守卫)。"""
+        g = self._mini()
+        g.nodes = {
+            "青云山": {"type": "location", "aliases": ["青云门"],
+                       "created_at": "t1", "source_chunks": ["c1"]},
+            "青云门": {"type": "organization", "aliases": ["青云山"],
+                       "created_at": "t2", "source_chunks": ["c1"]},
+        }
+        assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 0
+        assert len(g.nodes) == 2

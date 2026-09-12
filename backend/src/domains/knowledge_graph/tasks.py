@@ -1147,6 +1147,21 @@ def _enforce_schema(kb: Dict, entities: List[Dict], relations: List[Dict]):
 # 整块放弃合并(宁可漏并,不可错并;超限会在任务日志告警)
 _MERGE_COMPONENT_MAX = 12
 
+# 类型族:同族类型视为同一身份可并。文学本体里 person/creature 是同一
+# 角色的两面——"比丘国国丈(person)就是白鹿精(creature)",人形职务名与
+# 真身互为别名是常态而非异常(西游记实测:残留碎片 10/12 全是这类跨型
+# 对,皇后(灭法国的另一人)与弼马温(event)则被既有守卫正确排除)。
+# 异族仍严格互斥(青云山 location / 青云门 organization 永不并);
+# 非文学库两型不同时存在,规则天然惰性。
+_MERGE_TYPE_FAMILY = {"person", "creature"}
+
+
+def _types_compatible(ta: str, tb: str) -> bool:
+    """合并的类型约束:同型或同族可并;空型(信息不足)放行由其他守卫把关。"""
+    if not ta or not tb or ta == tb:
+        return True
+    return ta in _MERGE_TYPE_FAMILY and tb in _MERGE_TYPE_FAMILY
+
 
 def _contested_alias_set(claims: Dict[str, Set[str]]) -> Set[str]:
     """别名争议判定(泛称识别)的核心:返回不能作身份锚点的别名集合。
@@ -1431,7 +1446,7 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
             stats["rejected"] += 1
             continue
         e_a, e_b = by_name[a], by_name[b]
-        if (e_a.get("type") or "") != (e_b.get("type") or ""):
+        if not _types_compatible(e_a.get("type") or "", e_b.get("type") or ""):
             stats["rejected"] += 1
             continue
         if (a, b) in connected:
@@ -1618,7 +1633,7 @@ def _merge_alias_pass(graph, kb_id: str, doc_id: str) -> int:
     def _types_ok(a: str, b: str) -> bool:
         ta = (by_name.get(a) or {}).get("type") or ""
         tb = (by_name.get(b) or {}).get("type") or ""
-        return not (ta and tb and ta != tb)
+        return _types_compatible(ta, tb)
 
     for e in entities:
         if e["normalized"] in hubs:
