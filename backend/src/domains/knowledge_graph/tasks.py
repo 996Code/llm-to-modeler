@@ -1261,13 +1261,20 @@ def _blank_unanchored_evidence(relations: List[Dict], chunk_text: str) -> int:
 
 # ── 收尾 LLM 身份复合(5.9) ────────────────────────────────────
 # LLM 只做语义提案("这两个名字像同一个对象"),代码做确定性接地:
-# 提案对必须在双方溯源块的原文里找到 ≤span 字的共现窗口(两名独立
-# 出现,短名不得只是长名的子串)才允许合并——幻觉需要伪造真实共现
-# 才能落地。模拟实测(西游记 893 实体):9 提案过 4,拒绝均有据。
+# 提案对必须在双方溯源块的原文里找到 ≤span 字的**命名句窗口**——
+# 两名独立出现 + 窗口含身份动词(称/名/唤/号…)。只查共现不够:
+# "孙悟空大战六耳猕猴"也是共现,共现≠同一(自审抓出的假阳性洞)。
+# 模拟实测(西游记 893 实体):9 提案过 4,拒绝均有据。
 _CONSOLIDATE_BATCH = 120     # 每次名录调用的实体数
 _CONSOLIDATE_SPAN = 80       # 证据共现窗口上限(无标点古文按滑窗不按句切)
 _CONSOLIDATE_MAX_PROPOSALS = 20   # 每批提案上限(进 prompt,约束输出)
 _LLM_MERGE_MAX = 50          # 单文档 LLM 复合合并的保险阀
+# 命名句身份动词:窗口内必须命中其一才算"文本说了它俩是同一个"。
+# 不含"是/打/战"这类高频繁词——它们出现在大量非身份句里,会重新
+# 打开"共现即通过"的假阳性洞。
+_BINDING_MARKER_RE = re.compile(
+    r"[称名唤号即乃做]|原是|正是|变作|化作|叫做|唤作|名曰|本名|法名|道号"
+    r"|浑名|绰名|绰号|自号|赐名|改名|受封|敕封|册封|题作|唤做")
 
 
 def _names_independent_in(window: str, a: str, b: str) -> bool:
@@ -1288,9 +1295,11 @@ def _names_independent_in(window: str, a: str, b: str) -> bool:
 def _find_pair_evidence(a: str, b: str, e_a: Dict, e_b: Dict,
                         chunk_texts: Dict[str, str],
                         span: int = _CONSOLIDATE_SPAN) -> str:
-    """在两实体溯源块并集的原文里找双名共现窗口(逐字证据)。
+    """在两实体溯源块并集的原文里找**命名句窗口**(逐字证据)。
 
-    找不到返回空串 = 提案缺乏文本接地,拒绝合并。
+    窗口须同时满足:≤span 字、双名独立出现、含身份动词(_BINDING_MARKER_RE)。
+    找不到返回空串 = 提案缺乏文本接地,拒绝合并。共现但无身份动词
+    (如"孙悟空大战六耳猕猴")不算证据——共现≠同一。
     """
     seqs = set(e_a.get("source_chunks") or []) | set(e_b.get("source_chunks") or [])
     for cid in sorted(seqs):
@@ -1300,7 +1309,8 @@ def _find_pair_evidence(a: str, b: str, e_a: Dict, e_b: Dict,
         for ma in re.finditer(re.escape(a), t):
             for mb in re.finditer(re.escape(b), t):
                 lo, hi = min(ma.start(), mb.start()), max(ma.end(), mb.end())
-                if hi - lo <= span and _names_independent_in(t[lo:hi], a, b):
+                if hi - lo <= span and _names_independent_in(t[lo:hi], a, b) \
+                        and _BINDING_MARKER_RE.search(t[lo:hi]):
                     return t[lo:hi]
     return ""
 
@@ -1328,10 +1338,16 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
     seen_pairs = set()
     for i in range(0, len(entities), _CONSOLIDATE_BATCH):
         batch = entities[i:i + _CONSOLIDATE_BATCH]
+
+        def _clean(s: str) -> str:
+            # 名录消毒:name/description 来自不可信文档,反引号能破坏模板
+            # 围栏、换行能伪造名录行——压平成单行无害文本
+            return re.sub(r"\s+", " ", str(s or "")).replace("```", "~~~")[:40]
+
         roster = "\n".join(
-            f"- {e['name']}({e.get('type') or '?'})"
-            f" {(e.get('description') or '')[:30]}"
-            + (f" 别名:{'/'.join(e['aliases'][:8])}" if e.get("aliases") else "")
+            f"- {_clean(e['name'])}({e.get('type') or '?'}) {_clean(e.get('description'))}"
+            + (f" 别名:{'/'.join(_clean(a) for a in e['aliases'][:8])}"
+               if e.get("aliases") else "")
             for e in batch)
         prompt = loader.render(
             "knowledge_graph", "consolidate",
@@ -1343,8 +1359,9 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                 temperature=temperature, conv_id=conv_id,
                 stage="kg.consolidate", model=model_override or None)
         except Exception as e:
-            handle.log(f"身份复合批次失败(跳过): {e}", level="warn",
-                       error=str(e)[:160])
+            if handle:
+                handle.log(f"身份复合批次失败(跳过): {e}", level="warn",
+                           error=str(e)[:160])
             continue
         for p in (data or {}).get("merges") or []:
             a = normalize_name(str((p or {}).get("a") or ""))
@@ -1354,12 +1371,13 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                 if key not in seen_pairs:
                     seen_pairs.add(key)
                     proposals.append(key)
-        stats["proposals"] += len(seen_pairs)
+    stats["proposals"] = len(seen_pairs)
 
     # 保险阀:提案过多视为名录语义失控,全部放弃(宁可漏并)
     if len(proposals) > _LLM_MERGE_MAX:
-        handle.log(f"身份复合提案 {len(proposals)} 组超过保险阀 {_LLM_MERGE_MAX},"
-                   f"本次全部放弃", level="warn")
+        if handle:
+            handle.log(f"身份复合提案 {len(proposals)} 组超过保险阀 {_LLM_MERGE_MAX},"
+                       f"本次全部放弃", level="warn")
         stats["rejected"] = len(proposals)
         return stats
 
@@ -1370,6 +1388,8 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                 -len(name))
 
     for a, b in proposals:
+        if a not in by_name or b not in by_name:
+            continue  # 本轮早前合并已吸收一方,静默跳过
         e_a, e_b = by_name[a], by_name[b]
         if (e_a.get("type") or "") != (e_b.get("type") or ""):
             stats["rejected"] += 1
@@ -1383,8 +1403,9 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                                    [{"canonical": canon, "fragment": frag}])
         if int((res or {}).get("merged") or 0):
             stats["applied"] += 1
-            handle.log(f"身份复合: {frag} → {canon}(证据:{evidence[:50]})",
-                       level="warn", canonical=canon, fragment=frag)
+            if handle:
+                handle.log(f"身份复合: {frag} → {canon}(证据:{evidence[:50]})",
+                           level="warn", canonical=canon, fragment=frag)
         else:
             stats["rejected"] += 1
 

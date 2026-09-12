@@ -1382,3 +1382,32 @@ class TestLLMConsolidation:
             temperature=0.0, conv_id="c")
         assert stats["rejected"] == 1 and stats["applied"] == 0
         assert {k[1] for k in graph.nodes if k[0] == kb["id"]} == {"齐天大圣", "孙悟空"}
+
+    def test_adversarial_cooccurrence_rejected(self, env):
+        """共现≠同一:战斗句'孙悟空大战六耳猕猴'是真实共现但无身份动词,
+        接地必须拒绝——这是'只查共现'版本的假阳性洞(自审发现)。"""
+        env.llm.consolidate_result = [
+            {"a": "孙悟空", "b": "六耳猕猴", "reason": "长得一样"}]
+        kb, doc = _make_doc(env, "对抗", ["[E:孙悟空]大战[E:六耳猕猴]三百回合不分胜负"])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        q = t["result"]["quality"]
+        assert q["llmMergeApplied"] == 0 and q["llmMergeRejected"] == 1
+        names = {k[1] for k in env.graph.nodes if k[0] == kb["id"]}
+        assert {"孙悟空", "六耳猕猴"} <= names
+
+    def test_proposals_counted_once_across_batches(self, env, monkeypatch):
+        """计数器回归:多批次名录各自返回同一提案时只计一次
+        (旧版 `+= len(seen_pairs)` 在批次循环内会重复累加)。"""
+        monkeypatch.setattr(tasks, "_CONSOLIDATE_BATCH", 2)
+        env.llm.consolidate_result = [
+            {"a": "齐天大圣", "b": "孙悟空", "reason": "同物"}]
+        kb, doc = _make_doc(env, "计数", [
+            "第一章\n\n[E:齐天大圣]今宣你做个官[E:孙悟空]应了。",
+            "第二章\n\n后文再提[E:孙悟空]取经。",
+            "第三章\n\n又提[E:齐天大圣]旧事。",
+        ])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        q = t["result"]["quality"]
+        assert q["llmMergeProposals"] == 1
