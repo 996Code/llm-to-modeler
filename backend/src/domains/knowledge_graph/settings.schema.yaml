@@ -126,6 +126,11 @@ groups:
         label: 收尾LLM身份复合
         default: true
         help: 导入收尾把全图实体名录分批交给 LLM 找"同一实体被拆成多节点"的残余;每个提案必须在双方溯源块原文中找到双名共现窗口才合并(代码接地,宁漏不错)
+      - key: llm_identity_merge_types
+        type: string
+        label: 身份复合类型白名单
+        default: person,creature
+        help: 允许参与同一性复合的实体类型(逗号分隔)。地名/物品的"同一性"提案几乎全是包含关系(山与山中的洞),身份同一性是有名字的角色才有的属性;留空 = 不限类型(不建议)
       - key: extraction_temperature
         type: int
         label: 抽取温度(x100)

@@ -682,10 +682,13 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     consolidation = {"proposals": 0, "applied": 0, "rejected": 0}
     if _cfg(app_state, "llm_identity_merge", True):
         try:
+            merge_types = str(_cfg(app_state, "llm_identity_merge_types",
+                                   "person,creature") or "")
             consolidation = _run_consolidation(
                 handle, loader, llm, graph, store, kb_id, doc_id,
                 temperature=temperature, conv_id=conv_id,
-                model_override=extraction_model or "")
+                model_override=extraction_model or "",
+                eligible_types={t.strip() for t in merge_types.split(",") if t.strip()})
             if consolidation.get("applied") or consolidation.get("rejected"):
                 handle.log(
                     f"收尾身份复合: 提案 {consolidation['proposals']} 组,"
@@ -1275,6 +1278,9 @@ _LLM_MERGE_MAX = 50          # 单文档 LLM 复合合并的保险阀
 _BINDING_MARKER_RE = re.compile(
     r"[称名唤号即乃做]|原是|正是|变作|化作|叫做|唤作|名曰|本名|法名|道号"
     r"|浑名|绰名|绰号|自号|赐名|改名|受封|敕封|册封|题作|唤做")
+# 群体名(数量词+量词/众诸群前缀)是集合不是身份——"金紧禁三个箍儿"
+# 含三个箍儿,与"紧箍儿"是群体与成员,永不参与同一性合并
+_GROUP_NAME_RE = re.compile(r"[两二三四五六七八九十百千0-9]+[个件位只条支]|^众|^诸|^群")
 
 
 def _names_independent_in(window: str, a: str, b: str) -> bool:
@@ -1317,7 +1323,8 @@ def _find_pair_evidence(a: str, b: str, e_a: Dict, e_b: Dict,
 
 def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                        doc_id: str, temperature: float, conv_id: str,
-                       model_override: str = "") -> Dict[str, int]:
+                       model_override: str = "",
+                       eligible_types: Optional[Set[str]] = None) -> Dict[str, int]:
     """收尾 LLM 身份复合:名录分批给 LLM 提案,代码接地验证后合并。
 
     与抽取/对账的分工:抽取只看单块(视角局部,齐天大圣/孙悟空 不一定
@@ -1326,10 +1333,19 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
     保险阀卡在接地合并数(_LLM_MERGE_MAX):提案在接地前无害,不该
     被提案数连坐(线上首跑:98 提案被旧阀全弃,含合法对)。
 
+    eligible_types:允许参与同一性复合的类型(缺省 person/creature)。
+    线上二跑实锤教训:地名/物品的"同一性"提案几乎全是包含关系
+    (金皘山山中间乃是金皘洞/水帘洞→花果山 12 组错并)——洞在山上、
+    观在山中是"位于"关系,该走关系边不是合并;有名字的身份(人物/
+    精怪)才有"称号/法号/化名"式同一性。群体名(金紧禁三个箍儿)是
+    集合不是身份,含数量词的名字一律不参与。
+
     Returns: {"proposals", "applied", "rejected"}(质量报告字段)。
     """
     stats = {"proposals": 0, "applied": 0, "rejected": 0}
     entities = graph.list_entities(kb_id)
+    if eligible_types is not None:
+        entities = [e for e in entities if (e.get("type") or "") in eligible_types]
     if len(entities) < 2:
         return stats
     by_name = {e["normalized"]: e for e in entities}
@@ -1375,6 +1391,8 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
         for p in (data or {}).get("merges") or []:
             a = normalize_name(str((p or {}).get("a") or ""))
             b = normalize_name(str((p or {}).get("b") or ""))
+            if _GROUP_NAME_RE.search(a) or _GROUP_NAME_RE.search(b):
+                continue  # 群体名是集合,永不参与同一性合并
             if a in by_name and b in by_name and a != b:
                 key = (a, b) if a < b else (b, a)
                 if key not in seen_pairs:

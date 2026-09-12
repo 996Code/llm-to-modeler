@@ -1430,3 +1430,36 @@ class TestLLMConsolidation:
         assert q["llmMergeProposals"] == 2
         assert q["llmMergeApplied"] == 1   # 阀卡合并数:执行了一组合法合并
         assert q["llmMergeRejected"] == 1  # 第二组因达阀被拒,不是全弃
+
+    def test_location_out_of_scope_rejected(self, env):
+        """二跑实锤回归:地名包含关系(山与山中的洞)是'位于'不是同一——
+        类型白名单(person/creature)把 location 排除出复合范围。"""
+        env.llm.consolidate_result = []  # 建图阶段不提案
+        kb, doc = _make_doc(env, "地名", ["[E:金皘山]山中间乃是[E:金皘洞]"])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        graph = env.graph
+        for k in graph.nodes:
+            if k[0] == kb["id"]:
+                graph.nodes[k]["type"] = "location"
+        env.llm.consolidate_result = [
+            {"a": "金皘山", "b": "金皘洞", "reason": "同地"}]
+        stats = tasks._run_consolidation(
+            handle=None, loader=self._loader(), llm=env.llm, graph=graph,
+            store=env.store, kb_id=kb["id"], doc_id=doc["id"],
+            temperature=0.0, conv_id="c",
+            eligible_types={"person", "creature"})
+        assert stats["applied"] == 0
+        assert {k[1] for k in graph.nodes if k[0] == kb["id"]} == {"金皘山", "金皘洞"}
+
+    def test_group_name_never_merged(self, env):
+        """群体名(含数量词)是集合不是身份:'金紧禁三个箍儿'≠'紧箍儿'。"""
+        env.llm.consolidate_result = [
+            {"a": "金紧禁三个箍儿", "b": "紧箍儿", "reason": "相关"}]
+        kb, doc = _make_doc(env, "群体", ["[E:金紧禁三个箍儿]与[E:紧箍儿]乃宝贝"])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        q = t["result"]["quality"]
+        assert q["llmMergeApplied"] == 0
+        names = {k[1] for k in env.graph.nodes if k[0] == kb["id"]}
+        assert {"金紧禁三个箍儿", "紧箍儿"} <= names
