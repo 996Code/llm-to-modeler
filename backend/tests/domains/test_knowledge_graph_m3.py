@@ -29,6 +29,8 @@ class MockLLM:
         self.fail_markers: list = []
         self.extract_calls = 0
         self.embed_calls = 0
+        # 收尾身份复合的固定提案(a/b 为名录原名;None = 不提案)
+        self.consolidate_result = None
         # 默认"相关"(general 模板里无 domain/range 约束);测试端点约束
         # 校验时把 rel_type 改成带约束的类型制造违例(如 person→person 任职于)
         self.rel_type = "相关"
@@ -60,6 +62,8 @@ class MockLLM:
             return {"entities": entities, "relations": relations}
         if stage == "kg.induce_schema":
             return self.induce_result
+        if stage == "kg.consolidate":
+            return {"merges": self.consolidate_result or []}
         return {}
 
     def embeddings(self, texts, conv_id=None, stage=None):
@@ -1260,3 +1264,121 @@ class TestAnchorNameOnly:
         text = "第三回 四海千山皆拱伏。他说,你去吧。"
         kept, dropped = tasks._anchor_filter(ents, text)
         assert kept == [] and dropped == 2
+
+
+# ── 收尾对账不动点循环 ─────────────────────────────────────────
+
+class TestMergeFixpoint:
+
+    class _ChainGraph:
+        def __init__(self):
+            self.nodes = {
+                "张三": {"type": "person", "aliases": ["李四"], "created_at": "t1",
+                         "source_chunks": ["c1"]},
+                "李四": {"type": "person", "aliases": ["王五"], "created_at": "t2",
+                         "source_chunks": ["c2"]},
+                "王五": {"type": "person", "aliases": [], "created_at": "t3",
+                         "source_chunks": ["c3"]},
+            }
+
+        def list_entities(self, kb):
+            return [{"normalized": k, "name": k, "type": v["type"],
+                     "aliases": list(v["aliases"]),
+                     "source_chunks": list(v["source_chunks"]),
+                     "description": "", "created_at": v["created_at"]}
+                    for k, v in self.nodes.items()]
+
+        def merge_entities(self, kb, doc, pairs):
+            m = 0
+            for p in pairs:
+                c, f = p["canonical"], p["fragment"]
+                if c not in self.nodes or f not in self.nodes:
+                    continue
+                self.nodes[c]["aliases"] = list(dict.fromkeys(
+                    self.nodes[c]["aliases"] + self.nodes[f]["aliases"] + [f]))
+                self.nodes[c]["source_chunks"] = list(dict.fromkeys(
+                    self.nodes[c]["source_chunks"] + self.nodes[f]["source_chunks"]))
+                del self.nodes[f]
+                m += 1
+            return {"merged": m}
+
+    def test_chain_converges_in_one_call(self):
+        """张三声称李四、李四声称王五:单趟只能并 A-B(建表时 C 边不存在),
+        合并后 A 吸收别名才出现 A-C 边——不动点循环一趟调用内全部收敛。"""
+        g = self._ChainGraph()
+        n = tasks._merge_same_type_alias_pairs(g, "kb", "d1")
+        assert n == 2
+        assert set(g.nodes) == {"张三"}
+        assert {"李四", "王五"} <= set(g.nodes["张三"]["aliases"])
+
+
+# ── 双名独立出现判定 ──────────────────────────────────────────
+
+class TestNamesIndependent:
+
+    def test_substring_entailment_rejected(self):
+        assert tasks._names_independent_in("前路虎先锋拿了个和尚", "先锋", "虎先锋") is False
+
+    def test_independent_occurrence_accepted(self):
+        assert tasks._names_independent_in("孙悟空中了计,那先锋领兵", "先锋", "孙悟空") is True
+
+    def test_same_name_rejected(self):
+        assert tasks._names_independent_in("齐天大圣齐天大圣", "齐天大圣", "齐天大圣") is False
+
+
+# ── 收尾 LLM 身份复合(5.9 E2E) ────────────────────────────────
+
+class TestLLMConsolidation:
+
+    def _loader(self):
+        from pathlib import Path
+        from sdk.prompt_loader import PromptLoader
+        return PromptLoader(packs_root=Path(tasks.__file__).resolve().parent.parent)
+
+    def test_proposal_with_evidence_merges(self, env):
+        """提案对在同块原文双名共现 → 接地通过并合并;质量报告入账。"""
+        env.llm.consolidate_result = [
+            {"a": "齐天大圣", "b": "孙悟空", "reason": "同物"}]
+        kb, doc = _make_doc(env, "复合", ["[E:齐天大圣]今宣你做个官[E:孙悟空]应了"])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        q = t["result"]["quality"]
+        assert q["llmMergeProposals"] == 1 and q["llmMergeApplied"] == 1
+        # 图中只剩一个节点,另一名进别名
+        remaining = [k for k in env.graph.nodes if k[0] == kb["id"]]
+        assert len(remaining) == 1
+        canon = env.graph.nodes[remaining[0]]
+        assert "齐天大圣" in (remaining[0][1], *canon["aliases"])
+        assert "孙悟空" in (remaining[0][1], *canon["aliases"])
+
+    def test_proposal_without_evidence_rejected(self, env):
+        """两名字同块但相距超过证据窗口(80 字) → 接地失败拒绝,节点保留。"""
+        env.llm.consolidate_result = [
+            {"a": "甲妖", "b": "乙妖", "reason": "直觉"}]
+        filler = "此地山高林密涧深,往来皆是樵夫猎户,四时香火不绝,土人说常有神仙显圣,又传曾有得道真人在此修行。" * 2
+        kb, doc = _make_doc(env, "复合拒", [f"[E:甲妖]盘踞山北。{filler}而[E:乙妖]占着山南。"])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        q = t["result"]["quality"]
+        assert q["llmMergeProposals"] == 1 and q["llmMergeApplied"] == 0
+        assert q["llmMergeRejected"] == 1
+        names = {k[1] for k in env.graph.nodes if k[0] == kb["id"]}
+        assert {"甲妖", "乙妖"} <= names
+
+    def test_type_mismatch_rejected(self, env):
+        """类型不同的提案直接拒绝(代码强制,LLM 建议仅参考)。"""
+        kb, doc = _make_doc(env, "复合类型", ["[E:齐天大圣]与[E:孙悟空]对答"])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        graph = env.graph
+        # 人为把一个节点改成别的类型,模拟 LLM 提案撞上类型不一致
+        for k in graph.nodes:
+            if k[0] == kb["id"] and k[1] == "孙悟空":
+                graph.nodes[k]["type"] = "item"
+        env.llm.consolidate_result = [
+            {"a": "齐天大圣", "b": "孙悟空", "reason": "x"}]
+        stats = tasks._run_consolidation(
+            handle=None, loader=self._loader(), llm=env.llm, graph=graph,
+            store=env.store, kb_id=kb["id"], doc_id=doc["id"],
+            temperature=0.0, conv_id="c")
+        assert stats["rejected"] == 1 and stats["applied"] == 0
+        assert {k[1] for k in graph.nodes if k[0] == kb["id"]} == {"齐天大圣", "孙悟空"}

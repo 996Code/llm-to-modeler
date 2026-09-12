@@ -675,6 +675,27 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         handle.log(f"收尾描述连边失败(不影响导入结论): {e}",
                    level="warn", error=str(e)[:200])
 
+    # 5.9) 收尾 LLM 身份复合(可配):全局视野收最后一层碎片——块内没
+    # 说出互指、对账收不了的残余(如 齐天大圣/孙悟空 各自成节点)。LLM
+    # 只提语义候选,代码对每个提案在双方溯源块里找原文共现窗口,接地
+    # 失败即拒绝。llm_identity_merge=false 可整段关闭。
+    consolidation = {"proposals": 0, "applied": 0, "rejected": 0}
+    if _cfg(app_state, "llm_identity_merge", True):
+        try:
+            consolidation = _run_consolidation(
+                handle, loader, llm, graph, store, kb_id, doc_id,
+                temperature=temperature, conv_id=conv_id,
+                model_override=extraction_model or "")
+            if consolidation.get("applied") or consolidation.get("rejected"):
+                handle.log(
+                    f"收尾身份复合: 提案 {consolidation['proposals']} 组,"
+                    f"接地通过合并 {consolidation['applied']} 组,"
+                    f"拒绝 {consolidation['rejected']} 组",
+                    level="warn", **consolidation)
+        except Exception as e:
+            handle.log(f"收尾身份复合失败(不影响导入结论): {e}",
+                       level="warn", error=str(e)[:200])
+
     # 6) 收尾统计
     final_status = "partial" if failed_chunks else "succeeded"
     doc_counts = graph.document_counts(kb_id, doc_id)
@@ -697,6 +718,9 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         "fragmentsBefore": fragments_before,
         "fragmentsAfter": fragments_after,
         "mentionEdges": linked,
+        "llmMergeProposals": consolidation.get("proposals", 0),
+        "llmMergeApplied": consolidation.get("applied", 0),
+        "llmMergeRejected": consolidation.get("rejected", 0),
     }
     handle.log(
         f"导入完成({final_status}): {entity_total} 实体 / {relation_total} 关系"
@@ -1235,8 +1259,166 @@ def _blank_unanchored_evidence(relations: List[Dict], chunk_text: str) -> int:
     return n
 
 
-def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str) -> int:
-    """收尾消歧对账:按"文本揭示的别名指认"合并同类型重复实体(幂等)。
+# ── 收尾 LLM 身份复合(5.9) ────────────────────────────────────
+# LLM 只做语义提案("这两个名字像同一个对象"),代码做确定性接地:
+# 提案对必须在双方溯源块的原文里找到 ≤span 字的共现窗口(两名独立
+# 出现,短名不得只是长名的子串)才允许合并——幻觉需要伪造真实共现
+# 才能落地。模拟实测(西游记 893 实体):9 提案过 4,拒绝均有据。
+_CONSOLIDATE_BATCH = 120     # 每次名录调用的实体数
+_CONSOLIDATE_SPAN = 80       # 证据共现窗口上限(无标点古文按滑窗不按句切)
+_CONSOLIDATE_MAX_PROPOSALS = 20   # 每批提案上限(进 prompt,约束输出)
+_LLM_MERGE_MAX = 50          # 单文档 LLM 复合合并的保险阀
+
+
+def _names_independent_in(window: str, a: str, b: str) -> bool:
+    """窗口内两名字是否"独立"出现:短名的某次出现不落在长名的出现内。
+
+    防"虎先锋+先锋"式假共现——'先锋'只是'虎先锋'的子串时不算双名。
+    """
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    if short == long_:
+        return False
+    long_spans = [(m.start(), m.end()) for m in re.finditer(re.escape(long_), window)]
+    for m in re.finditer(re.escape(short), window):
+        if not any(ls <= m.start() and m.end() <= le for ls, le in long_spans):
+            return True
+    return False
+
+
+def _find_pair_evidence(a: str, b: str, e_a: Dict, e_b: Dict,
+                        chunk_texts: Dict[str, str],
+                        span: int = _CONSOLIDATE_SPAN) -> str:
+    """在两实体溯源块并集的原文里找双名共现窗口(逐字证据)。
+
+    找不到返回空串 = 提案缺乏文本接地,拒绝合并。
+    """
+    seqs = set(e_a.get("source_chunks") or []) | set(e_b.get("source_chunks") or [])
+    for cid in sorted(seqs):
+        t = chunk_texts.get(cid) or ""
+        if a not in t or b not in t:
+            continue
+        for ma in re.finditer(re.escape(a), t):
+            for mb in re.finditer(re.escape(b), t):
+                lo, hi = min(ma.start(), mb.start()), max(ma.end(), mb.end())
+                if hi - lo <= span and _names_independent_in(t[lo:hi], a, b):
+                    return t[lo:hi]
+    return ""
+
+
+def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
+                       doc_id: str, temperature: float, conv_id: str,
+                       model_override: str = "") -> Dict[str, int]:
+    """收尾 LLM 身份复合:名录分批给 LLM 提案,代码接地验证后合并。
+
+    与抽取/对账的分工:抽取只看单块(视角局部,齐天大圣/孙悟空 不一定
+    在同块互指),对账只认已有的别名互指(没断言的收不了)——这里用
+    全局视野补最后一层:LLM 看名录提语义候选,代码回查原文共现。
+
+    Returns: {"proposals", "applied", "rejected"}(质量报告字段)。
+    """
+    stats = {"proposals": 0, "applied": 0, "rejected": 0}
+    entities = graph.list_entities(kb_id)
+    if len(entities) < 2:
+        return stats
+    by_name = {e["normalized"]: e for e in entities}
+    chunk_texts = {c["id"]: (c.get("text") or "") for c in store.list_chunks(doc_id)}
+
+    entities.sort(key=lambda e: (e.get("type") or "", e["normalized"]))
+    proposals: List[Dict] = []
+    seen_pairs = set()
+    for i in range(0, len(entities), _CONSOLIDATE_BATCH):
+        batch = entities[i:i + _CONSOLIDATE_BATCH]
+        roster = "\n".join(
+            f"- {e['name']}({e.get('type') or '?'})"
+            f" {(e.get('description') or '')[:30]}"
+            + (f" 别名:{'/'.join(e['aliases'][:8])}" if e.get("aliases") else "")
+            for e in batch)
+        prompt = loader.render(
+            "knowledge_graph", "consolidate",
+            roster=roster, entity_count=len(batch),
+            max_proposals=_CONSOLIDATE_MAX_PROPOSALS)
+        try:
+            data = llm.chat_json(
+                [{"role": "user", "content": prompt}],
+                temperature=temperature, conv_id=conv_id,
+                stage="kg.consolidate", model=model_override or None)
+        except Exception as e:
+            handle.log(f"身份复合批次失败(跳过): {e}", level="warn",
+                       error=str(e)[:160])
+            continue
+        for p in (data or {}).get("merges") or []:
+            a = normalize_name(str((p or {}).get("a") or ""))
+            b = normalize_name(str((p or {}).get("b") or ""))
+            if a in by_name and b in by_name and a != b:
+                key = (a, b) if a < b else (b, a)
+                if key not in seen_pairs:
+                    seen_pairs.add(key)
+                    proposals.append(key)
+        stats["proposals"] += len(seen_pairs)
+
+    # 保险阀:提案过多视为名录语义失控,全部放弃(宁可漏并)
+    if len(proposals) > _LLM_MERGE_MAX:
+        handle.log(f"身份复合提案 {len(proposals)} 组超过保险阀 {_LLM_MERGE_MAX},"
+                   f"本次全部放弃", level="warn")
+        stats["rejected"] = len(proposals)
+        return stats
+
+    def _canon_key(name: str):
+        e = by_name[name]
+        return (e.get("created_at") or "9999",
+                -len(e.get("source_chunks") or []),
+                -len(name))
+
+    for a, b in proposals:
+        e_a, e_b = by_name[a], by_name[b]
+        if (e_a.get("type") or "") != (e_b.get("type") or ""):
+            stats["rejected"] += 1
+            continue
+        evidence = _find_pair_evidence(a, b, e_a, e_b, chunk_texts)
+        if not evidence:
+            stats["rejected"] += 1
+            continue
+        canon, frag = sorted((a, b), key=_canon_key)
+        res = graph.merge_entities(kb_id, doc_id,
+                                   [{"canonical": canon, "fragment": frag}])
+        if int((res or {}).get("merged") or 0):
+            stats["applied"] += 1
+            handle.log(f"身份复合: {frag} → {canon}(证据:{evidence[:50]})",
+                       level="warn", canonical=canon, fragment=frag)
+        else:
+            stats["rejected"] += 1
+
+    # 复合合并把碎片别名并进 canonical,可能解锁新的别名互指——再收敛一遍
+    try:
+        _merge_same_type_alias_pairs(graph, kb_id, doc_id)
+    except Exception:
+        pass
+    return stats
+
+
+def _merge_same_type_alias_pairs(graph, kb_id: str, doc_id: str,
+                                 max_passes: int = 5) -> int:
+    """收尾消歧对账(不动点循环):反复跑合并单趟,直到一趟内无新合并。
+
+    为什么必须循环:单趟的指认表在函数开头一次性建立,而合并会把碎片
+    别名并进 canonical——A 并 B 后,A 新获得的别名可能恰好是另一个
+    节点 C 的名字,这个新指认边在单趟建表时不存在。线上西游记实测:
+    单趟结束后离线复跑还能再并 6 组(二魔→银角大王 等)。每趟严格
+    减少节点数,必然终止;max_passes 是防御性上限。
+
+    Returns: 各趟成功合并的总对数。
+    """
+    total = 0
+    for _ in range(max(1, max_passes)):
+        n = _merge_alias_pass(graph, kb_id, doc_id)
+        total += n
+        if not n:
+            break
+    return total
+
+
+def _merge_alias_pass(graph, kb_id: str, doc_id: str) -> int:
+    """收尾消歧对账单趟:按"文本揭示的别名指认"合并同类型重复实体。
 
     知识来源 = 正文:小说后段明确写的"张小凡后来叫鬼厉""万人往即鬼王"
     被 LLM 抽进 aliases(互指),这里按这条文本级指认把碎片并回本体。
