@@ -1322,7 +1322,9 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
 
     与抽取/对账的分工:抽取只看单块(视角局部,齐天大圣/孙悟空 不一定
     在同块互指),对账只认已有的别名互指(没断言的收不了)——这里用
-    全局视野补最后一层:LLM 看名录提语义候选,代码回查原文共现。
+    全局视野补最后一层:LLM 看名录提语义候选,代码回查原文命名句。
+    保险阀卡在接地合并数(_LLM_MERGE_MAX):提案在接地前无害,不该
+    被提案数连坐(线上首跑:98 提案被旧阀全弃,含合法对)。
 
     Returns: {"proposals", "applied", "rejected"}(质量报告字段)。
     """
@@ -1371,15 +1373,11 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                 if key not in seen_pairs:
                     seen_pairs.add(key)
                     proposals.append(key)
-    stats["proposals"] = len(seen_pairs)
-
-    # 保险阀:提案过多视为名录语义失控,全部放弃(宁可漏并)
-    if len(proposals) > _LLM_MERGE_MAX:
         if handle:
-            handle.log(f"身份复合提案 {len(proposals)} 组超过保险阀 {_LLM_MERGE_MAX},"
-                       f"本次全部放弃", level="warn")
-        stats["rejected"] = len(proposals)
-        return stats
+            handle.log(f"身份复合: 批次 {i // _CONSOLIDATE_BATCH + 1} 提案累计 "
+                       f"{len(seen_pairs)} 组", batch=i // _CONSOLIDATE_BATCH + 1,
+                       proposals=len(seen_pairs))
+    stats["proposals"] = len(seen_pairs)
 
     def _canon_key(name: str):
         e = by_name[name]
@@ -1387,9 +1385,16 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                 -len(e.get("source_chunks") or []),
                 -len(name))
 
+    # 保险阀卡在"接地通过的合并数"而非提案数:提案在接地验证前是无害
+    # 的旁路信息,接地(命名句窗口)才是真正的防线——把阀放在提案数上会
+    # 连坐合法提案(线上首跑实测:98 提案被阀全弃,其中含合法对)。达阀
+    # 即停,后续提案只计入 rejected。
     for a, b in proposals:
         if a not in by_name or b not in by_name:
             continue  # 本轮早前合并已吸收一方,静默跳过
+        if stats["applied"] >= _LLM_MERGE_MAX:
+            stats["rejected"] += 1
+            continue
         e_a, e_b = by_name[a], by_name[b]
         if (e_a.get("type") or "") != (e_b.get("type") or ""):
             stats["rejected"] += 1
@@ -1408,6 +1413,9 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                            level="warn", canonical=canon, fragment=frag)
         else:
             stats["rejected"] += 1
+    if handle and stats["applied"] >= _LLM_MERGE_MAX:
+        handle.log(f"身份复合: 接地合并数达保险阀 {_LLM_MERGE_MAX},"
+                   f"剩余提案不再执行", level="warn")
 
     # 复合合并把碎片别名并进 canonical,可能解锁新的别名互指——再收敛一遍
     try:

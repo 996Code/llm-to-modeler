@@ -1411,3 +1411,22 @@ class TestLLMConsolidation:
         assert t["status"] == "succeeded", t["error"]
         q = t["result"]["quality"]
         assert q["llmMergeProposals"] == 1
+
+    def test_valve_caps_applied_not_proposals(self, env, monkeypatch):
+        """保险阀回归(线上首跑事故:98 提案被旧阀整批连坐):阀必须卡在
+        接地合并数——两个都合法的提案,阀=1 时执行第一个、第二个计拒,
+        而不是全部放弃。"""
+        monkeypatch.setattr(tasks, "_LLM_MERGE_MAX", 1)
+        env.llm.consolidate_result = [
+            {"a": "齐天大圣", "b": "孙悟空", "reason": "命名句"},
+            {"a": "孙行者", "b": "悟空", "reason": "命名句"}]
+        kb, doc = _make_doc(env, "阀位", [
+            "[E:齐天大圣]今宣你做个官[E:孙悟空]应了",
+            "[E:孙行者]又唤作[E:悟空]便是",
+        ])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        q = t["result"]["quality"]
+        assert q["llmMergeProposals"] == 2
+        assert q["llmMergeApplied"] == 1   # 阀卡合并数:执行了一组合法合并
+        assert q["llmMergeRejected"] == 1  # 第二组因达阀被拒,不是全弃
