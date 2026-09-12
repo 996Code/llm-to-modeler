@@ -7,15 +7,12 @@ state["conversation_id"] 为 None——意图路由/工具执行打点全部静�
 完整路径),只有真实链路暴露。本测试固化该路径:发一条真实 chat,
 断言 intent_route 打点确实落库且带会话归属。
 """
+import json
 import os
-import sqlite3
-import tempfile
 
 
-def test_chat_writes_trace_points_end_to_end(monkeypatch):
-    tmp = tempfile.mkdtemp()
-    monkeypatch.setenv("DATABASE_PATH", os.path.join(tmp, "t.db"))
-    monkeypatch.setenv("PACK_STATE_PATH", os.path.join(tmp, "p.json"))
+def test_chat_writes_trace_points_end_to_end(monkeypatch, tmp_path):
+    monkeypatch.setenv("PACK_STATE_PATH", str(tmp_path / "p.json"))
     monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:9/v1")  # 不可达:走 fallback
     monkeypatch.setenv("LLM_API_KEY", "x")
 
@@ -33,12 +30,14 @@ def test_chat_writes_trace_points_end_to_end(monkeypatch):
                       headers={"X-User-Id": "u"})
         assert resp.status_code == 200
 
-        conn = sqlite3.connect(os.path.join(tmp, "t.db"))
-        rows = conn.execute(
-            "SELECT payload FROM events WHERE kind='trace' AND conv_id=?",
-            (conv["id"],),
-        ).fetchall()
-        stages = [__import__("json").loads(r[0]).get("stage") for r in rows]
+        # conftest 已把 DATABASE_URL 指向 PG 测试库,直接查 events
+        import psycopg
+        with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
+            rows = conn.execute(
+                "SELECT payload FROM events WHERE kind='trace' AND conv_id=%s",
+                (conv["id"],),
+            ).fetchall()
+        stages = [json.loads(r[0]).get("stage") for r in rows]
         # LLM 不可达 → fallback chat;但两级路由决策与工具执行(失败)仍应打点
         assert "intent_route" in stages, f"意图路由打点缺失(仅 {stages})"
         assert "tool_execute" in stages, f"工具执行打点缺失(仅 {stages})"

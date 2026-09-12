@@ -33,8 +33,17 @@ services:
       - NEO4J_USER=${NEO4J_USER:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?请在 .env 配置 NEO4J_PASSWORD}
       - MILVUS_URI=http://milvus:19530
+      # 存储后端:平台 PG-only,DATABASE_URL 必填(默认指向下方 postgres 服务)。
+      # 显式设 DATABASE_URL 改指外部 PG 时注意:本地 postgres 服务仍会启动且
+      # POSTGRES_PASSWORD 仍必填(可给随机值;多余容器可手动停,app 不依赖其
+      # 健康)。存量 SQLite 迁移:停 app 容器后跑
+      # backend/scripts/migrate_sqlite_to_pg.py(幂等,见其头部 runbook)。
+      - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-llm}:${POSTGRES_PASSWORD:?请在 .env 配置 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-llm_modeler}}
+      # PG 连接池(services/db.py 读取;默认 2/8)
+      - PG_POOL_MIN=${PG_POOL_MIN:-2}
+      - PG_POOL_MAX=${PG_POOL_MAX:-8}
     volumes:
-      # 数据持久化（SQLite + 上传文件 + 日志）
+      # 数据持久化（KG 上传文件等;会话/日志/checkpoint 落 PG 不走本卷）
       - ./data/app:/app/data
       # 日志（loguru 轮转文件；stdout 由 docker logs 消费）
       - ./data/logs:/app/logs
@@ -45,6 +54,8 @@ services:
         condition: service_healthy
       milvus:
         condition: service_started
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ai-modeler/api/health | grep -q '\\\"status\\\": *\\\"healthy\\\"'"]
       interval: 30s
@@ -95,3 +106,25 @@ services:
       timeout: 20s
       retries: 5
       start_period: 90s
+
+  # ── PostgreSQL（存储后端：承载会话/调用日志/任务/插件设置/KG 元数据/
+  #    LangGraph checkpoint;平台 PG-only,DATABASE_URL 必填） ──
+  postgres:
+    image: postgres:16-alpine
+    container_name: llm-modeler-postgres
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - POSTGRES_USER=${POSTGRES_USER:-llm}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?请在 .env 配置 POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-llm_modeler}
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-llm} -d ${POSTGRES_DB:-llm_modeler}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s

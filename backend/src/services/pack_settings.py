@@ -36,7 +36,6 @@ PropertySource 优先级排序(命令行 > 配置文件 > 默认值)。
 import json
 import logging
 import os
-import sqlite3
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -222,32 +221,31 @@ class PackSettingsStore:
     多线程读 / 单线程写,无跨方法事务。
     """
 
-    def __init__(self, db_path: str):
-        from services.conversation_store import DEFAULT_DB_PATH
-        self.db_path = Path(db_path or DEFAULT_DB_PATH)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()  # 写操作串行化(读走新连接,无需锁)
+    def __init__(self, db_path: str = "", database_url: Optional[str] = None):
+        # db_path 已废弃(PG-only);保留形参兼容旧调用签名,实参忽略
+        from services.db import get_pg_engine
+        if db_path:
+            logger.warning("db_path 已废弃(PG-only),实参被忽略——存储由 DATABASE_URL 决定")
+        self.db = get_pg_engine(database_url)
+        self._lock = threading.Lock()  # 写操作串行化(读走池借还,无需锁)
         self._init_db()
-        logger.info(f"PackSettingsStore initialized: {self.db_path}")
+        logger.info("PackSettingsStore initialized: postgres")
 
-    def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+    def _get_conn(self):
+        return self.db.connect()
 
     def _init_db(self):
         """幂等建表(与 ConversationStore 同库不同表,互不影响)。
 
-        注意列名用 values_json:"values" 是 SQLite 关键字,不能直接作列名。
+        注意列名用 values_json:"values" 是 SQL 关键字,不能直接作列名。
         """
         with self._get_conn() as conn:
-            conn.executescript("""
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS pack_settings (
                     pack_name  TEXT PRIMARY KEY,  -- pack 名(目录名)
                     values_json TEXT NOT NULL,    -- JSON: {字段key: 保存值}
                     updated_at TEXT NOT NULL      -- ISO 时间戳(UTC)
-                );
+                )
             """)
 
     def get_values(self, pack_name: str) -> Dict[str, Any]:

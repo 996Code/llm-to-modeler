@@ -1,7 +1,7 @@
 """
 会话（Conversation）CRUD API 模块。
 
-负责会话的增删改查，会话消息的持久化由 ConversationStore（SQLite）负责。
+负责会话的增删改查，会话消息的持久化由 ConversationStore（PG）负责。
 
 接口清单：
   POST   /api/conversations              → 新建会话

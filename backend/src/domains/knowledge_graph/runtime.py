@@ -18,7 +18,7 @@ from domains.knowledge_graph.store import KGStore
 
 PACK_NAME = "knowledge_graph"
 
-# 原始上传文件的落盘目录(相对工作目录,与 data/conversations.db 同级)
+# 原始上传文件的落盘目录(相对工作目录 data/ 下)
 FILES_DIR_DEFAULT = "data/kg/files"
 
 _kg_store: Any = None
@@ -37,14 +37,14 @@ def settings_reader(app_state):
 
 
 def get_kg_store(app_state) -> KGStore:
-    """元数据存储单例(与 conversations.db 同库)。"""
+    """元数据存储单例(与平台同库同后端:DATABASE_URL,PG-only)。"""
     global _kg_store, _kg_store_fp
-    import os
-    db_path = os.getenv("DATABASE_PATH", "data/conversations.db")
+    from services.db import resolve_database_url
+    fingerprint = resolve_database_url() or ""
     with _kg_store_lock:
-        if _kg_store is None or _kg_store_fp != db_path:
-            _kg_store = KGStore(db_path)
-            _kg_store_fp = db_path
+        if _kg_store is None or _kg_store_fp != fingerprint:
+            _kg_store = KGStore()
+            _kg_store_fp = fingerprint
         return _kg_store
 
 

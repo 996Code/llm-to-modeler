@@ -14,7 +14,7 @@ PACKS_ENABLED(env)只能"改配置重启生效"。本模块把启停状态变成
 【持久化】
   - 文件格式:{"version": 1, "enabled": ["pack_a", ...]}
   - 原子写:先写同目录临时文件再 os.replace(崩溃不会留下半截 JSON)
-  - 默认路径 data/pack_state.json(与 conversations.db 同目录,随 deploy/data
+  - 默认路径 data/pack_state.json(data/ 目录,随 deploy/data
     bind mount 一起持久化);可用 PACK_STATE_PATH 覆盖
   - 与磁盘上已不存在的 pack(目录被删/改名)自动解耦:交集清洗 + 告警
 

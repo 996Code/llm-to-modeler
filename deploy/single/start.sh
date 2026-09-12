@@ -4,7 +4,7 @@
 # （比 supervisord 轻：不引入额外进程管理器，崩溃恢复语义相同）。
 set -e
 
-# 后台拉起后端（单进程：SqliteSaver/checkpoint 单写者；并发由线程池承担）
+# 后台拉起后端（单进程;并发由线程池承担,存储为 PG(DATABASE_URL 必填)）
 # 以 main:app 启动（PYTHONPATH 含 /app/src）：若以 src.main:app 启动，
 # src.X 与 X 双模块加载会让 thread-local（services 表/透传头）互不可见
 python -m uvicorn main:app --host 127.0.0.1 --port 8000 &

@@ -57,17 +57,13 @@
   - ``route_after_result``: handle_result 之后,要重跑(如用户追问后参数变了)回 execute_tool,否则 END
 """
 import logging
-import os
-from typing import Any, Optional
+from typing import Any
 
 # StateGraph:LangGraph 的核心图容器,类比 Spring 的 BeanDefinition / Flow 定义
 from langgraph.graph import StateGraph, START, END
 
 from engine.graph_state import GraphState
 from engine import nodes
-# DATABASE_PATH 未配置时的默认库路径——单一事实来源在 conversation_store,
-# 此处引用同一常量,避免 "data/conversations.db" 字面量多处散落后漏改
-from services.conversation_store import DEFAULT_DB_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +160,7 @@ def build_graph(
     )
 
     # 3. 编译(带 checkpoint)
-    # ── SqliteSaver 的 WHY（P6 生产化）──
+    # ── checkpointer 的 WHY（P6 生产化）──
     # checkpointer 的作用:每经过一个节点,自动把完整 state 快照存起来。
     # 好处:
     #   (a) 追问恢复:interrupt 暂停后,用户回答时带同一个 thread_id,框架自动恢复现场,
@@ -172,46 +168,44 @@ def build_graph(
     #       或会话对象序列化到 HttpSession/Redis。
     #   (b) 断点续跑:崩溃后能从最后一步重放,不用从头调 LLM(省钱省时)。
     #   (c) 调试/审计:可按 thread_id dump 任意一步的 state。
-    # 为什么用 SqliteSaver(而非 InMemorySaver):
+    # 为什么持久化 checkpointer(而非 InMemorySaver):
     #   - 生产场景进程会重启/多 worker,InMemorySaver 重启即丢失追问现场,
     #     用户在嵌入侧栏改到一半刷新就丢——已从「开发期够用」升级为「生产必需」。
-    #   - SqliteSaver 把 checkpoint 落盘到与会话同库的 SQLite 文件,零外部依赖。
-    #   - 依赖包 langgraph-checkpoint-sqlite 已加入 requirements.txt。
+    #   - 平台 PG-only:checkpoint 与四个 Store 同库(PostgresSaver)。
     #   - 关键前提:checkpoint 的可恢复性依赖 thread_id 唯一标识会话,
     #     调用方必须保证同一会话始终传同一 thread_id(见 conversation_id 字段)。
-    #
-    # 连接生命周期：from_conn_string 的 with 语义会在退出时 close 连接，
-    # 而编译后的图在后续每次请求 stream 时仍要用 checkpointer 读写 checkpoint——
-    # 所以这里显式创建进程级长连接（check_same_thread=False：LangGraph 可能跨线程调度节点）。
-    # 连接引用挂在 graph._conn 上，由调用方（main.lifespan 关闭段）经
-    # getattr(app.state.graph, "_conn", None) 拿到并 close——与 ConversationStore 同一收口思路。
-    import sqlite3
-    from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-
-    db_path = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
-    conn = sqlite3.connect(db_path, check_same_thread=False)
     # msgpack 反序列化类型白名单：tool_state 里的领域模型对象会被
     # checkpoint 序列化，resume 时重建。LangGraph 正在收紧"从序列化数据
     # 实例化任意类"（pickle 式攻击面），未注册类型未来版本直接拒绝。
-    # 白名单由装配层（main.py）从 pack manifest 声明聚合注入——引擎
-    # 不硬编码领域类名（零领域知识铁律）。
-    checkpointer = SqliteSaver(
-        conn=conn,
-        serde=JsonPlusSerializer(
-            allowed_msgpack_modules=list(msgpack_whitelist or []),
-        ),
+    # checkpointer:PostgresSaver(平台 PG-only,DATABASE_URL 必填,经
+    # require_database_url 校验——缺配置 fail-closed 不编图)。
+    # autocommit 必须:setup() 的 CREATE INDEX CONCURRENTLY 不能在事务块内跑;
+    # prepare_threshold=0 关闭自动 prepared statement(对齐官方 from_conn_string
+    # 工厂——共享长连接将来挂 PgBouncer transaction 模式时 named statement 会撞
+    # "prepared statement already exists");Saver 内部的 commit() 在 autocommit
+    # 连接上是安全空操作。
+    # 连接生命周期:进程级长连接挂在 graph._conn 上,由 main.lifespan 关闭段
+    # 统一释放(与 Store 池同一收口思路)。
+    serde = JsonPlusSerializer(
+        allowed_msgpack_modules=list(msgpack_whitelist or []),
     )
+
+    import psycopg
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from services.db import require_database_url
+    conn = psycopg.connect(require_database_url(), autocommit=True, prepare_threshold=0)
+    checkpointer = PostgresSaver(conn=conn, serde=serde)
+    checkpointer.setup()  # 幂等建 checkpoint 三表(首启)
 
     # compile 把 StateGraph 转成不可变、可调用的 CompiledStateGraph
     graph = workflow.compile(checkpointer=checkpointer)
-    # 连接挂到 graph 对象上：checkpointer 持有的这条长连接必须有人负责关，
-    # 否则进程退出前一直占用 SQLite 文件句柄（WAL 模式下还留 -wal/-shm 伴生文件）
+    # 连接挂到 graph 对象上：checkpointer 持有的这条长连接必须有人负责关
     graph._conn = conn
 
     logger.info(
         f"LangGraph StateGraph compiled: "
-        f"{len(registry.all())} tools, checkpointer=SqliteSaver"
+        f"{len(registry.all())} tools, checkpointer=PostgresSaver"
     )
 
     return graph

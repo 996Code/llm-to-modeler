@@ -104,7 +104,7 @@ async def admin_list_conversations(request: Request):
       q:            按标题模糊过滤
     """
     store = request.app.state.conversation_store
-    # max(1, ...):SQLite 对 LIMIT 负值按"不限制"处理,必须夹住下限防整表倾倒
+    # max(1, ...):LIMIT 负值等价"不限制",必须夹住下限防整表倾倒
     limit = max(1, min(_int_param(request, "limit", 20), 200))
     offset = max(0, _int_param(request, "offset", 0))
     user_id = (request.query_params.get("userId") or "").strip() or None

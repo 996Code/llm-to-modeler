@@ -283,7 +283,7 @@ class TaskManager:
     def _run(self, task_id: str, effective_key: str) -> None:
         """任务执行包装:状态迁移 + 异常兜底 + 收尾派发(SSE 终态事件在内)。
 
-        整个方法体都在 try/finally 保护下——store 异常(SQLite busy/磁盘满)
+        整个方法体都在 try/finally 保护下——store 异常(连接池耗尽/网络抖动)
         也必须走 _finish 释放串行键与并发额度,否则该键后续任务永久 pending、
         泄漏满 WORKERS 次后整个框架停摆。
         """

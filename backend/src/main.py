@@ -54,10 +54,8 @@ from api.meta import router as meta_router
 from api.tasks import router as tasks_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
 from llm.client import LLMClient
-# 会话存储：SQLite，以追加写事件流方式记录对话
-# DEFAULT_DB_PATH：DATABASE_PATH 未配置时的默认库路径(单一事实来源,
-# engine/graph.py 等处引用同一常量,避免 "data/conversations.db" 字面量散落多处)
-from services.conversation_store import DEFAULT_DB_PATH, ConversationStore
+# 会话存储：PostgreSQL(append-only 事件流;DATABASE_URL 必填,见 services.db)
+from services.conversation_store import ConversationStore
 # 上游客户端：调用上游服务做校验/增删改/拉取资产（地址按请求由宿主 services 表解析）
 from services.upstream_client import UpstreamClient, CLIENT_VERSION
 
@@ -91,10 +89,13 @@ async def lifespan(app: FastAPI):
     """
     logger.info("Starting LLM Form Modeler (LangGraph architecture)...")
 
-    # Conversation store (SQLite, append-only 事件流)
-    # 默认路径收敛在 conversation_store.DEFAULT_DB_PATH(见顶部 import 注释)
-    db_path = os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)
-    conv_store = ConversationStore(db_path)
+    # 存储后端:平台 PG-only,DATABASE_URL 必填(fail-closed,缺配置拒绝启动)。
+    # 四个 Store + LangGraph checkpointer 同一 PG 库;存量 SQLite 迁移见
+    # scripts/migrate_sqlite_to_pg.py。
+    from services.db import require_database_url
+    database_url = require_database_url()
+    logger.info("Storage backend: PostgreSQL")
+    conv_store = ConversationStore(database_url=database_url)
     app.state.conversation_store = conv_store
 
     # 上游客户端：注入会话存储，用于持久化上游调用日志（调试/监控用）。
@@ -105,13 +106,13 @@ async def lifespan(app: FastAPI):
 
     # 插件设置存储(声明式配置页的保存值;与依赖检测共用解析链)
     from services.pack_settings import PackSettingsStore
-    settings_store = PackSettingsStore(db_path)
+    settings_store = PackSettingsStore(database_url=database_url)
     app.state.settings_store = settings_store
 
     # 通用后台任务框架(任务表/日志表 + 线程池调度;handler 由 pack 注册)
     from services.task_store import TaskStore
     from services.task_manager import TaskManager
-    task_store = TaskStore(db_path)
+    task_store = TaskStore(database_url=database_url)
     task_manager = TaskManager(task_store)
     app.state.task_store = task_store
     app.state.task_manager = task_manager
@@ -133,7 +134,7 @@ async def lifespan(app: FastAPI):
     from adapters.http_asset_client import HttpAssetClient
 
     # pack 启停状态(管理端热切换的载体):优先级 状态文件 > PACKS_ENABLED env
-    # > 全部发现。文件落在 data/ 下(与 conversations.db 同目录,随部署卷持久化)
+    # > 全部发现。文件落在 data/ 下(随部署卷持久化)
     pack_state = PackState(
         os.getenv("PACK_STATE_PATH", "data/pack_state.json"),
         scan_pack_dirs(),
@@ -231,7 +232,7 @@ async def lifespan(app: FastAPI):
         logger.warning("compressor close failed", exc_info=True)
     upstream.close()  # 关闭 httpx 连接池，释放 socket
     llm_client.close()  # 关闭 OpenAI SDK 底层 httpx 连接池，释放 socket
-    # 关闭 checkpointer 的 SQLite 长连接——build_graph 把连接挂在 graph._conn
+    # 关闭 checkpointer 的 PG 长连接——build_graph 把连接挂在 graph._conn
     # 上(进程级连接,check_same_thread=False),这里拿到引用统一释放
     _checkpointer_conn = getattr(app.state.graph, "_conn", None)
     if _checkpointer_conn is not None:
@@ -239,6 +240,15 @@ async def lifespan(app: FastAPI):
             _checkpointer_conn.close()
         except Exception:
             logger.warning("Failed to close checkpointer connection", exc_info=True)
+    # 收尾:释放共享连接池(psycopg_pool worker 是 daemon 线程,不关也能退;
+    # 显式 close 让多进程/嵌入式场景不悬挂 PG 连接)
+    try:
+        from services.db import _pg_engine_cache
+        for _eng in list(_pg_engine_cache.values()):
+            _eng.close()
+        _pg_engine_cache.clear()
+    except Exception:
+        logger.warning("Failed to close pg engine pools", exc_info=True)
 
 
 # 创建 FastAPI 应用，lifespan 绑定生命周期
@@ -280,6 +290,12 @@ register_admin_auth(_require_admin)
 from services.pack_settings import PackSettingsReader as _PSR
 from sdk.pack_api import register_settings_reader
 register_settings_reader(lambda pack, store: _PSR(pack, store))
+
+# SDK 关系型存储的引擎工厂注册(pack 经 sdk.relational_store 取共享池,
+# 不 import services 层;依赖倒置模式同上,生产实现 = services.db.get_pg_engine)
+from services.db import get_pg_engine as _gpe
+from sdk.relational_store import register_engine_factory
+register_engine_factory(_gpe)
 
 # 注册各业务路由（顺序不影响路由匹配，FastAPI 按精确路径优先）
 app.include_router(health_router)

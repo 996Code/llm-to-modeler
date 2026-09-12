@@ -1,6 +1,4 @@
 """ConversationStore 测试 - append-only 事件流。"""
-import os
-import tempfile
 import pytest
 
 from src.services.conversation_store import ConversationStore
@@ -8,15 +6,8 @@ from src.services.conversation_store import ConversationStore
 
 @pytest.fixture
 def store():
-    """创建临时数据库的 ConversationStore。"""
-    db_path = tempfile.mktemp(suffix=".db")
-    s = ConversationStore(db_path)
-    yield s
-    # 清理
-    try:
-        os.unlink(db_path)
-    except:
-        pass
+    """ConversationStore(conftest 已引导 PG 测试库 + 每测试清表隔离)。"""
+    return ConversationStore()
 
 
 class TestAppendOnly:
@@ -67,8 +58,9 @@ class TestAppendOnly:
         assert len(messages) == 2
 
 
-class TestLegacyMigration:
-    """旧表迁移:RENAME 为 _legacy_ 留档,不导入数据。"""
+class TestSchemaReady:
+    """事件流表就绪性(PG-only;历史 SQLite RENAME 迁移已随收敛移除,
+    存量数据走 scripts/migrate_sqlite_to_pg.py 导入)。"""
 
     def test_new_conversation_starts_empty(self, store):
         """新会话从空表开始,无历史数据。"""
@@ -78,14 +70,12 @@ class TestLegacyMigration:
         messages = store.get_messages(conv_id)
         assert messages == []  # 空的
 
-    def test_old_tables_renamed(self, store):
-        """旧 conversations/messages 表应被 RENAME 为 _legacy_*。"""
-        import sqlite3
-        with sqlite3.connect(str(store.db_path)) as conn:
-            tables = [r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()]
-        assert "_legacy_conversations" in tables or "conversations" not in tables
+    def test_schema_writable(self, store):
+        """事件流表就绪且可写(建会话→写消息→读回)。"""
+        store.create_conversation("user1")
+        conv_id = store.list_conversations("user1")[0]["id"]
+        store.add_message(conv_id, "user", "你好")
+        assert store.get_messages(conv_id)[0]["content"] == "你好"
 
 
 class TestSessionMeta:

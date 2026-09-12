@@ -86,7 +86,6 @@ def test_kb_search_real_call_uses_positional(captured):
     from types import SimpleNamespace
 
     tmp = tempfile.mkdtemp()
-    os.environ.setdefault("DATABASE_PATH", os.path.join(tmp, "t.db"))
     os.environ.setdefault("PACK_STATE_PATH", os.path.join(tmp, "p.json"))
     os.environ.setdefault("ADMIN_TOKEN", "")
     os.environ.setdefault("LLM_BASE_URL", "http://127.0.0.1:9/v1")

@@ -76,7 +76,7 @@ def _load_current_config(request: Request, conv_id: Optional[str]) -> Optional[D
     用于统一对话入口——判断是否有已有配置（影响意图识别，
     如"修改制品"类操作需要已有配置才能执行）。
 
-    类比 Java 的 Session.getAttribute()，但是从 SQLite 读。
+    类比 Java 的 Session.getAttribute()，但是从 PG 读。
     """
     if not conv_id:
         return None  # 无会话 ID：首次对话，肯定没有已有配置
@@ -85,7 +85,7 @@ def _load_current_config(request: Request, conv_id: Optional[str]) -> Optional[D
     # conversation_store 挂在 app.state 上（类比 ServletContext 的全局属性）
     store = request.app.state.conversation_store
     try:
-        conv = store.get_conversation(conv_id, user_id)  # 从 SQLite 读会话
+        conv = store.get_conversation(conv_id, user_id)  # 从 PG 读会话
         if conv and conv.get("currentConfig"):
             return conv["currentConfig"]  # 返回已有的制品配置
     except Exception:

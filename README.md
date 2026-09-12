@@ -14,7 +14,7 @@
 | 前端 | Vue 3 + TypeScript + Vite + Ant Design Vue + Pinia + AntV G6（图谱可视化） |
 | 后端 | Python 3.12 + FastAPI + LangGraph StateGraph |
 | LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型；embedding 同协议） |
-| 存储 | SQLite（对话/审计/任务）+ Neo4j（图谱，可选）+ Milvus（向量，可选） |
+| 存储 | PostgreSQL（对话/审计/任务/checkpoint，必填）+ Neo4j（图谱，可选）+ Milvus（向量，可选） |
 | 上游 | AssetClient 抽象（HTTP 适配；地址请求级解析：宿主 services 表按请求下发） |
 
 ---
@@ -58,7 +58,7 @@
 │  │  │        │                                  ▼            │  │   │
 │  │  │        └──────────────────────→ handle_result ──→ END  │  │   │
 │  │  │                                                        │  │   │
-│  │  │  Checkpoint: SqliteSaver (thread_id = conv_id)       │  │   │
+│  │  │  Checkpoint: PostgresSaver (thread_id = conv_id)     │  │   │
 │  │  └────────────────────────────────────────────────────────┘  │   │
 │  │                                                              │   │
 │  │  辅助模块:                                                   │   │
@@ -264,7 +264,7 @@ domains/
 │   ├── settings.schema.yaml ← 声明式设置页 schema(管理端自动渲染)
 │   ├── api.py            ← 插件自有 HTTP API(挂 /api/packs/knowledge_graph)
 │   ├── tasks.py          ← 后台任务: 导入流水线(断点续跑/熔断/进度心跳)
-│   ├── store.py          ← 领域元数据(kg_ 三表, SQLite)
+│   ├── store.py          ← 领域元数据(kg_ 三表, PG)
 │   ├── stores.py         ← SDK 存储适配层(前缀登记+工厂单例)
 │   ├── retrieval.py      ← 混合检索问答(图谱+向量双路)
 │   ├── probes.py         ← 依赖连通性探针(装配期)
@@ -349,7 +349,7 @@ def _build_capabilities(self, ctx):
 - **queue_key 串行**:同 key 任务 FIFO 串行（如 `queue_key=kb_id` → 同库导入不并发写图）
 - **生命周期**:pending → running → succeeded/failed/cancelled;协作式取消（handler 周期检查 `cancelled`）
 - **可观测**:进度/消息推送（`handle.set_progress/log`）、请求级结构化日志（对齐 call_logs 粒度）、SSE 事件流（`GET /api/tasks/{id}/events`）、管理端任务中心实时视图（结构化日志分组/逐块进度条/活点心跳）
-- **持久化**:任务与日志落 SQLite,重启后可查历史
+- **持久化**:任务与日志落 PG,重启后可查历史
 
 ---
 
@@ -765,10 +765,10 @@ llm-to-modler/
 │       │   └── rate_limit.py       # 全局限速(RPM/TPM 双桶+EMA 校准)
 │       │
 │       └── services/
-│           ├── conversation_store.py  # SQLite 会话存储
+│           ├── conversation_store.py  # PG 会话存储(psycopg 连接池)
 │           ├── upstream_client.py     # 上游客户端
 │           ├── task_manager.py        # ★ 后台任务框架(队列串行/取消/SSE)
-│           ├── task_store.py          # ★ 任务+日志 SQLite 持久化
+│           ├── task_store.py          # ★ 任务+日志 PG 持久化
 │           ├── pack_manager.py        # 插件启停热生效
 │           ├── pack_api_mount.py      # 插件 HTTP API 挂载/卸载
 │           ├── pack_dependency.py     # 依赖门控装配
@@ -846,7 +846,8 @@ SDK 存储设施（前缀登记 + scope 签发隔离契约）。
 ```bash
 # 1. 准备配置
 cp .env.example .env
-vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD 等
+vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD、POSTGRES_PASSWORD 等
+           # 注意:DATABASE_URL 保持注释(compose 自动拼装,见 .env.example 说明)
 
 # 2. 一键发布（拉码 → 预构建 → 打镜像 → compose 切换 → 健康验证）
 ./deploy.sh
@@ -859,8 +860,13 @@ vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD 等
 ```
 
 - 应用入口：`http://<主机>:19090/ai-modeler/`（`HOST_PORT` 可改）
-- 数据落盘：`./data/app`（SQLite+上传文件）、`./data/neo4j`、`./data/milvus`
+- 数据落盘：`./data/postgres`（PG 数据）、`./data/app`（上传文件）、`./data/neo4j`、`./data/milvus`
 - embedding 模型：首次部署自动下载到 `./data/models/embedding/`（bge-m3，~543MB），
   跨版本复用；`EMBEDDING_BACKEND=local` 启用本地向量化
 - 镜像构建：`deploy.sh` 在 docker run 容器内预构建（前端 dist / 后端 .deps / nginx deb），
   `docker build` 只做纯 COPY，规避构建容器 DNS 坑
+
+**存量升级（SQLite → PG 迁移，一次性,手动执行）**：平台已收敛 PG-only,老版本
+升级需先手动迁移存量数据——源库落点、宿主执行命令与影响说明见
+`backend/scripts/migrate_sqlite_to_pg.py` 脚本头部的 runbook(幂等可重跑,
+不随镜像/部署分发)。

@@ -287,7 +287,6 @@ class FakeGraphStore:
 @pytest.fixture()
 def kg_client(tmp_path, monkeypatch):
     """组装最小应用:真实 KGStore(临时库) + Fake 图存储 + 真实 api router。"""
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "kg.db"))
     monkeypatch.setenv("KG_FILES_DIR", str(tmp_path / "files"))
     from domains.knowledge_graph import runtime
     runtime.reset_runtime_cache()

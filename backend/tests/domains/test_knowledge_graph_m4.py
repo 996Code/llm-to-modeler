@@ -109,7 +109,6 @@ class RetrievalFakeVector:
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "kg.db"))
     monkeypatch.setenv("KG_FILES_DIR", str(tmp_path / "files"))
     monkeypatch.delenv("LLM_EMBED_MODEL", raising=False)
     runtime.reset_runtime_cache()

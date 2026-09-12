@@ -15,7 +15,7 @@ Qwen3 推理模型处理：
   实际输出在 reasoning_content 里，需要回退读取。
 
 LLM 调用日志：
-  每次 LLM 调用自动持久化到 SQLite 的 call_logs 表（call_type='llm'），
+  每次 LLM 调用自动持久化到 PG 的 call_logs 表（call_type='llm'），
   含请求参数、响应摘要、耗时、状态码，方便调试和监控。
   类比 Java 的 AOP 日志切面，但是手动埋点。
 """

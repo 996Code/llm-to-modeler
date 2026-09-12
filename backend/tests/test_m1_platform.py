@@ -8,6 +8,7 @@
     未注册类型拒绝、重启 interrupted
   - pack API 动态挂载:挂载可访问 / 卸载 404 / 重挂 / 无路由泄漏
 """
+import os
 import time
 import types
 from unittest.mock import MagicMock
@@ -40,7 +41,9 @@ def _clear_probe_cache():
 @pytest.fixture()
 def task_manager(tmp_path):
     store = TaskStore(str(tmp_path / "tasks.db"))
-    return TaskManager(store, max_workers=2)
+    manager = TaskManager(store, max_workers=2)
+    yield manager
+    manager.close()  # 收线程池:防终态后的 error 日志行越过下一测试的清表
 
 
 @pytest.fixture()
@@ -445,12 +448,9 @@ class TestAuditFixes:
             m.submit("zz.dup", dedupe_key="doc:1")
         # 被拒绝的提交不得落库(先落库再拒绝 = 永不调度的僵尸 pending 任务)。
         # 断言库中任务数:此刻只有 t1 一个合法提交(拒绝的不算)
-        import sqlite3
-        conn = sqlite3.connect(str(m.store.db_path))
-        try:
+        import psycopg
+        with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
             n = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-        finally:
-            conn.close()
         assert n == 1, f"拒绝的提交也落库了(库里 {n} 个任务,应只有 1 个合法提交)"
         # 不同 key 不受影响
         t2 = m.submit("zz.dup", dedupe_key="doc:2")

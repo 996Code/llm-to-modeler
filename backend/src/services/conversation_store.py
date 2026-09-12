@@ -1,8 +1,8 @@
-"""ConversationStore - 基于 SQLite 的会话持久化(append-only 事件流架构)。
+"""ConversationStore - PostgreSQL 会话持久化(append-only 事件流架构)。
 
 【模块定位】
 本模块是整个会话系统的"数据库访问层"(DAO/Repository),负责把对话、消息、
-工具产出、调用日志等数据持久化到本地 SQLite 文件。可以理解成 Java 项目里的
+工具产出、调用日志等数据经 psycopg 连接池持久化到 PG。可以理解成 Java 项目里的
 ``@Repository`` + ``DataSource`` + MyBatis Mapper 的合体:既管连接、也管 SQL。
 
 【核心设计 - 事件溯源 (Event Sourcing)】
@@ -43,26 +43,25 @@ add_message 等),供 ``api/conversations.py`` 和 ``api/config.py`` 调用,
   - ConversationStore ≈ Spring 的 ``@Repository`` 单例 Bean
   - ``_get_conn()``    ≈ ``DataSource.getConnection()``,每次借一个新连接
   - ``with ... as conn`` ≈ try-with-resources,JVM 自动关连接
-  - ``sqlite3.Row``   ≈ MyBatis 的 Map 映射,可以按列名取值
+  - dict_row(psycopg)≈ MyBatis 的 Map 映射,可以按列名取值
   - WAL 模式          ≈ MySQL 的 InnoDB,支持读写并发不阻塞
 """
 import json
 import logging
-import sqlite3
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from services.db import get_pg_engine
 
 # 模块级 logger,等价于 Java 里 LoggerFactory.getLogger(getClass())
 logger = logging.getLogger(__name__)
 
+# 存储后端由 services.db 提供(PG-only,DATABASE_URL 必填)。
+
 # DATABASE_PATH 未配置时的默认库文件路径(相对当前工作目录)。
 # 【单一事实来源】main.py / engine/graph.py 等处的 env 默认值统一引用本常量,
 # 避免 "data/conversations.db" 字面量散落多处——改默认库路径时只动这里。
-DEFAULT_DB_PATH = "data/conversations.db"
-
-
 def _now() -> str:
     """获取当前 UTC 时间的 ISO 8601 字符串(timezone-aware,带时区)。
 
@@ -73,7 +72,7 @@ def _now() -> str:
 
 
 class ConversationStore:
-    """SQLite 持久化的会话存储(append-only 事件流)。
+    """PG 持久化的会话存储(append-only 事件流,连接池见 services.db)。
 
     【职责】
       - 管理三张表(events / session_meta / call_logs)的 DDL 与迁移
@@ -87,153 +86,85 @@ class ConversationStore:
       相当于 Spring 的 ``@Repository`` Bean。与 JPA EntityManager 不同,
       这里没有 ORM,SQL 全部手写(类似 MyBatis 的原生 SQL 模式)。
       每个 public 方法都会自己开一个连接(``_get_conn``),用完即关,
-      不做跨方法的事务传播——简单但足够,SQLite 单机无需连接池。
+      不做跨方法的事务传播——简单但足够,PG 侧由共享连接池承担并发。
 
     【线程安全】
-      SQLite 连接本身线程局部(不能跨线程共享),所以这里每次方法调用
-      都新建连接。配合 WAL 模式,多线程读 / 单线程写,并发性足够。
+      每次方法调用从连接池借还连接(池线程安全),事务语义
+      "成功提交 / 异常回滚"由 services.db 的连接上下文保证。
     """
 
-    def __init__(self, db_path: str = DEFAULT_DB_PATH):
+    def __init__(self, db_path: str = "", database_url: Optional[str] = None):
         """初始化存储。
 
         Args:
-            db_path: SQLite 文件路径。父目录不存在会自动创建。
+            db_path: 已废弃(PG-only 后无 SQLite 路径)。保留形参只为兼容
+                旧调用签名(历史测试/外部代码传 tmp 路径),实参被忽略。
+            database_url: PG 连接串;缺省走 env DATABASE_URL(必填,
+                见 services.db.require_database_url)。
         """
-        self.db_path = Path(db_path)
-        # 确保父目录存在(等价于 Java 的 Files.createDirectories)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # 首次启动时建表 / 迁移
+        if db_path:
+            logger.warning("db_path 已废弃(PG-only),实参被忽略——存储由 DATABASE_URL 决定")
+        self.db = get_pg_engine(database_url)
+        # 首次启动时建表
         self._init_db()
-        logger.info(f"ConversationStore initialized: {self.db_path}")
+        logger.info("ConversationStore initialized: postgres")
 
-    def _get_conn(self) -> sqlite3.Connection:
-        """创建并返回一个新的 SQLite 连接。
+    def _get_conn(self):
+        """从共享连接池借一个连接(成功提交 / 异常回滚,用完归还)。"""
+        return self.db.connect()
 
-        【Java 类比】 ≈ ``DataSource.getConnection()``,每次返回新连接。
-
-        重点:
-          - ``row_factory = sqlite3.Row``:让查询结果可以按列名取值
-            (类比 MyBatis 把 ResultSet 映射成 Map),否则只能按下标取。
-          - ``PRAGMA journal_mode=WAL``:开启 WAL(Write-Ahead Logging)。
-            类比 MySQL InnoDB 的 redolog,WAL 让"读不阻塞写、写不阻塞读",
-            显著提升并发性能。对长连接的 Web 服务几乎是必开项。
-        """
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+    # 三张核心表 + session_pack_state 的 DDL(两方言通用:
+    # TEXT/INTEGER/IF NOT EXISTS/复合主键语义完全一致)
+    _DDL = [
+        """CREATE TABLE IF NOT EXISTS events (
+            id TEXT PRIMARY KEY,         -- 事件 ID(UUID),主键
+            conv_id TEXT NOT NULL,       -- 所属会话 ID(外键语义,无约束)
+            kind TEXT NOT NULL,          -- 事件类型(见模块文档)
+            payload TEXT NOT NULL,       -- JSON 字符串,具体内容
+            created_at TEXT NOT NULL     -- ISO 时间戳(UTC)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_events_conv ON events(conv_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_events_kind ON events(conv_id, kind)",
+        """CREATE TABLE IF NOT EXISTS session_meta (
+            conv_id TEXT PRIMARY KEY,    -- 会话 ID,与 events.conv_id 对应
+            user_id TEXT NOT NULL,       -- 归属用户
+            context_key TEXT DEFAULT '', -- 宿主实体标识(嵌入模式绑定,如 entryId)
+            title TEXT DEFAULT '',       -- 会话标题(列表展示)
+            summary TEXT DEFAULT '',     -- 会话摘要(压缩后)
+            current_config TEXT,         -- 当前配置 JSON(制品配置快照)
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL     -- 列表按此字段倒序排序
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_meta_user ON session_meta(user_id, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_meta_context ON session_meta(user_id, context_key, updated_at DESC)",
+        """CREATE TABLE IF NOT EXISTS call_logs (
+            id TEXT PRIMARY KEY,
+            conv_id TEXT,                -- 可空:有些调用不属于特定会话
+            call_type TEXT NOT NULL,     -- 'llm'/'upstream'/'graph'/'vector'(开放枚举,插件可扩展)
+            endpoint TEXT NOT NULL,      -- 调用的接口地址
+            request_data TEXT,           -- 请求体 JSON
+            response_data TEXT,          -- 响应体 JSON
+            status_code INTEGER,         -- HTTP 状态码
+            duration_ms INTEGER,         -- 耗时(毫秒)
+            error_message TEXT,          -- 异常信息
+            created_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_call_logs_conv ON call_logs(conv_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_call_logs_type ON call_logs(call_type, created_at)",
+        """CREATE TABLE IF NOT EXISTS session_pack_state (
+            conv_id TEXT NOT NULL,
+            scope TEXT NOT NULL,
+            state_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (conv_id, scope)
+        )""",
+    ]
 
     def _init_db(self):
-        """初始化数据库:先迁移旧表,再创建新表(幂等,可重复执行)。
-
-        幂等性靠 ``IF NOT EXISTS`` 保证,等价于 Flyway / Liquibase
-        的 ``CREATE TABLE IF NOT EXISTS`` 脚本。
-        """
+        """建表/建索引(幂等,``IF NOT EXISTS``)。"""
         with self._get_conn() as conn:
-            # 1. 检测旧表,RENAME 为 _legacy_ 留档(不导入数据)
-            self._migrate_legacy_tables(conn)
-
-            # 2. 存量库列迁移（必须在 executescript 之前：下面的索引引用新列，
-            #    而老表的列还没加上时建索引会直接失败）。
-            #    CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，必须显式 ALTER；
-            #    幂等：新库（表还不存在）或列已存在时 OperationalError 静默跳过，
-            #    随后 executescript 会建出完整的新表。
-            try:
-                conn.execute("ALTER TABLE session_meta ADD COLUMN context_key TEXT DEFAULT ''")
-                logger.info("Migrated: session_meta.context_key added")
-            except sqlite3.OperationalError:
-                pass  # 表不存在（新库）或列已存在，跳过
-
-            # 3. 创建新表(append-only 事件流)
-            #    executescript 一次执行多段 DDL,类比 Java 里批量执行 SQL 脚本
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,         -- 事件 ID(UUID),主键
-                    conv_id TEXT NOT NULL,       -- 所属会话 ID(外键语义,无约束)
-                    kind TEXT NOT NULL,          -- 事件类型(见模块文档)
-                    payload TEXT NOT NULL,       -- JSON 字符串,具体内容
-                    created_at TEXT NOT NULL     -- ISO 时间戳(UTC)
-                );
-                -- 复合索引:按会话 + 时间查事件流(读路径主索引)
-                CREATE INDEX IF NOT EXISTS idx_events_conv ON events(conv_id, created_at);
-                -- 复合索引:按会话 + 类型过滤(例如只取 user/assistant)
-                CREATE INDEX IF NOT EXISTS idx_events_kind ON events(conv_id, kind);
-
-                CREATE TABLE IF NOT EXISTS session_meta (
-                    conv_id TEXT PRIMARY KEY,    -- 会话 ID,与 events.conv_id 对应
-                    user_id TEXT NOT NULL,       -- 归属用户
-                    context_key TEXT DEFAULT '', -- 宿主实体标识(嵌入模式绑定,如 entryId)
-                    title TEXT DEFAULT '',       -- 会话标题(列表展示)
-                    summary TEXT DEFAULT '',     -- 会话摘要(压缩后)
-                    current_config TEXT,         -- 当前配置 JSON(制品配置快照)
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL     -- 列表按此字段倒序排序
-                );
-                -- 列表查询索引:按用户 + 更新时间倒序(典型"我的会话列表"查询)
-                CREATE INDEX IF NOT EXISTS idx_meta_user ON session_meta(user_id, updated_at DESC);
-                -- 嵌入会话恢复索引:按 (user_id, context_key) 查最新会话
-                CREATE INDEX IF NOT EXISTS idx_meta_context ON session_meta(user_id, context_key, updated_at DESC);
-
-                CREATE TABLE IF NOT EXISTS call_logs (
-                    id TEXT PRIMARY KEY,
-                    conv_id TEXT,                -- 可空:有些调用不属于特定会话
-                    call_type TEXT NOT NULL,     -- 'llm'/'upstream'/'graph'/'vector'(开放枚举,插件可扩展)
-                    endpoint TEXT NOT NULL,      -- 调用的接口地址
-                    request_data TEXT,           -- 请求体 JSON
-                    response_data TEXT,          -- 响应体 JSON
-                    status_code INTEGER,         -- HTTP 状态码
-                    duration_ms INTEGER,         -- 耗时(毫秒)
-                    error_message TEXT,          -- 异常信息
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_call_logs_conv ON call_logs(conv_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_call_logs_type ON call_logs(call_type, created_at);
-
-                -- 会话级插件状态:工具跨轮记忆(如 KG 记住用户选过的知识库)。
-                -- scope 由工具声明(默认工具名;同插件多工具可共享同一 scope)。
-                -- 与对话历史同生命周期:会话删除级联清理;历史压缩不影响。
-                CREATE TABLE IF NOT EXISTS session_pack_state (
-                    conv_id TEXT NOT NULL,
-                    scope TEXT NOT NULL,
-                    state_json TEXT NOT NULL DEFAULT '{}',
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (conv_id, scope)
-                );
-            """)
-
-    def _migrate_legacy_tables(self, conn: sqlite3.Connection):
-        """旧表 RENAME 为 ``_legacy_*`` 留档,不导入数据。
-
-        【设计取舍】
-          阶段 4 重构时选择"留档不迁移",而不是写复杂的 ETL:
-            - 旧表结构和新表差异大,直接迁数据风险高
-            - 历史数据价值低(测试期数据),保留备查即可
-          类比 Java:这相当于 Flyway 的 baseline + 不执行回填脚本。
-
-        【幂等性】
-          RENAME 失败(表已不存在或已迁移)时静默吞掉异常,
-          确保多次启动不会报错。
-        """
-        # 检查旧 conversations 表是否存在:用 SELECT 探测,失败说明不存在
-        try:
-            conn.execute("SELECT 1 FROM conversations LIMIT 1")
-            has_legacy_conv = True
-        except sqlite3.OperationalError:
-            has_legacy_conv = False
-
-        if has_legacy_conv:
-            logger.info("Migrating legacy tables: RENAME to _legacy_* (no data import)")
-            # 先迁 messages,再迁 conversations(避免外键引用问题,虽然 SQLite 默认不强制)
-            try:
-                conn.execute("ALTER TABLE messages RENAME TO _legacy_messages")
-            except sqlite3.OperationalError:
-                pass  # 已迁移过,跳过
-            try:
-                conn.execute("ALTER TABLE conversations RENAME TO _legacy_conversations")
-            except sqlite3.OperationalError:
-                pass
-            logger.info("Legacy tables renamed: _legacy_conversations, _legacy_messages")
+            for stmt in self._DDL:
+                conn.execute(stmt)
 
     # ── Conversations(session_meta 表) ─────────────────────────
 
@@ -449,14 +380,19 @@ class ConversationStore:
 
     # 会话的 pack 判定子查询:最近一次 intent_route trace 的 pack(无则 NULL)。
     # 限定 stage=intent_route:ctx.trace 允许任意 detail 结构,不限定的话
-    # 任何带 pack 键的业务打点都会污染"会话归属插件"判定
-    _PACK_EXPR = ("(SELECT json_extract(e.payload, '$.detail.pack') FROM events e "
+    # 任何带 pack 键的业务打点都会污染"会话归属插件"判定。
+    # substr 守卫(不用 LIKE:模式里的 % 会撞 psycopg 占位符扫描):payload 必以 '{'
+    # 开头;万一存在被手工写坏的行,降级为 NULL(该会话归"其他")而不是
+    # 让整个管理端列表 500(jsonb 强转对非法 JSON 会抛错)。
+    _PACK_EXPR = ("(SELECT CASE WHEN substr(e.payload, 1, 1) = '{' THEN "
+                  "(e.payload::jsonb -> 'detail' ->> 'pack') ELSE NULL END "
+                  "FROM events e "
                   "WHERE e.conv_id = m.conv_id AND e.kind = 'trace' "
-                  "AND json_extract(e.payload, '$.stage') = 'intent_route' "
+                  "AND (CASE WHEN substr(e.payload, 1, 1) = '{' THEN "
+                  "(e.payload::jsonb ->> 'stage') ELSE '' END) = 'intent_route' "
                   "ORDER BY e.created_at DESC LIMIT 1)")
 
-    @staticmethod
-    def _admin_conversation_where(user_id: Optional[str], q: Optional[str],
+    def _admin_conversation_where(self, user_id: Optional[str], q: Optional[str],
                                    packs: Optional[List[str]] = None) -> tuple:
         """拼装管理端会话列表的 WHERE 子句与参数(动态 SQL,参数化防注入)。
 
@@ -468,11 +404,12 @@ class ConversationStore:
             clauses.append("m.user_id = ?")
             params.append(user_id)
         if q:
-            clauses.append("(m.title LIKE ? OR m.conv_id IN ("
-                           "SELECT e.conv_id FROM events e WHERE e.kind = 'user' AND e.payload LIKE ?))")
+            # ILIKE:模糊搜索大小写不敏感(与历史 SQLite LIKE 行为一致)
+            clauses.append("(m.title ILIKE ? OR m.conv_id IN ("
+                           "SELECT e.conv_id FROM events e WHERE e.kind = 'user' AND e.payload ILIKE ?))")
             params.extend([f"%{q}%", f"%{q}%"])
         if packs:
-            expr = ConversationStore._PACK_EXPR
+            expr = self._PACK_EXPR
             named = [p for p in packs if p]
             wants_other = any(not p for p in packs)
             parts = []
@@ -584,7 +521,7 @@ class ConversationStore:
         """删除会话。校验用户归属,删除成功返回 True。
 
         【级联删除】
-          SQLite 没开外键约束,这里手动级联:先删 session_meta,
+          PG 表未建外键约束,这里手动级联:先删 session_meta,
           再删 events 里所有该会话的事件。
 
         Args:
@@ -648,7 +585,7 @@ class ConversationStore:
             return {}
 
     def set_pack_state(self, conv_id: str, scope: str, state: Dict[str, Any]) -> None:
-        """整包写入某 scope 的插件状态(INSERT OR REPLACE)。
+        """整包写入某 scope 的插件状态(UPSERT:ON CONFLICT 覆盖)。
 
         Raises:
             ValueError: 序列化后超体积上限(防插件把状态当数据存储滥用)。
@@ -659,10 +596,11 @@ class ConversationStore:
                 f"pack state 超过 {self.PACK_STATE_MAX_BYTES} 字节上限(scope={scope})")
         with self._get_conn() as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO session_pack_state
-                   (conv_id, scope, state_json, updated_at) VALUES (?, ?, ?, ?)""",
-                (conv_id, scope, payload, _now()),
-            )
+                """INSERT INTO session_pack_state
+                   (conv_id, scope, state_json, updated_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT (conv_id, scope) DO UPDATE SET
+                     state_json = EXCLUDED.state_json, updated_at = EXCLUDED.updated_at""",
+                (conv_id, scope, payload, _now()))
 
     def update_conversation_config(
         self,
@@ -996,7 +934,7 @@ class ConversationStore:
 
     def _append_event(
         self,
-        conn: sqlite3.Connection,
+        conn: Any,
         conv_id: str,
         kind: str,
         payload: Dict[str, Any],

@@ -1,4 +1,4 @@
-"""KGStore - 知识图谱插件的 SQLite 元数据层(kg_ 前缀三表)。
+"""KGStore - 知识图谱插件的 PG 元数据层(kg_ 前缀三表)。
 
 【表职责】
   kg_knowledge_bases  知识库本体:名称/描述/schema_json(类型体系)/
@@ -13,16 +13,13 @@
   (uploaded = 已上传未导入;partial = 部分块失败但整体可用;幂等重导
    从 content_hash 判定"内容没变且已成功 → 跳过")
 
-【与平台的关系】同库不同表(ConversationStore 的 conversations.db),
+【与平台的关系】同库不同表(与 ConversationStore 同一个 PG 库,见 services.db),
 沿用"每方法新连接 + WAL"模式,平台零感知。
 """
 import json
 import logging
-import sqlite3
-import threading
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -35,68 +32,67 @@ def _now() -> str:
 class KGStore:
     """kg_* 三表的 DAO。"""
 
-    def __init__(self, db_path: str = ""):
-        import os
-        # 平台库路径:env 直读(与 runtime.get_kg_store 同口径),不 import 平台层
-        self.db_path = Path(db_path or os.getenv("DATABASE_PATH", "data/conversations.db"))
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: str = "", database_url: str = ""):
+        # db_path 已废弃(PG-only);保留形参兼容旧调用签名,实参忽略。
+        # 存储走 SDK 关系型通道(pack 独立 schema + 共享平台池)——
+        # pack 不直接 import 平台 services 层(架构方向:api → domains → sdk)
+        from sdk.relational_store import PackRelationalDB
+        if db_path:
+            logger.warning("db_path 已废弃(PG-only),实参被忽略——存储由 DATABASE_URL 决定")
+        self.db = PackRelationalDB("knowledge_graph", database_url or None)
         self._init_db()
-        logger.info(f"KGStore initialized: {self.db_path}")
+        logger.info("KGStore initialized: postgres(schema=knowledge_graph)")
 
-    def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        return conn
+    def _get_conn(self):
+        return self.db.connect()
+
+    _DDL = [
+        """CREATE TABLE IF NOT EXISTS kg_knowledge_bases (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            description TEXT DEFAULT '',
+            schema_json TEXT,               -- 本体:entity_types/relation_types/schema_mode/pending_types
+            schema_template TEXT DEFAULT '',-- 建库所选模板 key(溯源)
+            embedding_model TEXT DEFAULT '',
+            vector_dim INTEGER,
+            vector_enabled INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS kg_documents (
+            id TEXT PRIMARY KEY,
+            kb_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            mime_type TEXT DEFAULT '',
+            size_bytes INTEGER DEFAULT 0,
+            file_path TEXT DEFAULT '',
+            content_hash TEXT DEFAULT '',
+            import_status TEXT DEFAULT 'uploaded',
+            chunk_count INTEGER DEFAULT 0,
+            entity_count INTEGER DEFAULT 0,
+            relation_count INTEGER DEFAULT 0,
+            error TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_kg_docs_kb ON kg_documents(kb_id, created_at DESC)",
+        """CREATE TABLE IF NOT EXISTS kg_chunks (
+            id TEXT PRIMARY KEY,
+            kb_id TEXT NOT NULL,
+            doc_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            char_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',  -- pending/done/failed(chunk 级 checkpoint)
+            created_at TEXT NOT NULL
+        )""",
+    "CREATE INDEX IF NOT EXISTS idx_kg_chunks_doc ON kg_chunks(doc_id, seq)",
+    "CREATE INDEX IF NOT EXISTS idx_kg_chunks_status ON kg_chunks(doc_id, status)",
+    ]
 
     def _init_db(self):
-        with self._get_conn() as conn:
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS kg_knowledge_bases (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE,
-                    description TEXT DEFAULT '',
-                    schema_json TEXT,               -- 本体:entity_types/relation_types/schema_mode/pending_types
-                    schema_template TEXT DEFAULT '',-- 建库所选模板 key(溯源)
-                    embedding_model TEXT DEFAULT '',
-                    vector_dim INTEGER,
-                    vector_enabled INTEGER DEFAULT 0,
-                    status TEXT DEFAULT 'active',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS kg_documents (
-                    id TEXT PRIMARY KEY,
-                    kb_id TEXT NOT NULL,
-                    filename TEXT NOT NULL,
-                    mime_type TEXT DEFAULT '',
-                    size_bytes INTEGER DEFAULT 0,
-                    file_path TEXT DEFAULT '',
-                    content_hash TEXT DEFAULT '',
-                    import_status TEXT DEFAULT 'uploaded',
-                    chunk_count INTEGER DEFAULT 0,
-                    entity_count INTEGER DEFAULT 0,
-                    relation_count INTEGER DEFAULT 0,
-                    error TEXT DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_kg_docs_kb ON kg_documents(kb_id, created_at DESC);
-
-                CREATE TABLE IF NOT EXISTS kg_chunks (
-                    id TEXT PRIMARY KEY,
-                    kb_id TEXT NOT NULL,
-                    doc_id TEXT NOT NULL,
-                    seq INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    char_count INTEGER DEFAULT 0,
-                    status TEXT DEFAULT 'pending',  -- pending/done/failed(chunk 级 checkpoint)
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_kg_chunks_doc ON kg_chunks(doc_id, seq);
-                CREATE INDEX IF NOT EXISTS idx_kg_chunks_status ON kg_chunks(doc_id, status);
-            """)
+        self.db.init_schema(self._DDL)
 
     # ── 知识库 ─────────────────────────────────────────────
 
@@ -195,7 +191,7 @@ class KGStore:
             return cur.rowcount > 0
 
     @staticmethod
-    def _kb_row(row: sqlite3.Row) -> Dict[str, Any]:
+    def _kb_row(row: dict) -> Dict[str, Any]:
         d = dict(row)
         schema = None
         if d.get("schema_json"):
@@ -293,13 +289,14 @@ class KGStore:
                    WHERE import_status = 'importing'""",
                 (_now(),),
             )
-            # 排除活任务:先整体收敛再放回 importing(集合小,两步比拼 NOT IN 简单)
+            # 排除活任务:先整体收敛再放回 importing(集合小,两步比拼 NOT IN 简单)。
+            # LIKE 模式必须走参数:SQL 文本里的字面 '%' 会被 psycopg 当占位符扫描报错
             for doc_id in active_doc_ids:
                 conn.execute(
                     """UPDATE kg_documents SET import_status = 'importing', error = '',
                            updated_at = ? WHERE id = ? AND import_status = 'failed'
-                           AND error LIKE '服务重启导致导入中断%'""",
-                    (_now(), doc_id),
+                           AND error LIKE ?""",
+                    (_now(), doc_id, "服务重启导致导入中断%"),
                 )
             return cur.rowcount
 
@@ -311,7 +308,7 @@ class KGStore:
         return row["file_path"] if row else None
 
     @staticmethod
-    def _doc_row(row: sqlite3.Row) -> Dict[str, Any]:
+    def _doc_row(row: dict) -> Dict[str, Any]:
         d = dict(row)
         return {
             "id": d["id"], "kbId": d["kb_id"], "filename": d["filename"],

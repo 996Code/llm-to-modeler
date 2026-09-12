@@ -8,7 +8,7 @@
   - 混合检索问答(图谱子图 + 向量召回 → LLM 综合回答;对话工具 + REST)
 
 【三存储分工】
-  SQLite(conversations.db 同库 kg_ 前缀表) = 元数据与 checkpoint
+  PG(kg_ 前缀表) = 元数据与 checkpoint
   Neo4j  = 图谱(kb_id 隔离,(kb_id, normalized_name) NODE KEY)
   Milvus = 向量(每库一个 collection kg_{kb_id}_v1,删库即 drop)
 """
