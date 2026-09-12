@@ -1336,9 +1336,16 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
     chunk_texts = {c["id"]: (c.get("text") or "") for c in store.list_chunks(doc_id)}
 
     entities.sort(key=lambda e: (e.get("type") or "", e["normalized"]))
+    total_batches = (len(entities) + _CONSOLIDATE_BATCH - 1) // _CONSOLIDATE_BATCH
+    if handle:
+        handle.set_progress(min(99, 60 + 30 // max(1, total_batches)),
+                            f"身份复合: 0/{total_batches} 批")
+        handle.log(f"身份复合开始: {len(entities)} 实体分 {total_batches} 批复核"
+                   f"(每批 1 次 LLM 调用,约 2~4 分钟/批)", batches=total_batches)
     proposals: List[Dict] = []
     seen_pairs = set()
     for i in range(0, len(entities), _CONSOLIDATE_BATCH):
+        t0 = time.monotonic()
         batch = entities[i:i + _CONSOLIDATE_BATCH]
 
         def _clean(s: str) -> str:
@@ -1374,9 +1381,12 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                     seen_pairs.add(key)
                     proposals.append(key)
         if handle:
-            handle.log(f"身份复合: 批次 {i // _CONSOLIDATE_BATCH + 1} 提案累计 "
-                       f"{len(seen_pairs)} 组", batch=i // _CONSOLIDATE_BATCH + 1,
-                       proposals=len(seen_pairs))
+            done_b = i // _CONSOLIDATE_BATCH + 1
+            handle.set_progress(min(99, 60 + 30 * done_b // max(1, total_batches)),
+                                f"身份复合: {done_b}/{total_batches} 批")
+            handle.log(f"身份复合: 批次 {done_b}/{total_batches} 完成"
+                       f"(本批 {time.monotonic() - t0:.0f}s,提案累计 {len(seen_pairs)} 组)",
+                       batch=done_b, proposals=len(seen_pairs))
     stats["proposals"] = len(seen_pairs)
 
     def _canon_key(name: str):
