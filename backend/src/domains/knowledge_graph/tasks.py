@@ -519,7 +519,8 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             # 互指的多个实体声称 = 泛称/歧义称谓,从本批所有声称者丢弃
             # ——LLM 建议代码验证的别名侧补全(名字有锚定过滤、关系有
             # 端点校验、类型有本体强制,aliases 此前是唯一裸奔字段)。
-            contested = _drop_contested_aliases(kept_e, graph_alias_table)
+            contested = _drop_contested_aliases(kept_e, graph_alias_table,
+                                                graph=graph, kb_id=kb_id)
             contested_total += contested
             if contested:
                 handle.log(f"别名去争议: 丢弃 {contested} 个被多方声称的泛称别名",
@@ -1196,16 +1197,23 @@ def _contested_alias_set(claims: Dict[str, Set[str]]) -> Set[str]:
 
 
 def _drop_contested_aliases(entities: List[Dict],
-                            graph_aliases: Dict[str, Dict[str, Any]]) -> int:
-    """别名独占性校验:被互不互指的多个实体共同声称的别名,从本批全部丢弃。
+                            graph_aliases: Dict[str, Dict[str, Any]],
+                            graph=None, kb_id: str = "") -> int:
+    """别名独占性校验(对称执行):争议别名从本批与图谱侧声称一并清除。
 
     别名的语义前提是唯一指认:"美猴王"只指孙悟空。而"大王/老妖"这类
     泛称会被 LLM 灌进多个互不相识实体的 aliases——进图后会在收尾对账
     被并查集当合并锚点,链式把整片角色粘成一坨(线上西游记 289 组误并
-    事故的根因)。这是入库前的第一道拦截;图谱侧历史遗留由收尾的
-    _prune_graph_aliases 兜底(词表从图渲染,不清掉会持续回喂)。
+    事故的根因)。
 
-    entities 原地修改(aliases 字段收窄)。Returns: 丢弃的别名声称数。
+    对称性(干跑实锤补齐):旧版只丢本批声称者,先写入图的声称留存——
+    争夺史被抹掉后,最终图上泛指名(龙王/妖精/皇后)看起来像"无争议的
+    单声称者",类型族规则放开后收尾对账会把它连边吸进具体角色。修复:
+    发现争议时,图谱侧已有声称同步清除——图上留存的声称全部"从未被
+    争夺过"= 特定名(鬼厉/惊羽),单向指认合并从此安全。
+
+    entities 原地修改(aliases 字段收窄);graph+kbid 提供时,图谱侧
+    声称同步剪除(对称执行)。Returns: 丢弃的别名声称数(两侧合计)。
     """
     claims: Dict[str, Set[str]] = {}
     for name, info in (graph_aliases or {}).items():
@@ -1229,6 +1237,17 @@ def _drop_contested_aliases(entities: List[Dict],
                 if normalize_name(raw) == nm or normalize_name(raw) not in contested]
         dropped += len(e.get("aliases") or []) - len(keep)
         e["aliases"] = keep
+
+    # 对称执行:图谱侧已有声称一并剪除——争夺痕迹不留"幸存单声称者"
+    if graph is not None and kb_id:
+        remove = sorted({a for name, info in (graph_aliases or {}).items()
+                         for a in (info.get("aliases") or [])
+                         if normalize_name(a) in contested})
+        if remove:
+            try:
+                dropped += graph.prune_aliases(kb_id, remove)
+            except Exception:
+                logger.warning("图谱侧争议别名剪除失败(收尾对账兜底)", exc_info=True)
     return dropped
 
 
@@ -1506,10 +1525,13 @@ def _merge_alias_pass(graph, kb_id: str, doc_id: str) -> int:
     被 LLM 抽进 aliases(互指),这里按这条文本级指认把碎片并回本体。
     文本没说的,永不并——代码不做任何名字相似度类的猜测。
 
-    合并判据(三条都满足才并):
-      - 一方的名字出现在另一方的 aliases 里(指认边);
-      - 双方类型一致(青云山 location / 青云门 organization 不碰);
-      - 指认名通过互指佐证校验(见下)——泛称不作合并锚点。
+    合并判据(四条都满足才并):
+      - 双方互指:各自的名字出现在对方的 aliases 里(单向声称不可信——
+        剪枝抹掉争夺史,静态图上的单声称者无法与"泛指名竞争失败者"
+        区分,干跑实锤 龙王/妖精/皇后 三组此类错并);
+      - 双方类型同型或同族(person/creature,见 _types_compatible);
+      - 指认名通过互指佐证校验(见下)——泛称不作合并锚点;
+      - 任一方不是桥接枢纽(见下)。
 
     互指佐证(泛称防火墙,线上西游记实测教训):LLM 除了写真身份别名
     (张小凡→鬼厉),还会把泛称(妖怪/大王/老妖…)灌进几十个精怪的

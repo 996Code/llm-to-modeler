@@ -534,7 +534,6 @@ class TestImportPipeline:
         n = tasks._merge_same_type_alias_pairs(g, "kb", "d1")
         # 4 个碎片(美猴王/齐天大圣/石猴/老孙)各自并进 canonical,各计 1
         assert n == 4
-        # canonical:同批入库(t1)时溯源块最多者胜 → 孙悟空(4 块)
         assert set(g.nodes) == {"孙悟空"}
         assert {"石猴", "美猴王", "齐天大圣", "老孙"} <= set(g.nodes["孙悟空"]["aliases"])
         # 幂等
@@ -1277,7 +1276,7 @@ class TestMergeFixpoint:
                          "source_chunks": ["c1"]},
                 "李四": {"type": "person", "aliases": ["王五"], "created_at": "t2",
                          "source_chunks": ["c2"]},
-                "王五": {"type": "person", "aliases": [], "created_at": "t3",
+                "王五": {"type": "person", "aliases": ["李四"], "created_at": "t3",
                          "source_chunks": ["c3"]},
             }
 
@@ -1547,3 +1546,39 @@ class TestTypeFamilyCompat:
         }
         assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 0
         assert len(g.nodes) == 2
+
+
+# ── 争议剪枝对称执行 ──────────────────────────────────────────
+
+class TestSymmetricContestedPruning:
+
+    def test_graph_side_claim_pruned_too(self):
+        """对称执行(干跑实锤的漏洞):泾河龙王(图谱侧)先声称了 龙王,
+        后续批次 敖顺 也声称 龙王 → 争议。旧版只丢本批(敖顺),图上
+        留下"幸存单声称者",收尾对账会把泛指节点连边吸进泾河龙王;
+        新版图谱侧同步剪除。"""
+        g = FakeGraph()
+        g.upsert_batch("kb1", "d0", [
+            {"name": "泾河龙王", "normalized_name": "泾河龙王", "type": "person",
+             "aliases": ["龙王"], "chunk_ids": ["c1"]}], [])
+        graph_aliases = g.list_entity_aliases("kb1")  # 图谱侧已有声称
+        batch = [{"normalized_name": "敖顺", "name": "敖顺", "type": "person",
+                  "aliases": ["龙王"]}]
+        n = tasks._drop_contested_aliases(batch, graph_aliases, graph=g, kb_id="kb1")
+        assert n == 2  # 本批 1 + 图谱侧 1
+        assert batch[0]["aliases"] == []
+        assert g.nodes[("kb1", "泾河龙王")]["aliases"] == []
+
+    def test_uncontested_specific_alias_survives(self):
+        """从未被争夺的特定名(鬼厉 只被 张小凡 声称)不受对称剪枝影响,
+        单向指认合并的旗舰用例保全。"""
+        g = FakeGraph()
+        g.upsert_batch("kb1", "d0", [
+            {"name": "张小凡", "normalized_name": "张小凡", "type": "person",
+             "aliases": ["鬼厉"], "chunk_ids": ["c1"]}], [])
+        graph_aliases = g.list_entity_aliases("kb1")
+        batch = [{"normalized_name": "曾书书", "name": "曾书书", "type": "person",
+                  "aliases": ["书书"]}]
+        n = tasks._drop_contested_aliases(batch, graph_aliases, graph=g, kb_id="kb1")
+        assert n == 0
+        assert g.nodes[("kb1", "张小凡")]["aliases"] == ["鬼厉"]
