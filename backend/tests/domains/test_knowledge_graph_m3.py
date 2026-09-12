@@ -1339,17 +1339,19 @@ class TestLLMConsolidation:
         """提案对在同块原文双名共现 → 接地通过并合并;质量报告入账。"""
         env.llm.consolidate_result = [
             {"a": "齐天大圣", "b": "孙悟空", "reason": "同物"}]
-        kb, doc = _make_doc(env, "复合", ["[E:齐天大圣]今宣你做个官[E:孙悟空]应了"])
+        kb, doc = _make_doc(env, "复合", ["[E:玉帝]宣[E:齐天大圣]做个官[E:孙悟空]应了"])
         t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t["status"] == "succeeded", t["error"]
         q = t["result"]["quality"]
         assert q["llmMergeProposals"] == 1 and q["llmMergeApplied"] == 1
-        # 图中只剩一个节点,另一名进别名
-        remaining = [k for k in env.graph.nodes if k[0] == kb["id"]]
-        assert len(remaining) == 1
-        canon = env.graph.nodes[remaining[0]]
-        assert "齐天大圣" in (remaining[0][1], *canon["aliases"])
-        assert "孙悟空" in (remaining[0][1], *canon["aliases"])
+        # 合并对收敛为一,第三实体(玉帝)保留;canonical 取谁由入库序
+        # 决定,断言只要求:两名只剩一个节点,另一名进其别名
+        remaining = {k[1] for k in env.graph.nodes if k[0] == kb["id"]}
+        assert remaining == {"玉帝", "齐天大圣"} or remaining == {"玉帝", "孙悟空"}
+        canon_name = (remaining - {"玉帝"}).pop()
+        frag_name = "孙悟空" if canon_name == "齐天大圣" else "齐天大圣"
+        canon = env.graph.nodes[(kb["id"], canon_name)]
+        assert frag_name in canon["aliases"]
 
     def test_proposal_without_evidence_rejected(self, env):
         """两名字同块但相距超过证据窗口(80 字) → 接地失败拒绝,节点保留。"""
@@ -1421,8 +1423,8 @@ class TestLLMConsolidation:
             {"a": "齐天大圣", "b": "孙悟空", "reason": "命名句"},
             {"a": "孙行者", "b": "悟空", "reason": "命名句"}]
         kb, doc = _make_doc(env, "阀位", [
-            "[E:齐天大圣]今宣你做个官[E:孙悟空]应了",
-            "[E:孙行者]又唤作[E:悟空]便是",
+            "[E:玉帝]宣[E:齐天大圣]做个官[E:孙悟空]应了",
+            "[E:三藏]道[E:孙行者]又唤作[E:悟空]便是",
         ])
         t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t["status"] == "succeeded", t["error"]
@@ -1453,7 +1455,8 @@ class TestLLMConsolidation:
         assert {k[1] for k in graph.nodes if k[0] == kb["id"]} == {"金皘山", "金皘洞"}
 
     def test_group_name_never_merged(self, env):
-        """群体名(含数量词)是集合不是身份:'金紧禁三个箍儿'≠'紧箍儿'。"""
+        """群体≠成员:'金紧禁三个箍儿'≠'紧箍儿'——MockLLM 给两者建了
+        关系边,无边对判据判其为"两个实体发生了关系",拒绝合并。"""
         env.llm.consolidate_result = [
             {"a": "金紧禁三个箍儿", "b": "紧箍儿", "reason": "相关"}]
         kb, doc = _make_doc(env, "群体", ["[E:金紧禁三个箍儿]与[E:紧箍儿]乃宝贝"])
@@ -1463,3 +1466,29 @@ class TestLLMConsolidation:
         assert q["llmMergeApplied"] == 0
         names = {k[1] for k in env.graph.nodes if k[0] == kb["id"]}
         assert {"金紧禁三个箍儿", "紧箍儿"} <= names
+
+    def test_edge_connected_pair_rejected(self, env):
+        """无边对判据(结构不变量):已有关系边的两个实体是"两个东西发生
+        了关系",不是重复记录——二跑 12 组地名错并(金皘山-金皘洞 间有
+        位于/相关边)与'六耳变作悟空'(必有敌对边)全部被此拦下。"""
+        kb, doc = _make_doc(env, "无边对", ["[E:甲山]中间乃是[E:乙洞]"])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        graph = env.graph
+        # 两者间已被抽取建边(MockLLM 首两实体自动关系)
+        from sdk.graph_store import normalize_name
+        pairs = graph.list_connected_pairs(kb["id"])
+        assert (normalize_name("甲山"), normalize_name("乙洞")) in pairs
+        # 人为改成白名单类型再提案:有边 → 拒绝
+        for k in graph.nodes:
+            if k[0] == kb["id"]:
+                graph.nodes[k]["type"] = "person"
+        env.llm.consolidate_result = [
+            {"a": "甲山", "b": "乙洞", "reason": "像同一个"}]
+        stats = tasks._run_consolidation(
+            handle=None, loader=self._loader(), llm=env.llm, graph=graph,
+            store=env.store, kb_id=kb["id"], doc_id=doc["id"],
+            temperature=0.0, conv_id="c",
+            eligible_types={"person", "creature"})
+        assert stats["applied"] == 0 and stats["rejected"] == 1
+        assert {k[1] for k in graph.nodes if k[0] == kb["id"]} == {"甲山", "乙洞"}

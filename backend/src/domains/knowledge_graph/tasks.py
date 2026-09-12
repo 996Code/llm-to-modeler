@@ -657,28 +657,12 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         handle.log(f"收尾消歧对账失败(不影响导入结论): {e}",
                    level="warn", error=str(e)[:200])
 
-    fragments_after = _fragment_count()
-
-    # 5.8) 收尾描述连边(幂等):把 LLM 写进 description 却没建边的弱事实
-    # 收回成兜底关系——孤立实体的主要来源。确定性子串匹配,零猜测;
-    # 库没配兜底类型(缺省"相关")时整步跳过。
-    linked = 0
-    try:
-        rel_keys = {t.get("key") for t in ((kb.get("schema") or {}).get("relation_types") or [])
-                    if t.get("key")}
-        if _FALLBACK_RELATION_KEY in rel_keys:
-            linked = _backfill_mention_edges(graph, kb_id, doc_id)
-            if linked:
-                handle.log(f"收尾描述连边: 补 {linked} 条孤立实体兜底关系",
-                           level="warn", linked=linked)
-    except Exception as e:
-        handle.log(f"收尾描述连边失败(不影响导入结论): {e}",
-                   level="warn", error=str(e)[:200])
-
-    # 5.9) 收尾 LLM 身份复合(可配):全局视野收最后一层碎片——块内没
+    # 5.8) 收尾 LLM 身份复合(可配):全局视野收最后一层碎片——块内没
     # 说出互指、对账收不了的残余(如 齐天大圣/孙悟空 各自成节点)。LLM
-    # 只提语义候选,代码对每个提案在双方溯源块里找原文共现窗口,接地
-    # 失败即拒绝。llm_identity_merge=false 可整段关闭。
+    # 只提语义候选,代码三重接地(类型白名单/无边对/命名句窗口)后才
+    # 合并。**必须先于描述连边**:复合的无边对判据会把"齐天大圣-相关-
+    # 孙悟空"这类连边当"两个实体"的证据,先连边就自断旗舰用例;且合并
+    # 后别名更富,连边匹配更准。llm_identity_merge=false 可整段关闭。
     consolidation = {"proposals": 0, "applied": 0, "rejected": 0}
     if _cfg(app_state, "llm_identity_merge", True):
         try:
@@ -698,6 +682,24 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         except Exception as e:
             handle.log(f"收尾身份复合失败(不影响导入结论): {e}",
                        level="warn", error=str(e)[:200])
+
+    fragments_after = _fragment_count()
+
+    # 5.9) 收尾描述连边(幂等):把 LLM 写进 description 却没建边的弱事实
+    # 收回成兜底关系——孤立实体的主要来源。确定性子串匹配,零猜测;
+    # 库没配兜底类型(缺省"相关")时整步跳过。
+    linked = 0
+    try:
+        rel_keys = {t.get("key") for t in ((kb.get("schema") or {}).get("relation_types") or [])
+                    if t.get("key")}
+        if _FALLBACK_RELATION_KEY in rel_keys:
+            linked = _backfill_mention_edges(graph, kb_id, doc_id)
+            if linked:
+                handle.log(f"收尾描述连边: 补 {linked} 条孤立实体兜底关系",
+                           level="warn", linked=linked)
+    except Exception as e:
+        handle.log(f"收尾描述连边失败(不影响导入结论): {e}",
+                   level="warn", error=str(e)[:200])
 
     # 6) 收尾统计
     final_status = "partial" if failed_chunks else "succeeded"
@@ -1273,14 +1275,11 @@ _CONSOLIDATE_SPAN = 80       # 证据共现窗口上限(无标点古文按滑窗
 _CONSOLIDATE_MAX_PROPOSALS = 20   # 每批提案上限(进 prompt,约束输出)
 _LLM_MERGE_MAX = 50          # 单文档 LLM 复合合并的保险阀
 # 命名句身份动词:窗口内必须命中其一才算"文本说了它俩是同一个"。
-# 不含"是/打/战"这类高频繁词——它们出现在大量非身份句里,会重新
-# 打开"共现即通过"的假阳性洞。
+# 不含"是/打/战"这类高频繁词;不含"变作/化作"——变化≠改名(六耳
+# 狝猴变作悟空模样是假冒不是同一人),冒名句由结构判据(无边对)拦截。
 _BINDING_MARKER_RE = re.compile(
-    r"[称名唤号即乃做]|原是|正是|变作|化作|叫做|唤作|名曰|本名|法名|道号"
+    r"[称名唤号即乃做]|原是|正是|叫做|唤作|名曰|本名|法名|道号"
     r"|浑名|绰名|绰号|自号|赐名|改名|受封|敕封|册封|题作|唤做")
-# 群体名(数量词+量词/众诸群前缀)是集合不是身份——"金紧禁三个箍儿"
-# 含三个箍儿,与"紧箍儿"是群体与成员,永不参与同一性合并
-_GROUP_NAME_RE = re.compile(r"[两二三四五六七八九十百千0-9]+[个件位只条支]|^众|^诸|^群")
 
 
 def _names_independent_in(window: str, a: str, b: str) -> bool:
@@ -1391,8 +1390,6 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
         for p in (data or {}).get("merges") or []:
             a = normalize_name(str((p or {}).get("a") or ""))
             b = normalize_name(str((p or {}).get("b") or ""))
-            if _GROUP_NAME_RE.search(a) or _GROUP_NAME_RE.search(b):
-                continue  # 群体名是集合,永不参与同一性合并
             if a in by_name and b in by_name and a != b:
                 key = (a, b) if a < b else (b, a)
                 if key not in seen_pairs:
@@ -1407,6 +1404,16 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                        batch=done_b, proposals=len(seen_pairs))
     stats["proposals"] = len(seen_pairs)
 
+    # 结构判据(无边对):同一实体的碎片是"重复记录",相互之间没有关系
+    # 边;已有边相连的两个实体是"两个东西发生了关系",永远不该合并。
+    # 这是纯图结构不变量,零语义枚举——线上二跑的 12 组地名错并
+    # (金皘山-金皘洞 之类,彼此本就有'位于/相关'边)全部会被它拦下;
+    # '六耳猕猴变作悟空'类假冒也拦(两者必有敌对边)。
+    try:
+        connected = graph.list_connected_pairs(kb_id)
+    except Exception:
+        connected = set()
+
     def _canon_key(name: str):
         e = by_name[name]
         return (e.get("created_at") or "9999",
@@ -1414,9 +1421,9 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                 -len(name))
 
     # 保险阀卡在"接地通过的合并数"而非提案数:提案在接地验证前是无害
-    # 的旁路信息,接地(命名句窗口)才是真正的防线——把阀放在提案数上会
-    # 连坐合法提案(线上首跑实测:98 提案被阀全弃,其中含合法对)。达阀
-    # 即停,后续提案只计入 rejected。
+    # 的旁路信息,接地(类型白名单/无边对/命名句)才是真正的防线——把
+    # 阀放在提案数上会连坐合法提案(线上首跑:98 提案被旧阀全弃)。
+    # 达阀即停,后续提案只计入 rejected。
     for a, b in proposals:
         if a not in by_name or b not in by_name:
             continue  # 本轮早前合并已吸收一方,静默跳过
@@ -1426,6 +1433,9 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
         e_a, e_b = by_name[a], by_name[b]
         if (e_a.get("type") or "") != (e_b.get("type") or ""):
             stats["rejected"] += 1
+            continue
+        if (a, b) in connected:
+            stats["rejected"] += 1  # 已有关系边 = 两个实体,不是重复记录
             continue
         evidence = _find_pair_evidence(a, b, e_a, e_b, chunk_texts)
         if not evidence:
