@@ -111,4 +111,9 @@ export interface SSEResult {
   questions?: ClarificationQuestion[]  // 后端 AskQuestion 对象(非纯字符串)
   intent?: string                    // 意图分类："create" | "modify" | "general"
   conversationId?: string            // 会话 ID(懒创建场景:首条消息不带 id,后端建好后随 result 回传)
+  // chatbi pack(formatted 平铺字段,BiChartCard 渲染)
+  chart?: Record<string, any>        // ECharts option(chart_engine 产出)
+  metricHits?: Array<{ metric?: string, display_name?: string }>  // 命中业务指标
+  rowcount?: number                  // 结果行数
+  datasourceName?: string            // 数据源名
 }

@@ -195,9 +195,16 @@
                 </a-tag>
               </div>
               <div class="data-card-body">
+                <!-- chatbi 图表卡(ECharts/kpi/table + 命中指标标签) -->
+                <BiChartCard
+                  v-if="msg.formattedData?.chart"
+                  :chart="msg.formattedData.chart"
+                  :metric-hits="msg.formattedData.metricHits"
+                  :artifact="msg.dataResult"
+                />
                 <!-- 知识图谱检索结果:专用子图卡片(G6 懒加载渲染 + 来源引用) -->
                 <KgGraphCard
-                  v-if="msg.dataResult?.type === 'kg_search_result'"
+                  v-else-if="msg.dataResult?.type === 'kg_search_result'"
                   :result="msg.dataResult"
                   :cited-chunks="citedChunkNums(msg.content)"
                 />
@@ -294,6 +301,7 @@ import type { FormConfig, ClarificationQuestion, ClarificationOption } from '../
 // 子组件：输入框
 import ChatInput from './ChatInput.vue'
 import KgGraphCard from './KgGraphCard.vue'
+import BiChartCard from './BiChartCard.vue'
 // 子组件：JSON 变更视图（查看弹窗用，红删绿增）
 import JsonDiffView from '../json/JsonDiffView.vue'
 // HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage

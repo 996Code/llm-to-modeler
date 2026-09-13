@@ -123,14 +123,8 @@ register_admin_auth(require_admin)
 # 见 sdk.relational_store 的命名空间隔离)。TRUNCATE RESTART IDENTITY 把
 # 自增序列一并归零(task_logs 断线补齐游标、检查点行都回到"全新库"语义),
 # 等价于旧 SQLite 时代每测试一个 tmp 文件。pytest 默认串行执行,无并发竞争。
-_TRUNCATE_TABLES = (
-    "public.session_pack_state", "public.call_logs", "public.events",
-    "public.session_meta", "public.tasks", "public.task_logs",
-    "public.pack_settings",
-    "knowledge_graph.kg_chunks", "knowledge_graph.kg_documents",
-    "knowledge_graph.kg_knowledge_bases",
-    "public.checkpoints", "public.checkpoint_blobs", "public.checkpoint_writes",
-)
+_TRUNCATE_SCHEMAS = ("public", "knowledge_graph", "chatbi")
+_TRUNCATE_EXCLUDE = {"checkpoint_migrations"}
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -156,8 +150,8 @@ def _init_schema():
 
 @pytest.fixture(autouse=True)
 def _clean_tables(_init_schema):
-    """每测试清空全部业务表(函数级,autouse;schema 感知——只清实际存在的
-    限定表,防御式探测)。"""
+    """每测试清空全部业务表(函数级,autouse;按 _TRUNCATE_SCHEMAS 动态探测
+    现存表后 TRUNCATE,新 pack 表自动纳入隔离)。"""
     import psycopg
     from psycopg import sql
 
@@ -166,7 +160,10 @@ def _clean_tables(_init_schema):
             "SELECT table_schema, table_name FROM information_schema.tables "
             "WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"
         ).fetchall()
-        existing = {f"{r[0]}.{r[1]}" for r in rows} & set(_TRUNCATE_TABLES)
+        existing = {
+            f"{r[0]}.{r[1]}" for r in rows
+            if r[0] in _TRUNCATE_SCHEMAS and r[1] not in _TRUNCATE_EXCLUDE
+        }
         if existing:
             conn.execute(
                 sql.SQL("TRUNCATE {} RESTART IDENTITY CASCADE").format(

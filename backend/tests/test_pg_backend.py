@@ -221,20 +221,20 @@ def test_pg_kg_store_paths():
         ks.delete_kb(kb["id"])
 
 
-def test_truncate_list_covers_all_tables():
-    """清表名单漂移守卫:库内任何 schema 下的业务表(除 checkpoint_migrations
-    记账表)都必须以 schema 限定名出现在 conftest 清表名单里——否则新表/新
-    pack schema 残留跨测试脏数据,故障隐蔽。"""
+def test_truncate_covers_all_known_schemas():
+    """清表漂移守卫:凡出现在已知 pack schema(public/knowledge_graph/chatbi)
+    的表都会被动态清表覆盖;若未来新增 pack schema,必须同步加进
+    conftest._TRUNCATE_SCHEMAS,否则该 schema 的表逃过清表(跨测试脏数据)。"""
     import psycopg
-    from tests.conftest import _TRUNCATE_TABLES
+    from tests.conftest import _TRUNCATE_SCHEMAS
 
     with psycopg.connect(TEST_URL) as conn:
         rows = conn.execute(
-            "SELECT table_schema, table_name FROM information_schema.tables "
+            "SELECT DISTINCT table_schema FROM information_schema.tables "
             "WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"
         ).fetchall()
-    uncovered = ({f"{r[0]}.{r[1]}" for r in rows}
-                 - set(_TRUNCATE_TABLES) - {"public.checkpoint_migrations"})
-    assert not uncovered, (
-        f"以下表不在 tests/conftest.py 的 _TRUNCATE_TABLES 清表名单,"
-        f"会造成跨测试脏数据: {sorted(uncovered)}")
+    orphan_schemas = {r[0] for r in rows} - set(_TRUNCATE_SCHEMAS)
+    # 允许:其他插件在各自部署库建 schema;测试库里不该有未知 schema
+    assert not orphan_schemas, (
+        f"测试库出现未知 schema: {sorted(orphan_schemas)}——"
+        f"请加进 tests/conftest.py 的 _TRUNCATE_SCHEMAS")

@@ -1,0 +1,43 @@
+# chatbi 插件 manifest —— 自然语言 BI 查询(NL2SQL + 图表)
+# 移植自 chat-bi 独立平台;领域能力全量保留(数据源管理/语义层/图谱/
+# RAG 检索/记忆/指标闭环/Skills/多轮/澄清),平台机制(路由/SSE/落库/
+# 观测/身份)由引擎提供。
+
+domain:
+  description: >
+    业务数据查询与分析("查一下上个月 GMV""各城市订单量对比""画个趋势图"
+    "换成饼图"等)类需求;需要连接业务数据库做统计分析时路由到本域。
+    追问继承上一轮的查询维度(如"年度呢?""按日对比")。
+  compact_focus: 查询过的数据源与表、生成的 SQL、结果行数、命中的指标
+
+artifact:
+  type: data
+  actions: [view_json]
+  display:
+    welcome_icon: chart
+    data_labels:
+      rowcount: 返回行数
+      datasource_name: 数据源
+      metric_hits: 命中指标
+      tables: 涉及表
+    welcome_examples:
+      - {title: 月度销售趋势, desc: 各月订单金额走势, prompt: 最近12个月每月的订单金额趋势, icon: chart}
+      - {title: 城市对比, desc: 各城市订单量排名, prompt: 各城市的订单数量排名, icon: chart}
+      - {title: 品类占比, desc: 各品类销售额占比, prompt: 各品类的销售额占比分布, icon: chart}
+      - {title: 切换图表, desc: 把上一步结果换成饼图, prompt: 换成饼图, icon: chart}
+
+dependencies:
+  milvus:
+    required: true          # 语义层向量检索(两阶段召回第一阶段)
+    fields:
+      - milvus_uri
+    probe:
+      module: domains.chatbi.probes
+      fn: milvus
+
+admin:
+  settings: settings.schema.yaml
+  page: chatbi              # 管理端自定义页(数据源管理/语义层/图谱浏览)
+  title: 数据分析 ChatBI
+
+settings_side_effects: []

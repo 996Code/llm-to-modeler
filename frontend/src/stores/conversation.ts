@@ -305,6 +305,11 @@ export const useConversationStore = defineStore('conversation', () => {
             if (result.fieldCount !== undefined) formattedData.fieldCount = result.fieldCount
             if (result.formName !== undefined) formattedData.formName = result.formName
             if (result.title !== undefined) formattedData.title = result.title
+            // chatbi 图表卡(formatted 平铺: ECharts option + 命中指标 + 元信息)
+            if (result.chart !== undefined) formattedData.chart = result.chart
+            if (result.metricHits !== undefined) formattedData.metricHits = result.metricHits
+            if (result.rowcount !== undefined) formattedData.rowcount = result.rowcount
+            if (result.datasourceName !== undefined) formattedData.datasourceName = result.datasourceName
             messages.value.push({
               role: 'assistant',
               content: result.summary,

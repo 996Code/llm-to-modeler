@@ -1,0 +1,678 @@
+"""ask_data —— ChatBI 主查询工具(CompositeTool)。
+
+移植来源: chat-bi backend/app/ai/agent.py(7 步状态机,475 行) +
+backend/app/api/chat.py 的调用侧状态恢复逻辑。
+引擎侧映射: 7 步状态机 → CompositeTool steps;ask_user 三场景 → ToolResult.ask
+(interrupt/resume);StateStore 多轮继承 → session_state;意图识别 → 引擎路由
+(闲聊由引擎兜底,本工具只处理数据查询类)。
+
+步骤与 ChatBI 的对应:
+  resolve_datasource  ← chat.py 会话绑定数据源解析 + datasource registry
+  retrieve_schema     ← agent.py SCHEMA_SEARCH(两阶段检索 + 图谱表扩展 + 追问表继承)
+  think               ← agent.py THINKING(T027 预思考)
+  generate_sql        ← agent.py GENERATE_SQL(T029 prompt 分层 + T030 校验)
+  execute_sql         ← agent.py EXECUTE_SQL + SELF_HEAL(AEE-002, ≤max_rounds 回环)
+  check_result        ← agent.py SELF_CHECK(T033)——异常场景 → ask(结果异常澄清)
+  visualize           ← agent.py VISUALIZE(T034/T035) + metric 反哺闭环
+
+追问继承 (对标 chat-bi state_store 的 prev_sql/prev_tables):
+  每轮结束把 prev_sql/prev_tables/chart_config 写 session_state;
+  检索阶段合并 prev_tables(追问不丢表),history 注入 prompt。
+"""
+from __future__ import annotations
+
+import logging
+import time
+
+from sdk.tool import CompositeTool, ToolResult, ToolContext, AskOption, AskQuestion, AskSpec
+from sdk.relational_store import PackRelationalDB
+
+from domains.chatbi import datasources
+from domains.chatbi.checker import check_result, ResultIssue
+from domains.chatbi.chart_engine import generate_chart, inject_data
+from domains.chatbi.healer import extract_sql_text, heal_sql
+from domains.chatbi.security.sql_validator import validate_sql
+
+logger = logging.getLogger(__name__)
+
+# ── SQL 生成 prompt (T029 分层;移植自 sql_agent.py,文本原样) ──
+_SQL_SYSTEM_PROMPT = """你是 BI 系统的 SQL 生成器。根据用户问题和数据库 schema 生成 PostgreSQL 查询。
+
+严格规则 (违反则拒绝执行):
+1. 只能生成 SELECT 语句, 禁止任何写操作 (INSERT/UPDATE/DELETE/DROP/ALTER)
+2. 只能使用下方"允许的列"里列出的列名, 禁止臆造列名
+3. 遵守 data_type 约束: 不能对 VARCHAR/TEXT 做数值聚合(SUM/AVG), 不能对 DATE 做数值运算
+4. 禁止危险函数: LOAD_FILE/SLEEP/BENCHMARK/INTO OUTFILE
+5. 只返回 SQL, 不要解释文字, 不要 markdown 包裹
+6. 为每个 SELECT 输出列添加 AS 中文别名: schema 中列名后括号标注了中文名(中文: xxx), 用它做别名。聚合列也要有中文别名, 如 COUNT(*) AS 订单数。别名用双引号包裹, 如 user_id AS "用户ID"。
+
+只返回一条 SQL 语句。"""
+
+# ── 预思考 prompt (T027, 移植自 thinking.py) ─────────────────
+_THINKING_PROMPT = """你是 BI 分析师。在生成 SQL 前, 先分析查询思路。
+
+用户问题: {question}
+
+可用表/列:
+{schema}
+
+检索到的候选:
+{candidates}
+{history_section}
+请分析 (只返回 JSON):
+{{
+  "tables": ["选中的表名 (附一句理由)"],
+  "aggregation": "聚合方式说明 (SUM/COUNT/AVG + GROUP BY 维度)",
+  "caveats": ["注意事项 (Fan-Trap/多对多JOIN/维度混淆等陷阱)"],
+  "prev_sql_review": "如有对话历史, 简述上一轮 SQL 是否有可优化处 (无历史则留空)"
+}}"""
+
+
+def format_thinking_hint(thinking: dict | None) -> str | None:
+    """预思考结果 → SQL 生成提示文本(移植自 thinking.format_thinking_hint)。"""
+    if not thinking or thinking.get("error"):
+        return None
+    parts = []
+    if thinking.get("tables"):
+        parts.append("选表: " + "; ".join(str(t) for t in thinking["tables"]))
+    if thinking.get("aggregation"):
+        parts.append("聚合: " + str(thinking["aggregation"]))
+    if thinking.get("caveats"):
+        parts.append("注意: " + "; ".join(str(c) for c in thinking["caveats"]))
+    if thinking.get("prev_sql_review"):
+        parts.append("上轮优化: " + str(thinking["prev_sql_review"]))
+    return "\n".join(parts) if parts else None
+
+
+def _format_history(messages: list, max_turns: int = 4) -> str:
+    """对话消息 → 历史文本(追问注入;移植自 chat.py 的 history 组装)。"""
+    recent = messages[-(max_turns * 2):] if messages else []
+    lines = []
+    for m in recent:
+        role = "用户" if m.get("role") == "user" else "助手"
+        content = (m.get("content") or "")[:300]
+        if content:
+            lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+class AskDataTool(CompositeTool):
+    name = "ask_data"
+    description = "用自然语言查询业务数据库:自动检索表结构、生成 SQL、执行并生成图表"
+    when = "用户想查数据、看指标、做统计分析、对比趋势、生成图表报表时"
+    state_scope = "chatbi"  # 与 switch_chart 共享会话记忆(prev_sql/绑定数据源)
+
+    steps = ["resolve_datasource", "retrieve_schema", "think", "generate_sql",
+             "execute_sql", "check_result", "visualize", "finalize"]
+    pipeline_steps = [
+        {"key": "resolve_datasource", "label": "连接数据源"},
+        {"key": "retrieve_schema", "label": "检索表结构"},
+        {"key": "think", "label": "分析思路"},
+        {"key": "generate_sql", "label": "生成 SQL"},
+        {"key": "execute_sql", "label": "执行查询"},
+        {"key": "check_result", "label": "结果校验"},
+        {"key": "visualize", "label": "生成图表"},
+    ]
+
+    def __init__(self, app_state=None, db: PackRelationalDB | None = None,
+                 settings: dict | None = None):
+        self._app_state = app_state
+        self._db = db
+        self._settings = settings or {}
+
+    # ── 依赖取用(懒建;测试注入 db/settings) ──────────────────
+    def _get_db(self) -> PackRelationalDB:
+        if self._db is None:
+            from domains.chatbi.runtime import get_pack_db
+            self._db = get_pack_db()
+        return self._db
+
+    def _get_settings(self, ctx: ToolContext) -> dict:
+        if self._settings:
+            return self._settings
+        from domains.chatbi.runtime import get_settings_reader
+        return get_settings_reader(ctx).all()
+
+    def _get_llm(self, ctx: ToolContext):
+        return ctx.llm_client
+
+    def input_schema(self) -> dict:
+        return {"type": "object", "properties": {}, "required": []}
+
+    # ── Step 1: 数据源解析(chat.py 会话绑定逻辑移植) ───────────
+    def _step_resolve_datasource(self, state, ctx):
+        ctx.emit("stage", "resolve_datasource", "正在连接数据源...")
+        db = self._get_db()
+        sess = ctx.session_state
+        bound_id = (sess.get("datasource_id") if sess else None)
+        try:
+            info = datasources.resolve_datasource(db, bound_id)
+        except ValueError as e:
+            state["_need_clarify"] = True
+            state["_error"] = str(e)
+            return
+        state["ds"] = info
+        if sess and bound_id != info.id:
+            sess.set("datasource_id", info.id)  # 会话绑定数据源(显式切换才更新)
+
+    # ── Step 2: 检索(SCHEMA_SEARCH: 两阶段检索+图谱扩展+追问继承) ──
+    def _step_retrieve_schema(self, state, ctx):
+        if state.get("_need_clarify"):
+            return
+        ds: datasources.DataSourceInfo = state["ds"]
+        ctx.emit("stage", "retrieve_schema", f"正在检索 {ds.name} 的表结构...")
+        db = self._get_db()
+        settings = self._get_settings(ctx)
+        sess = ctx.session_state
+
+        # 语义层当前版本(未扫描 → 提示先扫描, fail-closed 不瞎猜)
+        from domains.chatbi import semantic
+        content = semantic.load_current_content(db, ds.id)
+        if content is None or not content.models:
+            state["_need_clarify"] = True
+            state["_error"] = (f"数据源「{ds.name}」尚未扫描语义层, 请先在管理端"
+                               f"执行扫描后再提问")
+            return
+
+        # 两阶段检索(向量召回 → LLM 精筛);向量设施不可用 → 全表清单降级
+        from domains.chatbi import retrieval as retrieval_mod
+        from domains.chatbi import stores as cb_stores
+        llm = self._get_llm(ctx)
+        question = state.get("user_input", "")
+        try:
+            store = cb_stores.get_vector(self._app_state)
+            embedder = cb_stores.get_embedder(llm)
+            rc = retrieval_mod.retrieve_context(
+                question, content, store, embedder,
+                data_source_id=ds.id, llm=llm, db=db,
+                top_k=int(settings.get("retrieve_top_k", 20)),
+                conv_id=ctx.conv_id)
+            seed_tables = rc["model_names"]
+            # 指标命中拆分(反查所属表用;对标 agent.py stage3 的 type 过滤)
+            state["hit_metric_names"] = [
+                m["name"] for m in getattr(rc["retrieval"], "models", [])
+                if isinstance(m, dict) and m.get("type") == "metric"]
+            # 一站式产物直接复用(与后续步骤的重复构建避免)
+            state["schema_context"] = rc["schema_context"]
+            state["allowed_columns"] = rc["allowed_columns"]
+            state["metrics_hint"] = rc["metrics_hint"]
+        except Exception as e:  # 向量设施故障 → 全表降级(检索降级不阻断, 对标 O8)
+            logger.warning("向量检索不可用, 降级全表清单: %s", e)
+            seed_tables = [m.name for m in content.models]
+
+        # 追问表继承 (ARC-04/chat_utils.inherit_prev_tables 移植):
+        # 只继承语义层中有定义的表(防止表已删除/重命名仍被引用), 去重
+        prev_tables = (sess.get("prev_tables") if sess else None) or []
+        merged = _inherit_prev_tables(prev_tables, list(seed_tables), content)
+        # 指标命中反查所属表(用户问"GMV"可能只召回 metric 记录, 补入所属表)
+        if not merged and state.get("hit_metric_names"):
+            metric_names = state["hit_metric_names"]
+            for model in content.models:
+                if any(m.name in metric_names for m in model.metrics):
+                    if model.name not in merged:
+                        merged.append(model.name)
+
+        # 图谱表扩展 + JOIN 路径预计算 (最短路径 + 社区补全, 对标 agent.py stage3:
+        # 请求级 SchemaGraph 单例, expand + join_path 共享同一实例)
+        expanded = list(merged)
+        join_path_section = ""
+        if settings.get("graph_enabled", True) and len(content.models) > 1:
+            from domains.chatbi.schema_graph import (get_schema_graph,
+                                                     expand_with_relationships,
+                                                     build_join_path_section)
+            try:
+                sg = get_schema_graph(content)
+                expanded = expand_with_relationships(
+                    content, merged,
+                    max_depth=int(settings.get("graph_max_join_path_hops", 4)),
+                    graph=sg)
+                join_path_section = build_join_path_section(
+                    content, expanded, graph=sg, seed_names=list(seed_tables),
+                    join_path_in_prompt=bool(
+                        settings.get("graph_join_path_in_prompt", True)))
+            except Exception as e:
+                logger.warning("图谱扩展失败(降级为检索表集): %s", e)
+
+        state["content"] = content
+        state["seed_tables"] = list(seed_tables)
+        state["expanded_tables"] = sorted(set(expanded) - set(seed_tables))
+        state["current_tables"] = expanded
+        state["join_path_section"] = join_path_section
+
+        # 多候选低分 → 表不确定澄清 (ask_user 场景②: CLARIFICATION)
+        # 注意: run_pipeline 丢弃 step 返回值——结果必须走 state["_result"]
+        if (not seed_tables and not prev_tables
+                and len(content.models) > int(settings.get("clarify_table_threshold", 8))):
+            options = [AskOption(label=m.display_name or m.name,
+                                 description=m.description or m.name)
+                       for m in content.models[:4]]
+            state["_need_clarify"] = True
+            state["_result"] = ToolResult(
+                artifact_type="data",
+                ask=AskSpec(questions=[AskQuestion(
+                    question=f"「{ds.name}」里有 {len(content.models)} 张表, "
+                             f"你想从哪张表的数据入手?",
+                    header="选择数据表",
+                    options=options,
+                )]),
+                summary="需要确认查询的数据表",
+                extra={"clarify_kind": "table_confirm",
+                       "tables": [m.name for m in content.models]},
+            )
+            return
+
+    # ── Step 3: 预思考(T027;失败降级空思考不阻塞) ──────────────
+    def _step_think(self, state, ctx):
+        if state.get("_need_clarify") or state.get("_result"):
+            return
+        ctx.emit("stage", "think", "正在分析查询思路...")
+        llm = self._get_llm(ctx)
+        settings = self._get_settings(ctx)
+        question = state.get("user_input", "")
+        content = state["content"]
+
+        schema_ctx = state.get("schema_context")
+        if not schema_ctx:
+            from domains.chatbi.retrieval import build_schema_context
+            schema_ctx = build_schema_context(content, state["current_tables"])
+        if not state.get("allowed_columns"):
+            from domains.chatbi.retrieval import extract_allowed_columns
+            state["allowed_columns"] = extract_allowed_columns(
+                content, state["current_tables"])
+
+        history = state.get("history_text") or ""
+        history_section = f"\n对话历史:\n{history}\n" if history else ""
+        prompt = _THINKING_PROMPT.format(
+            question=question, schema=schema_ctx,
+            candidates=", ".join(state["current_tables"]) or "(无)",
+            history_section=history_section)
+        thinking: dict = {}
+        try:
+            thinking = llm.chat_json(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0, stage="chatbi.think", conv_id=ctx.conv_id) or {}
+        except Exception as e:
+            logger.warning("预思考失败(降级空思考): %s", e)
+            thinking = {"error": str(e)}
+        state["thinking"] = thinking
+        state["thinking_hint"] = format_thinking_hint(thinking)
+
+    # ── Step 4: 生成 SQL(T029 分层注入: schema/fewshot/skills/指标/记忆/历史) ──
+    def _step_generate_sql(self, state, ctx):
+        if state.get("_need_clarify") or state.get("_result"):
+            return
+        ctx.emit("stage", "generate_sql", "正在生成 SQL...")
+        llm = self._get_llm(ctx)
+        settings = self._get_settings(ctx)
+        ds: datasources.DataSourceInfo = state["ds"]
+        content = state["content"]
+        question = state.get("user_input", "")
+
+        schema_ctx = state.get("schema_context")
+        if not schema_ctx:
+            from domains.chatbi.retrieval import build_schema_context
+            schema_ctx = build_schema_context(content, state["current_tables"])
+        # 白名单列: 取整个语义层的全部列(agent.py 权威注释——语义层本身是
+        # 安全边界;命中表只影响 schema_context,限制白名单会误拒正确 JOIN)
+        allowed = state.get("allowed_columns")
+        if not allowed:
+            from domains.chatbi.retrieval import extract_allowed_columns
+            allowed = extract_allowed_columns(content)
+        if not allowed:
+            # 防御: 无语义层 → Layer3 白名单失效 → fail-closed 拒绝生成
+            state["_error"] = "无语义层定义, 无法做白名单约束, 拒绝生成 SQL (请先扫描数据源)"
+            return
+        state["allowed_columns"] = allowed
+
+        # 注入段(全部保留 ChatBI 的注入点, 缺失则跳过)
+        sections = []
+        skills_text = ""
+        try:
+            from domains.chatbi.skills_loader import load_skills_text
+            skills_text = load_skills_text(ds.db_type)
+            if skills_text:
+                sections.append(f"【业务规则 (Skills)】\n{skills_text}")
+        except Exception as e:
+            logger.warning("Skills 加载失败(跳过): %s", e)
+
+        try:
+            from domains.chatbi import fewshot as fewshot_mod
+            from domains.chatbi import stores as cb_stores
+            examples = fewshot_mod.find_fewshot_examples(
+                question, cb_stores.get_vector(self._app_state),
+                cb_stores.get_embedder(llm), data_source_id=ds.id,
+                top_k=int(settings.get("fewshot_top_k", 3)),
+                db=self._get_db(), conv_id=ctx.conv_id)
+            fewshot_text = fewshot_mod.format_fewshot_prompt(examples)
+            if fewshot_text:
+                sections.append(f"【参考示例】\n{fewshot_text}")
+                state["fewshot_count"] = len(examples)
+        except Exception as e:
+            logger.warning("Few-shot 加载失败(跳过): %s", e)
+
+        if state.get("thinking_hint"):
+            sections.append(f"【预思考提示】\n{state['thinking_hint']}")
+        if state.get("join_path_section"):
+            sections.append(f"【JOIN 路径】\n{state['join_path_section']}")
+        metrics_hint = state.get("metrics_hint")
+        if metrics_hint is None:
+            from domains.chatbi.retrieval import build_metrics_hint
+            metrics_hint = build_metrics_hint(content, state["current_tables"])
+        if metrics_hint:
+            sections.append(f"【业务指标定义】\n{metrics_hint}")
+
+        try:
+            from domains.chatbi.memory import recall_text
+            mem_text = recall_text(llm, self._get_db(), question,
+                                   conv_id=ctx.conv_id)
+            if mem_text:
+                sections.append(f"【相关记忆】\n{mem_text}")
+        except Exception as e:
+            logger.warning("记忆召回失败(跳过): %s", e)
+
+        if state.get("history_text"):
+            sections.append(f"【对话历史】\n{state['history_text']}")
+        sections.append(f"【用户问题】{question}\n\n请生成 SQL:")
+
+        user_content = "\n\n".join(sections)
+        content_resp, _ = llm.chat(
+            messages=[{"role": "system", "content": _SQL_SYSTEM_PROMPT},
+                      {"role": "user", "content": user_content}],
+            temperature=0.0, stage="chatbi.generate_sql", conv_id=ctx.conv_id)
+
+        sql = extract_sql_text(content_resp)
+        if not sql:
+            # LLM 彻底失败(无 SQL) → final(failed);error_is_internal 语义由引擎处理
+            state["_error"] = "LLM 未返回有效 SQL"
+            return
+        state["sql"] = sql
+        validation = validate_sql(sql, allowed)
+        # 校验失败不在此终止: 与执行失败同入自愈循环(agent.py 统一 while-true)
+        state["validation"] = validation
+
+    # ── Step 5: 执行 + 自愈回环(EXECUTE_SQL + SELF_HEAL, ≤max_rounds) ──
+    def _step_execute_sql(self, state, ctx):
+        if state.get("_need_clarify") or state.get("_result") or state.get("_error"):
+            return
+        settings = self._get_settings(ctx)
+        ds: datasources.DataSourceInfo = state["ds"]
+        llm = self._get_llm(ctx)
+        max_rounds = int(settings.get("sql_self_heal_rounds", 2))
+        max_rows = int(settings.get("sql_max_rows", 10000))
+        timeout = int(settings.get("sql_execution_timeout", 30))
+        schema_ctx = _schema_ctx(state)
+
+        sql = state["sql"]
+        started = time.monotonic()
+        allowed = state.get("allowed_columns") or set()
+
+        # 校验首版 SQL (校验不过不执行——T030 fail-closed)
+        validation = state.get("validation")
+        last_error = None
+        result = None
+        if validation is not None and not validation.ok:
+            last_error = f"校验失败 ({validation.violated_layer}): {validation.reason}"
+        else:
+            result = datasources.execute_readonly(ds, sql, max_rows=max_rows,
+                                                  timeout_seconds=timeout)
+            if not result.ok:
+                last_error = result.error
+
+        # 自愈循环: 校验失败/执行失败 → heal → 重新校验 + 执行 (AEE-002)
+        heal_rounds = 0
+        while last_error is not None and heal_rounds < max_rounds:
+            heal_rounds += 1
+            ctx.emit("stage", "execute_sql", f"自愈中 (第 {heal_rounds} 轮)...")
+            if not state.get("heal_before_sql"):
+                state["heal_before_sql"] = sql
+            heal = heal_sql(llm, sql, last_error, allowed, schema_ctx,
+                            conv_id=ctx.conv_id)
+            if not heal.success:
+                last_error = f"SQL 自愈失败 ({heal_rounds} 轮): {heal.error}"
+                break
+            sql = heal.sql
+            # 重新校验(自愈结果也走三层校验, v1 教训 #32)
+            revalidation = validate_sql(sql, allowed)
+            if not revalidation.ok:
+                last_error = f"校验失败 ({revalidation.violated_layer}): {revalidation.reason}"
+                continue
+            result = datasources.execute_readonly(ds, sql, max_rows=max_rows,
+                                                  timeout_seconds=timeout)
+            last_error = result.error if not result.ok else None
+
+        duration = int((time.monotonic() - started) * 1000)
+        # 链路打点(引擎时间线;SQL 全文随 checkpoint 落制品)
+        ctx.trace("chatbi.execute",
+                  title=f"执行查询({ds.name})",
+                  status="ok" if last_error is None else "error",
+                  duration_ms=duration,
+                  detail={"heal_rounds": heal_rounds,
+                          "rows": (result.rowcount if result else 0),
+                          "truncated": bool(result and result.truncated)})
+        if last_error is not None:
+            state["_error"] = f"SQL 失败 (自愈 {heal_rounds} 轮未解决): {last_error}"
+            state["sql"] = sql
+            return
+        state["sql"] = sql
+        state["execute_result"] = result
+        state["heal_rounds"] = heal_rounds
+        ctx.emit("stage", "execute_sql_done", f"查询成功, 返回 {result.rowcount} 行")
+
+    # ── Step 6: 结果自检(T033;ALL_NULL/CARTESIAN → ask 澄清场景③) ──
+    def _step_check_result(self, state, ctx):
+        if state.get("_need_clarify") or state.get("_result") or state.get("_error"):
+            return
+        settings = self._get_settings(ctx)
+        max_rows = int(settings.get("sql_max_rows", 10000))
+        max_rounds = int(settings.get("sql_self_heal_rounds", 2))
+        result = state["execute_result"]
+        check = check_result(result.rows, result.columns, state["sql"],
+                             max_rows=max_rows)
+        state["check"] = check
+        if check.ok:
+            return
+
+        # 结果异常 → 先自动修正(suggestion 作纠正方向, 占自愈配额, AEE-003)
+        heal_rounds = int(state.get("heal_rounds", 0))
+        if check.suggestion and heal_rounds < max_rounds:
+            heal_rounds += 1  # 先占配额(与 SQL 自愈循环一致)
+            ctx.emit("stage", "check_result", f"结果异常({check.issue.value}), 自动修正中...")
+            llm = self._get_llm(ctx)
+            heal = heal_sql(llm, state["sql"], check.reason,
+                            state.get("allowed_columns") or set(),
+                            _schema_ctx(state), conv_id=ctx.conv_id,
+                            error_detail=f"{check.reason} 建议: {check.suggestion}")
+            if heal.success:
+                revalidate = validate_sql(heal.sql, state.get("allowed_columns") or set())
+                if revalidate.ok:
+                    ds: datasources.DataSourceInfo = state["ds"]
+                    re_result = datasources.execute_readonly(
+                        ds, heal.sql, max_rows=max_rows,
+                        timeout_seconds=int(settings.get("sql_execution_timeout", 30)))
+                    if re_result.ok:
+                        recheck = check_result(re_result.rows, re_result.columns,
+                                               heal.sql, max_rows=max_rows)
+                        if recheck.ok:
+                            logger.info("结果自检自动修正成功")
+                            state["sql"] = heal.sql
+                            state["execute_result"] = re_result
+                            state["check"] = recheck
+                            state["heal_rounds"] = heal_rounds
+                            return  # 修正成功, 跳过 ask_user(继续后续 step)
+
+        # 仍异常 → 主动暂停问用户 (ask_user 场景③: 结果异常)
+        state["_need_clarify"] = True
+        state["_result"] = ToolResult(
+            artifact_type="data",
+            ask=AskSpec(questions=[AskQuestion(
+                question=f"查询结果异常: {check.reason}。要怎么处理?",
+                header="结果异常",
+                options=[
+                    AskOption(label="按原样展示", description="仍查看当前结果"),
+                    AskOption(label="帮我调整查询", description="描述你想看的角度, 重新生成 SQL"),
+                ],
+            )]),
+            summary=f"结果异常: {check.reason}",
+            extra={"clarify_kind": "result_abnormal",
+                   "issue": check.issue.value if check.issue else "",
+                   "sql": state["sql"],
+                   "columns": result.columns, "rows": result.rows},
+        )
+
+    # ── Step 7: 图表(T034/T035) + 指标反哺闭环 ─────────────────
+    def _step_visualize(self, state, ctx):
+        if state.get("_need_clarify") or state.get("_result") or state.get("_error"):
+            return
+        ctx.emit("stage", "visualize", "正在生成图表...")
+        result = state["execute_result"]
+        llm = self._get_llm(ctx)
+        sess = ctx.session_state
+        chart_hint = (sess.get("chart_type_hint") if sess else None)
+        chart = generate_chart(llm, state.get("user_input", ""),
+                               result.columns, result.rows,
+                               chart_type_hint=chart_hint, conv_id=ctx.conv_id)
+        state["chart"] = chart
+
+        # 指标反哺闭环 (recall.persist_metric_feedback 移植):
+        # SQL 命中已知指标 → co_occurrence+1;新聚合模式(单表) → suggestion
+        try:
+            from domains.chatbi.feedback import persist_metric_feedback
+            hits = persist_metric_feedback(
+                self._get_db(), llm, state["sql"], state["content"],
+                datasource_id=state["ds"].id, conv_id=ctx.conv_id)
+            state["metric_hits"] = hits or []
+        except Exception as e:
+            logger.warning("指标反哺失败(不阻断): %s", e)
+            state["metric_hits"] = []
+
+    # ── Step 8: 组装 ToolResult + 会话状态写回 ─────────────────
+    def _step_finalize(self, state, ctx):
+        # 错误路径: error_for_llm 回流(引擎重试/降级判定用)
+        if state.get("_error"):
+            state["_result"] = ToolResult(
+                artifact_type="data",
+                error_for_llm=state["_error"],
+                summary=f"查询失败: {state['_error']}",
+                extra={"sql": state.get("sql", "")})
+            return
+
+        result: datasources.ExecuteResult = state["execute_result"]
+        chart = state.get("chart")
+        check = state.get("check")
+        rows_sample = result.rows[:50]  # STATE_STORE_ROW_SAMPLE_LIMIT 对齐
+
+        artifact = {
+            "sql": state["sql"],
+            "columns": result.columns,
+            "rows_sample": [list(r) for r in rows_sample],
+            "rowcount": result.rowcount,
+            "truncated": result.truncated,
+            "chart_option": chart.option if chart else None,
+            "chart_config": chart.config if chart else None,
+            "chart_degraded": chart.degraded if chart else False,
+            "thinking": state.get("thinking") or {},
+            "metric_hits": state.get("metric_hits") or [],
+            "datasource_id": state["ds"].id,
+            "datasource_name": state["ds"].name,
+            "seed_tables": state.get("seed_tables") or [],
+            "expanded_tables": state.get("expanded_tables") or [],
+            "join_path_section": state.get("join_path_section") or "",
+        }
+
+        # 会话状态写回(多轮继承的载体;对标 ChatBI StateStore)
+        sess = ctx.session_state
+        if sess:
+            sess.set("prev_sql", state["sql"])
+            sess.set("prev_tables", state["current_tables"])
+            if chart and chart.config:
+                sess.set("prev_chart_config", chart.config)
+
+        # summary 文案(含 0 行提示/命中指标)
+        parts = [f"查询完成, 返回 {result.rowcount} 行"]
+        if check and check.issue == ResultIssue.ZERO_ROWS:
+            parts.append(f"⚠ {check.reason}: {check.suggestion}")
+        if chart and chart.degraded:
+            parts.append("(图表为规则推断降级)")
+        if state.get("metric_hits"):
+            names = ", ".join(h.get("display_name") or h.get("metric", "")
+                              for h in state["metric_hits"][:5])
+            parts.append(f"命中指标: {names}")
+
+        state["_result"] = ToolResult(
+            artifact=artifact,
+            artifact_type="data",
+            summary="; ".join(parts),
+            extra={"sql": state["sql"]},
+            formatted={
+                "chart": chart.option if chart else None,   # 前端图表卡(ECharts)
+                "metricHits": state.get("metric_hits") or [],
+                "rowcount": result.rowcount,
+                "truncated": result.truncated,
+                "datasourceName": state["ds"].name,
+                "tables": state["current_tables"],
+                "seedTables": state.get("seed_tables") or [],
+                "expandedTables": state.get("expanded_tables") or [],
+            })
+
+    def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
+        # 会话历史文本(追问注入;供 think/generate_sql 使用)
+        if ctx.conv_id and ctx.conversation:
+            try:
+                msgs = ctx.conversation.get_messages(ctx.conv_id)
+                state["history_text"] = _format_history(msgs)
+            except Exception:
+                state["history_text"] = ""
+        self.run_pipeline(state, ctx)
+        result = state.get("_result")
+        if result is not None:
+            return result
+        # 兜底(不应到达): steps 全过但无结果
+        return ToolResult(artifact_type="data", error_for_llm="管线未产出结果",
+                          summary="查询未完成")
+
+    # ── 制品钩子(引擎压缩/标题/前端展示) ─────────────────────
+    def summarize_artifact(self, artifact: dict) -> str:
+        """压缩状态补偿(对标 ChatBI 压缩摘要: 当前表集/SQL/维度)。"""
+        tables = (artifact.get("seed_tables") or [])
+        return (f"已查询 {artifact.get('datasource_name', '')}"
+                f"(表: {', '.join(tables[:5])}), 返回 {artifact.get('rowcount')} 行")
+
+    def title_for(self, artifact: dict) -> str:
+        return (artifact.get("thinking") or {}).get("tables", [""])[0][:16] if artifact.get("thinking") else ""
+
+    def format_result(self, artifact: dict) -> dict:
+        return {
+            "chart": artifact.get("chart_option"),
+            "rowcount": artifact.get("rowcount"),
+            "metricHits": artifact.get("metric_hits") or [],
+            "datasourceName": artifact.get("datasource_name"),
+        }
+
+
+def _inherit_prev_tables(prev_tables: list, current_names: list,
+                         semantic_content) -> list:
+    """追问表继承(chat_utils.inherit_prev_tables 移植):
+    只继承语义层中有定义的表;跳过已存在;返回新 list。"""
+    if not prev_tables:
+        return current_names
+    result = list(current_names)
+    semantic_names = set()
+    if semantic_content and hasattr(semantic_content, "models"):
+        semantic_names = {m.name for m in semantic_content.models}
+    for t in prev_tables:
+        if not t or t in result:
+            continue
+        if t not in semantic_names:
+            logger.debug("追问表继承: '%s' 不在语义层中, 忽略", t)
+            continue
+        result.append(t)
+    return result
+
+
+def _schema_ctx(state) -> str:
+    """execute_sql 阶段复用 schema_context(自愈 prompt 需要)。"""
+    ctx = state.get("schema_context")
+    if ctx:
+        return ctx
+    from domains.chatbi.retrieval import build_schema_context
+    return build_schema_context(state["content"], state["current_tables"])
