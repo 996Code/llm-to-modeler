@@ -169,6 +169,7 @@ def _pg_introspect(conn) -> dict:
         "LEFT JOIN pg_catalog.pg_description dsc "
         " ON dsc.objoid = cls.oid AND dsc.objsubid = cols.ordinal_position "
         "WHERE cols.table_schema = ANY(%s) "
+        "AND cls.relkind IN ('r', 'p') "
         "ORDER BY cols.table_name, cols.ordinal_position", (schemas,)):
         table = r[0]
         result["tables"].setdefault(table, {"comment": "", "columns": []})
@@ -223,7 +224,10 @@ def _mysql_introspect(conn, database: str) -> dict:
     for r in conn.execute(
         "SELECT table_name, column_name, UPPER(column_type), "
         "COALESCE(column_comment, '') "
-        "FROM information_schema.columns WHERE table_schema = %s "
+        "FROM information_schema.columns cols "
+        "JOIN information_schema.tables t ON t.table_schema = cols.table_schema "
+        "AND t.table_name = cols.table_name AND t.table_type = 'BASE TABLE' "
+        "WHERE cols.table_schema = %s "
         "ORDER BY table_name, ordinal_position", (database,)):
         table = r[0]
         result["tables"].setdefault(table, {"comment": "", "columns": []})
@@ -903,7 +907,8 @@ def _resolve_datasource_id(db, connect_info: dict) -> str | None:
 
 
 def scan_datasource(llm, db, connect_info: dict, infer_metrics: bool = True,
-                    progress_cb=None) -> SemanticModelContent:
+                    progress_cb=None, datasource_id: str | None = None
+                    ) -> SemanticModelContent:
     """数据源扫描全流水线: 内省 → 外键 → LLM 富化 → 指标 → 示例问题 → 版本落库。
 
     Args:
@@ -976,7 +981,9 @@ def scan_datasource(llm, db, connect_info: dict, infer_metrics: bool = True,
     # ── Stage 4: 版本保存(88% → 95%) ──────────────────────────
     progress(88, "保存语义层...")
     try:
-        ds_id = _resolve_datasource_id(db, connect_info)
+        # datasource_id 直传优先(tasks 持有 payload 的 ds_id, 不靠连接信息反查——
+        # 同连接注册多行时反查可能归属错误, 评审 I5)
+        ds_id = datasource_id or _resolve_datasource_id(db, connect_info)
     except Exception as e:
         logger.warning("注册表匹配失败(不落库,仅返回内容): %s", e)
         ds_id = None
@@ -1080,11 +1087,12 @@ def load_current_content(db, datasource_id: str) -> SemanticModelContent | None:
     return content
 
 
-def rollback(db, datasource_id: str, version: int) -> int:
+def rollback(db, datasource_id: str, version: int) -> tuple:
     """回滚 = 把目标版本内容复制成新版本并置 current(append-only,不改历史)。
 
     移植 semantic_models.py rollback_to_version 语义;版本不存在抛 ValueError
-    (api.py 捕获后回 404)。
+    (api.py 捕获后回 404)。返回 (new_version, content)——回滚后索引重建需要
+    回滚到的内容(与源 rollback 后 rebuild 的编排对齐)。
     """
     content, _ = load_content(db, datasource_id, version)
     if content is None:
@@ -1092,7 +1100,7 @@ def rollback(db, datasource_id: str, version: int) -> int:
     new_version = save_content(db, datasource_id, content, source="rollback")
     logger.info("rollback: 数据源=%s 从 v%d 复制落新版本 v%d",
                 datasource_id, version, new_version)
-    return new_version
+    return new_version, content
 
 
 def delete_by_datasource(db, datasource_id: str) -> int:
@@ -1225,10 +1233,16 @@ def validate_metric_formula(formula: str) -> list[str]:
 
 
 def _apply_inferred_relationships(content, inferred) -> None:
-    """把图谱推断的关系建议写回 content(去重: 已有同表对关系不覆盖)。"""
+    """把图谱推断的关系建议写回 content(去重: 已有同表对关系不覆盖)。
+
+    分组键 = rel.name 拆出的来源表(源语义: Relationship.name 格式
+    "<from>_to_<to>", 见 graph_infer 产出与源 data_sources.py:525 的
+    from_table = rel.name.split("_to_")[0])——按 rel.name 直接分组
+    永远匹配不到表名, 推断关系会全部丢失。"""
     by_model: dict = {}
     for rel in inferred:
-        by_model.setdefault(rel.name, []).append(rel)
+        from_table = rel.name.split("_to_")[0]
+        by_model.setdefault(from_table, []).append(rel)
     for model in content.models:
         existing_pairs = {(r.name, r.target_model) for r in model.relationships}
         for rel in by_model.get(model.name, []):

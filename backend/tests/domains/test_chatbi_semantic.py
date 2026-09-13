@@ -378,7 +378,7 @@ class TestVersions:
         semantic.save_content(env.db, info.id, v1, source="manual")   # v2
         assert _versions(env.db, info.id) == [(1, 0), (2, 1)]
 
-        new_ver = semantic.rollback(env.db, info.id, 1)
+        new_ver, _rolled = semantic.rollback(env.db, info.id, 1)
         assert new_ver == 3
         assert _versions(env.db, info.id) == [(1, 0), (2, 0), (3, 1)]
         content, ver = semantic.load_content(env.db, info.id)

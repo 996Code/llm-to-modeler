@@ -110,17 +110,18 @@ async def update_datasource(ds_id: str, body: DatasourceUpdate):
 
 
 @router.delete("/datasources/{ds_id}", dependencies=[Depends(admin_required)])
-async def delete_datasource(ds_id: str):
+async def delete_datasource(ds_id: str, request: Request):
     db = _db()
-    # 级联清理: 语义版本 + 向量 collection(登记的 scope)
+    # 级联清理(超越源——源无删除端点, 停用替代): 语义版本 + 向量 collection
+    # + fewshot 行(stores.delete_data_source_storage: drop collection +
+    # 删 few-shot + clear scope 登记)。失败升级为 500 而非静默孤儿。
+    from domains.chatbi import semantic, stores
+    semantic.delete_by_datasource(db, ds_id)
     try:
-        from domains.chatbi import semantic, indexing
-        semantic.delete_by_datasource(db, ds_id)
-        indexing.drop_datasource_scope(db, ds_id)
-    except ImportError:
-        logger.warning("语义层/索引模块未就绪, 仅删除数据源行")
+        stores.delete_data_source_storage(db, stores.get_vector(request.app.state), ds_id)
     except Exception as e:
-        logger.warning("级联清理部分失败(继续删数据源行): %s", e)
+        logger.error("数据源 %s 向量/fewshot 级联清理失败: %s", ds_id, e)
+        raise HTTPException(500, f"向量存储清理失败, 已中止删除(避免孤儿): {e}")
     if not datasources.delete_datasource(db, ds_id):
         raise HTTPException(404, "数据源不存在")
     return {"ok": True}
@@ -172,15 +173,33 @@ async def get_semantic_models(ds_id: str, version: int | None = None):
 
 
 @router.put("/datasources/{ds_id}/semantic-models", dependencies=[Depends(admin_required)])
-async def update_semantic_models(ds_id: str, body: SemanticContentIn):
-    """人工校正 → 落新版本(is_current 翻转;source 标 manual)。"""
-    from domains.chatbi import semantic
+async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: Request):
+    """人工校正 → F9 注入防御校验 → 落新版本(is_current 翻转) → 重建索引。"""
+    from domains.chatbi import semantic, stores
     from domains.chatbi.models import SemanticModelContent
     try:
         content = SemanticModelContent.model_validate(body.content)
     except Exception as e:
         raise HTTPException(400, f"语义层结构校验失败: {e}")
+    # F9 注入防御(源 semantic_models.py PATCH 对 formula/condition 校验):
+    # schema 层不校验, API 层是唯一关口, 执行层三层校验是终极防线
+    for model in content.models:
+        for metric in model.metrics:
+            errors = semantic.validate_metric_formula(metric.formula)
+            if metric.condition:
+                errors += semantic.validate_metric_formula(metric.condition)
+            if errors:
+                raise HTTPException(422, f"指标 {metric.name} 公式非法: {errors[0]}")
     ver = semantic.save_content(_db(), ds_id, content, source="manual")
+    # 人工校正后重建向量索引(源 semantic_models.py:345-362;失败降级不阻塞)
+    try:
+        from domains.chatbi import indexing
+        from domains.chatbi.llm_compat import LLMCompat
+        indexing.rebuild_index(content, ds_id, stores.get_vector(request.app.state),
+                               stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+                               db=_db())
+    except Exception as e:
+        logger.warning("人工校正后索引重建失败(降级): %s", e)
     return {"ok": True, "version": ver}
 
 
@@ -194,12 +213,21 @@ async def semantic_diff(ds_id: str, from_version: int, to_version: int):
 
 
 @router.post("/semantic-rollback", dependencies=[Depends(admin_required)])
-async def semantic_rollback(ds_id: str, version: int):
-    from domains.chatbi import semantic
+async def semantic_rollback(ds_id: str, version: int, request: Request):
+    from domains.chatbi import semantic, stores
     try:
-        ver = semantic.rollback(_db(), ds_id, version)
+        ver, content = semantic.rollback(_db(), ds_id, version)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    # 回滚后重建索引(源 semantic_models.py:196-214;失败降级不阻塞)
+    try:
+        from domains.chatbi import indexing
+        from domains.chatbi.llm_compat import LLMCompat
+        indexing.rebuild_index(content, ds_id, stores.get_vector(request.app.state),
+                               stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+                               db=_db())
+    except Exception as e:
+        logger.warning("回滚后索引重建失败(降级): %s", e)
     return {"ok": True, "version": ver}
 
 

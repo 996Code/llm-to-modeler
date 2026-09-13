@@ -42,6 +42,12 @@ groups:
         default: 2
         min: 0
         max: 5
+      - key: sql_self_heal_circuit_breaker
+        type: int
+        label: 自愈熔断阈值(跨查询连续失败)
+        default: 3
+        min: 1
+        max: 20
   - key: retrieve
     title: 检索
     fields:

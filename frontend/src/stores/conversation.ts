@@ -142,6 +142,16 @@ export const useConversationStore = defineStore('conversation', () => {
       messages.value = (conv.messages || []).map((m: any) => ({
         ...m,
         dataResult: m.dataResult ?? m.dataArtifact ?? undefined,
+        // chatbi 制品恢复: formattedData 不落库, 从 dataArtifact 同构合成
+        // (与 tool.format_result 钩子同构) —— 否则刷新后图表卡/指标标签消失
+        formattedData: (m.dataResult ?? m.dataArtifact)?.chart_option
+          ? {
+              chart: (m.dataResult ?? m.dataArtifact).chart_option,
+              metricHits: (m.dataResult ?? m.dataArtifact).metric_hits || [],
+              rowcount: (m.dataResult ?? m.dataArtifact).rowcount,
+              datasourceName: (m.dataResult ?? m.dataArtifact).datasource_name,
+            }
+          : undefined,
       }))
       currentConfig.value = conv.currentConfig || null
       baselineConfig.value = null  // 切会话：diff 基线随下一轮交互重建

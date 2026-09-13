@@ -65,7 +65,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         content = semantic.scan_datasource(
             llm=llm, db=db, connect_info=_connect_info(info),
             infer_metrics=bool(settings.get("scan_metric_inference", True)),
-            progress_cb=progress)
+            progress_cb=progress, datasource_id=ds_id)
         # 向量索引重建 (对标 _run_scan_background 尾部 rebuild_index;
         # 失败降级不阻塞——RAG 检索可用全表降级路径)
         indexed = 0

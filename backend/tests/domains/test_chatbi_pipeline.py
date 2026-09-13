@@ -171,8 +171,12 @@ class TestFullPipeline:
                        "chatbi.generate_sql": "DROP TABLE biz_orders",
                        "*": "x"})
         result, _ = _run(env, "删表", llm)
-        # 校验失败 → 进自愈循环 → 耗尽 → 失败(AEE-002 + T030)
-        assert result.error_for_llm and "SQL 失败" in result.summary
+        # 校验失败 → 进自愈循环 → 耗尽 → 失败(AEE-002 + T030)。
+        # 自愈耗尽属内部错误 → summary 脱敏(源 error_is_internal 语义),
+        # 原文只进 error_for_llm 供引擎重试判定
+        assert result.error_for_llm and "SQL 失败" in result.error_for_llm
+        assert "查询执行失败" in result.summary
+        assert "DROP" not in result.summary
 
 
 # ── 场景 2: 自愈回环(执行失败 → heal → 成功) ─────────────────

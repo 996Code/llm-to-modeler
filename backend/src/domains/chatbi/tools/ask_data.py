@@ -30,7 +30,8 @@ from sdk.relational_store import PackRelationalDB
 from domains.chatbi import datasources
 from domains.chatbi.checker import check_result, ResultIssue
 from domains.chatbi.chart_engine import generate_chart, inject_data
-from domains.chatbi.healer import extract_sql_text, heal_sql
+from domains.chatbi.healer import (extract_sql_text, get_circuit_breaker,
+                                   heal_sql)
 from domains.chatbi.security.sql_validator import validate_sql
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,27 @@ class AskDataTool(CompositeTool):
                                f"执行扫描后再提问")
             return
 
+        # 场景② resume: 用户已选定表 → 直接作为种子表(跳过检索与澄清分支)
+        clarified = state.get("clarified_table")
+        if clarified:
+            matched = next((m.name for m in content.models
+                            if m.name == clarified
+                            or m.display_name == clarified), clarified)
+            state["content"] = content
+            state["seed_tables"] = [matched]
+            state["expanded_tables"] = []
+            state["current_tables"] = [matched]
+            state["join_path_section"] = ""
+            state.pop("clarified_table", None)
+            return
+
+        # SEC-007: 用户问题进 LLM prompt 前清洗(NFKC + 零宽/方向控制字符)
+        try:
+            from sdk.sanitize import sanitize_text
+            state["user_input"] = sanitize_text(state.get("user_input", ""))
+        except ImportError:
+            pass
+
         # 两阶段检索(向量召回 → LLM 精筛);向量设施不可用 → 全表清单降级
         from domains.chatbi import retrieval as retrieval_mod
         from domains.chatbi import stores as cb_stores
@@ -191,11 +213,18 @@ class AskDataTool(CompositeTool):
                 data_source_id=ds.id, llm=llm, db=db,
                 top_k=int(settings.get("retrieve_top_k", 20)),
                 conv_id=ctx.conv_id)
-            seed_tables = rc["model_names"]
-            # 指标命中拆分(反查所属表用;对标 agent.py stage3 的 type 过滤)
-            state["hit_metric_names"] = [
-                m["name"] for m in getattr(rc["retrieval"], "models", [])
-                if isinstance(m, dict) and m.get("type") == "metric"]
+            # 源 agent.py:250-254: 只取 type=model 的记录作表名;
+            # 纯指标召回(如问"GMV"只命中 metric 记录)时指标名不得混入表名
+            all_hits = [m for m in getattr(rc["retrieval"], "models", [])
+                        if isinstance(m, dict)]
+            seed_tables = [m["name"] for m in all_hits
+                           if m.get("name") and m.get("type") != "metric"]
+            # 检索降级标记(O8: 精筛失败→提示结果可能不精确;源 agent.py:223-225)
+            state["retrieval_degraded"] = bool(
+                getattr(rc["retrieval"], "degraded", False))
+            # 指标命中拆分(反查所属表用)
+            state["hit_metric_names"] = [m["name"] for m in all_hits
+                                         if m.get("type") == "metric"]
             # 一站式产物直接复用(与后续步骤的重复构建避免)
             state["schema_context"] = rc["schema_context"]
             state["allowed_columns"] = rc["allowed_columns"]
@@ -228,7 +257,7 @@ class AskDataTool(CompositeTool):
                 sg = get_schema_graph(content)
                 expanded = expand_with_relationships(
                     content, merged,
-                    max_depth=int(settings.get("graph_max_join_path_hops", 4)),
+                    max_depth=int(settings.get("graph_expand_depth", 2)),
                     graph=sg)
                 join_path_section = build_join_path_section(
                     content, expanded, graph=sg, seed_names=list(seed_tables),
@@ -251,6 +280,8 @@ class AskDataTool(CompositeTool):
                                  description=m.description or m.name)
                        for m in content.models[:4]]
             state["_need_clarify"] = True
+            state["clarify_kind"] = "table_confirm"
+            state["clarify_tables"] = [m.name for m in content.models]
             state["_result"] = ToolResult(
                 artifact_type="data",
                 ask=AskSpec(questions=[AskQuestion(
@@ -316,12 +347,12 @@ class AskDataTool(CompositeTool):
         if not schema_ctx:
             from domains.chatbi.retrieval import build_schema_context
             schema_ctx = build_schema_context(content, state["current_tables"])
-        # 白名单列: 取整个语义层的全部列(agent.py 权威注释——语义层本身是
-        # 安全边界;命中表只影响 schema_context,限制白名单会误拒正确 JOIN)
-        allowed = state.get("allowed_columns")
-        if not allowed:
-            from domains.chatbi.retrieval import extract_allowed_columns
-            allowed = extract_allowed_columns(content)
+        # 白名单列: 无条件取整个语义层的全部列(源 agent.py:296-302 权威注释——
+        # 语义层本身是安全边界;命中表只影响 schema_context,限制白名单会
+        # 误拒图谱扩展/继承表的正确 JOIN)。retrieve_context 返回的受限集合
+        # 仅作降级兜底, 此处一律覆盖。
+        from domains.chatbi.retrieval import extract_allowed_columns
+        allowed = extract_allowed_columns(content)
         if not allowed:
             # 防御: 无语义层 → Layer3 白名单失效 → fail-closed 拒绝生成
             state["_error"] = "无语义层定义, 无法做白名单约束, 拒绝生成 SQL (请先扫描数据源)"
@@ -430,7 +461,9 @@ class AskDataTool(CompositeTool):
             if not state.get("heal_before_sql"):
                 state["heal_before_sql"] = sql
             heal = heal_sql(llm, sql, last_error, allowed, schema_ctx,
-                            conv_id=ctx.conv_id)
+                            conv_id=ctx.conv_id,
+                            circuit_breaker=get_circuit_breaker(
+                                int(settings.get("sql_self_heal_circuit_breaker", 3))))
             if not heal.success:
                 last_error = f"SQL 自愈失败 ({heal_rounds} 轮): {heal.error}"
                 break
@@ -470,6 +503,30 @@ class AskDataTool(CompositeTool):
         max_rows = int(settings.get("sql_max_rows", 10000))
         max_rounds = int(settings.get("sql_self_heal_rounds", 2))
         result = state["execute_result"]
+
+        # 场景③ resume"按原样展示": 复用中断前结果, 跳过 check 直接出图
+        if state.get("show_as_is"):
+            state.pop("show_as_is", None)
+            return
+        # 场景③ resume 自由输入: 作为修正方向 heal 一次(带用户描述)
+        adjust_hint = state.pop("adjust_hint", None)
+        if adjust_hint:
+            ctx.emit("stage", "check_result", "按您的描述调整查询...")
+            llm0 = self._get_llm(ctx)
+            heal0 = heal_sql(llm0, state["sql"], adjust_hint,
+                             state.get("allowed_columns") or set(),
+                             _schema_ctx(state), conv_id=ctx.conv_id,
+                             error_detail=f"用户想要: {adjust_hint}")
+            if heal0.success and validate_sql(heal0.sql, state.get("allowed_columns") or set()).ok:
+                ds0: datasources.DataSourceInfo = state["ds"]
+                re0 = datasources.execute_readonly(
+                    ds0, heal0.sql, max_rows=max_rows,
+                    timeout_seconds=int(settings.get("sql_execution_timeout", 30)))
+                if re0.ok:
+                    state["sql"] = heal0.sql
+                    state["execute_result"] = re0
+                    result = re0
+
         check = check_result(result.rows, result.columns, state["sql"],
                              max_rows=max_rows)
         state["check"] = check
@@ -505,6 +562,10 @@ class AskDataTool(CompositeTool):
                             return  # 修正成功, 跳过 ask_user(继续后续 step)
 
         # 仍异常 → 主动暂停问用户 (ask_user 场景③: 结果异常)
+        # 现场结果写 state(resume 重跑时 tool_state 保留,"按原样展示"直接复用)
+        state["clarify_kind"] = "result_abnormal"
+        state["abnormal_result"] = {"sql": state["sql"], "columns": result.columns,
+                                    "rows": result.rows}
         state["_need_clarify"] = True
         state["_result"] = ToolResult(
             artifact_type="data",
@@ -551,13 +612,20 @@ class AskDataTool(CompositeTool):
 
     # ── Step 8: 组装 ToolResult + 会话状态写回 ─────────────────
     def _step_finalize(self, state, ctx):
-        # 错误路径: error_for_llm 回流(引擎重试/降级判定用)
+        # 错误路径: 区分业务错误(可发原文)与内部错误(脱敏文案, 对标源
+        # error_is_internal——agent.py:331/372/395/474 + chat.py:554-555)。
+        # error_for_llm 保留原文供引擎重试判定;summary 走脱敏文案给用户。
         if state.get("_error"):
+            raw = state["_error"]
+            is_business = raw.startswith(("SQL 校验失败", "无语义层定义",
+                                          "尚未扫描语义层", "尚无可用数据源"))
+            user_text = raw if is_business else "查询执行失败, 请稍后重试或调整问法"
             state["_result"] = ToolResult(
                 artifact_type="data",
-                error_for_llm=state["_error"],
-                summary=f"查询失败: {state['_error']}",
-                extra={"sql": state.get("sql", "")})
+                error_for_llm=raw,
+                summary=f"查询失败: {user_text}",
+                extra={"sql": state.get("sql", ""),
+                       "error_internal": not is_business})
             return
 
         result: datasources.ExecuteResult = state["execute_result"]
@@ -576,12 +644,42 @@ class AskDataTool(CompositeTool):
             "chart_degraded": chart.degraded if chart else False,
             "thinking": state.get("thinking") or {},
             "metric_hits": state.get("metric_hits") or [],
+            "fewshot_count": state.get("fewshot_count", 0),
+            "heal_rounds": state.get("heal_rounds", 0),
             "datasource_id": state["ds"].id,
             "datasource_name": state["ds"].name,
             "seed_tables": state.get("seed_tables") or [],
             "expanded_tables": state.get("expanded_tables") or [],
             "join_path_section": state.get("join_path_section") or "",
         }
+
+        # 记忆抽取 (源 chat_stream 在成功查询后调 extract_memory_from_turn
+        # + persist——移植为 extract_and_save_memory, 含来源对话关联)。
+        # LLM 判定该轮是否值得记;失败/不该记静默跳过(fail-open 不阻塞)。
+        try:
+            from domains.chatbi.memory import extract_and_save_memory
+            extract_and_save_memory(
+                llm, self._get_db(), state.get("user_input", ""),
+                state["sql"], state.get("current_tables") or [],
+                result_summary, conv_id=ctx.conv_id)
+        except Exception as e:
+            logger.warning("记忆抽取失败(不阻塞): %s", e)
+
+        # few-shot 成功回流 (RAG-004;源 chat_stream.py:917-929):
+        # 成功查询的 Question-SQL Pair 入向量库, 后续相似问题召回作参考。
+        # 失败降级只记日志(不阻塞结果返回)。
+        try:
+            from domains.chatbi import fewshot as fewshot_mod
+            from domains.chatbi import stores as cb_stores
+            from domains.chatbi.llm_compat import LLMCompat
+            llm0 = self._get_llm(ctx)
+            fewshot_mod.index_fewshot_example(
+                state.get("user_input", ""), state["sql"],
+                cb_stores.get_embedder(llm0), state["ds"].id,
+                cb_stores.get_vector(self._app_state), self._get_db(),
+                conv_id=ctx.conv_id)
+        except Exception as e:
+            logger.warning("few-shot 回流失败(不阻塞): %s", e)
 
         # 会话状态写回(多轮继承的载体;对标 ChatBI StateStore)
         sess = ctx.session_state
@@ -619,6 +717,27 @@ class AskDataTool(CompositeTool):
             })
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
+        # ── 澄清回答消费(引擎 resume 注入 state["clarify_answers"]) ──
+        # 结构: {question_header: label 或 自由输入文本}
+        answers = state.get("clarify_answers") or {}
+        if answers:
+            kind = state.get("clarify_kind")
+            if kind == "table_confirm":
+                # 场景②: 用户选中的表(display_name → model.name), 写入
+                # clarified_table 供 retrieve_schema 跳过低分门槛直取
+                chosen = next(iter(answers.values()), "")
+                state["clarified_table"] = chosen
+                state.pop("clarify_kind", None)
+            elif kind == "result_abnormal":
+                # 场景③: "按原样展示" → 直接沿用中断前的执行结果继续出图;
+                # 其他回答(自由输入) → 作为修正方向在 check 步重试
+                choice = next(iter(answers.values()), "")
+                if choice and ("原样" in choice or "展示" in choice):
+                    state["show_as_is"] = True
+                    state.pop("clarify_kind", None)
+                elif choice:
+                    state["adjust_hint"] = choice  # 用户描述的角度
+
         # 会话历史文本(追问注入;供 think/generate_sql 使用)
         if ctx.conv_id and ctx.conversation:
             try:
