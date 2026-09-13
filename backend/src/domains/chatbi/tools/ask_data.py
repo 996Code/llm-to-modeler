@@ -134,7 +134,11 @@ class AskDataTool(CompositeTool):
         return get_settings_reader(ctx).all()
 
     def _get_llm(self, ctx: ToolContext):
-        return ctx.llm_client
+        # ctx.llm_client 是引擎裸实例(chat→str);pack 各栈按 (content, meta)
+        # 契约编写——统一经 LLMCompat 适配(llm_compat.py 有"unpack 症状"说明)
+        from domains.chatbi.llm_compat import LLMCompat
+        inner = ctx.llm_client
+        return inner if isinstance(inner, LLMCompat) else LLMCompat(inner)
 
     def input_schema(self) -> dict:
         return {"type": "object", "properties": {}, "required": []}

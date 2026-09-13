@@ -30,8 +30,12 @@ def get_settings_reader(ctx_or_state) -> Any:
 
 
 def get_llm(app_state) -> Any:
-    """引擎 LLM 客户端(会话上下文之外的后台任务/api 用)。"""
-    return app_state.llm_client
+    """引擎 LLM 客户端的 pack 契约适配(后台任务/api 用)。
+
+    引擎 chat 返回 str, pack 各栈按 (content, meta) 契约编写——
+    统一经 LLMCompat 转换(见 llm_compat.py 模块文档的"unpack 症状")。"""
+    from domains.chatbi.llm_compat import LLMCompat
+    return LLMCompat(app_state.llm_client)
 
 
 def reset_runtime_cache() -> None:

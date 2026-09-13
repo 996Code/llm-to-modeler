@@ -238,3 +238,28 @@ def test_truncate_covers_all_known_schemas():
     assert not orphan_schemas, (
         f"测试库出现未知 schema: {sorted(orphan_schemas)}——"
         f"请加进 tests/conftest.py 的 _TRUNCATE_SCHEMAS")
+
+
+def test_llm_compat_contract():
+    """LLMCompat 契约回归: 引擎 chat→str 必须被适配为 (content, meta)——
+    实启评审发现: 裸引擎实例传入 pack 服务时 `x, _ = llm.chat()` 会把
+    字符串按字符解包("too many values to unpack")。"""
+    from domains.chatbi.llm_compat import LLMCompat
+
+    class RawEngineLLM:
+        def chat(self, messages=None, temperature=None, stage=None, conv_id=None):
+            return "SELECT 1"          # 引擎真实行为: 返回 str
+        def chat_json(self, messages=None, **kw):
+            return {"ok": 1}
+        def embeddings(self, texts, **kw):
+            return [[0.1] * 4]
+
+    raw = RawEngineLLM()
+    adapter = LLMCompat(raw)
+    content, meta = adapter.chat(messages=[{"role": "user", "content": "q"}],
+                                 stage="chatbi.probe")
+    assert content == "SELECT 1" and meta == {}
+    assert adapter.chat_json(messages=[]) == {"ok": 1}
+    assert adapter.embeddings(["x"]) == [[0.1] * 4]
+    # 鸭子透传: 其余属性直达内部实例
+    assert adapter._inner is raw
