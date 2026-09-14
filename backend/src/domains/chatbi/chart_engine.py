@@ -238,7 +238,9 @@ def infer_chart_by_rule(columns: list, rows: list) -> dict | None:
     if not measure_indices and len(columns) >= 2:
         measure_indices = [len(columns) - 1]
 
-    names = [str(r[dim_idx]) if r and len(r) > dim_idx else "" for r in rows]
+    # 维度名截断(50 字符): TEXT 列查出超长串会原样进 xAxis/pie name,
+    # 万行×10KB 可使 option JSON 膨胀至数十 MB(前端渲染卡顿/传输爆炸)
+    names = [str(r[dim_idx])[:50] if r and len(r) > dim_idx else "" for r in rows]
     values = [_to_float(r[measure_indices[0]]) if r and len(r) > measure_indices[0] else None
               for r in rows]
     values = [v if v is not None else 0 for v in values]
@@ -362,7 +364,7 @@ def inject_data(chart_config: dict, columns: list, rows: list) -> dict | None:
     names = []
     for r in rows:
         if r and len(r) > dim_idx:
-            names.append(str(r[dim_idx]) if r[dim_idx] is not None else "")
+            names.append(str(r[dim_idx])[:50] if r[dim_idx] is not None else "")
         else:
             names.append("")
 

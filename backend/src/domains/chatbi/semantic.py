@@ -429,7 +429,8 @@ def _parse_json_response(content: str | None):
 # ════════════════════════════════════════════════════════════════
 
 def _enrich_with_llm(content: SemanticModelContent, llm,
-                     conv_id: str | None = None) -> None:
+                     conv_id: str | None = None,
+                     deadline: float | None = None) -> None:
     """扫描后用 LLM 给无注释的列补中文 display_name(原地 patch)。
 
     移植要点(逐点保留):
@@ -437,6 +438,9 @@ def _enrich_with_llm(content: SemanticModelContent, llm,
         confidence=0.5(退化列名)的列 → 补完升 source=auto_inferred, confidence=0.8
       - 跳过系统表;全量优先(≤200 表一次发),超过分批每批 100 张
       - LLM 失败/返回非法 → 降级保持退化列名,不阻塞扫描
+      - deadline(monotonic 时点)超时 → 剩余批次降级退化列名
+        (对标源 asyncio.wait_for 600s/阶段;逐批检查而非硬中断——
+        单批 LLM 请求由客户端自身超时兜底)
     """
     if llm is None:
         return
@@ -454,7 +458,12 @@ def _enrich_with_llm(content: SemanticModelContent, llm,
 
     # 全量优先: 200 表以内一次性发送; 超过则分批 100 表
     batch_size = 200 if len(tasks) <= 200 else 100
+    import time as _time
     for batch_start in range(0, len(tasks), batch_size):
+        if deadline is not None and _time.monotonic() > deadline:
+            logger.warning("LLM 富化阶段超时, 剩余 %d 张表降级退化列名",
+                           len(tasks) - batch_start)
+            return
         batch = tasks[batch_start:batch_start + batch_size]
         tables_desc = []
         for model, needs_infer in batch:
@@ -732,7 +741,8 @@ def _llm_infer_all(model: Model, llm, conv_id: str | None) -> None:
 
 def enrich_metrics(content: SemanticModelContent, llm,
                    rule_inference: bool = True,
-                   conv_id: str | None = None) -> None:
+                   conv_id: str | None = None,
+                   deadline: float | None = None) -> None:
     """扫描后推断业务指标(原地 patch;移植 enrich_metrics,两阶段)。
 
     阶段 1: 规则推断 simple 指标(零 LLM;rule_inference 开启时),保留已有
@@ -764,7 +774,12 @@ def enrich_metrics(content: SemanticModelContent, llm,
         candidates = [m for m in content.models
                       if m.name not in _SYSTEM_TABLES
                       and any(c.semantic_type == "measure" for c in m.columns)]
-    for model in candidates:
+    import time as _time
+    for idx, model in enumerate(candidates):
+        if deadline is not None and _time.monotonic() > deadline:
+            logger.warning("指标推断阶段超时, 剩余 %d 张表跳过 LLM 推断",
+                           len(candidates) - idx)
+            return
         if rule_inference:
             _llm_infer_composite(model, llm, conv_id)
         else:
@@ -964,10 +979,18 @@ def scan_datasource(llm, db, connect_info: dict, infer_metrics: bool = True,
     finally:
         conn.close()   # 扫描完即关(无引擎池,不占业务库连接)
 
+    # ── LLM 阶段共享 deadline(对标源 600s/阶段兜底) ─────────────
+    # 单请求超时(LLM_TIMEOUT, 默认 300s)只约束一次调用;逐表顺序的指标
+    # 推断最坏 N×300s(100 表≈8h), 任务卡死在 65% 且被 dedupe 挡住。
+    # deadline 到点 → 剩余表降级(退化列名/仅规则指标), 扫描仍能完成。
+    import time as _time
+    llm_deadline = (_time.monotonic() + 600
+                    if llm is not None else None)
+
     # ── Stage 2: LLM 中文富化(45%) — 失败降级退化列名 ───────────
     progress(45, "LLM 推断中文名...")
     try:
-        _enrich_with_llm(content, llm)
+        _enrich_with_llm(content, llm, deadline=llm_deadline)
     except Exception as e:
         logger.warning("LLM 推断失败, 退化列名: %s", e)
 
@@ -975,7 +998,7 @@ def scan_datasource(llm, db, connect_info: dict, infer_metrics: bool = True,
     progress(65, "LLM 推断业务指标...")
     if infer_metrics:
         try:
-            enrich_metrics(content, llm)
+            enrich_metrics(content, llm, deadline=llm_deadline)
         except Exception as e:
             logger.warning("LLM 指标推断失败, 跳过: %s", e)
 
@@ -1019,6 +1042,44 @@ def scan_datasource(llm, db, connect_info: dict, infer_metrics: bool = True,
 # ════════════════════════════════════════════════════════════════
 # 版本管理(chatbi_semantic_models;api.py 语义端点的读写面)
 # ════════════════════════════════════════════════════════════════
+
+def mark_manual_edits(old: SemanticModelContent | None,
+                      new: SemanticModelContent) -> int:
+    """人工校正打标(源 semantic_models.py:269-297 PATCH 的等价物, 前置版)。
+
+    与当前版本 diff: 表/列的 display_name/description 被修改 →
+    source=manual, confidence=1.0(原地改 new)。返回打标数量。
+
+    为什么必要: _enrich_with_llm 只挑 source==auto_inferred 且
+    confidence==0.5 的列补名——人工校正若不打标, 下次全量重扫时
+    LLM 推断名会覆盖人工校正名(自动刷新路径有 _merge_content 保护,
+    手动重扫没有)。
+    """
+    if old is None:
+        return 0
+    old_models = {m.name: m for m in old.models}
+    marked = 0
+    for new_m in new.models:
+        old_m = old_models.get(new_m.name)
+        if old_m is None:
+            continue  # 新表: 无对比基准
+        if (new_m.display_name != old_m.display_name
+                or new_m.description != old_m.description):
+            new_m.source = "manual"
+            new_m.confidence = 1.0
+            marked += 1
+        old_cols = {c.name: c for c in old_m.columns}
+        for new_c in new_m.columns:
+            old_c = old_cols.get(new_c.name)
+            if old_c is None:
+                continue  # 新列
+            if (new_c.display_name != old_c.display_name
+                    or new_c.description != old_c.description):
+                new_c.source = "manual"
+                new_c.confidence = 1.0
+                marked += 1
+    return marked
+
 
 def save_content(db, datasource_id: str, content: SemanticModelContent,
                  source: str = "manual") -> int:

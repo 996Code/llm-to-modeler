@@ -118,13 +118,17 @@ async def delete_datasource(ds_id: str, request: Request):
     db = _db()
     # 级联清理(超越源——源无删除端点, 停用替代): 语义版本 + 向量 collection
     # + fewshot 行(stores.delete_data_source_storage: drop collection +
-    # 删 few-shot + clear scope 登记)。失败升级为 500 而非静默孤儿。
+    # 删 few-shot + clear scope 登记) + 记忆(按 data_source_id 定向清理,
+    # 表已加列——此前无列想清也清不了, linkage 残留污染图谱演化)。
+    # 失败升级为 500 而非静默孤儿。
     from domains.chatbi import semantic, stores
     semantic.delete_by_datasource(db, ds_id)
     # M4 级联: 清理保存查询/看板 widget 的悬空引用
     with db.connect() as conn:
         conn.execute("DELETE FROM chatbi_saved_queries WHERE data_source_id = ?", (ds_id,))
         conn.execute("DELETE FROM chatbi_dashboard_widgets WHERE datasource_id = ?", (ds_id,))
+        # 记忆级联(含 linkage 共现经验; recent_queries 等用户级记忆不绑 ds 不动)
+        conn.execute("DELETE FROM chatbi_agent_memories WHERE data_source_id = ?", (ds_id,))
     try:
         stores.delete_data_source_storage(db, stores.get_vector(request.app.state), ds_id)
     except Exception as e:
@@ -133,6 +137,18 @@ async def delete_datasource(ds_id: str, request: Request):
     if not datasources.delete_datasource(db, ds_id):
         raise HTTPException(404, "数据源不存在")
     return {"ok": True}
+
+
+@router.post("/datasources/health-check/all", dependencies=[Depends(admin_required)])
+async def health_check_all():
+    """批量健康巡检(对标源 POST /health-check/all): 连续失败自动停用/恢复。
+
+    同步执行(数据源数量级小, 单源 5s 超时);定时巡检由 pack 调度线程
+    每 5 分钟触发同一函数。
+    """
+    from domains.chatbi import datasources as ds_mod
+    from domains.chatbi.runtime import get_pack_db
+    return ds_mod.check_all_health(get_pack_db())
 
 
 @router.post("/datasources/{ds_id}/health", dependencies=[Depends(admin_required)])
@@ -200,13 +216,24 @@ async def get_semantic_models(ds_id: str, version: int | None = None):
 
 @router.put("/datasources/{ds_id}/semantic-models", dependencies=[Depends(admin_required)])
 async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: Request):
-    """人工校正 → F9 注入防御校验 → 落新版本(is_current 翻转) → 重建索引。"""
+    """人工校正 → F9 注入防御校验 → 人工标注打标 → 落新版本 → 重建索引。
+
+    人工标注打标(源 semantic_models.py:269-297 的 PATCH 语义): 与当前版本
+    diff, 被修改的表/列 display_name/description 置 source=manual,
+    confidence=1.0——防止下次全量重扫时 _enrich_with_llm(只挑
+    auto_inferred/0.5 的列)把 LLM 推断名覆盖掉人工校正名。
+    """
     from domains.chatbi import semantic, stores
     from domains.chatbi.models import SemanticModelContent
     try:
         content = SemanticModelContent.model_validate(body.content)
     except Exception as e:
         raise HTTPException(400, f"语义层结构校验失败: {e}")
+    # 人工修改打标: 与当前版本对比, 变化的表/列 → manual/1.0
+    current, _ = semantic.load_current_content(_db(), ds_id)
+    marked = semantic.mark_manual_edits(current, content)
+    if marked:
+        logger.info("人工校正打标: %d 处表/列标注 → manual/1.0", marked)
     # F9 注入防御(源 semantic_models.py PATCH 对 formula/condition 校验):
     # schema 层不校验, API 层是唯一关口, 执行层三层校验是终极防线
     for model in content.models:

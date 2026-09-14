@@ -331,3 +331,45 @@ def check_health(info: DataSourceInfo, timeout_seconds: int = 5) -> dict:
     except Exception as e:
         return {"healthy": False, "latency_ms": int((time.monotonic() - started) * 1000),
                 "error": _clean_db_error(e)}
+
+
+# ── 批量健康巡检(源 datasource_health.check_all_datasources_health 移植) ──
+# 连续失败计数: 进程内存(源 _health_fail_counts 同为进程态;重启归零可接受)
+_health_fail_counts: dict[str, int] = {}
+HEALTH_MAX_FAILURES = 3  # 连续失败 3 次自动停用(源 datasource_health_check_max_failures)
+
+
+def check_all_health(db, max_failures: int = HEALTH_MAX_FAILURES) -> dict:
+    """巡检全部数据源(含已停用的——给恢复机会, 源同款语义)。
+
+    - ping 成功 + is_active=False → 恢复 is_active=True
+    - ping 失败 → 连续计数 +1; 达 max_failures → is_active=False(自动隔离,
+      查询侧 resolve_datasource 不再选中, 不用等用户查询报错才发现)
+    - 单源失败不影响其他源;不抛(定时任务容错)
+    """
+    summary = {"checked": 0, "healthy": 0, "unhealthy": 0,
+               "recovered": 0, "newly_deactivated": 0, "items": []}
+    for info in list_datasources(db, active_only=False):
+        summary["checked"] += 1
+        result = check_health(info)
+        ds_id = info.id
+        if result.get("healthy"):
+            summary["healthy"] += 1
+            _health_fail_counts.pop(ds_id, None)
+            if not info.is_active:
+                update_datasource(db, ds_id, is_active=True)
+                summary["recovered"] += 1
+                logger.info("数据源 %s 健康恢复, 重新启用", info.name)
+        else:
+            summary["unhealthy"] += 1
+            _health_fail_counts[ds_id] = _health_fail_counts.get(ds_id, 0) + 1
+            if _health_fail_counts[ds_id] >= max_failures and info.is_active:
+                update_datasource(db, ds_id, is_active=False)
+                summary["newly_deactivated"] += 1
+                logger.warning("数据源 %s 连续 %d 次健康检查失败, 自动停用",
+                               info.name, _health_fail_counts[ds_id])
+        summary["items"].append({"id": ds_id, "name": info.name,
+                                 "healthy": result.get("healthy", False),
+                                 "latencyMs": result.get("latency_ms"),
+                                 "isActive": info.is_active})
+    return summary

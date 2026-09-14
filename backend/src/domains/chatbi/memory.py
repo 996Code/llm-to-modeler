@@ -102,6 +102,7 @@ CHATBI_MEMORY_DDL = [
         aggregation TEXT,
         conversation_id TEXT,
         user_id TEXT,
+        data_source_id TEXT,
         extra_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -109,6 +110,10 @@ CHATBI_MEMORY_DDL = [
     "CREATE INDEX IF NOT EXISTS idx_chatbi_memory_type ON chatbi_agent_memories(type)",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_memory_user ON chatbi_agent_memories(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_memory_name ON chatbi_agent_memories(name)",
+    # 存量表迁移: 早期版本无 data_source_id 列(CREATE IF NOT EXISTS 不补列)。
+    # 必须在 ds 索引之前执行——索引引用该列, 顺序反了存量库会 UndefinedColumn
+    "ALTER TABLE chatbi_agent_memories ADD COLUMN IF NOT EXISTS data_source_id TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_chatbi_memory_ds ON chatbi_agent_memories(data_source_id)",
 ]
 
 # extra_metadata 中的已知结构化键(源 frontmatter metadata 的枚举字段;
@@ -234,6 +239,7 @@ class ChatBIMemoryStore:
         mem_id: Optional[str] = None,
         extra_metadata: Optional[dict] = None,
         user_id: Optional[str] = None,
+        data_source_id: Optional[str] = None,
     ) -> str:
         """写入(创建或更新)一条记忆, 返回记忆 id。
 
@@ -298,13 +304,13 @@ class ChatBIMemoryStore:
                     "INSERT INTO chatbi_agent_memories "
                     "(id, name, description, content, type, consolidated, "
                     " co_occurrence, tables_json, join_paths_json, scenes_json, "
-                    " aggregation, conversation_id, user_id, extra_json, "
-                    " created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " aggregation, conversation_id, user_id, data_source_id, "
+                    " extra_json, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (target_id, name, description, content, memory_type,
                      co_occurrence, _jsonify(tables), _jsonify(join_paths),
                      _jsonify(scenes), aggregation, conversation_id, user_id,
-                     extra_json, created_at, now),
+                     data_source_id, extra_json, created_at, now),
                 )
             else:
                 conn.execute(
@@ -312,12 +318,13 @@ class ChatBIMemoryStore:
                     "content = ?, type = ?, consolidated = 0, co_occurrence = ?, "
                     "tables_json = ?, join_paths_json = ?, scenes_json = ?, "
                     "aggregation = ?, conversation_id = ?, "
-                    "user_id = COALESCE(?, user_id), extra_json = ?, "
+                    "user_id = COALESCE(?, user_id), "
+                    "data_source_id = COALESCE(?, data_source_id), extra_json = ?, "
                     "updated_at = ? WHERE id = ?",
                     (name, description, content, memory_type, co_occurrence,
                      _jsonify(tables), _jsonify(join_paths), _jsonify(scenes),
-                     aggregation, conversation_id, user_id, extra_json, now,
-                     target_id),
+                     aggregation, conversation_id, user_id, data_source_id,
+                     extra_json, now, target_id),
                 )
         logger.info("Memory saved: %s (%s)", name, memory_type)
         return target_id
@@ -463,6 +470,7 @@ def recall_memories(
     db,
     max_count: Optional[int] = None,
     user_id: Optional[str] = None,
+    data_source_id: Optional[str] = None,
 ) -> list[dict]:
     """按相关性召回记忆 (最多 max_count 条)。
 
@@ -474,8 +482,9 @@ def recall_memories(
         db: pack 关系库 (源 memory_dir 的存储等价物)
         max_count: 最多返回条数 (None → DEFAULT_RECALL_COUNT=5,
             即 chat-bi memory_max_recall_count)
-        user_id: 宿主用户过滤 (源 tenant+data_source 目录隔离的替代维度;
-            None = 全量)
+        user_id: 宿主用户过滤 (None = 全量)
+        data_source_id: 数据源过滤 (源 memory/{tenant}/{ds}/ 目录隔离的
+            行存储等价; None = 不过滤——管理端全量场景)
 
     Returns:
         [{id, name, description, content}, ...] 按相关性降序, 无匹配返回空。
@@ -493,6 +502,9 @@ def recall_memories(
     if user_id:
         sql += " AND user_id = ?"
         params.append(user_id)
+    if data_source_id:
+        sql += " AND data_source_id = ?"
+        params.append(data_source_id)
     with db.connect() as conn:
         rows = conn.execute(sql, tuple(params)).fetchall()
     if not rows:
@@ -545,6 +557,7 @@ def recall_text(
     question: str,
     conv_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    data_source_id: Optional[str] = None,
     top_k: int = DEFAULT_RECALL_COUNT,
 ) -> str:
     """召回相关记忆并格式化为注入文本 (api/tools 契约入口)。
@@ -567,7 +580,8 @@ def recall_text(
         格式化记忆文本;无记忆/失败返回 ""。
     """
     try:
-        memories = recall_memories(question, db, max_count=top_k, user_id=user_id)
+        memories = recall_memories(question, db, max_count=top_k,
+                                   user_id=user_id, data_source_id=data_source_id)
         return format_memories_for_prompt(memories)
     except Exception as e:
         logger.warning("recall_text 记忆召回失败, 降级无记忆: %s", e)
@@ -739,6 +753,7 @@ def extract_and_save_memory(
     reply: str,
     conv_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    data_source_id: Optional[str] = None,
 ) -> Optional[dict]:
     """提炼并落库 — 源 chat_stream.py 调用侧组合的完整闭环移植。
 
@@ -760,6 +775,7 @@ def extract_and_save_memory(
         memory_type=extracted.get("type", "project"),
         extra_metadata=({"conversation_id": conv_id} if conv_id else None),
         user_id=user_id,
+        data_source_id=data_source_id,
     )
     extracted["id"] = mem_id
     logger.info("LLM 自主提炼记忆: %s", extracted["name"])
@@ -1149,6 +1165,7 @@ def _merge_and_save_linkage(
     existing: dict,
     conv_id: Optional[str],
     user_id: Optional[str],
+    data_source_id: Optional[str] = None,
 ) -> None:
     """更新已存在的 linkage 记忆 (源"更新分支 + 竞态重查分支"的合并实现)。
 
@@ -1225,6 +1242,7 @@ def _merge_and_save_linkage(
             **({"conversation_id": conv_id} if conv_id else {}),
         },
         user_id=user_id,
+        data_source_id=data_source_id,
     )
     logger.info("更新 linkage 记忆 %s-%s: co_occurrence=%s", table_a, table_b, new_co)
 
@@ -1234,6 +1252,7 @@ def persist_linkage_memory(
     state,
     conv_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    data_source_id: Optional[str] = None,
 ) -> None:
     """沉淀链路经验到 linkage 记忆 (E1 Task 2.1;源 1:1)。
 
@@ -1289,7 +1308,8 @@ def persist_linkage_memory(
             # 已存在：co_occurrence + 1，追加新场景（W1: 若 question 新颖）
             _merge_and_save_linkage(
                 store, table_a, table_b, state, direct_join_pairs,
-                join_paths, aggregation, existing, conv_id, user_id)
+                join_paths, aggregation, existing, conv_id, user_id,
+                data_source_id=data_source_id)
         else:
             # 新表对：创建 linkage 记忆
             # 防竞态: 写入前再次检查 (源同款;DB 名称幂等 upsert 兜底,
@@ -1299,7 +1319,8 @@ def persist_linkage_memory(
                 logger.warning("竞态检测: %s-%s 已存在, 走更新路径", table_a, table_b)
                 _merge_and_save_linkage(
                     store, table_a, table_b, state, direct_join_pairs,
-                    join_paths, aggregation, recheck, conv_id, user_id)
+                    join_paths, aggregation, recheck, conv_id, user_id,
+                    data_source_id=data_source_id)
             else:
                 content = _build_linkage_content(table_a, table_b, state, direct_join_pairs)
                 question = _attr(state, "user_input") or _attr(state, "question")
@@ -1318,5 +1339,6 @@ def persist_linkage_memory(
                         **({"conversation_id": conv_id} if conv_id else {}),
                     },
                     user_id=user_id,
+                    data_source_id=data_source_id,
                 )
                 logger.info("创建 linkage 记忆 %s-%s", table_a, table_b)

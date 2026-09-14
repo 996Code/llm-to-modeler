@@ -55,21 +55,32 @@ def _start_refresh_scheduler(manager, app_state) -> None:
     _refresh_stop = threading.Event()
 
     def _loop():
-        # 周期在每轮重新读设置(管理端热改即时生效);检查间隔取
-        # min(周期, 1h) 保证"改小周期"最多 1h 内生效
-        while not _refresh_stop.wait(3600):
+        # 双周期任务: 元数据刷新(metadata_refresh_hours, 缺省 6h, 0=关) +
+        # 健康巡检(5min, 对标源 APScheduler datasource_health 间隔)。
+        # 周期每轮重读设置(管理端热改即时生效);检查间隔取 5min 粒度。
+        _loop._last_refresh = _now_ts()   # 启动即视为已刷新(避免重启风暴)
+        _loop._last_health = 0.0
+        while not _refresh_stop.wait(300):
+            now = _now_ts()
+            # 健康巡检: 固定 5min(源 scheduler.py:94-102 同款间隔)
+            if now - _loop._last_health >= 300:
+                _loop._last_health = now
+                try:
+                    from domains.chatbi import datasources as ds_mod
+                    from domains.chatbi.runtime import get_pack_db
+                    ds_mod.check_all_health(get_pack_db())
+                except Exception as e:
+                    logger.warning("健康巡检失败(下轮重试): %s", e)
+            # 元数据刷新: 设置周期
             try:
                 hours = float(_load_settings(app_state).get("metadata_refresh_hours", 6))
             except Exception:
                 hours = 6
             if hours <= 0:
                 continue
-            # 简化: 检查间隔 1h, 到点按上次刷新时间判断是否到期。
-            # 状态存 pack 设置表太重, 用模块级时间戳(重启重置=重启即检一次, 可接受)
-            now = _now_ts()
-            if now - getattr(_loop, "_last_run", 0) < hours * 3600:
+            if now - _loop._last_refresh < hours * 3600:
                 continue
-            _loop._last_run = now
+            _loop._last_refresh = now
             try:
                 manager.submit("chatbi.refresh_semantics", payload={},
                                dedupe_key="chatbi:refresh:all")
@@ -77,11 +88,10 @@ def _start_refresh_scheduler(manager, app_state) -> None:
             except Exception as e:
                 logger.warning("元数据定时刷新提交失败: %s", e)
 
-    _loop._last_run = _now_ts()  # 启动即视为已刷新(避免进程重启风暴)
     _refresh_thread = threading.Thread(target=_loop, name="chatbi-metadata-refresh",
                                        daemon=True)
     _refresh_thread.start()
-    logger.info("chatbi metadata refresh scheduler started (interval from settings)")
+    logger.info("chatbi scheduler started: health 5min + metadata refresh (from settings)")
 
 
 def _now_ts() -> float:

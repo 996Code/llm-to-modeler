@@ -450,8 +450,12 @@ class AskDataTool(CompositeTool):
 
         try:
             from domains.chatbi.memory import recall_text
+            # 记忆按 用户+数据源 双维过滤(源 memory/{tenant}/{ds}/ 目录隔离):
+            # 数据源 A 的业务约定不得注入 B 的 prompt; 用户记忆不跨用户泄漏
             mem_text = recall_text(llm, self._get_db(), question,
-                                   conv_id=ctx.conv_id)
+                                   conv_id=ctx.conv_id,
+                                   user_id=ctx.user_id or None,
+                                   data_source_id=state["ds"].id)
             if mem_text:
                 sections.append(f"【相关记忆】\n{mem_text}")
         except Exception as e:
@@ -468,12 +472,6 @@ class AskDataTool(CompositeTool):
             sections.append(
                 f"【上轮筛选条件】\n{_filter_lines}\n"
                 f"(自动继承供参考; 若用户本轮明确取消或变更某项, 以本轮为准, 勿自动带上)")
-        prev_decisions = (_sess.get("prev_decisions") if _sess else None) or []
-        if prev_decisions:
-            dec_text = "\n".join(f"- {d.get('description','')}" for d in prev_decisions if d.get("description"))
-            if dec_text:
-                sections.append(f"【用户已确认决策】\n{dec_text}")
-
         sections.append(f"【用户问题】{question}\n\n请生成 SQL:")
 
         user_content = "\n\n".join(sections)
@@ -732,7 +730,9 @@ class AskDataTool(CompositeTool):
             extract_and_save_memory(
                 llm, self._get_db(), state.get("user_input", ""),
                 state["sql"], state.get("current_tables") or [],
-                result_summary, conv_id=ctx.conv_id)
+                result_summary, conv_id=ctx.conv_id,
+                user_id=ctx.user_id or None,
+                data_source_id=state["ds"].id)
         except Exception as e:
             logger.warning("记忆抽取失败(不阻塞): %s", e)
 
@@ -743,7 +743,9 @@ class AskDataTool(CompositeTool):
         # 单表查询内部自跳过;失败 fail-open。
         try:
             from domains.chatbi.memory import persist_linkage_memory
-            persist_linkage_memory(self._get_db(), state, conv_id=ctx.conv_id)
+            persist_linkage_memory(self._get_db(), state, conv_id=ctx.conv_id,
+                                   user_id=ctx.user_id or None,
+                                   data_source_id=state["ds"].id)
         except Exception as e:
             logger.warning("linkage 记忆沉淀失败(不阻塞): %s", e)
 

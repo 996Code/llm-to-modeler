@@ -7,7 +7,7 @@
 
 pack 适配:
   - tenant 删除(user_id 归属); SQLAlchemy → PackRelationalDB
-  - asyncio → 同步; JWT → admin_required / X-User-Id
+  - asyncio → 同步; JWT → user_required(用户级, 信 X-User-Id 行级隔离)
   - execute_sql → datasources.execute_readonly
   - generate_chart → chart_engine.generate_chart(同步)
   - CSV 注入防护 + utf-8-sig BOM(Excel 中文)保留
@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
-from sdk.pack_api import admin_required
+from sdk.pack_api import user_required
 from sdk.relational_store import PackRelationalDB
 
 from domains.chatbi import datasources
@@ -117,7 +117,7 @@ def save_query(db: PackRelationalDB, user_id: str, data_source_id: str,
 
 # ── 保存查询 API ─────────────────────────────────────────────
 
-@router.get("/saved-queries", dependencies=[Depends(admin_required)])
+@router.get("/saved-queries", dependencies=[Depends(user_required)])
 async def list_saved_queries(request: Request, limit: int = Query(50, ge=1, le=200)):
     uid = _user_id(request)
     with _db().connect() as conn:
@@ -135,7 +135,7 @@ async def list_saved_queries(request: Request, limit: int = Query(50, ge=1, le=2
     } for r in rows]}
 
 
-@router.get("/saved-queries/{sq_id}/export", dependencies=[Depends(admin_required)])
+@router.get("/saved-queries/{sq_id}/export", dependencies=[Depends(user_required)])
 async def export_saved_query_csv(sq_id: str, request: Request):
     """导出为 CSV(重跑 SQL + 三层校验 + CSV 注入防护 + utf-8-sig BOM)。"""
     uid = _user_id(request)
@@ -196,7 +196,7 @@ def _sanitize_csv_cell(value) -> str:
 
 # ── 看板 CRUD ────────────────────────────────────────────────
 
-@router.get("/dashboards", dependencies=[Depends(admin_required)])
+@router.get("/dashboards", dependencies=[Depends(user_required)])
 async def list_dashboards(request: Request):
     uid = _user_id(request)
     with _db().connect() as conn:
@@ -211,7 +211,7 @@ async def list_dashboards(request: Request):
     } for r in rows]}
 
 
-@router.post("/dashboards", dependencies=[Depends(admin_required)])
+@router.post("/dashboards", dependencies=[Depends(user_required)])
 async def create_dashboard(body: DashboardCreate, request: Request):
     uid = _user_id(request)
     did = str(uuid.uuid4())
@@ -224,7 +224,7 @@ async def create_dashboard(body: DashboardCreate, request: Request):
     return {"id": did, "name": body.name, "createdAt": now}
 
 
-@router.put("/dashboards/{did}", dependencies=[Depends(admin_required)])
+@router.put("/dashboards/{did}", dependencies=[Depends(user_required)])
 async def update_dashboard(did: str, body: DashboardCreate, request: Request):
     uid = _user_id(request)
     with _db().connect() as conn:
@@ -237,7 +237,7 @@ async def update_dashboard(did: str, body: DashboardCreate, request: Request):
     return {"ok": True}
 
 
-@router.delete("/dashboards/{did}", dependencies=[Depends(admin_required)])
+@router.delete("/dashboards/{did}", dependencies=[Depends(user_required)])
 async def delete_dashboard(did: str, request: Request):
     uid = _user_id(request)
     with _db().connect() as conn:
@@ -249,7 +249,7 @@ async def delete_dashboard(did: str, request: Request):
     return {"ok": True}
 
 
-@router.get("/dashboards/{did}", dependencies=[Depends(admin_required)])
+@router.get("/dashboards/{did}", dependencies=[Depends(user_required)])
 async def get_dashboard(did: str, request: Request):
     uid = _user_id(request)
     with _db().connect() as conn:
@@ -277,7 +277,7 @@ async def get_dashboard(did: str, request: Request):
 
 # ── Widget 操作 ──────────────────────────────────────────────
 
-@router.post("/dashboards/{did}/widgets", dependencies=[Depends(admin_required)])
+@router.post("/dashboards/{did}/widgets", dependencies=[Depends(user_required)])
 async def add_widget(did: str, body: WidgetCreate, request: Request):
     """添加 widget: 保存时跑一次 SQL 生成 chart_config 缓存(避免 refresh 重跑 LLM)。"""
     uid = _user_id(request)
@@ -339,7 +339,7 @@ async def add_widget(did: str, body: WidgetCreate, request: Request):
     return {"id": wid, "chartConfig": chart_config}
 
 
-@router.delete("/dashboards/{did}/widgets/{wid}", dependencies=[Depends(admin_required)])
+@router.delete("/dashboards/{did}/widgets/{wid}", dependencies=[Depends(user_required)])
 async def delete_widget(did: str, wid: str, request: Request):
     uid = _user_id(request)
     db = _db()
@@ -352,7 +352,7 @@ async def delete_widget(did: str, wid: str, request: Request):
     return {"ok": True}
 
 
-@router.put("/dashboards/{did}/widgets/layout", dependencies=[Depends(admin_required)])
+@router.put("/dashboards/{did}/widgets/layout", dependencies=[Depends(user_required)])
 async def update_layout(did: str, body: LayoutUpdate, request: Request):
     """批量更新 widget 布局(拖拽后保存)。"""
     uid = _user_id(request)
@@ -371,7 +371,7 @@ async def update_layout(did: str, body: LayoutUpdate, request: Request):
     return {"ok": True, "updated": updated}
 
 
-@router.put("/dashboards/{did}/widgets/{wid}/refresh", dependencies=[Depends(admin_required)])
+@router.put("/dashboards/{did}/widgets/{wid}/refresh", dependencies=[Depends(user_required)])
 async def refresh_widget(did: str, wid: str, request: Request):
     """刷新 widget: 实时重跑 SQL + 缓存 chart_config inject_data(不调 LLM)。"""
     db = _db()

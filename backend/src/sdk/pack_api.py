@@ -54,6 +54,18 @@ async def admin_required(request: Request) -> None:
     await _admin_auth_fn(request)
 
 
+async def user_required(request: Request) -> None:
+    """用户级端点鉴权(信任模型与 conversations API 一致)。
+
+    平台不维护用户登录态, 用户身份由上游网关注入 X-User-Id。
+    用户级端点(如 chatbi 的"我的查询/我的看板")不要求管理 token,
+    但必须携带用户标识——缺头时 401(以 "anonymous" 归属落库会
+    污染所有用户的数据视图, 宁拒勿混)。
+    """
+    if not request.headers.get("X-User-Id"):
+        raise HTTPException(401, "缺少用户标识(X-User-Id)")
+
+
 # ── 插件配置读取器(依赖倒置)─────────────────────────────────
 # pack 运行时要读自己的声明式配置(设置页保存值 > env > schema 默认)。
 # 读取器由平台实现,SDK 只持有工厂契约——插件经 settings_reader()
