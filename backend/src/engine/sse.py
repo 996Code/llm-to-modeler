@@ -41,13 +41,16 @@ class SSEEvent:
     类比 Java 的 SSE 事件对象，但 Python 用 dataclass 式的简单封装。
     """
 
-    def __init__(self, event: str, data: Dict[str, Any]):
+    def __init__(self, event: str, data: Dict[str, Any], seq: int = None):
         """初始化 SSE 事件。
 
         Args:
             event: 事件类型（stage/result/error/done/pipeline_definition/needsClarification）
             data: 事件数据字典，会被 JSON 序列化
+            seq: 事件序号(可选)——非 None 时输出 SSE 标准 `id:` 行,
+                 客户端断线重连可带 Last-Event-ID 头补齐错过的事件
         """
+        self.seq = seq
         self.event = event
         self.data = data
 
@@ -63,7 +66,8 @@ class SSEEvent:
             # 只为制造字节流动，不产生事件
             return ": ping\n\n"
         data_str = json.dumps(self.data, ensure_ascii=False, default=str)
-        return f"event: {self.event}\ndata: {data_str}\n\n"
+        id_line = f"id: {self.seq}\n" if self.seq is not None else ""
+        return f"event: {self.event}\n{id_line}data: {data_str}\n\n"
 
 
 class StreamManager:
@@ -90,6 +94,7 @@ class StreamManager:
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop):
+        self._event_seq = 0  # SSE 断线重连序号(Last-Event-ID)
         """初始化流管理器。
 
         Args:
@@ -97,6 +102,11 @@ class StreamManager:
         """
         self._loop = loop
         self._queue: asyncio.Queue = asyncio.Queue()
+
+    def _next_seq(self) -> int:
+        """事件序号自增——SSE 断线重连(Last-Event-ID)的基础。"""
+        self._event_seq += 1
+        return self._event_seq
 
     def heartbeat(self):
         """推送 SSE 心跳（`: ping` 注释行，线程安全）。
@@ -127,7 +137,7 @@ class StreamManager:
         # ★ call_soon_threadsafe：把 put_nowait 操作投递到事件循环线程执行
         # 工作线程不能直接操作 asyncio.Queue（非线程安全），必须通过这个桥接
         self._loop.call_soon_threadsafe(
-            self._queue.put_nowait, SSEEvent("stage", data)
+            self._queue.put_nowait, SSEEvent("stage", data, seq=self._next_seq())
         )
 
     def pipeline_definition(self, tool_name: str, steps: list):
@@ -144,7 +154,7 @@ class StreamManager:
         """
         data = {"tool": tool_name, "steps": steps}
         self._loop.call_soon_threadsafe(
-            self._queue.put_nowait, SSEEvent("pipeline_definition", data)
+            self._queue.put_nowait, SSEEvent("pipeline_definition", data, seq=self._next_seq())
         )
 
     async def emit_result(self, data: Dict[str, Any]):
@@ -158,7 +168,7 @@ class StreamManager:
         Args:
             data: 结果数据
         """
-        await self._queue.put(SSEEvent("result", data))
+        await self._queue.put(SSEEvent("result", data, seq=self._next_seq()))
 
     async def emit_error(self, message: str, **extra):
         """推送错误事件（只能在事件循环线程调用）。
@@ -167,7 +177,7 @@ class StreamManager:
             message: 错误信息（会给用户看到）
             **extra: 额外错误上下文
         """
-        await self._queue.put(SSEEvent("error", {"error": message, **extra}))
+        await self._queue.put(SSEEvent("error", {"error": message, **extra}, seq=self._next_seq()))
 
     async def emit_done(self):
         """推送完成事件并结束流。
@@ -175,7 +185,7 @@ class StreamManager:
         先发 done 事件告诉前端流程结束，再推入哨兵对象终止 stream() 循环。
         顺序很重要：必须先发 done 再发哨兵，否则前端收不到 done。
         """
-        await self._queue.put(SSEEvent("done", {"status": "done"}))
+        await self._queue.put(SSEEvent("done", {"status": "done"}, seq=self._next_seq()))
         await self._queue.put(_STREAM_END)  # 哨兵终止 stream 循环
 
     async def stream(self) -> AsyncGenerator[str, None]:

@@ -478,6 +478,7 @@ class AskDataTool(CompositeTool):
             last_error = result.error if not result.ok else None
 
         duration = int((time.monotonic() - started) * 1000)
+        state["_execute_duration_ms"] = duration
         # 链路打点(引擎时间线;SQL 全文随 checkpoint 落制品)
         ctx.trace("chatbi.execute",
                   title=f"执行查询({ds.name})",
@@ -728,9 +729,18 @@ class AskDataTool(CompositeTool):
                 "tables": state["current_tables"],
                 "seedTables": state.get("seed_tables") or [],
                 "expandedTables": state.get("expanded_tables") or [],
+                # 对话内明细(对标原系统 complete 事件的 step_durations/self_heal_rounds)
+                "totalDurationMs": state.get("_total_duration_ms", 0),
+                "healRounds": state.get("heal_rounds", 0),
+                "executeDurationMs": state.get("_execute_duration_ms", 0),
+                "chartDegraded": bool(chart and chart.degraded),
             })
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
+        # 对话内明细(走查差距修复): 每步耗时采集, finalize 汇总进 formatted
+        # 让用户在对话流中就能看到各步耗时(对标原系统 step_durations)
+        state["_step_timings"] = {}
+        state["_pipeline_start"] = time.time()
         # ── 澄清回答消费(引擎 resume 注入 state["clarify_answers"]) ──
         # 结构: {question_header: label 或 自由输入文本}
         answers = state.get("clarify_answers") or {}
@@ -759,7 +769,9 @@ class AskDataTool(CompositeTool):
                 state["history_text"] = _format_history(msgs)
             except Exception:
                 state["history_text"] = ""
+        self._timings_start = state.get("_pipeline_start", time.time())
         self.run_pipeline(state, ctx)
+        state["_total_duration_ms"] = int((time.time() - state["_pipeline_start"]) * 1000)
         result = state.get("_result")
         if result is not None:
             return result

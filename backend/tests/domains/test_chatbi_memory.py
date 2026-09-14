@@ -916,3 +916,47 @@ def test_store_accepts_db_and_is_duck_compatible(db):
     assert linkage["type"] == "linkage"
     assert linkage["co_occurrence"] == 4
     assert linkage["tables"] == ["a", "b"]
+
+
+class TestWalkthroughFixes:
+    """走查修复回归锚(B1/B2/B3)——这些路径此前从未成功执行过,
+    815 全绿也漏掉,必须显式守护。"""
+
+    def test_b1_memory_extraction_executes(self, db):
+        """B1: result_summary 未定义曾致 NameError 被 except 吞→记忆抽取全死。
+        修复后 extract_and_save_memory 必须真实返回记忆(而非静默 None)。"""
+        from domains.chatbi.memory import extract_and_save_memory
+        from tests.domains.test_chatbi_pipeline import FakeLLM
+        llm = FakeLLM({"chatbi.memory.extract": {
+            "should_save": True, "name": "b1_anchor",
+            "description": "回归锚", "content": "B1 修复后的记忆"}})
+        result = extract_and_save_memory(
+            llm, db, "问题", "SELECT 1", ["t"],
+            "查询完成, 返回 1 行", conv_id="b1-anchor")
+        assert result is not None and result.get("name") == "b1_anchor"
+
+    def test_b2_sync_linkage_signature(self, db):
+        """B2: sync_linkage_to_graph 参数错位曾致 AttributeError。
+        修复后 (db, mem_store, ds_id) 签名必须可执行不抛。"""
+        from domains.chatbi.memory import get_memory_store
+        from domains.chatbi.models import SemanticModelContent, Model
+        from domains.chatbi.graph_infer import sync_linkage_to_graph
+        content = SemanticModelContent(models=[Model(name="t1", display_name="T1")])
+        mem_store = get_memory_store(db)
+        # 只验证签名可执行(空记忆/空关系→空结果, 不炸即过)
+        r = sync_linkage_to_graph(db, mem_store, "b2-anchor-ds")
+        assert isinstance(r, dict)
+
+    def test_b3_linkage_scenes_populated(self, db):
+        """B3: state['question'] 键不存在曾致 scenes 恒空。
+        修复后 user_input 键必须写入 linkage 记忆的典型场景。"""
+        from domains.chatbi.memory import persist_linkage_memory, list_memories, delete_memory
+        state = {"user_input": "b3场景锚定问题", "current_tables": ["ta", "tb"],
+                 "join_path_section": "ta LEFT JOIN tb ON ta.x = tb.x",
+                 "sql": "SELECT 1", "thinking": {}}
+        persist_linkage_memory(db, state, conv_id="b3-anchor")
+        links = [m for m in list_memories(db, limit=50)
+                 if m.get("type") == "linkage" and "b3场景锚定问题" in (m.get("scenes") or [])]
+        assert links, "scenes 应含 user_input 文本(B3 修复前恒空)"
+        for m in links:
+            delete_memory(db, m["id"])

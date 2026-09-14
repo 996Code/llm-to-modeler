@@ -130,7 +130,19 @@ def _evolve_graph(db, datasource_id: str, content) -> None:
     suggestions = mine_implicit_relationships(history, existing)
     if not suggestions:
         return
-    updates = apply_confidence_updates(db, datasource_id, content, suggestions)
+    # 乐观锁: 先读当前 is_current 版本号, 传入 expected_version 防并发写冲突
+    # (走查发现的差距——原系统有, pack 此前未启用)
+    current_version = None
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT version FROM chatbi_semantic_models "
+                "WHERE data_source_id = ? AND is_current = 1", (datasource_id,)).fetchone()
+            current_version = row["version"] if row else None
+    except Exception as e:
+        logger.warning("乐观锁版本读取失败(降级为不校验): %s", e)
+    updates = apply_confidence_updates(db, datasource_id, content, suggestions,
+                                       expected_version=current_version)
     if updates:
         # B2 修复: sync_linkage_to_graph 正确签名为 (db, mem_store, data_source_id)
         # ——此前 content 落到 mem_store 位, list_memories() 必炸 AttributeError
