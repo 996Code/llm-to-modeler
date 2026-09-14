@@ -273,11 +273,18 @@ def rebuild_index(
             return RebuildResult(error=str(e))
 
     # 1. 删旧: 该 scope 的语义层分区(同数据源维度, few-shot 分区不受影响)
+    #    首次建索引时 collection 尚不存在——Milvus 抛 collection not found,
+    #    视为"无旧索引可删"(docstring 边界情况第一条), 继续建新。
+    #    此前把该异常当删除失败直接 return, 导致首次扫描永远建不出索引。
     try:
         deleted = store.delete_doc(scope, DOC_SCHEMA)
     except Exception as e:
-        logger.warning("rebuild_index 删旧索引失败: %s", e)
-        return RebuildResult(error=str(e))
+        if "not found" in str(e).lower() or "100" in str(e):
+            deleted = 0  # collection 不存在 = 无旧索引
+            logger.info("rebuild_index: collection 尚不存在(首次建), 跳过删旧")
+        else:
+            logger.warning("rebuild_index 删旧索引失败: %s", e)
+            return RebuildResult(error=str(e))
 
     # 2. 建新: 用新 content 重建索引
     try:
