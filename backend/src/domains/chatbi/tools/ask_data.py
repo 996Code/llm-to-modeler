@@ -200,6 +200,15 @@ class AskDataTool(CompositeTool):
         except ImportError:
             pass
 
+        # B(差异修复): normalized_question 剥离可视化措辞(对标 INT-004)——
+        # "用折线图展示本月销售额" → 问题="本月销售额", chart_hint="line"。
+        # 规则剥离(零 LLM 成本), 剥离后的问题进检索/SQL 生成。
+        raw_input = state.get("user_input", "")
+        stripped, chart_hint = _strip_visualization(raw_input)
+        if stripped and stripped != raw_input:
+            state["user_input"] = stripped
+            state["chart_hint"] = chart_hint
+
         # 两阶段检索(向量召回 → LLM 精筛);向量设施不可用 → 全表清单降级
         from domains.chatbi import retrieval as retrieval_mod
         from domains.chatbi import stores as cb_stores
@@ -407,6 +416,18 @@ class AskDataTool(CompositeTool):
 
         if state.get("history_text"):
             sections.append(f"【对话历史】\n{state['history_text']}")
+
+        # A(差异修复): 上轮筛选继承(对标 prev_filters) + 用户决策(DecisionPoint)
+        _sess = ctx.session_state
+        prev_filters = (_sess.get("prev_filters") if _sess else None) or {}
+        if prev_filters:
+            sections.append(f"【上轮筛选(自动继承)】\n{prev_filters}")
+        prev_decisions = (_sess.get("prev_decisions") if _sess else None) or []
+        if prev_decisions:
+            dec_text = "\n".join(f"- {d.get('description','')}" for d in prev_decisions if d.get("description"))
+            if dec_text:
+                sections.append(f"【用户已确认决策】\n{dec_text}")
+
         sections.append(f"【用户问题】{question}\n\n请生成 SQL:")
 
         user_content = "\n\n".join(sections)
@@ -593,7 +614,7 @@ class AskDataTool(CompositeTool):
         result = state["execute_result"]
         llm = self._get_llm(ctx)
         sess = ctx.session_state
-        chart_hint = (sess.get("chart_type_hint") if sess else None)
+        chart_hint = state.get("chart_hint") or (sess.get("chart_type_hint") if sess else None)
         chart = generate_chart(llm, state.get("user_input", ""),
                                result.columns, result.rows,
                                chart_type_hint=chart_hint, conv_id=ctx.conv_id)
@@ -703,6 +724,10 @@ class AskDataTool(CompositeTool):
             sess.set("prev_tables", state["current_tables"])
             if chart and chart.config:
                 sess.set("prev_chart_config", chart.config)
+            # A: 筛选条件提取写回(下轮 generate 注入继承)
+            extracted = _extract_filters_from_sql(state["sql"])
+            if extracted:
+                sess.set("prev_filters", extracted)
 
         # summary 文案(含 0 行提示/命中指标)
         parts = [f"查询完成, 返回 {result.rowcount} 行"]
@@ -796,6 +821,49 @@ class AskDataTool(CompositeTool):
             "metricHits": artifact.get("metric_hits") or [],
             "datasourceName": artifact.get("datasource_name"),
         }
+
+
+import re as _re_viz
+
+_VIZ_PATTERNS = [
+    (_re_viz.compile(r"用?(?:折线图|线图|曲线图|line chart)", _re_viz.IGNORECASE), "line"),
+    (_re_viz.compile(r"用?(?:柱状图|柱图|条形图|bar chart)", _re_viz.IGNORECASE), "bar"),
+    (_re_viz.compile(r"用?(?:饼图|饼状图|pie chart)", _re_viz.IGNORECASE), "pie"),
+    (_re_viz.compile(r"用?(?:散点图|scatter)", _re_viz.IGNORECASE), "scatter"),
+    (_re_viz.compile(r"画成|展示为|换成|改成|用.*(?:图|chart)展示", _re_viz.IGNORECASE), None),
+    (_re_viz.compile(r"画个|画一张|画一个|帮我画", _re_viz.IGNORECASE), None),
+]
+
+
+def _strip_visualization(question: str) -> tuple:
+    """剥离可视化措辞(对标 INT-004), 返回 (纯净问题, chart_type_hint 或 None)。"""
+    result = question
+    hint = None
+    for pattern, chart_type in _VIZ_PATTERNS:
+        if pattern.search(result):
+            if chart_type and not hint:
+                hint = chart_type
+            result = pattern.sub("", result)
+    result = _re_viz.sub(r"^(展示|显示|看看|看下)\s*", "", result)
+    result = _re_viz.sub(r"\s+", " ", result).strip()
+    return result, hint
+
+
+def _extract_filters_from_sql(sql: str) -> dict:
+    """从 WHERE 提取筛选条件(继承用; 简化解析, 只取 col=value/比较)。"""
+    if not sql:
+        return {}
+    filters = {}
+    where_m = _re_viz.search(
+        r"WHERE\s+(.*?)(?:GROUP|ORDER|HAVING|LIMIT|$)", sql, _re_viz.IGNORECASE | _re_viz.DOTALL)
+    if not where_m:
+        return {}
+    for m in _re_viz.finditer(
+            r"(\w+)\s*(?:>=|<=|!=|=|>|<)\s*('?[^'\s,)]+'?)", where_m.group(1)):
+        col, val = m.group(1), m.group(2).strip("'")
+        if col.lower() not in ("and", "or", "not", "is", "null", "like", "in", "between"):
+            filters[col] = val
+    return filters
 
 
 def _inherit_prev_tables(prev_tables: list, current_names: list,
