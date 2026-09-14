@@ -49,3 +49,8 @@ tokenizers>=0.21,<0.22                 # HF tokenizer(纯 Rust 实现,无重依�
 # ── 存储后端（PostgreSQL 唯一后端;DATABASE_URL 必填 fail-closed） ──
 psycopg[binary,pool]>=3.2,<4              # PG 驱动 + 连接池(services/db.py)
 langgraph-checkpoint-postgres>=3.1,<4     # PostgresSaver:追问现场/checkpoint 落 PG(engine/graph.py)
+
+# ── chatbi 插件(NL2SQL BI)自有依赖 ──
+sqlglot>=25,<28                        # SQL AST 解析(三层校验/方言)
+pymysql>=1.1,<2                        # MySQL 数据源执行(chatbi 插件,同步驱动)
+networkx>=3.0,<4                      # 知识图谱(SchemaGraph: Dijkstra/社区发现/中心度)

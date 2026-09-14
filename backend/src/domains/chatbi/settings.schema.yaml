@@ -1,0 +1,97 @@
+# chatbi 插件声明式设置页(设置页 > env > 默认;热生效)
+version: 1
+groups:
+  - key: infra
+    title: 基础设施依赖
+    fields:
+      - key: milvus_uri
+        type: string
+        label: Milvus 地址
+        env: MILVUS_URI
+        required: true
+        placeholder: http://milvus:19530
+        help: 语义层向量检索(两阶段召回);未配置时插件中心显示依赖未配置且不可启用
+  - key: security
+    title: 凭据加密
+    fields:
+      - key: fernet_key
+        type: secret
+        label: Fernet 密钥
+        env: FERNET_KEY
+        required: true
+        placeholder: openssl rand -hex 32 生成
+        help: 数据源密码加密存储;更换后已存密码无法解密(需重新录入)
+  - key: query
+    title: 查询执行
+    fields:
+      - key: sql_execution_timeout
+        type: int
+        label: SQL 执行超时(秒)
+        default: 30
+        min: 5
+        max: 300
+      - key: sql_max_rows
+        type: int
+        label: 结果最大行数
+        default: 10000
+        min: 100
+        max: 100000
+      - key: sql_self_heal_rounds
+        type: int
+        label: SQL 自愈轮数上限
+        default: 2
+        min: 0
+        max: 5
+      - key: sql_self_heal_circuit_breaker
+        type: int
+        label: 自愈熔断阈值(跨查询连续失败)
+        default: 3
+        min: 1
+        max: 20
+  - key: retrieve
+    title: 检索
+    fields:
+      - key: retrieve_top_k
+        type: int
+        label: 向量召回条数
+        default: 20
+        min: 5
+        max: 100
+      - key: fewshot_top_k
+        type: int
+        label: Few-shot 示例数
+        default: 3
+        min: 0
+        max: 10
+      - key: clarify_table_threshold
+        type: int
+        label: 触发表选择的表数阈值
+        default: 8
+        min: 3
+        max: 100
+  - key: graph
+    title: 知识图谱
+    fields:
+      - key: graph_enabled
+        type: bool
+        label: 启用图谱表扩展与 JOIN 路径
+        default: true
+      - key: graph_max_join_path_hops
+        type: int
+        label: JOIN 路径最大跳数
+        default: 4
+        min: 1
+        max: 8
+      - key: graph_join_path_in_prompt
+        type: bool
+        label: 在 SQL prompt 注入 JOIN 路径
+        default: true
+  - key: schedule
+    title: 定时任务
+    fields:
+      - key: metadata_refresh_hours
+        type: int
+        label: 语义层自动刷新间隔(小时,0=关闭)
+        default: 24
+        min: 0
+        max: 720

@@ -362,20 +362,28 @@ async function streamSSE(
  * @param raw 原始事件文本（不含分隔的 \n\n）
  * @returns 解析结果，或 null（没有 event 字段时无法识别）
  */
-function parseSSEEvent(raw: string): { type: string; data: any } | null {
+/** SSE 断线重连: 最后收到的事件序号(每次请求重置, 可用于诊断丢事件) */
+export let lastSSEEventId: number = 0
+
+function parseSSEEvent(raw: string): { type: string; data: any; seq?: number } | null {
   let type = ''
   let dataStr = ''
-  // 逐行扫描：行首为 "event:" 取类型，行首为 "data:" 累加数据
+  let seq: number | undefined
+  // 逐行扫描：行首为 "event:" 取类型，"id:" 取序号，"data:" 累加数据
   for (const line of raw.split('\n')) {
     if (line.startsWith('event:')) type = line.slice(6).trim()
+    else if (line.startsWith('id:')) seq = parseInt(line.slice(3).trim(), 10)
     else if (line.startsWith('data:')) dataStr += line.slice(5).trim()
   }
   if (!type) return null
+  // SSE 断线重连序号: 记录最后收到的事件号(将来 EventSource 改造时
+  // 重连请求可带 Last-Event-ID 头, 服务端从该序号后补发)
+  if (seq !== undefined && Number.isFinite(seq)) lastSSEEventId = seq
   try {
     // 尝试把 data 解析为 JSON 对象
-    return { type, data: JSON.parse(dataStr) }
+    return { type, data: JSON.parse(dataStr), seq }
   } catch {
     // JSON 解析失败时退回空对象，保证流程不中断
-    return { type, data: {} }
+    return { type, data: {}, seq }
   }
 }

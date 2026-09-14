@@ -142,6 +142,16 @@ export const useConversationStore = defineStore('conversation', () => {
       messages.value = (conv.messages || []).map((m: any) => ({
         ...m,
         dataResult: m.dataResult ?? m.dataArtifact ?? undefined,
+        // chatbi 制品恢复: formattedData 不落库, 从 dataArtifact 同构合成
+        // (与 tool.format_result 钩子同构) —— 否则刷新后图表卡/指标标签消失
+        formattedData: (m.dataResult ?? m.dataArtifact)?.chart_option
+          ? {
+              chart: (m.dataResult ?? m.dataArtifact).chart_option,
+              metricHits: (m.dataResult ?? m.dataArtifact).metric_hits || [],
+              rowcount: (m.dataResult ?? m.dataArtifact).rowcount,
+              datasourceName: (m.dataResult ?? m.dataArtifact).datasource_name,
+            }
+          : undefined,
       }))
       currentConfig.value = conv.currentConfig || null
       baselineConfig.value = null  // 切会话：diff 基线随下一轮交互重建
@@ -305,6 +315,16 @@ export const useConversationStore = defineStore('conversation', () => {
             if (result.fieldCount !== undefined) formattedData.fieldCount = result.fieldCount
             if (result.formName !== undefined) formattedData.formName = result.formName
             if (result.title !== undefined) formattedData.title = result.title
+            // chatbi 图表卡(formatted 平铺: ECharts option + 命中指标 + 元信息)
+            if (result.chart !== undefined) formattedData.chart = result.chart
+            if (result.metricHits !== undefined) formattedData.metricHits = result.metricHits
+            if (result.rowcount !== undefined) formattedData.rowcount = result.rowcount
+            if (result.datasourceName !== undefined) formattedData.datasourceName = result.datasourceName
+            // 对话内明细(对标原系统 step_durations/self_heal_rounds)
+            if (result.totalDurationMs !== undefined) formattedData.totalDurationMs = result.totalDurationMs
+            if (result.healRounds !== undefined) formattedData.healRounds = result.healRounds
+            if (result.executeDurationMs !== undefined) formattedData.executeDurationMs = result.executeDurationMs
+            if (result.chartDegraded !== undefined) formattedData.chartDegraded = result.chartDegraded
             messages.value.push({
               role: 'assistant',
               content: result.summary,
