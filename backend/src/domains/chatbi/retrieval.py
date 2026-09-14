@@ -38,7 +38,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict
 
 from domains.chatbi.models import SemanticModelContent
 from domains.chatbi.stores import (

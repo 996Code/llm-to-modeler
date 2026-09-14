@@ -656,6 +656,9 @@ class AskDataTool(CompositeTool):
         # 记忆抽取 (源 chat_stream 在成功查询后调 extract_memory_from_turn
         # + persist——移植为 extract_and_save_memory, 含来源对话关联)。
         # LLM 判定该轮是否值得记;失败/不该记静默跳过(fail-open 不阻塞)。
+        # B1 修复: result_summary 先组装(此前未定义, NameError 被 except 吞掉
+        # → 记忆抽取链路全死, 走查发现)
+        result_summary = f"查询完成, 返回 {result.rowcount} 行; SQL: {state['sql'][:200]}"
         try:
             from domains.chatbi.memory import extract_and_save_memory
             extract_and_save_memory(

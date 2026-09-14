@@ -1051,7 +1051,7 @@ def _build_linkage_content(
     is_direct = pair in direct_join_pairs
     join_path_section = _attr(state, "join_path_section") or ""
     current_tables = _attr(state, "current_tables") or []
-    question = _attr(state, "question")
+    question = _attr(state, "user_input") or _attr(state, "question")
 
     # JOIN 路径
     if is_direct and join_path_section:
@@ -1199,7 +1199,7 @@ def _merge_and_save_linkage(
     )
 
     # 合并 scenes: 已有 + 新问题 (去重)
-    question = _attr(state, "question")
+    question = _attr(state, "user_input") or _attr(state, "question")
     merged_scenes = list(existing_scenes)
     if question and question not in merged_scenes:
         merged_scenes.append(question)
@@ -1302,7 +1302,7 @@ def persist_linkage_memory(
                     join_paths, aggregation, recheck, conv_id, user_id)
             else:
                 content = _build_linkage_content(table_a, table_b, state, direct_join_pairs)
-                question = _attr(state, "question")
+                question = _attr(state, "user_input") or _attr(state, "question")
                 scenes = [question] if question else []
                 store.save_memory(
                     name=f"linkage-{table_a}-{table_b}",

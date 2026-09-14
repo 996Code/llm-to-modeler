@@ -201,7 +201,7 @@ def persist_metric_feedback(
         for func, col in sql_aggs:
             agg_expr = f"{func}({col})".upper()
             # 同时匹配带/不带空格的版本
-            if agg_expr in formula_upper or f"{func} ( {col} )" in formula_upper:
+            if agg_expr in formula_upper or f"{func.upper()} ( {col.upper()} )" in formula_upper:
                 matched = True
                 break
         if matched:

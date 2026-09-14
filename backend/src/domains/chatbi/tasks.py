@@ -132,7 +132,10 @@ def _evolve_graph(db, datasource_id: str, content) -> None:
         return
     updates = apply_confidence_updates(db, datasource_id, content, suggestions)
     if updates:
-        sync_linkage_to_graph(db, datasource_id, content)
+        # B2 修复: sync_linkage_to_graph 正确签名为 (db, mem_store, data_source_id)
+        # ——此前 content 落到 mem_store 位, list_memories() 必炸 AttributeError
+        from domains.chatbi.memory import get_memory_store
+        sync_linkage_to_graph(db, get_memory_store(db), datasource_id)
         logger.info("图谱演化: %s (ds=%s)", updates, datasource_id)
 
 
