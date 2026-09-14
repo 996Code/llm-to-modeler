@@ -876,7 +876,7 @@ def _extract_filters_from_sql(sql: str) -> dict:
     if not where_m:
         return {}
     for m in _re_viz.finditer(
-            r"(\w+)\s*(?:>=|<=|!=|=|>|<)\s*(?:'([^']*)'|\"([^\"]*)\"|([^'\s,)]+))", where_m.group(1)):
+            r"((?:\w+\.)?\w+)\s*(?:>=|<=|!=|=|>|<)\s*(?:'([^']*)'|\"([^\"]*)\"|([^'\s,)]+))", where_m.group(1)):
         col = m.group(1)
         val = next((g for g in (m.group(2), m.group(3), m.group(4)) if g is not None), "")
         if col.lower() not in ("and", "or", "not", "is", "null", "like", "in", "between"):
