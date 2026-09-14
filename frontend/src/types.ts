@@ -121,4 +121,12 @@ export interface SSEResult {
   healRounds?: number                // SQL 自愈轮数
   executeDurationMs?: number         // SQL 执行耗时(毫秒)
   chartDegraded?: boolean            // 图表是否降级(规则推断)
+  retrievalDegraded?: boolean        // 检索是否降级(结果可能不精确)
+  truncated?: boolean                // 结果是否被行数上限截断
+  tables?: string[]                  // 本次查询涉及的表
+  // M4 保存查询定位(加到看板/导出 CSV 直接引用)
+  savedQueryId?: string              // 自动保存的查询记录 id
+  sql?: string                       // 本次执行的 SQL
+  datasourceId?: string              // 数据源 id
+  chartConfig?: Record<string, any>  // 图表配置(chart_type/dim_col/measure_cols)
 }

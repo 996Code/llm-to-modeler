@@ -216,6 +216,16 @@
                 </div>
               </div>
               <div class="data-card-actions">
+                <template v-if="msg.formattedData?.savedQueryId">
+                  <a-button size="small" type="link"
+                            @click.stop="addToDashboard(msg.formattedData)">
+                    <AppstoreAddOutlined /> 加到看板
+                  </a-button>
+                  <a-button size="small" type="link"
+                            @click.stop="exportQueryCsv(msg.formattedData)">
+                    <DownloadOutlined /> 导出 CSV
+                  </a-button>
+                </template>
                 <a-button size="small" type="link" @click.stop="showJsonViewer(msg.dataResult)">
                   <EyeOutlined /> 查看详情
                 </a-button>
@@ -291,6 +301,7 @@ import {
   CopyOutlined, RollbackOutlined,
   SolutionOutlined, TeamOutlined, ContactsOutlined,
   SearchOutlined, ShareAltOutlined, FileTextOutlined, ApartmentOutlined, RobotOutlined,
+  AppstoreAddOutlined, DownloadOutlined,
 } from '@ant-design/icons-vue'
 // Modal：ant-design-vue 的弹窗组件（模板里的 JSON 查看器）
 import { Modal, message as antdMessage } from 'ant-design-vue'
@@ -428,6 +439,67 @@ const jsonViewerData = ref<Record<string, any> | null>(null)
  * 打开 JSON 查看器弹窗：把任意对象格式化成 2 空格缩进的 JSON 字符串后展示。
  * @param data 要展示的对象（表单配置或数据结果）
  */
+// ── M4: 保存查询的看板/导出入口(后端已自动保存, savedQueryId 定位本条) ──
+const M4_API = '/ai-modeler/api/packs/chatbi'
+
+function m4Headers(): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    'X-Admin-Token': localStorage.getItem('admin_token') || '',
+    'X-User-Id': localStorage.getItem('chatbi_user_id') || 'admin',
+  }
+}
+
+function exportQueryCsv(fd: any) {
+  fetch(`${M4_API}/saved-queries/${fd.savedQueryId}/export`, { headers: m4Headers() })
+    .then(async (r) => {
+      if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`)
+      const blob = await r.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `query-${String(fd.savedQueryId).slice(0, 8)}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+    })
+    .catch((e: Error) => antdMessage.error(`导出失败: ${e.message}`))
+}
+
+async function addToDashboard(fd: any) {
+  // 拉看板列表供选择(无看板时提示先建)
+  let boards: any[] = []
+  try {
+    const r = await fetch(`${M4_API}/dashboards`, { headers: m4Headers() })
+    if (r.ok) boards = (await r.json()).items || []
+  } catch { /* 网络错误走下面提示 */ }
+  if (!boards.length) {
+    antdMessage.info('还没有看板——请到管理端 ChatBI 页新建看板后再添加')
+    return
+  }
+  Modal.confirm({
+    title: '添加到看板',
+    content: `将当前结果图表加入「${boards[0].name}」?`,
+    okText: '添加',
+    cancelText: '取消',
+    onOk: async () => {
+      // 默认加入最近更新的看板;多看板管理在管理端 M4 页
+      const target = boards[0]
+      const r = await fetch(`${M4_API}/dashboards/${target.id}/widgets`, {
+        method: 'POST',
+        headers: m4Headers(),
+        body: JSON.stringify({
+          question: '对话查询',
+          query_sql: fd.sql || '',
+          datasource_id: fd.datasourceId || '',
+          chart_type: fd.chartConfig?.chart_type || 'table',
+        }),
+      })
+      if (r.ok) antdMessage.success(`已加入看板「${target.name}」`)
+      else antdMessage.error(`添加失败: ${(await r.json()).detail || r.status}`)
+    },
+  })
+}
+
 function showJsonViewer(data: FormConfig | Record<string, any>) {
   // 存对象：变更视图在 JsonDiffView 内做序列化 + 行级 diff
   jsonViewerData.value = data as Record<string, any>

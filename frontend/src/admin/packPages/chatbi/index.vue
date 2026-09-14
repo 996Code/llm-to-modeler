@@ -1,5 +1,8 @@
 <template>
   <div class="chatbi-admin">
+    <a-tabs v-model:activeKey="tab">
+      <a-tab-pane key="ds">
+        <template #tab><DatabaseOutlined /> 数据源</template>
     <!-- ══════════ 数据源管理 ══════════ -->
     <a-card title="数据源" class="section-card">
       <template #extra>
@@ -93,6 +96,13 @@
       </div>
     </a-card>
 
+      </a-tab-pane>
+      <a-tab-pane key="m4">
+        <template #tab><AppstoreOutlined /> 保存查询与看板</template>
+        <M4Page />
+      </a-tab-pane>
+    </a-tabs>
+
     <!-- ══════════ 新建数据源 ══════════ -->
     <a-modal v-model:open="showCreate" title="添加数据源" @ok="create">
       <a-form layout="vertical">
@@ -118,10 +128,12 @@
 // 后端 15 路由已就绪(/api/packs/chatbi/*), 本页消费其核心子集;
 // 图谱浏览/语义编辑器为增强项(数据在"查看详情"JSON 可见)。
 import { onMounted, reactive, ref } from 'vue'
-import { PlusOutlined } from '@ant-design/icons-vue'
+import { AppstoreOutlined, DatabaseOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
+import M4Page from './m4.vue'
 
 const PACK_API = '/ai-modeler/api/packs/chatbi'
+const tab = ref('ds')
 
 const datasources = ref<any[]>([])
 const loadingDs = ref(false)

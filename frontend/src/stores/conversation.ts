@@ -325,6 +325,14 @@ export const useConversationStore = defineStore('conversation', () => {
             if (result.healRounds !== undefined) formattedData.healRounds = result.healRounds
             if (result.executeDurationMs !== undefined) formattedData.executeDurationMs = result.executeDurationMs
             if (result.chartDegraded !== undefined) formattedData.chartDegraded = result.chartDegraded
+            if (result.retrievalDegraded !== undefined) formattedData.retrievalDegraded = result.retrievalDegraded
+            if (result.truncated !== undefined) formattedData.truncated = result.truncated
+            if (result.tables !== undefined) formattedData.tables = result.tables
+            // M4: 保存查询定位(加到看板/导出 CSV 直接引用本条)
+            if (result.savedQueryId !== undefined) formattedData.savedQueryId = result.savedQueryId
+            if (result.sql !== undefined) formattedData.sql = result.sql
+            if (result.datasourceId !== undefined) formattedData.datasourceId = result.datasourceId
+            if (result.chartConfig !== undefined) formattedData.chartConfig = result.chartConfig
             messages.value.push({
               role: 'assistant',
               content: result.summary,

@@ -156,6 +156,13 @@ class AskDataTool(CompositeTool):
             state["_need_clarify"] = True
             state["_error"] = str(e)
             return
+        except Exception as e:
+            # 解密失败(FERNET_KEY 轮换)/存储故障等: 不让异常炸穿管线
+            # (此前只捕 ValueError, RuntimeError 直接冒泡 → 用户只见"查询未完成")
+            logger.warning("数据源解析失败: %s", e)
+            state["_need_clarify"] = True
+            state["_error"] = f"数据源暂不可用: {e}"
+            return
         state["ds"] = info
         if sess and bound_id != info.id:
             sess.set("datasource_id", info.id)  # 会话绑定数据源(显式切换才更新)
@@ -475,10 +482,17 @@ class AskDataTool(CompositeTool):
         sections.append(f"【用户问题】{question}\n\n请生成 SQL:")
 
         user_content = "\n\n".join(sections)
-        content_resp, _ = llm.chat(
-            messages=[{"role": "system", "content": _SQL_SYSTEM_PROMPT},
-                      {"role": "user", "content": user_content}],
-            temperature=0.0, stage="chatbi.generate_sql", conv_id=ctx.conv_id)
+        try:
+            content_resp, _ = llm.chat(
+                messages=[{"role": "system", "content": _SQL_SYSTEM_PROMPT},
+                          {"role": "user", "content": user_content}],
+                temperature=0.0, stage="chatbi.generate_sql", conv_id=ctx.conv_id)
+        except Exception as e:
+            # LLM 网关故障(502/超时)不炸管线(对标源 sql_agent llm_failure):
+            # 给用户可读错误而非引擎兜底的"工具执行失败"
+            logger.warning("SQL 生成 LLM 调用失败: %s", e)
+            state["_error"] = f"AI 服务暂不可用, 请稍后重试 ({e})"
+            return
 
         sql = extract_sql_text(content_resp)
         if not sql:
@@ -755,11 +769,13 @@ class AskDataTool(CompositeTool):
             # 用户身份走 ctx.user_id(引擎从 GraphState 注入)——不从
             # forward_headers 猜: X-User-Id 是内部头被显式排除,
             # 且 Starlette key 小写, 大写精确匹配必 miss(归属恒 anonymous 的事故)。
-            save_query(self._get_db(), ctx.user_id or "anonymous", state["ds"].id,
-                       state.get("user_input", ""), state["sql"],
-                       conversation_id=ctx.conv_id,
-                       chart_config=chart.config if chart else None,
-                       result_summary={"row_count": result.rowcount})
+            _sq = save_query(self._get_db(), ctx.user_id or "anonymous", state["ds"].id,
+                             state.get("user_input", ""), state["sql"],
+                             conversation_id=ctx.conv_id,
+                             chart_config=chart.config if chart else None,
+                             result_summary={"row_count": result.rowcount})
+            # 回传 id: 前端图表卡"加到看板/导出"直接定位本条记录
+            state["_saved_query_id"] = _sq.get("id")
         except Exception as e:
             logger.warning("查询自动保存失败(不阻塞): %s", e)
 
@@ -823,6 +839,10 @@ class AskDataTool(CompositeTool):
                 "executeDurationMs": state.get("_execute_duration_ms", 0),
                 "chartDegraded": bool(chart and chart.degraded),
                 "retrievalDegraded": bool(state.get("retrieval_degraded")),
+                "savedQueryId": state.get("_saved_query_id"),
+                # 加到看板所需(add_widget 契约: question/query_sql/datasource_id)
+                "sql": state["sql"],
+                "datasourceId": state["ds"].id,
             })
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
@@ -864,9 +884,11 @@ class AskDataTool(CompositeTool):
         result = state.get("_result")
         if result is not None:
             return result
-        # 兜底(不应到达): steps 全过但无结果
-        return ToolResult(artifact_type="data", error_for_llm="管线未产出结果",
-                          summary="查询未完成")
+        # 兜底: steps 全过但无结果——带 _error 文案(此前统一"查询未完成",
+        # LLM 网关故障/数据源解密失败等真实原因对用户不可见)
+        err = state.get("_error") or "管线未产出结果"
+        return ToolResult(artifact_type="data", error_for_llm=err,
+                          summary=err if err != "管线未产出结果" else "查询未完成")
 
     # ── 制品钩子(引擎压缩/标题/前端展示) ─────────────────────
     def summarize_artifact(self, artifact: dict) -> str:
