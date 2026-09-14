@@ -6,8 +6,10 @@ PACKS_ENABLED(env)只能"改配置重启生效"。本模块把启停状态变成
 落盘,再由 services/pack_manager.py 热切换引擎装配。
 
 【状态来源优先级】(首次构造时解析,之后以内存态为准)
-  1. 状态文件存在 → 文件里的 enabled 集合(管理端操作过的就以此为准,
-     此时 env PACKS_ENABLED 不再生效——避免"界面开了、重启又关回去")
+  1. 状态文件存在 → 文件里的 enabled 集合 + 新发现 pack 自动并入
+     (管理端操作过的就以此为准,此时 env PACKS_ENABLED 不再生效——
+     避免"界面开了、重启又关回去";新部署的 pack 目录默认启用,
+     与"缺省全启用"语义一致,新插件即插即用)
   2. 状态文件不存在 + env PACKS_ENABLED 已配置 → env 作为初始默认值
   3. 状态文件不存在 + env 未配置 → 全部发现的 pack 都启用(向后兼容)
 
@@ -17,6 +19,9 @@ PACKS_ENABLED(env)只能"改配置重启生效"。本模块把启停状态变成
   - 默认路径 data/pack_state.json(data/ 目录,随 deploy/data
     bind mount 一起持久化);可用 PACK_STATE_PATH 覆盖
   - 与磁盘上已不存在的 pack(目录被删/改名)自动解耦:交集清洗 + 告警
+  - "新发现自动并入"只发生在构造时的一次性合并:文件里没有、磁盘上
+    新出现的 pack 进 enabled;管理端显式禁用(set_enabled False)后,
+    文件里就有了它的记录(在 enabled 外),重启不会再被并入
 
 【线程安全】
   threading.Lock 保护读改写。单进程 uvicorn 下足够;切换是低频管理操作。
@@ -66,11 +71,29 @@ class PackState:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._discovered: List[str] = sorted(set(discovered))
+        # _read_file 的产物(文件不存在/损坏时保持空默认)
+        self._file_known: Set[str] = set()
+        self._file_has_known = False
 
         persisted = self._read_file()
         if persisted is not None:
             self._source = "file"
             enabled: Set[str] = persisted
+            # 新发现并入: 磁盘上新增的 pack 目录默认启用(即插即用)。
+            # 判据 = known(文件记录过的全部包名, 含禁用)之外的 discovered。
+            # 旧格式(v1 无 known 字段)的固有歧义:"曾显式禁用"与"从未安装"
+            # 同形(都不在 enabled), 只能取其一——取"视为新装"(即插即用),
+            # 因为新插件部署是每次发版的常态, 而"旧格式+曾禁用"是一次性
+            # 迁移场景; 且首次落盘后 known 补全, 语义从此精确。
+            legacy = not self._file_has_known
+            new_packs = set(self._discovered) - persisted - self._known_names()
+            if new_packs:
+                logger.info(f"新发现 pack 自动启用: {sorted(new_packs)}")
+                enabled = enabled | new_packs
+            if legacy or new_packs:
+                # 旧格式迁移/新包并入 → 立即落盘补全 known(此后语义精确)
+                self._enabled = enabled & set(self._discovered)
+                self._write_file_locked()
         else:
             env_names = env_pack_whitelist()
             if env_names is not None:
@@ -168,16 +191,31 @@ class PackState:
             names = data.get("enabled")
             if not isinstance(names, list):
                 raise ValueError(f"invalid 'enabled' field: {type(names)}")
+            # 全量记录(含已禁用): 用于区分"从未见过的新 pack"与
+            # "显式禁用过的 pack"——前者默认启用, 后者保持禁用
+            known = data.get("known")
+            self._file_has_known = isinstance(known, list)
+            self._file_known = {str(n) for n in known} if self._file_has_known else set(names)
             return {str(n) for n in names}
         except Exception as e:
             logger.warning(f"pack 状态文件损坏,将按默认重新初始化({self._path}): {e}")
             return None
 
+    def _known_names(self) -> Set[str]:
+        """文件里出现过的全部 pack 名(旧格式无 known 字段 = enabled 集合本身)。"""
+        return getattr(self, "_file_known", set())
+
     def _write_file_locked(self):
-        """落盘当前 enabled 集合(调用方须已持有锁)。原子写:tmp + os.replace。"""
+        """落盘当前 enabled + known 集合(调用方须已持有锁)。原子写:tmp + os.replace。
+
+        known = 出现过的全部 pack(含禁用), 供下次启动区分
+        "新发现"(known 外, 默认启用)与"显式禁用"(known 内且不在 enabled)。
+        """
+        known = set(self._enabled) | set(self._discovered)
         payload = {
             "version": _STATE_VERSION,
             "enabled": sorted(self._enabled),
+            "known": sorted(known),
         }
         tmp = self._path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:

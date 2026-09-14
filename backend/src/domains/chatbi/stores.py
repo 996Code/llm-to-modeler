@@ -23,8 +23,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -249,9 +247,7 @@ CHATBI_RETRIEVAL_DDL = [
     "ON chatbi_few_shot_examples(data_source_id)",
 ]
 
-_db: Optional[PackRelationalDB] = None
-_db_fp: str = ""
-_db_lock = threading.Lock()
+# pack 关系库单例收敛到 runtime.get_pack_db(本模块不再持有实例)
 
 
 def _ensure_prefix_registered() -> None:
@@ -260,19 +256,14 @@ def _ensure_prefix_registered() -> None:
 
 
 def get_db() -> PackRelationalDB:
-    """pack 关系库单例(按 DATABASE_URL 指纹缓存;首次构建即幂等建表)。"""
-    global _db, _db_fp
-    fingerprint = os.getenv("DATABASE_URL", "")
-    with _db_lock:
-        if _db is not None and _db_fp == fingerprint:
-            return _db
-    db = PackRelationalDB(PACK_NAME)
-    # 幂等建表:models.py 契约表(数据源/语义模型)+ 本模块检索栈表
-    from domains.chatbi.models import CHATBI_DDL
-    db.init_schema(list(CHATBI_DDL) + CHATBI_RETRIEVAL_DDL)
-    with _db_lock:
-        _db, _db_fp = db, fingerprint
-    return db
+    """pack 关系库单例(委托 runtime.get_pack_db, 单一实例单一建表点)。
+
+    历史: 本函数曾自建 PackRelationalDB + 建检索栈表, 与 runtime._db 形成
+    双单例(unload 只清其一)。现收敛为委托——全量 DDL 聚合在
+    runtime._init_pack_schema, 卸载钩子清 runtime 一处即全清。
+    """
+    from domains.chatbi import runtime
+    return runtime.get_pack_db()
 
 
 # ── scope 登记(数据源行 ↔ 物理 collection 的映射)───────────────────
@@ -439,9 +430,12 @@ def get_embedder(llm: Any, stage: str = "chatbi.embed") -> ChatBIEmbedder:
 
 
 def reset_caches() -> None:
-    """释放 SDK 存储连接与 pack 库单例(测试/pack unload 钩子调用)。"""
-    global _db, _db_fp
+    """释放 SDK 存储连接与 pack 库单例(测试/pack unload 钩子调用)。
+
+    pack 库单例已收敛到 runtime(stores.get_db 委托), 这里同步清 runtime
+    一处即全清(双单例时期只清 stores._db 会漏 runtime._db)。
+    """
+    from domains.chatbi import runtime
     sdk_vector.reset_vector_store_cache()
-    with _db_lock:
-        _db, _db_fp = None, ""
+    runtime.reset_runtime_cache()
     unregister_prefix(VECTOR_PREFIX, owner=PACK_NAME)

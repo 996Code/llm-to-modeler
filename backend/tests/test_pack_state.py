@@ -35,13 +35,41 @@ def test_env_as_initial_default(tmp_path, monkeypatch):
 
 
 def test_file_overrides_env(tmp_path, monkeypatch):
-    """状态文件存在 → 文件优先,env 不再生效。"""
+    """状态文件存在 → 文件优先,env 不再生效。
+
+    语义演进(即插即用): 文件 enabled 外但磁盘上存在的 pack 视为
+    "新装"自动启用(旧格式无法区分"曾禁用"与"未装", 取新装语义)。
+    env 白名单(njmind_form)不生效; leave_application 来自文件,
+    njmind_form 是新装并入。
+    """
     monkeypatch.setenv("PACKS_ENABLED", "njmind_form")
     path = tmp_path / "pack_state.json"
     path.write_text(json.dumps({"version": 1, "enabled": ["leave_application"]}), encoding="utf-8")
     st = PackState(str(path), PACKS)
-    assert st.enabled_names() == {"leave_application"}
+    assert st.enabled_names() == set(PACKS)  # 文件值 + 新装并入
     assert st.source == "file"
+    # 迁移落盘: known 补全(此后"显式禁用"与"新装"可区分)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert set(data["known"]) == set(PACKS)
+
+
+def test_explicit_disable_survives_restart(tmp_path, monkeypatch):
+    """管理端显式禁用 → 落盘 known 记录 → 重启不再被"新装并入"误开。"""
+    monkeypatch.delenv("PACKS_ENABLED", raising=False)
+    path = tmp_path / "pack_state.json"
+    st = PackState(str(path), PACKS)
+    st.set_enabled("leave_application", False)
+    reborn = PackState(str(path), PACKS)
+    assert reborn.enabled_names() == {"njmind_form"}
+
+
+def test_new_pack_auto_enabled_after_migration(tmp_path, monkeypatch):
+    """known 落盘后(新格式), 再装新 pack → 自动启用(即插即用核心场景)。"""
+    monkeypatch.delenv("PACKS_ENABLED", raising=False)
+    path = tmp_path / "pack_state.json"
+    PackState(str(path), PACKS)  # 触发迁移落盘(known=PACKS)
+    st = PackState(str(path), PACKS + ["chatbi"])
+    assert st.enabled_names() == set(PACKS) | {"chatbi"}
 
 
 def test_toggle_persists_and_survives_restart(tmp_path, monkeypatch):
@@ -69,12 +97,16 @@ def test_toggle_noop_not_persisted(tmp_path, monkeypatch):
 
 
 def test_stale_names_cleaned(tmp_path, monkeypatch):
-    """文件引用了磁盘上已删除的 pack → 交集清洗,不报错。"""
+    """文件引用了磁盘上已删除的 pack → 交集清洗,不报错。
+
+    leave_application 在文件 enabled 外但磁盘存在 → 新装并入(即插即用)。
+    ghost 磁盘不存在 → 清洗掉。
+    """
     monkeypatch.delenv("PACKS_ENABLED", raising=False)
     path = tmp_path / "pack_state.json"
     path.write_text(json.dumps({"version": 1, "enabled": ["njmind_form", "ghost"]}), encoding="utf-8")
     st = PackState(str(path), PACKS)
-    assert st.enabled_names() == {"njmind_form"}
+    assert st.enabled_names() == set(PACKS)
 
 
 def test_unknown_pack_toggle_raises(tmp_path, monkeypatch):

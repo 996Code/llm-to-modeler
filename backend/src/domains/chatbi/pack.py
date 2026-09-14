@@ -38,7 +38,11 @@ def register_tasks(manager, app_state=None) -> None:
 
 
 def unload() -> None:
-    """卸载钩子: 释放 pack 单例(热切换/停机)。"""
-    from domains.chatbi import runtime
-    runtime.reset_runtime_cache()
+    """卸载钩子: 释放 pack 单例(热切换/停机)。
+
+    stores.reset_caches 覆盖: 向量存储连接缓存 + pack 库单例(经 runtime)
+    + 向量前缀登记——比只清 runtime._db 更完整。
+    """
+    from domains.chatbi import stores
+    stores.reset_caches()
     logger.info("chatbi unloaded: runtime cache released")

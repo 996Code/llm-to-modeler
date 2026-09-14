@@ -148,7 +148,7 @@ async def trigger_scan(ds_id: str, request: Request):
     """触发语义层扫描(后台任务,进度经 GET /scan 轮询)。"""
     if not datasources.get_datasource(_db(), ds_id):
         raise HTTPException(404, "数据源不存在")
-    from services.task_manager import DuplicateTaskError
+    from sdk.pack_api import DuplicateTaskError
     manager = request.app.state.task_manager
     try:
         task = manager.submit("chatbi.scan_datasource",

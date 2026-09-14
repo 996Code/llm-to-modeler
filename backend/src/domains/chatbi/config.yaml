@@ -28,7 +28,7 @@ artifact:
 
 dependencies:
   milvus:
-    required: true          # 语义层向量检索(两阶段召回第一阶段)
+    required: false         # 可选: 语义层向量检索(两阶段召回第一阶段);不可用时降级全表清单(对标原系统 SEC-005)
     fields:
       - milvus_uri
     probe:

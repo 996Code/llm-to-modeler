@@ -15,12 +15,31 @@ _db_lock = threading.Lock()
 
 
 def get_pack_db() -> PackRelationalDB:
-    """pack 关系型存储单例(schema=chatbi;引擎工厂经 main.py 装配注册)。"""
+    """pack 关系型存储单例(schema=chatbi;引擎工厂经 main.py 装配注册)。
+
+    首次构建即幂等建全量 pack 表(对标 KGStore 构造期 _init_db):
+    全新部署用户第一个请求(列数据源)不能因表不存在而 500。
+    """
     global _db
     with _db_lock:
         if _db is None:
             _db = PackRelationalDB(PACK_NAME)
+            _init_pack_schema(_db)
         return _db
+
+
+def _init_pack_schema(db: PackRelationalDB) -> None:
+    """幂等建 chatbi 全量表(数据源/语义层/检索栈/记忆/M4)。
+
+    各栈 DDL 均为 CREATE TABLE IF NOT EXISTS, 重复执行无副作用;
+    分散在各栈的懒建(如 datasources.init_store)保留作冗余兜底。
+    """
+    from domains.chatbi.models import CHATBI_DDL
+    from domains.chatbi.stores import CHATBI_RETRIEVAL_DDL
+    from domains.chatbi.memory import CHATBI_MEMORY_DDL
+    from domains.chatbi.m4 import M4_DDL
+    db.init_schema(list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
+                   + list(CHATBI_MEMORY_DDL) + list(M4_DDL))
 
 
 def get_settings_reader(ctx_or_state) -> Any:

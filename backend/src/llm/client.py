@@ -143,10 +143,14 @@ class LLMClient:
         # OpenAI SDK 客户端，兼容所有 OpenAI 兼容 API
         # 类比 Java 的 OkHttpClient 单例，全程复用底层连接
         # api_key 为空时给占位字符串：OpenAI SDK 要求非空，本地模型不校验
+        # max_retries 可配(env LLM_MAX_RETRIES, 默认 2 = SDK 默认):
+        # 5xx/连接失败时 SDK 自动指数退避重试。LLM 网关整体不可达的部署
+        # (重试注定失败, 只拖慢路由兜底)可调 0 让失败快速冒泡到上层降级。
         self.client = OpenAI(
             base_url=config.base_url,
             api_key=config.api_key or "placeholder-key",  # 占位 key，本地模型忽略
             timeout=config.timeout,
+            max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
         )
 
         logger.info(

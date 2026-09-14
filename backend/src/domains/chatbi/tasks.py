@@ -160,12 +160,14 @@ def _connect_info(info) -> dict:
 
 
 def _load_settings(app_state) -> dict:
+    """读 pack 设置(设置页保存值 > env > schema 默认)。
+
+    经 runtime.settings_reader(sdk.pack_api 门面)——不走 services 直连,
+    且必须携带 settings_store:管理端热改的保存值要让后台任务即时生效。
+    """
     try:
-        from services.pack_settings import PackSettingsReader
-        from services.pack_settings import read_settings_schema
-        schema = read_settings_schema("chatbi")
-        from services.pack_settings import resolve_all
-        return resolve_all("chatbi", schema=schema) if schema else {}
+        from domains.chatbi import runtime
+        return dict(runtime.settings_reader(app_state).all())
     except Exception:
         return {}
 
