@@ -311,6 +311,12 @@ def _llm_refine(
 
     logger.info("_llm_refine: %d 候选 → %d 精筛 (reason=%s)",
                 len(candidates), len(refined), parsed.get("reason", ""))
+    if not refined:
+        # LLM 选了名字但与候选零交集(回显 display_name/幻觉名)——
+        # 等效无匹配: 不带 no_match_reason 返回会让 ask_data 的
+        # fail-closed 分支漏判, 空 schema 硬跑(臆造列名→自愈空转)
+        return RetrievalResult(
+            no_match_reason="检索候选与问题不匹配, 请换一种问法或直接指定表名")
     return RetrievalResult(models=refined)
 
 

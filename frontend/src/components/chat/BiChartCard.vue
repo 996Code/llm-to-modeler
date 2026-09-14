@@ -28,7 +28,7 @@
         </tbody>
       </table>
       <div v-if="totalRows > 20" class="table-more">
-        仅显示前 20 行, 共 {{ totalRows }} 行
+        仅显示前 20 行, 共 {{ totalRows }} 行{{ truncated ? ' (已达查询上限, 结果被截断)' : '' }}
       </div>
     </div>
 
@@ -84,6 +84,7 @@ const tableRows = computed(() => props.artifact?.rows_sample || [])
 // 真实行数: rows_sample 只是样本(≤50), 全量行数在 detail.rowcount
 // (此前用样本长度当总数, 1 万行查询显示"共 50 行")
 const totalRows = computed(() => props.detail?.rowcount ?? tableRows.value.length)
+const truncated = computed(() => Boolean(props.detail?.truncated))
 
 const metricHits = computed(() => props.metricHits || [])
 

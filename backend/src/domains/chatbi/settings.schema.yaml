@@ -92,6 +92,6 @@ groups:
       - key: metadata_refresh_hours
         type: int
         label: 语义层自动刷新间隔(小时,0=关闭)
-        default: 24
+        default: 6
         min: 0
         max: 720

@@ -272,8 +272,8 @@ def execute_readonly(info: DataSourceInfo, sql: str,
                 with conn.cursor() as cur:
                     # DB 侧超时(MySQL 5.7+;毫秒)
                     cur.execute(f"SET SESSION max_execution_time = {timeout_seconds * 1000}")
-                    # SEC: READ ONLY 事务(MySQL 8+;与 PG 路径同防御纵深,
-                    # 旧版 MySQL 忽略该语句不报错)
+                    # SEC: READ ONLY 事务(MySQL 5.6.5+;与 PG 路径同防御纵深,
+                    # 更旧版本会报语法错误——由 except 统一捕获返回执行失败)
                     cur.execute("SET TRANSACTION READ ONLY")
                     cur.execute(sql)
                     columns = [d[0] for d in cur.description] if cur.description else []

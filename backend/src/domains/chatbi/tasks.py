@@ -176,13 +176,17 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 results.append({"datasource_id": info.id, "ok": True,
                                 "skipped": "never_scanned"})
                 continue
-            # 纯结构扫描(无 LLM) → 合并旧标注 → 指纹幂等落版本
+            # 纯结构扫描(无 LLM, 不落库) → 合并旧标注/指标/关系 → 一次落版本。
+            # persist=False: scan_datasource 内部 save 会先落一个"裸结构"
+            # 中间版本——指纹基准被污染(每周期净增 2 版本), 且裸结构短暂
+            # 成为 is_current(用户此刻查询丢失全部中文标注)。
             new_content = semantic.scan_datasource(
                 llm=None, db=db, connect_info=_connect_info(info),
-                infer_metrics=bool(settings.get("scan_metric_inference", True)))
+                infer_metrics=bool(settings.get("scan_metric_inference", True)),
+                datasource_id=info.id, persist=False)
             merged = _merge_content(current, new_content)
             version = semantic.save_content(db, info.id, merged, source="refresh")
-            _evolve_graph(db, info.id, merged)
+            _evolve_graph(db, info.id, merged, app_state=app_state)
             # 落了新版本 → 重建索引(I1: 版本与索引不漂移)
             try:
                 from domains.chatbi import stores as cb_stores
@@ -202,8 +206,9 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
     return {"refreshed": results}
 
 
-def _merge_content(old: "SemanticModelContentLike",
-                   new: "SemanticModelContentLike") -> "SemanticModelContentLike":
+def _merge_content(old, new):
+    # old/new: SemanticModelContent(类型注解省略——避免模块顶层 import
+    # semantic 造成的循环依赖, 运行时鸭子访问 .models/.sample_questions)
     """结构刷新合并(移植源 metadata_refresher._merge_content)。
 
     新扫描的表/列结构是权威(增删改), 但保留旧版本的 display_name/
@@ -217,6 +222,21 @@ def _merge_content(old: "SemanticModelContentLike",
             continue  # 新表: 用扫描退化值, 等下次 LLM 富化
         new_m.display_name = old_m.display_name or new_m.display_name
         new_m.description = old_m.description or new_m.description
+        # 指标/关系保留(I1): 刷新扫描(llm=None)只产规则 simple 指标 +
+        # 外键/命名关系, 直接用会静默丢掉 LLM composite 指标(如 GMV)与
+        # ai_inferred/implicit_mining 关系——语义层逐周期向裸结构退化。
+        if old_m.metrics:
+            # 旧指标全量保留: 结构刷新(llm=None)只会重产同名的规则 simple
+            # 指标, 而 LLM composite(如 GMV)/人工校正指标只在旧版本里——
+            # 丢了就是永久丢失(下次全量重扫也不一定复原)。
+            new_m.metrics = list(old_m.metrics)
+        if old_m.relationships:
+            new_rels = list(new_m.relationships)
+            new_rel_keys = {(r.name, r.target_model) for r in new_rels}
+            for r in old_m.relationships:
+                if (r.name, r.target_model) not in new_rel_keys:
+                    new_rels.append(r)  # 旧多出的关系(ai_inferred 等)保留
+            new_m.relationships = new_rels
         old_cols = {c.name: c for c in old_m.columns}
         for c in new_m.columns:
             old_c = old_cols.get(c.name)
@@ -259,10 +279,13 @@ def _make_index_rebuilder(app_state, datasource_id: str):
     return _rebuild
 
 
-def _evolve_graph(db, datasource_id: str, content) -> None:
+def _evolve_graph(db, datasource_id: str, content, app_state=None) -> None:
     """图谱置信度演化 (SEM-003;graph_infer 移植栈的接线点):
     查询历史(fewshot 示例 SQL) → 频繁 JOIN 表对挖掘 → confidence 提升 →
-    乐观锁写回语义层新版本。"""
+    乐观锁写回语义层新版本。
+
+    app_state: 索引重建回调需要(向量 store/embedder 构造);None 时
+    演化仍执行, 只是不重建索引。"""
     from domains.chatbi.graph_infer import (mine_implicit_relationships,
                                             apply_confidence_updates,
                                             sync_linkage_to_graph)

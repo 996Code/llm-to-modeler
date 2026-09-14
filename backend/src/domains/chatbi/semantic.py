@@ -931,7 +931,8 @@ def _resolve_datasource_id(db, connect_info: dict) -> str | None:
 
 
 def scan_datasource(llm, db, connect_info: dict, infer_metrics: bool = True,
-                    progress_cb=None, datasource_id: str | None = None
+                    progress_cb=None, datasource_id: str | None = None,
+                    persist: bool = True
                     ) -> SemanticModelContent:
     """数据源扫描全流水线: 内省 → 外键 → LLM 富化 → 指标 → 示例问题 → 版本落库。
 
@@ -943,6 +944,10 @@ def scan_datasource(llm, db, connect_info: dict, infer_metrics: bool = True,
         infer_metrics: False 时跳过指标推断(映射源配置 scan_metric_inference)。
         progress_cb: progress_cb(pct: int, stage: str);异常只告警不阻塞
                      (移植 _update_scan 的"进度更新失败不抛"语义)。
+        datasource_id: 直传数据源 id(同连接注册多行时反查可能归属错误)。
+        persist: False 时只扫描不落库——刷新链路专用: 外部先 _merge_content
+            保留标注再 save_content 一次落库。若内部也落, 裸结构中间版本
+            会污染指纹基准(每周期净增 2 版本)且短暂成为 is_current。
 
     Returns:
         SemanticModelContent(若注册表能按连接信息匹配到数据源行,已落最新版本)。
@@ -1010,7 +1015,10 @@ def scan_datasource(llm, db, connect_info: dict, infer_metrics: bool = True,
         logger.warning("示例问题生成失败, 留空 (不阻塞扫描)", exc_info=True)
         content.sample_questions = []
 
-    # ── Stage 4: 版本保存(88% → 95%) ──────────────────────────
+    # ── Stage 4: 版本保存(88% → 95%;persist=False 跳过) ───────
+    if not persist:
+        progress(95, f"完成(未落库): {len(content.models)} 张表")
+        return content
     progress(88, "保存语义层...")
     try:
         # datasource_id 直传优先(tasks 持有 payload 的 ds_id, 不靠连接信息反查——
