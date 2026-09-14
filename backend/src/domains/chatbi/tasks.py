@@ -141,7 +141,9 @@ def _evolve_graph(db, datasource_id: str, content) -> None:
             current_version = row["version"] if row else None
     except Exception as e:
         logger.warning("乐观锁版本读取失败(降级为不校验): %s", e)
-    updates = apply_confidence_updates(db, datasource_id, content, suggestions,
+    # C2 修复: 正确签名 (db, data_source_id, updates, new_pairs, expected_version)
+    # — content 之前落到 updates 位、suggestions 落到 new_pairs 位(参数错位同 B2)
+    updates = apply_confidence_updates(db, datasource_id, suggestions,
                                        expected_version=current_version)
     if updates:
         # B2 修复: sync_linkage_to_graph 正确签名为 (db, mem_store, data_source_id)

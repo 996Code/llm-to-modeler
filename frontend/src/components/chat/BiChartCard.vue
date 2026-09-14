@@ -1,6 +1,6 @@
 <template>
   <div class="bi-chart-card">
-    <!-- 命中指标标签行(ChatBI 指标闭环的用户可见出口) -->
+    <!-- 命中指标标签行(独立展示, 不参与图表类型链) -->
     <div v-if="metricHits.length" class="metric-hits">
       <a-tag v-for="h in metricHits.slice(0, 5)" :key="h.metric" color="gold" class="metric-tag">
         📊 {{ h.display_name || h.metric }}
@@ -8,11 +8,11 @@
       <a-tag v-if="metricHits.length > 5" color="default">+{{ metricHits.length - 5 }}</a-tag>
     </div>
 
-    <!-- 对话内明细: 耗时/自愈/降级(对标原系统 step_durations) -->
+    <!-- 对话内明细(独立展示, 不参与图表类型链) -->
     <div v-if="detailLine" class="detail-line">{{ detailLine }}</div>
 
-    <!-- KPI 指标卡: 大数字渲染(gauge 的简化展示) -->
-    <div v-else-if="isKpi" class="kpi-view">
+    <!-- KPI 指标卡(链头 v-if, 恢复正确分支) -->
+    <div v-if="isKpi" class="kpi-view">
       <div class="kpi-value">{{ kpiValue }}</div>
       <div class="kpi-name">{{ kpiName }}</div>
     </div>

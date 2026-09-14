@@ -205,9 +205,11 @@ class AskDataTool(CompositeTool):
         # 规则剥离(零 LLM 成本), 剥离后的问题进检索/SQL 生成。
         raw_input = state.get("user_input", "")
         stripped, chart_hint = _strip_visualization(raw_input)
-        if stripped and stripped != raw_input:
-            state["user_input"] = stripped
-            state["chart_hint"] = chart_hint
+        if stripped != raw_input:
+            if stripped:
+                state["user_input"] = stripped
+            if chart_hint:
+                state["chart_hint"] = chart_hint  # 空剥离也保留 hint(如"画个饼图")
 
         # 两阶段检索(向量召回 → LLM 精筛);向量设施不可用 → 全表清单降级
         from domains.chatbi import retrieval as retrieval_mod
@@ -421,7 +423,10 @@ class AskDataTool(CompositeTool):
         _sess = ctx.session_state
         prev_filters = (_sess.get("prev_filters") if _sess else None) or {}
         if prev_filters:
-            sections.append(f"【上轮筛选(自动继承)】\n{prev_filters}")
+            _filter_lines = "\n".join(f"- {k} = {v}" for k, v in prev_filters.items())
+            sections.append(
+                f"【上轮筛选条件】\n{_filter_lines}\n"
+                f"(自动继承供参考; 若用户本轮明确取消或变更某项, 以本轮为准, 勿自动带上)")
         prev_decisions = (_sess.get("prev_decisions") if _sess else None) or []
         if prev_decisions:
             dec_text = "\n".join(f"- {d.get('description','')}" for d in prev_decisions if d.get("description"))
@@ -614,7 +619,7 @@ class AskDataTool(CompositeTool):
         result = state["execute_result"]
         llm = self._get_llm(ctx)
         sess = ctx.session_state
-        chart_hint = state.get("chart_hint") or (sess.get("chart_type_hint") if sess else None)
+        chart_hint = state.get("chart_hint")
         chart = generate_chart(llm, state.get("user_input", ""),
                                result.columns, result.rows,
                                chart_type_hint=chart_hint, conv_id=ctx.conv_id)
@@ -704,10 +709,12 @@ class AskDataTool(CompositeTool):
         # M4: 成功查询自动保存(应用层去重, 供导出 CSV/看板引用)
         try:
             from domains.chatbi.m4 import save_query
-            save_query(self._get_db(), "anonymous", state["ds"].id,
+            _m4_uid = (ctx.forward_headers or {}).get("X-User-Id", "anonymous")
+            save_query(self._get_db(), _m4_uid, state["ds"].id,
                        state.get("user_input", ""), state["sql"],
                        conversation_id=ctx.conv_id,
-                       chart_config=chart.config if chart else None)
+                       chart_config=chart.config if chart else None,
+                       result_summary={"row_count": result.rowcount})
         except Exception as e:
             logger.warning("查询自动保存失败(不阻塞): %s", e)
 
@@ -736,8 +743,7 @@ class AskDataTool(CompositeTool):
                 sess.set("prev_chart_config", chart.config)
             # A: 筛选条件提取写回(下轮 generate 注入继承)
             extracted = _extract_filters_from_sql(state["sql"])
-            if extracted:
-                sess.set("prev_filters", extracted)
+            sess.set("prev_filters", extracted)  # 空也写=清除旧条件(取消生效)
 
         # summary 文案(含 0 行提示/命中指标)
         parts = [f"查询完成, 返回 {result.rowcount} 行"]
@@ -841,7 +847,8 @@ _VIZ_PATTERNS = [
     (_re_viz.compile(r"用?(?:饼图|饼状图|pie chart)", _re_viz.IGNORECASE), "pie"),
     (_re_viz.compile(r"用?(?:散点图|scatter)", _re_viz.IGNORECASE), "scatter"),
     (_re_viz.compile(r"画成|展示为|换成|改成|用.*(?:图|chart)展示", _re_viz.IGNORECASE), None),
-    (_re_viz.compile(r"画个|画一张|画一个|帮我画", _re_viz.IGNORECASE), None),
+    (_re_viz.compile(r"(?:画|帮我画)(?:一个|一张|个)?", _re_viz.IGNORECASE), None),
+    (_re_viz.compile(r"用?(?:表格|明细表?|table)", _re_viz.IGNORECASE), "table"),
 ]
 
 
@@ -854,7 +861,7 @@ def _strip_visualization(question: str) -> tuple:
             if chart_type and not hint:
                 hint = chart_type
             result = pattern.sub("", result)
-    result = _re_viz.sub(r"^(展示|显示|看看|看下)\s*", "", result)
+    result = _re_viz.sub(r"^(展示|显示|看看|看下|看)\s*", "", result)
     result = _re_viz.sub(r"\s+", " ", result).strip()
     return result, hint
 
@@ -865,12 +872,13 @@ def _extract_filters_from_sql(sql: str) -> dict:
         return {}
     filters = {}
     where_m = _re_viz.search(
-        r"WHERE\s+(.*?)(?:GROUP|ORDER|HAVING|LIMIT|$)", sql, _re_viz.IGNORECASE | _re_viz.DOTALL)
+        r"WHERE\s+(.*?)(?:\bGROUP\b|\bORDER\b|\bHAVING\b|\bLIMIT\b|$)", sql, _re_viz.IGNORECASE | _re_viz.DOTALL)
     if not where_m:
         return {}
     for m in _re_viz.finditer(
-            r"(\w+)\s*(?:>=|<=|!=|=|>|<)\s*('?[^'\s,)]+'?)", where_m.group(1)):
-        col, val = m.group(1), m.group(2).strip("'")
+            r"(\w+)\s*(?:>=|<=|!=|=|>|<)\s*(?:'([^']*)'|\"([^\"]*)\"|([^'\s,)]+))", where_m.group(1)):
+        col = m.group(1)
+        val = next((g for g in (m.group(2), m.group(3), m.group(4)) if g is not None), "")
         if col.lower() not in ("and", "or", "not", "is", "null", "like", "in", "between"):
             filters[col] = val
     return filters

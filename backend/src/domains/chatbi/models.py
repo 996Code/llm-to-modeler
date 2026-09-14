@@ -205,10 +205,12 @@ M4_DDL = [
         conversation_id TEXT,
         question TEXT NOT NULL,
         sql_text TEXT NOT NULL,
+        sql_hash TEXT NOT NULL,
         result_summary TEXT,
         chart_config TEXT,
         created_at TEXT NOT NULL
     )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_sq_hash ON chatbi_saved_queries(user_id, data_source_id, sql_hash)",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_sq_user ON chatbi_saved_queries(user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_sq_ds ON chatbi_saved_queries(data_source_id)",
     """CREATE TABLE IF NOT EXISTS chatbi_dashboards (

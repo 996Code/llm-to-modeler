@@ -121,6 +121,10 @@ async def delete_datasource(ds_id: str, request: Request):
     # 删 few-shot + clear scope 登记)。失败升级为 500 而非静默孤儿。
     from domains.chatbi import semantic, stores
     semantic.delete_by_datasource(db, ds_id)
+    # M4 级联: 清理保存查询/看板 widget 的悬空引用
+    with db.connect() as conn:
+        conn.execute("DELETE FROM chatbi_saved_queries WHERE data_source_id = ?", (ds_id,))
+        conn.execute("DELETE FROM chatbi_dashboard_widgets WHERE datasource_id = ?", (ds_id,))
     try:
         stores.delete_data_source_storage(db, stores.get_vector(request.app.state), ds_id)
     except Exception as e:

@@ -94,7 +94,8 @@ class StreamManager:
     """
 
     def __init__(self, loop: asyncio.AbstractEventLoop):
-        self._event_seq = 0  # SSE 断线重连序号(Last-Event-ID)
+        import itertools
+        self._event_seq_gen = itertools.count()  # 原子自增(GIL 下线程安全)
         """初始化流管理器。
 
         Args:
@@ -104,9 +105,8 @@ class StreamManager:
         self._queue: asyncio.Queue = asyncio.Queue()
 
     def _next_seq(self) -> int:
-        """事件序号自增——SSE 断线重连(Last-Event-ID)的基础。"""
-        self._event_seq += 1
-        return self._event_seq
+        """事件序号(itertools.count: next() 单字节码, GIL 下原子, 跨线程安全)。"""
+        return next(self._event_seq_gen)
 
     def heartbeat(self):
         """推送 SSE 心跳（`: ping` 注释行，线程安全）。

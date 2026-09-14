@@ -20,7 +20,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from sdk.pack_api import admin_required
@@ -58,6 +58,10 @@ def _user_id(request: Request) -> str:
 class DashboardCreate(BaseModel):
     name: str
 
+    def model_post_init(self, __context) -> None:
+        if not self.name or not self.name.strip():
+            raise ValueError("看板名称不能为空")
+
 
 class WidgetCreate(BaseModel):
     question: str
@@ -86,32 +90,35 @@ class LayoutUpdate(BaseModel):
 
 def save_query(db: PackRelationalDB, user_id: str, data_source_id: str,
                question: str, sql: str, conversation_id: str | None = None,
-               chart_config: dict | None = None) -> dict:
-    """成功查询后自动保存(应用层去重: 同 user+ds+sql 不重复)。"""
+               chart_config: dict | None = None, result_summary: dict | None = None) -> dict:
+    """成功查询后自动保存(哈希去重: 同 user+ds+sql_hash 唯一)。"""
     import json as _json
-    # 去重(SELECT-then-INSERT)
+    import hashlib as _hash
+    sql_hash = _hash.md5(sql.encode()).hexdigest()
     with db.connect() as conn:
         existing = conn.execute(
             "SELECT id FROM chatbi_saved_queries "
-            "WHERE user_id = ? AND data_source_id = ? AND sql_text = ? LIMIT 1",
-            (user_id, data_source_id, sql)).fetchone()
+            "WHERE user_id = ? AND data_source_id = ? AND sql_hash = ? LIMIT 1",
+            (user_id, data_source_id, sql_hash)).fetchone()
         if existing:
             return {"id": existing["id"], "deduplicated": True}
         qid = str(uuid.uuid4())
         conn.execute(
             """INSERT INTO chatbi_saved_queries
                (id, user_id, data_source_id, conversation_id, question, sql_text,
-                result_summary, chart_config, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                sql_hash, result_summary, chart_config, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (qid, user_id, data_source_id, conversation_id, question, sql,
-             None, _json.dumps(chart_config) if chart_config else None, _now()))
+             sql_hash,
+             _json.dumps(result_summary) if result_summary else None,
+             _json.dumps(chart_config) if chart_config else None, _now()))
     return {"id": qid, "deduplicated": False}
 
 
 # ── 保存查询 API ─────────────────────────────────────────────
 
 @router.get("/saved-queries", dependencies=[Depends(admin_required)])
-async def list_saved_queries(request: Request, limit: int = 50):
+async def list_saved_queries(request: Request, limit: int = Query(50, ge=1, le=200)):
     uid = _user_id(request)
     with _db().connect() as conn:
         rows = conn.execute(
@@ -123,7 +130,7 @@ async def list_saved_queries(request: Request, limit: int = 50):
         "id": r["id"], "dataSourceId": r["data_source_id"],
         "conversationId": r["conversation_id"], "question": r["question"],
         "sqlText": r["sql_text"],
-        "chartConfig": _json.loads(r["chart_config"]) if r["chart_config"] else None,
+        "chartConfig": _safe_json(r["chart_config"]),
         "createdAt": r["created_at"],
     } for r in rows]}
 
@@ -140,8 +147,14 @@ async def export_saved_query_csv(sq_id: str, request: Request):
     if not q:
         raise HTTPException(404, "查询记录不存在")
 
-    # SEC: 复用三层校验(不信任历史 SQL, 防注入)
-    validation = validate_sql(q["sql_text"], allowed_columns=set())
+    # SEC: 三层校验(不信任历史 SQL)—— Layer3 用语义层白名单(对标原系统 B3)
+    from domains.chatbi import semantic as _sem
+    from domains.chatbi.retrieval import extract_allowed_columns
+    _content = _sem.load_current_content(db, q["data_source_id"])
+    if _content is None:
+        raise HTTPException(422, "该数据源无语义层, 无法校验列白名单, 拒绝导出(fail-closed)")
+    _allowed = extract_allowed_columns(_content)
+    validation = validate_sql(q["sql_text"], allowed_columns=_allowed)
     if not validation.ok:
         raise HTTPException(422, f"SQL 校验失败: {validation.reason}")
 
@@ -161,7 +174,7 @@ async def export_saved_query_csv(sq_id: str, request: Request):
     if result.truncated:
         writer.writerow([f"# 提示: 超过 {_CSV_EXPORT_MAX_ROWS} 行, 仅导出前 {_CSV_EXPORT_MAX_ROWS} 行"])
     writer.writerow(result.columns)
-    for row in result.rows[:_CSV_EXPORT_MAX_ROWS]:
+    for row in result.rows:  # execute_readonly 已截断到 max_rows
         writer.writerow([_sanitize_csv_cell(c) for c in row])
 
     return Response(
@@ -255,7 +268,7 @@ async def get_dashboard(did: str, request: Request):
         "widgets": [{
             "id": w["id"], "question": w["question"], "querySql": w["query_sql"],
             "datasourceId": w["datasource_id"], "chartType": w["chart_type"],
-            "chartOption": _json.loads(w["chart_option"]) if w["chart_option"] else None,
+            "chartOption": _safe_json(w["chart_option"]),
             "positionX": w["position_x"], "positionY": w["position_y"],
             "width": w["width"], "height": w["height"],
         } for w in widgets],
@@ -290,7 +303,6 @@ async def add_widget(did: str, body: WidgetCreate, request: Request):
             if result.ok:
                 from domains.chatbi.chart_engine import generate_chart
                 from domains.chatbi.llm_compat import LLMCompat
-                from domains.chatbi import stores
                 # 管理端无 ToolContext, 直接构造 LLMCompat 包引擎 client
                 llm = request.app.state.llm_client
                 compat = LLMCompat(llm) if not isinstance(llm, LLMCompat) else llm
@@ -328,35 +340,42 @@ async def add_widget(did: str, body: WidgetCreate, request: Request):
 
 
 @router.delete("/dashboards/{did}/widgets/{wid}", dependencies=[Depends(admin_required)])
-async def delete_widget(did: str, wid: str):
-    with _db().connect() as conn:
+async def delete_widget(did: str, wid: str, request: Request):
+    uid = _user_id(request)
+    db = _db()
+    _require_dashboard(db, did, uid)
+    with db.connect() as conn:
         cur = conn.execute(
             "DELETE FROM chatbi_dashboard_widgets WHERE id = ? AND dashboard_id = ?",
             (wid, did))
-        if cur.rowcount == 0:
-            raise HTTPException(404, "Widget 不存在")
         conn.execute("UPDATE chatbi_dashboards SET updated_at = ? WHERE id = ?", (_now(), did))
     return {"ok": True}
 
 
 @router.put("/dashboards/{did}/widgets/layout", dependencies=[Depends(admin_required)])
-async def update_layout(did: str, body: LayoutUpdate):
+async def update_layout(did: str, body: LayoutUpdate, request: Request):
     """批量更新 widget 布局(拖拽后保存)。"""
-    with _db().connect() as conn:
+    uid = _user_id(request)
+    db = _db()
+    _require_dashboard(db, did, uid)
+    updated = 0
+    with db.connect() as conn:
         for item in body.layout:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE chatbi_dashboard_widgets "
                 "SET position_x = ?, position_y = ?, width = ?, height = ?, updated_at = ? "
                 "WHERE id = ? AND dashboard_id = ?",
                 (item.position_x, item.position_y, item.width, item.height, _now(), item.id, did))
+            updated += cur.rowcount
         conn.execute("UPDATE chatbi_dashboards SET updated_at = ? WHERE id = ?", (_now(), did))
-    return {"ok": True, "updated": len(body.layout)}
+    return {"ok": True, "updated": updated}
 
 
 @router.put("/dashboards/{did}/widgets/{wid}/refresh", dependencies=[Depends(admin_required)])
 async def refresh_widget(did: str, wid: str, request: Request):
     """刷新 widget: 实时重跑 SQL + 缓存 chart_config inject_data(不调 LLM)。"""
     db = _db()
+    _require_dashboard(db, did, _user_id(request))
     with db.connect() as conn:
         w = conn.execute(
             "SELECT * FROM chatbi_dashboard_widgets WHERE id = ? AND dashboard_id = ?",
@@ -385,7 +404,7 @@ async def refresh_widget(did: str, wid: str, request: Request):
         try:
             from domains.chatbi.chart_engine import inject_data
             chart_option = inject_data(
-                _json.loads(w["chart_option"]), result.columns,
+                _safe_json(w["chart_option"]) or {}, result.columns,
                 [tuple(r) for r in result.rows])
         except Exception as e:
             logger.warning("看板图表缓存注入失败: %s", e)
@@ -401,12 +420,44 @@ async def refresh_widget(did: str, wid: str, request: Request):
     }
 
 
-def _calc_next_position(existing: list) -> tuple:
-    """自动布局: 按行填充, 每行 2 个(列宽 6 总宽 12), 超出换行。"""
+def _safe_json(text: str | None) -> dict | None:
+    """JSON 反序列化容错: 损坏数据返回 None(不 500 整个列表)。"""
+    if not text:
+        return None
+    try:
+        import json as _j
+        v = _j.loads(text)
+        return v if isinstance(v, dict) else None
+    except Exception:
+        return None
+
+
+def _require_dashboard(db: PackRelationalDB, did: str, uid: str) -> None:
+    """归属校验: 看板必须属于 uid, 否则 404(不区分不存在/无权)。"""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM chatbi_dashboards WHERE id = ? AND user_id = ?",
+            (did, uid)).fetchone()
+    if not row:
+        raise HTTPException(404, "看板不存在")
+
+
+def _calc_next_position(existing: list, width: int = 6, total_cols: int = 12) -> tuple:
+    """自动布局: 按行扫描占列, 找第一个能放下 width 列的空位(对标原系统)。
+
+    existing: [(position_x, position_y, widget_width), ...]
+    """
     if not existing:
         return 0, 0
-    max_y = max(p[1] for p in existing)
-    same_row = [p for p in existing if p[1] == max_y]
-    if len(same_row) < 2:
-        return 6, max_y
+    # 占用矩阵: occupied[y][x] = True
+    max_y = max((p[1] for p in existing), default=0)
+    occupied = set()
+    for px, py, pw in existing:
+        for dx in range(max(pw, 1)):
+            occupied.add((px + dx, py))
+    # 按行扫描找第一个能放下的位置
+    for y in range(max_y + 2):
+        for x in range(0, total_cols - width + 1):
+            if all((x + dx, y) not in occupied for dx in range(width)):
+                return x, y
     return 0, max_y + 1
