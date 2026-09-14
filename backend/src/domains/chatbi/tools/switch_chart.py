@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _TYPE_WORDS = {
     "饼": "pie", "占比": "pie", "分布": "pie",
     "柱": "bar", "条形": "bar", "柱状": "bar",
-    "折线": "line", "趋势": "line", "线图": "line",
+    "折线": "line", "趋势": "line", "线图": "line", "曲线": "line",
     "表格": "table", "明细": "table", "表格式": "table",
     "散点": "scatter", "相关": "scatter",
     "指标卡": "kpi", "大数字": "kpi", "汇总": "kpi",

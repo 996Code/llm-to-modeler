@@ -222,10 +222,32 @@ def _mysql_connect(info: DataSourceInfo):
         cursorclass=pymysql.cursors.Cursor)
 
 
+def _inject_limit(sql: str, max_rows: int, db_type: str) -> str:
+    """无顶层 LIMIT 的 SELECT 自动加 LIMIT(max_rows+1)(防 DB 端全表扫描)。
+
+    移植源 sql_executor._inject_limit(v1 教训 #46: sqlglot AST 判断顶层
+    Limit, 不用字符串检测; 子查询的 LIMIT 不算——外层仍可能全表扫描)。
+    fetchmany 只限客户端取行, DB 端排序/聚合/扫描仍按全表执行,
+    LIMIT 注入是 DB 侧防护, 两者互补。parse 失败 → 原样返回
+    (三层校验已拦截非法 SQL, 这里只做增强不拦截)。
+    """
+    fetch_rows = max_rows + 1  # 多取 1 行用于判断是否截断
+    try:
+        import sqlglot
+        dialect = "mysql" if db_type == "mysql" else "postgres"
+        stmt = sqlglot.parse_one(sql, read=dialect)
+        if stmt.args.get("limit") is not None:
+            return sql
+        return stmt.limit(fetch_rows).sql(dialect=dialect)
+    except Exception:
+        return sql
+
+
 def execute_readonly(info: DataSourceInfo, sql: str,
                      max_rows: int = 10000, timeout_seconds: int = 30) -> ExecuteResult:
     """只读执行 BI 查询(READ ONLY 事务 + DB 侧超时 + max_rows 截断)。"""
     started = time.monotonic()
+    sql = _inject_limit(sql, max_rows, info.db_type)
     try:
         if info.db_type == "postgresql":
             conn = _pg_connect(info, timeout_seconds)
@@ -250,6 +272,9 @@ def execute_readonly(info: DataSourceInfo, sql: str,
                 with conn.cursor() as cur:
                     # DB 侧超时(MySQL 5.7+;毫秒)
                     cur.execute(f"SET SESSION max_execution_time = {timeout_seconds * 1000}")
+                    # SEC: READ ONLY 事务(MySQL 8+;与 PG 路径同防御纵深,
+                    # 旧版 MySQL 忽略该语句不报错)
+                    cur.execute("SET TRANSACTION READ ONLY")
                     cur.execute(sql)
                     columns = [d[0] for d in cur.description] if cur.description else []
                     rows = cur.fetchmany(max_rows + 1)

@@ -96,6 +96,10 @@ class ToolContext(BaseModel):
     conv_id: Optional[str] = None  # 会话 ID，用于日志记录
     registry: Any = None           # ToolRegistry(只读),供工具查询能力
     session_state: Any = None      # SessionStateHandle(可选,引擎注入)
+    # 请求用户身份(引擎注入;缺省 "anonymous")——插件按用户维度落自己的
+    # 业务数据(如 chatbi 的保存查询/看板归属)。此前插件从 forward_headers
+    # 猜 X-User-Id,而该头是内部头被显式排除,导致归属恒为 anonymous。
+    user_id: str = "anonymous"
 
     def trace(
         self,

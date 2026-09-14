@@ -169,6 +169,24 @@ async def scan_status(ds_id: str):
             "scannedAt": info.scanned_at}
 
 
+@router.post("/datasources/refresh-metadata/all", dependencies=[Depends(admin_required)])
+async def refresh_metadata_all(request: Request):
+    """手动触发元数据刷新(对标源 POST /data-sources/refresh-metadata/all)。
+
+    纯结构内省(无 LLM)+ 保留人工标注; 已扫描过的 active 数据源全量检查,
+    内容指纹未变不落新版本。后台任务执行, 结果经任务中心查询。
+    """
+    from sdk.pack_api import DuplicateTaskError
+    manager = request.app.state.task_manager
+    try:
+        task = manager.submit("chatbi.refresh_semantics",
+                              payload={},
+                              dedupe_key="chatbi:refresh:all")
+    except DuplicateTaskError:
+        raise HTTPException(409, "已有元数据刷新任务在进行")
+    return {"task_id": task["id"]}
+
+
 # ── 语义层(移植 semantic_models.py 全集) ─────────────────────
 
 @router.get("/datasources/{ds_id}/semantic-models", dependencies=[Depends(admin_required)])
@@ -218,6 +236,25 @@ async def semantic_diff(ds_id: str, from_version: int, to_version: int):
         return {"diff": semantic.diff_versions(_db(), ds_id, from_version, to_version)}
     except ValueError as e:
         raise HTTPException(404, str(e))
+
+
+@router.get("/datasources/{ds_id}/semantic-versions", dependencies=[Depends(admin_required)])
+async def semantic_versions(ds_id: str):
+    """版本历史列表(对标源 GET /semantic-models/{id}/versions)。
+
+    回滚/diff 前端需要枚举可用版本号;此前只有取单版本/diff/rollback,
+    版本清单无从获知。
+    """
+    if not datasources.get_datasource(_db(), ds_id):
+        raise HTTPException(404, "数据源不存在")
+    with _db().connect() as conn:
+        rows = conn.execute(
+            "SELECT version, is_current, created_at FROM chatbi_semantic_models "
+            "WHERE data_source_id = ? ORDER BY version DESC",
+            (ds_id,)).fetchall()
+    return {"items": [{"version": r["version"],
+                       "isCurrent": bool(r["is_current"]),
+                       "createdAt": r["created_at"]} for r in rows]}
 
 
 @router.post("/semantic-rollback", dependencies=[Depends(admin_required)])
@@ -288,7 +325,7 @@ async def delete_memory(mid: str):
 
 # ── 引导(扫描产出的示例问题) ─────────────────────────────────
 
-@router.get("/sample-questions")
+@router.get("/sample-questions", dependencies=[Depends(admin_required)])
 async def sample_questions(ds_id: str):
     from domains.chatbi import semantic
     content = semantic.load_current_content(_db(), ds_id)

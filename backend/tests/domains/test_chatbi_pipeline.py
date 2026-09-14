@@ -233,6 +233,44 @@ class TestClarifyTable:
         assert q.header == "选择数据表"
         assert len(q.options) >= 2
 
+    def test_few_tables_no_hit_asks_with_reason(self, env, monkeypatch):
+        # 表数 ≤ 阈值 + 检索无召回 → no_match 澄清(问题=检索原因,
+        # 选项=全量表供点名;不再空 schema 硬跑——管线-C1 修复)
+        import domains.chatbi.retrieval as retrieval_mod
+        import domains.chatbi.stores as stores_mod
+        from domains.chatbi.retrieval import RetrievalResult
+
+        def fake_retrieve_context(*a, **kw):
+            return {"retrieval": RetrievalResult(models=[], no_match_reason="无法匹配到相关表"),
+                    "model_names": [], "schema_context": "", "allowed_columns": set(),
+                    "metrics_hint": ""}
+        monkeypatch.setattr(stores_mod, "get_vector",
+                            lambda app_state: object())
+        monkeypatch.setattr(retrieval_mod, "retrieve_context", fake_retrieve_context)
+        # 阈值 > 表数(默认 8, env 只有 3 表) → 走 no_match 分支
+        llm = FakeLLM({"*": "x"})
+        result, _ = _run(env, "完全不相关的问题", llm)
+        assert result.ask is not None
+        q = result.ask.questions[0]
+        assert "无法匹配到相关表" in q.question
+        assert q.header == "未匹配到数据表"
+
+    def test_vector_down_many_tables_fail_closed(self, env, monkeypatch):
+        # 向量设施故障 + 大 schema(表 > 阈值) → 不再全表灌种子,
+        # 走表选择澄清让用户点名(I2 修复: prompt 膨胀且违背宁缺毋滥)
+        import domains.chatbi.stores as stores_mod
+
+        def boom(app_state):
+            raise RuntimeError("milvus down")
+        monkeypatch.setattr(stores_mod, "get_vector", boom)
+        env["tool"]._settings = dict(env["tool"]._settings, clarify_table_threshold=1)
+        llm = FakeLLM({"*": "x"})
+        result, _ = _run(env, "各城市订单量", llm)
+        assert result.ask is not None  # 澄清: 用户点名表
+        assert result.ask.questions[0].header == "选择数据表"
+        # 种子为空(不再全表灌入) — extra 里 tables 是全量清单供点名
+        assert result.extra.get("clarify_kind") == "table_confirm"
+
 
 # ── 场景 4: 澄清场景③(结果异常 → 自动修正 → ask 兜底) ────────
 

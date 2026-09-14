@@ -175,6 +175,9 @@ async def stream_graph(
             # 驼峰键会被 LangGraph 过滤丢弃,节点内 state 就拿不到会话 ID
             # (真实事故:统一 SSE 键风格的批量替换误伤过此键,链路打点全断)
             "conversation_id": conversation_id,
+            # 用户身份(网关 X-User-Id 解析):插件按用户维度落业务数据。
+            # 不走 forward_headers——X-User-Id 是内部头被显式排除。
+            "user_id": user_id or "anonymous",
             "forward_headers": forward_headers or {},
             STATE_CONTEXT_ARTIFACT: context_artifact,
             # 插件默认参数(宿主注入):{pack: {参数: 值}},经 tool_state 透传给工具

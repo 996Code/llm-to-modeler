@@ -215,13 +215,22 @@ def _pg_introspect(conn) -> dict:
 
 
 def _mysql_introspect(conn, database: str) -> dict:
-    """MySQL 内省:与 PG 版对齐(information_schema,按库名过滤系统库)。"""
+    """MySQL 内省:与 PG 版对齐(information_schema,按库名过滤系统库)。
+
+    pymysql 无 Connection.execute(只有 query+cursor)——统一走 cursor,
+    返回 tuple 行(PG 路径 psycopg 默认 tuple 行, 两侧下标访问一致)。
+    """
     result = {"tables": {}, "primary_keys": set(), "foreign_keys": []}
     if not database:
         return result
 
+    def _rows(sql, params):
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
     # 1. 列清单(column_type 自带长度/精度,如 decimal(10,2))
-    for r in conn.execute(
+    for r in _rows(
         "SELECT table_name, column_name, UPPER(column_type), "
         "COALESCE(column_comment, '') "
         "FROM information_schema.columns cols "
@@ -235,7 +244,7 @@ def _mysql_introspect(conn, database: str) -> dict:
             {"name": r[1], "data_type": r[2] or "", "comment": r[3] or ""})
 
     # 2. 表注释
-    for r in conn.execute(
+    for r in _rows(
         "SELECT table_name, COALESCE(table_comment, '') "
         "FROM information_schema.tables "
         "WHERE table_schema = %s AND table_type = 'BASE TABLE'", (database,)):
@@ -243,13 +252,13 @@ def _mysql_introspect(conn, database: str) -> dict:
             result["tables"][r[0]]["comment"] = r[1] or ""
 
     # 3. 主键
-    for r in conn.execute(
+    for r in _rows(
         "SELECT table_name, column_name FROM information_schema.key_column_usage "
         "WHERE table_schema = %s AND constraint_name = 'PRIMARY'", (database,)):
         result["primary_keys"].add((r[0], r[1]))
 
     # 4. 外键(referenced_table_name 非空即 FK 行)
-    for r in conn.execute(
+    for r in _rows(
         "SELECT table_name, column_name, referenced_table_name, referenced_column_name "
         "FROM information_schema.key_column_usage "
         "WHERE table_schema = %s AND referenced_table_name IS NOT NULL", (database,)):

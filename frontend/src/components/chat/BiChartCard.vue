@@ -27,8 +27,8 @@
           </tr>
         </tbody>
       </table>
-      <div v-if="tableRows.length > 20" class="table-more">
-        仅显示前 20 行, 共 {{ tableRows.length }} 行
+      <div v-if="totalRows > 20" class="table-more">
+        仅显示前 20 行, 共 {{ totalRows }} 行
       </div>
     </div>
 
@@ -57,6 +57,7 @@ const detailLine = computed(() => {
   if (d.totalDurationMs !== undefined) parts.push(`总耗时 ${(d.totalDurationMs / 1000).toFixed(1)}s`)
   if (d.executeDurationMs !== undefined) parts.push(`SQL ${(d.executeDurationMs / 1000).toFixed(1)}s`)
   if (d.healRounds > 0) parts.push(`自愈 ${d.healRounds} 轮`)
+  if (d.retrievalDegraded) parts.push('检索降级')
   if (d.chartDegraded) parts.push('图表规则推断')
   return parts.join(' · ')
 })
@@ -80,6 +81,9 @@ const kpiName = computed(() => props.chart?.series?.[0]?.data?.[0]?.name || '')
 // 由 props.chart 特判 + dataResult 行(父级注入)兜底
 const tableColumns = computed(() => props.artifact?.columns || [])
 const tableRows = computed(() => props.artifact?.rows_sample || [])
+// 真实行数: rows_sample 只是样本(≤50), 全量行数在 detail.rowcount
+// (此前用样本长度当总数, 1 万行查询显示"共 50 行")
+const totalRows = computed(() => props.detail?.rowcount ?? tableRows.value.length)
 
 const metricHits = computed(() => props.metricHits || [])
 

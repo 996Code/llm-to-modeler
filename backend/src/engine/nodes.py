@@ -309,6 +309,7 @@ def execute_tool_node(state: GraphState) -> dict:
         conv_id=tool_state.get("conversation_id"),  # 会话 ID
         registry=_registry,  # 工具注册表（工具可能要调其他工具）
         session_state=_mem_handle,  # 会话记忆句柄(可选)
+        user_id=state.get("user_id") or "anonymous",  # 用户身份(插件业务归属)
     )
     # object.__setattr__：绕过 Pydantic 的 frozen 限制，临时挂 prompt_loader
     # 类比 Java：反射注入非构造字段

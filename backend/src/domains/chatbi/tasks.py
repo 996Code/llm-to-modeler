@@ -23,7 +23,11 @@ def register_tasks(manager, app_state=None) -> None:
     """向平台任务框架注册本 pack 的任务 handler。
 
     app_state 经闭包捕获(模式照抄 knowledge_graph/tasks.py)——
-    TaskHandle 只有 payload/进度上报, 平台组件(LLM 客户端)从装配期捕获。"""
+    TaskHandle 只有 payload/进度上报, 平台组件(LLM 客户端)从装配期捕获。
+
+    另起元数据定时刷新守护线程(对标源 APScheduler 每 6h):
+    周期 = 设置 metadata_refresh_hours(0 = 关闭, 缺省 6);每轮经任务框架
+    submit 走统一通道(去重/任务中心可观测), 不直接调 handler。"""
     def _scan(handle):
         return _task_scan_datasource(handle, app_state)
 
@@ -33,6 +37,56 @@ def register_tasks(manager, app_state=None) -> None:
     manager.register("chatbi.scan_datasource", _scan, pack_name=PACK_NAME)
     manager.register("chatbi.refresh_semantics", _refresh, pack_name=PACK_NAME)
     logger.info("chatbi tasks registered: scan_datasource / refresh_semantics")
+    _start_refresh_scheduler(manager, app_state)
+
+
+_refresh_thread = None
+_refresh_stop = None
+
+
+def _start_refresh_scheduler(manager, app_state) -> None:
+    """元数据定时刷新线程(进程级单例;unload 由 pack 生命周期终止进程,
+    线程随进程退出——平台无 pack 级线程取消钩子, daemon 即可)。"""
+    global _refresh_thread, _refresh_stop
+    if _refresh_thread is not None and _refresh_thread.is_alive():
+        return
+    import threading
+
+    _refresh_stop = threading.Event()
+
+    def _loop():
+        # 周期在每轮重新读设置(管理端热改即时生效);检查间隔取
+        # min(周期, 1h) 保证"改小周期"最多 1h 内生效
+        while not _refresh_stop.wait(3600):
+            try:
+                hours = float(_load_settings(app_state).get("metadata_refresh_hours", 6))
+            except Exception:
+                hours = 6
+            if hours <= 0:
+                continue
+            # 简化: 检查间隔 1h, 到点按上次刷新时间判断是否到期。
+            # 状态存 pack 设置表太重, 用模块级时间戳(重启重置=重启即检一次, 可接受)
+            now = _now_ts()
+            if now - getattr(_loop, "_last_run", 0) < hours * 3600:
+                continue
+            _loop._last_run = now
+            try:
+                manager.submit("chatbi.refresh_semantics", payload={},
+                               dedupe_key="chatbi:refresh:all")
+                logger.info("元数据定时刷新已提交 (周期 %gh)", hours)
+            except Exception as e:
+                logger.warning("元数据定时刷新提交失败: %s", e)
+
+    _loop._last_run = _now_ts()  # 启动即视为已刷新(避免进程重启风暴)
+    _refresh_thread = threading.Thread(target=_loop, name="chatbi-metadata-refresh",
+                                       daemon=True)
+    _refresh_thread.start()
+    logger.info("chatbi metadata refresh scheduler started (interval from settings)")
+
+
+def _now_ts() -> float:
+    import time
+    return time.time()
 
 
 def _task_scan_datasource(handle, app_state=None) -> dict:
@@ -90,25 +144,109 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
 
 
 def _task_refresh_semantics(handle, app_state=None) -> dict:
-    """自动刷新入口: 对全部 active 数据源重扫(内容指纹变化才落新版本,
-    由 semantic.save_content 的版本幂等保证)。"""
-    from domains.chatbi import runtime, semantic, datasources
+    """自动刷新入口(对标源 metadata_refresher.refresh_all_metadata):
+
+    与全量扫描(scan_datasource)的语义差异:
+      - 只做结构内省(llm=None), 不跑 LLM 富化——刷新是高频低价值操作,
+        LLM 非确定性输出会产伪版本 + 全量调用成本;
+      - 保留人工/LLM 标注(_merge_content: 新结构权威, 旧标注优先);
+      - 跳过从未扫描过的数据源(首次扫描必须手动——需要 LLM 富化);
+      - 内容指纹未变 → save_content 幂等不落新版本;
+      - 落了新版本 → 重建向量索引(版本与索引不漂移)。
+    """
+    from domains.chatbi import runtime, semantic, datasources, indexing
     db = runtime.get_pack_db()
-    llm = runtime.get_llm(app_state) if app_state else None
     settings = _load_settings(app_state)
     results = []
     for info in datasources.list_datasources(db, active_only=True):
         try:
-            content = semantic.scan_datasource(
-                llm=llm, db=db, connect_info=_connect_info(info),
+            current = semantic.load_current_content(db, info.id)
+            if current is None:
+                # 从未扫描过: 首次扫描必须手动(需要 LLM 富化), 跳过
+                results.append({"datasource_id": info.id, "ok": True,
+                                "skipped": "never_scanned"})
+                continue
+            # 纯结构扫描(无 LLM) → 合并旧标注 → 指纹幂等落版本
+            new_content = semantic.scan_datasource(
+                llm=None, db=db, connect_info=_connect_info(info),
                 infer_metrics=bool(settings.get("scan_metric_inference", True)))
-            _evolve_graph(db, info.id, content)
-            results.append({"datasource_id": info.id, "models": len(content.models),
-                            "ok": True})
+            merged = _merge_content(current, new_content)
+            version = semantic.save_content(db, info.id, merged, source="refresh")
+            _evolve_graph(db, info.id, merged)
+            # 落了新版本 → 重建索引(I1: 版本与索引不漂移)
+            try:
+                from domains.chatbi import stores as cb_stores
+                llm = runtime.get_llm(app_state) if app_state else None
+                if llm is not None:
+                    indexing.rebuild_index(
+                        content=merged, data_source_id=info.id,
+                        store=cb_stores.get_vector(app_state),
+                        embedder=cb_stores.get_embedder(llm), db=db)
+            except Exception as e:
+                logger.warning("刷新后索引重建失败(降级, 手动重扫可修复): %s", e)
+            results.append({"datasource_id": info.id, "version": version,
+                            "models": len(merged.models), "ok": True})
         except Exception as e:
             logger.warning("自动刷新失败 %s: %s", info.name, e)
             results.append({"datasource_id": info.id, "ok": False, "error": str(e)[:200]})
     return {"refreshed": results}
+
+
+def _merge_content(old: "SemanticModelContentLike",
+                   new: "SemanticModelContentLike") -> "SemanticModelContentLike":
+    """结构刷新合并(移植源 metadata_refresher._merge_content)。
+
+    新扫描的表/列结构是权威(增删改), 但保留旧版本的 display_name/
+    description/semantic_type/source/confidence/sample_questions——
+    这些是人工/LLM 标注, 结构扫描(llm=None)只会产出退化值。
+    """
+    old_models = {m.name: m for m in old.models}
+    for new_m in new.models:
+        old_m = old_models.get(new_m.name)
+        if old_m is None:
+            continue  # 新表: 用扫描退化值, 等下次 LLM 富化
+        new_m.display_name = old_m.display_name or new_m.display_name
+        new_m.description = old_m.description or new_m.description
+        old_cols = {c.name: c for c in old_m.columns}
+        for c in new_m.columns:
+            old_c = old_cols.get(c.name)
+            if old_c is None:
+                continue  # 新列
+            c.display_name = old_c.display_name or c.display_name
+            c.description = old_c.description or c.description
+            if old_c.semantic_type:
+                c.semantic_type = old_c.semantic_type
+            if old_c.source:
+                c.source = old_c.source
+            if old_c.confidence:
+                c.confidence = old_c.confidence
+    new.sample_questions = old.sample_questions or new.sample_questions
+    return new
+
+
+def _make_index_rebuilder(app_state, datasource_id: str):
+    """构造图谱演化的索引重建回调(I2: 演化落新版本后索引不漂移)。
+
+    apply_confidence_updates 以关键字调用 rebuild_index(content=..., data_source_id=...);
+    向量设施不可用时返回 None(调用方按契约跳过重建, 只记 debug)。
+    """
+    try:
+        from domains.chatbi import runtime, stores as cb_stores, indexing
+        llm = runtime.get_llm(app_state) if app_state else None
+        if llm is None:
+            return None
+        store = cb_stores.get_vector(app_state)
+        embedder = cb_stores.get_embedder(llm)
+        db = runtime.get_pack_db()
+    except Exception as e:
+        logger.warning("索引重建回调构造失败(演化后跳过重建): %s", e)
+        return None
+
+    def _rebuild(content, data_source_id, **_kw):
+        return indexing.rebuild_index(
+            content=content, data_source_id=data_source_id,
+            store=store, embedder=embedder, db=db)
+    return _rebuild
 
 
 def _evolve_graph(db, datasource_id: str, content) -> None:
@@ -143,8 +281,10 @@ def _evolve_graph(db, datasource_id: str, content) -> None:
         logger.warning("乐观锁版本读取失败(降级为不校验): %s", e)
     # C2 修复: 正确签名 (db, data_source_id, updates, new_pairs, expected_version)
     # — content 之前落到 updates 位、suggestions 落到 new_pairs 位(参数错位同 B2)
-    updates = apply_confidence_updates(db, datasource_id, suggestions,
-                                       expected_version=current_version)
+    updates = apply_confidence_updates(
+        db, datasource_id, suggestions,
+        expected_version=current_version,
+        rebuild_index=_make_index_rebuilder(app_state, datasource_id))
     if updates:
         # B2 修复: sync_linkage_to_graph 正确签名为 (db, mem_store, data_source_id)
         # ——此前 content 落到 mem_store 位, list_memories() 必炸 AttributeError

@@ -99,6 +99,10 @@ class GraphState(TypedDict, total=False):
     compressed_history: str
     # 会话 ID;同时用作 LangGraph checkpoint 的 thread_id,保证同一会话取同一份快照
     conversation_id: str
+    # 请求用户身份(网关 X-User-Id 解析;缺省 "anonymous")——插件按用户
+    # 维度落业务数据(保存查询/看板归属等)。注意与 forward_headers 分开:
+    # X-User-Id 是内部头,不透传上游,引擎显式携带。
+    user_id: str
     # 嵌入(embed)模式下上游透传的请求头,工具可能需要(如多租户 token)
     forward_headers: Dict[str, str]
     # 对话的上下文参数(宿主下发的当前制品)——pack 路由据此判断画布状态,

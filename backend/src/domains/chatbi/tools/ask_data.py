@@ -216,6 +216,7 @@ class AskDataTool(CompositeTool):
         from domains.chatbi import stores as cb_stores
         llm = self._get_llm(ctx)
         question = state.get("user_input", "")
+        no_match_reason = None
         try:
             store = cb_stores.get_vector(self._app_state)
             embedder = cb_stores.get_embedder(llm)
@@ -233,6 +234,9 @@ class AskDataTool(CompositeTool):
             # 检索降级标记(O8: 精筛失败→提示结果可能不精确;源 agent.py:223-225)
             state["retrieval_degraded"] = bool(
                 getattr(rc["retrieval"], "degraded", False))
+            # 无召回原因(源 agent.py:238-242 fail-closed 消费点):
+            # 后续"无种子且无继承"时用它终止, 不再随机选表/空 schema 硬跑
+            no_match_reason = getattr(rc["retrieval"], "no_match_reason", None)
             # 指标命中拆分(反查所属表用)
             state["hit_metric_names"] = [m["name"] for m in all_hits
                                          if m.get("type") == "metric"]
@@ -242,7 +246,15 @@ class AskDataTool(CompositeTool):
             state["metrics_hint"] = rc["metrics_hint"]
         except Exception as e:  # 向量设施故障 → 全表降级(检索降级不阻断, 对标 O8)
             logger.warning("向量检索不可用, 降级全表清单: %s", e)
-            seed_tables = [m.name for m in content.models]
+            state["retrieval_degraded"] = True
+            # 全表降级仅在小 schema 下可行(表多时 prompt 膨胀且违背宁缺毋滥,
+            # 对标源 retriever.py:63-64 embed 失败返回失败原因不检索)
+            if len(content.models) <= int(settings.get("clarify_table_threshold", 8)):
+                seed_tables = [m.name for m in content.models]
+            else:
+                # 表多: 不灌全表种子(prompt 膨胀且违背宁缺毋滥),
+                # 留空 → 下方 threshold 澄清分支接管(用户点名表)
+                seed_tables = []
 
         # 追问表继承 (ARC-04/chat_utils.inherit_prev_tables 移植):
         # 只继承语义层中有定义的表(防止表已删除/重命名仍被引用), 去重
@@ -283,10 +295,39 @@ class AskDataTool(CompositeTool):
         state["current_tables"] = expanded
         state["join_path_section"] = join_path_section
 
+        # 无召回 fail-closed(源 ask_user.py:78-83 SCHEMA_AMBIGUOUS +
+        # agent.py:238-242 final 兜底): 无种子且无继承且无指标命中 →
+        # 澄清形式终止(问题=检索原因, 选项=全量表供点名), 不再"随机前4张表"
+        # 也不空 schema 硬跑(LLM 无 schema 必臆造列名, 校验失败自愈空转)。
+        # 表多于阈值时由下方 threshold 澄清分支接管(同一交互形态, 文案一致)。
+        _many_tables = len(content.models) > int(
+            settings.get("clarify_table_threshold", 8))
+        if not merged and no_match_reason and not _many_tables:
+            state["_need_clarify"] = True
+            state["clarify_kind"] = "table_confirm"
+            state["clarify_tables"] = [m.name for m in content.models]
+            state["_result"] = ToolResult(
+                artifact_type="data",
+                ask=AskSpec(questions=[AskQuestion(
+                    question=no_match_reason + "(也可以直接告诉我表名)",
+                    header="未匹配到数据表",
+                    options=[AskOption(label=m.display_name or m.name,
+                                       description=m.description or m.name)
+                             for m in content.models[:4]],
+                )]),
+                summary=no_match_reason,
+                extra={"clarify_kind": "table_confirm",
+                       "tables": [m.name for m in content.models]},
+            )
+            return
+
         # 多候选低分 → 表不确定澄清 (ask_user 场景②: CLARIFICATION)
         # 注意: run_pipeline 丢弃 step 返回值——结果必须走 state["_result"]
-        if (not seed_tables and not prev_tables
-                and len(content.models) > int(settings.get("clarify_table_threshold", 8))):
+        if (not seed_tables and not prev_tables and _many_tables):
+            # 澄清选项 = 语义层全量表(表多时用户自己点名表; 检索已无召回,
+            # 不存在"检索候选"可列——与源 ask_user.py:87-95 的差异:
+            # 源在低置信(top_score<0.5)时仍有召回候选可选, 本路径是
+            # 召回为空的兜底, 语义等价于源 SCHEMA_AMBIGUOUS 的全表确认)
             options = [AskOption(label=m.display_name or m.name,
                                  description=m.description or m.name)
                        for m in content.models[:4]]
@@ -709,8 +750,10 @@ class AskDataTool(CompositeTool):
         # M4: 成功查询自动保存(应用层去重, 供导出 CSV/看板引用)
         try:
             from domains.chatbi.m4 import save_query
-            _m4_uid = (ctx.forward_headers or {}).get("X-User-Id", "anonymous")
-            save_query(self._get_db(), _m4_uid, state["ds"].id,
+            # 用户身份走 ctx.user_id(引擎从 GraphState 注入)——不从
+            # forward_headers 猜: X-User-Id 是内部头被显式排除,
+            # 且 Starlette key 小写, 大写精确匹配必 miss(归属恒 anonymous 的事故)。
+            save_query(self._get_db(), ctx.user_id or "anonymous", state["ds"].id,
                        state.get("user_input", ""), state["sql"],
                        conversation_id=ctx.conv_id,
                        chart_config=chart.config if chart else None,
@@ -749,6 +792,8 @@ class AskDataTool(CompositeTool):
         parts = [f"查询完成, 返回 {result.rowcount} 行"]
         if check and check.issue == ResultIssue.ZERO_ROWS:
             parts.append(f"⚠ {check.reason}: {check.suggestion}")
+        if state.get("retrieval_degraded"):
+            parts.append("(检索降级: 结果可能不精确)")
         if chart and chart.degraded:
             parts.append("(图表为规则推断降级)")
         if state.get("metric_hits"):
@@ -775,6 +820,7 @@ class AskDataTool(CompositeTool):
                 "healRounds": state.get("heal_rounds", 0),
                 "executeDurationMs": state.get("_execute_duration_ms", 0),
                 "chartDegraded": bool(chart and chart.degraded),
+                "retrievalDegraded": bool(state.get("retrieval_degraded")),
             })
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
