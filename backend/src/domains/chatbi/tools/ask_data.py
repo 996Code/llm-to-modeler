@@ -701,6 +701,16 @@ class AskDataTool(CompositeTool):
         except Exception as e:
             logger.warning("linkage 记忆沉淀失败(不阻塞): %s", e)
 
+        # M4: 成功查询自动保存(应用层去重, 供导出 CSV/看板引用)
+        try:
+            from domains.chatbi.m4 import save_query
+            save_query(self._get_db(), "anonymous", state["ds"].id,
+                       state.get("user_input", ""), state["sql"],
+                       conversation_id=ctx.conv_id,
+                       chart_config=chart.config if chart else None)
+        except Exception as e:
+            logger.warning("查询自动保存失败(不阻塞): %s", e)
+
         # few-shot 成功回流 (RAG-004;源 chat_stream.py:917-929):
         # 成功查询的 Question-SQL Pair 入向量库, 后续相似问题召回作参考。
         # 失败降级只记日志(不阻塞结果返回)。

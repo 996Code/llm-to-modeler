@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# M4: 保存查询 + 看板路由(端口全集见 m4.py)
+from domains.chatbi.m4 import router as m4_router
+router.include_router(m4_router)
+
 
 def _db() -> PackRelationalDB:
     return get_pack_db()

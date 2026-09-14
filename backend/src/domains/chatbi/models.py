@@ -193,3 +193,46 @@ CHATBI_DDL = [
     "ON chatbi_semantic_models(data_source_id, version)",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_semantic_ds ON chatbi_semantic_models(data_source_id, is_current)",
 ]
+
+
+# ── M4: 保存查询 + 看板 (对标原系统 SavedQuery/Dashboard/DashboardWidget) ──
+
+M4_DDL = [
+    """CREATE TABLE IF NOT EXISTS chatbi_saved_queries (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        data_source_id TEXT NOT NULL,
+        conversation_id TEXT,
+        question TEXT NOT NULL,
+        sql_text TEXT NOT NULL,
+        result_summary TEXT,
+        chart_config TEXT,
+        created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_chatbi_sq_user ON chatbi_saved_queries(user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_chatbi_sq_ds ON chatbi_saved_queries(data_source_id)",
+    """CREATE TABLE IF NOT EXISTS chatbi_dashboards (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_chatbi_dash_user ON chatbi_dashboards(user_id, updated_at DESC)",
+    """CREATE TABLE IF NOT EXISTS chatbi_dashboard_widgets (
+        id TEXT PRIMARY KEY,
+        dashboard_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        query_sql TEXT,
+        datasource_id TEXT NOT NULL,
+        chart_type TEXT DEFAULT 'table',
+        chart_option TEXT,
+        position_x INTEGER DEFAULT 0,
+        position_y INTEGER DEFAULT 0,
+        width INTEGER DEFAULT 6,
+        height INTEGER DEFAULT 4,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_chatbi_w_dash ON chatbi_dashboard_widgets(dashboard_id, position_y, position_x)",
+]
