@@ -320,6 +320,11 @@ export const useConversationStore = defineStore('conversation', () => {
             if (result.metricHits !== undefined) formattedData.metricHits = result.metricHits
             if (result.rowcount !== undefined) formattedData.rowcount = result.rowcount
             if (result.datasourceName !== undefined) formattedData.datasourceName = result.datasourceName
+            // 对话内明细(对标原系统 step_durations/self_heal_rounds)
+            if (result.totalDurationMs !== undefined) formattedData.totalDurationMs = result.totalDurationMs
+            if (result.healRounds !== undefined) formattedData.healRounds = result.healRounds
+            if (result.executeDurationMs !== undefined) formattedData.executeDurationMs = result.executeDurationMs
+            if (result.chartDegraded !== undefined) formattedData.chartDegraded = result.chartDegraded
             messages.value.push({
               role: 'assistant',
               content: result.summary,

@@ -116,4 +116,9 @@ export interface SSEResult {
   metricHits?: Array<{ metric?: string, display_name?: string }>  // 命中业务指标
   rowcount?: number                  // 结果行数
   datasourceName?: string            // 数据源名
+  // chatbi 对话内明细(对标原系统 complete 事件)
+  totalDurationMs?: number           // 管线总耗时(毫秒)
+  healRounds?: number                // SQL 自愈轮数
+  executeDurationMs?: number         // SQL 执行耗时(毫秒)
+  chartDegraded?: boolean            // 图表是否降级(规则推断)
 }

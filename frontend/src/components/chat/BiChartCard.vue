@@ -8,6 +8,9 @@
       <a-tag v-if="metricHits.length > 5" color="default">+{{ metricHits.length - 5 }}</a-tag>
     </div>
 
+    <!-- 对话内明细: 耗时/自愈/降级(对标原系统 step_durations) -->
+    <div v-if="detailLine" class="detail-line">{{ detailLine }}</div>
+
     <!-- KPI 指标卡: 大数字渲染(gauge 的简化展示) -->
     <div v-else-if="isKpi" class="kpi-view">
       <div class="kpi-value">{{ kpiValue }}</div>
@@ -45,7 +48,18 @@ const props = defineProps<{
   chart: Record<string, any> | null | undefined
   metricHits?: Array<{ metric?: string, display_name?: string }>
   artifact?: Record<string, any> | null   // data 制品(table 视图取 columns/rows_sample)
+  detail?: Record<string, any> | null     // 对话内明细(totalDurationMs 等)
 }>()
+
+const detailLine = computed(() => {
+  const d = props.detail || {}
+  const parts: string[] = []
+  if (d.totalDurationMs !== undefined) parts.push(`总耗时 ${(d.totalDurationMs / 1000).toFixed(1)}s`)
+  if (d.executeDurationMs !== undefined) parts.push(`SQL ${(d.executeDurationMs / 1000).toFixed(1)}s`)
+  if (d.healRounds > 0) parts.push(`自愈 ${d.healRounds} 轮`)
+  if (d.chartDegraded) parts.push('图表规则推断')
+  return parts.join(' · ')
+})
 
 const chartEl = ref<HTMLElement | null>(null)
 let instance: echarts.ECharts | null = null
@@ -91,6 +105,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .bi-chart-card { width: 100%; }
 .metric-hits { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.detail-line { color: #999; font-size: 12px; margin-bottom: 8px; }
 .kpi-view { text-align: center; padding: 18px 0; }
 .kpi-value { font-size: 40px; font-weight: 700; color: #1677ff; }
 .kpi-name { margin-top: 4px; color: #888; font-size: 14px; }

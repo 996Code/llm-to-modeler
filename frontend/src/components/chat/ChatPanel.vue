@@ -201,6 +201,7 @@
                   :chart="msg.formattedData.chart"
                   :metric-hits="msg.formattedData.metricHits"
                   :artifact="msg.dataResult"
+                  :detail="msg.formattedData"
                 />
                 <!-- 知识图谱检索结果:专用子图卡片(G6 懒加载渲染 + 来源引用) -->
                 <KgGraphCard
