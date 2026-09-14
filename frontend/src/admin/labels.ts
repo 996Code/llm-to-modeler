@@ -39,6 +39,18 @@ export const STAGE_LABELS: Record<string, string> = {
   'kg.find_entities': '图谱·种子实体匹配',
   'kg.subgraph': '图谱·子图召回',
   'kg.vector_search': '向量·相似检索',
+  // 智能问数(chatbi)链路(检索两阶段 + 8 步管线的 LLM 环节)
+  'chatbi.embed': '向量·问题向量化',
+  'chatbi.retrieve.refine': 'LLM·检索精筛',
+  'chatbi.think': 'LLM·预思考',
+  'chatbi.generate_sql': 'LLM·SQL 生成',
+  'chatbi.heal': 'LLM·SQL 自愈',
+  'chatbi.chart': 'LLM·图表生成',
+  'chatbi.semantic.enrich': 'LLM·语义富化',
+  'chatbi.semantic.metrics': 'LLM·指标推断',
+  'chatbi.semantic.questions': 'LLM·示例问题',
+  'chatbi.graph.infer_relationships': 'LLM·关系推断',
+  'chatbi.memory.extract': 'LLM·记忆提炼',
 }
 
 export function stageLabel(stage: string | null | undefined, fallback?: string): string {

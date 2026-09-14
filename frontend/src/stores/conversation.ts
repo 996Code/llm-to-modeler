@@ -139,20 +139,32 @@ export const useConversationStore = defineStore('conversation', () => {
       currentConversation.value = conv
       // 历史消息里的 dataArtifact(数据型制品快照,如 KG 检索子图)映射到
       // dataResult——前端渲染分支复用 SSE 实时路径的同一条(图谱卡/数据卡)
-      messages.value = (conv.messages || []).map((m: any) => ({
-        ...m,
-        dataResult: m.dataResult ?? m.dataArtifact ?? undefined,
-        // chatbi 制品恢复: formattedData 不落库, 从 dataArtifact 同构合成
-        // (与 tool.format_result 钩子同构) —— 否则刷新后图表卡/指标标签消失
-        formattedData: (m.dataResult ?? m.dataArtifact)?.chart_option
-          ? {
-              chart: (m.dataResult ?? m.dataArtifact).chart_option,
-              metricHits: (m.dataResult ?? m.dataArtifact).metric_hits || [],
-              rowcount: (m.dataResult ?? m.dataArtifact).rowcount,
-              datasourceName: (m.dataResult ?? m.dataArtifact).datasource_name,
-            }
-          : undefined,
-      }))
+      messages.value = (conv.messages || []).map((m: any) => {
+        const art = m.dataResult ?? m.dataArtifact
+        return {
+          ...m,
+          dataResult: art ?? undefined,
+          // chatbi 制品恢复: formattedData 不落库, 从 dataArtifact 同构合成
+          // (与 tool.format_result 钩子同构) —— 否则刷新后图表卡/指标标签消失。
+          // M4 字段(sql/datasource_id/chart_config)一并合成——历史消息的
+          // "加到看板"按钮依赖它们兜底定位, 刷新页面后不再消失。
+          formattedData: art?.chart_option
+            ? {
+                chart: art.chart_option,
+                metricHits: art.metric_hits || [],
+                rowcount: art.rowcount,
+                datasourceName: art.datasource_name,
+                truncated: art.truncated,
+                chartDegraded: art.chart_degraded,
+                sql: art.sql,
+                datasourceId: art.datasource_id,
+                tables: art.tables,
+                chartConfig: art.chart_config,
+                savedQueryId: art.saved_query_id,
+              }
+            : undefined,
+        }
+      })
       currentConfig.value = conv.currentConfig || null
       baselineConfig.value = null  // 切会话：diff 基线随下一轮交互重建
     } finally {

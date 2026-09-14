@@ -157,30 +157,17 @@ import {
   AppstoreAddOutlined, ArrowLeftOutlined, DeleteOutlined, DownloadOutlined,
   HistoryOutlined, LayoutOutlined, PlusOutlined, ReloadOutlined,
 } from '@ant-design/icons-vue'
+import { chatbiApi } from '../../api'
 
-const PACK_API = '/ai-modeler/api/packs/chatbi'
 const tab = ref('queries')
 
-// ── 身份/请求头(与 admin 页同源约定;user 级端点要 X-User-Id) ──
-function headers(): Record<string, string> {
-  const token = localStorage.getItem('admin_token') || ''
-  return { 'Content-Type': 'application/json', 'X-Admin-Token': token }
-}
-function userHeaders(): Record<string, string> {
-  return { ...headers(), 'X-User-Id': localStorage.getItem('chatbi_user_id') || 'admin' }
+// ── 用户身份(M4 端点 user_required: X-User-Id 行级隔离) ──
+// 管理端场景下与登录人共享同一身份;Bearer/X-Admin-Token 由 chatbiApi 拦截器统一注入
+function uid(): string {
+  return localStorage.getItem('chatbi_user_id') || 'admin'
 }
 function fmtTime(iso: string): string {
   return iso ? iso.replace('T', ' ').slice(0, 16) : ''
-}
-
-async function jfetch(url: string, init?: RequestInit): Promise<any> {
-  const r = await fetch(url, init)
-  if (!r.ok) {
-    let detail = `HTTP ${r.status}`
-    try { detail = (await r.json()).detail || detail } catch { /* keep */ }
-    throw new Error(detail)
-  }
-  return r.json()
 }
 
 // ══════════ 保存查询 ══════════
@@ -190,28 +177,33 @@ const loadingQ = ref(false)
 async function loadQueries() {
   loadingQ.value = true
   try {
-    const d = await jfetch(`${PACK_API}/saved-queries?limit=100`, { headers: userHeaders() })
-    queries.value = d.items || []
-  } catch (e: any) { message.error(e.message) } finally { loadingQ.value = false }
+    const { data } = await chatbiApi.get('/saved-queries',
+                                         { params: { limit: 100 }, headers: { 'X-User-Id': uid() } })
+    queries.value = data.items || []
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e.message || '加载失败')
+  } finally { loadingQ.value = false }
 }
 
-function exportCsv(record: any) {
+async function exportCsv(record: any) {
   // 浏览器原生下载(CSV 端点直接回 text/csv + BOM)
-  const token = localStorage.getItem('admin_token') || ''
-  const uid = localStorage.getItem('chatbi_user_id') || 'admin'
-  fetch(`${PACK_API}/saved-queries/${record.id}/export`,
-        { headers: { 'X-Admin-Token': token, 'X-User-Id': uid } })
-    .then(async (r) => {
-      if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`)
-      const blob = await r.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `query-${record.id.slice(0, 8)}.csv`
-      a.click()
-      URL.revokeObjectURL(url)
-    })
-    .catch((e) => message.error(`导出失败: ${e.message}`))
+  try {
+    const resp = await fetch(
+      `${chatbiApi.defaults.baseURL}/saved-queries/${record.id}/export`,
+      { headers: { 'X-Admin-Token': localStorage.getItem('admin_token') || '',
+                   'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}`,
+                   'X-User-Id': uid() } })
+    if (!resp.ok) throw new Error((await resp.json()).detail || `HTTP ${resp.status}`)
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `query-${record.id.slice(0, 8)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e: any) {
+    message.error(`导出失败: ${e.message}`)
+  }
 }
 
 // ══════════ 看板 ══════════
@@ -228,50 +220,49 @@ let pendingQuery: any = null
 async function loadDashboards() {
   loadingD.value = true
   try {
-    const d = await jfetch(`${PACK_API}/dashboards`, { headers: userHeaders() })
-    dashboards.value = d.items || []
-  } catch (e: any) { message.error(e.message) } finally { loadingD.value = false }
+    const { data } = await chatbiApi.get('/dashboards', { headers: { 'X-User-Id': uid() } })
+    dashboards.value = data.items || []
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e.message || '加载失败')
+  } finally { loadingD.value = false }
 }
 
 async function createDash() {
   if (!newDashName.value.trim()) { message.warning('名称不能为空'); return }
   try {
-    await jfetch(`${PACK_API}/dashboards`, {
-      method: 'POST', headers: userHeaders(),
-      body: JSON.stringify({ name: newDashName.value.trim() }),
-    })
+    await chatbiApi.post('/dashboards', { name: newDashName.value.trim() },
+                         { headers: { 'X-User-Id': uid() } })
     message.success('看板已创建')
     showCreateDash.value = false
     newDashName.value = ''
     await loadDashboards()
-  } catch (e: any) { message.error(e.message) }
+  } catch (e: any) { message.error(e?.response?.data?.detail || e.message) }
 }
 
 async function renameDash(record: any) {
   const name = window.prompt('新名称', record.name)
   if (!name || !name.trim()) return
   try {
-    await jfetch(`${PACK_API}/dashboards/${record.id}`, {
-      method: 'PUT', headers: userHeaders(), body: JSON.stringify({ name: name.trim() }),
-    })
+    await chatbiApi.put(`/dashboards/${record.id}`, { name: name.trim() },
+                        { headers: { 'X-User-Id': uid() } })
     await loadDashboards()
-  } catch (e: any) { message.error(e.message) }
+  } catch (e: any) { message.error(e?.response?.data?.detail || e.message) }
 }
 
 async function removeDash(record: any) {
   try {
-    await jfetch(`${PACK_API}/dashboards/${record.id}`,
-                 { method: 'DELETE', headers: userHeaders() })
+    await chatbiApi.delete(`/dashboards/${record.id}`, { headers: { 'X-User-Id': uid() } })
     message.success('已删除')
     await loadDashboards()
-  } catch (e: any) { message.error(e.message) }
+  } catch (e: any) { message.error(e?.response?.data?.detail || e.message) }
 }
 
 async function openDash(record: any) {
   try {
-    currentDash.value = await jfetch(`${PACK_API}/dashboards/${record.id}`,
-                                     { headers: userHeaders() })
-  } catch (e: any) { message.error(e.message) }
+    const { data } = await chatbiApi.get(`/dashboards/${record.id}`,
+                                         { headers: { 'X-User-Id': uid() } })
+    currentDash.value = data
+  } catch (e: any) { message.error(e?.response?.data?.detail || e.message) }
 }
 
 function cardStyle(w: any) {
@@ -291,11 +282,13 @@ function renderWidget(w: any) {
 async function refreshWidget(w: any) {
   w._loading = true
   try {
-    w._live = await jfetch(
-      `${PACK_API}/dashboards/${currentDash.value.id}/widgets/${w.id}/refresh`,
-      { method: 'PUT', headers: userHeaders() })
-  } catch (e: any) { message.error(`「${w.question}」刷新失败: ${e.message}`) }
-  finally { w._loading = false }
+    const { data } = await chatbiApi.put(
+      `/dashboards/${currentDash.value.id}/widgets/${w.id}/refresh`,
+      {}, { headers: { 'X-User-Id': uid() } })
+    w._live = data
+  } catch (e: any) {
+    message.error(`「${w.question}」刷新失败: ${e?.response?.data?.detail || e.message}`)
+  } finally { w._loading = false }
 }
 
 async function refreshAll() {
@@ -306,10 +299,11 @@ async function refreshAll() {
 
 async function removeWidget(w: any) {
   try {
-    await jfetch(`${PACK_API}/dashboards/${currentDash.value.id}/widgets/${w.id}`,
-                 { method: 'DELETE', headers: userHeaders() })
+    await chatbiApi.delete(
+      `/dashboards/${currentDash.value.id}/widgets/${w.id}`,
+      { headers: { 'X-User-Id': uid() } })
     currentDash.value.widgets = currentDash.value.widgets.filter((x: any) => x.id !== w.id)
-  } catch (e: any) { message.error(e.message) }
+  } catch (e: any) { message.error(e?.response?.data?.detail || e.message) }
 }
 
 function openAddToDash(record: any) {
@@ -323,18 +317,15 @@ function openAddToDash(record: any) {
 async function addWidget() {
   if (!addWidgetForm.dashboardId) { message.warning('请选择看板'); return }
   try {
-    await jfetch(`${PACK_API}/dashboards/${addWidgetForm.dashboardId}/widgets`, {
-      method: 'POST', headers: userHeaders(),
-      body: JSON.stringify({
-        question: pendingQuery.question,
-        query_sql: pendingQuery.querySql,
-        datasource_id: pendingQuery.dataSourceId,
-        chart_type: addWidgetForm.chartType === 'auto' ? 'table' : addWidgetForm.chartType,
-      }),
-    })
+    await chatbiApi.post(`/dashboards/${addWidgetForm.dashboardId}/widgets`, {
+      question: pendingQuery.question,
+      query_sql: pendingQuery.sqlText,
+      datasource_id: pendingQuery.dataSourceId,
+      chart_type: addWidgetForm.chartType === 'auto' ? 'table' : addWidgetForm.chartType,
+    }, { headers: { 'X-User-Id': uid() } })
     message.success('已添加到看板')
     showAddWidget.value = false
-  } catch (e: any) { message.error(e.message) }
+  } catch (e: any) { message.error(e?.response?.data?.detail || e.message) }
 }
 
 onMounted(() => { loadQueries(); loadDashboards() })

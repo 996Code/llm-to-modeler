@@ -38,6 +38,6 @@ dependencies:
 admin:
   settings: settings.schema.yaml
   page: chatbi              # 管理端自定义页(数据源管理/语义层/图谱浏览)
-  title: 数据分析 ChatBI
+  title: 智能问数
 
 settings_side_effects: []

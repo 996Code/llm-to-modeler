@@ -562,6 +562,29 @@ kgApi.interceptors.response.use(
   },
 )
 
+// ── 智能问数插件(/api/packs/chatbi;管理端数据源/语义层 + 用户级 M4) ──
+// 双 token 与 kgApi 同模式: X-Admin-Token(管理口令) + Authorization Bearer
+// (auth.html 门禁签发;后端全局中间件优先校验 Bearer——此前页面自写 fetch
+// 只带 X-Admin-Token 被 401 拦截, 数据源列表"空且无网络请求"假象)
+export const chatbiApi = axios.create({
+  baseURL: (import.meta.env.BASE_URL || '/') + 'api/packs/chatbi',
+  headers: { 'Content-Type': 'application/json' },
+})
+chatbiApi.interceptors.request.use((config) => {
+  const token = getAdminToken()
+  if (token) config.headers['X-Admin-Token'] = token
+  const authToken = localStorage.getItem('auth_token')
+  if (authToken) config.headers['Authorization'] = `Bearer ${authToken}`
+  return config
+})
+chatbiApi.interceptors.response.use(
+  (resp) => resp,
+  (error) => {
+    if (error?.response?.status === 401) throw new UnauthorizedError('管理口令无效或已过期')
+    throw error
+  },
+)
+
 export async function fetchKgKbs(): Promise<KgKnowledgeBase[]> {
   const { data } = await kgApi.get('/kbs')
   return data.items

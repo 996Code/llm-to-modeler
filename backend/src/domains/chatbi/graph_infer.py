@@ -221,11 +221,14 @@ def _infer_relationships_batch_by_llm(
         try:
             # 不设单批超时 (源注释: asyncio.wait_for 会断开 LLM 连接中断生成,
             # 靠外层 infer_knowledge_graph 整体兜底); 同步调用天然阻塞至返回
-            content = llm.chat(
+            resp = llm.chat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 stage="chatbi.graph.infer_relationships",
             )
+            # 宿主契约 .chat → (content, meta) tuple(此前 tuple 直传
+            # _parse_json_response, .strip() 必炸 → 关系推断永远降级为空)
+            content = resp[0] if isinstance(resp, (tuple, list)) else resp
             raw_list = _parse_json_response(content)
             if raw_list is None or not isinstance(raw_list, list):
                 logger.warning(

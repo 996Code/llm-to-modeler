@@ -131,8 +131,8 @@ import { onMounted, reactive, ref } from 'vue'
 import { AppstoreOutlined, DatabaseOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import M4Page from './m4.vue'
+import { chatbiApi } from '../../api'
 
-const PACK_API = '/ai-modeler/api/packs/chatbi'
 const tab = ref('ds')
 
 const datasources = ref<any[]>([])
@@ -145,75 +145,85 @@ const scanning = ref<Set<string>>(new Set())
 const form = reactive({ name: '', db_type: 'postgresql', host: '', port: 5432,
                         database: '', username: '', password: '' })
 
-function headers(): Record<string, string> {
-  const token = localStorage.getItem('admin_token') || ''
-  return { 'Content-Type': 'application/json', 'X-Admin-Token': token }
-}
-
 async function loadList() {
   loadingDs.value = true
   try {
-    const r = await fetch(`${PACK_API}/datasources`, { headers: headers() })
-    datasources.value = (await r.json()).items || []
+    const { data } = await chatbiApi.get('/datasources')
+    datasources.value = data.items || []
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e.message || '加载失败')
   } finally {
     loadingDs.value = false
   }
 }
 
 async function create() {
-  const r = await fetch(`${PACK_API}/datasources`, {
-    method: 'POST', headers: headers(), body: JSON.stringify(form),
-  })
-  if (!r.ok) { message.error((await r.json()).detail || '创建失败'); return }
-  message.success('已创建')
-  showCreate.value = false
-  await loadList()
+  try {
+    await chatbiApi.post('/datasources', form)
+    message.success('已创建')
+    showCreate.value = false
+    await loadList()
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '创建失败')
+  }
 }
 
 async function health(record: any) {
-  const r = await fetch(`${PACK_API}/datasources/${record.id}/health`,
-                        { method: 'POST', headers: headers() })
-  healthInfo.value = await r.json()
+  try {
+    const { data } = await chatbiApi.post(`/datasources/${record.id}/health`)
+    healthInfo.value = data
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '健康检查失败')
+  }
 }
 
 async function scan(record: any) {
-  const r = await fetch(`${PACK_API}/datasources/${record.id}/scan`,
-                        { method: 'POST', headers: headers() })
-  if (!r.ok) { message.error((await r.json()).detail || '触发失败'); return }
-  message.info('扫描任务已提交')
-  pollScan(record.id)
+  try {
+    await chatbiApi.post(`/datasources/${record.id}/scan`)
+    message.info('扫描任务已提交')
+    pollScan(record.id)
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '触发失败')
+  }
 }
 
 async function pollScan(dsId: string) {
   // 扫描进度轮询(任务在后台跑;数据源行的 scanProgress 实时更新)
   const timer = setInterval(async () => {
-    const r = await fetch(`${PACK_API}/datasources/${dsId}/scan`, { headers: headers() })
-    const st = await r.json()
-    const row = datasources.value.find((d) => d.id === dsId)
-    if (row) { row.scanStatus = st.scanStatus; row.scanProgress = st.scanProgress
-               row.scanStage = st.scanStage }
-    if (st.scanStatus === 'done' || st.scanStatus === 'failed') {
+    try {
+      const { data: st } = await chatbiApi.get(`/datasources/${dsId}/scan`)
+      const row = datasources.value.find((d) => d.id === dsId)
+      if (row) { row.scanStatus = st.scanStatus; row.scanProgress = st.scanProgress
+                 row.scanStage = st.scanStage }
+      if (st.scanStatus === 'done' || st.scanStatus === 'failed') {
+        clearInterval(timer)
+        scanning.value.delete(dsId)
+        if (st.scanStatus === 'done') message.success('扫描完成')
+        else message.error(st.scanError || '扫描失败')
+      }
+    } catch {
       clearInterval(timer)
-      scanning.value.delete(dsId)
-      if (st.scanStatus === 'done') message.success('扫描完成')
-      else message.error(st.scanError || '扫描失败')
     }
   }, 3000)
 }
 
 async function viewSemantic(record: any) {
-  const r = await fetch(`${PACK_API}/datasources/${record.id}/semantic-models`,
-                        { headers: headers() })
-  if (!r.ok) { message.error('语义层未就绪'); return }
-  semantic.value = await r.json()
+  try {
+    const { data } = await chatbiApi.get(`/datasources/${record.id}/semantic-models`)
+    semantic.value = data
+  } catch {
+    message.error('语义层未就绪')
+  }
 }
 
 async function removeDs(record: any) {
-  const r = await fetch(`${PACK_API}/datasources/${record.id}`,
-                        { method: 'DELETE', headers: headers() })
-  if (!r.ok) { message.error((await r.json()).detail || '删除失败'); return }
-  message.success('已删除(含语义层与向量数据)')
-  await loadList()
+  try {
+    await chatbiApi.delete(`/datasources/${record.id}`)
+    message.success('已删除(含语义层与向量数据)')
+    await loadList()
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '删除失败')
+  }
 }
 
 onMounted(loadList)

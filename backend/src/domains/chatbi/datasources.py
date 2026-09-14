@@ -349,8 +349,11 @@ def check_all_health(db, max_failures: int = HEALTH_MAX_FAILURES) -> dict:
     """
     summary = {"checked": 0, "healthy": 0, "unhealthy": 0,
                "recovered": 0, "newly_deactivated": 0, "items": []}
-    for info in list_datasources(db, active_only=False):
+    for row in list_datasources(db, active_only=False):
         summary["checked"] += 1
+        # 解密密码再探测: list_datasources 不带 decrypt, password_plain 为空,
+        # 直接 ping 必失败 → 15 分钟内所有数据源被误停用(真实事故)
+        info = get_datasource(db, row.id, decrypt=True) or row
         result = check_health(info)
         ds_id = info.id
         if result.get("healthy"):

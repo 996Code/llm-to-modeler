@@ -443,9 +443,12 @@ const jsonViewerData = ref<Record<string, any> | null>(null)
 const M4_API = '/ai-modeler/api/packs/chatbi'
 
 function m4Headers(): Record<string, string> {
+  // 双 token 与平台 adminApi 同模式: Bearer 是全局中间件必需
+  // (只带 X-Admin-Token 会被 401 拦截——管理页同根因)
   return {
     'Content-Type': 'application/json',
     'X-Admin-Token': localStorage.getItem('admin_token') || '',
+    'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}`,
     'X-User-Id': localStorage.getItem('chatbi_user_id') || 'admin',
   }
 }
@@ -466,35 +469,45 @@ function exportQueryCsv(fd: any) {
 }
 
 async function addToDashboard(fd: any) {
-  // 拉看板列表供选择(无看板时提示先建)
+  // 拉看板列表;无看板时直接创建默认看板再添加(不把用户踢去管理端)
   let boards: any[] = []
   try {
     const r = await fetch(`${M4_API}/dashboards`, { headers: m4Headers() })
     if (r.ok) boards = (await r.json()).items || []
   } catch { /* 网络错误走下面提示 */ }
-  if (!boards.length) {
-    antdMessage.info('还没有看板——请到管理端 ChatBI 页新建看板后再添加')
-    return
+  let target = boards[0]
+  if (!target) {
+    try {
+      const r = await fetch(`${M4_API}/dashboards`, {
+        method: 'POST', headers: m4Headers(),
+        body: JSON.stringify({ name: '我的看板' }),
+      })
+      if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`)
+      target = await r.json()
+      antdMessage.info('已创建看板「我的看板」')
+    } catch (e: any) {
+      antdMessage.error(`创建看板失败: ${e.message}`)
+      return
+    }
   }
+  const boardName = target.name
   Modal.confirm({
     title: '添加到看板',
-    content: `将当前结果图表加入「${boards[0].name}」?`,
+    content: `将当前结果图表加入「${boardName}」?`,
     okText: '添加',
     cancelText: '取消',
     onOk: async () => {
-      // 默认加入最近更新的看板;多看板管理在管理端 M4 页
-      const target = boards[0]
       const r = await fetch(`${M4_API}/dashboards/${target.id}/widgets`, {
         method: 'POST',
         headers: m4Headers(),
         body: JSON.stringify({
-          question: '对话查询',
+          question: fd.tables?.length ? `查询(${fd.tables.join(', ')})` : '对话查询',
           query_sql: fd.sql || '',
           datasource_id: fd.datasourceId || '',
           chart_type: fd.chartConfig?.chart_type || 'table',
         }),
       })
-      if (r.ok) antdMessage.success(`已加入看板「${target.name}」`)
+      if (r.ok) antdMessage.success(`已加入看板「${boardName}」`)
       else antdMessage.error(`添加失败: ${(await r.json()).detail || r.status}`)
     },
   })

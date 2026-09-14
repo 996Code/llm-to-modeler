@@ -266,12 +266,15 @@ def _llm_refine(
     )
 
     try:
-        content = llm.chat(
+        resp = llm.chat(
             [{"role": "user", "content": prompt}],
             temperature=0.0,
             stage="chatbi.retrieve.refine",
             conv_id=conv_id,
         )
+        # 宿主契约 .chat → (content, meta) tuple;裸 str 客户端也兼容
+        # (此前直接把 tuple 传 parse_json_response, .strip() 必炸 → 精筛永远降级)
+        content = resp[0] if isinstance(resp, (tuple, list)) else resp
         parsed = parse_json_response(content)
         if parsed is None:
             logger.warning("_llm_refine: LLM 未返回有效 JSON, 降级返回原始召回")

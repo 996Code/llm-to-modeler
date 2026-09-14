@@ -731,6 +731,10 @@ class AskDataTool(CompositeTool):
             "seed_tables": state.get("seed_tables") or [],
             "expanded_tables": state.get("expanded_tables") or [],
             "join_path_section": state.get("join_path_section") or "",
+            # 历史恢复兜底: saved_query_id 随制品落库(formatted 不落库),
+            # 刷新页面后"导出 CSV"仍能定位本条记录
+            "saved_query_id": state.get("_saved_query_id"),
+            "current_tables": state.get("current_tables") or [],
         }
 
         # 记忆抽取 (源 chat_stream 在成功查询后调 extract_memory_from_turn
@@ -776,6 +780,10 @@ class AskDataTool(CompositeTool):
                              result_summary={"row_count": result.rowcount})
             # 回传 id: 前端图表卡"加到看板/导出"直接定位本条记录
             state["_saved_query_id"] = _sq.get("id")
+            # artifact 在 save 之前组装, 此处回填(制品随消息落库,
+            # 刷新页面后导出 CSV 仍能定位)
+            if isinstance(artifact, dict) and _sq.get("id"):
+                artifact["saved_query_id"] = _sq["id"]
         except Exception as e:
             logger.warning("查询自动保存失败(不阻塞): %s", e)
 
