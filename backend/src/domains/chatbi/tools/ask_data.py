@@ -665,6 +665,17 @@ class AskDataTool(CompositeTool):
         except Exception as e:
             logger.warning("记忆抽取失败(不阻塞): %s", e)
 
+        # linkage 记忆 (E1 Task 2.1;源 chat_stream 成功查询后调
+        # persist_linkage_memory): 多表 JOIN 查询沉淀表对共现经验,
+        # 是图谱置信度演化(mine_implicit_relationships)的数据源。
+        # state 含 current_tables/join_path_section/question/thinking——
+        # 单表查询内部自跳过;失败 fail-open。
+        try:
+            from domains.chatbi.memory import persist_linkage_memory
+            persist_linkage_memory(self._get_db(), state, conv_id=ctx.conv_id)
+        except Exception as e:
+            logger.warning("linkage 记忆沉淀失败(不阻塞): %s", e)
+
         # few-shot 成功回流 (RAG-004;源 chat_stream.py:917-929):
         # 成功查询的 Question-SQL Pair 入向量库, 后续相似问题召回作参考。
         # 失败降级只记日志(不阻塞结果返回)。
