@@ -128,6 +128,7 @@ def build_graph(
     # add_node(name, fn):fn 签名 (state: GraphState) -> dict,返回增量字段,框架自动 merge。
     # 注意节点是按 name 标识,边的 source/target 也用 name 引用。
     workflow.add_node("classify_intent", nodes.classify_intent_node)
+    workflow.add_node("check_confidence", nodes.check_confidence_node)
     workflow.add_node("execute_tool", nodes.execute_tool_node)
     workflow.add_node("handle_result", nodes.handle_result_node)
 
@@ -142,6 +143,15 @@ def build_graph(
     # route_by_tool:LLM 判到要调工具 → "tool";没合适工具(纯闲聊/打招呼)→ "end"。
     workflow.add_conditional_edges(
         "classify_intent",
+        nodes.route_by_tool,
+        {"tool": "check_confidence", "end": END},
+    )
+
+    # ── 置信度门槛后再次路由 ──
+    # check_confidence 可能清空 tool_name(用户选"换个说法"),需要重新判断:
+    # 有 tool_name → execute_tool;被清空 → END(本轮不执行,用户重述后重来)
+    workflow.add_conditional_edges(
+        "check_confidence",
         nodes.route_by_tool,
         {"tool": "execute_tool", "end": END},
     )

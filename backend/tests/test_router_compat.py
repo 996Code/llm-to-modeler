@@ -42,7 +42,8 @@ def test_real_njmind_router_old_signature_compatible():
     assert nodes._route_accepts_conv_id(router) is False
 
     # 真实规则路由跑创建话术(创建意图 + 无画布),不因 kwargs 抛 TypeError
-    name = router.route("帮我创建一个设备报修表单", None, history="", llm_client=None)
+    result = router.route("帮我创建一个设备报修表单", None, history="", llm_client=None)
+    name = result[0] if isinstance(result, tuple) else result
     assert name == "create_form", f"应路由到 create_form,实际 {name}"
 
 

@@ -117,6 +117,13 @@ _prompt_loader: Any = None
 # 引擎不 import domains——零领域知识铁律，同时避免重复加载 manifest）。
 _pack_configs: dict = {}
 
+# ── 意图置信度阈值 ──
+# pack 路由自评置信度低于此时,引擎追问用户确认(防误路由)。
+# 可通过 pack config 的 domain 声明注入: confidence_threshold_per_pack
+# 需包一层 env 解析(引擎不 import domains),这里只提供全局默认。
+# 设为 None = 关闭全局阈值(各 pack 自行决定是否追问)。
+_CONFIDENCE_THRESHOLD: Optional[float] = 0.6
+
 
 def configure(
     registry: ToolRegistry,
@@ -150,6 +157,7 @@ def classify_intent_node(state: GraphState) -> dict:
     compressed_history = state.get("compressed_history", "")  # 压缩后的历史，省 token
     conversation_id = state.get("conversation_id", "")  # 会话 ID（LLM 调用日志按此关联会话）
     # 是否已有配置：决定可用的工具集（如"修改"类工具需要已有配置）
+    intent_confidence = None  # pack 路由自评确信度;None=未声明(引擎不判定)
 
     # SSE 事件:告知前端正在识别意图
     # 类比 Java：服务端推送状态给前端，让 UI 显示 loading 文案
@@ -177,13 +185,19 @@ def classify_intent_node(state: GraphState) -> dict:
             route_kwargs = {}
             if conversation_id and _route_accepts_conv_id(router):
                 route_kwargs["conv_id"] = conversation_id
-            name = router.route(
+            route_result = router.route(
                 user_input,
                 state.get(CONTEXT_ARTIFACT),  # 画布（含未保存草稿）——pack 判断"修改 vs 创建"的依据
                 history=compressed_history,
                 llm_client=_llm_client,
                 **route_kwargs,
             )
+            # route() 返回 (tool_name, confidence) 元组;兼容旧实现只返回
+            # 字符串(部分 pack 未跟进协议升级,按 confidence=None 处理)
+            if isinstance(route_result, tuple):
+                name, intent_confidence = route_result
+            else:
+                name, intent_confidence = route_result, None
             # 名字校验（LLM 可能编造不存在的工具）；"需要画布但画布空"的
             # 防线在 pack 路由（前置铁律）与工具自身 validate_input，引擎不再重复
             if name and _registry.get(name):
@@ -238,6 +252,7 @@ def classify_intent_node(state: GraphState) -> dict:
     return {
         "tool_name": tool_name,  # 选中的工具名（路由依据）
         "intent_reason": intent_reason,  # 选择理由（日志用）
+        "intent_confidence": intent_confidence,  # 路由自评确信度(0-1/None)
         "conversation_title": conversation_title,  # 首轮标题(随 result 落库)
         # tool_state：透传给工具的内部状态，Graph 不读结构
         # 类比 Java：把 request-scoped 数据放进 ThreadLocal 传给下游 service
@@ -255,6 +270,73 @@ def classify_intent_node(state: GraphState) -> dict:
             # 图片类工具收到"未提供图片"(LangGraph 重构遗留回归)。
             "image_base64": state.get("tool_state", {}).get("image_base64"),
         },
+        "sse_events": sse_events,
+    }
+
+
+def check_confidence_node(state: GraphState) -> dict:
+    """置信度门槛:路由自评低于阈值时挂起追问,让用户确认意图。
+
+    引擎只透传 confidence、只做数值比较,不判断"多低算不确信"——
+    阈值是配置(全局默认 0.6,pack 可经 domain 声明覆盖)。追问走
+    现有 interrupt 机制:挂起 → 前端显示问题 → 用户选择 → resume
+    后按用户决定覆盖 tool_name(或保持原选)。
+
+    设计约束:
+      - confidence=None(旧路由/pack 未声明)→ 直接放行,不引入误判;
+      - fallback 兜底(LLM 失败)→ confidence 通常为 None,同样放行;
+      - 追问只挂起一次:resume 后 state 里已有 confirmed 标记,不再重复。
+    """
+    # 已确认过(恢复路径) → 直接放行
+    if state.get("intent_confirmed"):
+        return {"sse_events": []}
+
+    confidence = state.get("intent_confidence")
+    tool_name = state.get("tool_name", "")
+    # 无置信度(旧路由/兜底)/阈值关闭/无工具名 → 放行
+    if confidence is None or _CONFIDENCE_THRESHOLD is None or not tool_name:
+        return {"sse_events": []}
+    # 达到阈值 → 放行
+    if confidence >= _CONFIDENCE_THRESHOLD:
+        return {"sse_events": []}
+
+    # 低置信度 → 追问确认
+    sse_events = [{
+        "type": "stage",
+        "stage": "check_confidence",
+        "message": f"对您的意图不是很有把握, 请确认...",
+    }]
+    user_input = state.get("user_input", "")
+    interrupt_value = {
+        "questions": [{
+            "question": f"我理解您想「{user_input}」, 但把握不大, 请确认意图方向:",
+            "header": "意图确认",
+            "options": [
+                {"label": f"就按这个意思", "description": f"继续执行 {tool_name}"},
+                {"label": "让我换个说法", "description": "我会重新理解您的需求"},
+            ],
+        }],
+        "summary": f"对意图把握不足, 请确认",
+    }
+    answer = interrupt(interrupt_value)
+    # resume 后:用户选择第一个选项=继续原工具,否则清空 tool_name 走重路由
+    # answer 结构对齐前端 answerClarification: {header: label}
+    choice = ""
+    if isinstance(answer, dict):
+        choice = str(answer.get("意图确认") or answer.get("text") or "")
+    elif isinstance(answer, str):
+        choice = str(answer)
+    if "换个说法" in choice:
+        # 用户要重述:清空 tool_name,让 classify 重新识别(需要 rerun 路由)
+        return {
+            "tool_name": "",
+            "intent_confirmed": True,
+            "intent_confidence": None,
+            "sse_events": sse_events,
+        }
+    # 默认(就按这个意思 / 空 / 未知):保持原工具
+    return {
+        "intent_confirmed": True,
         "sse_events": sse_events,
     }
 

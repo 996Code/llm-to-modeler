@@ -342,6 +342,42 @@ async def admin_call_logs(request: Request):
     )
 
 
+@router.get("/call-stats")
+async def admin_call_stats(request: Request):
+    """调用统计:按环节(stage)聚合 token 用量与调用次数。
+
+    面向"这次 LLM 调用是在做意图路由还是 SQL 生成"的按环节成本透视——
+    只聚合 call_type=llm 且 request_data 带 stage 的记录,其他类型
+    (upstream/graph/vector)无 token 统计意义。
+    """
+    store = request.app.state.conversation_store
+    return store.get_call_stats()
+
+
+@router.get("/audit-logs")
+async def admin_audit_logs(request: Request):
+    """业务审计日志分页查询(谁在什么时候对什么资源做了什么)。
+
+    Query 参数:
+      limit/offset: 分页
+      resourceType: 资源类型(datasource/semantic/dashboard/memory 等)
+      action:       动作(create/update/delete/scan/rollback 等)
+      userId:       操作者
+      packName:     归属插件
+    """
+    store = request.app.state.conversation_store
+    limit = max(1, min(_int_param(request, "limit", 20), 200))
+    offset = max(0, _int_param(request, "offset", 0))
+    resource_type = (request.query_params.get("resourceType") or "").strip() or None
+    action = (request.query_params.get("action") or "").strip() or None
+    user_id = (request.query_params.get("userId") or "").strip() or None
+    pack_name = (request.query_params.get("packName") or "").strip() or None
+    return store.query_audit_logs(
+        resource_type=resource_type, action=action, user_id=user_id,
+        pack_name=pack_name, limit=limit, offset=offset,
+    )
+
+
 # ── 插件(pack)管理 ────────────────────────────────────────────
 
 def _dependency_status_for(request: Request, name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:

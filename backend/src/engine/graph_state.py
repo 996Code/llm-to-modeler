@@ -119,6 +119,11 @@ class GraphState(TypedDict, total=False):
     tool_name: str
     # LLM 给出的判断理由;落日志/审计用,帮助排查“为什么走错工具”
     intent_reason: str
+    # pack 路由自评的确信度(0-1;None=未声明)。引擎只透传不判定,
+    # check_confidence 节点据阈值决定是否追问(阈值全局默认, pack 可配)。
+    intent_confidence: Optional[float]
+    # 置信度追问已确认标记(防 resume 后重复追问)
+    intent_confirmed: bool
     # 会话标题(首轮由意图识别时同一 LLM 轮生成,全局统一——不再依赖
     # 工具 format_result/title_for 兜底或首条消息截断)。非空时 handle_result
     # 会随 result 推给前端并落 session_meta.title。

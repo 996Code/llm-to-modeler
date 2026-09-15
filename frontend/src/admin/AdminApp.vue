@@ -64,7 +64,7 @@ const tab = ref('overview')
 const navItems = computed(() => [
   { key: 'overview', label: '概览', icon: DashboardOutlined },
   { key: 'conversations', label: '会话', icon: MessageOutlined },
-  { key: 'calllogs', label: '调用日志', icon: ApiOutlined },
+  { key: 'calllogs', label: '审计 & 调用', icon: ApiOutlined },
   { key: 'tasks', label: '任务中心', icon: CloudServerOutlined },
   { key: 'packs', label: '插件', icon: AppstoreOutlined },
   ...packPages.value.map((p) => ({

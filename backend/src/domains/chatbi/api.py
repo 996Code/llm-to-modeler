@@ -46,6 +46,32 @@ def _user_id(request: Request) -> str:
     return request.headers.get("X-User-Id", "anonymous")
 
 
+def _audit(request: Request, resource_type: str, action: str,
+           resource_id: str = None, detail: dict = None,
+           status: str = "success", conv_id: str = None,
+           duration_ms: int = None) -> None:
+    """写业务审计事件(平台统一入口;失败只记日志不阻断主流程)。
+
+    pack_name 固定 chatbi(本文件即 chatbi 域 API);store 来自 app.state。
+    """
+    try:
+        store = request.app.state.conversation_store
+        store.write_audit_log(
+            user_id=_user_id(request),
+            resource_type=resource_type,
+            action=action,
+            status=status,
+            resource_id=resource_id,
+            detail=detail,
+            conv_id=conv_id,
+            pack_name="chatbi",
+            ip_address=request.client.host if request.client else None,
+            duration_ms=duration_ms,
+        )
+    except Exception as e:
+        logger.warning("chatbi audit write failed: %s", e)
+
+
 def _info_to_dict(info) -> dict:
     """DataSourceInfo → 前端驼峰 dict(密码字段永不回显)。"""
     return {
@@ -97,13 +123,15 @@ async def list_datasources():
 
 
 @router.post("/datasources", dependencies=[Depends(admin_required)])
-async def create_datasource(body: DatasourceCreate):
+async def create_datasource(body: DatasourceCreate, request: Request):
     try:
         info = datasources.create_datasource(
             _db(), body.name, body.db_type, body.host, body.port,
             body.database, body.username, body.password)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    _audit(request, "datasource", "create", resource_id=info.id,
+           detail={"name": info.name, "db_type": info.db_type})
     return _info_to_dict(info)
 
 
@@ -118,6 +146,7 @@ async def update_datasource(ds_id: str, body: DatasourceUpdate):
 @router.delete("/datasources/{ds_id}", dependencies=[Depends(admin_required)])
 async def delete_datasource(ds_id: str, request: Request):
     db = _db()
+    info = datasources.get_datasource(db, ds_id)
     # 级联清理(超越源——源无删除端点, 停用替代): 语义版本 + 向量 collection
     # + fewshot 行(stores.delete_data_source_storage: drop collection +
     # 删 few-shot + clear scope 登记) + 记忆(按 data_source_id 定向清理,
@@ -138,6 +167,8 @@ async def delete_datasource(ds_id: str, request: Request):
         raise HTTPException(500, f"向量存储清理失败, 已中止删除(避免孤儿): {e}")
     if not datasources.delete_datasource(db, ds_id):
         raise HTTPException(404, "数据源不存在")
+    _audit(request, "datasource", "delete", resource_id=ds_id,
+           detail={"name": info.name if info else ds_id})
     return {"ok": True}
 
 
@@ -174,6 +205,8 @@ async def trigger_scan(ds_id: str, request: Request):
                               dedupe_key=f"chatbi:scan:{ds_id}")
     except DuplicateTaskError:
         raise HTTPException(409, "该数据源已有扫描任务在进行")
+    _audit(request, "datasource", "scan", resource_id=ds_id,
+           detail={"task_id": task["id"]})
     return {"task_id": task["id"]}
 
 
@@ -255,6 +288,8 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
                                db=_db())
     except Exception as e:
         logger.warning("人工校正后索引重建失败(降级): %s", e)
+    _audit(request, "semantic", "update", resource_id=ds_id,
+           detail={"version": ver})
     return {"ok": True, "version": ver}
 
 
@@ -302,6 +337,8 @@ async def semantic_rollback(ds_id: str, version: int, request: Request):
                                db=_db())
     except Exception as e:
         logger.warning("回滚后索引重建失败(降级): %s", e)
+    _audit(request, "semantic", "rollback", resource_id=ds_id,
+           detail={"from_version": version, "new_version": ver})
     return {"ok": True, "version": ver}
 
 
@@ -366,7 +403,7 @@ class MemoryIn(BaseModel):
 
 
 @router.put("/memories", dependencies=[Depends(admin_required)])
-async def save_memory(body: MemoryIn):
+async def save_memory(body: MemoryIn, request: Request):
     """新建/更新记忆(对标源 PUT /memory;业务方自助沉淀业务约定)。"""
     from domains.chatbi import memory
     if not body.name.strip() or not body.content.strip():
@@ -375,14 +412,17 @@ async def save_memory(body: MemoryIn):
         name=body.name.strip(), description=body.description.strip(),
         content=body.content.strip(), memory_type=body.memory_type,
         mem_id=body.mem_id, data_source_id=body.data_source_id)
+    _audit(request, "memory", "update" if body.mem_id else "create",
+           resource_id=mem_id, detail={"name": body.name.strip(), "type": body.memory_type})
     return {"ok": True, "id": mem_id}
 
 
 @router.delete("/memories/{mid}", dependencies=[Depends(admin_required)])
-async def delete_memory(mid: str):
+async def delete_memory(mid: str, request: Request):
     from domains.chatbi import memory
     if not memory.delete_memory(_db(), mid):
         raise HTTPException(404, "记忆不存在")
+    _audit(request, "memory", "delete", resource_id=mid)
     return {"ok": True}
 
 
@@ -400,6 +440,7 @@ async def consolidate_memories_ep(request: Request):
                               dedupe_key="chatbi:memconsolidate")
     except DuplicateTaskError:
         raise HTTPException(409, "已有记忆整理任务在进行")
+    _audit(request, "memory", "consolidate", detail={"task_id": task["id"]})
     return {"task_id": task["id"], "status": "submitted"}
 
 

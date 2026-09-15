@@ -28,10 +28,16 @@ class PackRouter(Protocol):
 
     实现方（pack 自带或 DefaultPackRouter）负责把「用户消息 + 画布状态 +
     对话历史」映射到工具名。返回 None 表示无合适工具（由调用方决定兜底）。
+
+    route() 返回 (tool_name, confidence) 元组:
+      - tool_name: 工具名, None 表示无匹配
+      - confidence: 0.0-1.0 的确信度(None=未声明, 引擎不判定)
+      引擎只透传 confidence, 不做阈值判断——"多低算不确信"是领域语义,
+      由 pack 自己定(阈值可经 pack_configs 注入, 引擎侧有默认兜底)。
     """
 
     def route(self, user_input: str, artifact: Optional[dict],
-              history: str = "", llm_client=None) -> Optional[str]:
+              history: str = "", llm_client=None) -> tuple:
         ...
 
 
@@ -75,22 +81,25 @@ class DefaultPackRouter:
             "2. 只返回 JSON，不要解释。\n\n"
             f"{self.build_tools_section(has_artifact)}\n\n"
             f"当前 has_artifact={str(has_artifact).lower()}\n"
-            '输出格式: {"tool": "tool_name"} （无合适工具则 {"tool": null}）'
+            '输出格式: {"tool": "tool_name", "confidence": 0.0~1.0}'
+            '（无合适工具则 {"tool": null, "confidence": 0.0}）'
         )
 
     def route(self, user_input: str, artifact: Optional[dict],
-              history: str = "", llm_client=None, conv_id: str = None) -> Optional[str]:
+              history: str = "", llm_client=None, conv_id: str = None) -> tuple:
         """LLM 二级路由。无 llm_client 时退化为首个工具（测试/降级场景）。
 
         conv_id 透传给 LLM 调用日志（管理端链路追踪按会话关联）；
         不传时日志无会话归属，功能不受影响（向后兼容）。
 
         Returns:
-            工具名；无合适工具/LLM 失败返回 None（由引擎兜底链接管）。
+            (tool_name, confidence) 元组——tool_name 为 None 表示无匹配;
+            confidence 是 LLM 自评确信度(0-1), 无 llm_client 降级路径给 1.0
+            (确定性选择, 不引入误判追问)。
         """
         if llm_client is None:
             tools = self._registry.all()
-            return tools[0].name if tools else None
+            return (tools[0].name if tools else None, 1.0)
 
         parts = []
         if history:
@@ -109,7 +118,14 @@ class DefaultPackRouter:
         ]
         parsed = llm_client.chat_json(messages, conv_id=conv_id, stage="route_tool")
         name = parsed.get("tool") if isinstance(parsed, dict) else None
+        conf = parsed.get("confidence") if isinstance(parsed, dict) else None
+        # 置信度归一化: 非数字/越界 → None(引擎不判定), 数值钳到 [0,1]
+        try:
+            conf = float(conf)
+            conf = max(0.0, min(1.0, conf))
+        except (TypeError, ValueError):
+            conf = None
         # 校验名字真实存在（LLM 可能编造）——不存在视为无匹配
         if name and any(t.name == name for t in self._registry.all()):
-            return name
-        return None
+            return (name, conf)
+        return (None, conf)

@@ -263,6 +263,45 @@ export async function fetchCallLogs(params: {
   return data
 }
 
+export interface CallStageItem {
+  stage: string
+  callCount: number
+  promptTokens: number
+  completionTokens: number
+}
+
+export async function fetchCallStats(): Promise<{ items: CallStageItem[]; totalTokens: number }> {
+  const { data } = await adminApi.get('/call-stats')
+  return data
+}
+
+export interface AuditEventItem {
+  id: string
+  user_id: string
+  conv_id: string | null
+  pack_name: string | null
+  resource_type: string
+  resource_id: string | null
+  action: string
+  status: string
+  detail: Record<string, unknown> | null
+  ip_address: string | null
+  duration_ms: number | null
+  created_at: string
+}
+
+export async function fetchAuditLogs(params: {
+  limit: number
+  offset: number
+  resourceType?: string
+  action?: string
+  userId?: string
+  packName?: string
+}): Promise<Paged<AuditEventItem>> {
+  const { data } = await adminApi.get('/audit-logs', { params })
+  return data
+}
+
 export async function fetchPacks(): Promise<PacksPayload> {
   const { data } = await adminApi.get('/packs')
   return data

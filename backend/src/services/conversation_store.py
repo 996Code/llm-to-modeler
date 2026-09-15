@@ -170,6 +170,23 @@ class ConversationStore:
             updated_at TEXT NOT NULL,
             PRIMARY KEY (conv_id, scope)
         )""",
+        """CREATE TABLE IF NOT EXISTS audit_events (
+            id TEXT PRIMARY KEY,         -- 审计事件 ID(UUID)
+            user_id TEXT NOT NULL,       -- 操作者身份(网关 X-User-Id,缺省 anonymous)
+            conv_id TEXT,                -- 关联会话(可空:登录/数据源等无会话操作)
+            pack_name TEXT,              -- 归属插件(可空:平台级操作)
+            resource_type TEXT NOT NULL, -- 资源类型(datasource/semantic/dashboard/memory/conversation/skill 等,开放枚举)
+            resource_id TEXT,            -- 资源 ID(可空)
+            action TEXT NOT NULL,        -- 动作(create/update/delete/scan/rollback/consolidate/chat/login 等)
+            status TEXT NOT NULL,        -- success/fail/denied
+            detail TEXT,                 -- 操作关键信息 JSON(资源名/旧值/新值/错误等)
+            ip_address TEXT,             -- 来源 IP(可空)
+            duration_ms INTEGER,         -- 操作耗时(可空)
+            created_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_audit_type ON audit_events(resource_type, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_events(user_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_audit_pack ON audit_events(pack_name, created_at)",
     ]
 
     def _init_db(self):
@@ -943,6 +960,37 @@ class ConversationStore:
             },
         }
 
+    def get_call_stats(self) -> Dict[str, Any]:
+        """按环节(stage)聚合 LLM 调用 token 与次数(管理端成本透视)。
+
+        usage 存在 response_data.usage 里(OpenAI 兼容模型统一透传),
+        但部分网关不回 usage,此时该环节的 token 计为 0、只统计次数。
+        request_data.stage 为空(历史数据/非对话调用)归入 "(未标环节)"。
+        """
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT
+                     COALESCE(NULLIF(request_data::jsonb->>'stage', ''), '(未标环节)') AS stage,
+                     COUNT(*) AS call_count,
+                     COALESCE(SUM((response_data::jsonb->'usage'->>'prompt_tokens')::bigint), 0) AS prompt_tokens,
+                     COALESCE(SUM((response_data::jsonb->'usage'->>'completion_tokens')::bigint), 0) AS completion_tokens
+                   FROM call_logs
+                   WHERE call_type = 'llm'
+                   GROUP BY stage
+                   ORDER BY call_count DESC"""
+            ).fetchall()
+        items = [
+            {
+                "stage": r["stage"],
+                "callCount": int(r["call_count"]),
+                "promptTokens": int(r["prompt_tokens"]),
+                "completionTokens": int(r["completion_tokens"]),
+            }
+            for r in rows
+        ]
+        total_tokens = sum(i["promptTokens"] + i["completionTokens"] for i in items)
+        return {"items": items, "totalTokens": total_tokens}
+
     @staticmethod
     def _call_logs_where(conv_id: Optional[str], call_type: Optional[str]) -> tuple:
         """拼装 call_logs 查询的 WHERE 子句与参数(参数化防注入)。"""
@@ -955,6 +1003,115 @@ class ConversationStore:
             params.append(call_type)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return where, params
+
+    # ── Audit Events(业务审计日志) ─────────────────────────────
+
+    def write_audit_log(
+        self,
+        user_id: str,
+        resource_type: str,
+        action: str,
+        status: str = "success",
+        resource_id: Optional[str] = None,
+        detail: Optional[Dict[str, Any]] = None,
+        conv_id: Optional[str] = None,
+        pack_name: Optional[str] = None,
+        ip_address: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+    ) -> str:
+        """写入一条业务审计事件(独立事务,业务 rollback 不影响审计落库)。
+
+        与 call_logs 的分工:call_logs 记技术调用(request/response/token),
+        本表记业务操作(谁在什么时候对什么资源做了什么、结果如何)。
+
+        Args:
+            user_id:       操作者(网关 X-User-Id,缺省 anonymous)
+            resource_type: 资源类型(开放枚举:datasource/semantic/dashboard/
+                           memory/conversation/skill 等)
+            action:        动作(create/update/delete/scan/rollback/
+                           consolidate/chat/login 等,开放枚举)
+            status:        success / fail / denied
+            resource_id:   资源 ID(可空)
+            detail:        操作关键信息(资源名/旧值/新值/错误等)
+            conv_id:       关联会话(可空)
+            pack_name:     归属插件(可空)
+            ip_address:    来源 IP(可空)
+            duration_ms:   操作耗时(可空)
+
+        Returns:
+            审计事件 ID。
+        """
+        log_id = str(uuid.uuid4())
+        now = _now()
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO audit_events
+                   (id, user_id, conv_id, pack_name, resource_type, resource_id,
+                    action, status, detail, ip_address, duration_ms, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    log_id,
+                    user_id or "anonymous",
+                    conv_id,
+                    pack_name,
+                    resource_type,
+                    resource_id,
+                    action,
+                    status,
+                    json.dumps(detail, ensure_ascii=False) if detail else None,
+                    ip_address,
+                    duration_ms,
+                    now,
+                ),
+            )
+        return log_id
+
+    def query_audit_logs(
+        self,
+        resource_type: Optional[str] = None,
+        action: Optional[str] = None,
+        user_id: Optional[str] = None,
+        pack_name: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """管理端分页查询审计日志(按资源类型/动作/用户/插件过滤)。
+
+        Returns:
+            {"items": [...], "total": 总数}。items 的 detail 已反序列化为 dict。
+        """
+        clauses, params = [], []
+        if resource_type:
+            clauses.append("resource_type = ?")
+            params.append(resource_type)
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if pack_name:
+            clauses.append("pack_name = ?")
+            params.append(pack_name)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._get_conn() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) AS c FROM audit_events {where}", tuple(params)
+            ).fetchone()["c"]
+            rows = conn.execute(
+                f"SELECT * FROM audit_events {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        items = []
+        for r in rows:
+            item = dict(r)
+            if item.get("detail"):
+                try:
+                    item["detail"] = json.loads(item["detail"])
+                except Exception:
+                    pass
+            items.append(item)
+        return {"items": items, "total": int(total)}
 
     # ── Append-only 事件流 API(新) ─────────────────────────────
 
