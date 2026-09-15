@@ -102,6 +102,20 @@ if "test" not in _dbname:
         returncode=4,
     )
 
+# 安全闸 2:测试库不得与运行库同库。每个测试都会 TRUNCATE 全部业务表,
+# 若与运行库(backend/.env 的 DATABASE_URL / 运行中服务)同库,跑一次全量
+# 回归就会清空演示数据源/语义层/看板——已两次事故,此闸杜绝第三次。
+_runtime_db = (_cid(os.getenv("DATABASE_URL", "")).get("dbname") or "").lower()
+if _runtime_db and _runtime_db == _dbname:
+    pytest.exit(
+        f"TEST_DATABASE_URL 与运行库 DATABASE_URL 同库('{_dbname}')——"
+        "测试会 TRUNCATE 运行数据。请为 pytest 建专用库,如:\n"
+        "  docker exec chatbi-postgres psql -U root -d postgres "
+        "-c 'CREATE DATABASE llm_modeler_test_run OWNER root;'\n"
+        "并把 backend/.env 的 TEST_DATABASE_URL 指向它。",
+        returncode=4,
+    )
+
 _ensure_database(TEST_DATABASE_URL)
 # 运行时(Store/graph checkpointer/main lifespan)与测试同库
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL

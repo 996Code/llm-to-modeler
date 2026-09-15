@@ -23,7 +23,10 @@
       <div v-else-if="!graphData || !graphData.nodes.length" class="sgt-center">
         <a-empty description="暂无图谱数据——请先在数据源页完成扫描" />
       </div>
-      <div v-show="!loading && graphData?.nodes.length" ref="box" class="sgt-canvas" />
+      <!-- 渲染期间保持挂载但降透明度, 避免"旧图→白屏→新图"的闪一下;
+           loading 结束后淡入(120ms), 切换数据源的视觉连续性 -->
+      <div v-show="!loading && graphData?.nodes.length" ref="box" class="sgt-canvas"
+           :class="{ 'sgt-fade': !rendered }" />
 
       <!-- 详情面板(节点/边) -->
       <div v-if="selectedNode" class="sgt-panel">
@@ -94,6 +97,8 @@ const selectedEdge = ref<any>(null)
 
 const box = ref<HTMLElement | null>(null)
 let graph: import('@antv/g6').Graph | null = null
+// 渲染完成前画布降透明度(配合 .sgt-fade 淡入), 消除重绘白屏闪烁
+const rendered = ref(false)
 
 const _PALETTE = ['#5B8FF9', '#5AD8A6', '#F6BD16', '#E86452', '#6DC8EC',
                   '#945FB9', '#FF9845', '#1E9493', '#FF99C3', '#269A99']
@@ -123,12 +128,19 @@ async function loadGraph() {
   try {
     const { data } = await chatbiApi.get(`/datasources/${dsId.value}/graph`)
     graphData.value = data
+    // 等容器真正可见(切 Tab 首次挂载时 v-if 已保证, 但 keep 场景/首帧
+    // 布局未稳定时 offsetWidth 可能为 0)——双 rAF 确保布局完成再量尺寸
+    await nextFrame()
     await render()
   } catch (e: any) {
     graphData.value = null
   } finally {
     loading.value = false
   }
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 }
 
 function relSourceLabel(s: string): string {
@@ -142,6 +154,7 @@ function nodeEdges(nodeId: string) {
 
 async function render() {
   destroy()
+  rendered.value = false
   if (!box.value || !graphData.value?.nodes.length) return
   const G6 = await import('@antv/g6')
   if (!box.value || !graphData.value) return  // 卸载竞态
@@ -152,8 +165,15 @@ async function render() {
   // 画布尺寸取外层 wrap(固定视口), 不取 box——G6 渲染后会把 box 自身撑高
   // (121 节点实测 8440px), 二次 render 时 offsetHeight 已被污染
   const wrap = box.value.parentElement
-  const W = (wrap && wrap.offsetWidth) || box.value.offsetWidth || 800
-  const H = (wrap && wrap.offsetHeight) || 520
+  let W = (wrap && wrap.offsetWidth) || box.value.offsetWidth || 800
+  let H = (wrap && wrap.offsetHeight) || 520
+  // 容器尚未布局(Tab 刚激活/父级 display:none 刚解除)时尺寸为 0——
+  // 等一帧再量, 仍为 0 则用缺省值兜底, 绝不创建 0×0 画布(首绘空白的根因)
+  if (!W || !H) {
+    await nextFrame()
+    W = (wrap && wrap.offsetWidth) || 800
+    H = (wrap && wrap.offsetHeight) || 520
+  }
 
   graph = new G6.Graph({
     container: box.value,
@@ -244,16 +264,21 @@ async function render() {
       graph.zoomTo(0.8)
       await graph.fitCenter()
     }
+    rendered.value = true
   } catch { /* 渲染中断(切页) */ }
 
-  // G6 v5 + d3-force: 布局收敛/尺寸稳定后强制重绘一次(容器隐藏时首绘
-  // 可能是空画布)。尺寸仍取外层 wrap, 不取被 G6 撑高的 box。
+  // G6 v5 + d3-force: 布局收敛/尺寸稳定后校准一次画布尺寸(容器隐藏时
+  // 首绘可能是空画布/错位)。仅在尺寸确实变化时 resize, 避免无谓重绘闪烁。
   setTimeout(() => {
     if (!graph || !box.value) return
     try {
       const wrap2 = box.value.parentElement
-      graph.resize((wrap2 && wrap2.offsetWidth) || W, (wrap2 && wrap2.offsetHeight) || H)
-      graph.render()
+      const w2 = (wrap2 && wrap2.offsetWidth) || W
+      const h2 = (wrap2 && wrap2.offsetHeight) || H
+      if (w2 !== W || h2 !== H) {
+        graph.resize(w2, h2)
+        graph.render()
+      }
     } catch { /* 已销毁 */ }
   }, 400)
 }
@@ -299,9 +324,17 @@ onBeforeUnmount(destroy)
   background: #fff; overflow: hidden;
 }
 .sgt-canvas { position: absolute; inset: 0; overflow: hidden; }
-/* G6 v5 把 canvas 直接挂容器下且会按内容撑高(121 节点实测 8440px)——
-   钳制 canvas 高度为容器高, 否则画布视口错位/被裁出可视区 */
-.sgt-canvas canvas { position: absolute !important; top: 0 !important; left: 0 !important; }
+/* 重绘期间降透明度, 渲染完成后淡入——消除切换数据源时"旧图闪没→新图蹦出" */
+.sgt-fade { opacity: 0; transition: opacity 0.12s ease-out; }
+.sgt-canvas:not(.sgt-fade) { opacity: 1; }
+/* G6 v5 渲染时给容器内联 position:relative, 并给每层 canvas 内联
+   grid-area:1/1/2/2(预期父级 display:grid 层叠)。内联样式覆盖了上面的
+   scoped absolute → 容器被内容撑高(实测 1856px), 画了图的那层 canvas
+   被顶出 wrap 可视区——页面看起来"空白"(图谱 tab 空白的真正根因)。
+   !important 压回内联; display:grid 让多层 canvas(背景/主内容/前景)
+   按内联 grid-area 叠在同一格 */
+.sgt-canvas { position: absolute !important; inset: 0 !important; display: grid !important; }
+.sgt-canvas canvas { grid-area: 1 / 1 / 2 / 2; }
 .sgt-center {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
 }

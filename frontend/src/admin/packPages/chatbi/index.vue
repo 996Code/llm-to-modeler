@@ -20,7 +20,7 @@
       </a-tab-pane>
       <a-tab-pane key="graph">
         <template #tab><PartitionOutlined /> 图谱</template>
-        <SchemaGraphTab :ds-id="graphDsId" :datasources="datasourceOptions" />
+        <SchemaGraphTab v-if="tab === 'graph'" :ds-id="graphDsId" :datasources="datasourceOptions" />
       </a-tab-pane>
       <a-tab-pane key="memory">
         <template #tab><BulbOutlined /> 记忆</template>
