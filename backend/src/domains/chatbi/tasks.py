@@ -34,9 +34,13 @@ def register_tasks(manager, app_state=None) -> None:
     def _refresh(handle):
         return _task_refresh_semantics(handle, app_state)
 
+    def _consolidate(handle):
+        return _task_consolidate_memories(handle, app_state)
+
     manager.register("chatbi.scan_datasource", _scan, pack_name=PACK_NAME)
     manager.register("chatbi.refresh_semantics", _refresh, pack_name=PACK_NAME)
-    logger.info("chatbi tasks registered: scan_datasource / refresh_semantics")
+    manager.register("chatbi.memory.consolidate", _consolidate, pack_name=PACK_NAME)
+    logger.info("chatbi tasks registered: scan_datasource / refresh_semantics / memory.consolidate")
     _start_refresh_scheduler(manager, app_state)
 
 
@@ -151,6 +155,28 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         datasources.update_datasource(db, ds_id, scan_status="failed",
                                       scan_error=str(e)[:500])
         raise
+
+
+def _task_consolidate_memories(handle, app_state=None) -> dict:
+    """记忆整理任务入口(对标源 POST /memory/consolidate)。
+
+    LLM 合并去重碎片记忆;原记忆标记 consolidated 隐藏(可追溯),
+    linkage 结构化类型跳过。进度经任务中心 SSE 透出。
+    """
+    from domains.chatbi import memory, runtime
+    llm = runtime.get_llm(app_state) if app_state else None
+    if llm is None:
+        raise ValueError("LLM 客户端不可用——记忆整理需要 LLM(检查插件依赖配置)")
+    db = runtime.get_pack_db()
+
+    def progress(pct: int, stage: str):
+        try:
+            handle.set_progress(pct, stage)
+        except Exception:
+            pass
+
+    result = memory.consolidate_memories(llm, db, on_progress=progress)
+    return result
 
 
 def _task_refresh_semantics(handle, app_state=None) -> dict:

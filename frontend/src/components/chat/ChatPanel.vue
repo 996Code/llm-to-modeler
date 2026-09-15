@@ -226,6 +226,12 @@
                     <DownloadOutlined /> 导出 CSV
                   </a-button>
                 </template>
+                <!-- 本轮链路(通用能力:引擎级打点,任何 pack 的工具轮可看) -->
+                <a-button size="small" type="link"
+                          :disabled="!store.currentConversation?.id"
+                          @click.stop="openTurnTrace(i)">
+                  <NodeIndexOutlined /> 本轮链路
+                </a-button>
                 <a-button size="small" type="link" @click.stop="showJsonViewer(msg.dataResult)">
                   <EyeOutlined /> 查看详情
                 </a-button>
@@ -287,6 +293,12 @@
         <JsonDiffView :oldObj="store.baselineConfig" :newObj="jsonViewerData" />
       </div>
     </Modal>
+
+    <!-- 本轮链路弹窗:阶段时间线 + 耗时 + LLM 次数/token(通用能力) -->
+    <TurnTraceModal v-model="traceVisible"
+                    :conversation-id="traceConvId"
+                    :turn-index="traceTurnIndex"
+                    :title="traceTitle" />
   </div>
 </template>
 
@@ -301,7 +313,7 @@ import {
   CopyOutlined, RollbackOutlined,
   SolutionOutlined, TeamOutlined, ContactsOutlined,
   SearchOutlined, ShareAltOutlined, FileTextOutlined, ApartmentOutlined, RobotOutlined,
-  AppstoreAddOutlined, DownloadOutlined,
+  AppstoreAddOutlined, DownloadOutlined, NodeIndexOutlined,
 } from '@ant-design/icons-vue'
 // Modal：ant-design-vue 的弹窗组件（模板里的 JSON 查看器）
 import { Modal, message as antdMessage } from 'ant-design-vue'
@@ -316,6 +328,7 @@ import KgGraphCard from './KgGraphCard.vue'
 import BiChartCard from './BiChartCard.vue'
 // 子组件：JSON 变更视图（查看弹窗用，红删绿增）
 import JsonDiffView from '../json/JsonDiffView.vue'
+import TurnTraceModal from './TurnTraceModal.vue'
 // HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage
 import { getHostPort } from '../../composables/hostPort'
 // 通用 diff（快照摘要的变更数统计）
@@ -501,10 +514,11 @@ async function addToDashboard(fd: any) {
         method: 'POST',
         headers: m4Headers(),
         body: JSON.stringify({
-          question: fd.tables?.length ? `查询(${fd.tables.join(', ')})` : '对话查询',
+          // 组件标题用用户问题(可读), 而非表清单拼接
+          question: store.messages.filter(m => m.role === 'user').slice(-1)[0]?.content?.slice(0, 60) || '对话查询',
           query_sql: fd.sql || '',
           datasource_id: fd.datasourceId || '',
-          chart_type: fd.chartConfig?.chart_type || 'table',
+          chart_type: fd.chartConfig?.chart_type || 'bar',
         }),
       })
       if (r.ok) antdMessage.success(`已加入看板「${boardName}」`)
@@ -513,8 +527,28 @@ async function addToDashboard(fd: any) {
   })
 }
 
-function showJsonViewer(data: FormConfig | Record<string, any>) {
-  // 存对象：变更视图在 JsonDiffView 内做序列化 + 行级 diff
+// ── 本轮链路弹窗(通用能力) ──
+// 轮次定位:该条消息之前的 user 消息数即轮序(每轮 = user 提问 + assistant 应答;
+// 追问轮的 user 消息是回答文本, 同样计入——与后端 _build_trace 的分轮口径一致)
+const traceVisible = ref(false)
+const traceConvId = ref('')
+const traceTurnIndex = ref(0)
+const traceTitle = ref('')
+
+function openTurnTrace(msgIndex: number) {
+  const convId = store.currentConversation?.id
+  if (!convId) { antdMessage.warning('会话尚未保存, 暂无链路') ; return }
+  let userCount = 0
+  for (let k = 0; k <= msgIndex; k++) {
+    if (store.messages[k]?.role === 'user') userCount++
+  }
+  traceConvId.value = convId
+  traceTurnIndex.value = Math.max(0, userCount - 1)
+  traceTitle.value = (store.messages[msgIndex]?.content || '').slice(0, 24)
+  traceVisible.value = true
+}
+
+function showJsonViewer(data: FormConfig | Record<string, any>) {  // 存对象：变更视图在 JsonDiffView 内做序列化 + 行级 diff
   jsonViewerData.value = data as Record<string, any>
   jsonViewerVisible.value = true
   // 嵌入模式：请求宿主把悬浮窗临时撑大（420px 里看 diff 不可读）。

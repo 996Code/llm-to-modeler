@@ -62,9 +62,9 @@
       <ChatPanel />
     </div>
 
-    <!-- 右侧 JSON 配置区 -->
+    <!-- 右侧结果面板(按制品类型自适应:数据图表/SQL 或 配置 diff) -->
     <div class="json-area">
-      <JsonPanel />
+      <ResultPanel />
     </div>
   </a-layout>
 </template>
@@ -76,7 +76,7 @@ import { PlusOutlined, MessageOutlined, DeleteOutlined, RobotOutlined } from '@a
 import { useConversationStore } from '../stores/conversation'
 // 导入两个子组件（.vue 后缀可省略）
 import ChatPanel from '../components/chat/ChatPanel.vue'
-import JsonPanel from '../components/json/JsonPanel.vue'
+import ResultPanel from '../components/json/ResultPanel.vue'
 
 // 实例化 store，模板里即可通过 store.xxx 访问状态/动作
 const store = useConversationStore()

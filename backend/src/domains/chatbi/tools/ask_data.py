@@ -746,7 +746,7 @@ class AskDataTool(CompositeTool):
         try:
             from domains.chatbi.memory import extract_and_save_memory
             extract_and_save_memory(
-                llm, self._get_db(), state.get("user_input", ""),
+                self._get_llm(ctx), self._get_db(), state.get("user_input", ""),
                 state["sql"], state.get("current_tables") or [],
                 result_summary, conv_id=ctx.conv_id,
                 user_id=ctx.user_id or None,

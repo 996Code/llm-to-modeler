@@ -2,7 +2,7 @@
   <div class="kgc">
     <div class="kgc-head">
       <PartitionOutlined class="kgc-icon" />
-      <span class="kgc-title">知识图谱 · {{ result.kb?.name || '检索结果' }}</span>
+      <span class="kgc-title">知识库 · {{ result.kb?.name || '检索结果' }}</span>
       <a-tag color="processing" class="kgc-tag">{{ nodes.length }} 实体</a-tag>
       <a-tag color="cyan" class="kgc-tag">{{ edges.length }} 关系</a-tag>
       <a-tag v-if="chunkHits" class="kgc-tag">{{ chunkHits }} 片段引用</a-tag>

@@ -10,7 +10,7 @@ domain:
 admin:
   settings: settings.schema.yaml   # 声明式配置页(连接/抽取/检索参数)
   page: knowledge_graph            # 自定义管理页组件 key(前端注册表解析)
-  title: 知识图谱
+  title: 知识库
   # 设置保存后的热生效副作用(平台按声明执行,api 层零 pack 分支):
   # rate_limit = 限速参数保存即重配全局限速器,rpm/tpm 指向设置 key
   settings_side_effects:

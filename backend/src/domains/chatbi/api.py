@@ -10,8 +10,10 @@
           GET  /datasources/{id}/scan
   语义层: GET/PUT /datasources/{id}/semantic-models, GET /semantic-diff,
           POST /semantic-rollback
-  图谱:   GET /datasources/{id}/graph, POST /join-path-preview
-  记忆:   GET /memories, DELETE /memories/{mid}
+  图谱:   GET /datasources/{id}/graph, GET /datasources/{id}/graph/subgraph,
+          POST /join-path-preview
+  记忆:   GET /memories, PUT /memories, DELETE /memories/{mid},
+          POST /memories/consolidate(异步任务, 任务中心轮询进度)
   引导:   GET /sample-questions
 """
 from __future__ import annotations
@@ -316,6 +318,16 @@ async def get_graph(ds_id: str):
     return schema_graph.get_schema_graph(content).to_vis_data()
 
 
+@router.get("/datasources/{ds_id}/graph/subgraph", dependencies=[Depends(admin_required)])
+async def get_graph_subgraph(ds_id: str, center: str, depth: int = 2):
+    """子图数据(聚焦某表及其 depth-hop 邻居;大图浏览时按需下钻)。"""
+    from domains.chatbi import schema_graph, semantic
+    content = semantic.load_current_content(_db(), ds_id)
+    if content is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    return schema_graph.get_schema_graph(content).to_vis_subgraph(center, depth)
+
+
 @router.post("/join-path-preview", dependencies=[Depends(admin_required)])
 async def join_path_preview(ds_id: str, body: JoinPathIn):
     """表集 → JOIN 路径预览(图谱预计算;管理端调试用)。"""
@@ -337,9 +349,33 @@ async def join_path_preview(ds_id: str, body: JoinPathIn):
 # ── 记忆(移植 memory.py 管理端点) ────────────────────────────
 
 @router.get("/memories", dependencies=[Depends(admin_required)])
-async def list_memories(user_id: str | None = None, limit: int = 50):
+async def list_memories(user_id: str | None = None, limit: int = 100,
+                        include_consolidated: bool = True):
     from domains.chatbi import memory
-    return {"items": memory.list_memories(_db(), user_id=user_id, limit=limit)}
+    return {"items": memory.list_memories(_db(), user_id=user_id, limit=limit,
+                                          include_consolidated=include_consolidated)}
+
+
+class MemoryIn(BaseModel):
+    name: str
+    description: str = ""
+    content: str
+    memory_type: str = "project"      # project | preference | business | linkage
+    mem_id: str | None = None         # 有值 = 更新, 无值 = 新建
+    data_source_id: str | None = None
+
+
+@router.put("/memories", dependencies=[Depends(admin_required)])
+async def save_memory(body: MemoryIn):
+    """新建/更新记忆(对标源 PUT /memory;业务方自助沉淀业务约定)。"""
+    from domains.chatbi import memory
+    if not body.name.strip() or not body.content.strip():
+        raise HTTPException(422, "名称与内容不能为空")
+    mem_id = memory.get_memory_store(_db()).save_memory(
+        name=body.name.strip(), description=body.description.strip(),
+        content=body.content.strip(), memory_type=body.memory_type,
+        mem_id=body.mem_id, data_source_id=body.data_source_id)
+    return {"ok": True, "id": mem_id}
 
 
 @router.delete("/memories/{mid}", dependencies=[Depends(admin_required)])
@@ -348,6 +384,23 @@ async def delete_memory(mid: str):
     if not memory.delete_memory(_db(), mid):
         raise HTTPException(404, "记忆不存在")
     return {"ok": True}
+
+
+@router.post("/memories/consolidate", dependencies=[Depends(admin_required)])
+async def consolidate_memories_ep(request: Request):
+    """记忆整理(LLM 合并去重碎片记忆)——异步任务, 进度走任务中心 SSE。
+
+    对标源 POST /memory/consolidate 的 202+轮询语义;插件化后复用平台
+    任务中心(任务列表/日志/进度统一观测), 不再自造轮询端点。
+    """
+    from sdk.pack_api import DuplicateTaskError
+    manager = request.app.state.task_manager
+    try:
+        task = manager.submit("chatbi.memory.consolidate", payload={},
+                              dedupe_key="chatbi:memconsolidate")
+    except DuplicateTaskError:
+        raise HTTPException(409, "已有记忆整理任务在进行")
+    return {"task_id": task["id"], "status": "submitted"}
 
 
 # ── 引导(扫描产出的示例问题) ─────────────────────────────────

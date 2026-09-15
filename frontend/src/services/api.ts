@@ -119,6 +119,42 @@ export async function deleteConversation(id: string): Promise<void> {
   await api.delete(`/conversations/${id}`)
 }
 
+// ── 会话链路(通用能力:任何 pack 的工具轮都能看) ────────────────
+
+/** 链路轮次(后端 _build_trace 产出 + 每轮 LLM/token 汇总) */
+export interface TraceTurn {
+  userContent?: string | null
+  startedAt?: string
+  endedAt?: string
+  wallMs?: number
+  llmCallCount?: number
+  promptTokens?: number
+  completionTokens?: number
+  items?: Array<{
+    type: 'event' | 'call'
+    kind?: string
+    callType?: string
+    stage?: string | null
+    durationMs?: number | null
+    statusCode?: number | null
+    errorMessage?: string | null
+    at: string
+    [k: string]: unknown
+  }>
+}
+
+/**
+ * 会话链路(用户侧):分轮时间线 + 每轮 LLM 次数/token。
+ * @param id 会话 ID
+ * @param turn 可选,只取指定轮(0-based)——"查看本轮链路"轻量拉取
+ */
+export async function getConversationTrace(id: string, turn?: number): Promise<{ turns: TraceTurn[] }> {
+  const { data } = await api.get(`/conversations/${id}/trace`, {
+    params: turn !== undefined ? { turn } : undefined,
+  })
+  return data
+}
+
 // ── Pack manifest（通用层消费的声明：diff 身份键 / 展示字段 / 服务依赖）────
 
 /** pack manifest（/api/meta/packs 返回项；字段对前端是不透明声明） */

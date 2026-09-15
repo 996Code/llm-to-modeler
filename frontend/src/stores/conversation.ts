@@ -106,6 +106,15 @@ export const useConversationStore = defineStore('conversation', () => {
     return null
   })
 
+  // 最近一条数据制品消息(右侧面板"数据"视图用:chatbi 图表/SQL/表格等)
+  const latestDataMessage = computed(() => {
+    for (let i = messages.value.length - 1; i >= 0; i--) {
+      const msg = messages.value[i]
+      if (msg.dataResult) return msg
+    }
+    return null
+  })
+
   // 暴露的派生值：字段数、表单名（供 JSON 面板等展示）
   const currentConfigFieldCount = computed(() => _latestFormattedData.value?.fieldCount)
   const currentConfigName = computed(() => _latestFormattedData.value?.formName || _latestFormattedData.value?.title)
@@ -423,6 +432,7 @@ export const useConversationStore = defineStore('conversation', () => {
     isEmbedded,
     currentConfigFieldCount,
     currentConfigName,
+    latestDataMessage,
     loadConversations,
     selectConversation,
     startNewConversation,

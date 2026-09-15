@@ -168,3 +168,50 @@ async def delete_conversation(
     if not store.delete_conversation(conv_id, user_id):
         raise HTTPException(404, "Conversation not found")
     return {"success": True}
+
+
+@router.get("/{conv_id}/trace")
+async def get_conversation_trace(
+    conv_id: str,
+    request: Request,
+    x_user_id: Optional[str] = Header(None),
+    turn: Optional[int] = None,
+):
+    """会话链路(用户侧):分轮时间线 + 每轮 LLM 次数/token 汇总。
+
+    与管理端 /api/admin/conversations/{id}/trace 同源(复用 _build_trace),
+    差异:按用户隔离(admin + 管理口令可越权), 且默认可只取指定轮
+    (turn 参数, 0-based)——对话页"查看本轮链路"只拉一轮, 不搬全量。
+
+    通用能力:任何 pack 的工具轮都能看(链路打点 + call_logs 是引擎级),
+    不止 chatbi。
+    """
+    from api.admin import _build_trace
+    store = request.app.state.conversation_store
+    user_id = _get_user_id(request, x_user_id)
+    if user_id == "admin" and is_admin_authorized(request):
+        conv = store.get_conversation_any_user(conv_id)
+    else:
+        conv = store.get_conversation(conv_id, user_id)
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+
+    events = store.load_events(conv_id)
+    calls = store.get_call_logs(conv_id=conv_id, limit=500)
+    trace = _build_trace(conv, events, calls)
+    turns = trace.get("turns") or []
+    if turn is not None and 0 <= turn < len(turns):
+        turns = [turns[turn]]
+    # 每轮汇总: LLM 调用次数 + token 用量(responseData.usage 落库于 call_logs)
+    for t in turns:
+        llm_calls = [i for i in t.get("items", [])
+                     if i.get("type") == "call" and i.get("callType") == "llm"]
+        prompt_tokens = completion_tokens = 0
+        for c in llm_calls:
+            usage = (c.get("responseData") or {}).get("usage") or {}
+            prompt_tokens += int(usage.get("prompt_tokens") or 0)
+            completion_tokens += int(usage.get("completion_tokens") or 0)
+        t["llmCallCount"] = len(llm_calls)
+        t["promptTokens"] = prompt_tokens
+        t["completionTokens"] = completion_tokens
+    return {"conversationId": conv_id, "turns": turns}
