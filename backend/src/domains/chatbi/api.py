@@ -232,7 +232,7 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
     except Exception as e:
         raise HTTPException(400, f"语义层结构校验失败: {e}")
     # 人工修改打标: 与当前版本对比, 变化的表/列 → manual/1.0
-    current, _ = semantic.load_current_content(_db(), ds_id)
+    current = semantic.load_current_content(_db(), ds_id)
     marked = semantic.mark_manual_edits(current, content)
     if marked:
         logger.info("人工校正打标: %d 处表/列标注 → manual/1.0", marked)

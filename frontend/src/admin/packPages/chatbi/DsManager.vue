@@ -49,8 +49,7 @@
             <a-button size="small" type="link" @click="viewSemantic(record)"
                       :disabled="record.scanStatus !== 'done'">语义层</a-button>
             <a-button size="small" type="link" @click="emit('open-graph', record.id)"
-                      :disabled="record.scanStatus !== 'done'">图谱</a-button>
-            <a-popconfirm title="删除数据源及其语义层/向量数据?" ok-text="删除" ok-type="danger"
+                      :disabled="record.scanStatus !== 'done'">图谱</a-button>            <a-popconfirm title="删除数据源及其语义层/向量数据?" ok-text="删除" ok-type="danger"
                           @confirm="removeDs(record)">
               <a-button size="small" type="link" danger>删除</a-button>
             </a-popconfirm>
@@ -64,46 +63,6 @@
         <span class="muted">{{ healthInfo.server_version || healthInfo.error }}</span>
       </div>
     </a-card>
-
-    <!-- ══ 语义层查看(抽屉,不再占页面高度) ══ -->
-    <a-drawer v-model:open="semanticOpen" width="720" destroy-on-close
-              :title="semantic ? `语义层 · ${semanticDsName} v${semantic.version}` : '语义层'">
-      <template v-if="semantic">
-        <a-collapse>
-          <a-collapse-panel v-for="m in semantic.content.models" :key="m.name"
-                            :header="`${m.display_name}（${m.name}）— 列 ${m.columns.length} · 关系 ${m.relationships.length} · 指标 ${m.metrics.length}`">
-            <div class="model-detail">
-              <div class="detail-block">
-                <div class="block-title">列</div>
-                <a-tag v-for="c in m.columns" :key="c.name"
-                       :color="c.semantic_type === 'measure' ? 'blue' : c.semantic_type === 'key' ? 'purple' : 'default'">
-                  {{ c.name }} · {{ c.display_name }} · {{ c.data_type }}
-                </a-tag>
-              </div>
-              <div v-if="m.metrics.length" class="detail-block">
-                <div class="block-title">指标</div>
-                <div v-for="metric in m.metrics" :key="metric.name" class="metric-line">
-                  <b>{{ metric.display_name }}</b>
-                  <code>{{ metric.formula }}</code>
-                  <span v-if="metric.condition" class="muted">WHERE {{ metric.condition }}</span>
-                </div>
-              </div>
-              <div v-if="m.relationships.length" class="detail-block">
-                <div class="block-title">关系</div>
-                <div v-for="rel in m.relationships" :key="rel.name" class="metric-line">
-                  <code>{{ rel.join_type }} JOIN {{ rel.target_model }} ON {{ rel.on }}</code>
-                  <span class="muted">({{ rel.type }} · 置信度 {{ rel.confidence }})</span>
-                </div>
-              </div>
-            </div>
-          </a-collapse-panel>
-        </a-collapse>
-        <div v-if="semantic.content.sample_questions?.length" class="detail-block">
-          <div class="block-title">示例问题</div>
-          <a-tag v-for="q in semantic.content.sample_questions" :key="q" color="cyan">{{ q }}</a-tag>
-        </div>
-      </template>
-    </a-drawer>
 
     <!-- ══ 新建数据源(双栏排版,不再拉长) ══ -->
     <a-modal v-model:open="showCreate" title="添加数据源" ok-text="创建" cancel-text="取消"
@@ -156,6 +115,7 @@ import { chatbiApi } from '../../api'
 
 const emit = defineEmits<{
   (e: 'open-graph', dsId: string): void
+  (e: 'open-semantic', dsId: string): void
   (e: 'loaded', options: { id: string; name: string }[]): void
 }>()
 
@@ -166,9 +126,6 @@ const creating = ref(false)
 const healthInfo = ref<any>(null)
 const healthCheckingId = ref('')
 const bulkHealth = ref(false)
-const semantic = ref<any>(null)
-const semanticOpen = ref(false)
-const semanticDsName = ref('')
 
 const form = reactive({ name: '', db_type: 'postgresql', host: '', port: 5432,
                         database: '', username: '', password: '' })
@@ -278,15 +235,9 @@ async function pollScan(dsId: string) {
   }, 3000)
 }
 
-async function viewSemantic(record: any) {
-  try {
-    const { data } = await chatbiApi.get(`/datasources/${record.id}/semantic-models`)
-    semantic.value = data
-    semanticDsName.value = record.name
-    semanticOpen.value = true
-  } catch (e: any) {
-    message.error(errText(e, '语义层未就绪'))
-  }
+function viewSemantic(record: any) {
+  // 语义层已是独立平级 Tab(双栏编辑视图), 这里只做跨 Tab 联动
+  emit('open-semantic', record.id)
 }
 
 async function removeDs(record: any) {
@@ -308,10 +259,6 @@ onMounted(loadList)
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .health-line { margin-top: 8px; }
 .scan-stage { color: #999; font-size: 12px; }
-.model-detail { display: flex; flex-direction: column; gap: 10px; }
-.detail-block .block-title { font-weight: 600; margin-bottom: 4px; }
-.metric-line { margin-bottom: 4px; }
-.metric-line code { margin: 0 8px; background: #f5f5f5; padding: 1px 6px; border-radius: 3px; }
 /* 新建弹窗双栏:两个字段一行,压缩纵向长度 */
 .ds-form .form-row { display: flex; gap: 12px; }
 .ds-form .half { flex: 1; }

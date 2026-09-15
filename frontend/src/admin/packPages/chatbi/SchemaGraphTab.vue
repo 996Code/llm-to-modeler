@@ -149,10 +149,16 @@ async function render() {
   const nodes = graphData.value.nodes
   const edges = graphData.value.edges
 
+  // 画布尺寸取外层 wrap(固定视口), 不取 box——G6 渲染后会把 box 自身撑高
+  // (121 节点实测 8440px), 二次 render 时 offsetHeight 已被污染
+  const wrap = box.value.parentElement
+  const W = (wrap && wrap.offsetWidth) || box.value.offsetWidth || 800
+  const H = (wrap && wrap.offsetHeight) || 520
+
   graph = new G6.Graph({
     container: box.value,
-    width: box.value.offsetWidth || 800,
-    height: box.value.offsetHeight || 520,
+    width: W,
+    height: H,
     animation: false,
     data: {
       nodes: nodes.map((n) => ({
@@ -195,8 +201,10 @@ async function render() {
       },
     },
     layout: {
+      // 原版 g6-config.ts D3_FORCE_LAYOUT 同款参数(121 表大图验证过的配置)
       type: 'd3-force', preLayout: true, preventOverlap: true,
-      linkDistance: 110, nodeStrength: -300, collideStrength: 0.8, alphaDecay: 0.05,
+      linkDistance: 200, nodeStrength: -400, edgeStrength: 0.1,
+      collideStrength: 0.8, alphaDecay: 0.05, alphaMin: 0.001,
     },
     plugins: [{
       type: 'tooltip',
@@ -237,6 +245,17 @@ async function render() {
       await graph.fitCenter()
     }
   } catch { /* 渲染中断(切页) */ }
+
+  // G6 v5 + d3-force: 布局收敛/尺寸稳定后强制重绘一次(容器隐藏时首绘
+  // 可能是空画布)。尺寸仍取外层 wrap, 不取被 G6 撑高的 box。
+  setTimeout(() => {
+    if (!graph || !box.value) return
+    try {
+      const wrap2 = box.value.parentElement
+      graph.resize((wrap2 && wrap2.offsetWidth) || W, (wrap2 && wrap2.offsetHeight) || H)
+      graph.render()
+    } catch { /* 已销毁 */ }
+  }, 400)
 }
 
 function _esc(s: unknown): string {
@@ -279,7 +298,10 @@ onBeforeUnmount(destroy)
   position: relative; flex: 1; border: 1px solid #eef1f7; border-radius: 10px;
   background: #fff; overflow: hidden;
 }
-.sgt-canvas { position: absolute; inset: 0; }
+.sgt-canvas { position: absolute; inset: 0; overflow: hidden; }
+/* G6 v5 把 canvas 直接挂容器下且会按内容撑高(121 节点实测 8440px)——
+   钳制 canvas 高度为容器高, 否则画布视口错位/被裁出可视区 */
+.sgt-canvas canvas { position: absolute !important; top: 0 !important; left: 0 !important; }
 .sgt-center {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
 }

@@ -1197,7 +1197,10 @@ def delete_by_datasource(db, datasource_id: str) -> int:
 # 对比的列属性: 只关注语义相关的属性变化
 # data_type: 数据库类型变化 (如 VARCHAR→TEXT) 影响 SQL 生成
 # semantic_type: 语义类型变化 (如 普通列→度量) 影响 BI 分析
-_COL_DIFF_ATTRS = ("data_type", "semantic_type")
+# 列级 diff 参与属性: 结构(data_type) + 语义(semantic_type) + 人工标注
+# (display_name)。display_name 原版不参与——但版本对比 UI 需要展示
+# "中文名被改过"的表(否则人工校正后 diff 显示无差异, 用户困惑)。
+_COL_DIFF_ATTRS = ("data_type", "semantic_type", "display_name")
 
 
 def diff_semantic_contents(old: dict | None, new: dict | None) -> dict:
