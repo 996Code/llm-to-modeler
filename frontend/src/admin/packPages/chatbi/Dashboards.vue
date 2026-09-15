@@ -148,21 +148,32 @@ async function initGrid() {
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
   for (const w of widgets.value) renderWidgetContent(w)
 
-  // 拖拽/缩放结束 → 增量保存受影响项(原版同款: change 事件带 changedItems)
+  // 拖拽/缩放结束 → 即时保存(不等退出编辑)。
+  // gridstack 13 的事件参数:(event, nodes)——nodes 是受影响的 node 数组,
+  // 每个 node 自带 x/y/w/h/el(不需要再回 engine 查, 引擎值在事件后
+  // 才写回, 回查会拿到旧值——"拖完保存还原"的第二个根因)
   g.on('change', ((_event: unknown, ...args: unknown[]) => {
     if (!editMode.value) return
-    const changed = (Array.isArray(args[0]) ? args[0] : []) as Array<{ el?: HTMLElement }>
-    const layout = changed.map((it) => {
-      const el = it.el
+    const changed = (Array.isArray(args[0]) ? args[0] : [args[0]])
+      .filter(Boolean) as Array<{ el?: HTMLElement; x?: number; y?: number; w?: number; h?: number }>
+    const layout = changed.map((node) => {
+      const el = node.el
       if (!el) return null
-      const node = g.engine.nodes.find((n) => n.el === el)
       return {
         id: el.dataset.wid || '',
-        position_x: node?.x ?? 0, position_y: node?.y ?? 0,
-        width: node?.w ?? 6, height: node?.h ?? 4,
+        position_x: node.x ?? 0, position_y: node.y ?? 0,
+        width: node.w ?? 6, height: node.h ?? 4,
       }
     }).filter((i): i is { id: string; position_x: number; position_y: number; width: number; height: number } => !!i?.id)
     if (layout.length) saveLayout(layout)
+    // 同步本地 widgets(退出编辑重建时不再用旧位置)
+    for (const it of layout) {
+      const w = widgets.value.find((x) => x.id === it.id)
+      if (w) {
+        w.positionX = it.position_x; w.positionY = it.position_y
+        w.width = it.width; w.height = it.height
+      }
+    }
   }) as any)
 }
 
@@ -349,18 +360,37 @@ async function removeWidget(wid: string) {
 }
 
 async function toggleEditMode() {
-  editMode.value = !editMode.value
+  // 退出编辑:必须先保存再重建——重建会用 widgets.value(后端旧数据)重摆,
+  // 若先重建再保存, readLayout 读到的就是旧位置, 用户拖的新位置被覆盖
+  // ("拖完保存就还原"的根因)
+  if (editMode.value) {
+    const layout = readLayout()
+    editMode.value = false
+    if (grid) {
+      await nextTick()
+      initGrid()
+      await refreshAll(true)
+    }
+    message.info('已退出编辑模式')
+    if (layout.length) await saveLayout(layout)
+    // 保存成功后同步本地 widgets(下次重建不再用旧位置)
+    for (const it of layout) {
+      const w = widgets.value.find((x) => x.id === it.id)
+      if (w) {
+        w.positionX = it.position_x; w.positionY = it.position_y
+        w.width = it.width; w.height = it.height
+      }
+    }
+    return
+  }
+  // 进入编辑
+  editMode.value = true
   if (grid) {
-    // 原版同款: 重建 grid 让 disableDrag/disableResize 配置生效
-    // (setStatic 只冻结交互, 重建才能让拖拽/缩放手柄正确挂载)
     await nextTick()
     initGrid()
-    // 编辑模式切换会重建 DOM(图表实例被销毁)——立即恢复各 widget 内容,
-    // 编辑时看到的是真实图表而非"暂无数据"占位
     await refreshAll(true)
   }
-  message.info(editMode.value ? '已进入编辑模式, 可拖拽/缩放组件' : '已退出编辑模式')
-  if (!editMode.value) saveLayout(readLayout())
+  message.info('已进入编辑模式, 可拖拽/缩放组件')
 }
 
 async function saveLayout(layout: Array<{ id: string; position_x: number; position_y: number; width: number; height: number }>) {
@@ -472,13 +502,14 @@ onBeforeUnmount(() => {
 .dash-toolbar { display: flex; align-items: center; gap: 8px; }
 .grid-container { border-radius: 10px; }
 
-/* 工具条图标按钮:与 widget 内 .w-btn 同款规格(22px/透明底/hover 浅灰)——
-   总刷新与单图表刷新视觉统一 */
+/* 工具条图标按钮:与 widget 内 .w-btn 完全同规格(22px/同色/同圆角/hover
+   同浅灰)——总刷新与单图表刷新视觉完全统一 */
 .tb-icon-btn {
-  width: 24px; height: 24px; margin-left: 4px;
+  width: 22px; height: 22px; margin-left: 4px;
   border: none; background: transparent; border-radius: 4px;
   cursor: pointer; color: #86909c; font-size: 13px;
   display: inline-flex; align-items: center; justify-content: center;
+  padding: 0;
 }
 .tb-icon-btn:hover:not(:disabled) { background: #f2f3f5; color: #3370ff; }
 .tb-icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
