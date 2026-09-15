@@ -1,15 +1,11 @@
 <template>
   <div class="sq-page">
-    <a-card class="section-card">
-      <template #title>
-        <!-- Tab 已标明"保存查询", 此处只留计数, 不再重复页名 -->
-        <span class="muted">{{ queries.length }} 条</span>
-      </template>
-      <template #extra>
-        <a-button size="small" @click="loadQueries"><ReloadOutlined /> 刷新</a-button>
-      </template>
-      <a-table :data-source="queries" :loading="loadingQ" row-key="id" size="small"
-               :pagination="queries.length > 20 ? { pageSize: 20 } : false">
+    <div class="tab-toolbar">
+      <span>共 <b>{{ queries.length }}</b> 条</span>
+      <a-button size="small" @click="loadQueries"><ReloadOutlined /> 刷新</a-button>
+    </div>
+    <a-table :data-source="queries" :loading="loadingQ" row-key="id" size="small"
+             :pagination="queries.length > 20 ? { pageSize: 20 } : false">
         <a-table-column title="问题" data-index="question" :ellipsis="true" />
         <a-table-column title="SQL" width="320">
           <template #default="{ record }">
@@ -36,7 +32,6 @@
         </a-table-column>
       </a-table>
       <a-empty v-if="!loadingQ && !queries.length" description="暂无保存查询——在对话中完成一次查询即自动保存" />
-    </a-card>
 
     <!-- 加到看板(双栏) -->
     <a-modal v-model:open="showAddWidget" title="添加到看板" ok-text="添加" cancel-text="取消"
@@ -167,6 +162,12 @@ onMounted(() => { loadQueries(); loadDashboards() })
 
 <style scoped>
 .sq-page { display: flex; flex-direction: column; }
+.tab-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 12px; font-size: 13px; color: #86909c;
+}
+.tab-toolbar b { color: #1d2129; }
+.muted { color: #999; font-size: 12px; margin-left: 6px; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .sql-cell {
   display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis;

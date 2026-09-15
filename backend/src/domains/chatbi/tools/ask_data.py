@@ -503,6 +503,13 @@ class AskDataTool(CompositeTool):
         validation = validate_sql(sql, allowed)
         # 校验失败不在此终止: 与执行失败同入自愈循环(agent.py 统一 while-true)
         state["validation"] = validation
+        # 链路打点:SQL 全文入链(管理端"本轮链路"可见完整 SQL)
+        ctx.trace("chatbi.generate_sql",
+                  title="SQL 生成",
+                  status="ok" if (validation is not None and validation.ok) else "warn",
+                  detail={"sql": sql,
+                          "validation_ok": validation.ok if validation else None,
+                          "fewshot_count": state.get("fewshot_count", 0)})
 
     # ── Step 5: 执行 + 自愈回环(EXECUTE_SQL + SELF_HEAL, ≤max_rounds) ──
     def _step_execute_sql(self, state, ctx):
@@ -559,13 +566,24 @@ class AskDataTool(CompositeTool):
         duration = int((time.monotonic() - started) * 1000)
         state["_execute_duration_ms"] = duration
         # 链路打点(引擎时间线;SQL 全文随 checkpoint 落制品)
+        # 明细补充:SQL 全文 + 返回行数 + 列名 + 结果样例(前 3 行)——"本轮链路"
+        # 展开即可看到完整 SQL 与执行结果, 不再只是行数统计。
+        result_detail = {
+            "sql": sql,
+            "rows": (result.rowcount if result else 0),
+            "truncated": bool(result and result.truncated),
+        }
+        if result and result.ok:
+            try:
+                result_detail["columns"] = list(result.columns)[:30]
+                result_detail["sample_rows"] = [list(r) for r in result.rows[:3]]
+            except Exception:
+                pass
         ctx.trace("chatbi.execute",
                   title=f"执行查询({ds.name})",
                   status="ok" if last_error is None else "error",
                   duration_ms=duration,
-                  detail={"heal_rounds": heal_rounds,
-                          "rows": (result.rowcount if result else 0),
-                          "truncated": bool(result and result.truncated)})
+                  detail={"heal_rounds": heal_rounds, **result_detail})
         if last_error is not None:
             state["_error"] = f"SQL 失败 (自愈 {heal_rounds} 轮未解决): {last_error}"
             state["sql"] = sql

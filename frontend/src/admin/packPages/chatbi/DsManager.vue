@@ -1,19 +1,15 @@
 <template>
   <div class="ds-manager">
-    <a-card class="section-card">
-      <template #title>
-        <!-- Tab 已标明"数据源", 此处只留计数, 不再重复页名 -->
-        <span class="muted">{{ datasources.length }} 个</span>
-      </template>
-      <template #extra>
-        <a-button size="small" @click="checkAllHealth" :loading="bulkHealth">
-          <HeartOutlined /> 全量健康检查
-        </a-button>
-        <a-button type="primary" size="small" @click="showCreate = true">
-          <PlusOutlined /> 添加数据源
-        </a-button>
-      </template>
-      <a-table :data-source="datasources" :loading="loadingDs" row-key="id" size="small"
+    <div class="tab-toolbar">
+      <span>共 <b>{{ datasources.length }}</b> 个数据源</span>
+      <a-button size="small" @click="checkAllHealth" :loading="bulkHealth">
+        <HeartOutlined /> 全量健康检查
+      </a-button>
+      <a-button type="primary" size="small" @click="showCreate = true">
+        <PlusOutlined /> 添加数据源
+      </a-button>
+    </div>
+    <a-table :data-source="datasources" :loading="loadingDs" row-key="id" size="small"
                :pagination="false">
         <a-table-column title="名称" data-index="name" />
         <a-table-column title="类型" data-index="dbType" width="90" />
@@ -62,7 +58,6 @@
         </a-tag>
         <span class="muted">{{ healthInfo.server_version || healthInfo.error }}</span>
       </div>
-    </a-card>
 
     <!-- ══ 新建数据源(双栏排版,不再拉长) ══ -->
     <a-modal v-model:open="showCreate" title="添加数据源" ok-text="创建" cancel-text="取消"
@@ -255,7 +250,12 @@ onMounted(loadList)
 
 <style scoped>
 .ds-manager { display: flex; flex-direction: column; }
-.section-card { width: 100%; }
+.tab-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 12px; font-size: 13px; color: #86909c;
+}
+.tab-toolbar b { color: #1d2129; }
+.tab-toolbar .muted { margin-left: 0; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .health-line { margin-top: 8px; }
 .scan-stage { color: #999; font-size: 12px; }

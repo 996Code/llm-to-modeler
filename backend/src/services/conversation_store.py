@@ -49,10 +49,22 @@ add_message 等),供 ``api/conversations.py`` 和 ``api/config.py`` 调用,
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from services.db import get_pg_engine
+
+
+def _json_default(o: Any) -> str:
+    """json.dumps 兜底序列化:datetime/date → ISO 字符串,其余 → str。
+
+    事件 payload 里除 Decimal 外还可能混入 datetime(工具制品时间字段),
+    统一在此兜底, _append_event 的 default 链最后落到这里。
+    """
+    if isinstance(o, (datetime, date)):
+        return o.isoformat()
+    return str(o)
 
 # 模块级 logger,等价于 Java 里 LoggerFactory.getLogger(getClass())
 logger = logging.getLogger(__name__)
@@ -642,6 +654,20 @@ class ConversationStore:
                 (now, conv_id),
             )
 
+    def set_title(self, conv_id: str, title: str) -> None:
+        """单独更新会话标题(意图识别轮 LLM 生成后落库)。
+
+        与 update_conversation_config 解耦:数据/闲聊轮没有 config 制品,
+        也要写标题;空标题不覆盖(前端 displayTitle 仍可回退推导)。
+        """
+        if not title:
+            return
+        with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE session_meta SET title = ? WHERE conv_id = ?",
+                (title, conv_id),
+            )
+
     # ── Messages(events 表,append-only) ───────────────────────
 
     def add_message(
@@ -961,7 +987,12 @@ class ConversationStore:
         """
         event_id = event_id or str(uuid.uuid4())
         created_at = created_at or _now()
-        payload_json = json.dumps(payload, ensure_ascii=False)
+        # default=Decimal→str:数据制品里的金额/数值列(psycopg Decimal)
+        # 不处理会抛 "Object of type Decimal is not JSON serializable",
+        # 整条 assistant 消息落库失败——历史对话重开时 LLM 回复消失
+        payload_json = json.dumps(
+            payload, ensure_ascii=False,
+            default=lambda o: str(o) if isinstance(o, Decimal) else _json_default(o))
         conn.execute(
             "INSERT INTO events (id, conv_id, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
             (event_id, conv_id, kind, payload_json, created_at),

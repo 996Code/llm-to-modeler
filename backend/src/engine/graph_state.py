@@ -119,6 +119,10 @@ class GraphState(TypedDict, total=False):
     tool_name: str
     # LLM 给出的判断理由;落日志/审计用,帮助排查“为什么走错工具”
     intent_reason: str
+    # 会话标题(首轮由意图识别时同一 LLM 轮生成,全局统一——不再依赖
+    # 工具 format_result/title_for 兜底或首条消息截断)。非空时 handle_result
+    # 会随 result 推给前端并落 session_meta.title。
+    conversation_title: str
 
     # ── 工具执行(execute_tool 节点写) ──
     # 工具私有 state,Graph 层不解析其内部结构(开闭原则:新工具加字段不动 Graph)

@@ -225,9 +225,20 @@ def classify_intent_node(state: GraphState) -> dict:
         },
     })
 
+    # ── 会话标题生成(意图识别时同一 LLM 轮生成, 全局统一) ──
+    # 需求: 对话列表标题不再依赖"首条消息截断"或工具 title_for 兜底,
+    # 而是在识别意图的当轮顺带让 LLM 取一个简短标题。与路由共用
+    # conversation_id/stage 打点, 链路可追溯; 失败静默降级为空(前端
+    # 仍可回退 displayTitle 推导, 不阻塞主流程)。
+    conversation_title = ""
+    if conversation_id:
+        conversation_title = _generate_conversation_title(
+            user_input, conversation_id=conversation_id)
+
     return {
         "tool_name": tool_name,  # 选中的工具名（路由依据）
         "intent_reason": intent_reason,  # 选择理由（日志用）
+        "conversation_title": conversation_title,  # 首轮标题(随 result 落库)
         # tool_state：透传给工具的内部状态，Graph 不读结构
         # 类比 Java：把 request-scoped 数据放进 ThreadLocal 传给下游 service
         "tool_state": {
@@ -500,9 +511,10 @@ def handle_result_node(state: GraphState) -> dict:
         # (显式 ToolResult 字段,从 extra 魔法键升格——引擎不再伸手进领域扩展区)
         is_valid = (result.valid is not False and
                     not (result.validation_errors or []))
-        # 会话标题:调 Tool.title_for 钩子(引擎不读制品内部结构);
-        # 工具在 formatted 里自带 title 时以工具声明优先
-        title = formatted.get("title") or ""
+        # 会话标题:意图识别轮 LLM 生成优先(全局统一入口),
+        # 其次 formatted.title(工具声明),再次 title_for 钩子
+        intent_title = state.get("conversation_title", "")
+        title = intent_title or formatted.get("title") or ""
         if not title and artifact_type != "data":
             tool = _registry.get(state.get("tool_name", "")) if _registry else None
             title = tool.title_for(config) if tool else ""
@@ -593,6 +605,29 @@ def _append_trace(state: GraphState, payload: Dict[str, Any]) -> None:
         _conversation.append(conv_id, "trace", payload)
     except Exception as e:
         logger.warning(f"trace write failed ({payload.get('stage')}): {e}")
+
+
+def _generate_conversation_title(user_input: str, conversation_id: str) -> str:
+    """为会话取一个简短标题(意图识别当轮顺带调用 LLM)。
+
+    全局统一:标题在"识别意图"这一轮生成(所有调用 LLM 的入口同源),
+    不再依赖工具 title_for 兜底或首条消息截断。失败/空输入降级返回空串,
+    由 displayTitle 推导兜底——标题生成绝不阻塞主流程(Fail-Open)。
+    """
+    if not _llm_client or not user_input.strip():
+        return ""
+    try:
+        parsed = _llm_client.chat_json([
+            {"role": "system", "content":
+                "你是会话标题生成器。把用户消息压缩成一个不超过 16 字的会话标题。"
+                '只输出 JSON: {"title": "标题"}。不要解释。'},
+            {"role": "user", "content": user_input},
+        ], conv_id=conversation_id, stage="conversation_title", temperature=0.0)
+        title = (parsed.get("title") or "").strip() if isinstance(parsed, dict) else ""
+        return title[:40]
+    except Exception as e:
+        logger.warning(f"conversation title generation failed: {e}")
+        return ""
 
 
 def _route_accepts_conv_id(router: Any) -> bool:

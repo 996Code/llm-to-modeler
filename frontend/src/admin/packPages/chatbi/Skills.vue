@@ -1,14 +1,11 @@
 <template>
   <div class="skills-page">
-    <a-card class="section-card">
-      <template #title>
-        <span class="muted">{{ skills.length }} 条</span>
-      </template>
-      <template #extra>
-        <span class="muted">规则文件随插件分发, 每次查询按方言注入 SQL 生成 prompt</span>
-      </template>
+    <div class="tab-toolbar">
+      <span>共 <b>{{ skills.length }}</b> 条</span>
+      <span class="muted">规则文件随插件分发, 每次查询按方言注入 SQL 生成 prompt</span>
+    </div>
 
-      <a-empty v-if="!loading && !skills.length"
+    <a-empty v-if="!loading && !skills.length"
                description="暂无业务规则——规则文件位于插件 skills/ 目录(SKILL.md 格式)" />
 
       <a-collapse v-else v-model:activeKey="openKeys">
@@ -27,7 +24,6 @@
           </a-tabs>
         </a-collapse-panel>
       </a-collapse>
-    </a-card>
   </div>
 </template>
 
@@ -59,6 +55,12 @@ onMounted(loadSkills)
 
 <style scoped>
 .skills-page { display: flex; flex-direction: column; }
+.tab-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 12px; font-size: 13px; color: #86909c;
+}
+.tab-toolbar b { color: #1d2129; }
+.tab-toolbar .muted { margin-left: 0; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .skill-name { font-weight: 600; margin-right: 8px; }
 .skill-ver { font-size: 11px; }

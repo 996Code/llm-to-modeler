@@ -489,5 +489,15 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
                 # (不读领域字段——制品标题之类的键属于 pack,引擎只认钩子产出)
                 title = result_data.get("title", "新对话")
                 store.update_conversation_config(conv_id, config, title=title)
+
+        # 会话标题落库(意图识别轮 LLM 生成, 全局统一入口)。
+        # 覆盖三种结果形态:config / data / 闲聊都可能带 title——
+        # 数据/闲聊轮没有 config 分支, 这里单独写一次;空标题跳过。
+        title = result_data.get("title", "")
+        if title:
+            try:
+                store.set_title(conv_id, title)
+            except Exception as e:
+                logger.warning(f"Failed to set conversation title: {e}")
     except Exception as e:
         logger.warning(f"Failed to save result conversation: {e}")

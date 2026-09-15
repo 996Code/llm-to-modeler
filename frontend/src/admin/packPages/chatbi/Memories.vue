@@ -1,34 +1,28 @@
 <template>
   <div class="mem-page">
-    <a-card class="section-card">
-      <template #title>
-        <!-- Tab 已标明"记忆", 此处只留计数, 不再重复页名 -->
-        <span class="muted">{{ memories.length }} 条</span>
-      </template>
-      <template #extra>
-        <a-button size="small" @click="consolidate" :loading="consolidating">
-          <ForkOutlined /> 整理记忆
-        </a-button>
-        <a-button type="primary" size="small" @click="openCreate">
-          <PlusOutlined /> 新建记忆
-        </a-button>
-      </template>
-
-      <div class="mem-filter">
-        <a-radio-group v-model:value="typeFilter" size="small" @change="loadMemories">
-          <a-radio-button value="">全部</a-radio-button>
-          <a-radio-button value="project">项目</a-radio-button>
-          <a-radio-button value="preference">偏好</a-radio-button>
-          <a-radio-button value="business">业务</a-radio-button>
-          <a-radio-button value="linkage">表关联</a-radio-button>
-        </a-radio-group>
-        <a-checkbox v-model:checked="showConsolidated" @change="loadMemories">
-          显示已整理
-        </a-checkbox>
-        <span class="mem-hint">
-          <InfoCircleOutlined /> 生效中的记忆会在每次查询时按关键词召回并注入 SQL 生成;已整理的原始记忆已并入新记忆, 不再参与召回
-        </span>
-      </div>
+    <!-- 工具栏:按钮 + 分类筛选 + 整理/新建合并到一行 -->
+    <div class="mem-toolbar">
+      <a-button size="small" @click="consolidate" :loading="consolidating">
+        <ForkOutlined /> 整理记忆
+      </a-button>
+      <a-button type="primary" size="small" @click="openCreate">
+        <PlusOutlined /> 新建记忆
+      </a-button>
+      <a-radio-group v-model:value="typeFilter" size="small" @change="loadMemories">
+        <a-radio-button value="">全部</a-radio-button>
+        <a-radio-button value="project">项目</a-radio-button>
+        <a-radio-button value="preference">偏好</a-radio-button>
+        <a-radio-button value="business">业务</a-radio-button>
+        <a-radio-button value="linkage">表关联</a-radio-button>
+      </a-radio-group>
+      <a-checkbox v-model:checked="showConsolidated" @change="loadMemories">
+        显示已整理
+      </a-checkbox>
+      <span class="mem-count">共 <b>{{ memories.length }}</b> 条</span>
+    </div>
+    <div class="mem-hint">
+      <InfoCircleOutlined /> 生效中的记忆会在每次查询时按关键词召回并注入 SQL 生成;已整理的原始记忆已并入新记忆, 不再参与召回
+    </div>
 
       <a-table :data-source="filtered" :loading="loading" row-key="id" size="small"
                :pagination="filtered.length > 20 ? { pageSize: 20 } : false">
@@ -67,7 +61,6 @@
         </a-table-column>
       </a-table>
       <a-empty v-if="!loading && !filtered.length" description="暂无记忆——对话中会自动沉淀,也可手动新建业务约定" />
-    </a-card>
 
     <!-- 新建/编辑记忆(双栏) -->
     <a-modal v-model:open="showForm" :title="form.mem_id ? '编辑记忆' : '新建记忆'"
@@ -226,9 +219,13 @@ onMounted(loadMemories)
 
 <style scoped>
 .mem-page { display: flex; flex-direction: column; }
-.muted { color: #999; font-size: 12px; margin-left: 6px; }
-.mem-filter { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
-.mem-hint { font-size: 12px; color: #999; }
+.mem-toolbar {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+  font-size: 13px; flex-wrap: wrap;
+}
+.mem-count { color: #86909c; margin-left: auto; }
+.mem-count b { color: #1d2129; }
+.mem-hint { font-size: 12px; color: #999; margin-bottom: 12px; }
 .mem-content {
   display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-size: 12px; color: #4e5969; vertical-align: middle;

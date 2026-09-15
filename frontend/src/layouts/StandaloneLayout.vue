@@ -46,7 +46,9 @@
           @click="store.selectConversation(conv.id)"
         >
           <MessageOutlined class="conv-icon" />
-          <span class="conv-title">{{ conv.title }}</span>
+          <!-- displayTitle: 后端推导(真实 title > 首条用户消息截断 > 新对话)——
+               此前读 title(懒创建空串), 列表永远显示"新对话" -->
+          <span class="conv-title">{{ conv.displayTitle || conv.title || '新对话' }}</span>
           <!-- @click.stop 阻止事件冒泡（点击删除时不触发外层会话选中） -->
           <DeleteOutlined class="conv-del" @click.stop="store.removeConversation(conv.id)" />
         </div>
