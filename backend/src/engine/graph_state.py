@@ -35,9 +35,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, TypedDict
 
-# ToolResult:工具执行的标准化返回类型,工具内部产出它,Graph 把它序列化进 tool_result
-from sdk.tool import ToolResult
-
 
 class GraphState(TypedDict, total=False):
     """LangGraph 图状态(整条图的共享数据总线)。

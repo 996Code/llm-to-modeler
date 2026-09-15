@@ -36,7 +36,7 @@ from langgraph.types import interrupt
 
 from engine.graph_state import GraphState
 from engine.state_keys import STATE_CONTEXT_ARTIFACT as CONTEXT_ARTIFACT
-from sdk.tool import Tool, ToolResult, ToolContext, AskSpec, AskQuestion, AskOption, ClarificationRaised
+from sdk.tool import ToolResult, ToolContext, AskSpec, AskQuestion, AskOption, ClarificationRaised
 from sdk.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -304,7 +304,7 @@ def check_confidence_node(state: GraphState) -> dict:
     sse_events = [{
         "type": "stage",
         "stage": "check_confidence",
-        "message": f"对您的意图不是很有把握, 请确认...",
+        "message": "对您的意图不是很有把握, 请确认...",
     }]
     user_input = state.get("user_input", "")
     interrupt_value = {
@@ -312,20 +312,22 @@ def check_confidence_node(state: GraphState) -> dict:
             "question": f"我理解您想「{user_input}」, 但把握不大, 请确认意图方向:",
             "header": "意图确认",
             "options": [
-                {"label": f"就按这个意思", "description": f"继续执行 {tool_name}"},
+                {"label": "就按这个意思", "description": f"继续执行 {tool_name}"},
                 {"label": "让我换个说法", "description": "我会重新理解您的需求"},
             ],
         }],
-        "summary": f"对意图把握不足, 请确认",
+        "summary": "对意图把握不足, 请确认",
     }
     answer = interrupt(interrupt_value)
-    # resume 后:用户选择第一个选项=继续原工具,否则清空 tool_name 走重路由
-    # answer 结构对齐前端 answerClarification: {header: label}
+    # resume 后:前端 answerClarification(q, opt) 回传 {header: label}
+    # (见 ChatPanel.vue:710-711: store.sendMessage(opt.label, undefined, { [q.header]: opt.label }))
+    # 检查答案并判定用户选择
     choice = ""
     if isinstance(answer, dict):
+        # answer 结构: {意图确认: "就按这个意思"} 或 {意图确认: "让我换个说法"}
         choice = str(answer.get("意图确认") or answer.get("text") or "")
     elif isinstance(answer, str):
-        choice = str(answer)
+        choice = answer
     if "换个说法" in choice:
         # 用户要重述:清空 tool_name,让 classify 重新识别(需要 rerun 路由)
         return {

@@ -81,9 +81,27 @@ export interface AdminPack {
   artifactType: string
   services: string[]
   tools: string[]
+  /** 依赖检测结果:ok / missing_dependency / probe_failed */
+  dependency?: DependencyStatus
+  /** 是否声明了 settings.schema.yaml(有"设置"入口) */
+  hasSettings?: boolean
+  /** 自定义管理页组件 key(manifest admin.page;空 = 无自定义页) */
+  adminPage?: string
+  /** 自定义管理页标题(manifest admin.title) */
+  adminTitle?: string
 }
 
-// ── 链路追踪(trace)──────────────────────────────────────
+export interface DependencyStatus {
+  status: 'ok' | 'missing_dependency' | 'probe_failed'
+  missing?: string[]
+  detail?: string
+  dependencies?: Record<string, {
+    status: string
+    missing?: string[]
+    detail?: string
+    optional?: boolean
+  }>
+}
 
 /** 时间线项:事件(user/assistant/trace/checkpoint/...)或调用(llm/upstream) */
 export interface TraceItem {
@@ -310,36 +328,6 @@ export async function fetchPacks(): Promise<PacksPayload> {
 export async function setPackEnabled(name: string, enabled: boolean): Promise<PacksPayload & { loaded?: string[] }> {
   const { data } = await adminApi.post(`/packs/${name}/${enabled ? 'enable' : 'disable'}`)
   return data
-}
-
-export interface AdminPack {
-  name: string
-  enabled: boolean
-  description: string
-  fallback: string
-  artifactType: string
-  services: string[]
-  tools: string[]
-  /** 依赖检测结果:ok / missing_dependency / probe_failed */
-  dependency?: DependencyStatus
-  /** 是否声明了 settings.schema.yaml(有"设置"入口) */
-  hasSettings?: boolean
-  /** 自定义管理页组件 key(manifest admin.page;空 = 无自定义页) */
-  adminPage?: string
-  /** 自定义管理页标题(manifest admin.title) */
-  adminTitle?: string
-}
-
-export interface DependencyStatus {
-  status: 'ok' | 'missing_dependency' | 'probe_failed'
-  missing: string[]
-  detail: string
-  dependencies?: Record<string, {
-    status: string
-    missing?: string[]
-    detail?: string
-    optional?: boolean
-  }>
 }
 
 // ── 插件设置(声明式配置页) ─────────────────────────────────

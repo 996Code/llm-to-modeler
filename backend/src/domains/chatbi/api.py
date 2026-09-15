@@ -368,7 +368,6 @@ async def get_graph_subgraph(ds_id: str, center: str, depth: int = 2):
 @router.post("/join-path-preview", dependencies=[Depends(admin_required)])
 async def join_path_preview(ds_id: str, body: JoinPathIn):
     """表集 → JOIN 路径预览(图谱预计算;管理端调试用)。"""
-    from domains.chatbi import schema_graph
     from domains.chatbi import semantic
     content = semantic.load_current_content(_db(), ds_id)
     if content is None:

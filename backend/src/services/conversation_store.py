@@ -71,9 +71,6 @@ logger = logging.getLogger(__name__)
 
 # 存储后端由 services.db 提供(PG-only,DATABASE_URL 必填)。
 
-# DATABASE_PATH 未配置时的默认库文件路径(相对当前工作目录)。
-# 【单一事实来源】main.py / engine/graph.py 等处的 env 默认值统一引用本常量,
-# 避免 "data/conversations.db" 字面量散落多处——改默认库路径时只动这里。
 def _now() -> str:
     """获取当前 UTC 时间的 ISO 8601 字符串(timezone-aware,带时区)。
 

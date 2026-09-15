@@ -5,7 +5,7 @@
 
 本模块是整个 LLM 编排引擎的“装配车间”:把若干个无状态的节点函数
 (``nodes.classify_intent_node`` 等)按拓扑拼装成一张有向图,编译成可执行的
-``CompiledStateGraph``,供上层 (``engine/api.py`` 或 stream 入口) 调用
+``CompiledStateGraph``,供上层 (``engine/stream.py`` 或 stream 入口) 调用
 ``.stream()`` / ``.invoke()`` 驱动一轮对话。
 
 替代旧 ``engine/dispatcher.py`` 用手写 if/else 调度,改用 LangGraph 的 StateGraph
