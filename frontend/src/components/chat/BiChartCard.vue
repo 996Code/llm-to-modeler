@@ -96,6 +96,9 @@ function render() {
   instance.setOption(props.chart, true)
 }
 
+// 暴露图表实例(导出 Excel 嵌 PNG 用——原版 ChatView chartInstances 同款)
+defineExpose({ getChartInstance: () => instance })
+
 onMounted(render)
 watch(() => props.chart, () => {
   if (isKpi.value || isTable.value) return

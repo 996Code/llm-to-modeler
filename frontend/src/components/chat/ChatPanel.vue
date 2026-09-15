@@ -198,6 +198,7 @@
                 <!-- chatbi 图表卡(ECharts/kpi/table + 命中指标标签) -->
                 <BiChartCard
                   v-if="msg.formattedData?.chart"
+                  :ref="(el: any) => setBiChartRef(i, el)"
                   :chart="msg.formattedData.chart"
                   :metric-hits="msg.formattedData.metricHits"
                   :artifact="msg.dataResult"
@@ -222,8 +223,8 @@
                     <AppstoreAddOutlined /> 加到看板
                   </a-button>
                   <a-button size="small" type="link"
-                            @click.stop="exportQueryCsv(msg.formattedData)">
-                    <DownloadOutlined /> 导出 CSV
+                            @click.stop="exportQueryExcel(msg, i)">
+                    <DownloadOutlined /> 导出 Excel
                   </a-button>
                 </template>
                 <!-- 本轮链路(通用能力:引擎级打点,任何 pack 的工具轮可看) -->
@@ -282,7 +283,7 @@
          视口才有可读性；撑大悬浮窗本体由 RESIZE 协议承担，见 showJsonViewer） -->
     <Modal
       v-model:open="jsonViewerVisible"
-      title="配置 JSON"
+      title="AI 配置 JSON"
       :footer="null"
       width="100%"
       wrapClassName="json-viewer-fullscreen"
@@ -326,6 +327,7 @@ import type { FormConfig, ClarificationQuestion, ClarificationOption } from '../
 import ChatInput from './ChatInput.vue'
 import KgGraphCard from './KgGraphCard.vue'
 import BiChartCard from './BiChartCard.vue'
+import { exportQueryToExcel } from '../../utils/exportExcel'
 // 子组件：JSON 变更视图（查看弹窗用，红删绿增）
 import JsonDiffView from '../json/JsonDiffView.vue'
 import TurnTraceModal from './TurnTraceModal.vue'
@@ -479,6 +481,37 @@ function exportQueryCsv(fd: any) {
       URL.revokeObjectURL(url)
     })
     .catch((e: Error) => antdMessage.error(`导出失败: ${e.message}`))
+}
+
+// 导出 Excel 用:每条消息的 BiChartCard 实例引用(v-for 内 :ref 回调登记)
+const biChartRefs: Record<number, { getChartInstance: () => any } | null> = {}
+function setBiChartRef(index: number, el: any) {
+  if (el) biChartRefs[index] = el
+  else delete biChartRefs[index]
+}
+
+// 导出 Excel(原版 ChatView exportChart 同款: 数据 sheet + 图表 sheet 嵌 PNG)
+// 数据取本条消息的实时制品(列+行), 图表取 BiChartCard 暴露的 ECharts 实例
+async function exportQueryExcel(msg: any, index: number) {
+  const fd = msg.formattedData
+  const artifact = msg.dataResult
+  const columns: string[] = artifact?.columns || fd?.columns || []
+  const rows: any[][] = artifact?.rows_sample || fd?.rows || []
+  if (!columns.length) {
+    antdMessage.warning('当前查询无数据可导出')
+    return
+  }
+  try {
+    const chart = biChartRefs[index]?.getChartInstance?.()
+    await exportQueryToExcel({
+      question: store.messages.filter(m => m.role === 'user').slice(-1)[0]?.content?.slice(0, 60)
+        || fd?.title || '查询结果',
+      columns, rows, chart: chart || undefined,
+    })
+    antdMessage.success('已导出 Excel')
+  } catch (e: any) {
+    antdMessage.error(`导出失败: ${e.message || '未知错误'}`)
+  }
 }
 
 async function addToDashboard(fd: any) {

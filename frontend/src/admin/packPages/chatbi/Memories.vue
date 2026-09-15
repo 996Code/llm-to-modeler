@@ -2,7 +2,7 @@
   <div class="mem-page">
     <a-card class="section-card">
       <template #title>
-        <BulbOutlined /> 记忆
+        <!-- Tab 已标明"记忆", 此处只留计数, 不再重复页名 -->
         <span class="muted">{{ memories.length }} 条</span>
       </template>
       <template #extra>
@@ -25,6 +25,9 @@
         <a-checkbox v-model:checked="showConsolidated" @change="loadMemories">
           显示已整理
         </a-checkbox>
+        <span class="mem-hint">
+          <InfoCircleOutlined /> 生效中的记忆会在每次查询时按关键词召回并注入 SQL 生成;已整理的原始记忆已并入新记忆, 不再参与召回
+        </span>
       </div>
 
       <a-table :data-source="filtered" :loading="loading" row-key="id" size="small"
@@ -100,9 +103,10 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  BulbOutlined, ForkOutlined, PlusOutlined,
+  BulbOutlined, ForkOutlined, InfoCircleOutlined, PlusOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
+import { tasksApi } from '../../api'
 
 const memories = ref<any[]>([])
 const loading = ref(false)
@@ -182,12 +186,39 @@ async function consolidate() {
   consolidating.value = true
   try {
     const { data } = await chatbiApi.post('/memories/consolidate')
-    message.success(`整理任务已提交(任务 ${String(data.task_id).slice(0, 8)}…)——进度可在任务中心查看`)
-    // 轮询任务完成(简化: 30s 后刷新一次;任务中心有完整 SSE)
-    setTimeout(loadMemories, 30000)
+    message.success(`整理任务已提交(任务 ${String(data.task_id).slice(0, 8)}…)——进度与日志可在任务中心查看`)
+    // 轮询任务完成(整理通常 10-30s;完成后刷新列表看到新记忆)
+    pollTaskDone(data.task_id)
   } catch (e: any) {
     message.error(e?.response?.data?.detail || e.message || '提交失败')
   } finally { consolidating.value = false }
+}
+
+// 轮询任务终态:完成/失败后刷新列表并提示整理结果(不再让用户去任务中心找结果)
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+function pollTaskDone(taskId: string, attempt = 0) {
+  if (pollTimer) clearTimeout(pollTimer)
+  if (attempt > 30) return  // 最多 ~90s
+  pollTimer = setTimeout(async () => {
+    try {
+      const { data } = await tasksApi.get(`/${taskId}`)
+      if (data.status === 'succeeded') {
+        await loadMemories()
+        const r = data.result || {}
+        if (r.consolidated) {
+          message.success(`整理完成: 合并为 ${r.consolidated} 条精炼记忆(原 ${r.total} 条已标记隐藏)`)
+        } else {
+          message.info(`整理完成: ${r.detail || '无需整理'}`)
+        }
+        return
+      }
+      if (data.status === 'failed') {
+        message.error(`整理失败: ${data.error || '未知错误'}`)
+        return
+      }
+    } catch { /* 轮询失败继续 */ }
+    pollTaskDone(taskId, attempt + 1)
+  }, 3000)
 }
 
 onMounted(loadMemories)
@@ -196,7 +227,8 @@ onMounted(loadMemories)
 <style scoped>
 .mem-page { display: flex; flex-direction: column; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
-.mem-filter { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+.mem-filter { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
+.mem-hint { font-size: 12px; color: #999; }
 .mem-content {
   display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-size: 12px; color: #4e5969; vertical-align: middle;

@@ -127,6 +127,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             pass
         datasources.update_datasource(db, ds_id, scan_progress=pct, scan_stage=stage)
 
+    handle.log(f"开始扫描数据源: {info.name} ({info.db_type} {info.host}:{info.port}/{info.database})")
     datasources.update_datasource(db, ds_id, scan_status="scanning",
                                   scan_progress=0, scan_stage="开始扫描", scan_error="")
     try:
@@ -149,6 +150,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             db, ds_id, scan_status="done", scan_progress=100,
             scan_stage=f"完成: {len(content.models)} 张表, 索引 {indexed} 条",
             scanned_at=_now_iso())
+        handle.log(f"扫描完成: {len(content.models)} 张表, 向量索引 {indexed} 条")
         return {"models": len(content.models), "indexed": indexed,
                 "datasource_id": ds_id}
     except Exception as e:
@@ -161,7 +163,8 @@ def _task_consolidate_memories(handle, app_state=None) -> dict:
     """记忆整理任务入口(对标源 POST /memory/consolidate)。
 
     LLM 合并去重碎片记忆;原记忆标记 consolidated 隐藏(可追溯),
-    linkage 结构化类型跳过。进度经任务中心 SSE 透出。
+    linkage 结构化类型跳过。进度经任务中心 SSE 透出;关键节点写任务日志
+    (任务中心"日志"页签不再空白)。
     """
     from domains.chatbi import memory, runtime
     llm = runtime.get_llm(app_state) if app_state else None
@@ -175,7 +178,15 @@ def _task_consolidate_memories(handle, app_state=None) -> dict:
         except Exception:
             pass
 
+    handle.log("记忆整理开始: 读取全部记忆, 过滤已整理/结构化(linkage)条目")
     result = memory.consolidate_memories(llm, db, on_progress=progress)
+    # 整理结果写任务日志(用户在任务中心能直接看到"整理了几条/合并成几条")
+    detail = result.get("detail") or ""
+    handle.log(
+        f"整理完成: 合并为 {result.get('consolidated', 0)} 条精炼记忆, "
+        f"参与 {result.get('total', 0)} 条原始记忆。{detail}")
+    if result.get("consolidated"):
+        handle.log("原始记忆已标记为'已整理'(默认隐藏, 记忆页勾选'显示已整理'可查看)")
     return result
 
 

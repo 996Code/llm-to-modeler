@@ -412,3 +412,17 @@ async def sample_questions(ds_id: str):
     if content is None:
         return {"items": []}
     return {"items": content.sample_questions}
+
+
+# ── Skills 业务规则(只读管理端点;文件随 pack 分发, 编辑走部署流程) ──
+
+@router.get("/skills", dependencies=[Depends(admin_required)])
+async def list_skills():
+    """业务规则清单(名称/描述/版本/正文/方言 reference)——管理页展示用。"""
+    from domains.chatbi.skills_loader import SkillsLoader
+    skills = SkillsLoader().load_all()
+    return {"items": [{
+        "name": s.name, "description": s.description, "version": s.version,
+        "content": s.content,
+        "references": {k: v for k, v in s.references.items()},
+    } for s in skills.values()]}

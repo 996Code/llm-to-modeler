@@ -2,7 +2,7 @@
   <div class="sq-page">
     <a-card class="section-card">
       <template #title>
-        <HistoryOutlined /> 保存查询
+        <!-- Tab 已标明"保存查询", 此处只留计数, 不再重复页名 -->
         <span class="muted">{{ queries.length }} 条</span>
       </template>
       <template #extra>
@@ -26,8 +26,8 @@
         </a-table-column>
         <a-table-column title="操作" width="230">
           <template #default="{ record }">
-            <a-button size="small" type="link" @click="exportCsv(record)">
-              <DownloadOutlined /> 导出 CSV
+            <a-button size="small" type="link" @click="exportExcel(record)">
+              <DownloadOutlined /> 导出 Excel
             </a-button>
             <a-button size="small" type="link" @click="openAddToDash(record)">
               <AppstoreAddOutlined /> 加到看板
@@ -76,6 +76,7 @@ import {
   AppstoreAddOutlined, DownloadOutlined, HistoryOutlined, ReloadOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
+import { exportQueryToExcel } from '../../../utils/exportExcel'
 
 const emit = defineEmits<{ (e: 'add-to-dash', payload: { dashboardId?: string }): void }>()
 
@@ -111,21 +112,26 @@ async function loadDashboards() {
   } catch { /* 看板列表失败不阻塞查询页 */ }
 }
 
-async function exportCsv(record: any) {
+async function exportExcel(record: any) {
+  // 重跑 SQL 取实时数据 → 前端 exceljs 生成 .xlsx(数据 sheet, 原版同款体验)
   try {
     const resp = await fetch(
-      `${chatbiApi.defaults.baseURL}/saved-queries/${record.id}/export`,
+      `${chatbiApi.defaults.baseURL}/saved-queries/${record.id}/run`,
       { headers: { 'X-Admin-Token': localStorage.getItem('admin_token') || '',
                    'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}`,
                    'X-User-Id': uid() } })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const blob = await resp.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `query-${record.id.slice(0, 8)}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    if (!resp.ok) {
+      const d = await resp.json().catch(() => ({}))
+      throw new Error(d.detail || `HTTP ${resp.status}`)
+    }
+    const data = await resp.json()
+    if (!data.columns?.length) { message.warning('该查询无数据可导出'); return }
+    await exportQueryToExcel({
+      question: data.question || record.question,
+      columns: data.columns,
+      rows: data.rows || [],
+    })
+    message.success('已导出 Excel')
   } catch (e: any) {
     message.error(`导出失败: ${e.message}`)
   }

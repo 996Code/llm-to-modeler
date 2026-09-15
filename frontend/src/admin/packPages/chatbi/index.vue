@@ -1,5 +1,5 @@
 <template>
-  <!-- 智能问数管理页:数据源/语义层/保存查询/看板/图谱/记忆 六个平级 Tab(单层,不再嵌套) -->
+  <!-- 智能问数管理页:数据源/语义层/保存查询/看板/图谱/记忆/规则 七个平级 Tab(单层,不再嵌套) -->
   <div class="chatbi-admin">
     <a-tabs v-model:activeKey="tab" size="large" class="flat-tabs">
       <a-tab-pane key="ds">
@@ -26,19 +26,23 @@
         <template #tab><BulbOutlined /> 记忆</template>
         <Memories />
       </a-tab-pane>
+      <a-tab-pane key="skills">
+        <template #tab><FileTextOutlined /> 规则</template>
+        <Skills />
+      </a-tab-pane>
     </a-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-// 智能问数管理页 —— 六个平级 Tab 的编排壳:
+// 智能问数管理页 —— 七个平级 Tab 的编排壳:
 //   数据源(DsManager) / 语义层(SemanticLayer) / 保存查询(SavedQueries) /
-//   看板(Dashboards) / 图谱(SchemaGraphTab) / 记忆(Memories)
+//   看板(Dashboards) / 图谱(SchemaGraphTab) / 记忆(Memories) / 规则(Skills)
 // 职责:Tab 切换编排 + 跨 Tab 联动(数据源→语义层/图谱、保存查询→看板)。
 import { onMounted, ref } from 'vue'
 import {
-  BulbOutlined, DatabaseOutlined, HistoryOutlined, LayoutOutlined,
-  PartitionOutlined, ProfileOutlined,
+  BulbOutlined, DatabaseOutlined, FileTextOutlined, HistoryOutlined,
+  LayoutOutlined, PartitionOutlined, ProfileOutlined,
 } from '@ant-design/icons-vue'
 import DsManager from './DsManager.vue'
 import SemanticLayer from './SemanticLayer.vue'
@@ -46,6 +50,7 @@ import SavedQueries from './SavedQueries.vue'
 import Dashboards from './Dashboards.vue'
 import SchemaGraphTab from './SchemaGraphTab.vue'
 import Memories from './Memories.vue'
+import Skills from './Skills.vue'
 
 const tab = ref('ds')
 

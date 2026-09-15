@@ -135,6 +135,51 @@ async def list_saved_queries(request: Request, limit: int = Query(50, ge=1, le=2
     } for r in rows]}
 
 
+@router.get("/saved-queries/{sq_id}/run", dependencies=[Depends(user_required)])
+async def run_saved_query(sq_id: str, request: Request):
+    """重跑保存查询返回 JSON 结果(前端导出 Excel 用:数据 sheet 的数据源)。
+
+    与 export CSV 同一套安全闸(三层校验 + 只读执行), 只是返回 JSON
+    而非 CSV——前端 exceljs 生成 .xlsx(数据 sheet + 图表 sheet)。
+    """
+    uid = _user_id(request)
+    db = _db()
+    with db.connect() as conn:
+        q = conn.execute(
+            "SELECT * FROM chatbi_saved_queries WHERE id = ? AND user_id = ?",
+            (sq_id, uid)).fetchone()
+    if not q:
+        raise HTTPException(404, "查询记录不存在")
+
+    from domains.chatbi import semantic as _sem
+    from domains.chatbi.retrieval import extract_allowed_columns
+    _content = _sem.load_current_content(db, q["data_source_id"])
+    if _content is None:
+        raise HTTPException(422, "该数据源无语义层, 无法校验列白名单, 拒绝执行(fail-closed)")
+    _allowed = extract_allowed_columns(_content)
+    validation = validate_sql(q["sql_text"], allowed_columns=_allowed)
+    if not validation.ok:
+        raise HTTPException(422, f"SQL 校验失败: {validation.reason}")
+
+    ds = datasources.get_datasource(db, q["data_source_id"], decrypt=True)
+    if not ds:
+        raise HTTPException(404, "数据源不存在")
+    if not ds.is_active:
+        raise HTTPException(403, "数据源已禁用")
+    result = datasources.execute_readonly(ds, q["sql_text"], max_rows=_CSV_EXPORT_MAX_ROWS)
+    if not result.ok:
+        raise HTTPException(500, f"查询执行失败: {result.error}")
+
+    return {
+        "question": q["question"], "sql": q["sql_text"],
+        "columns": result.columns,
+        "rows": [list(r) for r in result.rows],
+        "rowCount": result.rowcount,
+        "truncated": bool(result.truncated),
+        "maxRows": _CSV_EXPORT_MAX_ROWS,
+    }
+
+
 @router.get("/saved-queries/{sq_id}/export", dependencies=[Depends(user_required)])
 async def export_saved_query_csv(sq_id: str, request: Request):
     """导出为 CSV(重跑 SQL + 三层校验 + CSV 注入防护 + utf-8-sig BOM)。"""
@@ -279,7 +324,13 @@ async def get_dashboard(did: str, request: Request):
 
 @router.post("/dashboards/{did}/widgets", dependencies=[Depends(user_required)])
 async def add_widget(did: str, body: WidgetCreate, request: Request):
-    """添加 widget: 保存时跑一次 SQL 生成 chart_config 缓存(避免 refresh 重跑 LLM)。"""
+    """添加 widget(毫秒级):只存 SQL + 图表类型, 不跑查询不调 LLM。
+
+    图表配置在首次 refresh 时按需生成并缓存(refresh 端点已有该逻辑)。
+    此前保存时同步跑 SQL + LLM 生成图表配置, 电商库等大表一次要等
+    十几秒——"添加到看板超级慢"的根因。保存与查询解耦后, 添加即返回,
+    打开看板/点刷新才真正执行(与原版 ChatBI 的行为一致)。
+    """
     uid = _user_id(request)
     db = _db()
     with db.connect() as conn:
@@ -289,30 +340,10 @@ async def add_widget(did: str, body: WidgetCreate, request: Request):
         if not dash:
             raise HTTPException(404, "看板不存在")
 
-    # SEC: SQL 校验
+    # SEC: SQL 校验(只校验不执行)
     validation = validate_sql(body.query_sql, allowed_columns=set())
     if not validation.ok:
         raise HTTPException(400, f"SQL 校验失败: {validation.reason}")
-
-    # 跑一次 SQL + 图表配置缓存
-    chart_config = None
-    try:
-        ds = datasources.get_datasource(db, body.datasource_id, decrypt=True)
-        if ds and ds.is_active:
-            result = datasources.execute_readonly(ds, body.query_sql)
-            if result.ok:
-                from domains.chatbi.chart_engine import generate_chart
-                from domains.chatbi.llm_compat import LLMCompat
-                # 管理端无 ToolContext, 直接构造 LLMCompat 包引擎 client
-                llm = request.app.state.llm_client
-                compat = LLMCompat(llm) if not isinstance(llm, LLMCompat) else llm
-                chart_result = generate_chart(
-                    compat, body.question, result.columns,
-                    [tuple(r) for r in result.rows], chart_type_hint=body.chart_type)
-                if chart_result.ok and chart_result.config:
-                    chart_config = chart_result.config
-    except Exception as e:
-        logger.warning("看板 widget 图表配置生成失败(不影响保存): %s", e)
 
     # 自动布局: 按行填充(每行 2 个, 列宽 6 总宽 12)
     with db.connect() as conn:
@@ -331,12 +362,12 @@ async def add_widget(did: str, body: WidgetCreate, request: Request):
                 chart_option, position_x, position_y, width, height, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (wid, did, body.question, body.query_sql, body.datasource_id,
-             body.chart_type, _json.dumps(chart_config) if chart_config else None,
+             body.chart_type, None,
              body.position_x if body.position_x is not None else auto_x,
              body.position_y if body.position_y is not None else auto_y,
              body.width, body.height, now, now))
         conn.execute("UPDATE chatbi_dashboards SET updated_at = ? WHERE id = ?", (now, did))
-    return {"id": wid, "chartConfig": chart_config}
+    return {"id": wid, "chartConfig": None}
 
 
 @router.delete("/dashboards/{did}/widgets/{wid}", dependencies=[Depends(user_required)])
@@ -412,12 +443,54 @@ async def refresh_widget(did: str, wid: str, request: Request):
         from domains.chatbi.chart_engine import infer_chart_by_rule
         chart_option = infer_chart_by_rule(result.columns, [tuple(r) for r in result.rows])
 
+    # 缓存回写:首次 refresh 时 chart_option 为空, 把规则推断的列映射
+    # config 落库, 下次刷新走 inject_data 快路径(不再依赖规则推断)
+    if not w["chart_option"] and chart_option:
+        try:
+            cfg = _extract_chart_config(w["chart_type"], result.columns,
+                                        [tuple(r) for r in result.rows])
+            if cfg:
+                with db.connect() as conn:
+                    conn.execute(
+                        "UPDATE chatbi_dashboard_widgets SET chart_option = ?, "
+                        "updated_at = ? WHERE id = ?",
+                        (_json.dumps(cfg), _now(), wid))
+        except Exception as e:
+            logger.warning("看板图表配置缓存回写失败(不影响返回): %s", e)
+
     return {
         "id": w["id"], "question": w["question"], "querySql": w["query_sql"],
         "datasourceId": w["datasource_id"],
         "columns": result.columns, "rows": [list(r) for r in result.rows[:200]],
         "rowCount": result.rowcount, "chartOption": chart_option,
     }
+
+
+def _extract_chart_config(chart_type: str | None, columns: list, rows: list) -> dict | None:
+    """从查询结果提取图表列映射 config(dim_col/measure_cols)。
+
+    refresh 缓存回写用——存列映射而非完整 option, 下次刷新经 inject_data
+    注入实时数据。维度列取第一个文本列, 度量列取全部数值列(与
+    infer_chart_by_rule 的规则一致, 不调 LLM)。
+    """
+    if not columns or not rows:
+        return None
+    ctype = chart_type or "bar"
+    dim_col = None
+    measure_cols = []
+    for i, c in enumerate(columns):
+        sample = rows[0][i] if rows and len(rows[0]) > i else None
+        if isinstance(sample, (int, float)) and not isinstance(sample, bool):
+            measure_cols.append(c)
+        elif dim_col is None:
+            dim_col = c
+    if ctype == "kpi":
+        return {"chart_type": "kpi", "measure_cols": measure_cols[:1]}
+    if ctype == "table":
+        return {"chart_type": "table"}
+    if not dim_col or not measure_cols:
+        return None
+    return {"chart_type": ctype, "dim_col": dim_col, "measure_cols": measure_cols}
 
 
 def _safe_json(text: str | None) -> dict | None:

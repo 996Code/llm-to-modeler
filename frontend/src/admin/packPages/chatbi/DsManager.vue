@@ -2,7 +2,7 @@
   <div class="ds-manager">
     <a-card class="section-card">
       <template #title>
-        <DatabaseOutlined /> 数据源
+        <!-- Tab 已标明"数据源", 此处只留计数, 不再重复页名 -->
         <span class="muted">{{ datasources.length }} 个</span>
       </template>
       <template #extra>

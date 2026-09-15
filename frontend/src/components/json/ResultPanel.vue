@@ -43,7 +43,7 @@
         <p class="empty-title">{{ store.currentConfig ? '还没有数据结果' : '查询结果会显示在这里' }}</p>
         <p class="empty-desc">
           {{ store.currentConfig
-            ? '本会话已生成表单配置——提问业务问题(如"各城市订单量")即可查询数据, 两种结果可随时切换'
+            ? '本会话已产出 AI 配置——提问业务问题(如"各城市订单量")即可查询数据, 两种结果可随时切换'
             : '试试问:"各城市的订单数量排名" · "本月销售额趋势" · "各品类销量占比"' }}
         </p>
       </div>
@@ -86,7 +86,7 @@
     <div v-else class="editor-container">
       <div v-if="!store.currentConfig" class="empty">
         <div class="empty-illustration"><FileTextOutlined /></div>
-        <p class="empty-title">{{ dataMsg ? '本会话还没有表单配置' : 'AI 产出的配置会显示在这里' }}</p>
+        <p class="empty-title">{{ dataMsg ? '本会话还没有 AI 配置' : 'AI 产出的配置会显示在这里' }}</p>
         <p class="empty-desc">
           {{ dataMsg
             ? '已切到配置视图——描述你的表单需求(如"做一个请假申请表, 含姓名/日期/事由")即可生成'
@@ -128,7 +128,16 @@ watch(() => dataMsg.value, (v) => { if (v) mode.value = 'data' }, { immediate: t
 watch(() => store.currentConfig, (v) => { if (v && !dataMsg.value) mode.value = 'config' })
 
 const headerIcon = computed(() => (mode.value === 'data' ? BarChartOutlined : CodeOutlined))
-const headerTitle = computed(() => (mode.value === 'data' ? '查询结果' : '配置 JSON'))
+// 标题场景化:数据视图看有没有图;配置视图通用化(平台多 pack——不止表单,
+// 标题按当前 pack 的制品类型动态取, 不写死"表单配置")
+const headerTitle = computed(() => {
+  if (mode.value === 'data') {
+    if (!dataMsg.value) return '查询结果'
+    if (dataMsg.value.dataResult?.type === 'kg_search_result') return '检索结果'
+    return dataMsg.value.formattedData?.chart ? '查询结果 · 图表' : '查询结果 · 明细'
+  }
+  return store.currentConfig ? 'AI 配置 · 变更对比' : 'AI 配置'
+})
 
 const sqlOpen = ref(false)
 
