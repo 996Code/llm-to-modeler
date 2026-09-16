@@ -115,6 +115,15 @@ class JoinPathIn(BaseModel):
     tables: list[str]
 
 
+class GraphRelationshipIn(BaseModel):
+    """图谱关系增删请求。"""
+    from_table: str
+    target_table: str
+    join_type: str = "LEFT"       # INNER | LEFT | RIGHT | FULL
+    on: str                       # JOIN ON 条件
+    cardinality: str = "N:1"      # N:1 | 1:N | 1:1 | N:N
+
+
 # ── 数据源管理(移植 data_sources.py 全集,密码永不回显) ────────
 
 @router.get("/datasources", dependencies=[Depends(admin_required)])
@@ -380,6 +389,145 @@ async def join_path_preview(ds_id: str, body: JoinPathIn):
     join_text = build_join_path_section(content, expanded, graph=sg,
                                         seed_names=list(body.tables))
     return {"expanded_tables": expanded, "join_paths": join_text}
+
+
+@router.get("/datasources/{ds_id}/graph/communities", dependencies=[Depends(admin_required)])
+async def graph_communities(ds_id: str):
+    """社区发现——将表按业务域聚类(社区着色/枢纽度排序的基础数据)。"""
+    from domains.chatbi import schema_graph, semantic
+    content = semantic.load_current_content(_db(), ds_id)
+    if content is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    sg = schema_graph.get_schema_graph(content)
+    return {"communities": sg.get_communities()}
+
+
+@router.get("/datasources/{ds_id}/graph/hubs", dependencies=[Depends(admin_required)])
+async def graph_hubs(ds_id: str, top_k: int = 10):
+    """枢纽表识别——度中心度最高的表(前后端统一渲染节点大小用)。"""
+    from domains.chatbi import schema_graph, semantic
+    content = semantic.load_current_content(_db(), ds_id)
+    if content is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    sg = schema_graph.get_schema_graph(content)
+    return {"hubs": [{"table": t, "centrality": round(c, 4)} for t, c in sg.get_hub_tables(top_k)]}
+
+
+@router.get("/datasources/{ds_id}/graph/impact", dependencies=[Depends(admin_required)])
+async def graph_impact(ds_id: str, table: str):
+    """影响分析——从给定表可达的所有下游表(改表前评估风险)。"""
+    from domains.chatbi import schema_graph, semantic
+    content = semantic.load_current_content(_db(), ds_id)
+    if content is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    sg = schema_graph.get_schema_graph(content)
+    return {"table": table, "impact": sg.get_impact(table)}
+
+
+@router.get("/datasources/{ds_id}/graph/reverse-relationships", dependencies=[Depends(admin_required)])
+async def graph_reverse_relationships(ds_id: str, table: str):
+    """反向关系——哪些表的正向关系指向此表(如 uc_users 被 N 张表引用)。"""
+    from domains.chatbi import schema_graph, semantic
+    content = semantic.load_current_content(_db(), ds_id)
+    if content is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    sg = schema_graph.get_schema_graph(content)
+    return {"table": table, "relationships": sg.get_reverse_relationships(table)}
+
+
+@router.get("/datasources/{ds_id}/graph/table-columns", dependencies=[Depends(admin_required)])
+async def graph_table_columns(ds_id: str, table: str):
+    """表列信息——节点详情面板按需拉列名/类型/语义类型。"""
+    from domains.chatbi import semantic
+    content = semantic.load_current_content(_db(), ds_id)
+    if content is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    for m in content.models:
+        if m.name == table:
+            return {"columns": [
+                {"name": c.name, "display_name": c.display_name,
+                 "data_type": c.data_type, "semantic_type": c.semantic_type,
+                 "description": c.description} for c in m.columns
+            ]}
+    raise HTTPException(404, f"表 {table} 不存在")
+
+
+@router.post("/datasources/{ds_id}/graph/relationship", dependencies=[Depends(admin_required)])
+async def graph_add_relationship(ds_id: str, body: GraphRelationshipIn, request: Request):
+    """新增图谱关系——手工标注 JOIN,写回语义层新版本 + 重建索引 + 审计。"""
+    from domains.chatbi import semantic, stores
+    content = semantic.load_current_content(_db(), ds_id)
+    if content is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    # 找到源表
+    source_model = next((m for m in content.models if m.name == body.from_table), None)
+    if source_model is None:
+        raise HTTPException(404, f"源表 {body.from_table} 不存在")
+    # 跳过已存在的同 ON 条件关系
+    existing = [r for r in source_model.relationships
+                if r.target_model == body.target_table and r.on == body.on]
+    if existing:
+        raise HTTPException(409, f"关系 {body.from_table} → {body.target_table} (ON: {body.on}) 已存在")
+    # 追加新关系
+    from domains.chatbi.models import Relationship
+    new_rel = Relationship(
+        name=f"rel_{body.from_table}_{body.target_table}",
+        target_model=body.target_table,
+        join_type=body.join_type,
+        on=body.on,
+        type=body.cardinality,
+        source="manual",
+        confidence=1.0,
+    )
+    source_model.relationships.append(new_rel)
+    ver = semantic.save_content(_db(), ds_id, content, source="manual")
+    # 重建索引
+    try:
+        from domains.chatbi import indexing
+        from domains.chatbi.llm_compat import LLMCompat
+        indexing.rebuild_index(content, ds_id,
+            stores.get_vector(request.app.state),
+            stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+            db=_db())
+    except Exception as e:
+        logger.warning("新增关系后索引重建失败(降级): %s", e)
+    _audit(request, "graph", "create", resource_id=ds_id,
+           detail={"from": body.from_table, "to": body.target_table, "on": body.on, "version": ver})
+    return {"ok": True, "version": ver}
+
+
+@router.delete("/datasources/{ds_id}/graph/relationship", dependencies=[Depends(admin_required)])
+async def graph_delete_relationship(ds_id: str, from_table: str, target_table: str, on: str = "",
+                                     request: Request = None):
+    """删除图谱关系——手工删除 JOIN 关系,写回语义层新版本 + 重建索引 + 审计。"""
+    from domains.chatbi import semantic, stores
+    content = semantic.load_current_content(_db(), ds_id)
+    if content is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    source_model = next((m for m in content.models if m.name == from_table), None)
+    if source_model is None:
+        raise HTTPException(404, f"源表 {from_table} 不存在")
+    before_count = len(source_model.relationships)
+    source_model.relationships = [
+        r for r in source_model.relationships
+        if not (r.target_model == target_table and (not on or r.on == on))
+    ]
+    if len(source_model.relationships) == before_count:
+        raise HTTPException(404, f"未找到匹配关系 {from_table} → {target_table}")
+    ver = semantic.save_content(_db(), ds_id, content, source="manual")
+    # 重建索引
+    try:
+        from domains.chatbi import indexing
+        from domains.chatbi.llm_compat import LLMCompat
+        indexing.rebuild_index(content, ds_id,
+            stores.get_vector(request.app.state),
+            stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+            db=_db())
+    except Exception as e:
+        logger.warning("删除关系后索引重建失败(降级): %s", e)
+    _audit(request, "graph", "delete", resource_id=ds_id,
+           detail={"from": from_table, "to": target_table, "on": on, "version": ver})
+    return {"ok": True, "version": ver}
 
 
 # ── 记忆(移植 memory.py 管理端点) ────────────────────────────

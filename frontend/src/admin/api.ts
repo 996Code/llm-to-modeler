@@ -65,6 +65,7 @@ export interface CallLogItem {
   conv_id: string | null
   call_type: string
   endpoint: string
+  pack_name: string | null
   request_data: unknown
   response_data: unknown
   status_code: number | null
@@ -276,6 +277,7 @@ export async function fetchCallLogs(params: {
   offset: number
   convId?: string
   callType?: string
+  packName?: string
 }): Promise<Paged<CallLogItem>> {
   const { data } = await adminApi.get('/call-logs', { params })
   return data

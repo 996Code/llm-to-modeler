@@ -151,6 +151,7 @@ class ConversationStore:
             conv_id TEXT,                -- 可空:有些调用不属于特定会话
             call_type TEXT NOT NULL,     -- 'llm'/'upstream'/'graph'/'vector'(开放枚举,插件可扩展)
             endpoint TEXT NOT NULL,      -- 调用的接口地址
+            pack_name TEXT,              -- 归属插件(可空:平台级/未路由的调用)
             request_data TEXT,           -- 请求体 JSON
             response_data TEXT,          -- 响应体 JSON
             status_code INTEGER,         -- HTTP 状态码
@@ -160,6 +161,9 @@ class ConversationStore:
         )""",
         "CREATE INDEX IF NOT EXISTS idx_call_logs_conv ON call_logs(conv_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_call_logs_type ON call_logs(call_type, created_at)",
+        # ── call_logs pack_name 列迁移(零停机:IF NOT EXISTS 幂等,历史数据 NULL) ──
+        "ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS pack_name TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_call_logs_pack ON call_logs(pack_name, created_at)",
         """CREATE TABLE IF NOT EXISTS session_pack_state (
             conv_id TEXT NOT NULL,
             scope TEXT NOT NULL,
@@ -789,6 +793,7 @@ class ConversationStore:
         duration_ms: Optional[int] = None,
         error_message: Optional[str] = None,
         conv_id: Optional[str] = None,
+        pack_name: Optional[str] = None,
     ) -> str:
         """保存一次 LLM 或上游服务调用日志(用于排查 / 审计)。
 
@@ -801,6 +806,7 @@ class ConversationStore:
             duration_ms:   耗时(毫秒)
             error_message: 失败时的异常信息
             conv_id:       关联会话(可空,通用调用无会话上下文)
+            pack_name:     归属插件(可空;管理端按 pack 维度过滤观测)
 
         Returns:
             新建日志记录的 ID。
@@ -811,14 +817,15 @@ class ConversationStore:
         with self._get_conn() as conn:
             conn.execute(
                 """INSERT INTO call_logs
-                   (id, conv_id, call_type, endpoint, request_data, response_data,
+                   (id, conv_id, call_type, endpoint, pack_name, request_data, response_data,
                     status_code, duration_ms, error_message, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     log_id,
                     conv_id,
                     call_type,
                     endpoint,
+                    pack_name,
                     json.dumps(request_data, ensure_ascii=False) if request_data else None,
                     json.dumps(response_data, ensure_ascii=False) if response_data else None,
                     status_code,
@@ -834,13 +841,15 @@ class ConversationStore:
         self,
         conv_id: Optional[str] = None,
         call_type: Optional[str] = None,
+        pack_name: Optional[str] = None,
         limit: int = 100
     ) -> List[Dict[str, Any]]:
-        """查询调用日志,支持按会话 / 类型过滤(四种组合)。
+        """查询调用日志,支持按会话 / 类型 / 插件过滤。
 
         Args:
             conv_id:   非空时只查该会话的日志
             call_type: 非空时只查该类型('llm' / 'upstream')
+            pack_name: 非空时只查该插件的日志(管理端按 pack 维度观测)
             limit:     最多返回条数
 
         Returns:
@@ -848,7 +857,7 @@ class ConversationStore:
         """
         # 过滤条件拼装收敛在 _call_logs_where(等价 MyBatis 的 <if> 动态 SQL),
         # 与 query_call_logs 共用一套 WHERE,避免两处分支漂移
-        where, params = self._call_logs_where(conv_id, call_type)
+        where, params = self._call_logs_where(conv_id, call_type, pack_name)
         with self._get_conn() as conn:
             rows = conn.execute(
                 f"SELECT * FROM call_logs {where} ORDER BY created_at DESC LIMIT ?",
@@ -870,6 +879,7 @@ class ConversationStore:
         self,
         conv_id: Optional[str] = None,
         call_type: Optional[str] = None,
+        pack_name: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
@@ -878,7 +888,7 @@ class ConversationStore:
         Returns:
             {"items": [...], "total": 满足条件的总条数}。items 反序列化规则同 get_call_logs。
         """
-        where, params = self._call_logs_where(conv_id, call_type)
+        where, params = self._call_logs_where(conv_id, call_type, pack_name)
         with self._get_conn() as conn:
             total = conn.execute(
                 f"SELECT COUNT(*) AS c FROM call_logs {where}", params
@@ -989,7 +999,8 @@ class ConversationStore:
         return {"items": items, "totalTokens": total_tokens}
 
     @staticmethod
-    def _call_logs_where(conv_id: Optional[str], call_type: Optional[str]) -> tuple:
+    def _call_logs_where(conv_id: Optional[str], call_type: Optional[str],
+                         pack_name: Optional[str] = None) -> tuple:
         """拼装 call_logs 查询的 WHERE 子句与参数(参数化防注入)。"""
         clauses, params = [], []
         if conv_id:
@@ -998,6 +1009,12 @@ class ConversationStore:
         if call_type:
             clauses.append("call_type = ?")
             params.append(call_type)
+        if pack_name:
+            clauses.append("pack_name = ?")
+            params.append(pack_name)
+        elif pack_name is not None and pack_name == "":
+            # 显式传空串 → 只看"无归属"的记录(兼容管理端 filter 的「其他」语义)
+            clauses.append("pack_name IS NULL")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return where, params
 

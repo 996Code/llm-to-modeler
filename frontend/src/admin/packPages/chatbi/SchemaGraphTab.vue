@@ -12,6 +12,11 @@
         <a-button @click="zoomBy(1 / 1.2)" title="缩小"><ZoomOutOutlined /></a-button>
         <a-button @click="fitView" title="适应画布"><FullscreenOutlined /></a-button>
       </a-button-group>
+      <a-divider type="vertical" />
+      <a-radio-group v-model:value="mode" size="small">
+        <a-radio-button value="browse">浏览</a-radio-button>
+        <a-radio-button value="edit">编辑关系</a-radio-button>
+      </a-radio-group>
       <span v-if="graphData" class="sgt-meta">
         {{ graphData.nodes.length }} 表 · {{ graphData.edges.length }} 关系
       </span>
@@ -43,12 +48,26 @@
           <div class="p-stat"><b>{{ selectedNode.metricCount }}</b><span>指标</span></div>
           <div class="p-stat"><b>{{ (selectedNode.centrality ?? 0).toFixed(2) }}</b><span>中心度</span></div>
         </div>
+        <!-- 影响分析 -->
+        <div class="panel-section">
+          <a-button size="small" type="link" :loading="impactLoading === selectedNode.id"
+                    @click="loadImpact(selectedNode.id)">
+            影响分析
+          </a-button>
+          <div v-if="impactResult" class="section-content">
+            <a-tag v-for="t in impactResult" :key="t" color="orange">{{ t }}</a-tag>
+            <div v-if="!impactResult.length" class="muted">无影响表</div>
+          </div>
+        </div>
         <div v-if="nodeEdges(selectedNode.id).length" class="panel-section">
           <div class="section-title">关联关系</div>
           <div v-for="(e, i) in nodeEdges(selectedNode.id)" :key="i" class="rel-line">
             <code>{{ e.source }} → {{ e.target }}</code>
             <div class="rel-on">{{ e.on }}</div>
-            <div class="rel-meta">{{ e.joinType }} · {{ e.cardinality }} · 置信度 {{ e.confidence }}</div>
+            <div class="rel-meta">{{ e.joinType }} · {{ e.cardinality }} · 置信度 {{ e.confidence }}
+              <a-button v-if="mode === 'edit'" size="small" type="link" danger
+                        @click="deleteRelationship(e)">删除</a-button>
+            </div>
           </div>
         </div>
       </div>
@@ -67,9 +86,58 @@
           <div class="kv"><span>基数</span><code>{{ selectedEdge.cardinality }}</code></div>
           <div class="kv"><span>置信度</span><code>{{ selectedEdge.confidence }}</code></div>
           <div class="kv"><span>来源</span><code>{{ relSourceLabel(selectedEdge.relSource) }}</code></div>
+          <div v-if="mode === 'edit'" style="margin-top:8px;text-align:right">
+            <a-button size="small" danger @click="deleteRelationship(selectedEdge)">删除关系</a-button>
+          </div>
         </div>
       </div>
     </div>
+
+    <!-- 编辑模式: 新增关系入口 -->
+    <div v-if="mode === 'edit'" class="sgt-edit-bar">
+      <a-button type="primary" size="small" @click="openAddRel">
+        <PlusOutlined /> 新增关系
+      </a-button>
+      <span class="muted">选择源表/目标表, 填写 JOIN ON 条件——写回语义层新版本并重建索引</span>
+    </div>
+
+    <!-- 新增关系弹窗 -->
+    <a-modal v-model:open="showAddRel" title="新增关系" ok-text="添加" cancel-text="取消"
+             :confirm-loading="addRelLoading" @ok="addRelationship">
+      <a-form layout="vertical">
+        <div class="form-row">
+          <a-form-item label="源表" required class="half">
+            <a-select v-model:value="addRelForm.from" show-search
+                      :options="tableOptions" placeholder="选择源表" />
+          </a-form-item>
+          <a-form-item label="目标表" required class="half">
+            <a-select v-model:value="addRelForm.target" show-search
+                      :options="tableOptions" placeholder="选择目标表" />
+          </a-form-item>
+        </div>
+        <a-form-item label="ON 条件" required>
+          <a-input v-model:value="addRelForm.on" placeholder="如: orders.user_id = users.id" />
+        </a-form-item>
+        <div class="form-row">
+          <a-form-item label="JOIN 类型" class="half">
+            <a-select v-model:value="addRelForm.joinType">
+              <a-select-option value="LEFT">LEFT</a-select-option>
+              <a-select-option value="INNER">INNER</a-select-option>
+              <a-select-option value="RIGHT">RIGHT</a-select-option>
+              <a-select-option value="FULL">FULL</a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="基数" class="half">
+            <a-select v-model:value="addRelForm.cardinality">
+              <a-select-option value="N:1">N:1</a-select-option>
+              <a-select-option value="1:N">1:N</a-select-option>
+              <a-select-option value="1:1">1:1</a-select-option>
+              <a-select-option value="N:N">N:N</a-select-option>
+            </a-select>
+          </a-form-item>
+        </div>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
@@ -77,9 +145,10 @@
 // 智能问数·图谱 Tab:数据源表关系图谱(G6 v5 动态导入,复用 KgGraphCard 的
 // 成熟配置:力导布局/悬停高亮/tooltip)。数据来自 GET /datasources/{id}/graph
 // (to_vis_data: 节点含社区/中心度, 边含 ON/置信度)。
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { message } from 'ant-design-vue'
 import {
-  CloseOutlined, FullscreenOutlined, ZoomInOutlined, ZoomOutOutlined,
+  CloseOutlined, FullscreenOutlined, PlusOutlined, ZoomInOutlined, ZoomOutOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 
@@ -94,6 +163,82 @@ const loading = ref(false)
 const graphData = ref<{ nodes: any[]; edges: any[] } | null>(null)
 const selectedNode = ref<any>(null)
 const selectedEdge = ref<any>(null)
+const mode = ref<'browse' | 'edit'>('browse')
+
+// 影响分析
+const impactLoading = ref('')
+const impactResult = ref<string[] | null>(null)
+
+// 新增关系
+const showAddRel = ref(false)
+const addRelLoading = ref(false)
+const addRelForm = reactive({ from: '', target: '', joinType: 'LEFT', on: '', cardinality: 'N:1' })
+const tableOptions = computed(() => (graphData.value?.nodes || []).map((n) => ({ value: n.id, label: n.label || n.id })))
+
+async function loadImpact(table: string) {
+  impactLoading.value = table
+  impactResult.value = null
+  try {
+    const { data } = await chatbiApi.get(`/datasources/${dsId.value}/graph/impact`, { params: { table } })
+    impactResult.value = data.impact || []
+  } catch {
+    impactResult.value = []
+  } finally {
+    impactLoading.value = ''
+  }
+}
+
+function openAddRel() {
+  addRelForm.from = selectedNode.value?.id || ''
+  addRelForm.target = ''
+  addRelForm.on = ''
+  addRelForm.joinType = 'LEFT'
+  addRelForm.cardinality = 'N:1'
+  showAddRel.value = true
+}
+
+async function addRelationship() {
+  if (!addRelForm.from || !addRelForm.target || !addRelForm.on.trim()) {
+    message.warning('请填写源表、目标表和 ON 条件')
+    return
+  }
+  addRelLoading.value = true
+  try {
+    await chatbiApi.post(`/datasources/${dsId.value}/graph/relationship`, {
+      from_table: addRelForm.from,
+      target_table: addRelForm.target,
+      join_type: addRelForm.joinType,
+      on: addRelForm.on.trim(),
+      cardinality: addRelForm.cardinality,
+    })
+    message.success('关系已添加, 语义层新版本已生成')
+    showAddRel.value = false
+    await loadGraph()
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '添加失败')
+  } finally {
+    addRelLoading.value = false
+  }
+}
+
+async function deleteRelationship(edge: any) {
+  if (!edge) return
+  await new Promise<void>((resolve) => {
+    // 用 antd Modal.confirm 需要 message 组件, 这里直接 confirm
+    if (window.confirm(`删除关系 ${edge.source} → ${edge.target}?`)) resolve()
+  })
+  try {
+    await chatbiApi.delete(`/datasources/${dsId.value}/graph/relationship`, {
+      params: { from_table: edge.source, target_table: edge.target, on: edge.on || '' },
+    })
+    message.success('关系已删除')
+    selectedNode.value = null
+    selectedEdge.value = null
+    await loadGraph()
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '删除失败')
+  }
+}
 
 const box = ref<HTMLElement | null>(null)
 let graph: import('@antv/g6').Graph | null = null
@@ -365,4 +510,13 @@ onBeforeUnmount(destroy)
 .kv { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; border-top: 1px solid #f5f5f6; font-size: 12px; }
 .kv span { color: #86909c; flex-shrink: 0; }
 .kv code { word-break: break-all; text-align: right; }
+.sgt-edit-bar {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  background: #f7f8fa; border-radius: 8px; margin-top: 4px;
+}
+.sgt-edit-bar .muted { color: #86909c; font-size: 12px; }
+.section-content { margin-top: 6px; }
+.section-content .ant-tag { margin: 2px; }
+.form-row { display: flex; gap: 12px; }
+.form-row .half { flex: 1; }
 </style>

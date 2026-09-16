@@ -169,6 +169,10 @@ def classify_intent_node(state: GraphState) -> dict:
     # =修改类"这类判断写在 pack 的 router 里，不再泄漏进引擎）。
     # conv_id/stage：让两级路由的 LLM 调用日志关联到会话并标注环节（管理端链路追踪）
     pack_name = _route_pack(user_input, compressed_history, conv_id=conversation_id or None)
+    # pack 归属绑定到 thread-local:后续工具执行期间的底层 LLM/上游/检索
+    # 调用日志(save_call_log)据此填入 call_logs.pack_name,管理端按 pack 维度观测
+    from sdk.call_context import bind_pack_name
+    bind_pack_name(pack_name)
 
     # 构建 user message
     tool_name = ""  # 选中的工具名，空表示未选中

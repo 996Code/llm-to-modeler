@@ -28,7 +28,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 # 会话上下文:日志层读线程绑定的 conv_id 兜底(call_context 无任何依赖,无循环)
-from sdk.call_context import current_conversation_id
+from sdk.call_context import current_conversation_id, current_pack_name
 
 from openai import OpenAI
 from pydantic import BaseModel
@@ -213,6 +213,7 @@ class LLMClient:
                 duration_ms=duration_ms,
                 error_message=error_message,
                 conv_id=conv_id,
+                pack_name=current_pack_name(),
             )
         except Exception as e:
             logger.warning(f"Failed to save LLM call log: {e}")

@@ -38,7 +38,7 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 # 会话上下文(同包,无循环依赖):日志层读线程绑定的 conv_id 兜底
-from sdk.call_context import current_conversation_id
+from sdk.call_context import current_conversation_id, current_pack_name
 
 import httpx
 
@@ -328,6 +328,7 @@ class UpstreamClient:
                 duration_ms=duration,
                 error_message=error_message,
                 conv_id=conv_id,
+                pack_name=current_pack_name(),
             )
         except Exception as e:
             logger.warning(f"Failed to save upstream call log: {e}")

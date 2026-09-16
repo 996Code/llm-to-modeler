@@ -38,8 +38,24 @@ def bind_conversation(conv_id: Optional[str]) -> None:
 def clear_conversation() -> None:
     """清空当前线程的会话绑定(请求结束时调用,防线程池复用串线)。"""
     _conversation.conv_id = None
+    _conversation.pack_name = None
 
 
 def current_conversation_id() -> Optional[str]:
     """读当前线程绑定的会话 ID;未绑定返回 None(调用方以此兜底)。"""
     return getattr(_conversation, "conv_id", None)
+
+
+def bind_pack_name(name: Optional[str]) -> None:
+    """在当前线程绑定活跃 pack 名称(一级路由完成后调用)。
+
+    pack 路由结果只存在于 classify_intent 节点内部;绑定到 thread-local
+    后,同一工作线程里后续的底层调用(save_call_log)自动读到此归属,
+    写入 call_logs.pack_name——管理端可观测性视图据此按 pack 维度过滤。
+    """
+    _conversation.pack_name = name or None
+
+
+def current_pack_name() -> Optional[str]:
+    """读当前线程绑定的 pack 名称;未绑定返回 None(平台级/未路由调用)。"""
+    return getattr(_conversation, "pack_name", None)

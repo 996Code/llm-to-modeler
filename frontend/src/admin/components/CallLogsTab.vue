@@ -16,6 +16,10 @@
           <a-select-option value="graph">图谱检索</a-select-option>
           <a-select-option value="vector">向量检索</a-select-option>
         </a-select>
+        <a-select v-model:value="filterPack" style="width: 150px" placeholder="按插件过滤" allow-clear
+          @change="search">
+          <a-select-option v-for="p in packOptions" :key="p.value" :value="p.value">{{ p.label }}</a-select-option>
+        </a-select>
         <a-input v-model:value="filterConvId" placeholder="按会话 ID 过滤" style="width: 260px" allow-clear
           @pressEnter="search">
           <template #prefix><SearchOutlined style="color: #bbb" /></template>
@@ -183,7 +187,7 @@
 // 审计 & 调用:三视角 Tab(调用明细/按环节统计/审计日志)。
 import { computed, inject, onMounted, reactive, ref, watch } from 'vue'
 import { SearchOutlined, ReloadOutlined } from '@ant-design/icons-vue'
-import { CallLogItem, fetchCallLogs, fetchCallStats, fetchAuditLogs, fmtTime, shortId, CallStageItem, AuditEventItem } from '../api'
+import { CallLogItem, fetchCallLogs, fetchCallStats, fetchAuditLogs, fmtTime, shortId, CallStageItem, AuditEventItem, fetchPacks } from '../api'
 import type { LoadSafely } from './loadSafely'
 import JsonViewer from './JsonViewer.vue'
 
@@ -194,6 +198,8 @@ const total = ref(0)
 const loading = ref(false)
 const filterType = ref('')
 const filterConvId = ref('')
+const filterPack = ref('')
+const packOptions = ref<{ value: string; label: string }[]>([])
 
 const viewMode = ref<'detail' | 'stats' | 'audit'>('detail')
 const statsRows = ref<CallStageItem[]>([])
@@ -332,6 +338,7 @@ async function load() {
       offset: (page.current - 1) * page.pageSize,
       callType: filterType.value || undefined,
       convId: filterConvId.value.trim() || undefined,
+      packName: filterPack.value || undefined,
     })
     rows.value = data.items
     total.value = data.total
@@ -349,7 +356,14 @@ function onTableChange(pag: { current?: number; pageSize?: number }) {
 
 function openDetail(record: CallLogItem) { detail.value = record; detailOpen.value = true }
 
-onMounted(() => { load(); loadStats(); loadAudit() })
+onMounted(() => { load(); loadStats(); loadAudit(); loadPackOptions() })
+
+async function loadPackOptions() {
+  try {
+    const data = await fetchPacks()
+    packOptions.value = data.items.map((p) => ({ value: p.name, label: p.name }))
+  } catch { /* 静默 */ }
+}
 
 watch(viewMode, (v) => {
   if (v === 'stats') loadStats()

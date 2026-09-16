@@ -61,6 +61,7 @@ def _log_retrieval_call(app_state, call_type: str, endpoint: str,
         if not conv_id:
             from sdk.call_context import current_conversation_id
             conv_id = current_conversation_id()
+        from sdk.call_context import current_pack_name
         cs.save_call_log(
             call_type=call_type,
             endpoint=endpoint,
@@ -70,6 +71,7 @@ def _log_retrieval_call(app_state, call_type: str, endpoint: str,
             duration_ms=duration_ms,
             error_message=error,
             conv_id=conv_id,
+            pack_name=current_pack_name(),
         )
     except Exception as e:  # 观测写失败不拖垮检索
         logger.warning(f"检索调用日志写入失败({endpoint}): {e}")

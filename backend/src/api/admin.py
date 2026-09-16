@@ -330,15 +330,18 @@ async def admin_call_logs(request: Request):
     Query 参数:
       limit/offset: 分页(limit 上限 200;request/response 全文可能很大)
       convId:       只看某会话的调用
-      callType:     llm / upstream
+      callType:     llm / upstream / graph / vector
+      packName:     只看某插件的调用(归属维度观测)
     """
     store = request.app.state.conversation_store
     limit = max(1, min(_int_param(request, "limit", 20), 200))
     offset = max(0, _int_param(request, "offset", 0))
     conv_id = (request.query_params.get("convId") or "").strip() or None
     call_type = (request.query_params.get("callType") or "").strip() or None
+    pack_name = (request.query_params.get("packName") or "").strip() or None
     return store.query_call_logs(
-        conv_id=conv_id, call_type=call_type, limit=limit, offset=offset
+        conv_id=conv_id, call_type=call_type, pack_name=pack_name,
+        limit=limit, offset=offset
     )
 
 

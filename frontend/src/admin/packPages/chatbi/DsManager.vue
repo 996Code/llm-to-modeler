@@ -5,6 +5,9 @@
       <a-button size="small" @click="checkAllHealth" :loading="bulkHealth">
         <HeartOutlined /> 全量健康检查
       </a-button>
+      <a-button size="small" @click="refreshMetadata">
+        <SyncOutlined /> 刷新元数据
+      </a-button>
       <a-button type="primary" size="small" @click="showCreate = true">
         <PlusOutlined /> 添加数据源
       </a-button>
@@ -104,7 +107,7 @@
 import { computed, defineEmits, defineExpose, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  DatabaseOutlined, HeartOutlined, PlusOutlined,
+  DatabaseOutlined, HeartOutlined, PlusOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 
@@ -199,6 +202,15 @@ async function checkAllHealth() {
     message.error(errText(e, '巡检失败'))
   } finally {
     bulkHealth.value = false
+  }
+}
+
+async function refreshMetadata() {
+  try {
+    const { data } = await chatbiApi.post('/datasources/refresh-metadata/all')
+    message.success(`元数据刷新任务已提交(任务 ${String(data.task_id).slice(0, 8)}…), 进度见任务中心`)
+  } catch (e: any) {
+    message.error(errText(e, '触发失败'))
   }
 }
 
