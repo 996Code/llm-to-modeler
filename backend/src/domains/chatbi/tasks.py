@@ -179,9 +179,12 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             index_status = "degraded"
             index_warning = f"扫描完成但索引重建失败——RAG 检索将降级, 重扫可修复: {str(e)[:120]}"
             handle.log(index_warning)
+        scan_stage = f"完成: {len(content.models)} 张表, 索引 {indexed} 条"
+        if index_warning:
+            scan_stage += f" ⚠ {index_warning}"   # 持久化到数据源行, scan-status 轮询可返回(八审 6.5)
         datasources.update_datasource(
             db, ds_id, scan_status="done", scan_progress=100,
-            scan_stage=f"完成: {len(content.models)} 张表, 索引 {indexed} 条",
+            scan_stage=scan_stage,
             scanned_at=_now_iso())
         handle.log(f"扫描完成: {len(content.models)} 张表, 向量索引 {indexed} 条"
                    + (" (索引降级)" if index_status != "ok" else ""))
@@ -296,16 +299,34 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 infer_metrics=bool(settings.get("scan_metric_inference", True)),
                 datasource_id=info.id, persist=False)
             merged = _merge_content(current, new_content)
+            # 6.3 修复: struct_changed 必须比较数据库行版本——
+            # content.version 是内容 schema 版本(恒为1), 之前拿它和
+            # DB 行版本比较, DB 到 v2 后永远"已变化", 跳过优化失效
+            prev_db_version = None
+            try:
+                with db.connect() as conn:
+                    _row = conn.execute(
+                        "SELECT version FROM chatbi_semantic_models "
+                        "WHERE data_source_id = ? AND is_current = 1",
+                        (info.id,)).fetchone()
+                    prev_db_version = _row["version"] if _row else 0
+            except Exception:
+                prev_db_version = None
             version = semantic.save_content(db, info.id, merged, source="refresh")
-            # 6.6: save_content 幂等(内容不变返回旧版本)——结构无变化时
-            # 用 current._version 判断是否真的写了新版本
-            struct_changed = version != current.version if hasattr(current, 'version') else True
+            struct_changed = (prev_db_version is None
+                              or version != prev_db_version)
             evolve = _evolve_graph(db, info.id, merged, app_state=app_state)
-            # 结构与图谱都无变化 → 跳过全量重建(7审 6.6: 无意义 embedding 压力)
-            if not struct_changed and evolve.get("versions_written", 0) == 0:
-                results.append({"datasource_id": info.id, "version": version,
-                                "ok": True, "changed": False,
-                                "detail": "结构无变化且无新图谱证据, 跳过重建"})
+            # 6.2 修复: 演进的 error/conflict 必须传播——不能把失败的数据源
+            # 报成 ok=true 再继续重建(七审实测: error=boom 仍返回 ok=true)
+            if evolve.get("index_rebuild") == "error":
+                results.append({"datasource_id": info.id, "ok": False,
+                                "error": f"图谱演进失败: {evolve.get('error', '')}"})
+                continue
+            if evolve.get("index_rebuild") == "conflict":
+                results.append({"datasource_id": info.id, "ok": False,
+                                "conflict": True,
+                                "error": "图谱演进乐观锁冲突(有并发语义写入), "
+                                         "下轮刷新自动重试"})
                 continue
             # 六审 P1.C 修复: 演化可能写出 v+2/v+3——最终索引必须对齐
             # 演化后的 current, 不再用演化前的 merged 覆盖(旧关系内容)
@@ -335,6 +356,27 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 logger.warning("刷新后索引重建失败(降级, 手动重扫可修复): %s", e)
                 index_status = "degraded"
                 index_warning = f"语义已写 v{final_version}, 索引落后——手动重扫可修复"
+            # 6.4 修复: 索引期间若 current 被并发变更(人工编辑/回滚), 刚建的
+            # 索引已过期——重载最新版本补建一次, 仍失败则明确 conflict
+            try:
+                _recheck = _sem.load_content(db, info.id)
+                if _recheck and _recheck[0] is not None and _recheck[1] != final_version:
+                    logger.warning("索引构建期间 current 并发变更 v%s→v%s, 重载重建",
+                                   final_version, _recheck[1])
+                    final_content, final_version = _recheck
+                    _rb = indexing.rebuild_index(
+                        content=final_content, data_source_id=info.id,
+                        store=cb_stores.get_vector(app_state),
+                        embedder=cb_stores.get_embedder(llm), db=db)
+                    if _rb is not None and getattr(_rb, "error", None):
+                        index_status = "conflict"
+                        index_warning = (f"并发语义变更(v{final_version}), "
+                                         f"索引对齐失败——重扫可修复")
+            except Exception as e:
+                index_status = "conflict"
+                index_warning = f"并发校验失败: {str(e)[:120]}"
+            if index_warning:
+                logger.warning("刷新索引降级 ds=%s: %s", info.id, index_warning)
             results.append({"datasource_id": info.id, "version": final_version,
                             "models": len(final_content.models), "ok": True,
                             "index_rebuild": index_status,
@@ -577,12 +619,13 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
         watermarks_to_set.append((pair, "implicit", cnt))
 
     if not all_updates and not all_new_pairs:
-        # 无更新也推进水位(避免下轮重复计算同量证据)
+        # 无更新也推进水位(避免下轮重复计算同量证据); 失败显式记录
+        # (八审 6.1: 无语义变更所以无重复消费风险, 但要可观测)
         for pair, sig, ev in watermarks_to_set:
             try:
                 set_watermark(db, datasource_id, pair, sig, ev)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("水位推进失败(无语义变更, 影响有限): %s", e)
         return result  # 无新证据 → 不写版本(幂等)
 
     # 乐观锁: 读当前版本号
@@ -597,21 +640,18 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
     except Exception as e:
         logger.warning("乐观锁版本读取失败(降级为不校验): %s", e)
 
-    # 不传 rebuild_index——索引由调用方在全部演化完成后统一重建(六审P1.C)
+    # 不传 rebuild_index——索引由调用方在全部演化完成后统一重建(六审P1.C)。
+    # 水位经 pending_watermarks 与语义版本同事务原子提交(八审 6.1)。
     from domains.chatbi.graph_infer import VersionConflictError
     try:
         apply_confidence_updates(
             db, datasource_id, all_updates,
             new_pairs=all_new_pairs or None,
-            expected_version=current_version)
+            expected_version=current_version,
+            pending_watermarks=[(pair, sig, ev)
+                                for pair, sig, ev in watermarks_to_set])
         result["versions_written"] = 1
         result["index_rebuild"] = "deferred"  # 调用方负责最终重建
-        # 写入成功 → 推进水位(下次只算增量)
-        for pair, sig, ev in watermarks_to_set:
-            try:
-                set_watermark(db, datasource_id, pair, sig, ev)
-            except Exception:
-                pass
         logger.info("图谱演化: %d updates, %d new_pairs (ds=%s)",
                     len(all_updates), len(all_new_pairs), datasource_id)
     except VersionConflictError as e:

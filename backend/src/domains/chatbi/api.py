@@ -173,6 +173,8 @@ async def delete_datasource(ds_id: str, request: Request):
         conn.execute("DELETE FROM chatbi_agent_memories WHERE data_source_id = ?", (ds_id,))
         # 查询统计级联(三审 P2: 删除数据源不留未定义归属的统计垃圾)
         conn.execute("DELETE FROM chatbi_query_stats WHERE data_source_id = ?", (ds_id,))
+        # 证据水位级联(八审 6.6: 删除数据源无 watermark 孤儿)
+        conn.execute("DELETE FROM chatbi_graph_watermarks WHERE data_source_id = ?", (ds_id,))
     try:
         stores.delete_data_source_storage(db, stores.get_vector(request.app.state), ds_id)
     except Exception as e:

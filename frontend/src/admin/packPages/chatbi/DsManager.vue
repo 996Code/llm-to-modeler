@@ -26,13 +26,16 @@
         </a-table-column>
         <a-table-column title="语义层" width="190">
           <template #default="{ record }">
+            <!-- 八审 6.5: 单一互斥链——此前两个独立 v-if, done 时第二条
+                 的 v-else 兜底显示"未扫描", 出现"已扫描+未扫描"矛盾 -->
             <template v-if="record.scanStatus === 'done'">
               <a-tag color="success">已扫描</a-tag>
               <span class="muted">{{ record.scanStage }}</span>
             </template>
-            <a-progress v-else-if="record.scanStatus === 'scanning'" :percent="record.scanProgress"
-                        size="small" status="active" />
-            <div v-if="record.scanStatus === 'scanning'" class="scan-stage">{{ record.scanStage }}</div>
+            <template v-else-if="record.scanStatus === 'scanning'">
+              <a-progress :percent="record.scanProgress" size="small" status="active" />
+              <div class="scan-stage">{{ record.scanStage }}</div>
+            </template>
             <a-tooltip v-else-if="record.scanStatus === 'failed'" :title="record.scanError || '扫描失败'">
               <a-tag color="error">扫描失败</a-tag>
             </a-tooltip>

@@ -396,15 +396,17 @@ def set_watermark(db, data_source_id: str, pair: tuple[str, str],
     """更新消费水位(UPSERT)。"""
     from datetime import datetime, timezone
     with db.connect() as conn:
+        # GREATEST 单调: 证据计数下降时水位不倒退(八审 6.1 建议3)
         conn.execute(
             "INSERT INTO chatbi_graph_watermarks "
             "(data_source_id, pair_key, signal, consumed_evidence, updated_at) "
             "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (data_source_id, pair_key, signal) "
-            "DO UPDATE SET consumed_evidence = ?, updated_at = ?",
+            "ON CONFLICT (data_source_id, pair_key, signal) DO UPDATE SET "
+            "consumed_evidence = GREATEST(chatbi_graph_watermarks.consumed_evidence, "
+            "                            EXCLUDED.consumed_evidence), "
+            "updated_at = EXCLUDED.updated_at",
             (data_source_id, _pair_key(pair), signal, evidence,
-             datetime.now(timezone.utc).isoformat(),
-             evidence, datetime.now(timezone.utc).isoformat()))
+             datetime.now(timezone.utc).isoformat()))
 
 
 def ensure_watermark_schema(db) -> None:
@@ -699,7 +701,11 @@ def apply_confidence_updates(
     expected_version: int | None = None,
     rebuild_index: Callable[..., Any] | None = None,
     on_index_error: Callable[[str], None] | None = None,
+    pending_watermarks: list[tuple[tuple[str, str], str, int]] | None = None,
 ) -> int:
+    """pending_watermarks: [(pair, signal, evidence)]——与语义新版本同事务
+    原子提交的证据水位(八审 6.1)。任一失败整事务回滚, 杜绝"语义已写、
+    水位未推进"的半提交窗口导致同证据重复消费。"""
     """将 confidence 更新写入语义层 (乐观锁, append-only 新版本)。
 
     流程:
@@ -842,6 +848,21 @@ def apply_confidence_updates(
                 _now_iso(),
             ),
         )
+        # 证据水位与语义版本同一事务(八审 6.1): 任一失败全回滚——
+        # 杜绝"语义已写、水位未推进"窗口下的同证据重复消费。
+        # GREATEST 单调: 证据计数下降时水位不倒退。
+        ensure_watermark_schema(db)
+        for _pair, _signal, _evidence in (pending_watermarks or []):
+            conn.execute(
+                "INSERT INTO chatbi_graph_watermarks "
+                "(data_source_id, pair_key, signal, consumed_evidence, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (data_source_id, pair_key, signal) DO UPDATE SET "
+                "consumed_evidence = GREATEST(chatbi_graph_watermarks.consumed_evidence, "
+                "                            EXCLUDED.consumed_evidence), "
+                "updated_at = EXCLUDED.updated_at",
+                (data_source_id, _pair_key(_pair), _signal, _evidence, _now_iso()),
+            )
     # with 块退出即提交 (成功提交/异常回滚, 见 services.db 事务语义)
 
     # 6. 重建向量索引 (降级不阻塞; 回调由调用方注入——检索栈归属其他移植件)
@@ -958,13 +979,15 @@ def sync_linkage_to_graph(
             new_pair_threshold=new_pair_threshold,
         )
 
-    # 无更新也要推水位(下轮只算增量, 幂等)
+    # 无更新也要推水位(下轮只算增量, 幂等); set_watermark 内部单调
     if not updates and not new_pairs:
         for _pair, _ev in (link_watermarks or {}).items():
             try:
                 set_watermark(db, data_source_id, _pair, "linkage", _ev)
-            except Exception:
-                pass
+            except Exception as e:
+                # 水位推进失败: 显式 warning(八审 6.1——不再静默吞掉;
+                # 无语义变更所以无重复消费风险, 仅影响下次增量的精确性)
+                logger.warning("水位推进失败(无语义变更, 影响有限): %s", e)
         return {
             "new_version": None,
             "boosted_pairs": 0,
@@ -983,6 +1006,7 @@ def sync_linkage_to_graph(
         nonlocal index_rebuild_state
         index_rebuild_state = f"degraded: {msg}"
 
+    # 水位与语义版本同一事务原子提交(八审 6.1)
     new_version = apply_confidence_updates(
         db=db,
         data_source_id=data_source_id,
@@ -992,13 +1016,9 @@ def sync_linkage_to_graph(
         else cur_version,
         rebuild_index=rebuild_index,
         on_index_error=_record_index_error,
+        pending_watermarks=[(pair, "linkage", ev)
+                            for pair, ev in link_watermarks.items()],
     )
-    # 写入成功 → 推进水位(幂等关键: 同证据不重复消费)
-    for _pair, _ev in link_watermarks.items():
-        try:
-            set_watermark(db, data_source_id, _pair, "linkage", _ev)
-        except Exception:
-            pass
 
     return {
         "new_version": new_version,
