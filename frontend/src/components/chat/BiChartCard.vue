@@ -11,6 +11,11 @@
     <!-- 对话内明细(独立展示, 不参与图表类型链) -->
     <div v-if="detailLine" class="detail-line">{{ detailLine }}</div>
 
+    <!-- 持久化降级提示: 查询成功但记忆/经验未沉淀(非阻断, 结果不受影响) -->
+    <div v-if="persistWarningLine" class="persist-warn">
+      ⚠ 部分经验未保存: {{ persistWarningLine }}
+    </div>
+
     <!-- KPI 指标卡(链头 v-if, 恢复正确分支) -->
     <div v-if="isKpi" class="kpi-view">
       <div class="kpi-value">{{ kpiValue }}</div>
@@ -61,6 +66,11 @@ const detailLine = computed(() => {
   if (d.chartDegraded) parts.push('图表规则推断')
   return parts.join(' · ')
 })
+
+// 持久化降级提示(复核报告: 源 persist_warning 等价物)——查询成功但
+// 记忆/经验/自动保存没存上时, 用户在结果卡下方直接看到, 不再只留服务端日志
+const persistWarningLine = computed(() =>
+  (props.detail?.persistWarnings || []).slice(0, 3).join('；'))
 
 const chartEl = ref<HTMLElement | null>(null)
 let instance: echarts.ECharts | null = null
@@ -114,6 +124,7 @@ onBeforeUnmount(() => {
 .bi-chart-card { width: 100%; }
 .metric-hits { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
 .detail-line { color: #999; font-size: 12px; margin-bottom: 8px; }
+.persist-warn { color: #d46b08; font-size: 12px; margin-bottom: 8px; }
 .kpi-view { text-align: center; padding: 18px 0; }
 .kpi-value { font-size: 40px; font-weight: 700; color: #1677ff; }
 .kpi-name { margin-top: 4px; color: #888; font-size: 14px; }

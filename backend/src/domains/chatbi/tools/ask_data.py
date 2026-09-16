@@ -231,6 +231,7 @@ class AskDataTool(CompositeTool):
                 question, content, store, embedder,
                 data_source_id=ds.id, llm=llm, db=db,
                 top_k=int(settings.get("retrieve_top_k", 20)),
+                score_threshold=float(settings.get("rag_score_threshold", 0.35)),
                 conv_id=ctx.conv_id)
             # 源 agent.py:250-254: 只取 type=model 的记录作表名;
             # 纯指标召回(如问"GMV"只命中 metric 记录)时指标名不得混入表名
@@ -530,6 +531,7 @@ class AskDataTool(CompositeTool):
         max_rounds = int(settings.get("sql_self_heal_rounds", 2))
         max_rows = int(settings.get("sql_max_rows", 10000))
         timeout = int(settings.get("sql_execution_timeout", 30))
+        conn_to = int(settings.get("db_connect_timeout", 5))
         schema_ctx = _schema_ctx(state)
 
         sql = state["sql"]
@@ -543,7 +545,7 @@ class AskDataTool(CompositeTool):
         if validation is not None and not validation.ok:
             last_error = f"校验失败 ({validation.violated_layer}): {validation.reason}"
         else:
-            result = datasources.execute_readonly(ds, sql, max_rows=max_rows,
+            result = datasources.execute_readonly(ds, sql, max_rows=max_rows, connect_timeout=conn_to,
                                                   timeout_seconds=timeout)
             if not result.ok:
                 last_error = result.error
@@ -568,7 +570,7 @@ class AskDataTool(CompositeTool):
             if not revalidation.ok:
                 last_error = f"校验失败 ({revalidation.violated_layer}): {revalidation.reason}"
                 continue
-            result = datasources.execute_readonly(ds, sql, max_rows=max_rows,
+            result = datasources.execute_readonly(ds, sql, max_rows=max_rows, connect_timeout=conn_to,
                                                   timeout_seconds=timeout)
             last_error = result.error if not result.ok else None
 
@@ -628,7 +630,8 @@ class AskDataTool(CompositeTool):
                 ds0: datasources.DataSourceInfo = state["ds"]
                 re0 = datasources.execute_readonly(
                     ds0, heal0.sql, max_rows=max_rows,
-                    timeout_seconds=int(settings.get("sql_execution_timeout", 30)))
+                    timeout_seconds=int(settings.get("sql_execution_timeout", 30)),
+                    connect_timeout=int(settings.get("db_connect_timeout", 5)))
                 if re0.ok:
                     state["sql"] = heal0.sql
                     state["execute_result"] = re0
@@ -656,7 +659,8 @@ class AskDataTool(CompositeTool):
                     ds: datasources.DataSourceInfo = state["ds"]
                     re_result = datasources.execute_readonly(
                         ds, heal.sql, max_rows=max_rows,
-                        timeout_seconds=int(settings.get("sql_execution_timeout", 30)))
+                        timeout_seconds=int(settings.get("sql_execution_timeout", 30)),
+                        connect_timeout=int(settings.get("db_connect_timeout", 5)))
                     if re_result.ok:
                         recheck = check_result(re_result.rows, re_result.columns,
                                                heal.sql, max_rows=max_rows)
@@ -762,6 +766,9 @@ class AskDataTool(CompositeTool):
             # 刷新页面后"导出 CSV"仍能定位本条记录
             "saved_query_id": state.get("_saved_query_id"),
             "current_tables": state.get("current_tables") or [],
+            # 持久化降级对用户可见(复核报告 P0-B 建议5): 此前只写服务器
+            # 日志, 用户不知道"这轮的经验没存上"(源 persist_warning 等价物)
+            "persist_warnings": state.get("_persist_warnings") or [],
         }
 
         # 记忆抽取 (源 chat_stream 在成功查询后调 extract_memory_from_turn
@@ -780,6 +787,7 @@ class AskDataTool(CompositeTool):
                 data_source_id=state["ds"].id)
         except Exception as e:
             logger.warning("记忆抽取失败(不阻塞): %s", e)
+            state.setdefault("_persist_warnings", []).append(f"记忆未沉淀: {e}")
 
         # linkage 记忆 (E1 Task 2.1;源 chat_stream 成功查询后调
         # persist_linkage_memory): 多表 JOIN 查询沉淀表对共现经验,
@@ -793,6 +801,7 @@ class AskDataTool(CompositeTool):
                                    data_source_id=state["ds"].id)
         except Exception as e:
             logger.warning("linkage 记忆沉淀失败(不阻塞): %s", e)
+            state.setdefault("_persist_warnings", []).append(f"JOIN经验未沉淀: {e}")
 
         # M4: 成功查询自动保存(应用层去重, 供导出 CSV/看板引用)
         try:
@@ -813,6 +822,7 @@ class AskDataTool(CompositeTool):
                 artifact["saved_query_id"] = _sq["id"]
         except Exception as e:
             logger.warning("查询自动保存失败(不阻塞): %s", e)
+            state.setdefault("_persist_warnings", []).append(f"查询未自动保存: {e}")
 
         # few-shot 成功回流 (RAG-004;源 chat_stream.py:917-929):
         # 成功查询的 Question-SQL Pair 入向量库, 后续相似问题召回作参考。
@@ -829,6 +839,7 @@ class AskDataTool(CompositeTool):
                 conv_id=ctx.conv_id)
         except Exception as e:
             logger.warning("few-shot 回流失败(不阻塞): %s", e)
+            state.setdefault("_persist_warnings", []).append(f"经验未回流: {e}")
 
         # 会话状态写回(多轮继承的载体;对标 ChatBI StateStore)
         sess = ctx.session_state
@@ -979,6 +990,7 @@ class AskDataTool(CompositeTool):
             "rowcount": artifact.get("rowcount"),
             "metricHits": artifact.get("metric_hits") or [],
             "datasourceName": artifact.get("datasource_name"),
+            "persistWarnings": artifact.get("persist_warnings") or [],
         }
 
 

@@ -204,21 +204,22 @@ class ExecuteResult:
         self.truncated = truncated
 
 
-def _pg_connect(info: DataSourceInfo, timeout_seconds: int):
+def _pg_connect(info: DataSourceInfo, timeout_seconds: int,
+                connect_timeout: int = 5):
     import psycopg
     return psycopg.connect(
         host=info.host, port=info.port, user=info.username,
         password=info.password_plain, dbname=info.database,
-        connect_timeout=5, autocommit=False,
+        connect_timeout=connect_timeout, autocommit=False,
         options=f"-c statement_timeout={timeout_seconds * 1000}")
 
 
-def _mysql_connect(info: DataSourceInfo):
+def _mysql_connect(info: DataSourceInfo, connect_timeout: int = 5):
     import pymysql
     return pymysql.connect(
         host=info.host, port=info.port, user=info.username,
         password=info.password_plain, database=info.database,
-        connect_timeout=5, charset="utf8mb4",
+        connect_timeout=connect_timeout, charset="utf8mb4",
         cursorclass=pymysql.cursors.Cursor)
 
 
@@ -244,13 +245,14 @@ def _inject_limit(sql: str, max_rows: int, db_type: str) -> str:
 
 
 def execute_readonly(info: DataSourceInfo, sql: str,
-                     max_rows: int = 10000, timeout_seconds: int = 30) -> ExecuteResult:
+                     max_rows: int = 10000, timeout_seconds: int = 30,
+                     connect_timeout: int = 5) -> ExecuteResult:
     """只读执行 BI 查询(READ ONLY 事务 + DB 侧超时 + max_rows 截断)。"""
     started = time.monotonic()
     sql = _inject_limit(sql, max_rows, info.db_type)
     try:
         if info.db_type == "postgresql":
-            conn = _pg_connect(info, timeout_seconds)
+            conn = _pg_connect(info, timeout_seconds, connect_timeout)
             try:
                 cur = conn.cursor()
                 # SEC: READ ONLY 事务 — 防御性约束, 即使校验被绕过也不能写
@@ -267,7 +269,7 @@ def execute_readonly(info: DataSourceInfo, sql: str,
             finally:
                 conn.close()
         elif info.db_type == "mysql":
-            conn = _mysql_connect(info)
+            conn = _mysql_connect(info, connect_timeout)
             try:
                 with conn.cursor() as cur:
                     # DB 侧超时(MySQL 5.7+;毫秒)
@@ -308,8 +310,10 @@ def check_health(info: DataSourceInfo, timeout_seconds: int = 5) -> dict:
     """连通性 + 延迟探测。返回 {healthy, latency_ms, server_version|error}。"""
     started = time.monotonic()
     try:
+        # 连接超时与探测超时共用(timeout_seconds 即探测预算)
         if info.db_type == "postgresql":
-            conn = _pg_connect(info, timeout_seconds)
+            conn = _pg_connect(info, timeout_seconds,
+                               connect_timeout=timeout_seconds)
             try:
                 cur = conn.cursor()
                 cur.execute("SELECT version()")
@@ -317,7 +321,7 @@ def check_health(info: DataSourceInfo, timeout_seconds: int = 5) -> dict:
             finally:
                 conn.close()
         elif info.db_type == "mysql":
-            conn = _mysql_connect(info)
+            conn = _mysql_connect(info, connect_timeout=timeout_seconds)
             try:
                 with conn.cursor() as cur:
                     cur.execute("SELECT VERSION()")

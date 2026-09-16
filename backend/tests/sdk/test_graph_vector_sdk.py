@@ -146,8 +146,12 @@ class TestPrefixIsolation:
         register_prefix("zz_sdk_test", "zz_owner")   # 幂等
 
     def test_kg_prefix_declared_by_adapter(self):
-        # stores.py 声明 kg 前缀(源码级检查——适配层是前缀唯一声明点)
-        src = open("src/domains/knowledge_graph/stores.py").read()
+        # stores.py 声明 kg 前缀(源码级检查——适配层是前缀唯一声明点)。
+        # 路径基于 __file__ 解析——此前硬编码 "src/..." 相对路径, 从仓库根
+        # 跑 pytest 时必失败(复核报告 P2: 测试对工作目录的依赖)。
+        from pathlib import Path
+        stores_py = Path(__file__).resolve().parents[2] / "src/domains/knowledge_graph/stores.py"
+        src = open(stores_py).read()
         assert 'GRAPH_PREFIX = "kg_"' in src
         assert 'VECTOR_PREFIX = "kg"' in src
         assert 'register_prefix("kg"' in src

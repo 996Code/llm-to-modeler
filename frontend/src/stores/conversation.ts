@@ -165,6 +165,7 @@ export const useConversationStore = defineStore('conversation', () => {
                 datasourceName: art.datasource_name,
                 truncated: art.truncated,
                 chartDegraded: art.chart_degraded,
+                persistWarnings: art.persist_warnings || [],
                 sql: art.sql,
                 datasourceId: art.datasource_id,
                 tables: art.tables,
@@ -346,6 +347,7 @@ export const useConversationStore = defineStore('conversation', () => {
             if (result.healRounds !== undefined) formattedData.healRounds = result.healRounds
             if (result.executeDurationMs !== undefined) formattedData.executeDurationMs = result.executeDurationMs
             if (result.chartDegraded !== undefined) formattedData.chartDegraded = result.chartDegraded
+            if (result.persistWarnings?.length) formattedData.persistWarnings = result.persistWarnings
             if (result.retrievalDegraded !== undefined) formattedData.retrievalDegraded = result.retrievalDegraded
             if (result.truncated !== undefined) formattedData.truncated = result.truncated
             if (result.tables !== undefined) formattedData.tables = result.tables

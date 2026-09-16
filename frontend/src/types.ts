@@ -122,6 +122,7 @@ export interface SSEResult {
   executeDurationMs?: number         // SQL 执行耗时(毫秒)
   chartDegraded?: boolean            // 图表是否降级(规则推断)
   retrievalDegraded?: boolean        // 检索是否降级(结果可能不精确)
+  persistWarnings?: string[]         // 持久化降级提示(记忆/经验未沉淀等, 非阻断)
   truncated?: boolean                // 结果是否被行数上限截断
   tables?: string[]                  // 本次查询涉及的表
   // M4 保存查询定位(加到看板/导出 CSV 直接引用)
