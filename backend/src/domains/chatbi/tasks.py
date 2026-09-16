@@ -164,6 +164,8 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         # 向量索引重建 (对标 _run_scan_background 尾部 rebuild_index;
         # 失败降级不阻塞——RAG 检索可用全表降级路径)
         indexed = 0
+        index_status = "ok"
+        index_warning = None
         try:
             from domains.chatbi import indexing, stores
             store = stores.get_vector(app_state)
@@ -174,12 +176,18 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             indexed = rb.indexed_count
         except Exception as e:
             logger.warning("向量索引重建失败(降级, 不阻塞扫描): %s", e)
+            index_status = "degraded"
+            index_warning = f"扫描完成但索引重建失败——RAG 检索将降级, 重扫可修复: {str(e)[:120]}"
+            handle.log(index_warning)
         datasources.update_datasource(
             db, ds_id, scan_status="done", scan_progress=100,
             scan_stage=f"完成: {len(content.models)} 张表, 索引 {indexed} 条",
             scanned_at=_now_iso())
-        handle.log(f"扫描完成: {len(content.models)} 张表, 向量索引 {indexed} 条")
+        handle.log(f"扫描完成: {len(content.models)} 张表, 向量索引 {indexed} 条"
+                   + (" (索引降级)" if index_status != "ok" else ""))
         return {"models": len(content.models), "indexed": indexed,
+                "index_rebuild": index_status,
+                **({"index_warning": index_warning} if index_warning else {}),
                 "datasource_id": ds_id}
     except Exception as e:
         datasources.update_datasource(db, ds_id, scan_status="failed",
@@ -289,22 +297,44 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 datasource_id=info.id, persist=False)
             merged = _merge_content(current, new_content)
             version = semantic.save_content(db, info.id, merged, source="refresh")
-            _evolve_graph(db, info.id, merged, app_state=app_state)
-            # 落了新版本 → 重建索引(I1: 版本与索引不漂移)
+            evolve = _evolve_graph(db, info.id, merged, app_state=app_state)
+            # 六审 P1.C 修复: 演化可能写出 v+2/v+3——最终索引必须对齐
+            # 演化后的 current, 不再用演化前的 merged 覆盖(旧关系内容)
+            from domains.chatbi import semantic as _sem
+            final_content = _sem.load_current_content(db, info.id) or merged
+            final_version = version
+            try:
+                with db.connect() as conn:
+                    row = conn.execute(
+                        "SELECT version FROM chatbi_semantic_models "
+                        "WHERE data_source_id = ? AND is_current = 1",
+                        (info.id,)).fetchone()
+                    if row:
+                        final_version = row["version"]
+            except Exception:
+                pass
+            index_status = "ok"
+            index_warning = None
             try:
                 from domains.chatbi import stores as cb_stores
                 llm = runtime.get_llm(app_state) if app_state else None
                 if llm is not None:
                     _rb = indexing.rebuild_index(
-                        content=merged, data_source_id=info.id,
+                        content=final_content, data_source_id=info.id,
                         store=cb_stores.get_vector(app_state),
                         embedder=cb_stores.get_embedder(llm), db=db)
                     if _rb is not None and getattr(_rb, "error", None):
                         raise RuntimeError(f"索引重建失败: {_rb.error}")
+                else:
+                    index_status = "skipped"
             except Exception as e:
                 logger.warning("刷新后索引重建失败(降级, 手动重扫可修复): %s", e)
-            results.append({"datasource_id": info.id, "version": version,
-                            "models": len(merged.models), "ok": True})
+                index_status = "degraded"
+                index_warning = f"语义已写 v{final_version}, 索引落后——手动重扫可修复"
+            results.append({"datasource_id": info.id, "version": final_version,
+                            "models": len(final_content.models), "ok": True,
+                            "index_rebuild": index_status,
+                            **({"index_warning": index_warning} if index_warning else {})})
         except Exception as e:
             logger.warning("自动刷新失败 %s: %s", info.name, e)
             results.append({"datasource_id": info.id, "ok": False, "error": str(e)[:200]})
@@ -439,16 +469,24 @@ def _graph_sync_targets(store, result: dict, data_source_id=None) -> set:
     return targets
 
 
-def _evolve_graph(db, datasource_id: str, content, app_state=None) -> None:
+def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
     """图谱置信度演化 (SEM-003;graph_infer 移植栈的接线点):
     查询历史(fewshot 示例 SQL) → 频繁 JOIN 表对挖掘 → confidence 提升 →
     乐观锁写回语义层新版本。
 
-    app_state: 索引重建回调需要(向量 store/embedder 构造);None 时
-    演化仍执行, 只是不重建索引。"""
+    六审 P1 重构: 两类信号(linkage + implicit)不再各自独立写版本——
+    先聚合到同一 current 快照, 一次乐观锁写入; 索引重建由调用方在
+    演化完成后统一执行(用最终 current, 不再用演化前的旧内容)。
+
+    Returns:
+        {"versions_written": int, "index_rebuild": str}
+    """
     from domains.chatbi.graph_infer import (mine_implicit_relationships,
                                             apply_confidence_updates,
                                             sync_linkage_to_graph)
+    from domains.chatbi import semantic as semantic_mod
+    result = {"versions_written": 0, "index_rebuild": "skipped"}
+
     try:
         from domains.chatbi import stores as cb_stores
         history = [row["sql"] for row in
@@ -456,47 +494,89 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> None:
                    if row.get("sql")]
     except Exception as e:
         logger.warning("查询历史读取失败(跳过演化): %s", e)
-        return
-    existing = [r for m in content.models for r in m.relationships]
+        return result
 
-    # ── linkage 反哺先行: 不依赖 implicit mining 是否有产出 ──
-    # 查询沉淀的 linkage 共现达到阈值就应 boost/建边;此前 sync 藏在
-    # suggestions 非空的分支里——没有 SQL 挖掘建议时已积累的 linkage
-    # 永远不同步(闭环断点, 复核报告 P0)。
-    try:
-        from domains.chatbi.memory import get_memory_store
-        from domains.chatbi.graph_infer import sync_linkage_to_graph
-        sync_res = sync_linkage_to_graph(
-            db, get_memory_store(db), datasource_id,
-            rebuild_index=_make_index_rebuilder(app_state, datasource_id),
-            **_linkage_sync_kwargs(app_state))
-        if sync_res:
-            logger.info("linkage 图谱同步: %s (ds=%s)", sync_res, datasource_id)
-    except Exception as e:
-        logger.warning("linkage 图谱同步失败(降级): %s", e)
+    # ── 聚合信号: linkage 共现 + implicit mining, 基于同一 current ──
+    # 六审 P1.B: 此前 linkage 写完新版本后, implicit 仍用旧 existing
+    # 计算——可能把刚提升的 confidence 写低。现在先取 linkage 的
+    # 目标值, 再取 implicit 建议, 合并后一次写入。
+    from domains.chatbi.memory import get_memory_store
+    from domains.chatbi.graph_infer import (linkage_memories_to_cooccurrence,
+                                            _compute_confidence_updates,
+                                            _discover_new_pairs)
+    from domains.chatbi.graph_core import (GRAPH_LINKAGE_CO_OCCURRENCE_THRESHOLD,
+                                           GRAPH_LINKAGE_NEW_PAIR_THRESHOLD,
+                                           GRAPH_LINKAGE_CONFIDENCE_BOOST,
+                                           GRAPH_FEEDBACK_DISCOVER_NEW_PAIRS)
+    kwargs = _linkage_sync_kwargs(app_state)
+    cooccurrence = linkage_memories_to_cooccurrence(
+        get_memory_store(db), datasource_id)
 
+    # 重载 current(不依赖调用方传入的 content——可能已过时)
+    current_content = semantic_mod.load_current_content(db, datasource_id)
+    if current_content is None:
+        return result
+    existing = [r for m in current_content.models for r in m.relationships]
+
+    # 合并两类信号到统一 updates/new_pairs(同快照)
+    all_updates: dict = {}
+    all_new_pairs: list = []
+
+    # 信号 1: linkage 共现 → 确定性目标值
+    if cooccurrence:
+        link_updates = _compute_confidence_updates(
+            cooccurrence=cooccurrence,
+            existing_relationships=existing,
+            co_occurrence_threshold=kwargs["co_occurrence_threshold"],
+            confidence_boost=kwargs["confidence_boost"])
+        all_updates.update(link_updates)
+        if kwargs["discover_new_pairs"]:
+            all_new_pairs.extend(_discover_new_pairs(
+                cooccurrence=cooccurrence,
+                existing_relationships=existing,
+                new_pair_threshold=kwargs["new_pair_threshold"]))
+
+    # 信号 2: implicit mining(历史 SQL) → 绝对值建议
     suggestions = mine_implicit_relationships(history, existing)
-    if not suggestions:
-        return
-    # 乐观锁: 先读当前 is_current 版本号, 传入 expected_version 防并发写冲突
-    # (走查发现的差距——原系统有, pack 此前未启用)
+    if suggestions:
+        for sug in suggestions:
+            pair = (sug.get("from_table"), sug.get("to_table"))
+            conf = sug.get("confidence", 0)
+            if pair in all_updates:
+                all_updates[pair] = max(all_updates[pair], conf)  # 取高不取低
+            else:
+                all_updates[pair] = conf
+
+    if not all_updates and not all_new_pairs:
+        return result  # 无新证据 → 不写版本(幂等)
+
+    # 乐观锁: 读当前版本号
     current_version = None
     try:
         with db.connect() as conn:
             row = conn.execute(
                 "SELECT version FROM chatbi_semantic_models "
-                "WHERE data_source_id = ? AND is_current = 1", (datasource_id,)).fetchone()
+                "WHERE data_source_id = ? AND is_current = 1",
+                (datasource_id,)).fetchone()
             current_version = row["version"] if row else None
     except Exception as e:
         logger.warning("乐观锁版本读取失败(降级为不校验): %s", e)
-    # C2 修复: 正确签名 (db, data_source_id, updates, new_pairs, expected_version)
-    # — content 之前落到 updates 位、suggestions 落到 new_pairs 位(参数错位同 B2)
-    updates = apply_confidence_updates(
-        db, datasource_id, suggestions,
-        expected_version=current_version,
-        rebuild_index=_make_index_rebuilder(app_state, datasource_id))
-    if updates:
-        logger.info("图谱演化: %s (ds=%s)", updates, datasource_id)
+
+    # 不传 rebuild_index——索引由调用方在全部演化完成后统一重建(六审P1.C)
+    try:
+        apply_confidence_updates(
+            db, datasource_id, all_updates,
+            new_pairs=all_new_pairs or None,
+            expected_version=current_version)
+        result["versions_written"] = 1
+        result["index_rebuild"] = "deferred"  # 调用方负责最终重建
+        logger.info("图谱演化: %d updates, %d new_pairs (ds=%s)",
+                    len(all_updates), len(all_new_pairs), datasource_id)
+    except Exception as e:
+        # 乐观锁冲突 = 有更新写入, 安全失败不覆盖
+        logger.warning("图谱演化写入失败(可能版本冲突): %s", e)
+        result["index_rebuild"] = "conflict"
+    return result
 
 
 def _connect_info(info) -> dict:

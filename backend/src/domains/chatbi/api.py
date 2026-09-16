@@ -300,6 +300,7 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
                 raise HTTPException(422, f"指标 {metric.name} 公式非法: {errors[0]}")
     ver = semantic.save_content(_db(), ds_id, content, source="manual")
     # 人工校正后重建向量索引(源 semantic_models.py:345-362;失败降级不阻塞)
+    index_rebuilt, index_warning = True, None
     try:
         from domains.chatbi import indexing
         from domains.chatbi.llm_compat import LLMCompat
@@ -310,9 +311,11 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
             raise RuntimeError(f"索引重建失败: {_rb.error}")
     except Exception as e:
         logger.warning("人工校正后索引重建失败(降级): %s", e)
+        index_rebuilt, index_warning = False, f"语义已保存 v{ver}, 索引落后——重扫可修复"
     _audit(request, "semantic", "update", resource_id=ds_id,
-           detail={"version": ver})
-    return {"ok": True, "version": ver}
+           detail={"version": ver, "index_rebuilt": index_rebuilt})
+    return {"ok": True, "version": ver, "index_rebuilt": index_rebuilt,
+            **({"warning": index_warning} if index_warning else {})}
 
 
 @router.get("/semantic-diff", dependencies=[Depends(admin_required)])
@@ -351,6 +354,7 @@ async def semantic_rollback(ds_id: str, version: int, request: Request):
     except ValueError as e:
         raise HTTPException(404, str(e))
     # 回滚后重建索引(源 semantic_models.py:196-214;失败降级不阻塞)
+    index_rebuilt, index_warning = True, None
     try:
         from domains.chatbi import indexing
         from domains.chatbi.llm_compat import LLMCompat
@@ -361,9 +365,12 @@ async def semantic_rollback(ds_id: str, version: int, request: Request):
             raise RuntimeError(f"索引重建失败: {_rb.error}")
     except Exception as e:
         logger.warning("回滚后索引重建失败(降级): %s", e)
+        index_rebuilt, index_warning = False, f"已回滚到 v{ver}, 索引落后——重扫可修复"
     _audit(request, "semantic", "rollback", resource_id=ds_id,
-           detail={"from_version": version, "new_version": ver})
-    return {"ok": True, "version": ver}
+           detail={"from_version": version, "new_version": ver,
+                   "index_rebuilt": index_rebuilt})
+    return {"ok": True, "version": ver, "index_rebuilt": index_rebuilt,
+            **({"warning": index_warning} if index_warning else {})}
 
 
 # ── 查询质量可观测(BI 维度; 复核报告 P1) ─────────────────────
@@ -751,6 +758,13 @@ class BackfillScopeIn(BaseModel):
     """存量无归属记忆批量归属(四审 5.3 一次性迁移工具)。"""
     data_source_id: str                  # 目标数据源(须真实存在)
     memory_ids: list[str] | None = None  # 指定记忆;None=全部无归属记忆
+
+
+@router.get("/memories/orphan-count", dependencies=[Depends(admin_required)])
+async def orphan_count():
+    """无归属记忆精确计数(六审 P3: 前端 limit=500 统计有偏差)。"""
+    from domains.chatbi import memory
+    return {"count": memory.count_orphan_memories(_db())}
 
 
 @router.post("/memories/backfill-scope", dependencies=[Depends(admin_required)])

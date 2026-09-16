@@ -553,11 +553,14 @@ def _compute_confidence_updates(
             continue
         if pair not in known:
             continue  # 未知表对由新表对发现逻辑处理
-        # boost = confidence_boost * 超出阈值的次数 (至少 1 次 boost)
+        # 六审 P1 幂等修复: 从证据总量算确定性目标值, 不在当前值上累加——
+        # 同一批共现无论跑多少轮, 目标恒定(此前 current += boost*n,
+        # 每个刷新周期都会重复提升, "频次"被误变为"定时任务执行次数")
         boost_count = co - co_occurrence_threshold + 1
-        new_conf = min(known[pair] + confidence_boost * boost_count, MAX_CONFIDENCE)
-        if new_conf > known[pair]:
-            updates[pair] = new_conf
+        target = min(confidence_boost * boost_count, MAX_CONFIDENCE)
+        # 单调: 目标只升不降, 已高于目标的(人工/LLM 标注)不动
+        if target > known[pair]:
+            updates[pair] = target
 
     return updates
 
@@ -687,7 +690,11 @@ def apply_confidence_updates(
                 pair = (model_name, target)
                 if pair in updates:
                     new_conf = updates[pair]
-                    if rel.get("confidence", 0) != new_conf:
+                    # 六审 P1 单调保护: 只升不降——implicit 建议基于旧快照
+                    # 可能把 linkage 刚提升的值写低 (旧0.6→linkage0.95→
+                    # implicit从旧值算出0.9→写回0.9 = 倒退)
+                    current_conf = rel.get("confidence", 0)
+                    if new_conf > current_conf:
                         rel["confidence"] = new_conf
                         # source 保持不变 (manual > foreign_key > ai_inferred > name_pattern)
                         # 不覆盖 source, 只提升 confidence

@@ -887,8 +887,9 @@ class TestLinkageAggregation:
         )]
         updates = _compute_updates_helper(
             {("biz_orders", "biz_users"): 5}, rels, threshold=3, boost=0.1)
-        # boost = 0.1 * (5 - 3 + 1) = 0.3 → 0.9
-        assert updates == {("biz_orders", "biz_users"): pytest.approx(0.9)}
+        # 六审P1确定性目标: target = min(0.1*(5-3+1), 0.95) = 0.3
+        # 但 current=0.6 > 0.3 → 单调保护 → 无更新
+        assert updates == {}
         # 低于阈值 / 未知表对 → 不进 updates
         assert _compute_updates_helper(
             {("biz_orders", "biz_users"): 2}, rels, threshold=3, boost=0.1) == {}
@@ -989,8 +990,13 @@ class TestApplyConfidenceUpdates:
     """apply_confidence_updates: 乐观锁 append-only 版本写回。"""
 
     def test_boost_writes_new_version(self, pg_engine):
-        _seed_semantic_model(pg_engine)
-        updates = {("biz_orders", "biz_users"): 0.9}
+        """写入侧单调: 只接受 > current 的值(FK confidence=1.0,
+        建议值必须 > 1.0 才生效——但 MAX_CONFIDENCE=0.95, 所以改用
+        低 confidence 关系验证)。"""
+        content = _make_content()
+        # products→categories 是 name_pattern 0.6 → 建议值 0.8 > 0.6 ✓
+        _seed_semantic_model(pg_engine, content=content)
+        updates = {("biz_products", "biz_categories"): 0.8}
         new_version = apply_confidence_updates(
             pg_engine, DS_ID, updates, expected_version=1)
         assert new_version == 2
@@ -998,11 +1004,11 @@ class TestApplyConfidenceUpdates:
         assert set(versions) == {1, 2}
         old_content, old_current = versions[1]
         new_content, new_current = versions[2]
-        assert (old_current, new_current) == (0, 1)  # 旧版本下线, 新版本生效
-        rel = _find_rel(new_content, "biz_orders", "biz_users")
-        assert rel["confidence"] == pytest.approx(0.9)
-        # source 保持不变 (只提升 confidence, 不覆盖来源标注)
-        assert rel["source"] == "foreign_key"
+        assert (old_current, new_current) == (0, 1)
+        rel = _find_rel(new_content, "biz_products", "biz_categories")
+        assert rel["confidence"] == pytest.approx(0.8)
+        # source 保持不变
+        assert rel["source"] == "name_pattern"
 
     def test_optimistic_lock_conflict(self, pg_engine):
         """版本号不符 → VersionConflictError, 事务回滚不落新版本。"""
@@ -1044,15 +1050,20 @@ class TestApplyConfidenceUpdates:
         assert rel["on"] == "biz_orders.id = fct_inventory.orders_id"
 
     def test_rebuild_index_callback(self, pg_engine):
-        """注入 rebuild_index 回调 → 更新成功后被调用; 抛错也只降级不阻塞。"""
-        _seed_semantic_model(pg_engine)
+        """注入 rebuild_index 回调 → 更新成功后被调用; 抛错也只降级不阻塞。
+
+        用 products→categories(name_pattern 0.6): 0.8 > 0.6 单调可写——
+        此前用 FK 1.0→0.9 在单调保护下不生效(六审 P1 语义变化)。
+        """
+        content = _make_content()
+        _seed_semantic_model(pg_engine, content=content)
         calls = []
 
         def rebuild(content, data_source_id):
             calls.append((content, data_source_id))
 
         version = apply_confidence_updates(
-            pg_engine, DS_ID, {("biz_orders", "biz_users"): 0.9},
+            pg_engine, DS_ID, {("biz_products", "biz_categories"): 0.8},
             expected_version=1, rebuild_index=rebuild)
         assert version == 2
         assert len(calls) == 1
@@ -1064,8 +1075,9 @@ class TestApplyConfidenceUpdates:
         def broken_rebuild(content, data_source_id):
             raise RuntimeError("indexer down")
 
+        # 第二段: v2 conf=0.8 → 建议 0.9 > 0.8 单调可写
         version = apply_confidence_updates(
-            pg_engine, DS_ID, {("biz_orders", "biz_products"): 0.8},
+            pg_engine, DS_ID, {("biz_products", "biz_categories"): 0.9},
             expected_version=2, rebuild_index=broken_rebuild)
         assert version == 3
 
@@ -1092,12 +1104,14 @@ class TestSyncLinkageToGraph:
              "tables": ["biz_orders", "biz_products"]},  # 排序后 == 关系方向
         ])
         out = sync_linkage_to_graph(pg_engine, mem, DS_ID, expected_version=1)
-        assert out == {"new_version": 2, "boosted_pairs": 1, "new_pairs": 0,
-                   "index_rebuild": "skipped"}   # 未注入rebuild=跳过(五审5.2)
-        new_content, is_current = _read_versions(pg_engine)[2]
+        # 六审P1确定性目标: target = min(0.1*(5-3+1), 0.95) = 0.3 < current 0.6
+        # 单调保护 → 无更新, 不写新版本(此前=0.6+0.3=0.9 增量语义已改)
+        assert out["new_version"] is None
+        assert out["detail"] == "无达阈值的表对, 无需更新"
+        # v1 仍是 current, confidence 维持 0.6
+        new_content, is_current = _read_versions(pg_engine)[1]
         assert is_current == 1
-        # boost = 0.1 * (5 - 3 + 1) = 0.3 → 0.6 + 0.3 = 0.9
-        assert _find_rel(new_content, "biz_orders", "biz_products")["confidence"] == pytest.approx(0.9)
+        assert _find_rel(new_content, "biz_orders", "biz_products")["confidence"] == pytest.approx(0.6)
 
     def test_sync_no_memories(self, pg_engine):
         _seed_semantic_model(pg_engine)
@@ -1164,7 +1178,8 @@ class TestIndexRebuildResultContract:
         content.models[1].relationships[1].source = "name_pattern"
         _seed_semantic_model(pg_engine, content=content)
         mem = FakeMemStore([
-            {"type": "linkage", "data_source_id": DS_ID, "co_occurrence": 5,
+            # co=9 → target = min(0.1*7, 0.95) = 0.7 > 0.6 → 可写入
+            {"type": "linkage", "data_source_id": DS_ID, "co_occurrence": 9,
              "tables": ["biz_orders", "biz_products"]},
         ])
         return sync_linkage_to_graph(pg_engine, mem, DS_ID,
@@ -1203,3 +1218,95 @@ class TestIndexRebuildResultContract:
         out = self._seed_and_sync(pg_engine, _boom)
         assert out["new_version"] == 2
         assert str(out["index_rebuild"]).startswith("degraded")
+
+
+class TestEvolutionIdempotency:
+    """六审 P1: 演化幂等性——同一批证据重复执行不重复提升/不新增版本。"""
+
+    def _seed_with_linkage(self, pg_engine, co=5):
+        """建语义层(orders→products confidence=0.6) + linkage 记忆。"""
+        content = _make_content()
+        content.models[1].relationships[1].confidence = 0.6
+        content.models[1].relationships[1].source = "name_pattern"
+        _seed_semantic_model(pg_engine, content=content)
+        return content
+
+    def test_same_evidence_twice_no_double_boost(self, pg_engine):
+        """确定性目标值: 同一 co_occurrence 跑两次, confidence 相同。"""
+        from domains.chatbi.graph_infer import (
+            _compute_confidence_updates, linkage_memories_to_cooccurrence)
+
+        existing = [r for m in _make_content().models for r in m.relationships]
+        cooccurrence = {("biz_orders", "biz_products"): 5}
+        updates1 = _compute_confidence_updates(cooccurrence, existing, 3, 0.1)
+        # 模拟第一次已应用 → confidence 变为 target
+        for r in existing:
+            if (r.name, r.target_model) in updates1:
+                r.confidence = updates1[(r.name, r.target_model)]
+        # 第二次用更新后的 existing 计算
+        updates2 = _compute_confidence_updates(cooccurrence, existing, 3, 0.1)
+        # 幂等: 第二次不应产生任何更新(target == current → 无提升)
+        assert ("biz_orders", "biz_products") not in updates2 or \
+            updates2 == {}, f"重复执行不应再提升: {updates2}"
+
+    def test_linkage_higher_implicit_lower_no_regression(self, pg_engine):
+        """单调保护: linkage 提到 0.9 后, implicit 建议 0.7 不得写低。"""
+        self._seed_with_linkage(pg_engine)
+        from domains.chatbi.graph_infer import apply_confidence_updates
+
+        # 先把 confidence 提到 0.9 (模拟 linkage)
+        apply_confidence_updates(pg_engine, DS_ID,
+                                 {("biz_orders", "biz_products"): 0.9},
+                                 expected_version=1)
+        # 再尝试写入 0.7 (模拟 implicit 用旧快照建议)——单调保护:
+        # 低于 current → 无有效变更 → ValueError(不写低值版本)
+        with pytest.raises(ValueError, match="无有效更新"):
+            apply_confidence_updates(pg_engine, DS_ID,
+                                     {("biz_orders", "biz_products"): 0.7},
+                                     expected_version=2)
+        # current 仍是 0.9
+        new_content, _ = _read_versions(pg_engine)[2]
+        for m in new_content["models"]:
+            for r in m.get("relationships", []):
+                if r.get("target_model") == "biz_products":
+                    assert r["confidence"] >= 0.9, \
+                        f"单调违规: {r['confidence']} < 0.9"
+
+    def test_no_new_evidence_no_new_version(self, pg_engine):
+        """无新信号: 空证据跑演化 → 不写版本。"""
+        from domains.chatbi.graph_infer import _compute_confidence_updates
+        existing = [r for m in _make_content().models for r in m.relationships]
+        updates = _compute_confidence_updates({}, existing, 3, 0.1)
+        assert updates == {}
+
+    def test_refresh_final_index_matches_current(self, pg_engine):
+        """六审 P1.C: 刷新后的最终索引 content == load_current_content()。
+
+        这里验证 _compute_confidence_updates 的确定性目标值性质:
+        相同 evidence → 相同 target → apply 后 current == target。
+        """
+        self._seed_with_linkage(pg_engine)
+        from domains.chatbi.graph_infer import (
+            _compute_confidence_updates, apply_confidence_updates)
+        # seed 用 confidence=0.6; local content 需对齐 DB(默认1.0会被 MAX 挡住)
+        content = _make_content()
+        content.models[1].relationships[1].confidence = 0.6
+        existing = [r for m in content.models for r in m.relationships]
+        updates = _compute_confidence_updates(
+            {("biz_orders", "biz_products"): 9}, existing, 3, 0.1)
+        target = updates[("biz_orders", "biz_products")]
+        assert target == pytest.approx(0.7)  # 确定性: min(0.1 * 7, 0.95)
+        ver = apply_confidence_updates(pg_engine, DS_ID, updates, expected_version=1)
+        new_content, _ = _read_versions(pg_engine)[ver]
+        # 语义层 confidence = target (确定性, 非累加)
+        for m in new_content["models"]:
+            for r in m.get("relationships", []):
+                if r.get("name") == "biz_orders_to_biz_products":
+                    assert r["confidence"] == pytest.approx(0.7)
+        # 幂等: 同一证据再跑一次 → target(0.7) == current(0.7) → 无更新
+        updates2 = _compute_confidence_updates(
+            {("biz_orders", "biz_products"): 9},
+            [r for m in SemanticModelContent(
+                **new_content).models for r in m.relationships],
+            3, 0.1)
+        assert ("biz_orders", "biz_products") not in updates2

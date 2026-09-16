@@ -169,8 +169,9 @@ const orphanCount = ref(0)
 const orphanTarget = ref('')   // 弹窗里选的目标库
 
 function loadOrphanCount() {
-  chatbiApi.get('/memories', { params: { limit: 500 } }).then(({ data }) => {
-    orphanCount.value = (data.items || []).filter((m: any) => !m.data_source_id).length
+  // 服务端精确 COUNT(六审 P3: 前端 limit=500 统计有上限偏差)
+  chatbiApi.get('/memories/orphan-count').then(({ data }) => {
+    orphanCount.value = data.count || 0
   }).catch(() => { /* 静默 */ })
 }
 

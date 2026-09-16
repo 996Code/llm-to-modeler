@@ -1023,6 +1023,17 @@ def _consolidate_group(llm, store, group_memories, user_id, data_source_id) -> i
     return saved
 
 
+def count_orphan_memories(db) -> int:
+    """无归属(data_source_id IS NULL)记忆总数(管理端归属工具显示用;
+    六审 P3: 前端 limit=500 统计有上限偏差, 服务端 COUNT 精确)。"""
+    _ensure_schema(db)
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM chatbi_agent_memories "
+            "WHERE data_source_id IS NULL").fetchone()
+        return int(row["c"])
+
+
 def backfill_memory_scope(
     db,
     data_source_id: str,
