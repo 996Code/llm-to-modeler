@@ -928,6 +928,11 @@ class AskDataTool(CompositeTool):
         self.run_pipeline(state, ctx)
         state["_total_duration_ms"] = int((time.time() - state["_pipeline_start"]) * 1000)
         result = state.get("_result")
+        # 总耗时回填: _step_finalize 在管线内构建 formatted 时
+        # _total_duration_ms 尚未算出(定格为 0)——此处补写真实值,
+        # 否则前端明细行永远显示"总耗时 0.0s"。
+        if result is not None and isinstance(getattr(result, "formatted", None), dict):
+            result.formatted["totalDurationMs"] = state["_total_duration_ms"]
         # ── 查询质量统计(BI 维度可观测, 复核报告 P1) ──
         # 三路径统一采集: ok(正常完成) / error(执行失败) / ask(挂起澄清)。
         # fail-open(record_query 内部吞异常), 统计故障不拖垮查询。

@@ -8,9 +8,6 @@
       <a-tag v-if="metricHits.length > 5" color="default">+{{ metricHits.length - 5 }}</a-tag>
     </div>
 
-    <!-- 对话内明细(独立展示, 不参与图表类型链) -->
-    <div v-if="detailLine" class="detail-line">{{ detailLine }}</div>
-
     <!-- 持久化降级提示: 查询成功但记忆/经验未沉淀(非阻断, 结果不受影响) -->
     <div v-if="persistWarningLine" class="persist-warn">
       ⚠ 部分经验未保存: {{ persistWarningLine }}
@@ -39,6 +36,9 @@
 
     <!-- ECharts 标准图表(pie/bar/line/scatter) -->
     <div v-else ref="chartEl" class="chart-el" :style="{ height: chartHeight }" />
+
+    <!-- 对话内明细(卡片右下角小字: 耗时/自愈/降级/LLM 用量) -->
+    <div v-if="detailLine" class="detail-line">{{ detailLine }}</div>
   </div>
 </template>
 
@@ -133,7 +133,10 @@ onBeforeUnmount(() => {
 <style scoped>
 .bi-chart-card { width: 100%; }
 .metric-hits { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
-.detail-line { color: #999; font-size: 12px; margin-bottom: 8px; }
+.detail-line {
+  color: #999; font-size: 12px;
+  margin-top: 6px; text-align: right;   /* 卡片右下角小字 */
+}
 .persist-warn { color: #d46b08; font-size: 12px; margin-bottom: 8px; }
 .kpi-view { text-align: center; padding: 18px 0; }
 .kpi-value { font-size: 40px; font-weight: 700; color: #1677ff; }

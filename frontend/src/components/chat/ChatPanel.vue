@@ -866,13 +866,40 @@ watch(() => store.streaming, (busy, was) => {
   }).catch(() => { /* 链路拉取失败静默——token 展示是增强, 不影响主流程 */ })
 })
 
-// 切换会话: 全量拉一次 trace 重算累计(历史轮次的 token 不丢)
+// 切换会话: 全量拉一次 trace 重算累计(历史轮次的 token 不丢),
+// 并把各轮的 LLM 用量/总耗时回填到对应消息——轮末回填只在内存,
+// 刷新后历史消息的明细行(右下角耗时·LLM×N·token)靠这里恢复。
 watch(() => store.currentConversation?.id, (convId) => {
   convTokens.value = 0
   if (!convId) return
   getConversationTrace(convId).then(({ turns }) => {
-    convTokens.value = (turns || []).reduce(
+    const list = turns || []
+    convTokens.value = list.reduce(
       (s, t) => s + (t.promptTokens || 0) + (t.completionTokens || 0), 0)
+    // 轮 ↔ 消息对应: 第 idx 轮 = 第 idx+1 个 user 消息之后的首个 assistant
+    let turnIdx = 0
+    let pendingUser = false
+    for (const m of store.messages as any[]) {
+      if (m.role === 'user') {
+        if (pendingUser) turnIdx += 1   // 连续 user(未答)跳过一轮槽位
+        pendingUser = true
+        continue
+      }
+      if (m.role === 'assistant' && pendingUser) {
+        pendingUser = false
+        const t = list[turnIdx]
+        if (t && m.formattedData) {
+          m.formattedData.llmCallCount = t.llmCallCount ?? 0
+          m.formattedData.promptTokens = t.promptTokens ?? 0
+          m.formattedData.completionTokens = t.completionTokens ?? 0
+          // 轮内明细此前只在轮末内存回填, 历史消息无值——用 trace 的
+          // wallMs 兜底(总耗时), 让明细行刷新后仍完整
+          if (m.formattedData.totalDurationMs === undefined && t.wallMs != null) {
+            m.formattedData.totalDurationMs = t.wallMs
+          }
+        }
+      }
+    }
   }).catch(() => { /* 静默 */ })
 })
 </script>
