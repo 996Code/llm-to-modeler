@@ -62,14 +62,20 @@ def _start_refresh_scheduler(manager, app_state) -> None:
 
     def _loop():
         # 双周期任务: 元数据刷新(metadata_refresh_hours, 缺省 6h, 0=关) +
-        # 健康巡检(5min, 对标源 APScheduler datasource_health 间隔)。
-        # 周期每轮重读设置(管理端热改即时生效);检查间隔取 5min 粒度。
+        # 健康巡检(health_check_interval_seconds, 缺省 5min, 对标源
+        # APScheduler datasource_health 间隔)。周期每轮重读设置(管理端
+        # 热改即时生效);检查粒度取 30s 轮询。
         _loop._last_refresh = _now_ts()   # 启动即视为已刷新(避免重启风暴)
         _loop._last_health = 0.0
-        while not _refresh_stop.wait(300):
+        while not _refresh_stop.wait(30):
             now = _now_ts()
-            # 健康巡检: 固定 5min(源 scheduler.py:94-102 同款间隔)
-            if now - _loop._last_health >= 300:
+            # 健康巡检: 设置周期(缺省 300s)
+            try:
+                health_iv = int(_load_settings(app_state)
+                                .get("health_check_interval_seconds", 300))
+            except Exception:
+                health_iv = 300
+            if health_iv > 0 and now - _loop._last_health >= health_iv:
                 _loop._last_health = now
                 try:
                     from domains.chatbi import datasources as ds_mod
@@ -97,7 +103,7 @@ def _start_refresh_scheduler(manager, app_state) -> None:
     _refresh_thread = threading.Thread(target=_loop, name="chatbi-metadata-refresh",
                                        daemon=True)
     _refresh_thread.start()
-    logger.info("chatbi scheduler started: health 5min + metadata refresh (from settings)")
+    logger.info("chatbi scheduler started: health (from settings) + metadata refresh (from settings)")
 
 
 def _now_ts() -> float:
@@ -211,7 +217,8 @@ def _task_consolidate_memories(handle, app_state=None, data_source_id=None) -> d
             from domains.chatbi.graph_infer import sync_linkage_to_graph
             res = sync_linkage_to_graph(
                 db, get_memory_store(db), ds_id,
-                rebuild_index=_make_index_rebuilder(app_state, ds_id))
+                rebuild_index=_make_index_rebuilder(app_state, ds_id),
+                **_linkage_sync_kwargs(app_state))
             handle.log(f"linkage 图谱同步完成 (ds={ds_id[:8]}…): {res}")
             graph_sync.append({"data_source_id": ds_id, "ok": True, "result": res})
         except Exception as e:
@@ -348,6 +355,25 @@ def _make_index_rebuilder(app_state, datasource_id: str):
     return _rebuild
 
 
+def _linkage_sync_kwargs(app_state) -> dict:
+    """linkage→图谱同步的阈值参数(设置页 > graph_core 默认常量)。
+
+    复核报告 P2: 共现阈值/新表对阈值/置信度增量/发现开关原先硬编码
+    常量, 不同数据规模只能改代码——统一收敛到设置链。
+    """
+    s = _load_settings(app_state)
+    return {
+        "co_occurrence_threshold": int(s.get(
+            "graph_linkage_co_occurrence_threshold", 3)),
+        "new_pair_threshold": int(s.get(
+            "graph_linkage_new_pair_threshold", 5)),
+        "confidence_boost": float(s.get(
+            "graph_linkage_confidence_boost", 0.1)),
+        "discover_new_pairs": bool(s.get(
+            "graph_linkage_discover_new_pairs", True)),
+    }
+
+
 def _evolve_graph(db, datasource_id: str, content, app_state=None) -> None:
     """图谱置信度演化 (SEM-003;graph_infer 移植栈的接线点):
     查询历史(fewshot 示例 SQL) → 频繁 JOIN 表对挖掘 → confidence 提升 →
@@ -377,7 +403,8 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> None:
         from domains.chatbi.graph_infer import sync_linkage_to_graph
         sync_res = sync_linkage_to_graph(
             db, get_memory_store(db), datasource_id,
-            rebuild_index=_make_index_rebuilder(app_state, datasource_id))
+            rebuild_index=_make_index_rebuilder(app_state, datasource_id),
+            **_linkage_sync_kwargs(app_state))
         if sync_res:
             logger.info("linkage 图谱同步: %s (ds=%s)", sync_res, datasource_id)
     except Exception as e:

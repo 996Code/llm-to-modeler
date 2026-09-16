@@ -353,6 +353,97 @@ async def semantic_rollback(ds_id: str, version: int, request: Request):
     return {"ok": True, "version": ver}
 
 
+# ── 查询质量可观测(BI 维度; 复核报告 P1) ─────────────────────
+
+def _slow_ms(request: Request) -> int:
+    """慢查询阈值(设置页可调, 缺省 10s 对标源 config.sql_slow_query_threshold)。"""
+    from sdk.pack_api import settings_reader
+    try:
+        return int(settings_reader(request.app.state, "chatbi")
+                   .get("slow_query_ms", 10_000))
+    except Exception:
+        return 10_000
+
+
+@router.get("/datasources/{ds_id}/metrics", dependencies=[Depends(admin_required)])
+async def datasource_metrics_ep(ds_id: str, request: Request):
+    """单数据源查询质量指标 + 慢查询 top + 依赖健康。
+
+    指标: 查询数/平均与最大耗时/错误率/慢查询数/自愈命中/检索降级/
+    图表降级/主动澄清次数(每次问数一行统计, 三路径全覆盖)。
+    """
+    from domains.chatbi import query_stats, datasources
+    if datasources.get_datasource(_db(), ds_id) is None:
+        raise HTTPException(404, "数据源不存在")
+    slow_ms = _slow_ms(request)
+    rows = query_stats.datasource_metrics(_db(), slow_ms=slow_ms,
+                                          data_source_id=ds_id)
+    metrics = rows[0] if rows else {
+        "data_source_id": ds_id, "query_count": 0, "avg_ms": 0, "max_ms": 0,
+        "error_count": 0, "error_rate": 0.0, "slow_count": 0, "heal_count": 0,
+        "retrieval_degraded_count": 0, "chart_degraded_count": 0,
+        "ask_user_count": 0}
+    return {
+        "metrics": metrics,
+        "slow_query_ms": slow_ms,
+        "slow_queries": query_stats.slow_queries(
+            _db(), ds_id, slow_ms=slow_ms, limit=10),
+    }
+
+
+@router.get("/datasources/{ds_id}/slow-queries", dependencies=[Depends(admin_required)])
+async def slow_queries_ep(ds_id: str, request: Request, limit: int = 20):
+    """慢查询明细(超阈值, 按耗时倒序;对标源 GET /slow-queries)。"""
+    from domains.chatbi import query_stats
+    return {"items": query_stats.slow_queries(
+        _db(), ds_id, slow_ms=_slow_ms(request),
+        limit=max(1, min(limit, 100)))}
+
+
+@router.get("/health/detail", dependencies=[Depends(admin_required)])
+async def health_detail_ep(request: Request):
+    """系统状态详情(对标源 T050 /health/detail)。
+
+    组件各自独立探测, 一个挂了不影响其他组件上报: 向量库(Milvus)/
+    LLM 网关/数据源加密凭据 + 各业务库最近健康状态。
+    """
+    components: dict = {}
+    # 向量库
+    try:
+        from domains.chatbi import stores as cb_stores
+        store = cb_stores.get_vector(request.app.state)
+        components["milvus"] = {"status": "ok",
+                                "detail": f"{type(store).__name__}"}
+    except Exception as e:
+        components["milvus"] = {"status": "fail", "detail": str(e)[:200]}
+    # LLM 网关
+    try:
+        llm = getattr(request.app.state, "llm_client", None)
+        model = getattr(llm, "model", "") if llm else ""
+        base = getattr(llm, "base_url", "") if llm else ""
+        components["llm"] = {"status": "ok" if llm else "unconfigured",
+                             "detail": f"model={model} base={base}"}
+    except Exception as e:
+        components["llm"] = {"status": "fail", "detail": str(e)[:200]}
+    # 加密凭据
+    try:
+        from sdk.pack_api import settings_reader
+        has_key = bool(settings_reader(request.app.state, "chatbi")
+                       .get("fernet_key"))
+        components["fernet"] = {"status": "ok" if has_key else "unconfigured",
+                                "detail": "数据源密码加密存储"}
+    except Exception as e:
+        components["fernet"] = {"status": "fail", "detail": str(e)[:200]}
+    # 各业务库概览(健康即时探测走「健康检查」按钮/巡检, 此处不重复探测)
+    from domains.chatbi import datasources
+    ds_list = [
+        {"id": info.id, "name": info.name,
+         "active": info.is_active, "scan_status": info.scan_status}
+        for info in datasources.list_datasources(_db())
+    ]
+    return {"components": components, "datasources": ds_list}
+
+
 # ── 图谱(移植 graph.py 的数据端点) ───────────────────────────
 
 @router.get("/datasources/{ds_id}/graph", dependencies=[Depends(admin_required)])

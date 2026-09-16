@@ -82,10 +82,66 @@ groups:
         default: 4
         min: 1
         max: 8
+      - key: graph_expand_depth
+        type: int
+        label: 表扩展 BFS 深度
+        default: 2
+        min: 1
+        max: 6
+      - key: graph_expand_max_total
+        type: int
+        label: 表扩展总数上限(含社区补全)
+        default: 10
+        min: 2
+        max: 50
+      - key: graph_expand_use_community
+        type: bool
+        label: 表扩展启用社区补全
+        default: true
       - key: graph_join_path_in_prompt
         type: bool
         label: 在 SQL prompt 注入 JOIN 路径
         default: true
+      - key: graph_linkage_co_occurrence_threshold
+        type: int
+        label: linkage 置信度提升的共现阈值
+        default: 3
+        min: 1
+        max: 100
+      - key: graph_linkage_new_pair_threshold
+        type: int
+        label: linkage 发现新表对的共现阈值
+        default: 5
+        min: 1
+        max: 100
+      - key: graph_linkage_confidence_boost
+        type: float
+        label: linkage 每次同步的置信度增量
+        default: 0.1
+        min: 0.01
+        max: 0.5
+      - key: graph_linkage_discover_new_pairs
+        type: bool
+        label: linkage 同步允许发现新表对
+        default: true
+  - key: memory
+    title: 记忆
+    fields:
+      - key: memory_recall_count
+        type: int
+        label: 每轮注入 prompt 的记忆条数上限
+        default: 5
+        min: 1
+        max: 20
+  - key: observability
+    title: 可观测
+    fields:
+      - key: slow_query_ms
+        type: int
+        label: 慢查询阈值(毫秒)
+        default: 10000
+        min: 1000
+        max: 60000
   - key: schedule
     title: 定时任务
     fields:
@@ -95,3 +151,13 @@ groups:
         default: 6
         min: 0
         max: 720
+      - key: health_check_interval_seconds
+        type: int
+        label: 数据源健康巡检间隔(秒)
+        default: 300
+        min: 30
+        max: 86400
+      - key: scan_metric_inference
+        type: bool
+        label: 扫描时 LLM 推断复合指标
+        default: true

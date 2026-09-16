@@ -38,8 +38,10 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
     from domains.chatbi.stores import CHATBI_RETRIEVAL_DDL
     from domains.chatbi.memory import CHATBI_MEMORY_DDL
     from domains.chatbi.m4 import M4_DDL
+    from domains.chatbi.query_stats import QUERY_STATS_DDL
     db.init_schema(list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
-                   + list(CHATBI_MEMORY_DDL) + list(M4_DDL))
+                   + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
+                   + list(QUERY_STATS_DDL))
 
 
 def get_settings_reader(ctx_or_state) -> Any:

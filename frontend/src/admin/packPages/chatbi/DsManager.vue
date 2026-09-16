@@ -39,10 +39,11 @@
             <span v-else class="muted">未扫描</span>
           </template>
         </a-table-column>
-        <a-table-column title="操作" width="360">
+        <a-table-column title="操作" width="400">
           <template #default="{ record }">
             <a-button size="small" type="link" :loading="healthCheckingId === record.id"
                       @click="health(record)">健康</a-button>
+            <a-button size="small" type="link" @click="showMetrics(record)">指标</a-button>
             <a-button size="small" type="link" :disabled="record.scanStatus === 'scanning'"
                       @click="scan(record)">{{ record.scanStatus === 'done' ? '重新扫描' : '扫描' }}</a-button>
             <a-button size="small" type="link" @click="viewSemantic(record)"
@@ -61,6 +62,46 @@
         </a-tag>
         <span class="muted">{{ healthInfo.server_version || healthInfo.error }}</span>
       </div>
+
+    <!-- ══ 查询质量指标抽屉(BI 维度可观测) ══ -->
+    <a-drawer v-model:open="metricsOpen" width="620"
+              :title="`查询指标 · ${metricsDs?.name || ''}`">
+      <a-spin :spinning="metricsLoading">
+        <template v-if="metrics">
+          <div class="metric-grid">
+            <div class="metric-card"><b>{{ metrics.query_count }}</b><span>总查询</span></div>
+            <div class="metric-card"><b>{{ metrics.error_count }}</b><span>失败 ({{ metrics.error_rate }}%)</span></div>
+            <div class="metric-card"><b>{{ fmtMs(metrics.avg_ms) }}</b><span>平均耗时</span></div>
+            <div class="metric-card" :class="{ warn: metrics.slow_count > 0 }">
+              <b>{{ metrics.slow_count }}</b><span>慢查询(&gt;{{ fmtMs(slowMs) }})</span></div>
+            <div class="metric-card"><b>{{ metrics.heal_count }}</b><span>触发自愈</span></div>
+            <div class="metric-card" :class="{ warn: metrics.retrieval_degraded_count > 0 }">
+              <b>{{ metrics.retrieval_degraded_count }}</b><span>检索降级</span></div>
+            <div class="metric-card"><b>{{ metrics.chart_degraded_count }}</b><span>图表降级</span></div>
+            <div class="metric-card"><b>{{ metrics.ask_user_count }}</b><span>主动澄清</span></div>
+          </div>
+          <a-divider orientation="left" orientation-margin="0">慢查询 Top 10</a-divider>
+          <a-table v-if="slowList.length" :data-source="slowList" row-key="id" size="small"
+                   :pagination="false">
+            <a-table-column title="耗时" width="80">
+              <template #default="{ record }">
+                <a-tag color="orange">{{ fmtMs(record.duration_ms) }}</a-tag>
+              </template>
+            </a-table-column>
+            <a-table-column title="问题" data-index="question" ellipsis="true" />
+            <a-table-column title="行数" data-index="row_count" width="70" />
+            <a-table-column title="自愈" width="60">
+              <template #default="{ record }">{{ record.heal_rounds || 0 }}</template>
+            </a-table-column>
+            <a-table-column title="时间" width="150">
+              <template #default="{ record }">{{ (record.created_at || '').replace('T', ' ').slice(0, 19) }}</template>
+            </a-table-column>
+          </a-table>
+          <a-empty v-else description="暂无慢查询" />
+        </template>
+        <a-empty v-else-if="!metricsLoading" description="暂无查询记录——问数产生后此处出现质量指标" />
+      </a-spin>
+    </a-drawer>
 
     <!-- ══ 新建数据源(双栏排版,不再拉长) ══ -->
     <a-modal v-model:open="showCreate" title="添加数据源" ok-text="创建" cancel-text="取消"
@@ -191,6 +232,37 @@ async function health(record: any) {
   }
 }
 
+// ── 查询质量指标(BI 维度可观测) ──
+const metricsOpen = ref(false)
+const metricsLoading = ref(false)
+const metricsDs = ref<any>(null)
+const metrics = ref<any>(null)
+const slowList = ref<any[]>([])
+const slowMs = ref(10000)
+
+async function showMetrics(record: any) {
+  metricsDs.value = record
+  metricsOpen.value = true
+  metricsLoading.value = true
+  metrics.value = null
+  slowList.value = []
+  try {
+    const { data } = await chatbiApi.get(`/datasources/${record.id}/metrics`)
+    metrics.value = data.metrics
+    slowList.value = data.slow_queries || []
+    slowMs.value = data.slow_query_ms || 10000
+  } catch (e: any) {
+    message.error(errText(e, '指标加载失败'))
+  } finally {
+    metricsLoading.value = false
+  }
+}
+
+function fmtMs(ms: number | null | undefined): string {
+  if (ms == null) return '-'
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
 async function checkAllHealth() {
   bulkHealth.value = true
   try {
@@ -270,6 +342,16 @@ onMounted(loadList)
 .tab-toolbar .muted { margin-left: 0; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .health-line { margin-top: 8px; }
+.metric-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px;
+}
+.metric-card {
+  background: #f7f8fa; border-radius: 8px; padding: 10px 4px; text-align: center;
+}
+.metric-card b { display: block; font-size: 18px; color: #1f2329; }
+.metric-card span { font-size: 11px; color: #86909c; }
+.metric-card.warn { background: #fff7e6; }
+.metric-card.warn b { color: #d46b08; }
 .scan-stage { color: #999; font-size: 12px; }
 /* 新建弹窗双栏:两个字段一行,压缩纵向长度 */
 .ds-form .form-row { display: flex; gap: 12px; }

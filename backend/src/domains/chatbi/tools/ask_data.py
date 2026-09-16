@@ -284,7 +284,14 @@ class AskDataTool(CompositeTool):
                                                      expand_with_relationships,
                                                      build_join_path_section)
             try:
-                sg = get_schema_graph(content)
+                # 图谱栈参数走设置页(阈值可调;缺省与 graph_core 常量一致)
+                sg = get_schema_graph(
+                    content,
+                    expand_max_total=int(settings.get("graph_expand_max_total", 10)),
+                    expand_use_community=bool(
+                        settings.get("graph_expand_use_community", True)),
+                    max_join_path_hops=int(
+                        settings.get("graph_max_join_path_hops", 4)))
                 expanded = expand_with_relationships(
                     content, merged,
                     max_depth=int(settings.get("graph_expand_depth", 2)),
@@ -459,10 +466,12 @@ class AskDataTool(CompositeTool):
             from domains.chatbi.memory import recall_text
             # 记忆按 用户+数据源 双维过滤(源 memory/{tenant}/{ds}/ 目录隔离):
             # 数据源 A 的业务约定不得注入 B 的 prompt; 用户记忆不跨用户泄漏
+            # 召回条数上限走设置页(memory_recall_count, 缺省 5 同源默认)
             mem_text = recall_text(llm, self._get_db(), question,
                                    conv_id=ctx.conv_id,
                                    user_id=ctx.user_id or None,
-                                   data_source_id=state["ds"].id)
+                                   data_source_id=state["ds"].id,
+                                   top_k=int(settings.get("memory_recall_count", 5)))
             if mem_text:
                 sections.append(f"【相关记忆】\n{mem_text}")
         except Exception as e:
@@ -908,6 +917,10 @@ class AskDataTool(CompositeTool):
         self.run_pipeline(state, ctx)
         state["_total_duration_ms"] = int((time.time() - state["_pipeline_start"]) * 1000)
         result = state.get("_result")
+        # ── 查询质量统计(BI 维度可观测, 复核报告 P1) ──
+        # 三路径统一采集: ok(正常完成) / error(执行失败) / ask(挂起澄清)。
+        # fail-open(record_query 内部吞异常), 统计故障不拖垮查询。
+        self._record_query_stats(state, ctx, result)
         if result is not None:
             return result
         # 兜底: steps 全过但无结果——带 _error 文案(此前统一"查询未完成",
@@ -915,6 +928,40 @@ class AskDataTool(CompositeTool):
         err = state.get("_error") or "管线未产出结果"
         return ToolResult(artifact_type="data", error_for_llm=err,
                           summary=err if err != "管线未产出结果" else "查询未完成")
+
+    def _record_query_stats(self, state: dict, ctx, result) -> None:
+        """把本轮问数写入 chatbi_query_stats(数据源维度的质量底座)。
+
+        数据源未解析成功(resolve 失败/澄清)时无归属维度, 跳过。
+        """
+        ds = state.get("ds")
+        if ds is None:
+            return
+        try:
+            from domains.chatbi.query_stats import record_query
+            is_ask = bool(result is not None and getattr(result, "ask", None))
+            err = state.get("_error")
+            chart = state.get("chart")
+            executed = state.get("execute_result")
+            record_query(
+                self._get_db(),
+                data_source_id=ds.id,
+                user_id=ctx.user_id or None,
+                conv_id=ctx.conv_id,
+                question=state.get("user_input", ""),
+                sql_text=state.get("sql", ""),
+                duration_ms=state.get("_execute_duration_ms"),
+                row_count=executed.rowcount if executed else None,
+                status="ask" if is_ask else ("error" if err else "ok"),
+                error_message=(err or "")[:300] or None,
+                heal_rounds=int(state.get("heal_rounds", 0) or 0),
+                retrieval_degraded=1 if state.get("retrieval_degraded") else 0,
+                chart_degraded=1 if (chart and getattr(chart, "degraded", False)) else 0,
+                asked_user=1 if is_ask else 0,
+                metric_hits=len(state.get("metric_hits") or []),
+            )
+        except Exception as e:
+            logger.warning("查询统计采集失败(不阻塞): %s", e)
 
     # ── 制品钩子(引擎压缩/标题/前端展示) ─────────────────────
     def summarize_artifact(self, artifact: dict) -> str:

@@ -40,7 +40,8 @@ from domains.chatbi.models import SemanticModelContent
 logger = logging.getLogger(__name__)
 
 
-def get_schema_graph(content: SemanticModelContent | None) -> SchemaGraph:
+def get_schema_graph(content: SemanticModelContent | None,
+                     **overrides) -> SchemaGraph:
     """构建 SchemaGraph 实例 (请求级工厂函数)。
 
     调用方在请求处理流程中调用一次, 将返回的 SchemaGraph 传给
@@ -48,11 +49,14 @@ def get_schema_graph(content: SemanticModelContent | None) -> SchemaGraph:
 
     Args:
         content: 语义层内容 (None → 空图)
+        overrides: SchemaGraph 构造参数透传(expand_max_total/
+            expand_use_community/max_join_path_hops 等)——设置页阈值
+            注入的通道, 未传时用图谱栈默认常量。
 
     Returns:
-        SchemaGraph 实例 (图谱栈配置用默认值常量, 可由调用方再行构造替换)
+        SchemaGraph 实例。
     """
-    sg = SchemaGraph(content)
+    sg = SchemaGraph(content, **overrides)
     logger.info(
         "🕸️ SchemaGraph 构建: %d 节点, %d 边",
         sg.node_count, sg.edge_count,
