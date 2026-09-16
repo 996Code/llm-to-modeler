@@ -131,6 +131,8 @@ async def list_saved_queries(request: Request, limit: int = Query(50, ge=1, le=2
         "conversationId": r["conversation_id"], "question": r["question"],
         "sqlText": r["sql_text"],
         "chartConfig": _safe_json(r["chart_config"]),
+        # 保存时的行数快照(前端"结果"列; 此前漏返回 → 恒显示"- 行")
+        "resultSummary": _safe_json(r["result_summary"]),
         "createdAt": r["created_at"],
     } for r in rows]}
 
