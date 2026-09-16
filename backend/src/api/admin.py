@@ -352,9 +352,13 @@ async def admin_call_stats(request: Request):
     面向"这次 LLM 调用是在做意图路由还是 SQL 生成"的按环节成本透视——
     只聚合 call_type=llm 且 request_data 带 stage 的记录,其他类型
     (upstream/graph/vector)无 token 统计意义。
+
+    Query 参数:
+      packName: 只统计该插件的调用(BI 维度成本透视)
     """
     store = request.app.state.conversation_store
-    return store.get_call_stats()
+    pack_name = (request.query_params.get("packName") or "").strip() or None
+    return store.get_call_stats(pack_name=pack_name)
 
 
 @router.get("/audit-logs")

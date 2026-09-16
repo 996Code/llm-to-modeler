@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import logging
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
@@ -116,12 +118,12 @@ class JoinPathIn(BaseModel):
 
 
 class GraphRelationshipIn(BaseModel):
-    """图谱关系增删请求。"""
+    """图谱关系增删请求(非法枚举直接 422, 不等内部构造才炸)。"""
     from_table: str
     target_table: str
-    join_type: str = "LEFT"       # INNER | LEFT | RIGHT | FULL
-    on: str                       # JOIN ON 条件
-    cardinality: str = "N:1"      # N:1 | 1:N | 1:1 | N:N
+    join_type: Literal["INNER", "LEFT", "RIGHT", "FULL"] = "LEFT"
+    on: str                       # JOIN ON 条件(表.列 = 表.列 [AND ...])
+    cardinality: Literal["N:1", "1:N", "1:1", "N:N"] = "N:1"
 
 
 # ── 数据源管理(移植 data_sources.py 全集,密码永不回显) ────────
@@ -452,82 +454,77 @@ async def graph_table_columns(ds_id: str, table: str):
     raise HTTPException(404, f"表 {table} 不存在")
 
 
-@router.post("/datasources/{ds_id}/graph/relationship", dependencies=[Depends(admin_required)])
-async def graph_add_relationship(ds_id: str, body: GraphRelationshipIn, request: Request):
-    """新增图谱关系——手工标注 JOIN,写回语义层新版本 + 重建索引 + 审计。"""
-    from domains.chatbi import semantic, stores
-    content = semantic.load_current_content(_db(), ds_id)
-    if content is None:
-        raise HTTPException(404, "该数据源尚未扫描语义层")
-    # 找到源表
-    source_model = next((m for m in content.models if m.name == body.from_table), None)
-    if source_model is None:
-        raise HTTPException(404, f"源表 {body.from_table} 不存在")
-    # 跳过已存在的同 ON 条件关系
-    existing = [r for r in source_model.relationships
-                if r.target_model == body.target_table and r.on == body.on]
-    if existing:
-        raise HTTPException(409, f"关系 {body.from_table} → {body.target_table} (ON: {body.on}) 已存在")
-    # 追加新关系
-    from domains.chatbi.models import Relationship
-    new_rel = Relationship(
-        name=f"rel_{body.from_table}_{body.target_table}",
-        target_model=body.target_table,
-        join_type=body.join_type,
-        on=body.on,
-        type=body.cardinality,
-        source="manual",
-        confidence=1.0,
-    )
-    source_model.relationships.append(new_rel)
-    ver = semantic.save_content(_db(), ds_id, content, source="manual")
-    # 重建索引
-    try:
-        from domains.chatbi import indexing
+def _graph_index_rebuilder(request: Request, ds_id: str, content):
+    """图谱变更后的索引重建回调(向量 store/embedder 从 app_state 构造)。"""
+    def _rebuild():
+        from domains.chatbi import indexing, stores
         from domains.chatbi.llm_compat import LLMCompat
-        indexing.rebuild_index(content, ds_id,
+        indexing.rebuild_index(
+            content, ds_id,
             stores.get_vector(request.app.state),
             stores.get_embedder(LLMCompat(request.app.state.llm_client)),
             db=_db())
+    return _rebuild
+
+
+@router.post("/datasources/{ds_id}/graph/relationship", dependencies=[Depends(admin_required)])
+async def graph_add_relationship(ds_id: str, body: GraphRelationshipIn, request: Request):
+    """新增图谱关系——源/目标表 + ON 列级校验,写回语义层新版本 + 重建索引 + 审计。
+
+    索引重建失败不谎报成功: 响应带 index_rebuilt=False + warning,
+    前端提示"语义层已保存, 索引待重建"。
+    """
+    from domains.chatbi import graph_edit, semantic
+    try:
+        result = graph_edit.add_relationship(
+            _db(), ds_id,
+            from_table=body.from_table, target_table=body.target_table,
+            join_type=body.join_type, on=body.on, cardinality=body.cardinality)
+    except graph_edit.GraphEditError as e:
+        raise HTTPException(e.status, e.message)
+    # 版本落库后重建索引(成功/失败均不改变语义层结果, 只影响响应标志)
+    content = semantic.load_current_content(_db(), ds_id)
+    try:
+        _graph_index_rebuilder(request, ds_id, content)()
+        index_rebuilt, warning = True, None
     except Exception as e:
         logger.warning("新增关系后索引重建失败(降级): %s", e)
+        index_rebuilt, warning = False, str(e)[:200]
     _audit(request, "graph", "create", resource_id=ds_id,
-           detail={"from": body.from_table, "to": body.target_table, "on": body.on, "version": ver})
-    return {"ok": True, "version": ver}
+           detail={"from": body.from_table, "to": body.target_table,
+                   "on": body.on, "version": result["version"],
+                   "index_rebuilt": index_rebuilt})
+    return {"ok": True, "version": result["version"],
+            "index_rebuilt": index_rebuilt, "warning": warning}
 
 
 @router.delete("/datasources/{ds_id}/graph/relationship", dependencies=[Depends(admin_required)])
 async def graph_delete_relationship(ds_id: str, from_table: str, target_table: str, on: str = "",
                                      request: Request = None):
-    """删除图谱关系——手工删除 JOIN 关系,写回语义层新版本 + 重建索引 + 审计。"""
-    from domains.chatbi import semantic, stores
-    content = semantic.load_current_content(_db(), ds_id)
-    if content is None:
-        raise HTTPException(404, "该数据源尚未扫描语义层")
-    source_model = next((m for m in content.models if m.name == from_table), None)
-    if source_model is None:
-        raise HTTPException(404, f"源表 {from_table} 不存在")
-    before_count = len(source_model.relationships)
-    source_model.relationships = [
-        r for r in source_model.relationships
-        if not (r.target_model == target_table and (not on or r.on == on))
-    ]
-    if len(source_model.relationships) == before_count:
-        raise HTTPException(404, f"未找到匹配关系 {from_table} → {target_table}")
-    ver = semantic.save_content(_db(), ds_id, content, source="manual")
-    # 重建索引
+    """删除图谱关系——正反向一起清理,写回语义层新版本 + 重建索引 + 审计。"""
+    from domains.chatbi import graph_edit, semantic
     try:
-        from domains.chatbi import indexing
-        from domains.chatbi.llm_compat import LLMCompat
-        indexing.rebuild_index(content, ds_id,
-            stores.get_vector(request.app.state),
-            stores.get_embedder(LLMCompat(request.app.state.llm_client)),
-            db=_db())
+        result = graph_edit.delete_relationship(
+            _db(), ds_id, from_table=from_table, target_table=target_table, on=on)
+    except graph_edit.GraphEditError as e:
+        raise HTTPException(e.status, e.message)
+    content = semantic.load_current_content(_db(), ds_id)
+    try:
+        _graph_index_rebuilder(request, ds_id, content)()
+        index_rebuilt, warning = True, None
     except Exception as e:
         logger.warning("删除关系后索引重建失败(降级): %s", e)
+        index_rebuilt, warning = False, str(e)[:200]
     _audit(request, "graph", "delete", resource_id=ds_id,
-           detail={"from": from_table, "to": target_table, "on": on, "version": ver})
-    return {"ok": True, "version": ver}
+           detail={"from": from_table, "to": target_table, "on": on,
+                   "version": result["version"],
+                   "removed_forward": result["removed_forward"],
+                   "removed_reverse": result["removed_reverse"],
+                   "index_rebuilt": index_rebuilt})
+    return {"ok": True, "version": result["version"],
+            "removed_forward": result["removed_forward"],
+            "removed_reverse": result["removed_reverse"],
+            "index_rebuilt": index_rebuilt, "warning": warning}
 
 
 # ── 记忆(移植 memory.py 管理端点) ────────────────────────────
@@ -573,21 +570,32 @@ async def delete_memory(mid: str, request: Request):
     return {"ok": True}
 
 
+class ConsolidateIn(BaseModel):
+    """记忆整理请求(可选数据源限定)。"""
+    data_source_id: str | None = None   # 只整理该数据源(None=全部, 仍按scope分组)
+
+
 @router.post("/memories/consolidate", dependencies=[Depends(admin_required)])
-async def consolidate_memories_ep(request: Request):
+async def consolidate_memories_ep(body: ConsolidateIn | None = None, request: Request = None):
     """记忆整理(LLM 合并去重碎片记忆)——异步任务, 进度走任务中心 SSE。
 
     对标源 POST /memory/consolidate 的 202+轮询语义;插件化后复用平台
     任务中心(任务列表/日志/进度统一观测), 不再自造轮询端点。
+
+    scope 隔离(复核报告 P0): 按 用户+数据源 分组整理, 新记忆继承归属;
+    data_source_id 可限定只整理某个数据源。整理完成后对涉及的每个数据源
+    执行 linkage → 图谱同步(任务日志可见, 失败降级不静默)。
     """
     from sdk.pack_api import DuplicateTaskError
     manager = request.app.state.task_manager
+    payload = {"data_source_id": body.data_source_id} if body and body.data_source_id else {}
     try:
-        task = manager.submit("chatbi.memory.consolidate", payload={},
+        task = manager.submit("chatbi.memory.consolidate", payload=payload,
                               dedupe_key="chatbi:memconsolidate")
     except DuplicateTaskError:
         raise HTTPException(409, "已有记忆整理任务在进行")
-    _audit(request, "memory", "consolidate", detail={"task_id": task["id"]})
+    _audit(request, "memory", "consolidate",
+           detail={"task_id": task["id"], "data_source_id": body.data_source_id if body else None})
     return {"task_id": task["id"], "status": "submitted"}
 
 

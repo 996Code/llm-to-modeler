@@ -290,8 +290,8 @@ export interface CallStageItem {
   completionTokens: number
 }
 
-export async function fetchCallStats(): Promise<{ items: CallStageItem[]; totalTokens: number }> {
-  const { data } = await adminApi.get('/call-stats')
+export async function fetchCallStats(packName?: string): Promise<{ items: CallStageItem[]; totalTokens: number }> {
+  const { data } = await adminApi.get('/call-stats', { params: packName ? { packName } : {} })
   return data
 }
 

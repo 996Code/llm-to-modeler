@@ -176,3 +176,43 @@ class TestPackState:
         # 本人删除:正常级联
         assert store.delete_conversation(conv_id, "owner") is True
         assert store.get_pack_state(conv_id, "knowledge_graph") == {}
+
+
+class TestCallLogsPackFilter:
+    """call_logs pack 维度观测(复核报告 P1): pack_name 落库 + 明细/统计过滤。"""
+
+    def _seed(self, store):
+        store.save_call_log(
+            call_type="llm", endpoint="chat/completions",
+            request_data={"stage": "chatbi.generate_sql"},
+            response_data={"usage": {"prompt_tokens": 100, "completion_tokens": 50}},
+            pack_name="chatbi")
+        store.save_call_log(
+            call_type="llm", endpoint="chat/completions",
+            request_data={"stage": "leave.extract"},
+            response_data={"usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+            pack_name="leave_application")
+        store.save_call_log(
+            call_type="llm", endpoint="chat/completions",
+            request_data={"stage": "route_pack"},
+            response_data={"usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+        # 历史/平台级调用: pack_name 为 NULL
+
+    def test_query_filters_by_pack(self, store):
+        self._seed(store)
+        r = store.query_call_logs(pack_name="chatbi")
+        assert r["total"] == 1
+        assert r["items"][0]["pack_name"] == "chatbi"
+        assert r["items"][0]["request_data"]["stage"] == "chatbi.generate_sql"
+        # 其他 pack
+        assert store.query_call_logs(pack_name="leave_application")["total"] == 1
+
+    def test_stats_filters_by_pack(self, store):
+        self._seed(store)
+        stats = store.get_call_stats(pack_name="chatbi")
+        assert stats["totalTokens"] == 150      # 100 + 50, 不含其他 pack
+        assert len(stats["items"]) == 1
+        assert stats["items"][0]["stage"] == "chatbi.generate_sql"
+        # 无过滤 = 全量(含 NULL 归属)
+        total_all = store.get_call_stats()
+        assert total_all["totalTokens"] == 150 + 15 + 2

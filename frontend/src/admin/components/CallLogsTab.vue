@@ -30,6 +30,10 @@
 
       <!-- 按环节统计 -->
       <template v-else-if="viewMode === 'stats'">
+        <a-select v-model:value="statsFilterPack" style="width: 150px" placeholder="按插件过滤" allow-clear
+          @change="loadStats">
+          <a-select-option v-for="p in packOptions" :key="p.value" :value="p.value">{{ p.label }}</a-select-option>
+        </a-select>
         <span class="cl-count">合计 {{ fmtTokens(statsTotalTokens) }} token</span>
         <a-button size="small" @click="loadStats"><ReloadOutlined /> 刷新</a-button>
       </template>
@@ -205,6 +209,7 @@ const viewMode = ref<'detail' | 'stats' | 'audit'>('detail')
 const statsRows = ref<CallStageItem[]>([])
 const statsLoading = ref(false)
 const statsTotalTokens = ref(0)
+const statsFilterPack = ref('')
 const statsColumns = [
   { title: '环节', key: 'stage', width: 220 },
   { title: '调用次数', key: 'callCount', width: 100 },
@@ -380,7 +385,7 @@ function fmtTokens(n?: number): string {
 async function loadStats() {
   statsLoading.value = true
   try {
-    const data = await fetchCallStats()
+    const data = await fetchCallStats(statsFilterPack.value || undefined)
     statsRows.value = data.items
     statsTotalTokens.value = data.totalTokens
   } catch { statsRows.value = [] }

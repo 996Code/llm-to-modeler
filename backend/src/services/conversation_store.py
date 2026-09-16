@@ -967,24 +967,33 @@ class ConversationStore:
             },
         }
 
-    def get_call_stats(self) -> Dict[str, Any]:
+    def get_call_stats(self, pack_name: Optional[str] = None) -> Dict[str, Any]:
         """按环节(stage)聚合 LLM 调用 token 与次数(管理端成本透视)。
 
         usage 存在 response_data.usage 里(OpenAI 兼容模型统一透传),
         但部分网关不回 usage,此时该环节的 token 计为 0、只统计次数。
         request_data.stage 为空(历史数据/非对话调用)归入 "(未标环节)"。
+
+        pack_name: 非空时只统计该插件的调用(BI 维度成本透视,与
+        调用明细的 packName 过滤同一套语义)。
         """
+        where = "WHERE call_type = 'llm'"
+        params: tuple = ()
+        if pack_name:
+            where += " AND pack_name = ?"
+            params = (pack_name,)
         with self._get_conn() as conn:
             rows = conn.execute(
-                """SELECT
+                f"""SELECT
                      COALESCE(NULLIF(request_data::jsonb->>'stage', ''), '(未标环节)') AS stage,
                      COUNT(*) AS call_count,
                      COALESCE(SUM((response_data::jsonb->'usage'->>'prompt_tokens')::bigint), 0) AS prompt_tokens,
                      COALESCE(SUM((response_data::jsonb->'usage'->>'completion_tokens')::bigint), 0) AS completion_tokens
                    FROM call_logs
-                   WHERE call_type = 'llm'
+                   {where}
                    GROUP BY stage
-                   ORDER BY call_count DESC"""
+                   ORDER BY call_count DESC""",
+                params,
             ).fetchall()
         items = [
             {

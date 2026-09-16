@@ -181,6 +181,10 @@ def _entry_from_row(row: dict) -> dict:
         entry["conv_id"] = row["conversation_id"]  # 管理端别名
     if row.get("user_id"):
         entry["user_id"] = row["user_id"]  # 宿主归属 (tenant 目录隔离的替代维度)
+    if row.get("data_source_id"):
+        # 数据源归属(源 memory/{tenant}/{ds}/ 目录隔离的行存储等价维度)。
+        # 此前遗漏: 整理分组/过滤按它取值永远是 None——scope 隔离失效。
+        entry["data_source_id"] = row["data_source_id"]
     if row.get("co_occurrence") is not None:
         entry["co_occurrence"] = int(row["co_occurrence"])
     for col, key in (("tables_json", "tables"),
@@ -789,8 +793,9 @@ def consolidate_memories(
     db,
     ids: Optional[list[str]] = None,
     on_progress: Optional[Callable[[int, str], None]] = None,
+    data_source_id: Optional[str] = None,
 ) -> dict:
-    """整理记忆 — LLM 合并去重碎片化记忆。
+    """整理记忆 — LLM 合并去重碎片化记忆(按 用户+数据源 分组,禁止跨 scope 合并)。
 
     当记忆条目较多时, 将碎片化的记忆合并为更精炼的几条。
     原有记忆标记 consolidated=true (默认隐藏), 合并结果作为新记忆写入。
@@ -801,6 +806,13 @@ def consolidate_memories(
       - linkage 类型是结构化数据, 跳过 (LLM 整理会破坏结构)
       - 单条或少条时跳过 (不值得调 LLM)
 
+    scope 隔离 (对标源 memory/{tenant}/{ds}/ 目录隔离):
+      - 候选按 (user_id, data_source_id) 分组, 每组独立调 LLM 整理——
+        不同用户/不同数据源的业务知识绝不进同一个 prompt;
+      - 整理产出的新记忆继承该组的 user_id + data_source_id——
+        recall_memories 按 双维过滤召回, 归属丢失 = 整理结果永远召不回;
+      - 先写新记忆、后标记原记忆 (写入失败时原记忆不丢失)。
+
     Args:
         llm: 引擎 LLMClient (.chat 返回 (content, meta);源 llm_chat +
             parse_json_response 的等价注入——整理结果是 JSON 数组,
@@ -808,9 +820,12 @@ def consolidate_memories(
         db: pack 关系库
         ids: 只整理指定的记忆 (None = 整理全部未整理的)
         on_progress: 进度回调 (progress 0-100, stage 描述文字)
+        data_source_id: 只整理该数据源的记忆 (None = 全部数据源, 仍按
+            scope 分组)
 
     Returns:
-        {"consolidated": int, "total": int, "detail": str}
+        {"consolidated": int, "total": int, "detail": str,
+         "groups": int, "scopes": [{"user_id", "data_source_id"}...]}
     """
     def _progress(pct: int, stage: str):
         if on_progress:
@@ -820,7 +835,8 @@ def consolidate_memories(
 
     store = get_memory_store(db)
     all_memories = store.list_memories()
-    # 过滤: 已整理的不参与, ids 非空时只取指定的 (空列表/None 都表示整理全部)
+    # 过滤: 已整理的不参与, ids 非空时只取指定的 (空列表/None 都表示整理全部),
+    # data_source_id 非空时只取该数据源的
     memories = []
     for m in all_memories:
         if m.get("consolidated"):
@@ -829,27 +845,83 @@ def consolidate_memories(
             continue
         if ids and m["id"] not in ids:
             continue
+        if data_source_id and m.get("data_source_id") != data_source_id:
+            continue
         memories.append(m)
 
     if len(memories) <= 1:
         _progress(100, "完成")
-        return {"consolidated": 0, "total": len(memories), "detail": "记忆条目较少, 无需整理"}
+        return {"consolidated": 0, "total": len(memories),
+                "detail": "记忆条目较少, 无需整理", "groups": 0, "scopes": []}
 
-    # 读取所有记忆内容 (DB 正文即 Markdown body;源在此剥离 frontmatter,
-    # 该步骤随文件存储一并退役)
-    _progress(10, "读取记忆内容...")
-    all_content = []
+    # ── scope 分组: (user_id, data_source_id) 各自独立整理 ──
+    groups: dict[tuple, list[dict]] = {}
     for m in memories:
+        key = (m.get("user_id"), m.get("data_source_id"))
+        groups.setdefault(key, []).append(m)
+
+    _progress(10, f"读取记忆内容 ({len(groups)} 个用户/数据源分组)...")
+
+    total_saved = 0
+    total_marked = 0
+    group_scopes: list[dict] = []
+    group_details: list[str] = []
+    progress_base = 10
+    progress_span = 80  # 10 → 90 按组推进
+
+    for gi, ((g_user, g_ds), group_memories) in enumerate(groups.items()):
+        pct = progress_base + int(progress_span * gi / len(groups))
+        _progress(pct, f"整理分组 {gi + 1}/{len(groups)} "
+                       f"(用户={g_user or '-'} 数据源={g_ds or '-'})...")
+        try:
+            group_saved = _consolidate_group(
+                llm, store, group_memories, user_id=g_user, data_source_id=g_ds)
+        except Exception as e:
+            # 单组失败不拖垮其他组;原记忆保持未整理, 下一轮可重试
+            logger.warning("consolidate 分组失败 (user=%s ds=%s): %s",
+                           g_user, g_ds, e)
+            group_details.append(
+                f"用户={g_user or '-'} 数据源={g_ds or '-'}: 整理失败({e})")
+            continue
+        if group_saved > 0:
+            # 先写新记忆成功, 再标记原记忆隐藏 (失败不丢原记忆)
+            for m in group_memories:
+                store.mark_consolidated(m["id"])
+                total_marked += 1
+            total_saved += group_saved
+            group_scopes.append({"user_id": g_user, "data_source_id": g_ds})
+            group_details.append(
+                f"用户={g_user or '-'} 数据源={g_ds or '-'}: "
+                f"{len(group_memories)} 条 → {group_saved} 条")
+
+    _progress(100, "完成")
+    detail = (f"整理为 {total_saved} 条精炼记忆, {total_marked} 条原始记忆"
+              f"已标记为已整理 (默认隐藏)")
+    if group_details:  # 多组或存在失败组时给分组明细(含"整理失败"标注)
+        detail += "; " + "; ".join(group_details)
+    return {
+        "consolidated": total_saved,
+        "total": len(memories),
+        "detail": detail,
+        "groups": len(group_scopes),
+        "scopes": group_scopes,
+    }
+
+
+def _consolidate_group(llm, store, group_memories, user_id, data_source_id) -> int:
+    """整理单个 scope 组内的记忆, 新记忆继承组归属;返回成功写入条数。
+
+    任何异常向上抛(由调用方决定是否标记原记忆——本函数失败时原记忆
+    保持未整理状态, 下一轮整理可重试)。
+    """
+    all_content = []
+    for m in group_memories:
         body = store.read_memory(m["id"]) or ""
         if body:
             all_content.append(
                 f"[{m['name']}] ({m.get('type', 'project')}) {m.get('description', '')}\n{body}")
-
     if not all_content:
-        _progress(100, "完成")
-        return {"consolidated": 0, "total": len(memories), "detail": "无有效记忆内容可整理"}
-
-    _progress(30, "调用 LLM 整理中...")
+        return 0
 
     # prompt 与源原文一致
     prompt = (
@@ -865,57 +937,37 @@ def consolidate_memories(
         + "\n\n只返回 JSON 数组, 不要解释。"
     )
 
-    try:
-        content, _ = llm.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=0.0,
-            stage="chatbi.memory.consolidate",
+    content, _ = llm.chat(
+        [{"role": "user", "content": prompt}],
+        temperature=0.0,
+        stage="chatbi.memory.consolidate",
+    )
+    parsed = parse_json_response(content)
+    if not parsed:
+        return 0
+    # 兼容: LLM 可能返回 dict 而非 list
+    if isinstance(parsed, dict):
+        parsed = parsed.get("memories", [parsed])
+    if not isinstance(parsed, list):
+        return 0
+
+    saved = 0
+    for item in parsed:
+        name = (item.get("name") or "").strip()
+        desc = (item.get("description") or "").strip()
+        mem_content = (item.get("content") or "").strip()
+        if not name or not mem_content:
+            continue
+        store.save_memory(
+            name=name,
+            description=desc or name,
+            content=mem_content,
+            memory_type="consolidated",
+            user_id=user_id,
+            data_source_id=data_source_id,
         )
-
-        _progress(80, "写入整理结果...")
-        parsed = parse_json_response(content)
-        if not parsed:
-            _progress(100, "完成")
-            return {"consolidated": 0, "total": len(memories), "detail": "LLM 未返回有效结果"}
-        # 兼容: LLM 可能返回 dict 而非 list
-        if isinstance(parsed, dict):
-            parsed = parsed.get("memories", [parsed])
-        if not isinstance(parsed, list):
-            _progress(100, "完成")
-            return {"consolidated": 0, "total": len(memories), "detail": "LLM 返回格式异常"}
-
-        # 写入整理后的记忆 (每条生成新 id, 类型统一为 consolidated)
-        saved = 0
-        for item in parsed:
-            name = (item.get("name") or "").strip()
-            desc = (item.get("description") or "").strip()
-            mem_content = (item.get("content") or "").strip()
-            if not name or not mem_content:
-                continue
-            store.save_memory(
-                name=name,
-                description=desc or name,
-                content=mem_content,
-                memory_type="consolidated",
-            )
-            saved += 1
-
-        # 标记原始记忆为已整理
-        _progress(90, "标记原始记忆...")
-        marked = 0
-        for m in memories:
-            store.mark_consolidated(m["id"])
-            marked += 1
-
-        _progress(100, "完成")
-        return {
-            "consolidated": saved,
-            "total": len(memories),
-            "detail": f"整理为 {saved} 条精炼记忆, {marked} 条原始记忆已标记为已整理 (默认隐藏)",
-        }
-    except Exception as e:
-        logger.warning("consolidate_memories 失败: %s", e)
-        return {"consolidated": 0, "total": len(memories), "detail": f"整理失败: {e}"}
+        saved += 1
+    return saved
 
 
 # ── 查询流水 (源 recall.save_query_memory, 无生产调用方, 保留备用)────────

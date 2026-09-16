@@ -115,8 +115,22 @@
                       :options="tableOptions" placeholder="选择目标表" />
           </a-form-item>
         </div>
-        <a-form-item label="ON 条件" required>
-          <a-input v-model:value="addRelForm.on" placeholder="如: orders.user_id = users.id" />
+        <a-form-item label="JOIN 条件 (ON)" required>
+          <!-- 结构化列选择(源 ChatBI 语义): 只能选真实列, 杜绝拼写错误/
+               无效列进语义层;多行 = 多列 JOIN(AND 连接) -->
+          <div v-for="(c, i) in onConditions" :key="i" class="on-row">
+            <a-select v-model:value="c.left" :options="colOptions(fromColumns)"
+                      placeholder="源表列" show-search style="flex: 1" />
+            <span class="on-eq">=</span>
+            <a-select v-model:value="c.right" :options="colOptions(targetColumns)"
+                      placeholder="目标表列" show-search style="flex: 1" />
+            <a-button v-if="onConditions.length > 1" size="small" type="text" danger
+                      @click="onConditions.splice(i, 1)">−</a-button>
+          </div>
+          <a-button size="small" type="dashed" block style="margin-top: 4px"
+                    @click="onConditions.push({ left: '', right: '' })">
+            + 加一列条件 (AND)
+          </a-button>
         </a-form-item>
         <div class="form-row">
           <a-form-item label="JOIN 类型" class="half">
@@ -172,8 +186,29 @@ const impactResult = ref<string[] | null>(null)
 // 新增关系
 const showAddRel = ref(false)
 const addRelLoading = ref(false)
-const addRelForm = reactive({ from: '', target: '', joinType: 'LEFT', on: '', cardinality: 'N:1' })
+const addRelForm = reactive({ from: '', target: '', joinType: 'LEFT', cardinality: 'N:1' })
+// 结构化 ON 条件(列级选择, 后端按表/列真实性校验——替代自由文本)
+const onConditions = ref<{ left: string; right: string }[]>([{ left: '', right: '' }])
+const fromColumns = ref<string[]>([])
+const targetColumns = ref<string[]>([])
 const tableOptions = computed(() => (graphData.value?.nodes || []).map((n) => ({ value: n.id, label: n.label || n.id })))
+const colOptions = (cols: string[]) => cols.map((c) => ({ value: c, label: c }))
+
+// 选表变化 → 拉该表列清单(table-columns API), 列下拉只给真实列
+async function loadColumns(table: string, side: 'from' | 'target') {
+  if (!table || !dsId.value) { if (side === 'from') fromColumns.value = []; else targetColumns.value = []; return }
+  try {
+    const { data } = await chatbiApi.get(`/datasources/${dsId.value}/graph/table-columns`, { params: { table } })
+    if (side === 'from') fromColumns.value = (data.columns || []).map((c: any) => c.name)
+    else targetColumns.value = (data.columns || []).map((c: any) => c.name)
+  } catch {
+    if (side === 'from') fromColumns.value = []
+    else targetColumns.value = []
+  }
+}
+
+watch(() => addRelForm.from, (v) => loadColumns(v, 'from'))
+watch(() => addRelForm.target, (v) => loadColumns(v, 'target'))
 
 async function loadImpact(table: string) {
   impactLoading.value = table
@@ -191,27 +226,38 @@ async function loadImpact(table: string) {
 function openAddRel() {
   addRelForm.from = selectedNode.value?.id || ''
   addRelForm.target = ''
-  addRelForm.on = ''
   addRelForm.joinType = 'LEFT'
   addRelForm.cardinality = 'N:1'
+  onConditions.value = [{ left: '', right: '' }]
+  fromColumns.value = []
+  targetColumns.value = []
   showAddRel.value = true
+  // openAddRel 可能先于 watch 触发拉列(表已选中场景)
+  if (addRelForm.from) loadColumns(addRelForm.from, 'from')
 }
 
 async function addRelationship() {
-  if (!addRelForm.from || !addRelForm.target || !addRelForm.on.trim()) {
-    message.warning('请填写源表、目标表和 ON 条件')
+  // ON 条件由结构化行构建(至少一行且两侧列都选齐)
+  const pairs = onConditions.value.filter((c) => c.left && c.right)
+  if (!addRelForm.from || !addRelForm.target || !pairs.length) {
+    message.warning('请填写源表、目标表, 并至少配一对 JOIN 列')
     return
   }
   addRelLoading.value = true
   try {
-    await chatbiApi.post(`/datasources/${dsId.value}/graph/relationship`, {
+    const on = pairs.map((c) => `${addRelForm.from}.${c.left} = ${addRelForm.target}.${c.right}`).join(' AND ')
+    const { data } = await chatbiApi.post(`/datasources/${dsId.value}/graph/relationship`, {
       from_table: addRelForm.from,
       target_table: addRelForm.target,
       join_type: addRelForm.joinType,
-      on: addRelForm.on.trim(),
+      on,
       cardinality: addRelForm.cardinality,
     })
-    message.success('关系已添加, 语义层新版本已生成')
+    if (data.index_rebuilt === false) {
+      message.warning(`关系已添加(语义层 v${data.version}), 但索引重建失败——检索可能滞后, 手动重扫可修复`)
+    } else {
+      message.success(`关系已添加, 语义层新版本 v${data.version} 已生成`)
+    }
     showAddRel.value = false
     await loadGraph()
   } catch (e: any) {
@@ -223,15 +269,19 @@ async function addRelationship() {
 
 async function deleteRelationship(edge: any) {
   if (!edge) return
-  await new Promise<void>((resolve) => {
-    // 用 antd Modal.confirm 需要 message 组件, 这里直接 confirm
-    if (window.confirm(`删除关系 ${edge.source} → ${edge.target}?`)) resolve()
-  })
+  // 取消直接返回——此前用"确认才 resolve"的 Promise, 取消时永不完成,
+  // 处理函数被永久挂起(复核报告 P0)
+  if (!window.confirm(`删除关系 ${edge.source} → ${edge.target}? (反向关系一并删除)`)) return
   try {
-    await chatbiApi.delete(`/datasources/${dsId.value}/graph/relationship`, {
+    const { data } = await chatbiApi.delete(`/datasources/${dsId.value}/graph/relationship`, {
       params: { from_table: edge.source, target_table: edge.target, on: edge.on || '' },
     })
-    message.success('关系已删除')
+    const n = (data.removed_forward || 0) + (data.removed_reverse || 0)
+    if (data.index_rebuilt === false) {
+      message.warning(`已删除 ${n} 条关系(语义层 v${data.version}), 但索引重建失败——手动重扫可修复`)
+    } else {
+      message.success(`已删除 ${n} 条关系`)
+    }
     selectedNode.value = null
     selectedEdge.value = null
     await loadGraph()
@@ -461,6 +511,8 @@ onBeforeUnmount(destroy)
 </script>
 
 <style scoped>
+.on-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.on-eq { color: #86909c; flex-shrink: 0; }
 .sgt-page { display: flex; flex-direction: column; gap: 10px; height: calc(100vh - 220px); min-height: 480px; }
 .sgt-toolbar { display: flex; align-items: center; gap: 10px; }
 .sgt-meta { color: #86909c; font-size: 12px; margin-left: auto; }

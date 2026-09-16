@@ -35,7 +35,9 @@ def register_tasks(manager, app_state=None) -> None:
         return _task_refresh_semantics(handle, app_state)
 
     def _consolidate(handle):
-        return _task_consolidate_memories(handle, app_state)
+        payload = handle.payload or {}
+        return _task_consolidate_memories(
+            handle, app_state, data_source_id=payload.get("data_source_id"))
 
     manager.register("chatbi.scan_datasource", _scan, pack_name=PACK_NAME)
     manager.register("chatbi.refresh_semantics", _refresh, pack_name=PACK_NAME)
@@ -159,12 +161,18 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         raise
 
 
-def _task_consolidate_memories(handle, app_state=None) -> dict:
+def _task_consolidate_memories(handle, app_state=None, data_source_id=None) -> dict:
     """记忆整理任务入口(对标源 POST /memory/consolidate)。
 
     LLM 合并去重碎片记忆;原记忆标记 consolidated 隐藏(可追溯),
     linkage 结构化类型跳过。进度经任务中心 SSE 透出;关键节点写任务日志
     (任务中心"日志"页签不再空白)。
+
+    闭环接线(复核报告 P0): 整理完成后按涉及的每个数据源无条件调用
+    sync_linkage_to_graph——linkage 共现反哺图谱不再只藏在元数据刷新里;
+    同步失败记入任务日志与结果(degraded 可见), 不静默。
+
+    data_source_id: 只整理该数据源的记忆(None = 全部, 仍按 scope 分组)。
     """
     from domains.chatbi import memory, runtime
     llm = runtime.get_llm(app_state) if app_state else None
@@ -178,8 +186,10 @@ def _task_consolidate_memories(handle, app_state=None) -> dict:
         except Exception:
             pass
 
-    handle.log("记忆整理开始: 读取全部记忆, 过滤已整理/结构化(linkage)条目")
-    result = memory.consolidate_memories(llm, db, on_progress=progress)
+    scope_text = f" (仅数据源 {data_source_id})" if data_source_id else ""
+    handle.log(f"记忆整理开始{scope_text}: 按 用户+数据源 分组, 过滤已整理/结构化(linkage)条目")
+    result = memory.consolidate_memories(
+        llm, db, on_progress=progress, data_source_id=data_source_id)
     # 整理结果写任务日志(用户在任务中心能直接看到"整理了几条/合并成几条")
     detail = result.get("detail") or ""
     handle.log(
@@ -187,6 +197,28 @@ def _task_consolidate_memories(handle, app_state=None) -> dict:
         f"参与 {result.get('total', 0)} 条原始记忆。{detail}")
     if result.get("consolidated"):
         handle.log("原始记忆已标记为'已整理'(默认隐藏, 记忆页勾选'显示已整理'可查看)")
+
+    # ── linkage → 图谱反哺: 整理涉及的每个数据源都同步一次 ──
+    # scopes 只含"产出了新记忆"的组;无产出时该数据源没有变化, 无需同步。
+    graph_sync = []
+    involved_ds = {s.get("data_source_id") for s in result.get("scopes", [])
+                   if s.get("data_source_id")}
+    if data_source_id:
+        involved_ds = {d for d in involved_ds if d == data_source_id} or involved_ds
+    for ds_id in sorted(involved_ds):
+        try:
+            from domains.chatbi.memory import get_memory_store
+            from domains.chatbi.graph_infer import sync_linkage_to_graph
+            res = sync_linkage_to_graph(
+                db, get_memory_store(db), ds_id,
+                rebuild_index=_make_index_rebuilder(app_state, ds_id))
+            handle.log(f"linkage 图谱同步完成 (ds={ds_id[:8]}…): {res}")
+            graph_sync.append({"data_source_id": ds_id, "ok": True, "result": res})
+        except Exception as e:
+            logger.warning("整理后 linkage 图谱同步失败 (ds=%s): %s", ds_id, e)
+            handle.log(f"linkage 图谱同步失败 (ds={ds_id[:8]}…, 降级): {e}")
+            graph_sync.append({"data_source_id": ds_id, "ok": False, "error": str(e)[:200]})
+    result["graph_sync"] = graph_sync
     return result
 
 
@@ -335,6 +367,22 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> None:
         logger.warning("查询历史读取失败(跳过演化): %s", e)
         return
     existing = [r for m in content.models for r in m.relationships]
+
+    # ── linkage 反哺先行: 不依赖 implicit mining 是否有产出 ──
+    # 查询沉淀的 linkage 共现达到阈值就应 boost/建边;此前 sync 藏在
+    # suggestions 非空的分支里——没有 SQL 挖掘建议时已积累的 linkage
+    # 永远不同步(闭环断点, 复核报告 P0)。
+    try:
+        from domains.chatbi.memory import get_memory_store
+        from domains.chatbi.graph_infer import sync_linkage_to_graph
+        sync_res = sync_linkage_to_graph(
+            db, get_memory_store(db), datasource_id,
+            rebuild_index=_make_index_rebuilder(app_state, datasource_id))
+        if sync_res:
+            logger.info("linkage 图谱同步: %s (ds=%s)", sync_res, datasource_id)
+    except Exception as e:
+        logger.warning("linkage 图谱同步失败(降级): %s", e)
+
     suggestions = mine_implicit_relationships(history, existing)
     if not suggestions:
         return
@@ -356,10 +404,6 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> None:
         expected_version=current_version,
         rebuild_index=_make_index_rebuilder(app_state, datasource_id))
     if updates:
-        # B2 修复: sync_linkage_to_graph 正确签名为 (db, mem_store, data_source_id)
-        # ——此前 content 落到 mem_store 位, list_memories() 必炸 AttributeError
-        from domains.chatbi.memory import get_memory_store
-        sync_linkage_to_graph(db, get_memory_store(db), datasource_id)
         logger.info("图谱演化: %s (ds=%s)", updates, datasource_id)
 
 

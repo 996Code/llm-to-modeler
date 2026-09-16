@@ -548,8 +548,8 @@ class TestConsolidate:
         only = store.save_memory(name="only", description="d", content="c")
         llm = FakeLLM()
         result = consolidate_memories(llm, db)
-        assert result == {"consolidated": 0, "total": 1,
-                          "detail": "记忆条目较少, 无需整理"}
+        assert result["consolidated"] == 0 and result["total"] == 1
+        assert result["detail"] == "记忆条目较少, 无需整理"
         assert llm.chat_calls == []                     # 不值得调 LLM
         # ids 过滤到 1 条 → 同款早退
         result = consolidate_memories(llm, db, ids=[only])
@@ -571,7 +571,8 @@ class TestConsolidate:
         llm = FakeLLM(chat_error=RuntimeError("llm down"))
         result = consolidate_memories(llm, db)
         assert result["consolidated"] == 0
-        assert result["detail"].startswith("整理失败")
+        # scope 分组语义: 失败记入分组明细(不再是整体 detail 前缀)
+        assert "整理失败" in result["detail"]
         # 原记忆未被误标记
         assert all(not e["consolidated"]
                    for e in get_memory_store(db).list_memories())
@@ -580,7 +581,106 @@ class TestConsolidate:
         self._seed_two(db)
         llm = FakeLLM(chat_text="不是 JSON")
         result = consolidate_memories(llm, db)
-        assert result["detail"] == "LLM 未返回有效结果"
+        # 无效输出 → 该组 0 条产出, 原记忆保持未整理(不丢知识)
+        assert result["consolidated"] == 0
+        assert all(not e["consolidated"]
+                   for e in get_memory_store(db).list_memories())
+
+
+class TestConsolidateScope:
+    """scope 隔离(复核报告 P0): 按用户+数据源分组, 新记忆继承归属可召回。"""
+
+    def _seed_scoped(self, db):
+        store = get_memory_store(db)
+        # 用户 A / 数据源 X: 城市口径知识
+        store.save_memory(name="A-X-城市口径", description="城市统计口径",
+                          content="城市按 users.city 统计",
+                          user_id="userA", data_source_id="dsX")
+        store.save_memory(name="A-X-状态口径", description="订单状态口径",
+                          content="状态只算 paid",
+                          user_id="userA", data_source_id="dsX")
+        # 用户 B / 数据源 Y: 完全不同的业务知识
+        store.save_memory(name="B-Y-库存口径", description="库存统计口径",
+                          content="库存按仓库维度",
+                          user_id="userB", data_source_id="dsY")
+        store.save_memory(name="B-Y-退货口径", description="退货统计口径",
+                          content="退货剔除当日",
+                          user_id="userB", data_source_id="dsY")
+
+    def test_no_cross_scope_merge(self, db):
+        """两个 scope 各自整理——LLM 收到的 prompt 只含本 scope 记忆。"""
+        self._seed_scoped(db)
+        prompts_seen: list[str] = []
+
+        class ScopeLLM:
+            def chat(self, messages=None, temperature=None, stage=None, **kw):
+                prompts_seen.append(messages[0]["content"])
+                scope = "X" if "城市" in prompts_seen[-1] else "Y"
+                if scope == "X":
+                    body = json.dumps([{"name": "A-X合并", "description": "d",
+                                        "type": "project", "content": "城市+状态口径"}],
+                                      ensure_ascii=False)
+                else:
+                    body = json.dumps([{"name": "B-Y合并", "description": "d",
+                                        "type": "project", "content": "库存+退货口径"}],
+                                      ensure_ascii=False)
+                return body, {}
+
+        result = consolidate_memories(ScopeLLM(), db)
+        assert len(prompts_seen) == 2                    # 每 scope 独立一次 LLM
+        assert "城市" in prompts_seen[0] and "库存" not in prompts_seen[0]
+        assert "库存" in prompts_seen[1] and "城市" not in prompts_seen[1]
+        assert result["consolidated"] == 2 and result["groups"] == 2
+
+    def test_new_memories_inherit_scope_and_recallable(self, db):
+        """新记忆继承 user+ds 归属, 且能被同 scope 的查询召回。"""
+        self._seed_scoped(db)
+
+        class ScopeLLM:
+            def chat(self, messages=None, temperature=None, stage=None, **kw):
+                # 按 scope 出料(两组名字不同, 避免同名条目互相干扰断言)
+                if "城市" in messages[0]["content"]:
+                    return json.dumps([{"name": "A-X合并",
+                                        "description": "城市与状态统计口径",
+                                        "type": "project",
+                                        "content": "城市按 users.city, 状态只算 paid"}],
+                                      ensure_ascii=False), {}
+                return json.dumps([{"name": "B-Y合并", "description": "d",
+                                    "type": "project", "content": "c"}],
+                                  ensure_ascii=False), {}
+
+        consolidate_memories(ScopeLLM(), db)
+        entries = {e["name"]: e for e in get_memory_store(db).list_memories()}
+        merged = entries["A-X合并"]
+        assert merged["user_id"] == "userA" and merged["data_source_id"] == "dsX"
+        assert entries["B-Y合并"]["user_id"] == "userB"
+        # 原记忆已隐藏
+        assert entries["A-X-城市口径"]["consolidated"] is True
+
+        # 同 scope 召回得到新记忆(整理结果不失效)——此前归属为 NULL 永远召不回
+        hits = recall_memories("城市统计口径", db,
+                               user_id="userA", data_source_id="dsX")
+        assert any(h["name"] == "A-X合并" for h in hits)
+        # 跨 scope 召回不到 A 的整理结果(隔离不泄漏)
+        assert recall_memories("城市统计口径", db,
+                               user_id="userB", data_source_id="dsY") == []
+
+    def test_data_source_filter(self, db):
+        """data_source_id 参数: 只整理指定数据源, 其他 scope 不动。"""
+        self._seed_scoped(db)
+
+        class OnlyYLLM:
+            def chat(self, messages=None, temperature=None, stage=None, **kw):
+                return json.dumps([{"name": "仅Y合并", "description": "d",
+                                    "type": "project", "content": "c"}],
+                                  ensure_ascii=False), {}
+
+        result = consolidate_memories(OnlyYLLM(), db, data_source_id="dsY")
+        assert result["total"] == 2                       # 只取 dsY 的两条
+        entries = {e["name"]: e for e in get_memory_store(db).list_memories()}
+        assert entries["仅Y合并"]["data_source_id"] == "dsY"
+        # dsX 的记忆未被整理
+        assert entries["A-X-城市口径"]["consolidated"] is False
 
 
 # ── 查询流水 ─────────────────────────────────────────────────
