@@ -114,6 +114,10 @@ groups:
         type: bool
         label: 在 SQL prompt 注入 JOIN 路径
         default: true
+      - key: graph_community_algorithm
+        type: string
+        label: 社区发现算法(label_propagation/louvain)
+        default: label_propagation
       - key: graph_linkage_co_occurrence_threshold
         type: int
         label: linkage 置信度提升的共现阈值
@@ -154,6 +158,12 @@ groups:
         default: 10000
         min: 1000
         max: 60000
+      - key: query_stats_retention_days
+        type: int
+        label: 查询统计保留天数(0=永久)
+        default: 90
+        min: 0
+        max: 3650
   - key: schedule
     title: 定时任务
     fields:
@@ -173,3 +183,9 @@ groups:
         type: bool
         label: 扫描时 LLM 推断复合指标
         default: true
+      - key: health_check_max_failures
+        type: int
+        label: 健康巡检连续失败自动停用阈值(次)
+        default: 3
+        min: 1
+        max: 20

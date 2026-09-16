@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,21 @@ def record_query(db, **fields: Any) -> Optional[str]:
         return None
 
 
-def _agg_select(ds_filter: bool) -> str:
+def _since_clause(days: Optional[int]) -> tuple[str, list]:
+    """时间窗口子句(days>0 → 近 N 天; None/0 = 全部历史)。返回 (sql, params)。"""
+    if not days or days <= 0:
+        return "", []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    return "created_at >= ?", [cutoff]
+
+
+def _agg_select(ds_filter: bool, window: str) -> str:
+    where_parts = []
+    if ds_filter:
+        where_parts.append("data_source_id = ?")
+    if window:
+        where_parts.append(window)
+    where = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
     return f"""
         SELECT data_source_id,
                COUNT(*) AS query_count,
@@ -91,15 +105,24 @@ def _agg_select(ds_filter: bool) -> str:
                SUM(COALESCE(chart_degraded, 0)) AS chart_degraded_count,
                SUM(COALESCE(asked_user, 0)) AS ask_user_count
           FROM chatbi_query_stats
-          {'WHERE data_source_id = ?' if ds_filter else ''}
+          {where}
          GROUP BY data_source_id"""
 
 
 def datasource_metrics(db, slow_ms: int = DEFAULT_SLOW_QUERY_MS,
-                       data_source_id: Optional[str] = None) -> list[dict]:
-    """按数据源聚合查询质量指标(对标源 GET /datasource-metrics + P1 扩展)。"""
-    sql = _agg_select(bool(data_source_id))
-    params: tuple = (slow_ms, data_source_id) if data_source_id else (slow_ms,)
+                       data_source_id: Optional[str] = None,
+                       days: Optional[int] = None) -> list[dict]:
+    """按数据源聚合查询质量指标(对标源 GET /datasource-metrics + P1 扩展)。
+
+    days: 时间窗口(近 N 天;None/0 = 全部历史)——原系统口径为近 24h,
+    这里做成参数由前端选择(24h/7天/30天/全部)。
+    """
+    window_sql, window_params = _since_clause(days)
+    sql = _agg_select(bool(data_source_id), window_sql)
+    params: list = [slow_ms, *window_params]
+    if data_source_id:
+        params.append(data_source_id)
+    params = tuple(params)
     with db.connect() as conn:
         rows = conn.execute(sql, params).fetchall()
     out = []
@@ -124,16 +147,42 @@ def datasource_metrics(db, slow_ms: int = DEFAULT_SLOW_QUERY_MS,
 
 
 def slow_queries(db, data_source_id: str, slow_ms: int = DEFAULT_SLOW_QUERY_MS,
-                 limit: int = 20) -> list[dict]:
+                 limit: int = 20, days: Optional[int] = None) -> list[dict]:
     """慢查询明细(超阈值, 按耗时倒序;对标源 GET /slow-queries)。"""
-    with db.connect() as conn:
-        rows = conn.execute(
-            """SELECT id, data_source_id, user_id, question, sql_text,
+    window_sql, window_params = _since_clause(days)
+    sql = f"""SELECT id, data_source_id, user_id, question, sql_text,
                       duration_ms, row_count, status, error_message,
                       heal_rounds, created_at
                  FROM chatbi_query_stats
                 WHERE data_source_id = ? AND COALESCE(duration_ms, 0) > ?
-                ORDER BY duration_ms DESC LIMIT ?""",
-            (data_source_id, slow_ms, limit),
+                {'AND ' + window_sql if window_sql else ''}
+                ORDER BY duration_ms DESC LIMIT ?"""
+    with db.connect() as conn:
+        rows = conn.execute(
+            sql, (data_source_id, slow_ms, *window_params, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def purge_stats(db, retention_days: int) -> int:
+    """清理超保留期的统计行(0/负 = 关闭);返回删除条数。
+
+    由元数据刷新守护线程每轮调用(设置 query_stats_retention_days,
+    缺省 90 天)——统计表无归档需求, 到期即删。
+    """
+    if retention_days <= 0:
+        return 0
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+    with db.connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM chatbi_query_stats WHERE created_at < ?", (cutoff,))
+        return getattr(cur, "rowcount", 0) or 0
+
+
+def delete_stats_for_datasource(db, data_source_id: str) -> int:
+    """数据源删除时的级联清理(与保存查询/看板/记忆同规则: 一并删除)。"""
+    with db.connect() as conn:
+        cur = conn.execute(
+            "DELETE FROM chatbi_query_stats WHERE data_source_id = ?",
+            (data_source_id,))
+        return getattr(cur, "rowcount", 0) or 0

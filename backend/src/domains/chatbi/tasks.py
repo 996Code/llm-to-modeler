@@ -69,6 +69,18 @@ def _start_refresh_scheduler(manager, app_state) -> None:
         _loop._last_health = 0.0
         while not _refresh_stop.wait(30):
             now = _now_ts()
+            # 统计留存清理(设置 query_stats_retention_days, 缺省 90, 0=关)
+            try:
+                retention = int(_load_settings(app_state)
+                                .get("query_stats_retention_days", 90))
+                if retention > 0:
+                    from domains.chatbi.query_stats import purge_stats
+                    from domains.chatbi.runtime import get_pack_db
+                    purged = purge_stats(get_pack_db(), retention)
+                    if purged:
+                        logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
+            except Exception as e:
+                logger.warning("查询统计清理失败(下轮重试): %s", e)
             # 健康巡检: 设置周期(缺省 300s)
             try:
                 health_iv = int(_load_settings(app_state)
@@ -80,7 +92,10 @@ def _start_refresh_scheduler(manager, app_state) -> None:
                 try:
                     from domains.chatbi import datasources as ds_mod
                     from domains.chatbi.runtime import get_pack_db
-                    ds_mod.check_all_health(get_pack_db())
+                    ds_mod.check_all_health(
+                        get_pack_db(),
+                        max_failures=int(_load_settings(app_state)
+                                         .get("health_check_max_failures", 3)))
                 except Exception as e:
                     logger.warning("健康巡检失败(下轮重试): %s", e)
             # 元数据刷新: 设置周期
@@ -204,16 +219,15 @@ def _task_consolidate_memories(handle, app_state=None, data_source_id=None) -> d
     if result.get("consolidated"):
         handle.log("原始记忆已标记为'已整理'(默认隐藏, 记忆页勾选'显示已整理'可查看)")
 
-    # ── linkage → 图谱反哺: 整理涉及的每个数据源都同步一次 ──
-    # scopes 只含"产出了新记忆"的组;无产出时该数据源没有变化, 无需同步。
+    # ── linkage → 图谱反哺: 目标 = 显式 ds ∪ 候选 scope ∪ linkage distinct ds ──
+    # (三审 P0: 不能只取"成功产出合并记忆"的组——无产出/失败/仅 linkage
+    #  时再次提交整理任务必须仍能触发同步, 重试语义才真实成立)
     graph_sync = []
-    involved_ds = {s.get("data_source_id") for s in result.get("scopes", [])
-                   if s.get("data_source_id")}
-    if data_source_id:
-        involved_ds = {d for d in involved_ds if d == data_source_id} or involved_ds
+    from domains.chatbi.memory import get_memory_store
+    involved_ds = _graph_sync_targets(get_memory_store(db), result,
+                                      data_source_id=data_source_id)
     for ds_id in sorted(involved_ds):
         try:
-            from domains.chatbi.memory import get_memory_store
             from domains.chatbi.graph_infer import sync_linkage_to_graph
             res = sync_linkage_to_graph(
                 db, get_memory_store(db), ds_id,
@@ -225,6 +239,8 @@ def _task_consolidate_memories(handle, app_state=None, data_source_id=None) -> d
             logger.warning("整理后 linkage 图谱同步失败 (ds=%s): %s", ds_id, e)
             handle.log(f"linkage 图谱同步失败 (ds={ds_id[:8]}…, 降级): {e}")
             graph_sync.append({"data_source_id": ds_id, "ok": False, "error": str(e)[:200]})
+    if not involved_ds:
+        handle.log("无图谱同步目标(无候选记忆且无 linkage 记录)")
     result["graph_sync"] = graph_sync
     return result
 
@@ -372,6 +388,36 @@ def _linkage_sync_kwargs(app_state) -> dict:
         "discover_new_pairs": bool(s.get(
             "graph_linkage_discover_new_pairs", True)),
     }
+
+
+def _graph_sync_targets(store, result: dict, data_source_id=None) -> set:
+    """计算图谱同步的目标数据源集合(三审 P0: 重试语义必须真实可用)。
+
+    组成(并集):
+      - 显式指定的 data_source_id —— 无论本次是否产生合并记忆都同步;
+      - 本次参与整理的全部候选 scope(不只是成功产出组——首次失败/
+        无产出时再次提交仍能命中同一批数据源);
+      - 全局整理(未指定 ds)时: linkage 记忆的 distinct 数据源——
+        linkage 永远不参与合并, 但它是图谱反哺的直接数据源,
+        只有 linkage 也要同步(源: "数据源只有 linkage 记忆时提交
+        整理仍会执行图谱同步"验收场景)。
+    """
+    targets: set = set()
+    if data_source_id:
+        targets.add(data_source_id)
+    for s in result.get("candidate_scopes") or result.get("scopes") or []:
+        if s.get("data_source_id"):
+            targets.add(s["data_source_id"])
+    if not data_source_id:
+        # 全局整理: linkage 的 distinct ds 一并纳入(linkage 永不参与合并
+        # 也永不被标记整理, 无需 consolidated 过滤)
+        try:
+            for m in store.list_memories():
+                if m.get("type") == "linkage" and m.get("data_source_id"):
+                    targets.add(m["data_source_id"])
+        except Exception as e:
+            logger.warning("linkage 数据源清单读取失败(跳过该来源): %s", e)
+    return targets
 
 
 def _evolve_graph(db, datasource_id: str, content, app_state=None) -> None:

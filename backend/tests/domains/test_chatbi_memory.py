@@ -633,37 +633,43 @@ class TestConsolidateScope:
         assert result["consolidated"] == 2 and result["groups"] == 2
 
     def test_new_memories_inherit_scope_and_recallable(self, db):
-        """新记忆继承 user+ds 归属, 且能被同 scope 的查询召回。"""
+        """合并产物归属数据源全局(user_id=NULL), 该库任何用户可召回。"""
         self._seed_scoped(db)
 
         class ScopeLLM:
             def chat(self, messages=None, temperature=None, stage=None, **kw):
-                # 按 scope 出料(两组名字不同, 避免同名条目互相干扰断言)
+                # 按库出料(两组名字不同, 避免同名条目互相干扰断言)
                 if "城市" in messages[0]["content"]:
-                    return json.dumps([{"name": "A-X合并",
+                    return json.dumps([{"name": "X库合并",
                                         "description": "城市与状态统计口径",
                                         "type": "project",
                                         "content": "城市按 users.city, 状态只算 paid"}],
                                       ensure_ascii=False), {}
-                return json.dumps([{"name": "B-Y合并", "description": "d",
+                return json.dumps([{"name": "Y库合并", "description": "d",
                                     "type": "project", "content": "c"}],
                                   ensure_ascii=False), {}
 
-        consolidate_memories(ScopeLLM(), db)
+        result = consolidate_memories(ScopeLLM(), db)
         entries = {e["name"]: e for e in get_memory_store(db).list_memories()}
-        merged = entries["A-X合并"]
-        assert merged["user_id"] == "userA" and merged["data_source_id"] == "dsX"
-        assert entries["B-Y合并"]["user_id"] == "userB"
-        # 原记忆已隐藏
+        # 产品决策: 按数据源隔离不按用户——同库跨用户合并为共享知识,
+        # 产物 user_id=NULL(数据源全局规则)
+        merged = entries["X库合并"]
+        assert not merged.get("user_id")
+        assert merged["data_source_id"] == "dsX"
+        assert not entries["Y库合并"].get("user_id")
+        # 原记忆(用户A/用户B 的)已隐藏
         assert entries["A-X-城市口径"]["consolidated"] is True
 
-        # 同 scope 召回得到新记忆(整理结果不失效)——此前归属为 NULL 永远召不回
+        # 同库任何用户召回得到合并结果(OR NULL 语义)
         hits = recall_memories("城市统计口径", db,
                                user_id="userA", data_source_id="dsX")
-        assert any(h["name"] == "A-X合并" for h in hits)
-        # 跨 scope 召回不到 A 的整理结果(隔离不泄漏)
+        assert any(h["name"] == "X库合并" for h in hits)
+        hits_b = recall_memories("城市统计口径", db,
+                                 user_id="其他人", data_source_id="dsX")
+        assert any(h["name"] == "X库合并" for h in hits_b)
+        # 跨库召回不到(隔离不泄漏)
         assert recall_memories("城市统计口径", db,
-                               user_id="userB", data_source_id="dsY") == []
+                               user_id="userA", data_source_id="dsY") == []
 
     def test_data_source_filter(self, db):
         """data_source_id 参数: 只整理指定数据源, 其他 scope 不动。"""
@@ -1060,3 +1066,127 @@ class TestWalkthroughFixes:
         assert links, "scenes 应含 user_input 文本(B3 修复前恒空)"
         for m in links:
             delete_memory(db, m["id"])
+
+
+class TestGlobalMemoryScope:
+    """产品决策语义(三审 P0 + 用户确认): 按数据源隔离, 不按用户隔离。
+
+    - 手工/合并记忆 = 数据源全局规则(user_id=NULL), 该库所有用户可召回;
+    - 用户私有记忆(自动提炼带 user_id)不跨用户泄漏;
+    - 整理同库跨用户合并为共享知识。
+    """
+
+    def _seed_global(self, db):
+        store = get_memory_store(db)
+        # 手工全局规则(NULL user) + 用户私有记忆
+        store.save_memory(name="GMV口径", description="GMV统计口径",
+                          content="GMV = 已支付未退款订单总额",
+                          user_id=None, data_source_id="dsX")
+        store.save_memory(name="userB私有", description="B的私有偏好",
+                          content="只看近30天", user_id="userB",
+                          data_source_id="dsX")
+
+    def test_global_memory_recalled_for_any_user(self, db):
+        """NULL user 的数据源全局记忆: 任意用户在该库召回; 跨库不泄漏。"""
+        self._seed_global(db)
+        for who in ("userA", "userB", "随便谁"):
+            hits = recall_memories("GMV 统计口径", db,
+                                   user_id=who, data_source_id="dsX")
+            assert any(h["name"] == "GMV口径" for h in hits), who
+        # 跨库不泄漏
+        assert recall_memories("GMV 统计口径", db,
+                               user_id="userA", data_source_id="dsY") == []
+
+    def test_private_memory_not_leaked_across_users(self, db):
+        """用户私有记忆不跨用户泄漏(只本人可见)。"""
+        self._seed_global(db)
+        assert recall_memories("私有偏好", db,
+                               user_id="userB", data_source_id="dsX")
+        assert recall_memories("私有偏好", db,
+                               user_id="userA", data_source_id="dsX") == []
+
+    def test_same_ds_cross_user_merge(self, db):
+        """同库跨用户合并: 一次 LLM 调用, 产物为该库全局(NULL user)。"""
+        store = get_memory_store(db)
+        store.save_memory(name="A的城市口径", description="城市统计",
+                          content="城市按 users.city",
+                          user_id="userA", data_source_id="dsX")
+        store.save_memory(name="B的状态口径", description="状态统计",
+                          content="状态只算 paid",
+                          user_id="userB", data_source_id="dsX")
+
+        calls = []
+
+        class OneGroupLLM:
+            def chat(self, messages=None, temperature=None, stage=None, **kw):
+                calls.append(messages[0]["content"])
+                return json.dumps([{"name": "X库统一口径", "description": "城市与状态口径",
+                                    "type": "project", "content": "城市 users.city, 状态 paid"}],
+                                  ensure_ascii=False), {}
+
+        result = consolidate_memories(OneGroupLLM(), db)
+        assert len(calls) == 1                       # 同库一组(跨用户合并)
+        assert "A的城市口径" in calls[0] and "B的状态口径" in calls[0]
+        entries = {e["name"]: e for e in get_memory_store(db).list_memories()}
+        merged = entries["X库统一口径"]
+        assert not merged.get("user_id") and merged["data_source_id"] == "dsX"
+        # 两个原作者都能召回合并结果
+        for who in ("userA", "userB"):
+            assert any(h["name"] == "X库统一口径"
+                       for h in recall_memories("城市口径", db, user_id=who,
+                                                data_source_id="dsX"))
+
+    def test_candidate_scopes_even_without_output(self, db):
+        """LLM 无有效产出时 candidate_scopes 仍含候选组(P0-2 重试依据)。"""
+        store = get_memory_store(db)
+        store.save_memory(name="m1", description="d", content="c",
+                          user_id="u1", data_source_id="dsX")
+        store.save_memory(name="m2", description="d", content="c",
+                          user_id="u2", data_source_id="dsX")
+
+        class BadLLM:
+            def chat(self, messages=None, **kw):
+                return "不是 JSON", {}
+
+        result = consolidate_memories(BadLLM(), db)
+        assert result["consolidated"] == 0
+        assert result["candidate_scopes"] == [{"data_source_id": "dsX"}]
+        # 原记忆未被误标记(可重试)
+        assert all(not e["consolidated"]
+                   for e in get_memory_store(db).list_memories())
+
+
+class TestGraphSyncTargets:
+    """_graph_sync_targets: 显式 ds 必含 ∪ 候选 scope ∪ linkage distinct。"""
+
+    class _Store:
+        def __init__(self, memories):
+            self._m = memories
+
+        def list_memories(self):
+            return self._m
+
+    def test_explicit_ds_always_included(self):
+        from domains.chatbi.tasks import _graph_sync_targets
+        # 无候选无产出, 显式 ds 仍同步(重试语义核心)
+        t = _graph_sync_targets(self._Store([]), {"scopes": [], "candidate_scopes": []},
+                                data_source_id="dsA")
+        assert t == {"dsA"}
+
+    def test_candidate_and_linkage_union(self):
+        from domains.chatbi.tasks import _graph_sync_targets
+        store = self._Store([
+            {"type": "linkage", "data_source_id": "dsL", "consolidated": False},
+            {"type": "linkage", "data_source_id": "dsL", "consolidated": False},  # 去重
+            {"type": "linkage", "data_source_id": "dsM", "consolidated": True},   # 已整理仍算(保守)
+            {"type": "project", "data_source_id": "dsC"},
+        ])
+        t = _graph_sync_targets(store, {"candidate_scopes": [{"data_source_id": "dsC"}]})
+        assert t == {"dsC", "dsL", "dsM"}
+
+    def test_explicit_ds_limits_linkage_expansion(self):
+        from domains.chatbi.tasks import _graph_sync_targets
+        # 显式 ds 时只同步该库(linkage 扩展仅全局整理启用)
+        store = self._Store([{"type": "linkage", "data_source_id": "other"}])
+        t = _graph_sync_targets(store, {}, data_source_id="dsA")
+        assert t == {"dsA"}

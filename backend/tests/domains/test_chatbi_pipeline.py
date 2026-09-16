@@ -397,3 +397,66 @@ class TestSwitchChart:
         result = tool.execute({"user_input": "换成饼图"}, ctx)
         assert result.error_for_llm and "重新提问" in result.summary
         assert "校验未通过" in result.summary
+
+
+# ── 场景: 持久化降级可见性(三审 P0: persist_warnings 引用修复) ──────
+
+class TestPersistWarnings:
+    """四类持久化失败 → 查询仍成功返回, warning 进 artifact/formatted 对用户可见。
+
+    此前 bug: artifact 在持久化前用 ``state.get(...) or []`` 定格了独立
+    空列表, 后续 setdefault 追加到另一个列表——warning 永远传不出去。
+    """
+
+    SQL = ('SELECT u.city AS "城市", COUNT(*) AS "订单数" FROM public.biz_orders o '
+           'JOIN public.biz_users u ON o.user_id = u.id GROUP BY u.city')
+
+    def _llm(self):
+        return FakeLLM({
+            "chatbi.think": {"tables": ["biz_orders(订单表)"], "aggregation": "COUNT",
+                             "caveats": [], "prev_sql_review": ""},
+            "chatbi.generate_sql": f"```sql\n{self.SQL}\n```",
+            "chatbi.chart": {"chart_type": "bar", "dim_col": "城市",
+                             "measure_cols": ["订单数"]},
+        })
+
+    @pytest.mark.parametrize("target,fragment", [
+        ("domains.chatbi.memory.extract_and_save_memory", "记忆未沉淀"),
+        ("domains.chatbi.memory.persist_linkage_memory", "JOIN经验未沉淀"),
+        ("domains.chatbi.m4.save_query", "查询未自动保存"),
+        ("domains.chatbi.fewshot.index_fewshot_example", "经验未回流"),
+    ])
+    def test_each_persist_failure_visible(self, env, monkeypatch, target, fragment):
+        import importlib
+        module_path, fn_name = target.rsplit(".", 1)
+        mod = importlib.import_module(module_path)
+        monkeypatch.setattr(
+            mod, fn_name,
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+        result, _ = _run(env, "各城市的订单数量", self._llm())
+        # 查询本身成功(持久化 fail-open)
+        assert result.error_for_llm is None
+        assert result.artifact["rowcount"] >= 1
+        # warning 随 artifact 落库(历史恢复可见)
+        warnings = result.artifact.get("persist_warnings") or []
+        assert any(fragment in w for w in warnings), f"{fragment} 不在 {warnings}"
+        # format_result 钩子透出(引擎合并进 SSE result, 前端消息卡可见)
+        formatted = env["tool"].format_result(result.artifact)
+        assert any(fragment in w
+                   for w in formatted.get("persistWarnings") or [])
+
+    def test_no_unexpected_warnings(self, env, monkeypatch):
+        # 三段注入 no-op(记忆/linkage/保存查询); fewshot 在无向量配置的
+        # 测试环境参数求值即失败(环境性, 其可见性由参数化用例覆盖)——
+        # 断言: 其余三段零 warning, 出现的 warning 均为已知四类前缀
+        import domains.chatbi.memory as mem_mod
+        import domains.chatbi.m4 as m4_mod
+        monkeypatch.setattr(mem_mod, "extract_and_save_memory", lambda *a, **kw: None)
+        monkeypatch.setattr(mem_mod, "persist_linkage_memory", lambda *a, **kw: None)
+        monkeypatch.setattr(m4_mod, "save_query", lambda *a, **kw: {"id": "x"})
+        result, _ = _run(env, "各城市的订单数量", self._llm())
+        assert result.error_for_llm is None
+        ws = result.artifact.get("persist_warnings") or []
+        prefixes = ("记忆未沉淀", "JOIN经验未沉淀", "查询未自动保存", "经验未回流")
+        assert all(w.startswith(prefixes) for w in ws), ws
+        assert not any(w.startswith(prefixes[:3]) for w in ws), ws

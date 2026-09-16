@@ -67,6 +67,25 @@
     <a-drawer v-model:open="metricsOpen" width="620"
               :title="`查询指标 · ${metricsDs?.name || ''}`">
       <a-spin :spinning="metricsLoading">
+        <!-- 依赖健康(milvus/llm 真实探针;三审 P2) -->
+        <div v-if="healthDetail" class="dep-line">
+          <a-tag v-for="(c, k) in healthDetail.components" :key="k"
+                 :color="c.status === 'ok' ? 'green' : (c.status === 'unconfigured' ? 'default' : 'red')">
+            {{ { milvus: '向量库', llm: 'LLM 网关', fernet: '加密' }[k] || k }}: {{ c.status }}
+          </a-tag>
+          <a-tooltip :title="Object.values(healthDetail.components).map((c: any) => c.detail).join('\n')">
+            <span class="muted" style="font-size:12px;cursor:help">详情</span>
+          </a-tooltip>
+        </div>
+        <!-- 时间范围(0=全部) -->
+        <div class="range-line">
+          <a-radio-group v-model:value="metricsDays" size="small" @change="reloadMetrics">
+            <a-radio-button :value="1">24小时</a-radio-button>
+            <a-radio-button :value="7">7天</a-radio-button>
+            <a-radio-button :value="30">30天</a-radio-button>
+            <a-radio-button :value="0">全部</a-radio-button>
+          </a-radio-group>
+        </div>
         <template v-if="metrics">
           <div class="metric-grid">
             <div class="metric-card"><b>{{ metrics.query_count }}</b><span>总查询</span></div>
@@ -240,14 +259,30 @@ const metrics = ref<any>(null)
 const slowList = ref<any[]>([])
 const slowMs = ref(10000)
 
+const metricsDays = ref(0)
+const healthDetail = ref<any>(null)
+
 async function showMetrics(record: any) {
   metricsDs.value = record
   metricsOpen.value = true
+  metricsDays.value = 0
+  healthDetail.value = null
+  // 依赖健康与指标并行加载(探针 3s 超时, 不阻塞指标)
+  chatbiApi.get('/health/detail').then(({ data }) => {
+    healthDetail.value = data
+  }).catch(() => { /* 静默 */ })
+  await reloadMetrics()
+}
+
+async function reloadMetrics() {
+  if (!metricsDs.value) return
   metricsLoading.value = true
   metrics.value = null
   slowList.value = []
   try {
-    const { data } = await chatbiApi.get(`/datasources/${record.id}/metrics`)
+    const { data } = await chatbiApi.get(`/datasources/${metricsDs.value.id}/metrics`, {
+      params: { days: metricsDays.value || undefined },
+    })
     metrics.value = data.metrics
     slowList.value = data.slow_queries || []
     slowMs.value = data.slow_query_ms || 10000
@@ -342,6 +377,8 @@ onMounted(loadList)
 .tab-toolbar .muted { margin-left: 0; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .health-line { margin-top: 8px; }
+.dep-line { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.range-line { margin-bottom: 10px; }
 .metric-grid {
   display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px;
 }

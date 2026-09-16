@@ -292,7 +292,9 @@ class AskDataTool(CompositeTool):
                     expand_use_community=bool(
                         settings.get("graph_expand_use_community", True)),
                     max_join_path_hops=int(
-                        settings.get("graph_max_join_path_hops", 4)))
+                        settings.get("graph_max_join_path_hops", 4)),
+                    community_algorithm=str(settings.get(
+                        "graph_community_algorithm", "label_propagation")))
                 expanded = expand_with_relationships(
                     content, merged,
                     max_depth=int(settings.get("graph_expand_depth", 2)),
@@ -743,6 +745,10 @@ class AskDataTool(CompositeTool):
         chart = state.get("chart")
         check = state.get("check")
         rows_sample = result.rows[:50]  # STATE_STORE_ROW_SAMPLE_LIMIT 对齐
+        # 先在 state 上落键再引用同一列表: 后续四处持久化失败会 append 到
+        # 这个列表——artifact 必须引用同一对象, 否则收集到的 warning 传不
+        # 进制品(此前 state.get(...) or [] 产生独立临时空列表, 三审 P0)。
+        persist_warnings = state.setdefault("_persist_warnings", [])
 
         artifact = {
             "sql": state["sql"],
@@ -766,9 +772,9 @@ class AskDataTool(CompositeTool):
             # 刷新页面后"导出 CSV"仍能定位本条记录
             "saved_query_id": state.get("_saved_query_id"),
             "current_tables": state.get("current_tables") or [],
-            # 持久化降级对用户可见(复核报告 P0-B 建议5): 此前只写服务器
-            # 日志, 用户不知道"这轮的经验没存上"(源 persist_warning 等价物)
-            "persist_warnings": state.get("_persist_warnings") or [],
+            # 持久化降级对用户可见(源 persist_warning 等价物): 引用同一列表,
+            # 下方四段持久化失败 append 后随 artifact 落库(三审 P0 修复)
+            "persist_warnings": persist_warnings,
         }
 
         # 记忆抽取 (源 chat_stream 在成功查询后调 extract_memory_from_turn

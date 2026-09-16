@@ -171,6 +171,8 @@ async def delete_datasource(ds_id: str, request: Request):
         conn.execute("DELETE FROM chatbi_dashboard_widgets WHERE datasource_id = ?", (ds_id,))
         # 记忆级联(含 linkage 共现经验; recent_queries 等用户级记忆不绑 ds 不动)
         conn.execute("DELETE FROM chatbi_agent_memories WHERE data_source_id = ?", (ds_id,))
+        # 查询统计级联(三审 P2: 删除数据源不留未定义归属的统计垃圾)
+        conn.execute("DELETE FROM chatbi_query_stats WHERE data_source_id = ?", (ds_id,))
     try:
         stores.delete_data_source_storage(db, stores.get_vector(request.app.state), ds_id)
     except Exception as e:
@@ -366,18 +368,20 @@ def _slow_ms(request: Request) -> int:
 
 
 @router.get("/datasources/{ds_id}/metrics", dependencies=[Depends(admin_required)])
-async def datasource_metrics_ep(ds_id: str, request: Request):
+async def datasource_metrics_ep(ds_id: str, request: Request, days: int = 0):
     """单数据源查询质量指标 + 慢查询 top + 依赖健康。
 
     指标: 查询数/平均与最大耗时/错误率/慢查询数/自愈命中/检索降级/
     图表降级/主动澄清次数(每次问数一行统计, 三路径全覆盖)。
+    days: 时间窗口(1/7/30 等, 0 = 全部历史)——前端指标抽屉可切换。
     """
     from domains.chatbi import query_stats, datasources
     if datasources.get_datasource(_db(), ds_id) is None:
         raise HTTPException(404, "数据源不存在")
     slow_ms = _slow_ms(request)
+    days = max(0, min(days, 3650))
     rows = query_stats.datasource_metrics(_db(), slow_ms=slow_ms,
-                                          data_source_id=ds_id)
+                                          data_source_id=ds_id, days=days)
     metrics = rows[0] if rows else {
         "data_source_id": ds_id, "query_count": 0, "avg_ms": 0, "max_ms": 0,
         "error_count": 0, "error_rate": 0.0, "slow_count": 0, "heal_count": 0,
@@ -386,18 +390,19 @@ async def datasource_metrics_ep(ds_id: str, request: Request):
     return {
         "metrics": metrics,
         "slow_query_ms": slow_ms,
+        "days": days,
         "slow_queries": query_stats.slow_queries(
-            _db(), ds_id, slow_ms=slow_ms, limit=10),
+            _db(), ds_id, slow_ms=slow_ms, limit=10, days=days),
     }
 
 
 @router.get("/datasources/{ds_id}/slow-queries", dependencies=[Depends(admin_required)])
-async def slow_queries_ep(ds_id: str, request: Request, limit: int = 20):
+async def slow_queries_ep(ds_id: str, request: Request, limit: int = 20, days: int = 0):
     """慢查询明细(超阈值, 按耗时倒序;对标源 GET /slow-queries)。"""
     from domains.chatbi import query_stats
     return {"items": query_stats.slow_queries(
         _db(), ds_id, slow_ms=_slow_ms(request),
-        limit=max(1, min(limit, 100)))}
+        limit=max(1, min(limit, 100)), days=max(0, min(days, 3650)))}
 
 
 @router.get("/health/detail", dependencies=[Depends(admin_required)])
@@ -408,21 +413,47 @@ async def health_detail_ep(request: Request):
     LLM 网关/数据源加密凭据 + 各业务库最近健康状态。
     """
     components: dict = {}
-    # 向量库
+    # 向量库: 构造 + 轻量真实探针(列出 collection; 三审 P2: 不能只看
+    # "对象可构造"——配置错了构造也成功)
     try:
         from domains.chatbi import stores as cb_stores
         store = cb_stores.get_vector(request.app.state)
-        components["milvus"] = {"status": "ok",
-                                "detail": f"{type(store).__name__}"}
+        detail = f"{type(store).__name__}"
+        try:
+            inner = getattr(store, "_store", None) or store
+            probe = getattr(inner, "list_collections", None)
+            if callable(probe):
+                probe()
+                detail += " · collections 可列"
+        except Exception as pe:
+            detail = f"{detail} · 探针失败: {str(pe)[:120]}"
+            components["milvus"] = {"status": "fail", "detail": detail}
+            raise
+        components["milvus"] = {"status": "ok", "detail": detail}
     except Exception as e:
-        components["milvus"] = {"status": "fail", "detail": str(e)[:200]}
-    # LLM 网关
+        components.setdefault("milvus", {"status": "fail",
+                                         "detail": str(e)[:200]})
+    # LLM 网关: GET /models 真实探针(3s 超时, 带脱敏)
     try:
+        import httpx
         llm = getattr(request.app.state, "llm_client", None)
+        cfg = getattr(llm, "_config", None) or getattr(llm, "config", None)
+        base = getattr(cfg, "base_url", "") if cfg else ""
+        api_key = getattr(cfg, "api_key", "") if cfg else ""
         model = getattr(llm, "model", "") if llm else ""
-        base = getattr(llm, "base_url", "") if llm else ""
-        components["llm"] = {"status": "ok" if llm else "unconfigured",
-                             "detail": f"model={model} base={base}"}
+        status, detail = "ok", f"model={model}"
+        if base:
+            try:
+                headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+                r = httpx.get(f"{base.rstrip('/')}/models", headers=headers,
+                              timeout=3.0)
+                status = "ok" if r.status_code < 400 else "fail"
+                detail += f" · /models HTTP {r.status_code}"
+            except Exception as pe:
+                status, detail = "fail", f"{detail} · 探针失败: {str(pe)[:120]}"
+        else:
+            status, detail = "unconfigured", "未配置 base_url"
+        components["llm"] = {"status": status, "detail": detail[:200]}
     except Exception as e:
         components["llm"] = {"status": "fail", "detail": str(e)[:200]}
     # 加密凭据
@@ -621,34 +652,51 @@ async def graph_delete_relationship(ds_id: str, from_table: str, target_table: s
 # ── 记忆(移植 memory.py 管理端点) ────────────────────────────
 
 @router.get("/memories", dependencies=[Depends(admin_required)])
-async def list_memories(user_id: str | None = None, limit: int = 100,
-                        include_consolidated: bool = True):
+async def list_memories(user_id: str | None = None, data_source_id: str | None = None,
+                        limit: int = 100, include_consolidated: bool = True):
     from domains.chatbi import memory
     return {"items": memory.list_memories(_db(), user_id=user_id, limit=limit,
-                                          include_consolidated=include_consolidated)}
+                                          include_consolidated=include_consolidated,
+                                          data_source_id=data_source_id)}
 
 
 class MemoryIn(BaseModel):
     name: str
     description: str = ""
     content: str
-    memory_type: str = "project"      # project | preference | business | linkage
+    memory_type: str = "project"      # project | preference | business
     mem_id: str | None = None         # 有值 = 更新, 无值 = 新建
-    data_source_id: str | None = None
+    data_source_id: str | None = None # 新建必填(数据源全局规则);编辑留空=保留原值
 
 
 @router.put("/memories", dependencies=[Depends(admin_required)])
 async def save_memory(body: MemoryIn, request: Request):
-    """新建/更新记忆(对标源 PUT /memory;业务方自助沉淀业务约定)。"""
+    """新建/更新记忆(对标源 PUT /memory;业务方自助沉淀业务约定)。
+
+    scope 契约(三审 P0): 管理端手工记忆 = 数据源全局规则——
+      - 新建: data_source_id 必填, user_id 留空(NULL);
+        召回侧按 ``user_id = 当前用户 OR user_id IS NULL`` 命中,
+        该数据源所有用户的问数都能注入(此前 NULL 归属永远召不回)。
+      - 编辑: data_source_id 留空则保留原值(store 层 COALESCE),
+        不允许把已有记忆改成无归属。
+    """
     from domains.chatbi import memory
     if not body.name.strip() or not body.content.strip():
         raise HTTPException(422, "名称与内容不能为空")
+    if body.memory_type not in ("project", "preference", "business"):
+        raise HTTPException(422, "管理端仅支持 project/preference/business 类型"
+                                "(linkage 是查询沉淀的结构化数据)")
+    if not body.mem_id and not body.data_source_id:
+        raise HTTPException(422, "新建记忆必须选择数据源(数据源全局规则, "
+                                "对该数据源所有用户生效)")
     mem_id = memory.get_memory_store(_db()).save_memory(
         name=body.name.strip(), description=body.description.strip(),
         content=body.content.strip(), memory_type=body.memory_type,
         mem_id=body.mem_id, data_source_id=body.data_source_id)
     _audit(request, "memory", "update" if body.mem_id else "create",
-           resource_id=mem_id, detail={"name": body.name.strip(), "type": body.memory_type})
+           resource_id=mem_id,
+           detail={"name": body.name.strip(), "type": body.memory_type,
+                   "data_source_id": body.data_source_id})
     return {"ok": True, "id": mem_id}
 
 

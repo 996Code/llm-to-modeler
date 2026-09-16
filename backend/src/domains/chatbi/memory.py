@@ -490,6 +490,10 @@ def recall_memories(
         data_source_id: 数据源过滤 (源 memory/{tenant}/{ds}/ 目录隔离的
             行存储等价; None = 不过滤——管理端全量场景)
 
+    user_id 过滤语义(三审 P0): ``user_id = ? OR user_id IS NULL``——
+    归属为 NULL 的记忆是"数据源全局规则"(管理端手工沉淀的业务约定),
+    对该数据源的所有用户生效; 用户私有记忆不跨用户泄漏。
+
     Returns:
         [{id, name, description, content}, ...] 按相关性降序, 无匹配返回空。
     """
@@ -504,7 +508,7 @@ def recall_memories(
            "WHERE consolidated = 0 AND type != 'linkage'")
     params: list = []
     if user_id:
-        sql += " AND user_id = ?"
+        sql += " AND (user_id = ? OR user_id IS NULL)"
         params.append(user_id)
     if data_source_id:
         sql += " AND data_source_id = ?"
@@ -599,6 +603,7 @@ def list_memories(
     user_id: Optional[str] = None,
     limit: int = 50,
     include_consolidated: bool = True,
+    data_source_id: Optional[str] = None,
 ) -> list[dict]:
     """管理端记忆列表 (含来源对话 conversation_id/conv_id 与 created_at)。
 
@@ -613,6 +618,7 @@ def list_memories(
         user_id: 宿主用户过滤 (None = 全量)
         limit: 返回条数上限 (默认 50)
         include_consolidated: 是否包含已整理记忆
+        data_source_id: 数据源过滤 (None = 全部; 记忆页按库切换用)
 
     Returns:
         记忆条目列表 (含 content 正文)。
@@ -626,6 +632,9 @@ def list_memories(
     if user_id:
         where.append("user_id = ?")
         params.append(user_id)
+    if data_source_id:
+        where.append("data_source_id = ?")
+        params.append(data_source_id)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
@@ -795,7 +804,7 @@ def consolidate_memories(
     on_progress: Optional[Callable[[int, str], None]] = None,
     data_source_id: Optional[str] = None,
 ) -> dict:
-    """整理记忆 — LLM 合并去重碎片化记忆(按 用户+数据源 分组,禁止跨 scope 合并)。
+    """整理记忆 — LLM 合并去重碎片化记忆(按数据源分组,禁止跨库合并)。
 
     当记忆条目较多时, 将碎片化的记忆合并为更精炼的几条。
     原有记忆标记 consolidated=true (默认隐藏), 合并结果作为新记忆写入。
@@ -806,11 +815,14 @@ def consolidate_memories(
       - linkage 类型是结构化数据, 跳过 (LLM 整理会破坏结构)
       - 单条或少条时跳过 (不值得调 LLM)
 
-    scope 隔离 (对标源 memory/{tenant}/{ds}/ 目录隔离):
-      - 候选按 (user_id, data_source_id) 分组, 每组独立调 LLM 整理——
-        不同用户/不同数据源的业务知识绝不进同一个 prompt;
-      - 整理产出的新记忆继承该组的 user_id + data_source_id——
-        recall_memories 按 双维过滤召回, 归属丢失 = 整理结果永远召不回;
+    scope 隔离 (产品决策: 按数据源隔离, 不按用户隔离):
+      - 候选按 data_source_id 分组, 每组独立调 LLM 整理——不同数据源的
+        业务知识绝不进同一个 prompt; 同库内不同用户的记忆可合并为
+        该库的共享知识;
+      - 整理产出的新记忆 user_id 留空(NULL = 数据源全局规则),
+        data_source_id 继承分组——recall_memories 按
+        ``user_id = 当前用户 OR user_id IS NULL`` 命中, 该库所有用户
+        的问数都能召回合并结果;
       - 先写新记忆、后标记原记忆 (写入失败时原记忆不丢失)。
 
     Args:
@@ -821,11 +833,12 @@ def consolidate_memories(
         ids: 只整理指定的记忆 (None = 整理全部未整理的)
         on_progress: 进度回调 (progress 0-100, stage 描述文字)
         data_source_id: 只整理该数据源的记忆 (None = 全部数据源, 仍按
-            scope 分组)
+            数据源分组)
 
     Returns:
         {"consolidated": int, "total": int, "detail": str,
-         "groups": int, "scopes": [{"user_id", "data_source_id"}...]}
+         "groups": int, "scopes": [{"data_source_id"}...],
+         "candidate_scopes": [{"data_source_id"}...]}
     """
     def _progress(pct: int, stage: str):
         if on_progress:
@@ -854,13 +867,17 @@ def consolidate_memories(
         return {"consolidated": 0, "total": len(memories),
                 "detail": "记忆条目较少, 无需整理", "groups": 0, "scopes": []}
 
-    # ── scope 分组: (user_id, data_source_id) 各自独立整理 ──
-    groups: dict[tuple, list[dict]] = {}
+    # ── scope 分组: 按数据源各自独立整理(产品决策: 不按用户隔离,
+    # 同库内跨用户的记忆合并为该库共享知识) ──
+    groups: dict[object, list[dict]] = {}
     for m in memories:
-        key = (m.get("user_id"), m.get("data_source_id"))
+        key = m.get("data_source_id")
         groups.setdefault(key, []).append(m)
+    # 候选 scope 全量透出(三审 P0): 图谱同步目标依据"参与整理的组",
+    # 而非"成功产出合并记忆的组"——无合并产出/失败时同步仍可重试。
+    candidate_scopes = [{"data_source_id": d} for d in groups]
 
-    _progress(10, f"读取记忆内容 ({len(groups)} 个用户/数据源分组)...")
+    _progress(10, f"读取记忆内容 ({len(groups)} 个数据源分组)...")
 
     total_saved = 0
     total_marked = 0
@@ -869,19 +886,19 @@ def consolidate_memories(
     progress_base = 10
     progress_span = 80  # 10 → 90 按组推进
 
-    for gi, ((g_user, g_ds), group_memories) in enumerate(groups.items()):
+    for gi, (g_ds, group_memories) in enumerate(groups.items()):
         pct = progress_base + int(progress_span * gi / len(groups))
         _progress(pct, f"整理分组 {gi + 1}/{len(groups)} "
-                       f"(用户={g_user or '-'} 数据源={g_ds or '-'})...")
+                       f"(数据源={g_ds or '-'})...")
         try:
+            # 新记忆 user_id=None(数据源全局规则): 该库所有用户可召回
             group_saved = _consolidate_group(
-                llm, store, group_memories, user_id=g_user, data_source_id=g_ds)
+                llm, store, group_memories, user_id=None, data_source_id=g_ds)
         except Exception as e:
             # 单组失败不拖垮其他组;原记忆保持未整理, 下一轮可重试
-            logger.warning("consolidate 分组失败 (user=%s ds=%s): %s",
-                           g_user, g_ds, e)
+            logger.warning("consolidate 分组失败 (ds=%s): %s", g_ds, e)
             group_details.append(
-                f"用户={g_user or '-'} 数据源={g_ds or '-'}: 整理失败({e})")
+                f"数据源={g_ds or '-'}: 整理失败({e})")
             continue
         if group_saved > 0:
             # 先写新记忆成功, 再标记原记忆隐藏 (失败不丢原记忆)
@@ -889,9 +906,9 @@ def consolidate_memories(
                 store.mark_consolidated(m["id"])
                 total_marked += 1
             total_saved += group_saved
-            group_scopes.append({"user_id": g_user, "data_source_id": g_ds})
+            group_scopes.append({"data_source_id": g_ds})
             group_details.append(
-                f"用户={g_user or '-'} 数据源={g_ds or '-'}: "
+                f"数据源={g_ds or '-'}: "
                 f"{len(group_memories)} 条 → {group_saved} 条")
 
     _progress(100, "完成")
@@ -905,11 +922,12 @@ def consolidate_memories(
         "detail": detail,
         "groups": len(group_scopes),
         "scopes": group_scopes,
+        "candidate_scopes": candidate_scopes,
     }
 
 
 def _consolidate_group(llm, store, group_memories, user_id, data_source_id) -> int:
-    """整理单个 scope 组内的记忆, 新记忆继承组归属;返回成功写入条数。
+    """整理单个数据源组内的记忆, 新记忆写为该库全局(user_id=None);返回成功写入条数。
 
     任何异常向上抛(由调用方决定是否标记原记忆——本函数失败时原记忆
     保持未整理状态, 下一轮整理可重试)。

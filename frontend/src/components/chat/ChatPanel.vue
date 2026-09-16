@@ -862,9 +862,22 @@ watch(() => store.streaming, (busy, was) => {
     msg.formattedData.llmCallCount = t.llmCallCount ?? 0
     msg.formattedData.promptTokens = t.promptTokens ?? 0
     msg.formattedData.completionTokens = t.completionTokens ?? 0
-    convTokens.value += (t.promptTokens || 0) + (t.completionTokens || 0)
+    // 累计口径统一为"全量重算"(三审 P2: 轮末 += 与切会话全量赋值并发时
+    // 存在重复累计/旧值覆盖竞态)——重算与切会话路径共用同一函数
+    recalcConvTokens(convId)
   }).catch(() => { /* 链路拉取失败静默——token 展示是增强, 不影响主流程 */ })
 })
+
+// 全量重算对话累计 token(唯一写入口, 消除竞态)
+let _tokenCalcConvId = ''
+function recalcConvTokens(convId: string) {
+  _tokenCalcConvId = convId
+  getConversationTrace(convId).then(({ turns }) => {
+    if (_tokenCalcConvId !== convId) return   // 会话已切换, 丢弃旧结果
+    convTokens.value = (turns || []).reduce(
+      (s, t) => s + (t.promptTokens || 0) + (t.completionTokens || 0), 0)
+  }).catch(() => { /* 静默 */ })
+}
 
 // 切换会话: 全量拉一次 trace 重算累计(历史轮次的 token 不丢),
 // 并把各轮的 LLM 用量/总耗时回填到对应消息——轮末回填只在内存,
@@ -873,6 +886,7 @@ watch(() => store.currentConversation?.id, (convId) => {
   convTokens.value = 0
   if (!convId) return
   getConversationTrace(convId).then(({ turns }) => {
+    if (_tokenCalcConvId !== convId) return
     const list = turns || []
     convTokens.value = list.reduce(
       (s, t) => s + (t.promptTokens || 0) + (t.completionTokens || 0), 0)
