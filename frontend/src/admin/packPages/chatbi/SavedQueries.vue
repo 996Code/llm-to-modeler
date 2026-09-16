@@ -7,11 +7,15 @@
     <a-table :data-source="queries" :loading="loadingQ" row-key="id" size="small"
              :pagination="queries.length > 20 ? { pageSize: 20 } : false">
         <a-table-column title="问题" data-index="question" :ellipsis="true" />
-        <a-table-column title="SQL" width="320">
+        <a-table-column title="SQL" :ellipsis="true" width="300">
           <template #default="{ record }">
-            <a-tooltip :title="record.sqlText" placement="topLeft">
+            <a-popover trigger="click" placement="leftTop"
+                       overlay-class-name="sql-popover">
               <code class="sql-cell">{{ record.sqlText }}</code>
-            </a-tooltip>
+              <template #content>
+                <pre class="sql-full">{{ record.sqlText }}</pre>
+              </template>
+            </a-popover>
           </template>
         </a-table-column>
         <a-table-column title="结果" data-index="rowCount" width="80">
@@ -169,11 +173,14 @@ onMounted(() => { loadQueries(); loadDashboards() })
 .tab-toolbar b { color: #1d2129; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
+/* 列宽内单行省略(ellipsis 由 a-table-column 接管, 不再 max-width 硬限——
+   此前 inline-block 300px 在窄屏下溢出覆盖右侧"结果"列) */
 .sql-cell {
-  display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; background: #f5f5f5; padding: 1px 6px; border-radius: 3px;
-  font-size: 12px; vertical-align: middle;
+  display: block; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; background: #f5f5f5; padding: 2px 6px; border-radius: 3px;
+  font-size: 12px; cursor: pointer;
 }
+.sql-cell:hover { background: #eef1f6; }
 .aw-form .form-row { display: flex; gap: 12px; }
 .aw-form .half { flex: 1; }
 .aw-preview {
@@ -181,4 +188,12 @@ onMounted(() => { loadQueries(); loadDashboards() })
 }
 .aw-preview-label { font-size: 12px; color: #86909c; margin-bottom: 4px; }
 .aw-preview-q { font-size: 13px; color: #1f2329; font-weight: 500; }
+</style>
+
+<style>
+.sql-popover .sql-full {
+  max-width: 560px; max-height: 320px; overflow: auto; margin: 0;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all;
+  background: #1e1e1e; color: #a5d6ff; padding: 10px 12px; border-radius: 6px;
+}
 </style>

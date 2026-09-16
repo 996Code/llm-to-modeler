@@ -152,13 +152,24 @@
             </a-tag>
           </template>
           <template v-else-if="column.key === 'detail'">
-            <span class="cl-detail-summary">{{ auditDetailSummary(record) }}</span>
+            <a-popover v-if="record.detail" trigger="click" placement="leftTop"
+                       overlay-class-name="audit-detail-popover">
+              <span class="cl-detail-summary cl-detail-click">
+                {{ auditDetailSummary(record) || '(查看)' }}
+              </span>
+              <template #content>
+                <pre class="audit-detail-full">{{ JSON.stringify(record.detail, null, 2) }}</pre>
+              </template>
+            </a-popover>
+            <span v-else class="cl-detail-summary">-</span>
           </template>
           <template v-else-if="column.key === 'conv_id'">
             <a-tooltip v-if="record.conv_id" :title="record.conv_id">
               <span class="cl-conv">{{ shortId(record.conv_id) }}</span>
             </a-tooltip>
-            <span v-else>-</span>
+            <a-tooltip v-else title="数据源/语义层等管理操作无关联会话">
+              <span class="cl-conv-none">管理操作</span>
+            </a-tooltip>
           </template>
         </template>
       </a-table>
@@ -250,6 +261,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   create: '创建', update: '更新', delete: '删除', scan: '扫描',
   rollback: '回滚', consolidate: '整理', chat: '对话', login: '登录',
 }
+
+const JSON_ = JSON  // 模板内访问
 
 function auditDetailSummary(r: AuditEventItem): string {
   const d = r.detail as Record<string, unknown> | null
@@ -429,4 +442,15 @@ function onAuditTableChange(pag: { current?: number; pageSize?: number }) {
 .cl-tokens { font-weight: 600; color: #374151; font-variant-numeric: tabular-nums; }
 .cl-tokens-sub { font-size: 11.5px; color: #9ca3af; margin-left: 6px; }
 .cl-detail-summary { font-size: 12px; color: #4b5563; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; display: inline-block; }
+
+.cl-detail-click { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.cl-detail-click:hover { color: #1677ff; }
+.cl-conv-none { color: #bbb; font-size: 12px; }
+</style>
+<style>
+.audit-detail-popover .audit-detail-full {
+  max-width: 520px; max-height: 340px; overflow: auto; margin: 0;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all;
+  background: #f7f8fa; padding: 10px 12px; border-radius: 6px;
+}
 </style>
