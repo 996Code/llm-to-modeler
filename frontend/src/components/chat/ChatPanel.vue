@@ -277,6 +277,7 @@
       @send="handleSend"
       :streaming="store.streaming"
       :pending-clarification="store.pendingClarification"
+      :total-tokens="convTokens"
     />
 
     <!-- JSON 查看器 Modal：全屏（嵌入模式下 iframe 只有 420px 宽，弹窗必须拉满
@@ -318,6 +319,8 @@ import {
 } from '@ant-design/icons-vue'
 // Modal：ant-design-vue 的弹窗组件（模板里的 JSON 查看器）
 import { Modal, message as antdMessage } from 'ant-design-vue'
+// 单轮 trace 拉取(轮末给消息卡补 LLM 次数/token, 输入框累计对话 token)
+import { getConversationTrace } from '../../services/api'
 // 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
 import { useConversationStore } from '../../stores/conversation'
 import { copyText } from '../../utils/clipboard'
@@ -830,6 +833,47 @@ watch(() => store.stageMessage, () => {
   nextTick(() => {
     if (msgListRef.value) msgListRef.value.scrollTop = msgListRef.value.scrollHeight
   })
+})
+
+// ── 轮末 token 回填(原版 T047/T048 摘要交互的等价物) ──────────
+// 一轮生成结束(streaming → false)后拉单轮 trace:
+//   ① 消息卡 detailLine 直接可见"LLM ×N · N tokens"(不用点开链路弹窗);
+//   ② 输入框角累计本对话 token(成本感知常显)。
+// call_logs 在工具执行期同步落库, 轮末即可查, 无需后端改动。
+const convTokens = ref(0)
+
+watch(() => store.streaming, (busy, was) => {
+  if (busy || was === undefined) return
+  const convId = store.currentConversation?.id
+  if (!convId) return
+  // 找最后一个 assistant 消息(本轮产物)
+  const idx = [...store.messages].map((m, i) => ({ m, i }))
+    .reverse().find(({ m }) => m.role === 'assistant')?.i
+  if (idx === undefined) return
+  const msg: any = store.messages[idx]
+  if (!msg.formattedData || msg.formattedData._traceLoaded) return
+  msg.formattedData._traceLoaded = true
+  // turnIndex = 该消息之前的 user 消息个数(与 openTurnTrace/_build_trace 同口径)
+  let userCount = 0
+  for (let k = 0; k <= idx; k++) if (store.messages[k]?.role === 'user') userCount++
+  getConversationTrace(convId, Math.max(0, userCount - 1)).then(({ turns }) => {
+    const t = turns?.[0]
+    if (!t) return
+    msg.formattedData.llmCallCount = t.llmCallCount ?? 0
+    msg.formattedData.promptTokens = t.promptTokens ?? 0
+    msg.formattedData.completionTokens = t.completionTokens ?? 0
+    convTokens.value += (t.promptTokens || 0) + (t.completionTokens || 0)
+  }).catch(() => { /* 链路拉取失败静默——token 展示是增强, 不影响主流程 */ })
+})
+
+// 切换会话: 全量拉一次 trace 重算累计(历史轮次的 token 不丢)
+watch(() => store.currentConversation?.id, (convId) => {
+  convTokens.value = 0
+  if (!convId) return
+  getConversationTrace(convId).then(({ turns }) => {
+    convTokens.value = (turns || []).reduce(
+      (s, t) => s + (t.promptTokens || 0) + (t.completionTokens || 0), 0)
+  }).catch(() => { /* 静默 */ })
 })
 </script>
 

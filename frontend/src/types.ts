@@ -123,6 +123,9 @@ export interface SSEResult {
   chartDegraded?: boolean            // 图表是否降级(规则推断)
   retrievalDegraded?: boolean        // 检索是否降级(结果可能不精确)
   persistWarnings?: string[]         // 持久化降级提示(记忆/经验未沉淀等, 非阻断)
+  llmCallCount?: number              // 本轮 LLM 调用次数(轮末从链路回填)
+  promptTokens?: number              // 本轮输入 token(轮末回填)
+  completionTokens?: number          // 本轮输出 token(轮末回填)
   truncated?: boolean                // 结果是否被行数上限截断
   tables?: string[]                  // 本次查询涉及的表
   // M4 保存查询定位(加到看板/导出 CSV 直接引用)

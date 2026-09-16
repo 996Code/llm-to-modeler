@@ -64,8 +64,18 @@ const detailLine = computed(() => {
   if (d.healRounds > 0) parts.push(`自愈 ${d.healRounds} 轮`)
   if (d.retrievalDegraded) parts.push('检索降级')
   if (d.chartDegraded) parts.push('图表规则推断')
+  // LLM 次数与 token(轮末从链路回填;原版 T049 摘要行的等价物, 免开弹窗)
+  if (d.llmCallCount) parts.push(`LLM ×${d.llmCallCount}`)
+  const tokens = (d.promptTokens || 0) + (d.completionTokens || 0)
+  if (tokens > 0) parts.push(`${fmtTokens(tokens)} tokens`)
   return parts.join(' · ')
 })
+
+function fmtTokens(n: number): string {
+  if (n >= 10000) return `${(n / 10000).toFixed(1)}万`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
 
 // 持久化降级提示(复核报告: 源 persist_warning 等价物)——查询成功但
 // 记忆/经验/自动保存没存上时, 用户在结果卡下方直接看到, 不再只留服务端日志

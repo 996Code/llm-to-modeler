@@ -35,6 +35,7 @@
         :placeholder="placeholderText"
         :auto-size="{ minRows: 1, maxRows: 4 }"
         @press-enter="onEnter"
+        @keydown="onKeydown"
         :disabled="streaming"
         class="input-box"
         :bordered="false"
@@ -79,6 +80,8 @@
     </div>
     <div class="input-footer">
       <span>内容由 AI 生成，请核对后再使用</span>
+      <!-- 对话累计 token(原版 T048 token 预算的等价物): 成本感知常显 -->
+      <span v-if="totalTokens" class="token-usage">本对话已用 {{ fmtTokens(totalTokens) }} tokens</span>
     </div>
   </div>
 </template>
@@ -94,6 +97,7 @@ import { SendOutlined, LoadingOutlined, PaperClipOutlined } from '@ant-design/ic
 const props = defineProps<{
   streaming: boolean                  // 是否正在流式生成（生成时禁用输入）
   pendingClarification?: boolean      // 当前是否处于追问态（影响占位文案）
+  totalTokens?: number                // 当前对话累计 token(输入框角常显)
 }>()
 
 // defineEmits：声明本组件会触发的事件（接口契约，类比 Java 的事件总线/回调接口）。
@@ -197,13 +201,66 @@ function send() {
   if (!canSend.value) return
   // 图片可能为 null，统一转 undefined（后端按可选参数处理）
   const img = imageBase64.value || undefined
+  const sent = text.value.trim()
   // emit 触发事件，父组件通过 @send 监听
   // emit 类比 Java 的事件总线发布：fireEvent(new SendEvent(text, img))
-  emit('send', text.value.trim(), img)
+  emit('send', sent, img)
+  // 计入输入历史(↑↓ 翻阅; 与最近一条相同则不重复入栈, 上限 100)
+  if (sent && sent !== inputHistory.value[inputHistory.value.length - 1]) {
+    inputHistory.value.push(sent)
+    if (inputHistory.value.length > 100) inputHistory.value.shift()
+  }
+  histIdx.value = -1   // 回到"新草稿"态
+  savedDraft.value = ''
   // 清空草稿（文本 + 图片），为下一次输入做准备
   text.value = ''
   imageBase64.value = null
   imagePreview.value = null
+}
+
+// ── ↑↓ 历史输入切换(原版 ChatView navigateHistory 等价物) ──
+// 仅在光标处于首行(↑)/末行(↓)时接管方向键——多行编辑中不移交。
+const inputHistory = ref<string[]>([])
+const histIdx = ref(-1)          // -1 = 不在历史中(新草稿)
+const savedDraft = ref('')       // 进入历史前保存的未完成草稿
+
+function onKeydown(e: KeyboardEvent) {
+  const el = e.target as HTMLTextAreaElement
+  if (e.key === 'ArrowUp' && !el.value.slice(0, el.selectionStart).includes('\n')) {
+    e.preventDefault()
+    navigateHistory(-1)
+  } else if (e.key === 'ArrowDown' && !el.value.slice(el.selectionEnd).includes('\n')) {
+    e.preventDefault()
+    navigateHistory(1)
+  }
+}
+
+function navigateHistory(dir: -1 | 1) {
+  if (!inputHistory.value.length) return
+  if (histIdx.value === -1 && dir === -1) {
+    // 首次进入历史: 保存当前草稿, 从最新一条开始
+    savedDraft.value = text.value
+    histIdx.value = inputHistory.value.length - 1
+  } else {
+    const next = histIdx.value + dir
+    if (next >= inputHistory.value.length) {
+      // ↓ 越过最旧 → 回到新草稿
+      histIdx.value = -1
+      text.value = savedDraft.value
+      return
+    }
+    if (next < 0) return
+    histIdx.value = next
+  }
+  text.value = inputHistory.value[histIdx.value]
+}
+
+/** token 数格式化(k/万) */
+function fmtTokens(n?: number): string {
+  if (!n) return '0'
+  if (n >= 10000) return `${(n / 10000).toFixed(1)}万`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
 }
 
 /**
@@ -375,10 +432,14 @@ function onEnter(e: KeyboardEvent) {
 .input-footer {
   max-width: 880px;
   margin: 8px auto 0;
-  text-align: center;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
   font-size: 11px;
   color: var(--text-placeholder);
 }
+/* 对话累计 token 角标 */
+.token-usage { color: var(--text-secondary); }
 
 /* 窄屏调整内边距 */
 @media (max-width: 768px) {
