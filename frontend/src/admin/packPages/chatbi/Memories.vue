@@ -63,11 +63,15 @@
           </template>
         </a-table-column>
         <a-table-column title="描述" data-index="description" :ellipsis="true" />
-        <a-table-column title="内容" width="320">
+        <a-table-column title="内容" :ellipsis="true" width="300">
           <template #default="{ record }">
-            <a-tooltip :title="record.content" placement="topLeft">
+            <a-popover trigger="click" placement="leftTop"
+                       overlay-class-name="mem-content-popover">
               <span class="mem-content">{{ record.content }}</span>
-            </a-tooltip>
+              <template #content>
+                <pre class="mem-content-full">{{ record.content }}</pre>
+              </template>
+            </a-popover>
           </template>
         </a-table-column>
         <a-table-column title="状态" width="90">
@@ -319,9 +323,18 @@ onMounted(() => {
 .mem-hint { font-size: 12px; color: #999; margin-bottom: 12px; }
 .mem-scope { font-size: 12px; color: #4e5969; }
 .mem-content {
-  display: inline-block; max-width: 300px; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; font-size: 12px; color: #4e5969; vertical-align: middle;
+  display: block; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 12px; color: #4e5969; cursor: pointer;
 }
+.mem-content:hover { color: #1677ff; }
 .mem-form .form-row { display: flex; gap: 12px; }
 .mem-form .half { flex: 1; }
+</style>
+
+<style>
+.mem-content-popover .mem-content-full {
+  max-width: 520px; max-height: 340px; overflow: auto; margin: 0;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  background: #f7f8fa; padding: 10px 12px; border-radius: 6px;
+}
 </style>
