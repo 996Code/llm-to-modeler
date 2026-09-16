@@ -4,6 +4,9 @@
       <span>共 <b>{{ queries.length }}</b> 条</span>
       <a-button size="small" @click="loadQueries"><ReloadOutlined /> 刷新</a-button>
     </div>
+    <div class="sq-hint">
+      <InfoCircleOutlined /> 行数为保存查询那一刻的快照;导出 Excel 与加入看板时会<b>实时重跑 SQL</b> 取最新数据
+    </div>
     <a-table :data-source="queries" :loading="loadingQ" row-key="id" size="small"
              :pagination="queries.length > 20 ? { pageSize: 20 } : false">
         <a-table-column title="问题" data-index="question" :ellipsis="true" />
@@ -18,7 +21,14 @@
             </a-popover>
           </template>
         </a-table-column>
-        <a-table-column title="结果" data-index="rowCount" width="80">
+        <a-table-column width="80">
+          <template #title>
+            <span>结果
+              <a-tooltip title="保存查询那一刻的行数快照——导出/看板会实时重跑 SQL, 行数可能不同">
+                <InfoCircleOutlined style="color:#bbb;cursor:help;margin-left:2px" />
+              </a-tooltip>
+            </span>
+          </template>
           <template #default="{ record }">{{ record.resultSummary?.row_count ?? '-' }} 行</template>
         </a-table-column>
         <a-table-column title="时间" data-index="createdAt" width="160">
@@ -72,7 +82,7 @@
 import { defineEmits, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  AppstoreAddOutlined, DownloadOutlined, HistoryOutlined, ReloadOutlined,
+  AppstoreAddOutlined, DownloadOutlined, HistoryOutlined, InfoCircleOutlined, ReloadOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 import { exportQueryToExcel } from '../../../utils/exportExcel'
@@ -171,6 +181,8 @@ onMounted(() => { loadQueries(); loadDashboards() })
   margin-bottom: 12px; font-size: 13px; color: #86909c;
 }
 .tab-toolbar b { color: #1d2129; }
+.sq-hint { font-size: 12px; color: #999; margin-bottom: 12px; }
+.sq-hint b { color: #4e5969; font-weight: 500; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 /* 列宽内单行省略(ellipsis 由 a-table-column 接管, 不再 max-width 硬限——
