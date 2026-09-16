@@ -169,6 +169,8 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             store = stores.get_vector(app_state)
             embedder = stores.get_embedder(llm)
             rb = indexing.rebuild_index(content, ds_id, store, embedder, db=db)
+            if rb is not None and getattr(rb, "error", None):
+                raise RuntimeError(rb.error)   # RebuildResult.error 契约(五审5.2)
             indexed = rb.indexed_count
         except Exception as e:
             logger.warning("向量索引重建失败(降级, 不阻塞扫描): %s", e)
