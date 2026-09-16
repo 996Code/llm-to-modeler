@@ -340,7 +340,7 @@ async function pollScan(dsId: string) {
                  row.scanStage = st.scanStage; row.scanError = st.scanError }
       if (st.scanStatus === 'done' || st.scanStatus === 'failed') {
         clearInterval(timer)
-        if (st.scanStatus === 'done') message.success('扫描完成')
+        if (st.scanStatus === 'done') message.success('扫描完成' + (st.index_warning ? ` — ${st.index_warning}` : ''))
         else message.error(st.scanError || '扫描失败')
       }
     } catch {

@@ -297,22 +297,26 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 datasource_id=info.id, persist=False)
             merged = _merge_content(current, new_content)
             version = semantic.save_content(db, info.id, merged, source="refresh")
+            # 6.6: save_content 幂等(内容不变返回旧版本)——结构无变化时
+            # 用 current._version 判断是否真的写了新版本
+            struct_changed = version != current.version if hasattr(current, 'version') else True
             evolve = _evolve_graph(db, info.id, merged, app_state=app_state)
+            # 结构与图谱都无变化 → 跳过全量重建(7审 6.6: 无意义 embedding 压力)
+            if not struct_changed and evolve.get("versions_written", 0) == 0:
+                results.append({"datasource_id": info.id, "version": version,
+                                "ok": True, "changed": False,
+                                "detail": "结构无变化且无新图谱证据, 跳过重建"})
+                continue
             # 六审 P1.C 修复: 演化可能写出 v+2/v+3——最终索引必须对齐
             # 演化后的 current, 不再用演化前的 merged 覆盖(旧关系内容)
+            # 6.7: 同一次读取获得 content+version(防并发窗口 content 与
+            # version 来自不同版本); load_content 返回 (content, version) 二元组
             from domains.chatbi import semantic as _sem
-            final_content = _sem.load_current_content(db, info.id) or merged
-            final_version = version
-            try:
-                with db.connect() as conn:
-                    row = conn.execute(
-                        "SELECT version FROM chatbi_semantic_models "
-                        "WHERE data_source_id = ? AND is_current = 1",
-                        (info.id,)).fetchone()
-                    if row:
-                        final_version = row["version"]
-            except Exception:
-                pass
+            _loaded = _sem.load_content(db, info.id)
+            if _loaded and _loaded[0] is not None:
+                final_content, final_version = _loaded
+            else:
+                final_content, final_version = merged, version
             index_status = "ok"
             index_warning = None
             try:
@@ -501,13 +505,12 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
     # 计算——可能把刚提升的 confidence 写低。现在先取 linkage 的
     # 目标值, 再取 implicit 建议, 合并后一次写入。
     from domains.chatbi.memory import get_memory_store
+    from domains.chatbi import semantic as semantic_mod
     from domains.chatbi.graph_infer import (linkage_memories_to_cooccurrence,
                                             _compute_confidence_updates,
-                                            _discover_new_pairs)
-    from domains.chatbi.graph_core import (GRAPH_LINKAGE_CO_OCCURRENCE_THRESHOLD,
-                                           GRAPH_LINKAGE_NEW_PAIR_THRESHOLD,
-                                           GRAPH_LINKAGE_CONFIDENCE_BOOST,
-                                           GRAPH_FEEDBACK_DISCOVER_NEW_PAIRS)
+                                            _discover_new_pairs,
+                                            ensure_watermark_schema,
+                                            set_watermark)
     kwargs = _linkage_sync_kwargs(app_state)
     cooccurrence = linkage_memories_to_cooccurrence(
         get_memory_store(db), datasource_id)
@@ -518,36 +521,68 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
         return result
     existing = [r for m in current_content.models for r in m.relationships]
 
-    # 合并两类信号到统一 updates/new_pairs(同快照)
     all_updates: dict = {}
     all_new_pairs: list = []
+    watermarks_to_set: list = []  # [(pair, signal, evidence)]
 
-    # 信号 1: linkage 共现 → 确定性目标值
+    try:
+        ensure_watermark_schema(db)
+    except Exception:
+        pass  # 水位表建失败退化为无水位(全量计算, 不崩溃)
+
+    # 信号 1: linkage 共现 → 水位感知 boost(七审 6.2:
+    # 保留"共现达阈值即提升"的原语义 + 同证据不重复消费)
     if cooccurrence:
-        link_updates = _compute_confidence_updates(
+        link_updates, link_wm = _compute_confidence_updates(
             cooccurrence=cooccurrence,
             existing_relationships=existing,
             co_occurrence_threshold=kwargs["co_occurrence_threshold"],
-            confidence_boost=kwargs["confidence_boost"])
+            confidence_boost=kwargs["confidence_boost"],
+            db=db, data_source_id=datasource_id, signal="linkage")
         all_updates.update(link_updates)
+        watermarks_to_set.extend((p, "linkage", e) for p, e in link_wm.items())
         if kwargs["discover_new_pairs"]:
             all_new_pairs.extend(_discover_new_pairs(
                 cooccurrence=cooccurrence,
                 existing_relationships=existing,
                 new_pair_threshold=kwargs["new_pair_threshold"]))
 
-    # 信号 2: implicit mining(历史 SQL) → 绝对值建议
-    suggestions = mine_implicit_relationships(history, existing)
-    if suggestions:
-        for sug in suggestions:
-            pair = (sug.get("from_table"), sug.get("to_table"))
-            conf = sug.get("confidence", 0)
-            if pair in all_updates:
-                all_updates[pair] = max(all_updates[pair], conf)  # 取高不取低
-            else:
-                all_updates[pair] = conf
+    # 信号 2: implicit mining(历史 SQL) → 水位感知(七审 6.3)
+    # 七审 6.1 修复: 返回类型是 dict[pair, float], 用 .items() 遍历
+    suggestions = mine_implicit_relationships(
+        history, existing, db=db, data_source_id=datasource_id)
+    for pair, conf in suggestions.items():
+        if pair in all_updates:
+            all_updates[pair] = max(all_updates[pair], conf)  # 取高不取低
+        else:
+            all_updates[pair] = conf
+    # implicit 的水位也更新(证据量 = 达标历史的当前计数)
+    from collections import Counter as _Counter
+    import re as _re
+    _table_re = _re.compile(r"\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)", _re.IGNORECASE)
+    _known_names = set()
+    for r in existing:
+        f = r.name.split("_to_")[0] if "_to_" in r.name else ""
+        if f:
+            _known_names.add(f)
+            _known_names.add(r.target_model)
+    _implicit_co = _Counter()
+    for sql in history:
+        _tabs = set(_table_re.findall(sql))
+        for t1 in _known_names:
+            for t2 in _known_names:
+                if t1 < t2 and t1 in _tabs and t2 in _tabs:
+                    _implicit_co[(t1, t2)] += 1
+    for pair, cnt in _implicit_co.items():
+        watermarks_to_set.append((pair, "implicit", cnt))
 
     if not all_updates and not all_new_pairs:
+        # 无更新也推进水位(避免下轮重复计算同量证据)
+        for pair, sig, ev in watermarks_to_set:
+            try:
+                set_watermark(db, datasource_id, pair, sig, ev)
+            except Exception:
+                pass
         return result  # 无新证据 → 不写版本(幂等)
 
     # 乐观锁: 读当前版本号
@@ -563,6 +598,7 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
         logger.warning("乐观锁版本读取失败(降级为不校验): %s", e)
 
     # 不传 rebuild_index——索引由调用方在全部演化完成后统一重建(六审P1.C)
+    from domains.chatbi.graph_infer import VersionConflictError
     try:
         apply_confidence_updates(
             db, datasource_id, all_updates,
@@ -570,12 +606,22 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
             expected_version=current_version)
         result["versions_written"] = 1
         result["index_rebuild"] = "deferred"  # 调用方负责最终重建
+        # 写入成功 → 推进水位(下次只算增量)
+        for pair, sig, ev in watermarks_to_set:
+            try:
+                set_watermark(db, datasource_id, pair, sig, ev)
+            except Exception:
+                pass
         logger.info("图谱演化: %d updates, %d new_pairs (ds=%s)",
                     len(all_updates), len(all_new_pairs), datasource_id)
-    except Exception as e:
-        # 乐观锁冲突 = 有更新写入, 安全失败不覆盖
-        logger.warning("图谱演化写入失败(可能版本冲突): %s", e)
+    except VersionConflictError as e:
+        logger.warning("图谱演化版本冲突(有并发写入, 不覆盖): %s", e)
         result["index_rebuild"] = "conflict"
+    except Exception as e:
+        # 编程错误让任务失败可见(七审 6.4: 不再统称"可能版本冲突")
+        logger.exception("图谱演化写入异常: %s", e)
+        result["index_rebuild"] = "error"
+        result["error"] = str(e)[:200]
     return result
 
 

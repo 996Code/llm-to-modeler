@@ -821,7 +821,7 @@ class TestEvolution:
             "SELECT c FROM biz_orders inner join biz_users ON 1=1",
         ]
         suggestions = mine_implicit_relationships(sqls, self._rels())
-        assert suggestions == {("biz_orders", "biz_users"): pytest.approx(0.9)}
+        assert suggestions == {("biz_orders", "biz_users"): pytest.approx(0.7)}  # 水位首次: 0.6+0.1*1
 
     def test_mine_below_threshold(self):
         """共现 < 3 次不提升。"""
@@ -885,16 +885,16 @@ class TestLinkageAggregation:
             name="biz_orders_to_biz_users", target_model="biz_users",
             join_type="LEFT", on="x=y", type="N:1", confidence=0.6,
         )]
-        updates = _compute_updates_helper(
-            {("biz_orders", "biz_users"): 5}, rels, threshold=3, boost=0.1)
-        # 六审P1确定性目标: target = min(0.1*(5-3+1), 0.95) = 0.3
-        # 但 current=0.6 > 0.3 → 单调保护 → 无更新
-        assert updates == {}
+        # 七审水位: co=5, threshold=3 → boost=3-2=1次(只算超出阈值-1的部分)
+        # conf=0.6 → target = 0.6+0.1*1 = 0.7
+        updates, _wm = _compute_updates_helper(
+            {("biz_orders", "biz_users"): 3}, rels, threshold=3, boost=0.1)
+        assert updates == {("biz_orders", "biz_users"): pytest.approx(0.7)}
         # 低于阈值 / 未知表对 → 不进 updates
         assert _compute_updates_helper(
-            {("biz_orders", "biz_users"): 2}, rels, threshold=3, boost=0.1) == {}
+            {("biz_orders", "biz_users"): 2}, rels, threshold=3, boost=0.1)[0] == {}
         assert _compute_updates_helper(
-            {("a", "b"): 99}, rels, threshold=3, boost=0.1) == {}
+            {("a", "b"): 99}, rels, threshold=3, boost=0.1)[0] == {}
 
     def test_discover_new_pairs(self):
         rels = [Relationship(
@@ -1104,14 +1104,12 @@ class TestSyncLinkageToGraph:
              "tables": ["biz_orders", "biz_products"]},  # 排序后 == 关系方向
         ])
         out = sync_linkage_to_graph(pg_engine, mem, DS_ID, expected_version=1)
-        # 六审P1确定性目标: target = min(0.1*(5-3+1), 0.95) = 0.3 < current 0.6
-        # 单调保护 → 无更新, 不写新版本(此前=0.6+0.3=0.9 增量语义已改)
-        assert out["new_version"] is None
-        assert out["detail"] == "无达阈值的表对, 无需更新"
-        # v1 仍是 current, confidence 维持 0.6
-        new_content, is_current = _read_versions(pg_engine)[1]
+        # 七审水位方案: co=5, threshold=3, wm=0 → boost=5-2=3次 → 0.6+0.3=0.9
+        # (保留原 ChatBI "共现达阈值即提升"语义, 且与原公式结果一致)
+        assert out["new_version"] == 2
+        new_content, is_current = _read_versions(pg_engine)[2]
         assert is_current == 1
-        assert _find_rel(new_content, "biz_orders", "biz_products")["confidence"] == pytest.approx(0.6)
+        assert _find_rel(new_content, "biz_orders", "biz_products")["confidence"] == pytest.approx(0.9)
 
     def test_sync_no_memories(self, pg_engine):
         _seed_semantic_model(pg_engine)
@@ -1276,8 +1274,8 @@ class TestEvolutionIdempotency:
         """无新信号: 空证据跑演化 → 不写版本。"""
         from domains.chatbi.graph_infer import _compute_confidence_updates
         existing = [r for m in _make_content().models for r in m.relationships]
-        updates = _compute_confidence_updates({}, existing, 3, 0.1)
-        assert updates == {}
+        updates, _wm = _compute_confidence_updates({}, existing, 3, 0.1)
+        assert updates == {} and _wm == {}
 
     def test_refresh_final_index_matches_current(self, pg_engine):
         """六审 P1.C: 刷新后的最终索引 content == load_current_content()。
@@ -1292,21 +1290,131 @@ class TestEvolutionIdempotency:
         content = _make_content()
         content.models[1].relationships[1].confidence = 0.6
         existing = [r for m in content.models for r in m.relationships]
-        updates = _compute_confidence_updates(
-            {("biz_orders", "biz_products"): 9}, existing, 3, 0.1)
+        updates, _wm = _compute_confidence_updates(
+            {("biz_orders", "biz_products"): 9}, existing, 3, 0.1,
+            db=pg_engine, data_source_id=DS_ID)
         target = updates[("biz_orders", "biz_products")]
-        assert target == pytest.approx(0.7)  # 确定性: min(0.1 * 7, 0.95)
+        # 水位首次: co=9, wm=0 → boost=9-2=7 → 0.6+0.7=1.3 → cap 0.95
+        assert target == pytest.approx(0.95)
         ver = apply_confidence_updates(pg_engine, DS_ID, updates, expected_version=1)
         new_content, _ = _read_versions(pg_engine)[ver]
-        # 语义层 confidence = target (确定性, 非累加)
         for m in new_content["models"]:
             for r in m.get("relationships", []):
                 if r.get("name") == "biz_orders_to_biz_products":
-                    assert r["confidence"] == pytest.approx(0.7)
-        # 幂等: 同一证据再跑一次 → target(0.7) == current(0.7) → 无更新
-        updates2 = _compute_confidence_updates(
+                    assert r["confidence"] == pytest.approx(0.95)
+        # 同证据再跑: 水位已更新 → 无新 boost
+        _content2 = SemanticModelContent(**new_content)
+        updates2, _ = _compute_confidence_updates(
             {("biz_orders", "biz_products"): 9},
-            [r for m in SemanticModelContent(
-                **new_content).models for r in m.relationships],
-            3, 0.1)
-        assert ("biz_orders", "biz_products") not in updates2
+            [r for m in _content2.models for r in m.relationships],
+            3, 0.1, db=pg_engine, data_source_id=DS_ID)
+        assert ("biz_orders", "biz_products") not in updates2  # 幂等
+
+
+def _get_rel_conf(content, from_table: str, to_table: str) -> float:
+    """从 SemanticModelContent 或 dict 中取关系的 confidence(兼容两种类型)."""
+    models = content.models if hasattr(content, 'models') else content.get("models", [])
+    for m in models:
+        mname = m.name if hasattr(m, 'name') else m.get("name", "")
+        rels = m.relationships if hasattr(m, 'relationships') else m.get("relationships", [])
+        if mname == from_table:
+            for r in rels:
+                target = r.target_model if hasattr(r, 'target_model') else r.get("target_model", "")
+                if target == to_table:
+                    return r.confidence if hasattr(r, 'confidence') else r.get("confidence", 0)
+    return -1.0
+
+
+class TestEvolveGraphOrchestration:
+    """七审 6.4: 真正调用 _evolve_graph 的编排级测试(非纯函数)。
+
+    覆盖: 首次演化写版本 + 同证据幂等 + 水位推进 + 增量证据.
+    """
+    import sys
+    sys.path.insert(0, '.')
+
+    def _setup(self, pg_engine):
+        """低confidence关系 + linkage记忆 + fewshot历史."""
+        # 清掉水位表(可能残留)
+        try:
+            with pg_engine.connect() as conn:
+                conn.execute("DELETE FROM chatbi_graph_watermarks")
+        except Exception:
+            pass
+
+        content = _make_content()
+        content.models[1].relationships[1].confidence = 0.6
+        content.models[1].relationships[1].source = "name_pattern"
+        _seed_semantic_model(pg_engine, content=content)
+
+        from domains.chatbi.memory import ChatBIMemoryStore, CHATBI_MEMORY_DDL
+        pg_engine.init_schema(list(CHATBI_MEMORY_DDL))
+        store = ChatBIMemoryStore(pg_engine)
+        store.save_memory(name="linkage-orders-products", description="d",
+                          content="c", memory_type="linkage",
+                          data_source_id=DS_ID,
+                          extra_metadata={"co_occurrence": 3,
+                                          "tables": ["biz_orders", "biz_products"]})
+        return store
+
+    def test_evolve_writes_version_then_idempotent(self, pg_engine):
+        """首次演化写一个版本; 同证据再跑不新增版本(真正的幂等验证)."""
+        from domains.chatbi.tasks import _evolve_graph
+        from domains.chatbi.memory import get_memory_store
+
+        store = self._setup(pg_engine)
+        # 确保 list_memories 走 store(给 _evolve_graph 用)
+        from domains.chatbi import memory as mem_mod
+        original = mem_mod.get_memory_store
+        mem_mod.get_memory_store = lambda db: store
+        try:
+            from domains.chatbi import semantic as sem_mod
+            before = sem_mod.load_content(pg_engine, DS_ID)
+            v0 = before[1] if before else 1
+
+            # 第一次: co=3, threshold=3, conf=0.6 → target=0.6+0.1*1=0.7
+            r1 = _evolve_graph(pg_engine, DS_ID, before[0])
+            assert r1["versions_written"] == 1, f"首次应写版本: {r1}"
+
+            loaded1 = sem_mod.load_content(pg_engine, DS_ID)
+            assert loaded1[1] == v0 + 1
+            conf1 = _get_rel_conf(loaded1[0], "biz_orders", "biz_products")
+            assert conf1 == pytest.approx(0.7), \
+                f"水位方案首次: 0.6+0.1*1=0.7, 实际 {conf1}"
+
+            # 第二次(同证据): 水位已=3 → 无新证据 → 不写版本
+            r2 = _evolve_graph(pg_engine, DS_ID, loaded1[0])
+            assert r2["versions_written"] == 0, f"同证据幂等失败: {r2}"
+            loaded2 = sem_mod.load_content(pg_engine, DS_ID)
+            assert loaded2[1] == loaded1[1]  # 版本没变
+        finally:
+            mem_mod.get_memory_store = original
+
+    def test_evolve_incremental_evidence(self, pg_engine):
+        """co 从 3 涨到 5: 只消费增量(2), target = 0.7 + 0.1*2 = 0.9."""
+        from domains.chatbi.tasks import _evolve_graph
+        from domains.chatbi import memory as mem_mod, semantic as sem_mod
+
+        store = self._setup(pg_engine)
+        original = mem_mod.get_memory_store
+        mem_mod.get_memory_store = lambda db: store
+        try:
+            c0 = sem_mod.load_content(pg_engine, DS_ID)[0]
+            _evolve_graph(pg_engine, DS_ID, c0)  # 第一次: co=3 → 0.7
+
+            # 模拟新增证据: co 3→5
+            store.save_memory(name="linkage-orders-products", description="d",
+                              content="c", memory_type="linkage",
+                              data_source_id=DS_ID, mem_id="linkage-orders-products",
+                              extra_metadata={"co_occurrence": 5,
+                                              "tables": ["biz_orders", "biz_products"]})
+
+            c1 = sem_mod.load_content(pg_engine, DS_ID)[0]
+            _evolve_graph(pg_engine, DS_ID, c1)  # 增量: co=5, 水位=3 → +0.1*2
+
+            c2 = sem_mod.load_content(pg_engine, DS_ID)
+            conf = _get_rel_conf(c2[0], "biz_orders", "biz_products")
+            assert conf == pytest.approx(0.9), \
+                f"增量: 0.7+0.1*2=0.9, 实际 {conf}"
+        finally:
+            mem_mod.get_memory_store = original

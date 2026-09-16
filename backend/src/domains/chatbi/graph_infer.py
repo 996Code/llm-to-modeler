@@ -360,9 +360,66 @@ def infer_knowledge_graph(
 # ── T017: 演化（算法先行，e2e 留 Phase 6）─────────────────────
 # NOTE: 沿用源仓库标记——以下两个函数目前无生产调用方, 仅有单元测试。
 
+
+
+# ── 证据消费水位(六审/七审 P1: 幂等的关键——记录每对表已消费的证据量) ──
+
+WATERMARK_DDL = [
+    """CREATE TABLE IF NOT EXISTS chatbi_graph_watermarks (
+        data_source_id TEXT NOT NULL,
+        pair_key TEXT NOT NULL,           -- "table_a|table_b" 字典序
+        signal TEXT NOT NULL,             -- 'linkage' | 'implicit'
+        consumed_evidence INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (data_source_id, pair_key, signal)
+    )""",
+]
+
+
+def _pair_key(pair: tuple[str, str]) -> str:
+    return "|".join(sorted(pair))
+
+
+def get_watermark(db, data_source_id: str, pair: tuple[str, str],
+                  signal: str) -> int:
+    """读某表对某信号的已消费证据量(缺省 0)。"""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT consumed_evidence FROM chatbi_graph_watermarks "
+            "WHERE data_source_id = ? AND pair_key = ? AND signal = ?",
+            (data_source_id, _pair_key(pair), signal)).fetchone()
+        return int(row["consumed_evidence"]) if row else 0
+
+
+def set_watermark(db, data_source_id: str, pair: tuple[str, str],
+                  signal: str, evidence: int) -> None:
+    """更新消费水位(UPSERT)。"""
+    from datetime import datetime, timezone
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO chatbi_graph_watermarks "
+            "(data_source_id, pair_key, signal, consumed_evidence, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (data_source_id, pair_key, signal) "
+            "DO UPDATE SET consumed_evidence = ?, updated_at = ?",
+            (data_source_id, _pair_key(pair), signal, evidence,
+             datetime.now(timezone.utc).isoformat(),
+             evidence, datetime.now(timezone.utc).isoformat()))
+
+
+def ensure_watermark_schema(db) -> None:
+    """幂等建水位表(首次使用时调用)。"""
+    with db.connect() as conn:
+        for stmt in WATERMARK_DDL:
+            conn.execute(stmt)
+
+
 def mine_implicit_relationships(
     query_history: list[str],
     existing_relationships: list[Relationship],
+    *,
+    db=None,
+    data_source_id: str = "",
 ) -> dict[tuple[str, str], float]:
     """挖掘历史查询中的频繁 JOIN 表对 → confidence 提升。
 
@@ -403,17 +460,28 @@ def mine_implicit_relationships(
             if t1 in tables_in_sql and t2 in tables_in_sql:
                 cooccur[(t1, t2)] += 1
 
-    # 频繁 → 提升
+    # 频繁 → 提升(七审 6.3: 水位感知——同一批历史不重复计权)
     suggestions: dict[tuple[str, str], float] = {}
     for pair, count in cooccur.items():
         if count < FREQUENT_JOIN_THRESHOLD:
             continue
         current = known_pairs.get(pair, 0.0)
+        # 水位: 只对超出已消费水位的部分 boost
+        watermark = 0
+        if db is not None and data_source_id:
+            try:
+                ensure_watermark_schema(db)
+                watermark = get_watermark(db, data_source_id, pair, "implicit")
+            except Exception:
+                watermark = 0
+        boost_count = count - max(watermark, FREQUENT_JOIN_THRESHOLD - 1)
+        if boost_count <= 0:
+            continue  # 同一历史已消费, 幂等
         boosted = min(
-            current + FREQUENT_JOIN_BOOST * count,
+            current + FREQUENT_JOIN_BOOST * boost_count,
             MAX_CONFIDENCE,
         )
-        if boosted > current:
+        if boosted > current + 1e-9:
             suggestions[pair] = boosted
     return suggestions
 
@@ -524,23 +592,26 @@ def _compute_confidence_updates(
     existing_relationships: list[Relationship],
     co_occurrence_threshold: int,
     confidence_boost: float,
-) -> dict[tuple[str, str], float]:
-    """计算已知关系的 confidence boost (不修改任何数据)。
+    *,
+    db=None,
+    data_source_id: str = "",
+    signal: str = "linkage",
+) -> tuple[dict[tuple[str, str], float], dict[tuple[str, str], int]]:
+    """计算已知关系的 confidence boost(水位感知, 不修改语义层)。
 
-    对共现次数 >= co_occurrence_threshold 的已知表对,
-    confidence += confidence_boost * (co_occurrence - threshold + 1),
-    封顶 MAX_CONFIDENCE。
-
-    Args:
-        cooccurrence: linkage 轻聚合结果
-        existing_relationships: 当前语义层关系
-        co_occurrence_threshold: 共现阈值 (chat-bi: graph_linkage_co_occurrence_threshold)
-        confidence_boost: 每次增量 (chat-bi: graph_linkage_confidence_boost)
+    幂等方案(七审 6.2): 每对表维护"已消费证据水位"——只对超出水位的
+    新增证据计算 boost, 保留原 ChatBI "共现达阈值即提升"的语义:
+      - 首次: co=3, threshold=3, watermark=0 →
+        boost_count = co - max(watermark, threshold-1) = 3-2 = 1,
+        target = current(0.6) + 0.1*1 = 0.7 ✓(与原 ChatBI 一致)
+      - 同证据再跑: watermark 已=3 → boost_count=0 → 不更新 ✓(幂等)
+      - co 涨到 5: boost_count = 5-3 = 2, 在 current 上加 0.2 ✓
 
     Returns:
-        {(from, to): new_confidence} 仅包含有提升的表对
+        (updates, new_watermarks):
+        updates = {(from, to): new_confidence} 仅含有提升的表对
+        new_watermarks = {pair: evidence} 调用方在写入成功后应更新水位
     """
-    # 已知关系 → 当前 confidence
     known: dict[tuple[str, str], float] = {}
     for r in existing_relationships:
         from_table = r.name.split("_to_")[0] if "_to_" in r.name else ""
@@ -548,21 +619,32 @@ def _compute_confidence_updates(
             known[(from_table, r.target_model)] = r.confidence
 
     updates: dict[tuple[str, str], float] = {}
+    new_watermarks: dict[tuple[str, str], int] = {}
     for pair, co in cooccurrence.items():
+        # 无论是否达标, 都把当前证据量记为新水位(下次只算增量)
+        new_watermarks[pair] = co
         if co < co_occurrence_threshold:
             continue
         if pair not in known:
-            continue  # 未知表对由新表对发现逻辑处理
-        # 六审 P1 幂等修复: 从证据总量算确定性目标值, 不在当前值上累加——
-        # 同一批共现无论跑多少轮, 目标恒定(此前 current += boost*n,
-        # 每个刷新周期都会重复提升, "频次"被误变为"定时任务执行次数")
-        boost_count = co - co_occurrence_threshold + 1
-        target = min(confidence_boost * boost_count, MAX_CONFIDENCE)
-        # 单调: 目标只升不降, 已高于目标的(人工/LLM 标注)不动
-        if target > known[pair]:
+            continue
+        # 水位: 低于阈值-1 的证据已"隐含消费"(不触发 boost)
+        watermark = 0
+        if db is not None and data_source_id:
+            try:
+                ensure_watermark_schema(db)
+                watermark = get_watermark(db, data_source_id, pair, signal)
+            except Exception:
+                watermark = 0  # 水位读失败退化为全量(安全: 最多多算一次)
+        boost_count = co - max(watermark, co_occurrence_threshold - 1)
+        if boost_count <= 0:
+            continue  # 无新增证据(幂等)
+        target = min(known[pair] + confidence_boost * boost_count,
+                     MAX_CONFIDENCE)
+        # 浮点容差(七审 P3): 数学上相等的浮点不产生空版本
+        if target > known[pair] + 1e-9:
             updates[pair] = target
 
-    return updates
+    return updates, new_watermarks
 
 
 def _discover_new_pairs(
@@ -858,12 +940,13 @@ def sync_linkage_to_graph(
     for m in content.models:
         all_relationships.extend(m.relationships)
 
-    # 3. 计算 confidence boost
-    updates = _compute_confidence_updates(
+    # 3. 计算 confidence boost(水位感知; 七审 6.2)
+    updates, link_watermarks = _compute_confidence_updates(
         cooccurrence=cooccurrence,
         existing_relationships=all_relationships,
         co_occurrence_threshold=co_occurrence_threshold,
         confidence_boost=confidence_boost,
+        db=db, data_source_id=data_source_id, signal="linkage",
     )
 
     # 4. 新表对发现
@@ -875,8 +958,13 @@ def sync_linkage_to_graph(
             new_pair_threshold=new_pair_threshold,
         )
 
-    # 无更新则跳过
+    # 无更新也要推水位(下轮只算增量, 幂等)
     if not updates and not new_pairs:
+        for _pair, _ev in (link_watermarks or {}).items():
+            try:
+                set_watermark(db, data_source_id, _pair, "linkage", _ev)
+            except Exception:
+                pass
         return {
             "new_version": None,
             "boosted_pairs": 0,
@@ -905,6 +993,12 @@ def sync_linkage_to_graph(
         rebuild_index=rebuild_index,
         on_index_error=_record_index_error,
     )
+    # 写入成功 → 推进水位(幂等关键: 同证据不重复消费)
+    for _pair, _ev in link_watermarks.items():
+        try:
+            set_watermark(db, data_source_id, _pair, "linkage", _ev)
+        except Exception:
+            pass
 
     return {
         "new_version": new_version,
