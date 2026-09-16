@@ -1093,7 +1093,7 @@ class TestSyncLinkageToGraph:
         ])
         out = sync_linkage_to_graph(pg_engine, mem, DS_ID, expected_version=1)
         assert out == {"new_version": 2, "boosted_pairs": 1, "new_pairs": 0,
-                   "index_rebuild": "ok"}   # 无rebuild注入=跳过, 状态ok
+                   "index_rebuild": "skipped"}   # 未注入rebuild=跳过(五审5.2)
         new_content, is_current = _read_versions(pg_engine)[2]
         assert is_current == 1
         # boost = 0.1 * (5 - 3 + 1) = 0.3 → 0.6 + 0.3 = 0.9
@@ -1135,7 +1135,7 @@ class TestSyncLinkageToGraph:
         ])
         out = sync_linkage_to_graph(pg_engine, mem, DS_ID, expected_version=1)
         assert out == {"new_version": 2, "boosted_pairs": 0, "new_pairs": 1,
-                   "index_rebuild": "ok"}
+                   "index_rebuild": "skipped"}
         new_content, _ = _read_versions(pg_engine)[2]
         rel = _find_rel(new_content, "biz_orders", "fct_inventory")
         assert rel is not None
@@ -1152,3 +1152,54 @@ class TestSyncLinkageToGraph:
             pg_engine, mem, DS_ID, expected_version=1, discover_new_pairs=False)
         assert out["new_version"] is None
         assert out["detail"] == "无达阈值的表对, 无需更新"
+
+
+class TestIndexRebuildResultContract:
+    """五审 5.2: rebuild_index 的真实失败契约是返回 RebuildResult(error),
+    不是抛异常——error 必须被识别为 degraded, 版本仍成功落库。"""
+
+    def _seed_and_sync(self, pg_engine, rebuild):
+        content = _make_content()
+        content.models[1].relationships[1].confidence = 0.6
+        content.models[1].relationships[1].source = "name_pattern"
+        _seed_semantic_model(pg_engine, content=content)
+        mem = FakeMemStore([
+            {"type": "linkage", "data_source_id": DS_ID, "co_occurrence": 5,
+             "tables": ["biz_orders", "biz_products"]},
+        ])
+        return sync_linkage_to_graph(pg_engine, mem, DS_ID,
+                                     expected_version=1, rebuild_index=rebuild)
+
+    def test_rebuild_result_error_reported_degraded(self, pg_engine):
+        """真实契约: RebuildResult(error=...) → index_rebuild=degraded。"""
+        from domains.chatbi.indexing import RebuildResult
+
+        def _fake_rebuild(**kw):
+            return RebuildResult(deleted_count=3, indexed_count=0,
+                                 error="milvus unavailable")
+
+        out = self._seed_and_sync(pg_engine, _fake_rebuild)
+        # 语义版本成功写入(乐观锁通过)
+        assert out["new_version"] == 2
+        assert out["boosted_pairs"] == 1
+        # 索引状态明确 degraded——不谎报 ok
+        assert str(out["index_rebuild"]).startswith("degraded")
+        assert "milvus unavailable" in out["index_rebuild"]
+        # 版本确实落库
+        new_content, is_current = _read_versions(pg_engine)[2]
+        assert is_current == 1
+
+    def test_rebuild_none_means_skipped(self, pg_engine):
+        """未注入/不可构造 rebuilder → skipped(不是 ok)。"""
+        out = self._seed_and_sync(pg_engine, None)
+        assert out["new_version"] == 2
+        assert out["index_rebuild"] == "skipped"
+
+    def test_rebuild_exception_still_degraded(self, pg_engine):
+        """回调抛异常(既有路径)仍 degraded——行为不回归。"""
+        def _boom(**kw):
+            raise RuntimeError("vector store down")
+
+        out = self._seed_and_sync(pg_engine, _boom)
+        assert out["new_version"] == 2
+        assert str(out["index_rebuild"]).startswith("degraded")

@@ -1301,3 +1301,50 @@ class TestBackfillScope:
         entries = {e["name"]: e for e in store.list_memories()}
         assert entries["a"]["data_source_id"] == "dsX"
         assert entries["b"].get("data_source_id") is None
+
+
+class TestSummaryAndSuggestionIsolation:
+    """五审十.5: 摘要过滤与 metric_suggestion 隔离的回归锚。"""
+
+    def test_summary_excludes_other_ds_and_private(self, db):
+        from domains.chatbi.memory import _get_existing_memory_summaries
+        store = get_memory_store(db)
+        store.save_memory(name="A库规则", description="甲库", content="c",
+                          data_source_id="dsA")
+        store.save_memory(name="B库规则", description="乙库", content="c",
+                          data_source_id="dsB")
+        store.save_memory(name="A库他人私有", description="乙私有", content="c",
+                          user_id="别人", data_source_id="dsA")
+        store.save_memory(name="A库我的私有", description="我的", content="c",
+                          user_id="me", data_source_id="dsA")
+        s = _get_existing_memory_summaries(store, user_id="me",
+                                           data_source_id="dsA")
+        assert "A库规则" in s          # 当前库全局
+        assert "A库我的私有" in s      # 本人私有
+        assert "B库规则" not in s      # 他库不进
+        assert "A库他人私有" not in s  # 他人私有不进
+
+    def test_metric_suggestion_scoped_dedup(self, db):
+        """同名 suggestion 在不同库各自独立存在(跨库不互相抑制)。"""
+        from domains.chatbi.feedback import persist_metric_feedback
+        from domains.chatbi.models import (Column, Metric, Model,
+                                           SemanticModelContent)
+        content = SemanticModelContent(models=[
+            Model(name="t1", display_name="T1", columns=[
+                Column(name="amt", display_name="金额", data_type="NUMERIC"),
+                Column(name="cat", display_name="类", data_type="TEXT"),
+            ], metrics=[Metric(
+                name="max_amt", display_name="最大金额",
+                formula="MAX(amt)", type="single")])])  # 已有指标→SUM 是新聚合
+        sql = "SELECT cat, SUM(amt) FROM t1 GROUP BY cat"
+        # 库 A 两次 + 库 B 一次
+        persist_metric_feedback(db, None, sql, content, "dsA", question="q")
+        persist_metric_feedback(db, None, sql, content, "dsA", question="q")
+        persist_metric_feedback(db, None, sql, content, "dsB", question="q")
+        entries = [m for m in get_memory_store(db).list_memories()
+                   if m["type"] == "metric_suggestion"]
+        by_ds = {}
+        for e in entries:
+            by_ds.setdefault(e["data_source_id"], []).append(e["name"])
+        assert len(by_ds["dsA"]) == 1   # 同库去重
+        assert len(by_ds["dsB"]) == 1   # 跨库独立

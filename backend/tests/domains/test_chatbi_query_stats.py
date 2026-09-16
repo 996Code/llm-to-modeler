@@ -89,8 +89,7 @@ class TestMetrics:
         assert m["slow_count"] == 2
 
     def test_ds_filter_with_days_window(self, db):
-        """ds + days 组合(四审 P1 回归锚: 参数错位曾让此场景恒空)。"""
-        import time as _t
+        """ds + days 真组合(五审十.3: 上一版两个断言分别只传了其中一个)。"""
         from domains.chatbi.query_stats import record_query
         # ds1 新旧各一条, ds2 一条新的
         rid_old = record_query(db, data_source_id="ds1", status="ok",
@@ -101,13 +100,17 @@ class TestMetrics:
                 ("2020-01-01T00:00:00+00:00", rid_old))
         record_query(db, data_source_id="ds1", status="ok", duration_ms=9000)
         record_query(db, data_source_id="ds2", status="ok", duration_ms=100)
-        rows = {r["data_source_id"]: r
-                for r in datasource_metrics(db, days=7)}
-        assert rows["ds1"]["query_count"] == 1   # 过期那条不进 7 天窗口
-        assert rows["ds2"]["query_count"] == 1
-        # 不带 days 的单库过滤仍正确
-        only1 = datasource_metrics(db, data_source_id="ds1")
-        assert only1[0]["query_count"] == 2
+        # ★ 同一次调用同时传 ds + days(参数错位时此处恒空)
+        only1_7d = datasource_metrics(db, data_source_id="ds1", days=7)
+        assert len(only1_7d) == 1
+        assert only1_7d[0]["data_source_id"] == "ds1"
+        assert only1_7d[0]["query_count"] == 1   # 过期那条不进窗口
+        # ds1 全历史 = 2
+        only1_all = datasource_metrics(db, data_source_id="ds1")
+        assert only1_all[0]["query_count"] == 2
+        # 仅 days(全库)
+        rows7 = {r["data_source_id"]: r for r in datasource_metrics(db, days=7)}
+        assert rows7["ds2"]["query_count"] == 1
 
     def test_single_ds_filter(self, db):
         _seed(db)

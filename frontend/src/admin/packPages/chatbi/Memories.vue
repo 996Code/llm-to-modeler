@@ -22,11 +22,19 @@
       <a-checkbox v-model:checked="showConsolidated" @change="loadMemories">
         显示已整理
       </a-checkbox>
-      <a-popconfirm v-if="orphanCount" :title="`把 ${orphanCount} 条无归属记忆全部归属到当前选中的数据源?`"
-                    ok-text="归属" ok-type="danger" @confirm="backfillScope">
+      <a-popconfirm v-if="orphanCount" ok-text="归属" ok-type="danger"
+                    :title="`把 ${orphanCount} 条无归属记忆归属到哪个数据源?`"
+                    @confirm="backfillScope">
+        <template #icon></template>
         <a-button size="small" danger>
-          <LinkOutlined /> 归属到当前库 ({{ orphanCount }})
+          <LinkOutlined /> 归属无归属记忆 ({{ orphanCount }})
         </a-button>
+        <template #description>
+          <a-select v-model:value="orphanTarget" placeholder="选择目标数据源"
+                    style="width: 220px; margin-top: 6px" @click.stop>
+            <a-select-option v-for="d in datasources" :key="d.id" :value="d.id">{{ d.name }}</a-select-option>
+          </a-select>
+        </template>
       </a-popconfirm>
       <span class="mem-count">共 <b>{{ memories.length }}</b> 条</span>
     </div>
@@ -73,6 +81,9 @@
         <a-table-column title="操作" width="150">
           <template #default="{ record }">
             <a-tooltip v-if="record.type === 'linkage'" title="linkage 是查询沉淀的结构化数据, 不提供文本编辑">
+              <a-button size="small" type="link" disabled>编辑</a-button>
+            </a-tooltip>
+            <a-tooltip v-else-if="record.type === 'metric_suggestion'" title="系统生成的指标建议——请到语义层页面采纳为指标定义">
               <a-button size="small" type="link" disabled>编辑</a-button>
             </a-tooltip>
             <a-button v-else size="small" type="link" @click="openEdit(record)">编辑</a-button>
@@ -148,30 +159,41 @@ const form = reactive({ mem_id: '', name: '', description: '', content: '', memo
 const filtered = computed(() =>
   typeFilter.value ? memories.value.filter((m) => m.type === typeFilter.value) : memories.value)
 
-// 无归属记忆数(批量归属工具的显隐与文案)
-const orphanCount = computed(() =>
-  memories.value.filter((m) => !m.data_source_id).length)
+// 无归属记忆数——独立全量拉取(五审 5.3: 若随 dsFilter 过滤, 选库后
+// 孤儿被过滤掉 → 按钮消失, 工具永远不可达; 不选库又点不了)
+const orphanCount = ref(0)
+const orphanTarget = ref('')   // 弹窗里选的目标库
+
+function loadOrphanCount() {
+  chatbiApi.get('/memories', { params: { limit: 500 } }).then(({ data }) => {
+    orphanCount.value = (data.items || []).filter((m: any) => !m.data_source_id).length
+  }).catch(() => { /* 静默 */ })
+}
 
 async function backfillScope() {
-  if (!dsFilter.value) {
-    message.warning('请先在左侧选择目标数据源, 再执行归属')
+  if (!orphanTarget.value) {
+    message.warning('请选择目标数据源')
     return
   }
   try {
     const { data } = await chatbiApi.post('/memories/backfill-scope',
-      { data_source_id: dsFilter.value })
-    message.success(`已归属 ${data.backfilled} 条记忆到当前库——立即参与问数召回`)
+      { data_source_id: orphanTarget.value })
+    message.success(`已归属 ${data.backfilled} 条记忆到所选库——立即参与问数召回`)
+    orphanTarget.value = ''
     await loadMemories()
+    loadOrphanCount()
   } catch (e: any) {
     message.error(e?.response?.data?.detail || '归属失败')
   }
 }
 
 function typeLabel(t: string): string {
-  return { project: '项目', preference: '偏好', business: '业务', linkage: '表关联' }[t] || t || '-'
+  return { project: '项目', preference: '偏好', business: '业务', linkage: '表关联',
+           metric_suggestion: '指标建议' }[t] || t || '-'
 }
 function typeColor(t: string): string {
-  return { project: 'blue', preference: 'purple', business: 'gold', linkage: 'cyan' }[t] || 'default'
+  return { project: 'blue', preference: 'purple', business: 'gold', linkage: 'cyan',
+           metric_suggestion: 'geekblue' }[t] || 'default'
 }
 
 async function loadMemories() {
@@ -282,6 +304,7 @@ onMounted(() => {
     datasources.value = (data.items || []).map((d: any) => ({ id: d.id, name: d.name }))
   }).catch(() => { /* 静默 */ })
   loadMemories()
+  loadOrphanCount()
 })
 </script>
 

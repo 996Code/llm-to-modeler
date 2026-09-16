@@ -759,7 +759,11 @@ def apply_confidence_updates(
     if rebuild_index is not None:
         try:
             content_obj = SemanticModelContent(**new_content)
-            rebuild_index(content=content_obj, data_source_id=data_source_id)
+            _rb = rebuild_index(content=content_obj, data_source_id=data_source_id)
+            # rebuild_index 的失败契约是返回 RebuildResult(error=...) 而非
+            # raise(五审 5.2)——统一在此识别, 调用方传任何 rebuild 都不谎报
+            if _rb is not None and getattr(_rb, "error", None):
+                raise RuntimeError(f"索引重建失败: {_rb.error}")
         except Exception as e:
             logger.warning("图谱更新后重建索引失败, RAG 检索将降级: %s", e)
             # 降级信息回调给调用方(四审 5.2: 任务结果必须能看到
@@ -876,7 +880,9 @@ def sync_linkage_to_graph(
     # 5. 写入 (乐观锁): 调用方未显式传版本时, 用第 2 步刚读到的当前
     # 版本——此前默认 None 会跳过校验, README 声明的乐观锁实际没启用(四审 5.2)
     cur_version = rows[0]["version"]
-    index_rebuild_state = "ok"   # or "skipped" / "degraded: ..."
+    # 未注入 rebuilder(向量设施不可构造) = skipped——不是 ok(五审 5.2:
+    # 索引没有重建就不能报告成功, 哪怕版本写入本身成功)
+    index_rebuild_state = "ok" if rebuild_index is not None else "skipped"
 
     def _record_index_error(msg: str) -> None:
         nonlocal index_rebuild_state

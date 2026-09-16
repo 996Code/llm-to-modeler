@@ -293,10 +293,12 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 from domains.chatbi import stores as cb_stores
                 llm = runtime.get_llm(app_state) if app_state else None
                 if llm is not None:
-                    indexing.rebuild_index(
+                    _rb = indexing.rebuild_index(
                         content=merged, data_source_id=info.id,
                         store=cb_stores.get_vector(app_state),
                         embedder=cb_stores.get_embedder(llm), db=db)
+                    if _rb is not None and getattr(_rb, "error", None):
+                        raise RuntimeError(f"索引重建失败: {_rb.error}")
             except Exception as e:
                 logger.warning("刷新后索引重建失败(降级, 手动重扫可修复): %s", e)
             results.append({"datasource_id": info.id, "version": version,
@@ -374,9 +376,15 @@ def _make_index_rebuilder(app_state, datasource_id: str):
         return None
 
     def _rebuild(content, data_source_id, **_kw):
-        return indexing.rebuild_index(
+        result = indexing.rebuild_index(
             content=content, data_source_id=data_source_id,
             store=store, embedder=embedder, db=db)
+        # rebuild_index 的失败契约是返回 RebuildResult(error=...) 而非抛
+        # 异常(五审 5.2)——error 非空时 raise, 让调用方的 except/
+        # on_index_error 降级路径真实生效, 不再谎报成功
+        if result is not None and getattr(result, "error", None):
+            raise RuntimeError(f"索引重建失败: {result.error}")
+        return result
     return _rebuild
 
 

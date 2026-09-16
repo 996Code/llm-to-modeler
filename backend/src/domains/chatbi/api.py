@@ -303,9 +303,11 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
     try:
         from domains.chatbi import indexing
         from domains.chatbi.llm_compat import LLMCompat
-        indexing.rebuild_index(content, ds_id, stores.get_vector(request.app.state),
-                               stores.get_embedder(LLMCompat(request.app.state.llm_client)),
-                               db=_db())
+        _rb = indexing.rebuild_index(content, ds_id, stores.get_vector(request.app.state),
+                                     stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+                                     db=_db())
+        if _rb is not None and getattr(_rb, "error", None):
+            raise RuntimeError(f"索引重建失败: {_rb.error}")
     except Exception as e:
         logger.warning("人工校正后索引重建失败(降级): %s", e)
     _audit(request, "semantic", "update", resource_id=ds_id,
@@ -352,9 +354,11 @@ async def semantic_rollback(ds_id: str, version: int, request: Request):
     try:
         from domains.chatbi import indexing
         from domains.chatbi.llm_compat import LLMCompat
-        indexing.rebuild_index(content, ds_id, stores.get_vector(request.app.state),
-                               stores.get_embedder(LLMCompat(request.app.state.llm_client)),
-                               db=_db())
+        _rb = indexing.rebuild_index(content, ds_id, stores.get_vector(request.app.state),
+                                     stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+                                     db=_db())
+        if _rb is not None and getattr(_rb, "error", None):
+            raise RuntimeError(f"索引重建失败: {_rb.error}")
     except Exception as e:
         logger.warning("回滚后索引重建失败(降级): %s", e)
     _audit(request, "semantic", "rollback", resource_id=ds_id,
@@ -489,7 +493,7 @@ async def health_detail_ep(request: Request):
 # ── 图谱(移植 graph.py 的数据端点) ───────────────────────────
 
 @router.get("/datasources/{ds_id}/graph", dependencies=[Depends(admin_required)])
-async def get_graph(ds_id: str):
+async def get_graph(ds_id: str, request: Request = None):
     """全图数据(节点/边/社区/枢纽;前端 G6/ECharts 渲染)。"""
     from domains.chatbi import schema_graph
     from domains.chatbi import semantic
@@ -515,7 +519,7 @@ async def get_graph_subgraph(ds_id: str, center: str, depth: int = 2):
 
 
 @router.post("/join-path-preview", dependencies=[Depends(admin_required)])
-async def join_path_preview(ds_id: str, body: JoinPathIn):
+async def join_path_preview(ds_id: str, body: JoinPathIn, request: Request = None):
     """表集 → JOIN 路径预览(图谱预计算;管理端调试用)。"""
     from domains.chatbi import semantic
     content = semantic.load_current_content(_db(), ds_id)
@@ -605,11 +609,15 @@ def _graph_index_rebuilder(request: Request, ds_id: str, content):
     def _rebuild():
         from domains.chatbi import indexing, stores
         from domains.chatbi.llm_compat import LLMCompat
-        indexing.rebuild_index(
+        _rb = indexing.rebuild_index(
             content, ds_id,
             stores.get_vector(request.app.state),
             stores.get_embedder(LLMCompat(request.app.state.llm_client)),
             db=_db())
+        # RebuildResult.error 是真实的失败契约(五审 5.2): 转 raise 让
+        # 端点的 except 分支把 index_rebuilt 标 False, 不谎报成功
+        if _rb is not None and getattr(_rb, "error", None):
+            raise RuntimeError(f"索引重建失败: {_rb.error}")
     return _rebuild
 
 
