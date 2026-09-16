@@ -486,15 +486,19 @@ class VersionConflictError(Exception):
         )
 
 
-def linkage_memories_to_cooccurrence(mem_store) -> dict[tuple[str, str], int]:
-    """从 linkage 记忆 frontmatter 轻聚合表对共现次数。
+def linkage_memories_to_cooccurrence(
+        mem_store, data_source_id: str | None = None) -> dict[tuple[str, str], int]:
+    """从 linkage 记忆轻聚合表对共现次数(按数据源隔离)。
 
-    遍历所有 type=linkage 的记忆, 读取 co_occurrence 和 tables,
-    返回 {(table_a, table_b): co_occurrence} 字典序表对映射。
+    只聚合 data_source_id 匹配的 linkage 记忆, 读取 co_occurrence 和
+    tables, 返回 {(table_a, table_b): co_occurrence} 字典序表对映射。
 
     Args:
-        mem_store: 记忆存储实例 (鸭子类型: 有 list_memories() -> list[dict];
-            chat-bi 为 AgentMemoryStore, 由记忆栈移植件提供)
+        mem_store: 记忆存储实例 (鸭子类型: 有 list_memories() -> list[dict])
+        data_source_id: 目标数据源(四审 P0)——源是 {tenant}/{ds}/ 物理目录
+            天然隔离, 行存储下不过滤会把 A 库的共现提升 B 库的关系置信度、
+            用 A 的未知表对在 B 里触发新关系发现。None 时只聚合无归属
+            行(历史数据兜底, 不跨库)。
 
     Returns:
         {(table_a, table_b): co_occurrence} — 字典序表对 → 共现次数
@@ -502,6 +506,8 @@ def linkage_memories_to_cooccurrence(mem_store) -> dict[tuple[str, str], int]:
     result: dict[tuple[str, str], int] = {}
     for m in mem_store.list_memories():
         if m.get("type") != "linkage":
+            continue
+        if m.get("data_source_id") != data_source_id:
             continue
         co = m.get("co_occurrence")
         tables = m.get("tables")
@@ -607,6 +613,7 @@ def apply_confidence_updates(
     new_pairs: list[tuple[tuple[str, str], float]] | None = None,
     expected_version: int | None = None,
     rebuild_index: Callable[..., Any] | None = None,
+    on_index_error: Callable[[str], None] | None = None,
 ) -> int:
     """将 confidence 更新写入语义层 (乐观锁, append-only 新版本)。
 
@@ -755,6 +762,13 @@ def apply_confidence_updates(
             rebuild_index(content=content_obj, data_source_id=data_source_id)
         except Exception as e:
             logger.warning("图谱更新后重建索引失败, RAG 检索将降级: %s", e)
+            # 降级信息回调给调用方(四审 5.2: 任务结果必须能看到
+            # "版本已写但索引落后", 不能记成完全成功)
+            if on_index_error is not None:
+                try:
+                    on_index_error(str(e)[:200])
+                except Exception:
+                    pass
     else:
         logger.debug("图谱更新后未注入 rebuild_index, 跳过向量索引重建")
 
@@ -810,7 +824,7 @@ def sync_linkage_to_graph(
         ValueError: 无当前版本 / 无更新内容
     """
     # 1. 轻聚合
-    cooccurrence = linkage_memories_to_cooccurrence(mem_store)
+    cooccurrence = linkage_memories_to_cooccurrence(mem_store, data_source_id)
     if not cooccurrence:
         return {"new_version": None, "boosted_pairs": 0, "new_pairs": 0, "detail": "无 linkage 记忆"}
 
@@ -859,20 +873,33 @@ def sync_linkage_to_graph(
             "detail": "无达阈值的表对, 无需更新",
         }
 
-    # 5. 写入 (乐观锁)
+    # 5. 写入 (乐观锁): 调用方未显式传版本时, 用第 2 步刚读到的当前
+    # 版本——此前默认 None 会跳过校验, README 声明的乐观锁实际没启用(四审 5.2)
+    cur_version = rows[0]["version"]
+    index_rebuild_state = "ok"   # or "skipped" / "degraded: ..."
+
+    def _record_index_error(msg: str) -> None:
+        nonlocal index_rebuild_state
+        index_rebuild_state = f"degraded: {msg}"
+
     new_version = apply_confidence_updates(
         db=db,
         data_source_id=data_source_id,
         updates=updates,
         new_pairs=new_pairs,
-        expected_version=expected_version,
+        expected_version=expected_version if expected_version is not None
+        else cur_version,
         rebuild_index=rebuild_index,
+        on_index_error=_record_index_error,
     )
 
     return {
         "new_version": new_version,
         "boosted_pairs": len(updates),
         "new_pairs": len(new_pairs or []),
+        # 索引重建状态(ok/degraded)——任务侧据此区分"完全成功"与
+        # "版本已写但 RAG 索引落后(需重扫修复)"
+        "index_rebuild": index_rebuild_state,
     }
 
 

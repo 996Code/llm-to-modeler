@@ -149,6 +149,14 @@ class ChatBIVectorStore:
     def __init__(self, sdk_store: Any):
         self._sdk = sdk_store
 
+    def ping(self) -> None:
+        """底层 Milvus 真实连通性探针(委托 SDK ping = list_collections)。
+
+        健康端点用(四审 P1: 此前"适配对象可构造"就显示 ok——配置错了
+        也绿, 假阳性)。
+        """
+        self._sdk.ping()
+
     @staticmethod
     def _chunk_id(rec: VectorRecord) -> str:
         """VectorRecord → SDK chunk_id(≤64 字符)。

@@ -186,15 +186,22 @@ async def delete_datasource(ds_id: str, request: Request):
 
 
 @router.post("/datasources/health-check/all", dependencies=[Depends(admin_required)])
-async def health_check_all():
+async def health_check_all(request: Request):
     """批量健康巡检(对标源 POST /health-check/all): 连续失败自动停用/恢复。
 
-    同步执行(数据源数量级小, 单源 5s 超时);定时巡检由 pack 调度线程
-    每 5 分钟触发同一函数。
+    同步执行(数据源数量级小, 单源 5s 超时);定时巡检由 pack 调度线程触发
+    同一函数。停用阈值走设置(health_check_max_failures, 与定时巡检一致——
+    四审 5.5: 此前手动入口仍用默认常量)。
     """
     from domains.chatbi import datasources as ds_mod
     from domains.chatbi.runtime import get_pack_db
-    return ds_mod.check_all_health(get_pack_db())
+    from sdk.pack_api import settings_reader
+    try:
+        max_failures = int(settings_reader(request.app.state, "chatbi")
+                           .get("health_check_max_failures", 3))
+    except Exception:
+        max_failures = 3
+    return ds_mod.check_all_health(get_pack_db(), max_failures=max_failures)
 
 
 @router.post("/datasources/{ds_id}/health", dependencies=[Depends(admin_required)])
@@ -357,6 +364,16 @@ async def semantic_rollback(ds_id: str, version: int, request: Request):
 
 # ── 查询质量可观测(BI 维度; 复核报告 P1) ─────────────────────
 
+def _graph_setting(request, key: str, default):
+    if request is None:
+        return default
+    from sdk.pack_api import settings_reader
+    try:
+        return settings_reader(request.app.state, 'chatbi').get(key, default)
+    except Exception:
+        return default
+
+
 def _slow_ms(request: Request) -> int:
     """慢查询阈值(设置页可调, 缺省 10s 对标源 config.sql_slow_query_threshold)。"""
     from sdk.pack_api import settings_reader
@@ -413,40 +430,34 @@ async def health_detail_ep(request: Request):
     LLM 网关/数据源加密凭据 + 各业务库最近健康状态。
     """
     components: dict = {}
-    # 向量库: 构造 + 轻量真实探针(列出 collection; 三审 P2: 不能只看
-    # "对象可构造"——配置错了构造也成功)
+    # 向量库: 真实 ping(委托 SDK list_collections; 四审 P1——此前找
+    # 不到可调方法时默认 ok, 配置错了也绿)。探针不可用 = fail, 不默认成功
     try:
         from domains.chatbi import stores as cb_stores
         store = cb_stores.get_vector(request.app.state)
-        detail = f"{type(store).__name__}"
-        try:
-            inner = getattr(store, "_store", None) or store
-            probe = getattr(inner, "list_collections", None)
-            if callable(probe):
-                probe()
-                detail += " · collections 可列"
-        except Exception as pe:
-            detail = f"{detail} · 探针失败: {str(pe)[:120]}"
-            components["milvus"] = {"status": "fail", "detail": detail}
-            raise
-        components["milvus"] = {"status": "ok", "detail": detail}
+        ping = getattr(store, "ping", None)
+        if not callable(ping):
+            raise RuntimeError("向量适配器无 ping 探针")
+        ping()
+        components["milvus"] = {"status": "ok", "detail": "ping 通过"}
     except Exception as e:
-        components.setdefault("milvus", {"status": "fail",
-                                         "detail": str(e)[:200]})
-    # LLM 网关: GET /models 真实探针(3s 超时, 带脱敏)
+        components["milvus"] = {"status": "fail",
+                                "detail": f"Milvus 不可达: {str(e)[:160]}"}
+    # LLM 网关: GET /models 真实探针(异步 httpx 不阻塞事件循环;
+    # 模型名从 config 读——llm.model 属性不存在, 此前恒显示空)
     try:
         import httpx
         llm = getattr(request.app.state, "llm_client", None)
         cfg = getattr(llm, "_config", None) or getattr(llm, "config", None)
         base = getattr(cfg, "base_url", "") if cfg else ""
         api_key = getattr(cfg, "api_key", "") if cfg else ""
-        model = getattr(llm, "model", "") if llm else ""
+        model = getattr(cfg, "model", "") if cfg else ""
         status, detail = "ok", f"model={model}"
         if base:
             try:
                 headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-                r = httpx.get(f"{base.rstrip('/')}/models", headers=headers,
-                              timeout=3.0)
+                async with httpx.AsyncClient(timeout=3.0) as ac:
+                    r = await ac.get(f"{base.rstrip('/')}/models", headers=headers)
                 status = "ok" if r.status_code < 400 else "fail"
                 detail += f" · /models HTTP {r.status_code}"
             except Exception as pe:
@@ -485,7 +496,12 @@ async def get_graph(ds_id: str):
     content = semantic.load_current_content(_db(), ds_id)
     if content is None:
         raise HTTPException(404, "该数据源尚未扫描语义层")
-    return schema_graph.get_schema_graph(content).to_vis_data()
+    return schema_graph.get_schema_graph(content,
+        community_algorithm=str(_graph_setting(request, "graph_community_algorithm", "label_propagation")),
+        max_join_path_hops=int(_graph_setting(request, "graph_max_join_path_hops", 4)),
+        expand_max_total=int(_graph_setting(request, "graph_expand_max_total", 10)),
+        expand_use_community=bool(_graph_setting(request, "graph_expand_use_community", True)),
+        ).to_vis_data()
 
 
 @router.get("/datasources/{ds_id}/graph/subgraph", dependencies=[Depends(admin_required)])
@@ -508,7 +524,11 @@ async def join_path_preview(ds_id: str, body: JoinPathIn):
     from domains.chatbi.schema_graph import (get_schema_graph,
                                              expand_with_relationships,
                                              build_join_path_section)
-    sg = get_schema_graph(content)
+    sg = get_schema_graph(content,
+        max_join_path_hops=int(_graph_setting(request, "graph_max_join_path_hops", 4)),
+        expand_max_total=int(_graph_setting(request, "graph_expand_max_total", 10)),
+        expand_use_community=bool(_graph_setting(request, "graph_expand_use_community", True)),
+        community_algorithm=str(_graph_setting(request, "graph_community_algorithm", "label_propagation")))
     expanded = expand_with_relationships(content, body.tables, graph=sg)
     join_text = build_join_path_section(content, expanded, graph=sg,
                                         seed_names=list(body.tables))
@@ -516,46 +536,50 @@ async def join_path_preview(ds_id: str, body: JoinPathIn):
 
 
 @router.get("/datasources/{ds_id}/graph/communities", dependencies=[Depends(admin_required)])
-async def graph_communities(ds_id: str):
+async def graph_communities(ds_id: str, request: Request = None):
     """社区发现——将表按业务域聚类(社区着色/枢纽度排序的基础数据)。"""
     from domains.chatbi import schema_graph, semantic
     content = semantic.load_current_content(_db(), ds_id)
     if content is None:
         raise HTTPException(404, "该数据源尚未扫描语义层")
-    sg = schema_graph.get_schema_graph(content)
+    sg = schema_graph.get_schema_graph(content,
+        community_algorithm=str(_graph_setting(request, "graph_community_algorithm", "label_propagation")))
     return {"communities": sg.get_communities()}
 
 
 @router.get("/datasources/{ds_id}/graph/hubs", dependencies=[Depends(admin_required)])
-async def graph_hubs(ds_id: str, top_k: int = 10):
+async def graph_hubs(ds_id: str, top_k: int = 10, request: Request = None):
     """枢纽表识别——度中心度最高的表(前后端统一渲染节点大小用)。"""
     from domains.chatbi import schema_graph, semantic
     content = semantic.load_current_content(_db(), ds_id)
     if content is None:
         raise HTTPException(404, "该数据源尚未扫描语义层")
-    sg = schema_graph.get_schema_graph(content)
+    sg = schema_graph.get_schema_graph(content,
+        community_algorithm=str(_graph_setting(request, "graph_community_algorithm", "label_propagation")))
     return {"hubs": [{"table": t, "centrality": round(c, 4)} for t, c in sg.get_hub_tables(top_k)]}
 
 
 @router.get("/datasources/{ds_id}/graph/impact", dependencies=[Depends(admin_required)])
-async def graph_impact(ds_id: str, table: str):
+async def graph_impact(ds_id: str, table: str, request: Request = None):
     """影响分析——从给定表可达的所有下游表(改表前评估风险)。"""
     from domains.chatbi import schema_graph, semantic
     content = semantic.load_current_content(_db(), ds_id)
     if content is None:
         raise HTTPException(404, "该数据源尚未扫描语义层")
-    sg = schema_graph.get_schema_graph(content)
+    sg = schema_graph.get_schema_graph(content,
+        community_algorithm=str(_graph_setting(request, "graph_community_algorithm", "label_propagation")))
     return {"table": table, "impact": sg.get_impact(table)}
 
 
 @router.get("/datasources/{ds_id}/graph/reverse-relationships", dependencies=[Depends(admin_required)])
-async def graph_reverse_relationships(ds_id: str, table: str):
+async def graph_reverse_relationships(ds_id: str, table: str, request: Request = None):
     """反向关系——哪些表的正向关系指向此表(如 uc_users 被 N 张表引用)。"""
     from domains.chatbi import schema_graph, semantic
     content = semantic.load_current_content(_db(), ds_id)
     if content is None:
         raise HTTPException(404, "该数据源尚未扫描语义层")
-    sg = schema_graph.get_schema_graph(content)
+    sg = schema_graph.get_schema_graph(content,
+        community_algorithm=str(_graph_setting(request, "graph_community_algorithm", "label_propagation")))
     return {"table": table, "relationships": sg.get_reverse_relationships(table)}
 
 
@@ -683,12 +707,18 @@ async def save_memory(body: MemoryIn, request: Request):
     from domains.chatbi import memory
     if not body.name.strip() or not body.content.strip():
         raise HTTPException(422, "名称与内容不能为空")
-    if body.memory_type not in ("project", "preference", "business"):
-        raise HTTPException(422, "管理端仅支持 project/preference/business 类型"
-                                "(linkage 是查询沉淀的结构化数据)")
+    if body.memory_type not in ("project", "preference", "business",
+                                "consolidated"):
+        raise HTTPException(422, "管理端仅支持 project/preference/business/"
+                                "consolidated 类型(linkage 是查询沉淀的"
+                                "结构化数据, 不提供文本编辑)")
     if not body.mem_id and not body.data_source_id:
         raise HTTPException(422, "新建记忆必须选择数据源(数据源全局规则, "
                                 "对该数据源所有用户生效)")
+    # 校验数据源真实存在(四审 P1: 此前只查非空, 传错 ID 也落库)
+    from domains.chatbi import datasources as _ds_mod
+    if body.data_source_id and _ds_mod.get_datasource(_db(), body.data_source_id) is None:
+        raise HTTPException(404, f"数据源 {body.data_source_id} 不存在")
     mem_id = memory.get_memory_store(_db()).save_memory(
         name=body.name.strip(), description=body.description.strip(),
         content=body.content.strip(), memory_type=body.memory_type,
@@ -707,6 +737,31 @@ async def delete_memory(mid: str, request: Request):
         raise HTTPException(404, "记忆不存在")
     _audit(request, "memory", "delete", resource_id=mid)
     return {"ok": True}
+
+
+class BackfillScopeIn(BaseModel):
+    """存量无归属记忆批量归属(四审 5.3 一次性迁移工具)。"""
+    data_source_id: str                  # 目标数据源(须真实存在)
+    memory_ids: list[str] | None = None  # 指定记忆;None=全部无归属记忆
+
+
+@router.post("/memories/backfill-scope", dependencies=[Depends(admin_required)])
+async def backfill_memory_scope(body: BackfillScopeIn, request: Request):
+    """把无归属(data_source_id IS NULL)记忆批量归属到指定数据源。
+
+    存量迁移工具: 迁移前这些记录不参与问数召回; 归属后成为该库全局
+    规则(user_id 保持 NULL)即可被召回。返回迁移条数。
+    """
+    from domains.chatbi import memory
+    from domains.chatbi import datasources as _ds_mod
+    if _ds_mod.get_datasource(_db(), body.data_source_id) is None:
+        raise HTTPException(404, f"数据源 {body.data_source_id} 不存在")
+    n = memory.backfill_memory_scope(
+        _db(), data_source_id=body.data_source_id,
+        memory_ids=body.memory_ids)
+    _audit(request, "memory", "update", resource_id=body.data_source_id,
+           detail={"backfilled": n, "target_ds": body.data_source_id})
+    return {"ok": True, "backfilled": n}
 
 
 class ConsolidateIn(BaseModel):

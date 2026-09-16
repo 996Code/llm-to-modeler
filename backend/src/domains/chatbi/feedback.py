@@ -225,8 +225,12 @@ def persist_metric_feedback(
         table_name = sql_tables_raw[0]
         try:
             store = _get_memory_store(db)
-            # 检查是否已有同名 suggestion (防重复;源 list_memories 同款)
-            existing_names = {m.get("name") for m in store.list_memories()}
+            # 检查是否已有同名 suggestion (防重复;按数据源收口——四审 P0:
+            # 同名表的指标建议在不同库各自独立, 不能跨库互相抑制;
+            # suggestion 记忆也必须带归属, 否则无法按库管理)
+            existing_names = {
+                m.get("name") for m in store.list_memories()
+                if m.get("data_source_id") == datasource_id}
         except Exception as e:
             # 存储异常时跳过 suggestion (不阻断命中统计)
             store = None
@@ -262,6 +266,7 @@ def persist_metric_feedback(
                         description=f"表 {table_name} 的新指标建议: {agg_expr}",
                         content="\n".join(content_lines),
                         memory_type="metric_suggestion",
+                        data_source_id=datasource_id,
                         extra_metadata={
                             "table": table_name,
                             "formula": agg_expr,

@@ -1088,11 +1088,12 @@ class TestSyncLinkageToGraph:
         content.models[1].relationships[1].source = "name_pattern"
         _seed_semantic_model(pg_engine, content=content)
         mem = FakeMemStore([
-            {"type": "linkage", "co_occurrence": 5,
+            {"type": "linkage", "data_source_id": DS_ID, "co_occurrence": 5,
              "tables": ["biz_orders", "biz_products"]},  # 排序后 == 关系方向
         ])
         out = sync_linkage_to_graph(pg_engine, mem, DS_ID, expected_version=1)
-        assert out == {"new_version": 2, "boosted_pairs": 1, "new_pairs": 0}
+        assert out == {"new_version": 2, "boosted_pairs": 1, "new_pairs": 0,
+                   "index_rebuild": "ok"}   # 无rebuild注入=跳过, 状态ok
         new_content, is_current = _read_versions(pg_engine)[2]
         assert is_current == 1
         # boost = 0.1 * (5 - 3 + 1) = 0.3 → 0.6 + 0.3 = 0.9
@@ -1106,7 +1107,8 @@ class TestSyncLinkageToGraph:
 
     def test_sync_no_semantic_model(self, pg_engine):
         mem = FakeMemStore([
-            {"type": "linkage", "co_occurrence": 5,
+            {"type": "linkage", "data_source_id": "ds_missing", "co_occurrence": 5
+             ,
              "tables": ["biz_orders", "biz_users"]},
         ])
         out = sync_linkage_to_graph(pg_engine, mem, "ds_missing")
@@ -1117,7 +1119,7 @@ class TestSyncLinkageToGraph:
         """共现未达阈值 → 明确跳过 (无版本变更)。"""
         _seed_semantic_model(pg_engine)
         mem = FakeMemStore([
-            {"type": "linkage", "co_occurrence": 2,
+            {"type": "linkage", "data_source_id": DS_ID, "co_occurrence": 2,
              "tables": ["biz_orders", "biz_users"]},
         ])
         out = sync_linkage_to_graph(pg_engine, mem, DS_ID, expected_version=1)
@@ -1128,11 +1130,12 @@ class TestSyncLinkageToGraph:
         """新表对发现: 共现 5 次 (>=阈值 5) 的未知表对以 implicit_mining 落库。"""
         _seed_semantic_model(pg_engine)
         mem = FakeMemStore([
-            {"type": "linkage", "co_occurrence": 5,
+            {"type": "linkage", "data_source_id": DS_ID, "co_occurrence": 5,
              "tables": ["biz_orders", "fct_inventory"]},
         ])
         out = sync_linkage_to_graph(pg_engine, mem, DS_ID, expected_version=1)
-        assert out == {"new_version": 2, "boosted_pairs": 0, "new_pairs": 1}
+        assert out == {"new_version": 2, "boosted_pairs": 0, "new_pairs": 1,
+                   "index_rebuild": "ok"}
         new_content, _ = _read_versions(pg_engine)[2]
         rel = _find_rel(new_content, "biz_orders", "fct_inventory")
         assert rel is not None
@@ -1142,7 +1145,7 @@ class TestSyncLinkageToGraph:
         """关闭新表对发现开关 → 未达 boost 阈值时整体跳过。"""
         _seed_semantic_model(pg_engine)
         mem = FakeMemStore([
-            {"type": "linkage", "co_occurrence": 5,
+            {"type": "linkage", "data_source_id": DS_ID, "co_occurrence": 5,
              "tables": ["biz_orders", "fct_inventory"]},
         ])
         out = sync_linkage_to_graph(

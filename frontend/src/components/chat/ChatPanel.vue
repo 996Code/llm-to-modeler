@@ -862,59 +862,57 @@ watch(() => store.streaming, (busy, was) => {
     msg.formattedData.llmCallCount = t.llmCallCount ?? 0
     msg.formattedData.promptTokens = t.promptTokens ?? 0
     msg.formattedData.completionTokens = t.completionTokens ?? 0
-    // 累计口径统一为"全量重算"(三审 P2: 轮末 += 与切会话全量赋值并发时
-    // 存在重复累计/旧值覆盖竞态)——重算与切会话路径共用同一函数
-    recalcConvTokens(convId)
+    // 累计口径统一为"全量重算", 与切会话路径共用同一入口(含回填)
+    loadConversationTrace(convId)
   }).catch(() => { /* 链路拉取失败静默——token 展示是增强, 不影响主流程 */ })
 })
 
-// 全量重算对话累计 token(唯一写入口, 消除竞态)
+// 全量拉取 trace 的唯一入口: 累计重算 + 按轮回填消息明细(四审 P1 统一)。
+// 每次请求前更新 generation, 旧回调直接丢弃——消除轮末/切会话并发竞态。
 let _tokenCalcConvId = ''
-function recalcConvTokens(convId: string) {
+let _traceGen = 0
+function loadConversationTrace(convId: string) {
   _tokenCalcConvId = convId
+  const gen = ++_traceGen
   getConversationTrace(convId).then(({ turns }) => {
-    if (_tokenCalcConvId !== convId) return   // 会话已切换, 丢弃旧结果
-    convTokens.value = (turns || []).reduce(
-      (s, t) => s + (t.promptTokens || 0) + (t.completionTokens || 0), 0)
-  }).catch(() => { /* 静默 */ })
-}
-
-// 切换会话: 全量拉一次 trace 重算累计(历史轮次的 token 不丢),
-// 并把各轮的 LLM 用量/总耗时回填到对应消息——轮末回填只在内存,
-// 刷新后历史消息的明细行(右下角耗时·LLM×N·token)靠这里恢复。
-watch(() => store.currentConversation?.id, (convId) => {
-  convTokens.value = 0
-  if (!convId) return
-  getConversationTrace(convId).then(({ turns }) => {
-    if (_tokenCalcConvId !== convId) return
+    if (gen !== _traceGen || _tokenCalcConvId !== convId) return
     const list = turns || []
     convTokens.value = list.reduce(
       (s, t) => s + (t.promptTokens || 0) + (t.completionTokens || 0), 0)
-    // 轮 ↔ 消息对应: 第 idx 轮 = 第 idx+1 个 user 消息之后的首个 assistant
+    // 轮 ↔ 消息对应: 第 k 个被 assistant 应答的 user 消息 = 第 k 轮;
+    // 连续 user(未答)只占一个槽位。匹配到 assistant 后立即递增。
     let turnIdx = 0
     let pendingUser = false
     for (const m of store.messages as any[]) {
       if (m.role === 'user') {
-        if (pendingUser) turnIdx += 1   // 连续 user(未答)跳过一轮槽位
         pendingUser = true
         continue
       }
       if (m.role === 'assistant' && pendingUser) {
         pendingUser = false
         const t = list[turnIdx]
-        if (t && m.formattedData) {
-          m.formattedData.llmCallCount = t.llmCallCount ?? 0
-          m.formattedData.promptTokens = t.promptTokens ?? 0
-          m.formattedData.completionTokens = t.completionTokens ?? 0
-          // 轮内明细此前只在轮末内存回填, 历史消息无值——用 trace 的
-          // wallMs 兜底(总耗时), 让明细行刷新后仍完整
-          if (m.formattedData.totalDurationMs === undefined && t.wallMs != null) {
-            m.formattedData.totalDurationMs = t.wallMs
-          }
+        turnIdx += 1                      // 匹配即递增——多轮各用各的 trace
+        if (!t || !m.formattedData) continue
+        m.formattedData.llmCallCount = t.llmCallCount ?? 0
+        m.formattedData.promptTokens = t.promptTokens ?? 0
+        m.formattedData.completionTokens = t.completionTokens ?? 0
+        // 历史消息无轮末内存值——用 trace 的 wallMs 兜底总耗时
+        if (m.formattedData.totalDurationMs === undefined && t.wallMs != null) {
+          m.formattedData.totalDurationMs = t.wallMs
         }
       }
     }
   }).catch(() => { /* 静默 */ })
+}
+
+// 切换会话: 全量拉一次 trace——累计重算 + 各轮回填共用同一入口。
+// (四审 P1 修复: 此前 watcher 未先赋 _tokenCalcConvId 就比较, 回调被
+//  自己的 guard 拦掉 → 打开历史会话后累计/明细全空; 且轮次映射在匹配
+//  assistant 后不递增 turnIdx → 多轮历史全部用第一轮的 trace)
+watch(() => store.currentConversation?.id, (convId) => {
+  convTokens.value = 0
+  if (!convId) return
+  loadConversationTrace(convId)
 })
 </script>
 

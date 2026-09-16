@@ -88,6 +88,27 @@ class TestMetrics:
         m = datasource_metrics(db, slow_ms=400)[0]
         assert m["slow_count"] == 2
 
+    def test_ds_filter_with_days_window(self, db):
+        """ds + days 组合(四审 P1 回归锚: 参数错位曾让此场景恒空)。"""
+        import time as _t
+        from domains.chatbi.query_stats import record_query
+        # ds1 新旧各一条, ds2 一条新的
+        rid_old = record_query(db, data_source_id="ds1", status="ok",
+                               duration_ms=20000)
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE chatbi_query_stats SET created_at = ? WHERE id = ?",
+                ("2020-01-01T00:00:00+00:00", rid_old))
+        record_query(db, data_source_id="ds1", status="ok", duration_ms=9000)
+        record_query(db, data_source_id="ds2", status="ok", duration_ms=100)
+        rows = {r["data_source_id"]: r
+                for r in datasource_metrics(db, days=7)}
+        assert rows["ds1"]["query_count"] == 1   # 过期那条不进 7 天窗口
+        assert rows["ds2"]["query_count"] == 1
+        # 不带 days 的单库过滤仍正确
+        only1 = datasource_metrics(db, data_source_id="ds1")
+        assert only1[0]["query_count"] == 2
+
     def test_single_ds_filter(self, db):
         _seed(db)
         rows = datasource_metrics(db, data_source_id="ds2")

@@ -67,20 +67,23 @@ def _start_refresh_scheduler(manager, app_state) -> None:
         # 热改即时生效);检查粒度取 30s 轮询。
         _loop._last_refresh = _now_ts()   # 启动即视为已刷新(避免重启风暴)
         _loop._last_health = 0.0
+        _loop._last_purge = 0.0   # 留存清理按小时级执行(四审 5.4: 每 30s 一次 DELETE 过频)
         while not _refresh_stop.wait(30):
             now = _now_ts()
-            # 统计留存清理(设置 query_stats_retention_days, 缺省 90, 0=关)
-            try:
-                retention = int(_load_settings(app_state)
-                                .get("query_stats_retention_days", 90))
-                if retention > 0:
-                    from domains.chatbi.query_stats import purge_stats
-                    from domains.chatbi.runtime import get_pack_db
-                    purged = purge_stats(get_pack_db(), retention)
-                    if purged:
-                        logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
-            except Exception as e:
-                logger.warning("查询统计清理失败(下轮重试): %s", e)
+            # 统计留存清理(每小时一次; 设置 retention 缺省 90 天, 0=关)
+            if now - _loop._last_purge >= 3600:
+                _loop._last_purge = now
+                try:
+                    retention = int(_load_settings(app_state)
+                                    .get("query_stats_retention_days", 90))
+                    if retention > 0:
+                        from domains.chatbi.query_stats import purge_stats
+                        from domains.chatbi.runtime import get_pack_db
+                        purged = purge_stats(get_pack_db(), retention)
+                        if purged:
+                            logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
+                except Exception as e:
+                    logger.warning("查询统计清理失败(下轮重试): %s", e)
             # 健康巡检: 设置周期(缺省 300s)
             try:
                 health_iv = int(_load_settings(app_state)
@@ -233,8 +236,14 @@ def _task_consolidate_memories(handle, app_state=None, data_source_id=None) -> d
                 db, get_memory_store(db), ds_id,
                 rebuild_index=_make_index_rebuilder(app_state, ds_id),
                 **_linkage_sync_kwargs(app_state))
-            handle.log(f"linkage 图谱同步完成 (ds={ds_id[:8]}…): {res}")
-            graph_sync.append({"data_source_id": ds_id, "ok": True, "result": res})
+            idx_state = (res or {}).get("index_rebuild", "ok")
+            if str(idx_state).startswith("degraded"):
+                handle.log(f"linkage 图谱同步完成 (ds={ds_id[:8]}…): "
+                           f"版本已写, 但索引重建{idx_state}——RAG 检索可能滞后, 手动重扫可修复")
+            else:
+                handle.log(f"linkage 图谱同步完成 (ds={ds_id[:8]}…): {res}")
+            graph_sync.append({"data_source_id": ds_id, "ok": True,
+                               "index_rebuild": idx_state, "result": res})
         except Exception as e:
             logger.warning("整理后 linkage 图谱同步失败 (ds=%s): %s", ds_id, e)
             handle.log(f"linkage 图谱同步失败 (ds={ds_id[:8]}…, 降级): {e}")

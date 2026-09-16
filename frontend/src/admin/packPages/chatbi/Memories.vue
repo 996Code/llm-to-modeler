@@ -22,6 +22,12 @@
       <a-checkbox v-model:checked="showConsolidated" @change="loadMemories">
         显示已整理
       </a-checkbox>
+      <a-popconfirm v-if="orphanCount" :title="`把 ${orphanCount} 条无归属记忆全部归属到当前选中的数据源?`"
+                    ok-text="归属" ok-type="danger" @confirm="backfillScope">
+        <a-button size="small" danger>
+          <LinkOutlined /> 归属到当前库 ({{ orphanCount }})
+        </a-button>
+      </a-popconfirm>
       <span class="mem-count">共 <b>{{ memories.length }}</b> 条</span>
     </div>
     <div class="mem-hint">
@@ -59,12 +65,17 @@
         <a-table-column title="状态" width="90">
           <template #default="{ record }">
             <a-tag v-if="record.consolidated" color="default">已整理</a-tag>
+            <a-tag v-else-if="!record.data_source_id" color="red"
+                   title="无归属的记忆不参与问数召回, 请用「归属到当前库」修复">未生效</a-tag>
             <a-tag v-else color="green">生效中</a-tag>
           </template>
         </a-table-column>
         <a-table-column title="操作" width="150">
           <template #default="{ record }">
-            <a-button size="small" type="link" @click="openEdit(record)">编辑</a-button>
+            <a-tooltip v-if="record.type === 'linkage'" title="linkage 是查询沉淀的结构化数据, 不提供文本编辑">
+              <a-button size="small" type="link" disabled>编辑</a-button>
+            </a-tooltip>
+            <a-button v-else size="small" type="link" @click="openEdit(record)">编辑</a-button>
             <a-popconfirm title="删除该记忆?" ok-text="删除" ok-type="danger"
                           @confirm="removeMem(record)">
               <a-button size="small" type="link" danger>删除</a-button>
@@ -113,7 +124,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  BulbOutlined, ForkOutlined, InfoCircleOutlined, PlusOutlined,
+  BulbOutlined, ForkOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 import { tasksApi } from '../../api'
@@ -136,6 +147,25 @@ const form = reactive({ mem_id: '', name: '', description: '', content: '', memo
 
 const filtered = computed(() =>
   typeFilter.value ? memories.value.filter((m) => m.type === typeFilter.value) : memories.value)
+
+// 无归属记忆数(批量归属工具的显隐与文案)
+const orphanCount = computed(() =>
+  memories.value.filter((m) => !m.data_source_id).length)
+
+async function backfillScope() {
+  if (!dsFilter.value) {
+    message.warning('请先在左侧选择目标数据源, 再执行归属')
+    return
+  }
+  try {
+    const { data } = await chatbiApi.post('/memories/backfill-scope',
+      { data_source_id: dsFilter.value })
+    message.success(`已归属 ${data.backfilled} 条记忆到当前库——立即参与问数召回`)
+    await loadMemories()
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || '归属失败')
+  }
+}
 
 function typeLabel(t: string): string {
   return { project: '项目', preference: '偏好', business: '业务', linkage: '表关联' }[t] || t || '-'

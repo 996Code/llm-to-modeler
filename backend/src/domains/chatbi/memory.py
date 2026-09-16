@@ -292,13 +292,23 @@ class ChatBIMemoryStore:
                 else:
                     target_id = mem_id.replace(".md", "")
             elif memory_type == "linkage":
-                # linkage 同名(同表对)幂等 upsert: 保留最新一条 (源索引去重语义)
-                row = conn.execute(
-                    "SELECT id, created_at FROM chatbi_agent_memories "
-                    "WHERE name = ? AND type = 'linkage' "
-                    "ORDER BY updated_at DESC LIMIT 1",
-                    (name,),
-                ).fetchone()
+                # linkage 同库同表对幂等 upsert: 保留最新一条 (源索引去重语义)。
+                # 必须带 data_source_id——同名表对不同业务库极常见(orders/users
+                # 处处都有), 不带会把 A 库的 JOIN 经验覆盖/迁到 B 库(四审 P0)。
+                if data_source_id:
+                    row = conn.execute(
+                        "SELECT id, created_at FROM chatbi_agent_memories "
+                        "WHERE name = ? AND type = 'linkage' AND data_source_id = ? "
+                        "ORDER BY updated_at DESC LIMIT 1",
+                        (name, data_source_id),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT id, created_at FROM chatbi_agent_memories "
+                        "WHERE name = ? AND type = 'linkage' AND data_source_id IS NULL "
+                        "ORDER BY updated_at DESC LIMIT 1",
+                        (name,),
+                    ).fetchone()
                 if row:
                     target_id, created_at, is_new = row["id"], row["created_at"], False
             if target_id is None:
@@ -384,11 +394,18 @@ class ChatBIMemoryStore:
                 (stem,))
         return (getattr(cur, "rowcount", 0) or 0) > 0
 
-    def get_linkage_memory(self, table_a: str, table_b: str) -> Optional[dict]:
-        """按表对查询 linkage 记忆 (表对字典序规范化, 支持 caller 乱序传入)。"""
+    def get_linkage_memory(self, table_a: str, table_b: str,
+                           data_source_id: Optional[str] = None) -> Optional[dict]:
+        """按表对查询 linkage 记忆 (表对字典序规范化, 支持 caller 乱序传入)。
+
+        data_source_id: 按库隔离查表对——同名表在不同业务库是不同关系,
+        不传则仅匹配无归属的历史行(不跨库取)。
+        """
         pair = sorted([table_a, table_b])
         for m in self.list_memories():
             if m.get("type") != "linkage":
+                continue
+            if m.get("data_source_id") != data_source_id:
                 continue
             tables = m.get("tables")
             if tables and sorted(tables) == pair:
@@ -431,14 +448,16 @@ class ChatBIMemoryStore:
         removed = 0
         with self._db.connect() as conn:
             rows = conn.execute(
-                "SELECT id, name FROM chatbi_agent_memories "
+                "SELECT id, name, data_source_id FROM chatbi_agent_memories "
                 "WHERE type = 'linkage' ORDER BY updated_at ASC, id ASC"
             ).fetchall()
-            keep: dict[str, str] = {}
+            # 去重键 = (数据源, 表对名)——不同业务库的同名表对是不同关系,
+            # 不能互删(四审 P0)
+            keep: dict[tuple, str] = {}
             for r in rows:
-                keep[r["name"]] = r["id"]  # ASC 遍历, 后者(最新)覆盖
+                keep[(r["data_source_id"], r["name"])] = r["id"]  # ASC 遍历, 后者覆盖
             for r in rows:
-                if keep.get(r["name"]) != r["id"]:
+                if keep.get((r["data_source_id"], r["name"])) != r["id"]:
                     conn.execute(
                         "DELETE FROM chatbi_agent_memories WHERE id = ?",
                         (r["id"],))
@@ -654,14 +673,26 @@ def delete_memory(db, memory_id: str) -> bool:
 
 # ── LLM 自主提炼 (源 recall.extract_memory_from_turn + 调用侧组合)────────
 
-def _get_existing_memory_summaries(store: ChatBIMemoryStore) -> str:
-    """获取已有记忆的摘要 (供 LLM 避免重复;源同名私有函数 1:1)。
+def _get_existing_memory_summaries(store: ChatBIMemoryStore,
+                                   user_id: Optional[str] = None,
+                                   data_source_id: Optional[str] = None) -> str:
+    """获取已有记忆的摘要 (供 LLM 避免重复;源同名函数的 scope 收口版)。
 
-    数据流: 读取全部记忆条目的 name/description 拼接摘要文本传给 LLM,
-    作为"去重"的第一道防线 (第二道在 consolidate_memories 中合并)。
+    数据流: 读取 当前数据源 + (当前用户私有 OR 全局规则) 的记忆
+    name/description 拼接摘要传给 LLM 作"去重"第一道防线(第二道在
+    consolidate_memories 合并)。
+
+    scope 过滤(四审 P0): 源是 {tenant}/{ds}/ 物理目录天然隔离, 行存储
+    下必须显式过滤——否则 A 库的提炼 prompt 会包含 B 库的摘要(跨库
+    知识泄漏 + A 的新知识被误判为重复)。
     """
     summaries = []
     for m in store.list_memories():
+        if data_source_id and m.get("data_source_id") != data_source_id:
+            continue
+        mu = m.get("user_id")
+        if mu is not None and user_id and mu != user_id:
+            continue   # 他人私有记忆不进当前用户的去重视野
         summaries.append(f"- {m['name']}: {m.get('description', '')}")
     return "\n".join(summaries) if summaries else "(无)"
 
@@ -674,6 +705,8 @@ def extract_memory_from_turn(
     reply: str,
     db,
     conv_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    data_source_id: Optional[str] = None,
 ) -> Optional[dict]:
     """LLM 自主提炼 — 判断本轮对话是否产生了值得跨会话保留的新知识。
 
@@ -694,8 +727,9 @@ def extract_memory_from_turn(
     Returns:
         提炼结果 {name, description, type, content} 或 None (不值得记/失败)。
     """
-    # 读取已有记忆, 避免重复 (源同款第一道去重防线)
-    existing_summaries = _get_existing_memory_summaries(get_memory_store(db))
+    # 读取已有记忆, 避免重复 (源同款第一道去重防线; 按库+用户scope过滤)
+    existing_summaries = _get_existing_memory_summaries(
+        get_memory_store(db), user_id=user_id, data_source_id=data_source_id)
 
     # prompt 与源原文一致
     prompt = (
@@ -778,7 +812,8 @@ def extract_and_save_memory(
         落库结果 (extracted + id) 或 None (无新知识/失败;失败不阻断主流程)。
     """
     extracted = extract_memory_from_turn(
-        llm, question, sql, tables, reply, db, conv_id=conv_id)
+        llm, question, sql, tables, reply, db, conv_id=conv_id,
+        user_id=user_id, data_source_id=data_source_id)
     if not extracted:
         return None
     mem_id = get_memory_store(db).save_memory(
@@ -986,6 +1021,31 @@ def _consolidate_group(llm, store, group_memories, user_id, data_source_id) -> i
         )
         saved += 1
     return saved
+
+
+def backfill_memory_scope(
+    db,
+    data_source_id: str,
+    memory_ids: Optional[list[str]] = None,
+) -> int:
+    """把无归属记忆批量归属到指定数据源(存量迁移工具, 四审 5.3)。
+
+    只动 data_source_id IS NULL 的行(有归属的不动, 防误改);linkage
+    结构化行同样回填(它们本就该有归属, 历史版本漏写)。返回更新条数。
+    """
+    _ensure_schema(db)
+    with db.connect() as conn:
+        if memory_ids:
+            cur = conn.execute(
+                "UPDATE chatbi_agent_memories SET data_source_id = ? "
+                "WHERE data_source_id IS NULL AND id IN "
+                f"({','.join('?' for _ in memory_ids)})",
+                (data_source_id, *memory_ids))
+        else:
+            cur = conn.execute(
+                "UPDATE chatbi_agent_memories SET data_source_id = ? "
+                "WHERE data_source_id IS NULL", (data_source_id,))
+        return getattr(cur, "rowcount", 0) or 0
 
 
 # ── 查询流水 (源 recall.save_query_memory, 无生产调用方, 保留备用)────────
@@ -1371,8 +1431,8 @@ def persist_linkage_memory(
         # 提取该表对的 JOIN ON 条件 (结构化)
         join_paths = _extract_join_on_conditions(join_path_section, table_a, table_b)
 
-        # 检查是否已有该表对的 linkage 记忆
-        existing = store.get_linkage_memory(table_a, table_b)
+        # 检查是否已有该表对的 linkage 记忆(按库隔离——不跨库取同名表对)
+        existing = store.get_linkage_memory(table_a, table_b, data_source_id)
 
         if existing:
             # 已存在：co_occurrence + 1，追加新场景（W1: 若 question 新颖）
@@ -1384,7 +1444,7 @@ def persist_linkage_memory(
             # 新表对：创建 linkage 记忆
             # 防竞态: 写入前再次检查 (源同款;DB 名称幂等 upsert 兜底,
             # 竞态命中即走更新路径, 不会重复建行/丢增量)
-            recheck = store.get_linkage_memory(table_a, table_b)
+            recheck = store.get_linkage_memory(table_a, table_b, data_source_id)
             if recheck:
                 logger.warning("竞态检测: %s-%s 已存在, 走更新路径", table_a, table_b)
                 _merge_and_save_linkage(

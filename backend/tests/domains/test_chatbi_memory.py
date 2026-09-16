@@ -43,6 +43,7 @@ from domains.chatbi.memory import (
     list_memories,
     persist_linkage_memory,
     recall_memories,
+    backfill_memory_scope,
     recall_text,
     save_query_memory,
     _extract_join_on_conditions,
@@ -1190,3 +1191,113 @@ class TestGraphSyncTargets:
         store = self._Store([{"type": "linkage", "data_source_id": "other"}])
         t = _graph_sync_targets(store, {}, data_source_id="dsA")
         assert t == {"dsA"}
+
+
+class TestLinkageDsIsolation:
+    """四审 P0: 同名表对不同业务库的 linkage 完全隔离。"""
+
+    def _seed_linkage(self, db):
+        store = get_memory_store(db)
+        # A 库 orders-users
+        store.save_memory(name="linkage-orders-users",
+                          description="d", content="c",
+                          memory_type="linkage",
+                          data_source_id="dsA",
+                          extra_metadata={"co_occurrence": 3,
+                                          "tables": ["orders", "users"]})
+        # B 库同名表对
+        store.save_memory(name="linkage-orders-users",
+                          description="d", content="c",
+                          memory_type="linkage",
+                          data_source_id="dsB",
+                          extra_metadata={"co_occurrence": 5,
+                                          "tables": ["orders", "users"]})
+        return store
+
+    def test_upsert_scoped_by_ds(self, db):
+        """同库 upsert 不跨库覆盖: A 写同表对应命中 A 行, B 行不变。"""
+        store = get_memory_store(db)
+        # 直接测 save_memory 的 linkage upsert
+        id_a1 = store.save_memory(name="linkage-orders-users", description="d",
+                                  content="c", memory_type="linkage",
+                                  data_source_id="dsA",
+                                  extra_metadata={"co_occurrence": 1,
+                                                  "tables": ["orders", "users"]})
+        id_a2 = store.save_memory(name="linkage-orders-users", description="d",
+                                  content="c", memory_type="linkage",
+                                  data_source_id="dsA",
+                                  extra_metadata={"co_occurrence": 2,
+                                                  "tables": ["orders", "users"]})
+        assert id_a1 == id_a2   # 同库 upsert 命中同一行
+        # B 库独立建行
+        id_b = store.save_memory(name="linkage-orders-users", description="d",
+                                 content="c", memory_type="linkage",
+                                 data_source_id="dsB",
+                                 extra_metadata={"co_occurrence": 9,
+                                                 "tables": ["orders", "users"]})
+        assert id_b != id_a1
+
+    def test_get_linkage_scoped(self, db):
+        store = self._seed_linkage(db)
+        m_a = store.get_linkage_memory("users", "orders", data_source_id="dsA")
+        m_b = store.get_linkage_memory("users", "orders", data_source_id="dsB")
+        assert m_a["co_occurrence"] == 3
+        assert m_b["co_occurrence"] == 5
+        # 不传 ds 只匹配无归属行(都不中)
+        assert store.get_linkage_memory("users", "orders") is None
+
+    def test_reconcile_does_not_cross_ds(self, db):
+        """去重键含 ds: 同库重复才删, 跨库同名表对各留一条。
+
+        upsert 已按 (ds, name) 幂等, 不会自造重复——这里直接 SQL 插入
+        一条 A 库的重复行(绕过 upsert)模拟历史脏数据。
+        """
+        store = self._seed_linkage(db)
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_agent_memories "
+                "(id, name, description, content, type, consolidated, "
+                " data_source_id, created_at, updated_at) "
+                "VALUES ('dup-a', 'linkage-orders-users', 'd', 'c', "
+                "'linkage', 0, 'dsA', '2026-01-01', '2026-01-01')")
+        removed = store.reconcile_index()
+        assert removed == 1                      # 只删 A 库的重复
+        # 两库各留一条
+        rows = [m for m in store.list_memories() if m["type"] == "linkage"]
+        dss = sorted(m["data_source_id"] for m in rows)
+        assert dss == ["dsA", "dsB"]
+
+    def test_cooccurrence_scoped(self, db):
+        """聚合只取目标库: A 的共现不得进入 B 的图谱更新。"""
+        from domains.chatbi.graph_infer import linkage_memories_to_cooccurrence
+        store = self._seed_linkage(db)
+        co_a = linkage_memories_to_cooccurrence(store, "dsA")
+        co_b = linkage_memories_to_cooccurrence(store, "dsB")
+        assert co_a == {("orders", "users"): 3}
+        assert co_b == {("orders", "users"): 5}
+
+
+class TestBackfillScope:
+    """存量无归属记忆批量归属(四审 5.3 迁移工具)。"""
+
+    def test_backfill_all_orphans(self, db):
+        store = get_memory_store(db)
+        store.save_memory(name="孤儿规则", description="d", content="c",
+                          user_id=None, data_source_id=None)
+        store.save_memory(name="已有归属", description="d", content="c",
+                          user_id=None, data_source_id="dsA")
+        n = backfill_memory_scope(db, data_source_id="dsX")
+        assert n == 1
+        entries = {e["name"]: e for e in store.list_memories()}
+        assert entries["孤儿规则"]["data_source_id"] == "dsX"
+        assert entries["已有归属"]["data_source_id"] == "dsA"  # 有归属不动
+
+    def test_backfill_specific_ids(self, db):
+        store = get_memory_store(db)
+        id1 = store.save_memory(name="a", description="d", content="c")
+        store.save_memory(name="b", description="d", content="c")
+        n = backfill_memory_scope(db, "dsX", memory_ids=[id1])
+        assert n == 1
+        entries = {e["name"]: e for e in store.list_memories()}
+        assert entries["a"]["data_source_id"] == "dsX"
+        assert entries["b"].get("data_source_id") is None

@@ -74,8 +74,11 @@ class MilvusVectorStore:
         if not collection_prefix:
             raise ValueError("collection_prefix 必传,由使用方声明命名空间")
         from pymilvus import MilvusClient
+        # timeout=5: 连接/请求级超时——健康探针 ping 在 Milvus 停机时
+        # 快速失败变红, 而不是挂起等默认长超时(四审验收场景 8)
         self._client = MilvusClient(
             uri=uri, user=user or None, password=password or None,
+            timeout=5,
         )
         self._prefix = collection_prefix
 

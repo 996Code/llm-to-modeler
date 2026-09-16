@@ -119,9 +119,12 @@ def datasource_metrics(db, slow_ms: int = DEFAULT_SLOW_QUERY_MS,
     """
     window_sql, window_params = _since_clause(days)
     sql = _agg_select(bool(data_source_id), window_sql)
-    params: list = [slow_ms, *window_params]
+    # 占位符顺序对齐 SQL: slow_ms(SELECT 内) → data_source_id → created_at
+    # (四审 P1 修复: 此前 cutoff 与 ds 错位, 选时间窗口后汇总恒为空)
+    params: list = [slow_ms]
     if data_source_id:
         params.append(data_source_id)
+    params.extend(window_params)
     params = tuple(params)
     with db.connect() as conn:
         rows = conn.execute(sql, params).fetchall()

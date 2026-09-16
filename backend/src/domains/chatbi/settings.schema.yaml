@@ -116,7 +116,7 @@ groups:
         default: true
       - key: graph_community_algorithm
         type: string
-        label: 社区发现算法(label_propagation/louvain)
+        label: 社区发现算法(label_propagation/greedy_modularity)
         default: label_propagation
       - key: graph_linkage_co_occurrence_threshold
         type: int
