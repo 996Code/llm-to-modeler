@@ -300,3 +300,44 @@ class TestSkills:
         assert "DATE_FORMAT" in mysql_text
         plain = load_skills_text(None)
         assert "GMV" in plain and "DATE_TRUNC" not in plain  # 无方言不带 reference
+
+
+class TestMergeRescan:
+    """十四审自查: _merge_rescan 来源感知 merge(含 key bug 回归锚)."""
+
+    def test_source_aware_merge(self, chatbi_db):
+        from domains.chatbi.tasks import _merge_rescan
+        from domains.chatbi.models import (
+            SemanticModelContent, Model, Column, Metric, Relationship)
+
+        old = SemanticModelContent(models=[
+            Model(name='t', display_name='旧名', columns=[
+                Column(name='id', display_name='旧ID', data_type='INT', source='manual'),
+                Column(name='amt', display_name='旧auto', data_type='NUM', source='ai_inferred'),
+            ], metrics=[
+                Metric(name='m_manual', display_name='M', formula='SUM(x)', type='single', source='manual'),
+            ], relationships=[
+                Relationship(name='r_manual', target_model='u', join_type='LEFT', on='x=y', type='N:1', source='manual'),
+                Relationship(name='r_gone', target_model='gone', join_type='LEFT', on='x=z', type='N:1', source='foreign_key'),
+            ]),
+        ])
+        new = SemanticModelContent(models=[
+            Model(name='t', display_name='新auto名', columns=[
+                Column(name='id', display_name='新ID', data_type='INT'),
+                Column(name='amt', display_name='新auto值', data_type='NUM'),
+            ], metrics=[
+                Metric(name='m_new', display_name='N', formula='MIN(x)', type='single'),
+            ], relationships=[
+                Relationship(name='r_fk', target_model='v', join_type='LEFT', on='x=w', type='N:1', source='foreign_key'),
+            ]),
+        ])
+        merged = _merge_rescan(old, new)
+        m = merged.models[0]
+        # manual 保留 / auto 更新 / 已删FK不复活(7 项核心语义)
+        assert m.columns[0].display_name == '旧ID'
+        assert m.columns[1].display_name == '新auto值'
+        assert any(x.name == 'm_manual' for x in m.metrics)
+        assert any(x.name == 'm_new' for x in m.metrics)
+        assert any(r.name == 'r_manual' for r in m.relationships)
+        assert not any(r.target_model == 'gone' for r in m.relationships)
+        assert any(r.target_model == 'v' for r in m.relationships)

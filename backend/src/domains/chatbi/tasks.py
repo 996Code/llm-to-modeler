@@ -555,7 +555,7 @@ def _merge_rescan(old, new):
     old_models = {m.name: m for m in old.models}
 
     for new_m in new.models:
-        old_m = old_models.get(new_m)
+        old_m = old_models.get(new_m.name)  # 用 name 作 key(不是 Model 对象)
         if old_m is None:
             continue  # 新表: 全部用扫描新值
 
