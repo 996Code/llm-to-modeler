@@ -115,6 +115,7 @@ def _start_refresh_scheduler(manager, app_state) -> None:
                 hours = float(_load_settings(app_state).get("metadata_refresh_hours", 6))
             except Exception:
                 hours = 6
+            # TODO(soak-diag): 定位 refresh 未触发, 收完撤
             if hours <= 0:
                 continue
             if now - _loop._last_refresh < hours * 3600:
@@ -1510,8 +1511,12 @@ def _load_settings(app_state) -> dict:
     """
     try:
         from domains.chatbi import runtime
-        return dict(runtime.settings_reader(app_state).all())
-    except Exception:
+        return dict(runtime.get_settings_reader(app_state).all())
+    except Exception as e:
+        # 十九审: 此前 AttributeError 被静默吞掉——runtime 模块只有
+        # get_settings_reader, settings_reader 属性不存在, 导致所有
+        # 后台任务设置(刷新周期/健康间隔/检索参数)永远走缺省
+        logger.warning("读 pack 设置失败, 全部走缺省: %s", e)
         return {}
 
 
