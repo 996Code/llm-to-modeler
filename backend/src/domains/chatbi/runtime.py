@@ -74,6 +74,12 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
                    + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
                    + list(QUERY_STATS_DDL) + list(WATERMARK_DDL))
     _migrate_single_current(db)  # 建表后修复存量双 current(幂等)
+    # 十二审 8.1 P0: 唯一索引必须在迁移之后创建——CHATBI_DDL 不含它,
+    # 旧库有双current时先建索引会 UniqueViolation 阻断启动
+    with db.connect() as conn:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_semantic_current "
+            "ON chatbi_semantic_models(data_source_id) WHERE is_current = 1")
 
 
 def get_settings_reader(ctx_or_state) -> Any:

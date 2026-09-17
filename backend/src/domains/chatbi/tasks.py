@@ -193,7 +193,8 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             from domains.chatbi import indexing, stores
             store = stores.get_vector(app_state)
             embedder = stores.get_embedder(llm)
-            rb = indexing.guarded_rebuild(content, ds_id, store, embedder, db=db)
+            rb = indexing.guarded_rebuild(content, ds_id, store, embedder, db=db,
+                                           expected_version=version if 'version' in dir() else None)
             if rb is not None and getattr(rb, "error", None):
                 raise RuntimeError(rb.error)   # RebuildResult.error 契约(五审5.2)
             indexed = rb.indexed_count
@@ -397,7 +398,8 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                     _rb = indexing.guarded_rebuild(
                         content=final_content, data_source_id=info.id,
                         store=cb_stores.get_vector(app_state),
-                        embedder=cb_stores.get_embedder(llm), db=db)
+                        embedder=cb_stores.get_embedder(llm), db=db,
+                        expected_version=final_version)  # 十二审8.2
                     if _rb is not None and getattr(_rb, "error", None):
                         raise RuntimeError(f"索引重建失败: {_rb.error}")
                 else:
@@ -417,7 +419,8 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                     _rb = indexing.guarded_rebuild(
                         content=final_content, data_source_id=info.id,
                         store=cb_stores.get_vector(app_state),
-                        embedder=cb_stores.get_embedder(llm), db=db)
+                        embedder=cb_stores.get_embedder(llm), db=db,
+                        expected_version=final_version)  # 十二审8.2
                     if _rb is not None and getattr(_rb, "error", None):
                         index_status = "conflict"
                         index_warning = (f"并发语义变更(v{final_version}), "

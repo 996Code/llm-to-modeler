@@ -192,9 +192,6 @@ CHATBI_DDL = [
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_semantic_version "
     "ON chatbi_semantic_models(data_source_id, version)",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_semantic_ds ON chatbi_semantic_models(data_source_id, is_current)",
-    # 九审 7.1: 数据库最终护栏——每个数据源最多一条 is_current=1
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_semantic_current "
-    "ON chatbi_semantic_models(data_source_id) WHERE is_current = 1",
 ]
 
 

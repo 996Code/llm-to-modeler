@@ -181,8 +181,14 @@ def add_relationship(
         source="manual",
         confidence=1.0,
     ))
-    version = semantic.save_content(db, ds_id, content, source="manual",
-                                    expected_version=expected_version)
+    try:
+        version = semantic.save_content(db, ds_id, content, source="manual",
+                                        expected_version=expected_version)
+    except Exception as e:
+        if 'VersionConflict' in type(e).__name__:
+            # 十二审 8.3: CAS冲突→409(不是500), 前端进专门的409分支
+            raise GraphEditError(409, f"图谱已被其他管理员更新——请刷新后重试")
+        raise
     index_rebuilt, warning = _run_rebuild(index_rebuilder)
     return {"version": version, "index_rebuilt": index_rebuilt, "warning": warning}
 
@@ -249,8 +255,13 @@ def delete_relationship(
         raise GraphEditError(
             404, f"未找到匹配关系 {from_table} → {target_table}")
 
-    version = semantic.save_content(db, ds_id, content, source="manual",
-                                    expected_version=expected_version)
+    try:
+        version = semantic.save_content(db, ds_id, content, source="manual",
+                                        expected_version=expected_version)
+    except Exception as e:
+        if 'VersionConflict' in type(e).__name__:
+            raise GraphEditError(409, f"图谱已被其他管理员更新——请刷新后重试")
+        raise
     index_rebuilt, warning = _run_rebuild(index_rebuilder)
     return {"version": version, "removed_forward": removed_forward,
             "removed_reverse": removed_reverse,

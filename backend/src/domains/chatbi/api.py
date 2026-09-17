@@ -308,8 +308,9 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
         from domains.chatbi import semantic as _sem_chk
         _, existing_v = _sem_chk.load_content(_db(), ds_id)
         if existing_v is not None:
-            logger.warning("语义更新未携带 expected_version (ds=%s, "
-                           "current v%d)——旧客户端或直连 API", ds_id, existing_v)
+            # 十二审 8.4: 已有版本缺 expected → 拒绝(不是warning)
+            raise HTTPException(428, f"更新已有语义版本必须携带 expected_version "
+                                    f"(当前 v{existing_v})——请先 GET 获取最新版本")
     try:
         ver = semantic.save_content(_db(), ds_id, content, source="manual",
                                     expected_version=body.expected_version)
@@ -324,7 +325,7 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
         from domains.chatbi.llm_compat import LLMCompat
         _rb = indexing.guarded_rebuild(content, ds_id, stores.get_vector(request.app.state),
                                      stores.get_embedder(LLMCompat(request.app.state.llm_client)),
-                                     db=_db())
+                                     db=_db(), expected_version=ver)  # 十二审8.2
         if _rb is not None and getattr(_rb, "error", None):
             raise RuntimeError(f"索引重建失败: {_rb.error}")
     except Exception as e:
@@ -378,7 +379,7 @@ async def semantic_rollback(ds_id: str, version: int, request: Request):
         from domains.chatbi.llm_compat import LLMCompat
         _rb = indexing.guarded_rebuild(content, ds_id, stores.get_vector(request.app.state),
                                      stores.get_embedder(LLMCompat(request.app.state.llm_client)),
-                                     db=_db())
+                                     db=_db(), expected_version=ver)  # 十二审8.2
         if _rb is not None and getattr(_rb, "error", None):
             raise RuntimeError(f"索引重建失败: {_rb.error}")
     except Exception as e:
@@ -522,17 +523,17 @@ async def get_graph(ds_id: str, request: Request = None):
     """全图数据(节点/边/社区/枢纽;前端 G6/ECharts 渲染)。"""
     from domains.chatbi import schema_graph
     from domains.chatbi import semantic
-    content = semantic.load_current_content(_db(), ds_id)
-    if content is None:
+    # 十二审 8.5: content+version 同一次读取(两次读间并发写→旧图+新版本)
+    _loaded = semantic.load_content(_db(), ds_id)
+    if _loaded is None or _loaded[0] is None:
         raise HTTPException(404, "该数据源尚未扫描语义层")
+    content, _ds_ver = _loaded
     _vis = schema_graph.get_schema_graph(content,
         community_algorithm=str(_graph_setting(request, "graph_community_algorithm", "label_propagation")),
         max_join_path_hops=int(_graph_setting(request, "graph_max_join_path_hops", 4)),
         expand_max_total=int(_graph_setting(request, "graph_expand_max_total", 10)),
         expand_use_community=bool(_graph_setting(request, "graph_expand_use_community", True)),
         ).to_vis_data()
-    # 十一审 7.3: 图谱编辑需要版本前置——GET 返回当前语义版本
-    _, _ds_ver = semantic.load_content(_db(), ds_id)
     _vis["semanticVersion"] = _ds_ver
     return _vis
 
@@ -633,7 +634,8 @@ async def graph_table_columns(ds_id: str, table: str):
     raise HTTPException(404, f"表 {table} 不存在")
 
 
-def _graph_index_rebuilder(request: Request, ds_id: str, content):
+def _graph_index_rebuilder(request: Request, ds_id: str, content,
+                           expected_version: int | None = None):
     """图谱变更后的索引重建回调(向量 store/embedder 从 app_state 构造)。"""
     def _rebuild():
         from domains.chatbi import indexing, stores
@@ -642,7 +644,7 @@ def _graph_index_rebuilder(request: Request, ds_id: str, content):
             content, ds_id,
             stores.get_vector(request.app.state),
             stores.get_embedder(LLMCompat(request.app.state.llm_client)),
-            db=_db())
+            db=_db(), expected_version=expected_version)  # 十二审8.2
         # RebuildResult.error 是真实的失败契约(五审 5.2): 转 raise 让
         # 端点的 except 分支把 index_rebuilt 标 False, 不谎报成功
         if _rb is not None and getattr(_rb, "error", None):
@@ -669,7 +671,8 @@ async def graph_add_relationship(ds_id: str, body: GraphRelationshipIn, request:
     # 版本落库后重建索引(成功/失败均不改变语义层结果, 只影响响应标志)
     content = semantic.load_current_content(_db(), ds_id)
     try:
-        _graph_index_rebuilder(request, ds_id, content)()
+        _graph_index_rebuilder(request, ds_id, content,
+                               expected_version=result["version"])()
         index_rebuilt, warning = True, None
     except Exception as e:
         logger.warning("新增关系后索引重建失败(降级): %s", e)
@@ -695,7 +698,8 @@ async def graph_delete_relationship(ds_id: str, from_table: str, target_table: s
         raise HTTPException(e.status, e.message)
     content = semantic.load_current_content(_db(), ds_id)
     try:
-        _graph_index_rebuilder(request, ds_id, content)()
+        _graph_index_rebuilder(request, ds_id, content,
+                               expected_version=result["version"])()
         index_rebuilt, warning = True, None
     except Exception as e:
         logger.warning("删除关系后索引重建失败(降级): %s", e)

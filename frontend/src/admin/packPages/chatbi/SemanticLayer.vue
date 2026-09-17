@@ -461,7 +461,7 @@ async function persist(okMsg: string) {
       message.success(`${okMsg} (v${data.version})`)
     }
   } catch (e: any) {
-    if (e?.response?.status === 409) {
+    if (e?.response?.status === 409 || e?.response?.status === 428) {
       // 十审 7.7: 保留本地草稿——不 loadContent 覆盖用户编辑
       message.warning('内容已被其他管理员更新——您的修改仍在本页, 可复制后刷新对比', 6)
     } else {
