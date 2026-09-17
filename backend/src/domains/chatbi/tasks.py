@@ -110,13 +110,20 @@ def _start_refresh_scheduler(manager, app_state) -> None:
                 continue
             if now - _loop._last_refresh < hours * 3600:
                 continue
-            _loop._last_refresh = now
             try:
                 manager.submit("chatbi.refresh_semantics", payload={},
                                dedupe_key="chatbi:refresh:all")
+                _loop._last_refresh = now   # 九审 7.4: submit成功后才推进
                 logger.info("元数据定时刷新已提交 (周期 %gh)", hours)
             except Exception as e:
-                logger.warning("元数据定时刷新提交失败: %s", e)
+                # 九审 7.4: 失败短退避(下一个30s tick重试), 不丢完整周期
+                _loop._refresh_fail_count = getattr(_loop, '_refresh_fail_count', 0) + 1
+                if _loop._refresh_fail_count <= 10:  # 最多 ~5分钟 内重试
+                    logger.warning("元数据定时刷新提交失败(第%d次, 下tick重试): %s",
+                                   _loop._refresh_fail_count, e)
+                else:
+                    _loop._last_refresh = now  # 放弃本周期
+                    logger.error("元数据定时刷新连续失败10次, 跳过本周期: %s", e)
 
     _refresh_thread = threading.Thread(target=_loop, name="chatbi-metadata-refresh",
                                        daemon=True)
@@ -124,9 +131,20 @@ def _start_refresh_scheduler(manager, app_state) -> None:
     logger.info("chatbi scheduler started: health (from settings) + metadata refresh (from settings)")
 
 
+def stop_refresh_scheduler() -> None:
+    """停止调度线程(pack unload 时调用; 九审 7.4 生命周期完整化)."""
+    global _refresh_thread, _refresh_stop
+    if _refresh_stop is not None:
+        _refresh_stop.set()
+    if _refresh_thread is not None and _refresh_thread.is_alive():
+        _refresh_thread.join(timeout=5)
+    _refresh_thread = None
+    _refresh_stop = None
+
+
 def _now_ts() -> float:
     import time
-    return time.time()
+    return time.monotonic()   # 九审 7.4: 单调时钟, 不受 wall clock 跳变影响
 
 
 def _task_scan_datasource(handle, app_state=None) -> dict:
@@ -316,6 +334,13 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
             struct_changed = (prev_db_version is None
                               or version != prev_db_version)
             evolve = _evolve_graph(db, info.id, merged, app_state=app_state)
+            # 九审 7.6: 结构与图谱都无变化 → 跳过全量重建(此前 struct_changed
+            # 算了但没用, 240周期仍重建240次)
+            if not struct_changed and evolve.get("versions_written", 0) == 0:
+                results.append({"datasource_id": info.id, "version": version,
+                                "ok": True, "changed": False,
+                                "detail": "结构无变化且无新图谱证据, 跳过索引重建"})
+                continue
             # 6.2 修复: 演进的 error/conflict 必须传播——不能把失败的数据源
             # 报成 ok=true 再继续重建(七审实测: error=boom 仍返回 ok=true)
             if evolve.get("index_rebuild") == "error":
@@ -384,7 +409,21 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
         except Exception as e:
             logger.warning("自动刷新失败 %s: %s", info.name, e)
             results.append({"datasource_id": info.id, "ok": False, "error": str(e)[:200]})
-    return {"refreshed": results}
+    # 九审 7.5: 汇总 partial failure——有失败时任务不能显示 succeeded
+    failed = [r for r in results if not r.get("ok")]
+    summary = {"refreshed": results,
+               "total": len(results),
+               "succeeded": len(results) - len(failed),
+               "failed": len(failed)}
+    if failed:
+        summary["failed_details"] = [
+            {"datasource_id": r["datasource_id"], "error": r.get("error", "")}
+            for r in failed]
+        # 抛出让任务标 failed(平台 TaskManager 对异常写 status=failed)
+        raise RuntimeError(
+            f"元数据刷新: {len(failed)}/{len(results)} 个数据源失败 — "
+            + "; ".join(r.get("error", "")[:60] for r in failed[:3]))
+    return summary
 
 
 def _merge_content(old, new):

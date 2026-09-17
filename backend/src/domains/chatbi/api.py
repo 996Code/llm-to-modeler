@@ -110,7 +110,8 @@ class DatasourceUpdate(BaseModel):
 
 
 class SemanticContentIn(BaseModel):
-    content: dict                      # SemanticModelContent JSON(人工校正)
+    content: dict
+    expected_version: int | None = None   # 九审 7.2: 版本前置条件                      # SemanticModelContent JSON(人工校正)
 
 
 class JoinPathIn(BaseModel):
@@ -300,7 +301,13 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
                 errors += semantic.validate_metric_formula(metric.condition)
             if errors:
                 raise HTTPException(422, f"指标 {metric.name} 公式非法: {errors[0]}")
-    ver = semantic.save_content(_db(), ds_id, content, source="manual")
+    try:
+        ver = semantic.save_content(_db(), ds_id, content, source="manual",
+                                    expected_version=body.expected_version)
+    except Exception as e:
+        if "VersionConflict" in type(e).__name__ or "conflict" in str(e).lower():
+            raise HTTPException(409, "内容已被其他管理员更新——请重新加载后再保存")
+        raise
     # 人工校正后重建向量索引(源 semantic_models.py:345-362;失败降级不阻塞)
     index_rebuilt, index_warning = True, None
     try:

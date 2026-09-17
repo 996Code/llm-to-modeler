@@ -1090,7 +1090,7 @@ def mark_manual_edits(old: SemanticModelContent | None,
 
 
 def save_content(db, datasource_id: str, content: SemanticModelContent,
-                 source: str = "manual") -> int:
+                 source: str = "manual", expected_version: int | None = None) -> int:
     """落新版本 + is_current 翻转,返回版本号(append-only)。
 
     - 版本号 = 该数据源当前最大版本 + 1,单调递增
@@ -1102,10 +1102,25 @@ def save_content(db, datasource_id: str, content: SemanticModelContent,
     payload = json.dumps(content.model_dump(), ensure_ascii=False)
     fingerprint = json.dumps(content.model_dump(), ensure_ascii=False, sort_keys=True)
     with db.connect() as conn:
+        # 九审 7.2: 悲观锁 + 版本前置条件——多管理员/并发写不允许旧快照静默覆盖
+        try:
+            conn.execute(
+                "SELECT id FROM chatbi_data_sources WHERE id = ? FOR UPDATE",
+                (datasource_id,))
+        except Exception:
+            pass
         row = conn.execute(
             "SELECT version, content FROM chatbi_semantic_models "
             "WHERE data_source_id = ? ORDER BY version DESC LIMIT 1",
             (datasource_id,)).fetchone()
+        # 获锁后校验 expected_version(九审 7.2: 旧快照提交 → 领域异常而非静默覆盖)
+        if expected_version is not None and row:
+            if int(row["version"]) != expected_version:
+                from domains.chatbi.graph_infer import VersionConflictError
+                raise VersionConflictError(
+                    expected_version=expected_version,
+                    current_version=int(row["version"]),
+                    pending_updates={},)
         if row:
             latest_version = int(row["version"])
             try:

@@ -45,4 +45,10 @@ def unload() -> None:
     """
     from domains.chatbi import stores
     stores.reset_caches()
-    logger.info("chatbi unloaded: runtime cache released")
+    # 九审 7.4: 停止调度线程(此前 unload 不停, 热禁用后旧线程持旧引用继续提交)
+    try:
+        from domains.chatbi.tasks import stop_refresh_scheduler
+        stop_refresh_scheduler()
+    except Exception as e:
+        logger.warning("chatbi scheduler 停止失败: %s", e)
+    logger.info("chatbi unloaded: runtime cache released + scheduler stopped")

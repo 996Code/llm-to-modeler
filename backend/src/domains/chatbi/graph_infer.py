@@ -741,8 +741,16 @@ def apply_confidence_updates(
     import copy
 
     with db.connect() as conn:
-        # 1. 读取当前版本 (同 data_source_id 正常仅 1 行 is_current=1;
-        #    防御性取第一行——异常多 current 行由第 5 步统一压为 0)
+        # 1. 悲观锁: 锁定数据源行——所有语义写入共用此协议(九审 7.1 P0:
+        #    此前两个事务可同时读 current=v1 并都成功提交, 产生双 is_current=1)
+        try:
+            conn.execute(
+                "SELECT id FROM chatbi_data_sources WHERE id = ? FOR UPDATE",
+                (data_source_id,))
+        except Exception:
+            pass  # 数据源行不存在/测试替身兼容
+
+        # 2. 获锁后重读 current(不信任锁外快照——九审 7.1 建议2)
         rows = conn.execute(
             "SELECT id, version, content FROM chatbi_semantic_models "
             "WHERE data_source_id = ? AND is_current = 1",
@@ -753,7 +761,7 @@ def apply_confidence_updates(
             raise ValueError(f"数据源 {data_source_id} 无当前语义层版本")
         current = rows[0]
 
-        # 2. 乐观锁校验
+        # 3. 乐观锁校验(基于获锁后的最新版本)
         if expected_version is not None and current["version"] != expected_version:
             raise VersionConflictError(
                 expected_version=expected_version,
@@ -821,12 +829,18 @@ def apply_confidence_updates(
         if not changed:
             raise ValueError("无有效更新内容 (所有表对 confidence 未变或表不在语义层中)")
 
-        # 5. 旧版本 is_current=0
-        conn.execute(
+        # 5. 旧版本 is_current=0(CAS: 锁内 version 不可能变, 0行=并发护栏)
+        _cur = conn.execute(
             "UPDATE chatbi_semantic_models SET is_current = 0 "
-            "WHERE data_source_id = ? AND is_current = 1",
-            (data_source_id,),
+            "WHERE data_source_id = ? AND is_current = 1 AND version = ?",
+            (data_source_id, current["version"]),
         )
+        if getattr(_cur, "rowcount", 1) == 0:
+            raise VersionConflictError(
+                expected_version=current["version"],
+                current_version=None,
+                pending_updates=updates,
+            )
 
         # 新版本号 = 全局 max + 1
         max_row = conn.execute(
@@ -851,7 +865,9 @@ def apply_confidence_updates(
         # 证据水位与语义版本同一事务(八审 6.1): 任一失败全回滚——
         # 杜绝"语义已写、水位未推进"窗口下的同证据重复消费。
         # GREATEST 单调: 证据计数下降时水位不倒退。
-        ensure_watermark_schema(db)
+        # 水位表已进中央 schema(runtime._init_pack_schema), 不在热事务内
+        # 二次借连接 ensure(九审 7.7: 池上限 8 时多请求各持一事务再等第二条
+        # 连接 → PoolTimeout 成批回滚; PG_POOL_MAX=1 时单请求自锁)
         for _pair, _signal, _evidence in (pending_watermarks or []):
             conn.execute(
                 "INSERT INTO chatbi_graph_watermarks "

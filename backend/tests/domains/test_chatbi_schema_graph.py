@@ -1516,3 +1516,90 @@ class TestWatermarkAtomicity:
         set_watermark(pg_engine, DS_ID, ("a", "b"), "linkage", 5)
         set_watermark(pg_engine, DS_ID, ("a", "b"), "linkage", 2)  # 下降尝试
         assert get_watermark(pg_engine, DS_ID, ("a", "b"), "linkage") == 5
+
+
+class TestConcurrentSemanticWrites:
+    """九审 7.1/7.2: 并发写语义层的原子性——绝不允许双 current、静默覆盖."""
+
+    def test_barrier_concurrent_no_double_current(self, pg_engine):
+        """两线程同持 expected=v1 → 悲观锁保证只有一个成功提交."""
+        import threading
+        from domains.chatbi.graph_infer import (
+            apply_confidence_updates, ensure_watermark_schema)
+
+        content = _make_content()
+        content.models[1].relationships[1].confidence = 0.6
+        content.models[1].relationships[1].source = "name_pattern"
+        _seed_semantic_model(pg_engine, content=content)
+        ensure_watermark_schema(pg_engine)
+
+        barrier = threading.Barrier(2)
+        results = {"a": None, "b": None}
+
+        def worker(key, pair, conf):
+            barrier.wait()  # 同时进入
+            try:
+                ver = apply_confidence_updates(
+                    pg_engine, DS_ID, {pair: conf},
+                    expected_version=1,
+                    pending_watermarks=[(pair, "linkage", 3)])
+                results[key] = ("ok", ver)
+            except Exception as e:
+                results[key] = ("conflict", str(e)[:60])
+
+        t1 = threading.Thread(target=worker, args=("a",
+            ("biz_orders", "biz_products"), 0.7))
+        t2 = threading.Thread(target=worker, args=("b",
+            ("biz_orders", "biz_products"), 0.75))
+        t1.start(); t2.start(); t1.join(); t2.join()
+
+        outcomes = sorted(r[0] for r in results.values())
+        # 悲观锁: 只允许一个 ok, 另一个 conflict(获锁后发现版本变了)
+        assert outcomes.count("ok") == 1, \
+            f"并发必须只允许一个成功: {results}"
+        assert outcomes.count("conflict") == 1
+
+        # 数据库只有一条 current
+        with pg_engine.connect() as conn:
+            cur_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM chatbi_semantic_models "
+                "WHERE data_source_id = ? AND is_current = 1",
+                (DS_ID,)).fetchone()["c"]
+        assert cur_count == 1, f"双 current! count={cur_count}"
+
+    def test_stale_snapshot_save_content_conflict(self, pg_engine):
+        """旧快照 save_content → VersionConflictError(不静默覆盖)."""
+        from domains.chatbi import semantic
+        content = _make_content()
+        _seed_semantic_model(pg_engine, content=content)
+
+        # A 保存 v2(不带 expected——自动路径)
+        content.models[0].display_name = "A改的"
+        v2 = semantic.save_content(pg_engine, DS_ID, content, source="manual")
+        assert v2 == 2
+
+        # B 基于旧 v1 的快照, 传 expected=1 → 应冲突
+        stale = _make_content()
+        stale.models[0].display_name = "B改的"
+        from domains.chatbi.graph_infer import VersionConflictError
+        with pytest.raises(VersionConflictError):
+            semantic.save_content(pg_engine, DS_ID, stale, source="manual",
+                                  expected_version=1)
+
+        # current 仍是 A 的
+        loaded, _ = semantic.load_content(pg_engine, DS_ID)
+        assert loaded.models[0].display_name == "A改的"
+
+    def test_single_current_unique_index(self, pg_engine):
+        """数据库护栏: partial unique index 禁止两条 is_current=1."""
+        content = _make_content()
+        _seed_semantic_model(pg_engine, content=content)
+        # 手动插入第二条 current → 应被唯一索引拒绝
+        with pytest.raises(Exception):
+            with pg_engine.connect() as conn:
+                conn.execute(
+                    "INSERT INTO chatbi_semantic_models "
+                    "(id, data_source_id, version, content, is_current, created_at) "
+                    "VALUES (?, ?, ?, ?, 1, ?)",
+                    (uuid.uuid4().hex, DS_ID, 99,
+                     json.dumps(content.model_dump()), _now_iso()))

@@ -452,7 +452,8 @@ async function persist(okMsg: string) {
   saving.value = true
   try {
     const { data } = await chatbiApi.put(
-      `/datasources/${dsId.value}/semantic-models`, { content: content.value })
+      `/datasources/${dsId.value}/semantic-models`,
+      { content: content.value, expected_version: version.value || null })
     version.value = data.version
     if (data.index_rebuilt === false) {
       message.warning(`${okMsg} (v${data.version}) — 但索引重建失败: ${data.warning || '请重扫恢复'}`)
