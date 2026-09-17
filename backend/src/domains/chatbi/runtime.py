@@ -23,9 +23,36 @@ def get_pack_db() -> PackRelationalDB:
     global _db
     with _db_lock:
         if _db is None:
-            _db = PackRelationalDB(PACK_NAME)
-            _init_pack_schema(_db)
+            candidate = PackRelationalDB(PACK_NAME)
+            _init_pack_schema(candidate)  # 十审 7.4: 失败不缓存半初始化实例
+            _db = candidate               # 只有成功才赋值单例
         return _db
+
+
+def _migrate_single_current(db: PackRelationalDB) -> None:
+    """十审 7.4: 存量双 current 修复——建唯一索引前, 收敛 current 到最高版本.
+
+    此前版本允许产生双 is_current=1; 直接 CREATE UNIQUE INDEX 会失败.
+    迁移规则: 每数据源保留 MAX(version) 的 current, 其余清零, 记日志.
+    """
+    with db.connect() as conn:
+        # 找有多个 current 的数据源
+        dupes = conn.execute(
+            "SELECT data_source_id, COUNT(*) AS c "
+            "FROM chatbi_semantic_models WHERE is_current = 1 "
+            "GROUP BY data_source_id HAVING COUNT(*) > 1").fetchall()
+        for d in dupes:
+            ds_id = d["data_source_id"]
+            # 保留 MAX(version), 其余清零
+            conn.execute(
+                "UPDATE chatbi_semantic_models SET is_current = 0 "
+                "WHERE data_source_id = ? AND is_current = 1 "
+                "AND version < (SELECT MAX(version) FROM chatbi_semantic_models "
+                "               WHERE data_source_id = ? AND is_current = 1)",
+                (ds_id, ds_id))
+            import logging
+            logging.getLogger(__name__).warning(
+                "存量双 current 修复: ds=%s 收敛到最高版本", ds_id)
 
 
 def _init_pack_schema(db: PackRelationalDB) -> None:
@@ -40,6 +67,7 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
     from domains.chatbi.m4 import M4_DDL
     from domains.chatbi.query_stats import QUERY_STATS_DDL
     from domains.chatbi.graph_infer import WATERMARK_DDL
+    _migrate_single_current(db)  # 十审 7.4: 先修复存量双 current 再建唯一索引
     db.init_schema(list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
                    + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
                    + list(QUERY_STATS_DDL) + list(WATERMARK_DDL))

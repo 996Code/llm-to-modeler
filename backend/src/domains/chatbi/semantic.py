@@ -1190,7 +1190,10 @@ def rollback(db, datasource_id: str, version: int) -> tuple:
     content, _ = load_content(db, datasource_id, version)
     if content is None:
         raise ValueError(f"版本 {version} 不存在")
-    new_version = save_content(db, datasource_id, content, source="rollback")
+    # 十审 7.1: 回滚也是语义写入——传当前版本做前置(防回滚覆盖并发编辑)
+    _, cur_v = load_content(db, datasource_id)
+    new_version = save_content(db, datasource_id, content, source="rollback",
+                               expected_version=cur_v)
     logger.info("rollback: 数据源=%s 从 v%d 复制落新版本 v%d",
                 datasource_id, version, new_version)
     return new_version, content

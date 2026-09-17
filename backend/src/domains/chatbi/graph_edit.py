@@ -121,6 +121,7 @@ def add_relationship(
     from_table: str, target_table: str,
     join_type: str, on: str, cardinality: str,
     index_rebuilder: Optional[Callable[[], Any]] = None,
+    expected_version: Optional[int] = None,
 ) -> dict:
     """新增图谱关系(手工标注 JOIN): 校验 → 追加 → 语义层新版本 → 重建索引。
 
@@ -133,9 +134,14 @@ def add_relationship(
     from domains.chatbi import semantic
     from domains.chatbi.models import Relationship
 
-    content = semantic.load_current_content(db, ds_id)
+    _loaded = semantic.load_content(db, ds_id)
+    content, current_version = (_loaded if _loaded[0] is not None
+                                 else (None, None))
     if content is None:
         raise GraphEditError(404, "该数据源尚未扫描语义层")
+    if expected_version is not None and current_version != expected_version:
+        raise GraphEditError(409, f"版本冲突: 当前 v{current_version}, "
+                                  f"请求基于 v{expected_version}")
     models_by_name = {m.name: m for m in content.models}
     source_model = models_by_name.get(from_table)
     if source_model is None:
@@ -175,7 +181,8 @@ def add_relationship(
         source="manual",
         confidence=1.0,
     ))
-    version = semantic.save_content(db, ds_id, content, source="manual")
+    version = semantic.save_content(db, ds_id, content, source="manual",
+                                    expected_version=expected_version)
     index_rebuilt, warning = _run_rebuild(index_rebuilder)
     return {"version": version, "index_rebuilt": index_rebuilt, "warning": warning}
 
@@ -184,6 +191,7 @@ def delete_relationship(
     db, ds_id: str, *,
     from_table: str, target_table: str, on: str = "",
     index_rebuilder: Optional[Callable[[], Any]] = None,
+    expected_version: Optional[int] = None,
 ) -> dict:
     """删除图谱关系: 正向(from→target)与反向(target→from)一起清理。
 
@@ -241,7 +249,8 @@ def delete_relationship(
         raise GraphEditError(
             404, f"未找到匹配关系 {from_table} → {target_table}")
 
-    version = semantic.save_content(db, ds_id, content, source="manual")
+    version = semantic.save_content(db, ds_id, content, source="manual",
+                                    expected_version=expected_version)
     index_rebuilt, warning = _run_rebuild(index_rebuilder)
     return {"version": version, "removed_forward": removed_forward,
             "removed_reverse": removed_reverse,

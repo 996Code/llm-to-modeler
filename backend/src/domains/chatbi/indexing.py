@@ -222,6 +222,47 @@ class RebuildResult:
     error: Optional[str] = None
 
 
+# 十审 7.2: datasource 级索引构建串行锁——同一数据源的 delete-then-build
+# 不允许交错(否则旧版构建可在新版之后发布)
+_index_build_locks: dict = {}
+_index_build_guard = __import__('threading').Lock()
+
+def _get_build_lock(ds_id: str):
+    import threading
+    with _index_build_guard:
+        if ds_id not in _index_build_locks:
+            _index_build_locks[ds_id] = threading.Lock()
+        return _index_build_locks[ds_id]
+
+
+def guarded_rebuild(content, data_source_id, store, embedder, db,
+                    expected_version=None):
+    """带 datasource 级串行锁和版本前后复查的 rebuild_index 包装。
+
+    十审 7.2: delete-then-build 无锁时, 旧版构建可在新版之后完成并
+    覆盖已发布的新版。串行锁 + 构建前版本校验保证最终发布最新版。
+    """
+    from domains.chatbi import semantic
+    lock = _get_build_lock(data_source_id)
+    with lock:
+        # 构建前校验: expected_version 不匹配说明有更新版本, 旧构建让路
+        if expected_version is not None:
+            _, cur_v = semantic.load_content(db, data_source_id)
+            if cur_v is not None and cur_v != expected_version:
+                return type('R', (), {'error': f'跳过过时构建 v{expected_version} (current v{cur_v})',
+                                      'deleted_count': 0, 'indexed_count': 0})()
+        result = rebuild_index(content, data_source_id, store, embedder, db)
+        # 构建后复查: 构建期间 current 变了 → 用最新版补建一次
+        _, cur_v = semantic.load_content(db, data_source_id)
+        if cur_v is not None and hasattr(content, 'version') and            getattr(content, 'version', 0) != cur_v:
+            from domains.chatbi import semantic as _sem
+            latest_content, _ = _sem.load_content(db, data_source_id)
+            if latest_content is not None:
+                result = rebuild_index(latest_content, data_source_id,
+                                       store, embedder, db)
+        return result
+
+
 def rebuild_index(
     content: SemanticModelContent,
     data_source_id: str,

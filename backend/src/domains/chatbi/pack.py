@@ -43,12 +43,12 @@ def unload() -> None:
     stores.reset_caches 覆盖: 向量存储连接缓存 + pack 库单例(经 runtime)
     + 向量前缀登记——比只清 runtime._db 更完整。
     """
-    from domains.chatbi import stores
-    stores.reset_caches()
-    # 九审 7.4: 停止调度线程(此前 unload 不停, 热禁用后旧线程持旧引用继续提交)
+    # 十审 7.6: 先停调度线程再 reset(停止窗口内不访问已重置资源)
     try:
         from domains.chatbi.tasks import stop_refresh_scheduler
         stop_refresh_scheduler()
     except Exception as e:
         logger.warning("chatbi scheduler 停止失败: %s", e)
+    from domains.chatbi import stores
+    stores.reset_caches()
     logger.info("chatbi unloaded: runtime cache released + scheduler stopped")

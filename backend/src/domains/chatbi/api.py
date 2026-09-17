@@ -301,6 +301,14 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
                 errors += semantic.validate_metric_formula(metric.condition)
             if errors:
                 raise HTTPException(422, f"指标 {metric.name} 公式非法: {errors[0]}")
+    # 十审 7.7: expected_version 省略时 warning(不完全阻断以兼容旧
+    # 客户端, 但审计留痕; 新前端已强制传递)
+    if body.expected_version is None:
+        from domains.chatbi import semantic as _sem_chk
+        _, existing_v = _sem_chk.load_content(_db(), ds_id)
+        if existing_v is not None:
+            logger.warning("语义更新未携带 expected_version (ds=%s, "
+                           "current v%d)——旧客户端或直连 API", ds_id, existing_v)
     try:
         ver = semantic.save_content(_db(), ds_id, content, source="manual",
                                     expected_version=body.expected_version)

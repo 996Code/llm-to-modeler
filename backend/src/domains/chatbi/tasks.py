@@ -330,19 +330,32 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                     prev_db_version = _row["version"] if _row else 0
             except Exception:
                 prev_db_version = None
-            version = semantic.save_content(db, info.id, merged, source="refresh")
+            # 十审 7.1: 传 expected_version——此前 refresh 不带版本前置,
+            # 旧快照可静默覆盖管理员的新编辑(报告复现: Admin-A v2 被
+            # Refresh-from-v1 v3 覆盖)。冲突时基于最新版重试一次。
+            from domains.chatbi.graph_infer import VersionConflictError as _VCE
+            try:
+                version = semantic.save_content(db, info.id, merged,
+                                                source="refresh",
+                                                expected_version=prev_db_version)
+            except _VCE:
+                # 冲突: 有并发人工/图谱写入——重新加载 current, 重新 merge
+                logger.info("刷新版本冲突 ds=%s, 基于最新版重试", info.id)
+                from domains.chatbi import semantic as _sem_r
+                _retry = _sem_r.load_content(db, info.id)
+                if _retry and _retry[0] is not None:
+                    _retry_content = _merge_content(_retry[0], new_content)
+                    version = semantic.save_content(
+                        db, info.id, _retry_content, source="refresh",
+                        expected_version=_retry[1])
+                else:
+                    raise  # 无法重试(无 current)
             struct_changed = (prev_db_version is None
                               or version != prev_db_version)
             evolve = _evolve_graph(db, info.id, merged, app_state=app_state)
-            # 九审 7.6: 结构与图谱都无变化 → 跳过全量重建(此前 struct_changed
-            # 算了但没用, 240周期仍重建240次)
-            if not struct_changed and evolve.get("versions_written", 0) == 0:
-                results.append({"datasource_id": info.id, "version": version,
-                                "ok": True, "changed": False,
-                                "detail": "结构无变化且无新图谱证据, 跳过索引重建"})
-                continue
-            # 6.2 修复: 演进的 error/conflict 必须传播——不能把失败的数据源
-            # 报成 ok=true 再继续重建(七审实测: error=boom 仍返回 ok=true)
+            # 十审 7.3: error/conflict 检查必须在 unchanged 快路之前——
+            # 此前 unchanged 放在前面, evolve 返回 error+versions_written=0
+            # 时错误被吞掉, 刷新仍报 ok=true(八轮修好的传播再次失效)
             if evolve.get("index_rebuild") == "error":
                 results.append({"datasource_id": info.id, "ok": False,
                                 "error": f"图谱演进失败: {evolve.get('error', '')}"})
@@ -352,6 +365,13 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                                 "conflict": True,
                                 "error": "图谱演进乐观锁冲突(有并发语义写入), "
                                          "下轮刷新自动重试"})
+                continue
+            # 九审 7.6: 结构与图谱都无变化 → 跳过全量重建(此前 struct_changed
+            # 算了但没用, 240周期仍重建240次)——只在 error/conflict 之后
+            if not struct_changed and evolve.get("versions_written", 0) == 0:
+                results.append({"datasource_id": info.id, "version": version,
+                                "ok": True, "changed": False,
+                                "detail": "结构无变化且无新图谱证据, 跳过索引重建"})
                 continue
             # 六审 P1.C 修复: 演化可能写出 v+2/v+3——最终索引必须对齐
             # 演化后的 current, 不再用演化前的 merged 覆盖(旧关系内容)
@@ -419,6 +439,12 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
         summary["failed_details"] = [
             {"datasource_id": r["datasource_id"], "error": r.get("error", "")}
             for r in failed]
+        # 十审 7.8: 抛之前逐条写任务日志——结构化详情在任务中心可见
+        # (TaskManager 对异常只存 error string, 不保存局部 summary)
+        for r in failed:
+            handle.log(f"刷新失败 ds={r['datasource_id'][:8]}…: {r.get('error', '')}")
+        handle.log(f"汇总: {len(results) - len(failed)}/{len(results)} 成功, "
+                   f"{len(failed)} 失败")
         # 抛出让任务标 failed(平台 TaskManager 对异常写 status=failed)
         raise RuntimeError(
             f"元数据刷新: {len(failed)}/{len(results)} 个数据源失败 — "

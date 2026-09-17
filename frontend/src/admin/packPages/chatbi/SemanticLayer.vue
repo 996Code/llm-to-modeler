@@ -461,8 +461,13 @@ async function persist(okMsg: string) {
       message.success(`${okMsg} (v${data.version})`)
     }
   } catch (e: any) {
-    message.error(e?.response?.data?.detail || '保存失败')
-    await loadContent()   // 失败回滚到服务端状态
+    if (e?.response?.status === 409) {
+      // 十审 7.7: 保留本地草稿——不 loadContent 覆盖用户编辑
+      message.warning('内容已被其他管理员更新——您的修改仍在本页, 可复制后刷新对比', 6)
+    } else {
+      message.error(e?.response?.data?.detail || '保存失败')
+      await loadContent()   // 非 409 失败回滚到服务端状态
+    }
   } finally {
     saving.value = false
   }
