@@ -317,8 +317,8 @@ class TestMergeRescan:
             ], metrics=[
                 Metric(name='m_manual', display_name='M', formula='SUM(amt)', type='single', source='manual'),
             ], relationships=[
-                Relationship(name='r_manual', target_model='u', join_type='LEFT', on='x=y', type='N:1', source='manual'),
-                Relationship(name='r_gone', target_model='gone', join_type='LEFT', on='x=z', type='N:1', source='foreign_key'),
+                Relationship(name='r_manual', target_model='u', join_type='LEFT', on='t.amt = u.id', type='N:1', source='manual'),
+                Relationship(name='r_gone', target_model='gone', join_type='LEFT', on='t.amt = gone.id', type='N:1', source='foreign_key'),
             ]),
         ])
         new = SemanticModelContent(models=[
@@ -328,7 +328,7 @@ class TestMergeRescan:
             ], metrics=[
                 Metric(name='m_new', display_name='N', formula='MIN(x)', type='single'),
             ], relationships=[
-                Relationship(name='r_fk', target_model='v', join_type='LEFT', on='x=w', type='N:1', source='foreign_key'),
+                Relationship(name='r_fk', target_model='v', join_type='LEFT', on='t.amt = v.id', type='N:1', source='foreign_key'),
             ]),
             # r_manual 的 target='u'——必须存在于新扫描中(否则被正确丢弃)
             Model(name='u', display_name='U', columns=[

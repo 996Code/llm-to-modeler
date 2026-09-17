@@ -194,8 +194,10 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         # refresh 的 _merge_content 旧值全覆盖会吞掉重扫的新 LLM 名/指标/
         # 问题(重扫的核心目的就是重新富化); rescan 按 source 分治:
         #   manual/人工标注 → 保留旧值; auto(LLM/规则推断) → 允许新值替换
+        # 十七审 7.6: merge 报告(停用/冲突)进任务结果 + 持久化供页面展示
+        merge_report = _new_report()
         if _pre and _pre[0] is not None:
-            content = _merge_rescan(_pre[0], content)
+            content = _merge_rescan(_pre[0], content, report=merge_report)
         try:
             version = semantic.save_content(db, ds_id, content,
                                             source="scan",
@@ -209,12 +211,16 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                 infer_metrics=bool(settings.get("scan_metric_inference", True)),
                 progress_cb=progress, datasource_id=ds_id, persist=False)
             if _retry and _retry[0] is not None:
-                content = _merge_rescan(_retry[0], _re_scan)  # 来源感知
+                merge_report = _new_report()  # 以最终生效的 merge 报告为准
+                content = _merge_rescan(_retry[0], _re_scan, report=merge_report)
                 version = semantic.save_content(db, ds_id, content,
                                                 source="scan",
                                                 expected_version=_retry[1])
             else:
                 raise
+        if merge_report.get("requires_review"):
+            save_merge_report(db, ds_id, version, merge_report)
+            _log_report(handle, merge_report, f"重扫 v{version}")
         # 向量索引重建 (对标 _run_scan_background 尾部 rebuild_index;
         # 失败降级不阻塞——RAG 检索可用全表降级路径)
         indexed = 0
@@ -246,6 +252,11 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         return {"models": len(content.models), "indexed": indexed,
                 "index_rebuild": index_status,
                 **({"index_warning": index_warning} if index_warning else {}),
+                # 十七审 7.6: 停用/冲突清单进任务结果(任务中心可见)
+                **({"dropped_items": merge_report["dropped_items"],
+                    "conflicts": merge_report["conflicts"],
+                    "requires_review": True}
+                   if merge_report.get("requires_review") else {}),
                 "datasource_id": ds_id}
     except Exception as e:
         datasources.update_datasource(db, ds_id, scan_status="failed",
@@ -337,7 +348,11 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
     db = runtime.get_pack_db()
     settings = _load_settings(app_state)
     results = []
-    for info in datasources.list_datasources(db, active_only=True):
+    for row in datasources.list_datasources(db, active_only=True):
+        # list_datasources 不带 decrypt(password_plain 为空)——同健康巡检
+        # 的既有教训: 不解密直连必失败(fe_sendauth: no password supplied)。
+        # 此前定时刷新自迁移以来一直在任务层静默失败(脚本验证绕过了本层)。
+        info = datasources.get_datasource(db, row.id, decrypt=True) or row
         try:
             # 十一审 7.2 P0: content 和 revision 必须同一次读取——
             # 此前 current 用 load_current_content(只有content), 版本号
@@ -358,7 +373,8 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 llm=None, db=db, connect_info=_connect_info(info),
                 infer_metrics=bool(settings.get("scan_metric_inference", True)),
                 datasource_id=info.id, persist=False)
-            merged = _merge_content(current, new_content)
+            merge_report = _new_report()  # 十七审 7.6: 停用/冲突清单
+            merged = _merge_content(current, new_content, report=merge_report)
             # 十一审 7.2: 直接用同快照的 current_version, 不再另查
             prev_db_version = current_version
             # 十审 7.1: 传 expected_version——此前 refresh 不带版本前置,
@@ -381,12 +397,17 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                         llm=None, db=db, connect_info=_connect_info(info),
                         infer_metrics=bool(settings.get("scan_metric_inference", True)),
                         datasource_id=info.id, persist=False)
-                    _retry_merged = _merge_content(_retry[0], _re_scanned)
+                    merge_report = _new_report()  # 以最终生效的 merge 报告为准
+                    _retry_merged = _merge_content(_retry[0], _re_scanned,
+                                                   report=merge_report)
                     version = semantic.save_content(
                         db, info.id, _retry_merged, source="refresh",
                         expected_version=_retry[1])
                 else:
                     raise  # 无法重试(无 current)
+            if merge_report.get("requires_review"):
+                save_merge_report(db, info.id, version, merge_report)
+                _log_report(handle, merge_report, f"刷新 v{version}")
             struct_changed = (prev_db_version is None
                               or version != prev_db_version)
             evolve = _evolve_graph(db, info.id, merged, app_state=app_state)
@@ -464,7 +485,12 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
             results.append({"datasource_id": info.id, "version": final_version,
                             "models": len(final_content.models), "ok": True,
                             "index_rebuild": index_status,
-                            **({"index_warning": index_warning} if index_warning else {})})
+                            **({"index_warning": index_warning} if index_warning else {}),
+                            # 十七审 7.6: 停用/冲突清单进任务结果
+                            **({"dropped_items": merge_report["dropped_items"],
+                                "conflicts": merge_report["conflicts"],
+                                "requires_review": True}
+                               if merge_report.get("requires_review") else {})})
         except Exception as e:
             logger.warning("自动刷新失败 %s: %s", info.name, e)
             results.append({"datasource_id": info.id, "ok": False, "error": str(e)[:200]})
@@ -493,167 +519,425 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
 
 
 
-# ══ 十六审: 共用结构验证器(refresh/rescan 复用, 不再两套分叉) ══
+# ══ 十七审: 共用结构验证器 + merge 报告(refresh/rescan 复用) ══
+# 十六审的教训: 简单正则只能识别最规范的表达式(CASE/condition/引号
+# JOIN/calculated 全部漏过), 集合去重把优先级做反(自动项压过人工项)。
+# 本版原则:
+#   1. 表达式引用提取换 sqlglot AST(解析失败 fail-closed 停用+复核);
+#   2. 关系 ON 复用 graph_edit.parse_on_conditions(与人工增删同一解析器,
+#      引号/多列 JOIN 天然一致);
+#   3. 同名/同端点冲突时有效人工项优先, 自动项被压制;
+#   4. 失效人工项停用进待复核清单(dropped_items), 不静默回退自动版本。
 
 import re as _re
 
-_COL_REF = _re.compile(r'\b([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)\b')
+_MANUAL_SOURCES = ('manual', 'manual_edit')   # 旧数据 manual 兼容
+
+
+class _Unparseable(Exception):
+    """表达式无法解析(fail-closed 信号)。"""
+
+
+def _new_report() -> dict:
+    """merge 报告骨架(任务结果与语义页面共用结构)。"""
+    return {"dropped_items": [], "conflicts": [], "requires_review": False}
+
+
+def _report_drop(report, kind, table, name, reason):
+    """记录一个被停用的语义项(人工项必须可见; 自动项 debug 级)。"""
+    report["dropped_items"].append(
+        {"kind": kind, "table": table, "name": name, "reason": reason})
+    report["requires_review"] = True
+
+
+def _report_conflict(report, table, manual, auto, detail):
+    """记录一个人工/自动属性冲突(人工已保留, 管理员可复核)。"""
+    report["conflicts"].append(
+        {"table": table, "manual": manual, "auto": auto, "detail": detail})
+    report["requires_review"] = True
 
 
 def _validate_structure(new_content):
-    """构造新结构的表→列映射(用于校验旧语义引用)."""
-    tables = {}
-    for m in new_content.models:
-        tables[m.name] = {c.name for c in m.columns}
-    return tables
+    """构造新结构的表→列映射(校验旧语义引用的物理基准)。"""
+    return {m.name: {c.name for c in m.columns} for m in new_content.models}
 
 
-def _metric_columns_valid(metric, table_name, table_cols):
-    """校验指标表达式引用的列是否仍存在(simple 的 formula 内引用本表列)."""
-    if not metric.formula:
-        return True  # 无表达式不校验
-    # 提取括号内的列名(如 SUM(amount) → amount)
-    for ref in _re.findall(r'\w+\((\w+)\)', metric.formula):
-        if ref not in table_cols:
-            return False
-    return True
+def _expr_column_refs(expr: str) -> set:
+    """sqlglot 提取表达式列引用 → {(table|None, column)}。
 
-
-def _rel_columns_valid(rel, source_table, source_cols, target_table, target_cols):
-    """校验关系的 ON 条件两端列是否存在."""
-    if not rel.on:
-        return True  # 无 ON 不校验(可能由 AI 推断)
-    # 解析 "a.col1 = b.col2" 中的表.列引用
-    for t, c in _COL_REF.findall(rel.on):
-        if t == source_table and c not in source_cols:
-            return False
-        if t == target_table and c not in target_cols:
-            return False
-    return True
-
-
-def _rel_identity(rel, source_table):
-    """关系的规范化端点标识(用于等价去重)."""
-    # 解析 ON 提取排序后的 (table, column) 对
-    pairs = sorted(_COL_REF.findall(rel.on or ""))
-    return (source_table, rel.target_model, tuple(pairs))
-
-
-def _filter_stale_items(model_name, old_m, new_m, all_tables):
-    """过滤引用已删结构的旧语义项, 返回 (valid_metrics, valid_rels, dropped)."""
-    table_cols = all_tables.get(model_name, set())
-    target_cols_map = {m.name: {c.name for c in m.columns}
-                       for m in []}  # 从 new_content 取
-    dropped = {"metrics": [], "relationships": []}
-
-    # 指标: 校验公式引用列
-    valid_metrics = []
-    for met in (old_m.metrics or []):
-        if 'manual' in (getattr(met, 'source', '') or ''):
-            if _metric_columns_valid(met, model_name, table_cols):
-                valid_metrics.append(met)
-            else:
-                dropped["metrics"].append(met.name)
-                logger.warning("merge: 丢弃引用已删列的人工指标 %s (table=%s)",
-                               met.name, model_name)
-
-    # 关系: 校验目标表存在 + ON 两端列存在
-    valid_rels = []
-    for rel in (old_m.relationships or []):
-        if getattr(rel, 'source', '') not in ('manual', 'manual_edit'):
-            continue  # auto 的由新扫描决定
-        if rel.target_model not in all_tables:
-            dropped["relationships"].append(rel.name)
-            logger.warning("merge: 丢弃指向已删表的人工关系 %s→%s",
-                           model_name, rel.target_model)
-            continue
-        target_cols = all_tables.get(rel.target_model, set())
-        if not _rel_columns_valid(rel, model_name, table_cols,
-                                  rel.target_model, target_cols):
-            dropped["relationships"].append(rel.name)
-            logger.warning("merge: 丢弃引用已删列的人工关系 %s (ON=%s)",
-                           rel.name, rel.on)
-            continue
-        valid_rels.append(rel)
-
-    return valid_metrics, valid_rels, dropped
-
-
-def _merge_content(old, new):
-    """结构刷新合并(refresh 专用; 十六审重构: 使用共用结构验证器).
-
-    refresh(定时结构扫描 llm=None)的语义: 新结构权威(增删表列),
-    保留旧标注, 但旧人工指标/关系必须通过新结构校验(引用已删列/表
-    的旧项停用+告警, 不再静默保留错误语义).
+    bare 引用(如 SUM(amount) 的 amount)table=None, 归属指标所在表;
+    限定引用(orders.amount)按 table 归属校验。解析失败抛 _Unparseable
+    ——调用方 fail-closed(停用+待复核), 不允许"解析不了就放行"。
     """
+    import sqlglot
+    from sqlglot import exp as _sql_exp
+    try:
+        tree = sqlglot.parse_one(expr, read="postgres")
+    except Exception as e:
+        raise _Unparseable(f"{type(e).__name__}: {str(e)[:80]}")
+    return {(c.table or None, c.name) for c in tree.find_all(_sql_exp.Column)}
+
+
+def _refs_valid(refs, table_name, table_cols, all_tables):
+    """列引用集合是否全部仍存在; 失效返回原因串, 有效返回 None。"""
+    for table, col in refs:
+        if table is None or table == table_name:
+            if col not in table_cols:
+                return f"missing_column: {col}"
+        else:
+            other = all_tables.get(table)
+            if other is None or col not in other:
+                return f"missing_column: {table}.{col}"
+    return None
+
+
+def _metric_valid(metric, table_name, table_cols, all_tables,
+                  metric_names) -> str | None:
+    """指标结构校验。composite: factor 闭包; single: formula+condition 引用。
+
+    metric_names: 该表当前合并结果中的指标名集合(composite 校验基准)。
+    """
+    if metric.type == "composite" or metric.factor_metric_names:
+        missing = [n for n in (metric.factor_metric_names or [])
+                   if n not in metric_names]
+        if missing:
+            return f"missing_factor_metrics: {','.join(missing)}"
+        return None
+    for expr, label in ((metric.formula, "formula"), (metric.condition, "condition")):
+        if not expr:
+            continue
+        try:
+            refs = _expr_column_refs(expr)
+        except _Unparseable:
+            return f"unparseable_{label}"
+        err = _refs_valid(refs, table_name, table_cols, all_tables)
+        if err:
+            return f"{label} {err}"
+    return None
+
+
+def _calc_valid(cf, table_name, table_cols, all_tables) -> str | None:
+    """计算字段公式校验(行级表达式, 引用本表/跨表列)。"""
+    try:
+        refs = _expr_column_refs(cf.formula)
+    except _Unparseable:
+        return "unparseable_formula"
+    return _refs_valid(refs, table_name, table_cols, all_tables)
+
+
+def _rel_identity_and_valid(rel, table_name, new_content, all_tables):
+    """关系校验 + 规范端点标识。
+
+    校验复用 graph_edit.parse_on_conditions(人工增删关系的同一解析器):
+    引号标识符、多列 AND JOIN 与图谱编辑口径天然一致。
+
+    Returns:
+        (identity, error): identity 为规范化端点元组(解析成功时);
+        error 非空 = 失效原因(此时 identity 为 None)。
+    """
+    from domains.chatbi.graph_edit import parse_on_conditions, GraphEditError
+    if rel.target_model not in all_tables:
+        return None, f"missing_table: {rel.target_model}"
+    if not (rel.on or "").strip():
+        return None, "missing_on"
+    try:
+        conds = parse_on_conditions(new_content, table_name,
+                                    rel.target_model, rel.on or "")
+    except GraphEditError as e:
+        return None, str(e)
+    identity = (rel.target_model, tuple(sorted(
+        (c["left_table"], c["left_column"], c["right_table"], c["right_column"])
+        for c in conds)))
+    return identity, None
+
+
+def _merge_metrics(old_m, new_m, all_tables, new_content, report,
+                   keep_unregenerated_auto: bool) -> None:
+    """指标合并(十七审 P0 7.1 + P1 7.3)。
+
+    优先级(同名冲突时):
+      1. 有效人工(manual/manual_edit)——最高, 压制同名自动项;
+      2. 新扫描项(规则 simple + LLM 产物);
+      3. 旧 composite(人工优先于 auto)——factor 闭包对合并后名集校验;
+      4. 旧 auto simple 未再生项——仅 refresh 保留(刷新不跑 LLM, 不保留
+         会丢 LLM/运行时产物); rescan 的 LLM 全量重推, 不保留避免累积。
+
+    失效人工项停用进 dropped_items; 其名字仍占位(同名自动项不得静默
+    顶替——宁缺毋滥, 管理员在复核清单里决定)。
+    """
+    table_name = new_m.name
+    table_cols = all_tables.get(table_name, set())
+    old_metrics = list(old_m.metrics or [])
+    manual_names = {m.name for m in old_metrics
+                    if (getattr(m, 'source', '') or '') in _MANUAL_SOURCES}
+    new_names = {m.name for m in (new_m.metrics or [])}
+
+    merged: list = []
+    taken: set = set()
+
+    def _is_composite(m):
+        return m.type == "composite" or bool(m.factor_metric_names)
+
+    # ── 1) 有效人工 simple 优先 ──
+    for met in old_metrics:
+        src = (getattr(met, 'source', '') or '')
+        if src not in _MANUAL_SOURCES or _is_composite(met):
+            continue
+        err = _metric_valid(met, table_name, table_cols, all_tables, ())
+        if err:
+            _report_drop(report, "metric", table_name, met.name, err)
+            logger.warning("merge: 停用失效人工指标 %s (table=%s): %s",
+                           met.name, table_name, err)
+        else:
+            merged.append(met)
+            taken.add(met.name)
+
+    # ── 2) 新扫描项(人工占位名/已取名压制; 扫描内部同名保留首个) ──
+    for nm in (new_m.metrics or []):
+        if nm.name in manual_names or nm.name in taken:
+            continue
+        merged.append(nm)
+        taken.add(nm.name)
+
+    # ── 3) 旧 composite(人工排前: 同名时人工版本胜出) ──
+    old_comps = [m for m in old_metrics if _is_composite(m)]
+    old_comps.sort(key=lambda m: 0 if (getattr(m, 'source', '') or '')
+                   in _MANUAL_SOURCES else 1)
+    for met in old_comps:
+        src = (getattr(met, 'source', '') or '')
+        is_manual = src in _MANUAL_SOURCES
+        if met.name in taken or met.name in manual_names:
+            continue  # 同名已被占(或人工占位), auto 版本让路
+        err = _metric_valid(met, table_name, table_cols, all_tables, taken)
+        if err:
+            if is_manual:
+                _report_drop(report, "metric", table_name, met.name, err)
+                logger.warning("merge: 停用失效人工 composite %s (table=%s): %s",
+                               met.name, table_name, err)
+            else:
+                logger.debug("merge: 丢弃闭包失效的 auto composite %s: %s",
+                             met.name, err)
+            continue
+        merged.append(met)
+        taken.add(met.name)
+
+    # ── 4) 旧 auto simple 未再生(仅 refresh) ──
+    if keep_unregenerated_auto:
+        for met in old_metrics:
+            src = (getattr(met, 'source', '') or '')
+            if (src in _MANUAL_SOURCES or _is_composite(met)
+                    or met.name in taken or met.name in manual_names
+                    or met.name in new_names):
+                continue
+            if src in ("rule_inferred", "foreign_key"):
+                continue  # 规则产物未再生 = 规则不再命中(结构变化), 丢弃
+            err = _metric_valid(met, table_name, table_cols, all_tables, taken)
+            if err:
+                logger.debug("merge: 丢弃失效旧 auto 指标 %s: %s", met.name, err)
+                continue
+            merged.append(met)
+            taken.add(met.name)
+
+    new_m.metrics = merged
+
+
+def _merge_relationships(old_m, new_m, all_tables, new_content, report) -> None:
+    """关系合并(十七审 P0 7.2)。
+
+    优先级(等价端点冲突时):
+      1. 有效人工(manual/manual_edit)——名称/JOIN 类型/基数全保留;
+      2. 新扫描 FK/命名关系——与人工等价时被压制; JOIN 类型或基数不同
+         时记录 conflicts(人工已保留, 管理员可见, 不静默选择);
+      3. 旧 ai_inferred/演化学习关系未再生——结构仍有效则保留
+         (refresh 不重跑演化, 丢弃会丢学习成果);
+      4. 旧 foreign_key 未再生——丢弃(内省产物, 未再生 = 数据库已删该 FK)。
+    """
+    table_name = new_m.name
+    merged: list = []
+    ids: set = set()
+
+    # ── 1) 有效人工优先(端点占位) ──
+    for rel in (old_m.relationships or []):
+        src = (getattr(rel, 'source', '') or '')
+        if src not in _MANUAL_SOURCES:
+            continue
+        identity, err = _rel_identity_and_valid(
+            rel, table_name, new_content, all_tables)
+        if err:
+            _report_drop(report, "relationship", table_name, rel.name, err)
+            logger.warning("merge: 停用失效人工关系 %s (table=%s): %s",
+                           rel.name, table_name, err)
+            continue
+        if identity in ids:
+            continue  # 人工内部等价重复, 保留首个
+        merged.append(rel)
+        ids.add(identity)
+    manual_by_id = {_rel_identity_and_valid(r, table_name, new_content,
+                                            all_tables)[0]: r
+                    for r in merged}
+
+    # ── 2) 新扫描项: 人工等价压制 + 属性冲突可见 ──
+    for nr in (new_m.relationships or []):
+        identity, err = _rel_identity_and_valid(
+            nr, table_name, new_content, all_tables)
+        if err or identity is None:
+            continue  # 扫描项解析失败罕见(自身刚生成)
+        if identity in manual_by_id:
+            mr = manual_by_id[identity]
+            if ((mr.join_type or None) != (nr.join_type or None)
+                    or (mr.type or None) != (nr.type or None)):
+                _report_conflict(
+                    report, table_name, mr.name, nr.name,
+                    f"ON 等价但属性不同: 人工 {mr.join_type}/{mr.type} vs "
+                    f"自动 {nr.join_type}/{nr.type}(已保留人工配置)")
+                logger.info("merge: 人工关系 %s 与自动 %s 端点等价但属性不同"
+                            "(保留人工, 已记入复核)", mr.name, nr.name)
+            continue
+        if identity in ids:
+            continue  # 与其他自动项等价(保留首个)
+        merged.append(nr)
+        ids.add(identity)
+
+    # ── 3/4) 旧 auto 关系未再生项 ──
+    for rel in (old_m.relationships or []):
+        src = (getattr(rel, 'source', '') or '')
+        if src in _MANUAL_SOURCES:
+            continue
+        identity, err = _rel_identity_and_valid(
+            rel, table_name, new_content, all_tables)
+        if err or identity is None or identity in ids:
+            continue
+        if src == "foreign_key":
+            continue  # FK 内省产物: 未再生 = 数据库已删该外键
+        # ai_inferred/name_pattern 等演化学习关系: 结构仍有效则保留
+        merged.append(rel)
+        ids.add(identity)
+
+    new_m.relationships = merged
+
+
+def _merge_calculated_fields(old_m, new_m, all_tables, report) -> None:
+    """计算字段: 保留旧的, 但公式引用失效的停用+待复核(十七审 7.5)。"""
+    table_name = new_m.name
+    table_cols = all_tables.get(table_name, set())
+    kept = []
+    for cf in (getattr(old_m, 'calculated_fields', None) or []):
+        err = _calc_valid(cf, table_name, table_cols, all_tables)
+        if err:
+            _report_drop(report, "calculated_field", table_name, cf.name, err)
+            logger.warning("merge: 停用失效计算字段 %s (table=%s): %s",
+                           cf.name, table_name, err)
+            continue
+        kept.append(cf)
+    new_m.calculated_fields = kept
+
+
+def _apply_manual_annotation(old_item, new_item, table_level: bool) -> None:
+    """manual_edit 的原子保留: 值+来源+置信度一起迁移(十五审 P0 教训)。"""
+    if old_item.display_name:
+        new_item.display_name = old_item.display_name
+    if old_item.description is not None:
+        new_item.description = old_item.description
+    if not table_level and old_item.semantic_type:
+        new_item.semantic_type = old_item.semantic_type
+    new_item.source = old_item.source
+    if getattr(old_item, 'confidence', None) is not None:
+        new_item.confidence = old_item.confidence
+
+
+def _merge_content(old, new, report=None):
+    """结构刷新合并(refresh 专用; llm=None 的定时结构扫描)。
+
+    语义: 新物理结构权威(增删表列), 旧标注按来源分治保留——
+      manual_edit: 原子保留(值+来源+置信度);
+      db_comment: 用本次数据库注释(comment 变更生效, 值+来源原子更新;
+                  注释被删 → 退化新扫描值 + 复核条目);
+      auto_inferred: 旧 LLM 展示值保留(refresh 不重跑 LLM), 但新库新增
+                  注释时新注释覆盖(值+来源一起换, 禁止错配)。
+    指标/关系/计算字段: 经结构校验后人工优先(见 _merge_metrics 等)。
+    """
+    if report is None:
+        report = _new_report()
     all_tables = _validate_structure(new)
     old_models = {m.name: m for m in old.models}
     for new_m in new.models:
         old_m = old_models.get(new_m.name)
         if old_m is None:
             continue  # 新表: 用扫描退化值, 等下次 LLM 富化
-        new_m.display_name = old_m.display_name or new_m.display_name
-        new_m.description = old_m.description or new_m.description
-        # 表级 provenance 原子保留
-        if getattr(old_m, 'source', '') in ('manual', 'manual_edit'):
-            new_m.source = old_m.source
-            if hasattr(old_m, 'confidence') and old_m.confidence is not None:
-                new_m.confidence = old_m.confidence
 
-        # 指标/关系: 经结构校验后保留(十六审 7.2: 不再保留失效项)
-        if old_m.metrics or old_m.relationships:
-            v_metrics, v_rels, _dropped = _filter_stale_items(
-                new_m.name, old_m, new_m, all_tables)
-            # auto 指标用新扫描的(规则 simple); 人工的经校验保留
-            existing_metric_names = {m.name for m in (new_m.metrics or [])}
-            merged_metrics = list(new_m.metrics or [])
-            for met in v_metrics:
-                if met.name not in existing_metric_names:
-                    merged_metrics.append(met)
-            new_m.metrics = merged_metrics
+        # ── 表级: 按来源分治(十七审 7.4) ──
+        old_src = (getattr(old_m, 'source', '') or '')
+        new_src = (getattr(new_m, 'source', '') or '')
+        if old_src in _MANUAL_SOURCES:
+            _apply_manual_annotation(old_m, new_m, table_level=True)
+        elif old_src == 'db_comment':
+            if new_src != 'db_comment':
+                # 注释被删除: 退化到新扫描值(表名/auto), 记复核
+                _report_drop(report, "db_comment_removed", new_m.name,
+                             new_m.name, "数据库表注释已被删除, 展示名退化为表名")
+        else:  # auto_inferred 等
+            if new_src == 'db_comment':
+                pass  # 新增注释覆盖旧 auto 值(值+来源用新扫描, 原子)
+            else:
+                # 旧 LLM 值原子保留(display+source+confidence 一起)
+                if old_m.display_name:
+                    new_m.display_name = old_m.display_name
+                if old_m.description is not None:
+                    new_m.description = old_m.description
+                new_m.source = old_m.source
+                if old_m.confidence is not None:
+                    new_m.confidence = old_m.confidence
 
-            # 关系: 新扫描的 FK/命名 + 经校验的人工
-            existing_rel_ids = {_rel_identity(r, new_m.name)
-                                for r in (new_m.relationships or [])}
-            merged_rels = list(new_m.relationships or [])
-            for rel in v_rels:
-                if _rel_identity(rel, new_m.name) not in existing_rel_ids:
-                    merged_rels.append(rel)
-            new_m.relationships = merged_rels
-
-        # 列级: 保留旧标注(值+来源+置信度)
+        # ── 列级: 同一来源分治 ──
         old_cols = {c.name: c for c in old_m.columns}
         for c in new_m.columns:
             old_c = old_cols.get(c.name)
             if old_c is None:
                 continue
-            c.display_name = old_c.display_name or c.display_name
-            c.description = old_c.description or c.description
-            if old_c.semantic_type:
-                c.semantic_type = old_c.semantic_type
-            if old_c.source:
-                c.source = old_c.source
-            if old_c.confidence:
-                c.confidence = old_c.confidence
+            o_src = (getattr(old_c, 'source', '') or '') or ''
+            n_src = (getattr(c, 'source', '') or '') or ''
+            if o_src in _MANUAL_SOURCES:
+                _apply_manual_annotation(old_c, c, table_level=False)
+            elif o_src == 'db_comment':
+                if n_src != 'db_comment':
+                    _report_drop(report, "db_comment_removed", new_m.name,
+                                 c.name, f"列 {c.name} 的数据库注释已被删除")
+            else:
+                if n_src == 'db_comment':
+                    pass  # 新增注释覆盖
+                else:
+                    if old_c.display_name:
+                        c.display_name = old_c.display_name
+                    if old_c.description is not None:
+                        c.description = old_c.description
+                    if old_c.semantic_type:
+                        c.semantic_type = old_c.semantic_type
+                    c.source = old_c.source
+                    if old_c.confidence:
+                        c.confidence = old_c.confidence
 
-        # calculated_fields: 保留旧的(十六审 7.1: 此前 refresh 清空)
-        if hasattr(old_m, 'calculated_fields') and old_m.calculated_fields:
-            new_m.calculated_fields = list(old_m.calculated_fields)
+        # ── 指标/关系/计算字段: 人工优先 + 结构校验 + 未再生 auto 保留 ──
+        _merge_metrics(old_m, new_m, all_tables, new, report,
+                       keep_unregenerated_auto=True)
+        _merge_relationships(old_m, new_m, all_tables, new, report)
+        _merge_calculated_fields(old_m, new_m, all_tables, report)
 
     new.sample_questions = old.sample_questions or new.sample_questions
     return new
 
 
-def _merge_rescan(old, new):
-    """重扫专用 merge(十六审重构: 使用共用结构验证器 + 等价去重).
+def _merge_rescan(old, new, report=None):
+    """重扫专用 merge(全量 LLM 重推)。
 
-    分治规则:
-      表/列级: 旧 manual_edit → 原子保留全部字段
-      指标: manual 经列校验保留 + 按name压制同名auto
-      关系: manual 经表/列校验保留 + 按端点identity去重等价
-      calculated_fields: 保留旧的
-      sample_questions: 用新生成
+    与 refresh 的差异:
+      - LLM 富化/指标/示例问题全量重跑 → auto 值用新扫描的(重扫目的),
+        未再生的旧 auto 指标不保留(避免非确定性累积);
+      - manual_edit 标注原子保留;
+      - db_comment 由扫描重读, 注释变更自然生效;
+      - 指标/关系同样人工优先 + 结构校验(共用 _merge_metrics 等)。
     """
+    if report is None:
+        report = _new_report()
     all_tables = _validate_structure(new)
     old_models = {m.name: m for m in old.models}
 
@@ -662,59 +946,80 @@ def _merge_rescan(old, new):
         if old_m is None:
             continue
 
-        # ── 表级: manual_edit 原子保留 ──
-        old_src = getattr(old_m, 'source', '') or ''
-        if 'manual' in old_src:
-            if old_m.display_name:
-                new_m.display_name = old_m.display_name
-            if old_m.description:
-                new_m.description = old_m.description
-            new_m.source = old_m.source
-            if hasattr(old_m, 'confidence') and old_m.confidence is not None:
-                new_m.confidence = old_m.confidence
+        # ── 表级: manual_edit 原子保留; 其余(auto/db_comment)用新扫描值 ──
+        old_src = (getattr(old_m, 'source', '') or '')
+        if old_src in _MANUAL_SOURCES:
+            _apply_manual_annotation(old_m, new_m, table_level=True)
 
-        # ── 列级: manual_edit 原子保留 ──
+        # ── 列级: 同构 ──
         old_cols = {c.name: c for c in old_m.columns}
         for c in new_m.columns:
             old_c = old_cols.get(c.name)
             if old_c is None:
                 continue
-            col_src = getattr(old_c, 'source', '') or ''
-            if col_src in ('manual', 'manual_edit'):
-                if old_c.display_name:
-                    c.display_name = old_c.display_name
-                if old_c.description:
-                    c.description = old_c.description
-                if old_c.semantic_type:
-                    c.semantic_type = old_c.semantic_type
-                c.source = old_c.source
-                if hasattr(old_c, 'confidence') and old_c.confidence is not None:
-                    c.confidence = old_c.confidence
+            if ((getattr(old_c, 'source', '') or '')
+                    in _MANUAL_SOURCES):
+                _apply_manual_annotation(old_c, c, table_level=False)
 
-        # ── 指标: 经结构校验 + name 去重(manual 压制 auto) ──
-        v_metrics, v_rels, _dropped = _filter_stale_items(
-            new_m.name, old_m, new_m, all_tables)
-        merged_metrics = list(v_metrics)
-        manual_names = {m.name for m in v_metrics}
-        for nm in (new_m.metrics or []):
-            if nm.name not in manual_names:
-                merged_metrics.append(nm)
-        new_m.metrics = merged_metrics
+        # ── 指标/关系/计算字段: 人工优先 + 结构校验 ──
+        _merge_metrics(old_m, new_m, all_tables, new, report,
+                       keep_unregenerated_auto=False)
+        _merge_relationships(old_m, new_m, all_tables, new, report)
+        _merge_calculated_fields(old_m, new_m, all_tables, report)
 
-        # ── 关系: 经结构校验 + 端点 identity 去重(十六审 7.3.3) ──
-        existing_ids = {_rel_identity(r, new_m.name)
-                        for r in (new_m.relationships or [])}
-        merged_rels = list(new_m.relationships or [])
-        for rel in v_rels:
-            if _rel_identity(rel, new_m.name) not in existing_ids:
-                merged_rels.append(rel)
-        new_m.relationships = merged_rels
-
-        # ── calculated_fields: 保留旧的 ──
-        if hasattr(old_m, 'calculated_fields') and old_m.calculated_fields:
-            new_m.calculated_fields = list(old_m.calculated_fields)
-
+    # 示例问题: 用新生成(重扫目的)
     return new
+
+
+# ── merge 报告持久化(十七审 7.6: 任务结果 + 语义页面可见) ──────────
+
+def save_merge_report(db, data_source_id: str, version: int,
+                      report: dict) -> None:
+    """落 merge 报告(语义页面 review 接口的数据源)。失败降级不阻塞刷新。"""
+    import json
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_merge_reports "
+                "(data_source_id, version, report, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (data_source_id) DO UPDATE SET "
+                "version = EXCLUDED.version, report = EXCLUDED.report, "
+                "updated_at = EXCLUDED.updated_at",
+                (data_source_id, version, json.dumps(report, ensure_ascii=False),
+                 _now_iso()))
+    except Exception as e:
+        logger.warning("merge 报告落库失败(ds=%s): %s", data_source_id, e)
+
+
+def get_merge_report(db, data_source_id: str):
+    """读最近一次 merge 报告; 无记录或结构损坏 → None。"""
+    import json
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT version, report FROM chatbi_merge_reports "
+                "WHERE data_source_id = ?", (data_source_id,)).fetchone()
+        if not row:
+            return None
+        return {"version": int(row["version"]),
+                "report": json.loads(row["report"])}
+    except Exception:
+        return None
+
+
+def _log_report(handle, report: dict, version_label: str) -> None:
+    """merge 报告的关键内容写任务日志(任务中心可见)。"""
+    dropped = report.get("dropped_items") or []
+    conflicts = report.get("conflicts") or []
+    for item in dropped:
+        handle.log(f"⚠ 停用 {item['kind']} {item['table']}.{item['name']}: "
+                   f"{item['reason']}")
+    for c in conflicts:
+        handle.log(f"⚠ 关系属性冲突 {c['table']}: {c['detail']}")
+    if dropped or conflicts:
+        handle.log(f"共停用 {len(dropped)} 项 / 属性冲突 {len(conflicts)} 项"
+                   f"({version_label})——详情见语义层页面「待复核」提示")
 
 
 def _make_index_rebuilder(app_state, datasource_id: str):
@@ -901,6 +1206,21 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
                     _implicit_co[(t1, t2)] += 1
     for pair, cnt in _implicit_co.items():
         watermarks_to_set.append((pair, "implicit", cnt))
+
+    # 十七审: 臆造 ON 源头过滤——implicit_mining 的新表对在 evolve 侧就用
+    # 当前结构校验端点列, 全无效时不进 apply(否则 apply 收不到任何有效
+    # 变更会 raise"无有效更新内容"→ 刷新误报失败; 且坏关系写进内容会被
+    # 下轮 merge 丢弃, 形成"挖→丢→再挖"的无限版本膨胀)。
+    if all_new_pairs:
+        from domains.chatbi.graph_infer import _implicit_on_valid
+        _cols = {m.name: {c.name for c in m.columns}
+                 for m in current_content.models}
+        _before = len(all_new_pairs)
+        all_new_pairs = [p for p in all_new_pairs
+                         if _implicit_on_valid(_cols, p[0][0], p[0][1])]
+        if len(all_new_pairs) < _before:
+            logger.info("隐式挖掘: %d 个新表对因臆造 ON 列不存在被过滤",
+                        _before - len(all_new_pairs))
 
     if not all_updates and not all_new_pairs:
         # 无更新也推进水位(避免下轮重复计算同量证据); 失败显式记录

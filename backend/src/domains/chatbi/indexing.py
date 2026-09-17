@@ -113,6 +113,7 @@ def build_index(
     embedder: ChatBIEmbedder,
     db: Optional[PackRelationalDB] = None,
     scope: Optional[str] = None,
+    doc_id: str = DOC_SCHEMA,
 ) -> IndexResult:
     """把 SemanticModelContent 索引进向量库。
 
@@ -123,6 +124,8 @@ def build_index(
         embedder: ChatBIEmbedder (llm.embeddings 底座)
         db: pack 关系库 (scope 未显式给出时用于解析/签发数据源 scope_id)
         scope: 显式指定的物理 scope (优先于 db 解析;测试直连用)
+        doc_id: 目标分区(十七审 7.7: revision 构建写 "schema_r{version}",
+            读者读 active 指针指向的分区;缺省 legacy "schema")
 
     Returns:
         IndexResult(indexed_count) — 失败时 indexed_count=0, error 非空 (不抛)
@@ -203,7 +206,7 @@ def build_index(
             return IndexResult(indexed_count=0, error=str(e))
 
     try:
-        store.upsert_records(scope, records, doc_id=DOC_SCHEMA)
+        store.upsert_records(scope, records, doc_id=doc_id)
     except Exception as e:
         logger.warning("build_index upsert 失败, 跳过索引: %s", e)
         return IndexResult(indexed_count=0, error=str(e))
@@ -241,6 +244,9 @@ def guarded_rebuild(content, data_source_id, store, embedder, db,
 
     十审 7.2: delete-then-build 无锁时, 旧版构建可在新版之后完成并
     覆盖已发布的新版。串行锁 + 构建前版本校验保证最终发布最新版。
+    十七审 7.7: 带 expected_version 时走 revision 发布——新内容写独立
+    分区, 成功后原子翻转 active 指针(更高 version 才能翻转), 消灭
+    delete-first 空窗和多 worker 交错覆盖。
     """
     from domains.chatbi import semantic
     lock = _get_build_lock(data_source_id)
@@ -251,7 +257,8 @@ def guarded_rebuild(content, data_source_id, store, embedder, db,
             if cur_v is not None and cur_v != expected_version:
                 return type('R', (), {'error': f'跳过过时构建 v{expected_version} (current v{cur_v})',
                                       'deleted_count': 0, 'indexed_count': 0})()
-        result = rebuild_index(content, data_source_id, store, embedder, db)
+        result = rebuild_index(content, data_source_id, store, embedder, db,
+                               revision=expected_version)
         # 构建后复查: 构建期间 current 变了 → 用最新版补建一次
         _, cur_v = semantic.load_content(db, data_source_id)
         if cur_v is not None and expected_version is not None and cur_v != expected_version:
@@ -259,7 +266,7 @@ def guarded_rebuild(content, data_source_id, store, embedder, db,
             latest_content, _ = _sem.load_content(db, data_source_id)
             if latest_content is not None:
                 result = rebuild_index(latest_content, data_source_id,
-                                       store, embedder, db)
+                                       store, embedder, db, revision=cur_v)
         return result
 
 
@@ -270,8 +277,9 @@ def rebuild_index(
     embedder: ChatBIEmbedder,
     db: Optional[PackRelationalDB] = None,
     scope: Optional[str] = None,
+    revision: Optional[int] = None,
 ) -> RebuildResult:
-    """语义层变更后重建索引 (删旧 + 建新)。
+    """语义层变更后重建索引。
 
     Args:
         content: 新的语义层内容
@@ -280,26 +288,19 @@ def rebuild_index(
         embedder: ChatBIEmbedder
         db: pack 关系库 (scope 未显式给出时用于解析/签发数据源 scope_id)
         scope: 显式指定的物理 scope (优先于 db 解析;测试直连用)
+        revision: 语义版本号(十七审 7.7)——非 None 时走 revision 发布:
+            全量写入独立分区 schema_r{revision} → 原子翻转 active 指针
+            (仅更高版本可翻转) → 延迟清理旧分区。None 走 legacy
+            delete-first(兼容无版本调用方)。
 
     Returns:
         RebuildResult(deleted_count, indexed_count) — 失败时 error 非空 (不抛)
 
-    流程:
-      1. 删该数据源 DOC_SCHEMA 分区的全部旧索引
-         (源实现 delete_by_filter({"data_source_id"}) 的 per-scope 等价物)
-      2. 用新 content 重建 (build_index)
-      失败任一步 → 降级返回, 不阻塞调用方
-
-    为什么删建而非 diff:
-      - diff 需要 content 版本对比, 复杂且易错 (增删改列/指标/关系组合)
-      - 删全量 + 重建语义清晰, 对标 RAG-001 "更新索引"
-      - 触发点少 (回滚/编辑), 性能不是瓶颈
-
-    边界情况:
-    - 数据源没有旧索引 (首次重建): 删除返回 0, 不影响建新
-    - 删除失败: 不继续建新 (避免重复记录), 返回错误
-    - 建新失败: 旧索引已删除, 该数据源暂时没有索引 (空窗期)
-      这是设计接受的降级行为: 用户下次手动触发索引重建即可修复。
+    revision 发布的正确性:
+      - 构建中途失败 → 指针未动, 读者继续读旧分区(无空窗);
+      - 两个 worker 并行 → 各写各的版本分区(物理不交错), 指针由
+        版本守卫保证最终指向最新完成者;
+      - 旧任务晚于新任务完成 → 低版本翻转被拒, 不覆盖已发布新版。
     """
     # 物理 scope 解析(与 build_index 同规则)
     if scope is None:
@@ -313,6 +314,12 @@ def rebuild_index(
             logger.warning("rebuild_index scope 解析失败: %s", e)
             return RebuildResult(error=str(e))
 
+    # ── 十七审 7.7: revision 发布路径(带版本号的调用方) ──
+    if revision is not None:
+        return _rebuild_with_revision(
+            content, data_source_id, store, embedder, scope, db, revision)
+
+    # ── legacy 路径: 删旧 + 建新(无版本号的兼容调用方) ──
     # 1. 删旧: 该 scope 的语义层分区(同数据源维度, few-shot 分区不受影响)
     #    首次建索引时 collection 尚不存在——Milvus 抛 collection not found,
     #    视为"无旧索引可删"(docstring 边界情况第一条), 继续建新。
@@ -351,3 +358,72 @@ def rebuild_index(
         indexed_count=built.indexed_count,
         error=built.error,  # build_index 可能部分失败 (error 非空)
     )
+
+
+def _rebuild_with_revision(
+    content: SemanticModelContent,
+    data_source_id: str,
+    store: ChatBIVectorStore,
+    embedder: ChatBIEmbedder,
+    scope: str,
+    db: Optional[PackRelationalDB],
+    revision: int,
+) -> RebuildResult:
+    """revision namespace 发布: 建新分区 → 原子翻转指针 → 延迟清理旧分区。
+
+    指针翻转失败/让路时, 本次构建的分区成为无主垃圾(不影响正确性,
+    下次成功发布的清理只删"当时的旧分区", 不追历史垃圾——崩溃残余
+    分区靠数据源删除/手工清理兜底)。
+    """
+    from domains.chatbi.stores import get_active_doc_id, set_active_doc_id
+
+    prev_doc = get_active_doc_id(db, scope) if db is not None else None
+    new_doc = f"{DOC_SCHEMA}_r{revision}"
+
+    # 1. 全量构建到独立分区(不碰任何现存分区)
+    try:
+        built = build_index(
+            content=content, data_source_id=data_source_id,
+            store=store, embedder=embedder, scope=scope, doc_id=new_doc)
+    except Exception as e:
+        logger.warning("rebuild_index(revision) 构建失败(指针未动): %s", e)
+        return RebuildResult(error=str(e))
+    if built.error:
+        logger.warning("rebuild_index(revision) 构建降级(指针未动): %s",
+                       built.error)
+        return RebuildResult(error=built.error)
+
+    # 2. 原子翻转 active 指针(仅更高 version 生效)
+    if db is None:
+        logger.warning("rebuild_index(revision) 无 db 无法翻转指针, "
+                       "新分区 %s 未发布", new_doc)
+        return RebuildResult(error="revision 发布需要 db 写 active 指针")
+    try:
+        became_active = set_active_doc_id(db, scope, new_doc, revision)
+    except Exception as e:
+        logger.warning("rebuild_index(revision) 指针翻转失败(读者继续用旧分区): %s", e)
+        return RebuildResult(indexed_count=built.indexed_count,
+                             error=f"active 指针翻转失败: {e}")
+
+    if not became_active:
+        # 晚完成的旧任务: 已有更新 revision 发布, 本次让路。
+        # 不删除任何分区——另一 worker 可能刚发布了同版本分区。
+        logger.info("rebuild_index(revision) v%s 让路(已有更新版本发布)",
+                    revision)
+        return RebuildResult(indexed_count=built.indexed_count)
+
+    # 3. 延迟清理: 翻转成功后删上一分区(含 legacy "schema" 无版本分区)。
+    #    清理失败无害——旧分区只是垃圾, 读者已按指针读新分区。
+    deleted = 0
+    if prev_doc and prev_doc != new_doc:
+        try:
+            deleted = store.delete_doc(scope, prev_doc)
+        except Exception as e:
+            logger.info("rebuild_index(revision) 旧分区清理失败(无害): %s", e)
+
+    logger.info(
+        "rebuild_index(revision): v%s 分区 %s 发布 (删旧 %d, 建 %d, ds=%s)",
+        revision, new_doc, deleted, built.indexed_count, data_source_id,
+    )
+    return RebuildResult(deleted_count=deleted,
+                         indexed_count=built.indexed_count)

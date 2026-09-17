@@ -1034,9 +1034,21 @@ class TestApplyConfidenceUpdates:
                 pg_engine, DS_ID, {("biz_orders", "biz_users"): 1.0},  # 已是 1.0
                 expected_version=1)
 
+    @staticmethod
+    def _content_with_orders_fk_column():
+        """fct_inventory 带 orders_id 列的语义层(十七审: 挖掘源头 fail-closed
+        后, 臆造 ON 的端点列真实存在挖掘才成立)。"""
+        from copy import deepcopy
+        content = deepcopy(_make_content())
+        inv = next(m for m in content.models if m.name == "fct_inventory")
+        inv.columns.append(Column(name="orders_id", display_name="关联订单",
+                                  data_type="BIGINT"))
+        return content
+
     def test_new_pair_discovery(self, pg_engine):
         """新表对写入: source=implicit_mining, ON 按 from.id = to.<去前缀>_id 生成。"""
-        _seed_semantic_model(pg_engine)
+        _seed_semantic_model(
+            pg_engine, content=self._content_with_orders_fk_column())
         new_version = apply_confidence_updates(
             pg_engine, DS_ID, {},
             new_pairs=[(("biz_orders", "fct_inventory"), 0.5)],
@@ -1048,6 +1060,24 @@ class TestApplyConfidenceUpdates:
         assert rel["confidence"] == pytest.approx(0.5)
         # ON 生成: _strip_table_prefix("biz_orders") → "orders"
         assert rel["on"] == "biz_orders.id = fct_inventory.orders_id"
+
+    def test_new_pair_with_invented_column_rejected(self, pg_engine):
+        """十七审: 臆造 ON 端点列不存在 → 不挖(fail-closed), 无版本无坏关系。
+
+        fct_inventory 无 orders_id 列(_make_content 原始形态)——此前会写入
+        引用不存在列的 implicit_mining 关系: merge 侧丢弃 + evolve 下轮再挖,
+        形成无限版本膨胀, 坏关系还可能被 JOIN 规划选中。
+        """
+        _seed_semantic_model(pg_engine)   # 无 orders_id 列
+        with pytest.raises(ValueError, match="无有效更新内容"):
+            apply_confidence_updates(
+                pg_engine, DS_ID, {},
+                new_pairs=[(("biz_orders", "fct_inventory"), 0.5)],
+                expected_version=1)
+        versions = _read_versions(pg_engine)
+        assert set(versions.keys()) == {1}, "无效表对不得产生新版本"
+        v1_content, _ = versions[1]
+        assert _find_rel(v1_content, "biz_orders", "fct_inventory") is None
 
     def test_rebuild_index_callback(self, pg_engine):
         """注入 rebuild_index 回调 → 更新成功后被调用; 抛错也只降级不阻塞。
@@ -1140,7 +1170,9 @@ class TestSyncLinkageToGraph:
 
     def test_sync_discovers_new_pairs(self, pg_engine):
         """新表对发现: 共现 5 次 (>=阈值 5) 的未知表对以 implicit_mining 落库。"""
-        _seed_semantic_model(pg_engine)
+        _seed_semantic_model(
+            pg_engine, content=TestApplyConfidenceUpdates
+            ._content_with_orders_fk_column())
         mem = FakeMemStore([
             {"type": "linkage", "data_source_id": DS_ID, "co_occurrence": 5,
              "tables": ["biz_orders", "fct_inventory"]},

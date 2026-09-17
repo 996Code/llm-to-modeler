@@ -101,6 +101,27 @@ def _strip_table_prefix(name: str) -> str:
     return re.sub(r"^(biz_|t_|dim_|fact_|fct_)", "", name)
 
 
+def _implicit_on_columns(from_table: str, to_table: str):
+    """隐式挖掘臆造 ON 的两端列: from.id = to.<strip(from)>_id。"""
+    return ((from_table, "id"),
+            (to_table, f"{_strip_table_prefix(from_table)}_id"))
+
+
+def _implicit_on_valid(cols_by_model: dict, from_table: str, to_table: str) -> bool:
+    """臆造 ON 的两端列是否真实存在(十七审: 挖掘源头 fail-closed)。
+
+    此前不校验——挖出的关系引用臆造列(如 biz_order_items.categories_id),
+    merge 侧结构校验会丢弃, evolve 下轮再挖, 形成"挖→丢→再挖→再落版本"
+    的无限版本膨胀; 且坏关系可能被 NL2SQL JOIN 规划选中生成错误 SQL。
+    """
+    (t1, c1), (t2, c2) = _implicit_on_columns(from_table, to_table)
+    cols1 = cols_by_model.get(t1)
+    cols2 = cols_by_model.get(t2)
+    if cols1 is None or cols2 is None:
+        return False
+    return c1 in cols1 and c2 in cols2
+
+
 def _infer_relationships_by_name(
     model: Model,
     all_model_names: list[str],
@@ -798,8 +819,11 @@ def apply_confidence_updates(
 
         # 4. 新表对发现: 加入新 Relationship
         if new_pairs:
-            # 构建表名 → model_dict 映射
+            # 构建表名 → model_dict 映射 + 列集合(臆造 ON 的源头校验)
             model_by_name: dict[str, dict] = {m.get("name", ""): m for m in models}
+            cols_by_model = {
+                m.get("name", ""): {c.get("name") for c in m.get("columns", [])}
+                for m in models}
             for (from_table, to_table), confidence in new_pairs:
                 from_model = model_by_name.get(from_table)
                 if from_model is None:
@@ -810,12 +834,20 @@ def apply_confidence_updates(
                 existing_targets = {r.get("target_model") for r in from_model.get("relationships", [])}
                 if to_table in existing_targets:
                     continue
+                # 十七审: 臆造 ON 的两端列必须真实存在, 否则不挖
+                # (坏关系进内容 → merge 丢弃 → 下轮再挖 → 版本无限膨胀)
+                if not _implicit_on_valid(cols_by_model, from_table, to_table):
+                    logger.info(
+                        "新表对发现: %s → %s 的臆造 ON 列不存在, 跳过挖掘",
+                        from_table, to_table)
+                    continue
                 # 加入新关系
+                (t1, c1), (t2, c2) = _implicit_on_columns(from_table, to_table)
                 from_model.setdefault("relationships", []).append({
                     "name": f"{from_table}_to_{to_table}",
                     "target_model": to_table,
                     "join_type": "LEFT",
-                    "on": f"{from_table}.id = {to_table}.{_strip_table_prefix(from_table)}_id",
+                    "on": f"{t1}.{c1} = {t2}.{c2}",
                     "type": "N:1",
                     "source": "implicit_mining",
                     "confidence": confidence,

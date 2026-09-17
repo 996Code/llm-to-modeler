@@ -14,6 +14,16 @@
       </div>
     </div>
 
+    <!-- 待复核提示(十七审 7.6: merge 停用/冲突清单对管理员可见) -->
+    <a-alert v-if="reviewItems.length" type="warning" show-icon style="margin-bottom: 8px"
+             :message="`结构变化后有 ${reviewItems.length} 项语义被停用或存在属性冲突，请复核`">
+      <template #description>
+        <div v-for="(item, i) in reviewItems" :key="i" style="font-size: 12px">
+          · {{ reviewKindLabel(item.kind) }} <code>{{ item.table }}.{{ item.name }}</code> — {{ item.reason || item.detail }}
+        </div>
+      </template>
+    </a-alert>
+
     <!-- 空态 -->
     <a-empty v-if="!loading && !models.length" description="该数据源还没有语义层——请先在数据源页扫描"
              style="padding: 80px 0" />
@@ -352,6 +362,23 @@ function relCount(m: any): number {
 
 function selectTable(m: any) { selected.value = m }
 
+// ── 待复核清单(十七审 7.6): refresh/rescan 停用的人工项与属性冲突 ──
+const reviewItems = ref<any[]>([])
+function reviewKindLabel(kind: string): string {
+  return ({ metric: '指标', relationship: '关系', calculated_field: '计算字段',
+            db_comment_removed: '数据库注释' } as any)[kind] || kind
+}
+async function loadReview() {
+  if (!dsId.value) { reviewItems.value = []; return }
+  try {
+    const { data } = await chatbiApi.get(`/datasources/${dsId.value}/semantic-review`)
+    const r = data?.report || {}
+    reviewItems.value = [...(r.dropped_items || []), ...(r.conflicts || [])]
+  } catch {
+    reviewItems.value = []   // 拉取失败不阻塞页面
+  }
+}
+
 async function loadContent() {
   if (!dsId.value) return
   loading.value = true
@@ -365,6 +392,7 @@ async function loadContent() {
     // (PUT 发的是新 content, 用户的修改全部丢失)
     selected.value = models.value.find((m: any) => m.name === prevName)
       || models.value[0] || null
+    loadReview()   // 不 await——复核提示不阻塞主内容渲染
   } catch (e: any) {
     message.error(e?.response?.data?.detail || '语义层未就绪')
     content.value = null

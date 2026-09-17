@@ -273,6 +273,27 @@ async def get_semantic_models(ds_id: str, version: int | None = None):
     return {"version": ver, "content": content.model_dump()}
 
 
+@router.get("/datasources/{ds_id}/semantic-review", dependencies=[Depends(admin_required)])
+async def get_semantic_review(ds_id: str):
+    """最近一次 refresh/rescan 的停用/冲突清单(十七审 7.6)。
+
+    merge 因物理结构变化停用人工语义项(指标引用已删列、关系端点失效、
+    计算字段失效、DB 注释被删)或发现人工/自动属性冲突时, 报告持久化
+    在此——语义页面据此展示"待复核"提示, 不再只有服务端 WARNING。
+    无待复核记录 → report 为空结构(页面不显示提示)。
+    """
+    from domains.chatbi import semantic as _sem
+    if _sem.load_content(_db(), ds_id)[0] is None:
+        raise HTTPException(404, "该数据源尚未扫描语义层")
+    from domains.chatbi.tasks import get_merge_report
+    saved = get_merge_report(_db(), ds_id)
+    if saved is None:
+        return {"version": 0,
+                "report": {"dropped_items": [], "conflicts": [],
+                           "requires_review": False}}
+    return saved
+
+
 @router.put("/datasources/{ds_id}/semantic-models", dependencies=[Depends(admin_required)])
 async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: Request):
     """人工校正 → F9 注入防御校验 → 人工标注打标 → 落新版本 → 重建索引。

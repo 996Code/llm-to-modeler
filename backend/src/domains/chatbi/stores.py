@@ -356,6 +356,71 @@ def clear_scope(db: PackRelationalDB, data_source_id: str) -> None:
         )
 
 
+# ── 索引 revision namespace(十七审 7.7: 原子发布)─────────────────
+# 构建方: 新内容先写入独立分区 doc_id="schema_r{version}", 全量成功后
+# 单条 UPSERT 原子翻转 active 指针(仅更高 version 可翻转——旧任务晚完成
+# 不覆盖新任务); 读者(retrieve)按 scope 读 active 分区。
+# 构建中途崩溃 → 指针未动, 读者仍读旧分区; 残余分区是垃圾不影响正确性。
+
+def ensure_index_revision_schema(db: PackRelationalDB) -> None:
+    """幂等建 active 指针表(老部署升级路径;新部署由 CHATBI_DDL 覆盖)。"""
+    with db.connect() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS chatbi_index_revisions ("
+            "scope TEXT PRIMARY KEY, "
+            "active_doc_id TEXT NOT NULL, "
+            "version INTEGER NOT NULL, "
+            "updated_at TEXT NOT NULL)")
+
+
+def get_active_doc_id(db: Optional[PackRelationalDB],
+                      scope: str) -> Optional[str]:
+    """读 scope 当前生效的语义索引分区 doc_id(无记录 → None, 调用方
+    回退 legacy "schema" 分区)。任何异常按 None 处理(读路径不崩)。"""
+    if db is None:
+        return None
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT active_doc_id FROM chatbi_index_revisions "
+                "WHERE scope = ?", (scope,)).fetchone()
+        return (row or {}).get("active_doc_id") or None
+    except Exception:
+        return None
+
+
+def set_active_doc_id(db: PackRelationalDB, scope: str, doc_id: str,
+                      version: int) -> bool:
+    """原子翻转 active 指针; 仅当 version 高于现存值才生效。
+
+    Returns:
+        True = 本次写入成为 active;False = 已有更新的 revision(晚完成的
+        旧任务让路, 不覆盖)。调用方仅在 True 时清理旧分区。
+    """
+    ensure_index_revision_schema(db)
+    with db.connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO chatbi_index_revisions "
+            "(scope, active_doc_id, version, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (scope) DO UPDATE SET "
+            "active_doc_id = EXCLUDED.active_doc_id, "
+            "version = EXCLUDED.version, "
+            "updated_at = EXCLUDED.updated_at "
+            "WHERE EXCLUDED.version > chatbi_index_revisions.version",
+            (scope, doc_id, version, _now()))
+        # SQLite: 无匹配行时 rowcount 0(INSERT 成功为 1); PG 的 execute
+        # rowcount 对 DO UPDATE WHERE 不命中同样报 0——两种驱动口径一致
+        rowcount = getattr(cur, "rowcount", None)
+        if rowcount:
+            return True
+        # rowcount 不可靠的驱动: 回读确认
+        row = conn.execute(
+            "SELECT active_doc_id FROM chatbi_index_revisions "
+            "WHERE scope = ?", (scope,)).fetchone()
+        return bool(row and row["active_doc_id"] == doc_id)
+
+
 def delete_data_source_storage(db: PackRelationalDB, sdk_store: Any,
                                data_source_id: str) -> Optional[str]:
     """数据源删除的存储清理:drop 向量 collection + 删 few-shot 行 + 解除登记。
@@ -370,6 +435,15 @@ def delete_data_source_storage(db: PackRelationalDB, sdk_store: Any,
         except Exception as e:   # 向量清理失败不阻塞元数据删除(孤儿 collection 可手工清)
             logger.warning("chatbi drop collection 失败 (scope=%s): %s",
                            scope[:8], e)
+        # 十七审 7.7: 同步清 active 指针行(collection 已 drop, 残留指针
+        # 会让读者去读已不存在的分区)
+        try:
+            with db.connect() as conn:
+                conn.execute(
+                    "DELETE FROM chatbi_index_revisions WHERE scope = ?",
+                    (scope,))
+        except Exception:
+            pass
     delete_fewshot_examples(db, data_source_id)
     clear_scope(db, data_source_id)
     return scope

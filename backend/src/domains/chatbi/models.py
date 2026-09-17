@@ -194,6 +194,22 @@ CHATBI_DDL = [
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_semantic_version "
     "ON chatbi_semantic_models(data_source_id, version)",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_semantic_ds ON chatbi_semantic_models(data_source_id, is_current)",
+    # 十七审 7.7: 索引 revision namespace 的 active 指针——读者按 scope 查
+    # 当前生效分区(doc_id), 构建方先写新分区再原子翻转, 消灭 delete-first 空窗
+    """CREATE TABLE IF NOT EXISTS chatbi_index_revisions (
+        scope TEXT PRIMARY KEY,
+        active_doc_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    # 十七审 7.6: merge 停用/冲突报告——refresh/rescan 落库后写入,
+    # 语义页面经 GET /datasources/{id}/semantic/review 展示待复核清单
+    """CREATE TABLE IF NOT EXISTS chatbi_merge_reports (
+        data_source_id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        report TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
 ]
 
 
