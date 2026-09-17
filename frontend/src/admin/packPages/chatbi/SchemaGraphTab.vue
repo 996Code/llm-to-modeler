@@ -240,7 +240,11 @@ function openAddRel() {
 async function addRelationship() {
   // ON 条件由结构化行构建(至少一行且两侧列都选齐)
   const pairs = onConditions.value.filter((c) => c.left && c.right)
-  if (!addRelForm.from || !addRelForm.target || !pairs.length) {
+  if (semanticVersion.value == null) {
+      message.warning('图谱版本未加载——请先刷新页面')
+      return
+    }
+    if (!addRelForm.from || !addRelForm.target || !pairs.length) {
     message.warning('请填写源表、目标表, 并至少配一对 JOIN 列')
     return
   }

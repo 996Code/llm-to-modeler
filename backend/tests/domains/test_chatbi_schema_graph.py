@@ -1059,7 +1059,7 @@ class TestApplyConfidenceUpdates:
         _seed_semantic_model(pg_engine, content=content)
         calls = []
 
-        def rebuild(content, data_source_id):
+        def rebuild(content, data_source_id, **kw):
             calls.append((content, data_source_id))
 
         version = apply_confidence_updates(
@@ -1072,7 +1072,7 @@ class TestApplyConfidenceUpdates:
         assert ds == DS_ID
 
         # 回调异常 → 吞掉 (降级不阻塞), 版本照常落库
-        def broken_rebuild(content, data_source_id):
+        def broken_rebuild(content, data_source_id, **kw):
             raise RuntimeError("indexer down")
 
         # 第二段: v2 conf=0.8 → 建议 0.9 > 0.8 单调可写

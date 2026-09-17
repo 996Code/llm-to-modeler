@@ -885,7 +885,8 @@ def apply_confidence_updates(
     if rebuild_index is not None:
         try:
             content_obj = SemanticModelContent(**new_content)
-            _rb = rebuild_index(content=content_obj, data_source_id=data_source_id)
+            _rb = rebuild_index(content=content_obj, data_source_id=data_source_id,
+                                expected_version=new_version)  # 十三审7.3
             # rebuild_index 的失败契约是返回 RebuildResult(error=...) 而非
             # raise(五审 5.2)——统一在此识别, 调用方传任何 rebuild 都不谎报
             if _rb is not None and getattr(_rb, "error", None):

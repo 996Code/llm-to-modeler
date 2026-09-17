@@ -180,10 +180,38 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
     datasources.update_datasource(db, ds_id, scan_status="scanning",
                                   scan_progress=0, scan_stage="开始扫描", scan_error="")
     try:
+        # 十三审 7.1 P0: scan 加 CAS——persist=False + 外层 save 传 expected_version
+        # (此前 persist=True 内部 save 不带 expected, 后台扫描可静默覆盖管理员编辑)
+        from domains.chatbi.graph_infer import VersionConflictError
+        _pre = semantic.load_content(db, ds_id)
+        _pre_version = _pre[1] if _pre and _pre[0] is not None else 0  # 首次=0
         content = semantic.scan_datasource(
             llm=llm, db=db, connect_info=_connect_info(info),
             infer_metrics=bool(settings.get("scan_metric_inference", True)),
-            progress_cb=progress, datasource_id=ds_id)
+            progress_cb=progress, datasource_id=ds_id,
+            persist=False)  # 不在内部保存——由外部 CAS 保存
+        # rescan 时保留旧标注(同 refresh 的 merge 逻辑)
+        if _pre and _pre[0] is not None:
+            content = _merge_content(_pre[0], content)
+        try:
+            version = semantic.save_content(db, ds_id, content,
+                                            source="scan",
+                                            expected_version=_pre_version)
+        except VersionConflictError:
+            handle.log("扫描版本冲突(扫描期间有并发语义写入)——"
+                       "基于最新版重试一次")
+            _retry = semantic.load_content(db, ds_id)
+            _re_scan = semantic.scan_datasource(
+                llm=llm, db=db, connect_info=_connect_info(info),
+                infer_metrics=bool(settings.get("scan_metric_inference", True)),
+                progress_cb=progress, datasource_id=ds_id, persist=False)
+            if _retry and _retry[0] is not None:
+                content = _merge_content(_retry[0], _re_scan)
+                version = semantic.save_content(db, ds_id, content,
+                                                source="scan",
+                                                expected_version=_retry[1])
+            else:
+                raise
         # 向量索引重建 (对标 _run_scan_background 尾部 rebuild_index;
         # 失败降级不阻塞——RAG 检索可用全表降级路径)
         indexed = 0
@@ -194,9 +222,9 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             store = stores.get_vector(app_state)
             embedder = stores.get_embedder(llm)
             rb = indexing.guarded_rebuild(content, ds_id, store, embedder, db=db,
-                                           expected_version=version if 'version' in dir() else None)
+                                           expected_version=version)  # 十三审7.3
             if rb is not None and getattr(rb, "error", None):
-                raise RuntimeError(rb.error)   # RebuildResult.error 契约(五审5.2)
+                raise RuntimeError(rb.error)
             indexed = rb.indexed_count
         except Exception as e:
             logger.warning("向量索引重建失败(降级, 不阻塞扫描): %s", e)
@@ -527,9 +555,11 @@ def _make_index_rebuilder(app_state, datasource_id: str):
         return None
 
     def _rebuild(content, data_source_id, **_kw):
+        # 十三审 7.3: 从 kwargs 取 expected_version(apply 传入了 new_version)
         result = indexing.guarded_rebuild(
             content=content, data_source_id=data_source_id,
-            store=store, embedder=embedder, db=db)
+            store=store, embedder=embedder, db=db,
+            expected_version=_kw.get('expected_version'))
         # rebuild_index 的失败契约是返回 RebuildResult(error=...) 而非抛
         # 异常(五审 5.2)——error 非空时 raise, 让调用方的 except/
         # on_index_error 降级路径真实生效, 不再谎报成功

@@ -135,3 +135,56 @@ class TestMemoryEndpoints:
                    json={"data_source_id": ds_id})
         assert r.status_code == 200
         assert r.json()["backfilled"] == 1
+
+
+class TestSemanticPutValidation:
+    """十三审 7.6/7.2: 语义PUT校验ds存在 + 缺expected返回428."""
+
+    def test_put_nonexistent_ds_404(self, client):
+        c, _ = client
+        r = c.put("/datasources/no-such-ds/semantic-models",
+                  json={"content": {"models": []}})
+        assert r.status_code == 404
+
+    def test_put_missing_expected_428(self, client, ds_id):
+        c, _ = client
+        r = c.put(f"/datasources/{ds_id}/semantic-models",
+                  json={"content": {"models": []}})
+        assert r.status_code == 428
+
+    def test_put_with_expected_200(self, client, ds_id):
+        c, db = client
+        from domains.chatbi import semantic
+        _, cur_v = semantic.load_content(db, ds_id)
+        r = c.put(f"/datasources/{ds_id}/semantic-models",
+                  json={"content": {"models": [
+                      {"name": "t", "display_name": "T", "columns": []}]},
+                    "expected_version": cur_v})
+        assert r.status_code == 200, r.text
+
+
+class TestGraphApiValidation:
+    """十三审 7.2: 图谱增删缺expected返回428."""
+
+    def test_add_missing_expected_428(self, client, ds_id):
+        c, _ = client
+        r = c.post(f"/datasources/{ds_id}/graph/relationship",
+                   json={"from_table": "orders", "target_table": "users",
+                         "on": "orders.user_id = users.id"})
+        assert r.status_code == 428
+
+    def test_delete_missing_expected_428(self, client, ds_id):
+        c, _ = client
+        r = c.delete(f"/datasources/{ds_id}/graph/relationship",
+                     params={"from_table": "orders", "target_table": "users"})
+        assert r.status_code == 428
+
+
+class TestRollbackValidation:
+    """十三审 7.5: 回滚缺expected_current返回428."""
+
+    def test_rollback_missing_expected_428(self, client, ds_id):
+        c, _ = client
+        r = c.post("/semantic-rollback",
+                   params={"ds_id": ds_id, "version": 1})
+        assert r.status_code == 428

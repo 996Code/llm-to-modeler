@@ -565,7 +565,8 @@ async function doRollback(toVersion: number) {
   rollingBack.value = toVersion
   try {
     const { data } = await chatbiApi.post('/semantic-rollback', null, {
-      params: { ds_id: dsId.value, version: toVersion } })
+      params: { ds_id: dsId.value, version: toVersion,
+                expected_current_version: version.value || undefined } })
     if (data.index_rebuilt === false) {
       message.warning(`已回滚到 v${toVersion} — 但索引重建失败: ${data.warning || '请重扫恢复'}`)
     } else {
@@ -574,7 +575,9 @@ async function doRollback(toVersion: number) {
     versionDrawer.value = false
     await loadContent()
   } catch (e: any) {
-    message.error(e?.response?.data?.detail || '回滚失败')
+    e?.response?.status === 409
+        ? message.warning('回滚期间版本被并发修改——请刷新后重试')
+        : message.error(e?.response?.data?.detail || '回滚失败')
   } finally {
     rollingBack.value = null
   }

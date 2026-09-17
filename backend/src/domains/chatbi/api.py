@@ -124,8 +124,8 @@ class GraphRelationshipIn(BaseModel):
     target_table: str
     join_type: Literal["INNER", "LEFT", "RIGHT", "FULL"] = "LEFT"
     on: str                       # JOIN ON 条件(表.列 = 表.列 [AND ...])
-    cardinality: Literal["N:1", "1:N", "1:1", "N:N"] = "N:1"
-    expected_version: int | None = None  # 十一审 7.3: 语义版本前置
+    cardinality: Literal["N:1", "1:1", "N:N"] = "N:1"
+    expected_version: int | None = None  # 十三审 7.2: 必填(API层强制428)
 
 
 # ── 数据源管理(移植 data_sources.py 全集,密码永不回显) ────────
@@ -304,6 +304,10 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
                 raise HTTPException(422, f"指标 {metric.name} 公式非法: {errors[0]}")
     # 十审 7.7: expected_version 省略时 warning(不完全阻断以兼容旧
     # 客户端, 但审计留痕; 新前端已强制传递)
+    # 十三审 7.6: 校验数据源存在(防孤儿语义版本)
+    from domains.chatbi import datasources as _ds_chk
+    if _ds_chk.get_datasource(_db(), ds_id) is None:
+        raise HTTPException(404, f"数据源 {ds_id} 不存在")
     if body.expected_version is None:
         from domains.chatbi import semantic as _sem_chk
         _, existing_v = _sem_chk.load_content(_db(), ds_id)
@@ -344,6 +348,10 @@ async def semantic_diff(ds_id: str, from_version: int, to_version: int):
         return {"diff": semantic.diff_versions(_db(), ds_id, from_version, to_version)}
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except Exception as e:
+        if 'VersionConflict' in type(e).__name__:
+            raise HTTPException(409, "回滚期间版本被并发修改——请刷新后重试")
+        raise
 
 
 @router.get("/datasources/{ds_id}/semantic-versions", dependencies=[Depends(admin_required)])
@@ -366,12 +374,22 @@ async def semantic_versions(ds_id: str):
 
 
 @router.post("/semantic-rollback", dependencies=[Depends(admin_required)])
-async def semantic_rollback(ds_id: str, version: int, request: Request):
+async def semantic_rollback(ds_id: str, version: int, request: Request,
+                             expected_current_version: int | None = None):
     from domains.chatbi import semantic, stores
+    # 十三审 7.5: 客户端提交所见 current revision(不是服务端自定)
+    if expected_current_version is None:
+        raise HTTPException(428, "回滚必须携带 expected_current_version——"
+                                "请先获取当前版本号")
     try:
-        ver, content = semantic.rollback(_db(), ds_id, version)
+        ver, content = semantic.rollback(_db(), ds_id, version,
+                                          expected_current=expected_current_version)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except Exception as e:
+        if 'VersionConflict' in type(e).__name__:
+            raise HTTPException(409, "回滚期间版本被并发修改——请刷新后重试")
+        raise
     # 回滚后重建索引(源 semantic_models.py:196-214;失败降级不阻塞)
     index_rebuilt, index_warning = True, None
     try:
@@ -660,6 +678,11 @@ async def graph_add_relationship(ds_id: str, body: GraphRelationshipIn, request:
     前端提示"语义层已保存, 索引待重建"。
     """
     from domains.chatbi import graph_edit, semantic
+    # 十三审 7.2: expected_version 必填——图谱编辑已有语义版本,
+    # 省略时 fail-closed(不是warning)
+    if body.expected_version is None:
+        raise HTTPException(428, "图谱编辑必须携带 expected_version "
+                                "——请先 GET /graph 获取 semanticVersion")
     try:
         result = graph_edit.add_relationship(
             _db(), ds_id,
@@ -690,6 +713,9 @@ async def graph_delete_relationship(ds_id: str, from_table: str, target_table: s
                                      expected_version: int | None = None, request: Request = None):
     """删除图谱关系——正反向一起清理,写回语义层新版本 + 重建索引 + 审计。"""
     from domains.chatbi import graph_edit, semantic
+    if expected_version is None:
+        raise HTTPException(428, "图谱删除必须携带 expected_version "
+                                "——请先 GET /graph 获取 semanticVersion")
     try:
         result = graph_edit.delete_relationship(
             _db(), ds_id, from_table=from_table, target_table=target_table, on=on,

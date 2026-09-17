@@ -1180,7 +1180,8 @@ def load_current_content(db, datasource_id: str) -> SemanticModelContent | None:
     return content
 
 
-def rollback(db, datasource_id: str, version: int) -> tuple:
+def rollback(db, datasource_id: str, version: int,
+             expected_current: int | None = None) -> tuple:
     """回滚 = 把目标版本内容复制成新版本并置 current(append-only,不改历史)。
 
     移植 semantic_models.py rollback_to_version 语义;版本不存在抛 ValueError
@@ -1190,10 +1191,11 @@ def rollback(db, datasource_id: str, version: int) -> tuple:
     content, _ = load_content(db, datasource_id, version)
     if content is None:
         raise ValueError(f"版本 {version} 不存在")
-    # 十审 7.1: 回滚也是语义写入——传当前版本做前置(防回滚覆盖并发编辑)
+    # 十三审 7.5: 用客户端传入的 expected_current(识别旧页面意图)
     _, cur_v = load_content(db, datasource_id)
+    effective_expected = expected_current if expected_current is not None else cur_v
     new_version = save_content(db, datasource_id, content, source="rollback",
-                               expected_version=cur_v)
+                               expected_version=effective_expected)
     logger.info("rollback: 数据源=%s 从 v%d 复制落新版本 v%d",
                 datasource_id, version, new_version)
     return new_version, content
