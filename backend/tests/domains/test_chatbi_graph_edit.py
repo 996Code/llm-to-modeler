@@ -134,7 +134,7 @@ class TestAddRelationship:
         assert r["index_rebuilt"] is True  # 无 rebuilder = 视为不需要
         content = semantic.load_current_content(db, ds)
         rel = content.models[0].relationships[0]
-        assert rel.target_model == "users" and rel.source == "manual"
+        assert rel.target_model == "users" and rel.source == "manual_edit"  # 十六审 7.4
         assert rel.on == "orders.user_id = users.id"
 
     def test_source_table_missing_404(self, db, ds):

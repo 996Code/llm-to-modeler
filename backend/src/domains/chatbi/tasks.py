@@ -491,15 +491,102 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
     return summary
 
 
-def _merge_content(old, new):
-    # old/new: SemanticModelContent(类型注解省略——避免模块顶层 import
-    # semantic 造成的循环依赖, 运行时鸭子访问 .models/.sample_questions)
-    """结构刷新合并(移植源 metadata_refresher._merge_content)。
 
-    新扫描的表/列结构是权威(增删改), 但保留旧版本的 display_name/
-    description/semantic_type/source/confidence/sample_questions——
-    这些是人工/LLM 标注, 结构扫描(llm=None)只会产出退化值。
+
+# ══ 十六审: 共用结构验证器(refresh/rescan 复用, 不再两套分叉) ══
+
+import re as _re
+
+_COL_REF = _re.compile(r'\b([a-zA-Z_]\w*)\.([a-zA-Z_]\w*)\b')
+
+
+def _validate_structure(new_content):
+    """构造新结构的表→列映射(用于校验旧语义引用)."""
+    tables = {}
+    for m in new_content.models:
+        tables[m.name] = {c.name for c in m.columns}
+    return tables
+
+
+def _metric_columns_valid(metric, table_name, table_cols):
+    """校验指标表达式引用的列是否仍存在(simple 的 formula 内引用本表列)."""
+    if not metric.formula:
+        return True  # 无表达式不校验
+    # 提取括号内的列名(如 SUM(amount) → amount)
+    for ref in _re.findall(r'\w+\((\w+)\)', metric.formula):
+        if ref not in table_cols:
+            return False
+    return True
+
+
+def _rel_columns_valid(rel, source_table, source_cols, target_table, target_cols):
+    """校验关系的 ON 条件两端列是否存在."""
+    if not rel.on:
+        return True  # 无 ON 不校验(可能由 AI 推断)
+    # 解析 "a.col1 = b.col2" 中的表.列引用
+    for t, c in _COL_REF.findall(rel.on):
+        if t == source_table and c not in source_cols:
+            return False
+        if t == target_table and c not in target_cols:
+            return False
+    return True
+
+
+def _rel_identity(rel, source_table):
+    """关系的规范化端点标识(用于等价去重)."""
+    # 解析 ON 提取排序后的 (table, column) 对
+    pairs = sorted(_COL_REF.findall(rel.on or ""))
+    return (source_table, rel.target_model, tuple(pairs))
+
+
+def _filter_stale_items(model_name, old_m, new_m, all_tables):
+    """过滤引用已删结构的旧语义项, 返回 (valid_metrics, valid_rels, dropped)."""
+    table_cols = all_tables.get(model_name, set())
+    target_cols_map = {m.name: {c.name for c in m.columns}
+                       for m in []}  # 从 new_content 取
+    dropped = {"metrics": [], "relationships": []}
+
+    # 指标: 校验公式引用列
+    valid_metrics = []
+    for met in (old_m.metrics or []):
+        if 'manual' in (getattr(met, 'source', '') or ''):
+            if _metric_columns_valid(met, model_name, table_cols):
+                valid_metrics.append(met)
+            else:
+                dropped["metrics"].append(met.name)
+                logger.warning("merge: 丢弃引用已删列的人工指标 %s (table=%s)",
+                               met.name, model_name)
+
+    # 关系: 校验目标表存在 + ON 两端列存在
+    valid_rels = []
+    for rel in (old_m.relationships or []):
+        if getattr(rel, 'source', '') not in ('manual', 'manual_edit'):
+            continue  # auto 的由新扫描决定
+        if rel.target_model not in all_tables:
+            dropped["relationships"].append(rel.name)
+            logger.warning("merge: 丢弃指向已删表的人工关系 %s→%s",
+                           model_name, rel.target_model)
+            continue
+        target_cols = all_tables.get(rel.target_model, set())
+        if not _rel_columns_valid(rel, model_name, table_cols,
+                                  rel.target_model, target_cols):
+            dropped["relationships"].append(rel.name)
+            logger.warning("merge: 丢弃引用已删列的人工关系 %s (ON=%s)",
+                           rel.name, rel.on)
+            continue
+        valid_rels.append(rel)
+
+    return valid_metrics, valid_rels, dropped
+
+
+def _merge_content(old, new):
+    """结构刷新合并(refresh 专用; 十六审重构: 使用共用结构验证器).
+
+    refresh(定时结构扫描 llm=None)的语义: 新结构权威(增删表列),
+    保留旧标注, 但旧人工指标/关系必须通过新结构校验(引用已删列/表
+    的旧项停用+告警, 不再静默保留错误语义).
     """
+    all_tables = _validate_structure(new)
     old_models = {m.name: m for m in old.models}
     for new_m in new.models:
         old_m = old_models.get(new_m.name)
@@ -507,32 +594,39 @@ def _merge_content(old, new):
             continue  # 新表: 用扫描退化值, 等下次 LLM 富化
         new_m.display_name = old_m.display_name or new_m.display_name
         new_m.description = old_m.description or new_m.description
-        # 十五审 7.2: 表级 provenance 原子保留(此前只保值不保来源,
-        # refresh 后下次 rescan 会把人工表名当 auto 覆盖)
-        if 'manual' in (getattr(old_m, 'source', '') or ''):
+        # 表级 provenance 原子保留
+        if getattr(old_m, 'source', '') in ('manual', 'manual_edit'):
             new_m.source = old_m.source
             if hasattr(old_m, 'confidence') and old_m.confidence is not None:
                 new_m.confidence = old_m.confidence
-        # 指标/关系保留(I1): 刷新扫描(llm=None)只产规则 simple 指标 +
-        # 外键/命名关系, 直接用会静默丢掉 LLM composite 指标(如 GMV)与
-        # ai_inferred/implicit_mining 关系——语义层逐周期向裸结构退化。
-        if old_m.metrics:
-            # 旧指标全量保留: 结构刷新(llm=None)只会重产同名的规则 simple
-            # 指标, 而 LLM composite(如 GMV)/人工校正指标只在旧版本里——
-            # 丢了就是永久丢失(下次全量重扫也不一定复原)。
-            new_m.metrics = list(old_m.metrics)
-        if old_m.relationships:
-            new_rels = list(new_m.relationships)
-            new_rel_keys = {(r.name, r.target_model) for r in new_rels}
-            for r in old_m.relationships:
-                if (r.name, r.target_model) not in new_rel_keys:
-                    new_rels.append(r)  # 旧多出的关系(ai_inferred 等)保留
-            new_m.relationships = new_rels
+
+        # 指标/关系: 经结构校验后保留(十六审 7.2: 不再保留失效项)
+        if old_m.metrics or old_m.relationships:
+            v_metrics, v_rels, _dropped = _filter_stale_items(
+                new_m.name, old_m, new_m, all_tables)
+            # auto 指标用新扫描的(规则 simple); 人工的经校验保留
+            existing_metric_names = {m.name for m in (new_m.metrics or [])}
+            merged_metrics = list(new_m.metrics or [])
+            for met in v_metrics:
+                if met.name not in existing_metric_names:
+                    merged_metrics.append(met)
+            new_m.metrics = merged_metrics
+
+            # 关系: 新扫描的 FK/命名 + 经校验的人工
+            existing_rel_ids = {_rel_identity(r, new_m.name)
+                                for r in (new_m.relationships or [])}
+            merged_rels = list(new_m.relationships or [])
+            for rel in v_rels:
+                if _rel_identity(rel, new_m.name) not in existing_rel_ids:
+                    merged_rels.append(rel)
+            new_m.relationships = merged_rels
+
+        # 列级: 保留旧标注(值+来源+置信度)
         old_cols = {c.name: c for c in old_m.columns}
         for c in new_m.columns:
             old_c = old_cols.get(c.name)
             if old_c is None:
-                continue  # 新列
+                continue
             c.display_name = old_c.display_name or c.display_name
             c.description = old_c.description or c.description
             if old_c.semantic_type:
@@ -541,102 +635,85 @@ def _merge_content(old, new):
                 c.source = old_c.source
             if old_c.confidence:
                 c.confidence = old_c.confidence
+
+        # calculated_fields: 保留旧的(十六审 7.1: 此前 refresh 清空)
+        if hasattr(old_m, 'calculated_fields') and old_m.calculated_fields:
+            new_m.calculated_fields = list(old_m.calculated_fields)
+
     new.sample_questions = old.sample_questions or new.sample_questions
     return new
 
 
 def _merge_rescan(old, new):
-    """重扫专用 merge(十五审重构): 来源感知 + provenance 原子保留 + 集合去重.
+    """重扫专用 merge(十六审重构: 使用共用结构验证器 + 等价去重).
 
-    十四审版本的问题(十五审 P0/P1):
-      P0: 保留人工 display_name 时不保留 source/confidence → 来源被
-          悄悄降回 auto → 第二次重扫把人工值当 auto 覆盖(数据丢失链)
-      P1: manual/auto 同名指标直接拼接 → 重复项
-      P1: manual 关系不校验 target 是否仍存在 → 幽灵节点
-
-    分治规则(十五审版):
-      表级: 旧 manual → 原子保留 {display_name, description, source, confidence}
-      列级: 旧 manual → 原子保留 {display_name, description, semantic_type, source, confidence}
-      指标: 按 name 去重, manual 优先; 新 auto 同名丢弃
-      关系: manual 保留但校验 target_model 仍存在于新扫描(不存在则丢弃);
-            auto 不复活已删的
-      calculated_fields: 保留旧的(扫描不产此项, 不能清空)
-      sample_questions: 用新生成(重扫目的)
+    分治规则:
+      表/列级: 旧 manual_edit → 原子保留全部字段
+      指标: manual 经列校验保留 + 按name压制同名auto
+      关系: manual 经表/列校验保留 + 按端点identity去重等价
+      calculated_fields: 保留旧的
+      sample_questions: 用新生成
     """
+    all_tables = _validate_structure(new)
     old_models = {m.name: m for m in old.models}
-    # 新扫描的全部表名集合(校验 manual 关系 target 用)
-    new_table_names = {m.name for m in new.models}
 
     for new_m in new.models:
         old_m = old_models.get(new_m.name)
         if old_m is None:
-            continue  # 新表: 全部用扫描新值
+            continue
 
-        # ── 表级: manual 原子保留(值+来源+置信度, 十五审 P0) ──
+        # ── 表级: manual_edit 原子保留 ──
         old_src = getattr(old_m, 'source', '') or ''
         if 'manual' in old_src:
             if old_m.display_name:
                 new_m.display_name = old_m.display_name
             if old_m.description:
                 new_m.description = old_m.description
-            # 来源和置信度必须与显示值一起迁移(不能只复制一半)
             new_m.source = old_m.source
             if hasattr(old_m, 'confidence') and old_m.confidence is not None:
                 new_m.confidence = old_m.confidence
 
-        # ── 列级: manual 原子保留 ──
+        # ── 列级: manual_edit 原子保留 ──
         old_cols = {c.name: c for c in old_m.columns}
-        new_col_names = {c.name for c in new_m.columns}
         for c in new_m.columns:
             old_c = old_cols.get(c.name)
             if old_c is None:
-                continue  # 新列用新值
+                continue
             col_src = getattr(old_c, 'source', '') or ''
-            if 'manual' in col_src:
+            if col_src in ('manual', 'manual_edit'):
                 if old_c.display_name:
                     c.display_name = old_c.display_name
                 if old_c.description:
                     c.description = old_c.description
                 if old_c.semantic_type:
                     c.semantic_type = old_c.semantic_type
-                # provenance 原子保留(十五审 P0)
                 c.source = old_c.source
                 if hasattr(old_c, 'confidence') and old_c.confidence is not None:
                     c.confidence = old_c.confidence
-            # auto 来源: 保留新扫描值(重扫的更新目的)
 
-        # ── 指标: 按 name 去重, manual 优先(十五审 P1 7.3) ──
-        if old_m.metrics:
-            old_manual_metrics = {m.name: m for m in old_m.metrics
-                                  if 'manual' in (getattr(m, 'source', '') or '')}
-            # 新 auto 指标中, 同名被 manual 压制; 不同名的加入
-            merged_metrics = list(old_manual_metrics.values())
-            manual_names = set(old_manual_metrics.keys())
-            for nm in (new_m.metrics or []):
-                if nm.name not in manual_names:
-                    merged_metrics.append(nm)
-            new_m.metrics = merged_metrics
+        # ── 指标: 经结构校验 + name 去重(manual 压制 auto) ──
+        v_metrics, v_rels, _dropped = _filter_stale_items(
+            new_m.name, old_m, new_m, all_tables)
+        merged_metrics = list(v_metrics)
+        manual_names = {m.name for m in v_metrics}
+        for nm in (new_m.metrics or []):
+            if nm.name not in manual_names:
+                merged_metrics.append(nm)
+        new_m.metrics = merged_metrics
 
-        # ── 关系: manual 保留但校验 target 存在(十五审 P1 7.4) ──
-        if old_m.relationships:
-            valid_manual_rels = []
-            dropped_rels = []
-            for r in old_m.relationships:
-                if r.source == 'manual':
-                    if r.target_model in new_table_names:
-                        valid_manual_rels.append(r)
-                    else:
-                        dropped_rels.append(r.name)
-            if dropped_rels:
-                logger.warning("rescan merge: 丢弃指向已删表的人工关系 %s (table=%s)",
-                               dropped_rels, new_m.name)
-            new_m.relationships = valid_manual_rels + list(new_m.relationships or [])
+        # ── 关系: 经结构校验 + 端点 identity 去重(十六审 7.3.3) ──
+        existing_ids = {_rel_identity(r, new_m.name)
+                        for r in (new_m.relationships or [])}
+        merged_rels = list(new_m.relationships or [])
+        for rel in v_rels:
+            if _rel_identity(rel, new_m.name) not in existing_ids:
+                merged_rels.append(rel)
+        new_m.relationships = merged_rels
 
-        # ── calculated_fields: 保留旧的(扫描不产此项, 不能清空) ──
+        # ── calculated_fields: 保留旧的 ──
         if hasattr(old_m, 'calculated_fields') and old_m.calculated_fields:
             new_m.calculated_fields = list(old_m.calculated_fields)
 
-    # 示例问题: 用新生成(重扫目的)
     return new
 
 

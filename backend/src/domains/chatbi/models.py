@@ -18,7 +18,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ── source 枚举(关系/字段的来源,影响人工复核优先级)─────────────
-SourceStr = str  # 不用 Literal 锁死,允许扩展: manual/auto_inferred/foreign_key/name_pattern/ai_inferred
+# 十六审 7.4 来源模型: db_comment(数据库注释) / manual_edit(管理员编辑,
+# 兼容旧值 manual) / auto_inferred(LLM/规则推断) / foreign_key / name_pattern / ai_inferred
+SourceStr = str  # 不用 Literal 锁死,允许扩展
 
 
 class _Inferred(BaseModel):

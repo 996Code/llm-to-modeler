@@ -374,10 +374,11 @@ async function loadContent() {
   }
 }
 
-// ── 来源徽标(原版同款文案) ──
+// ── 来源徽标(十六审 7.4: db_comment/manual_edit 拆分, 兼容旧 manual) ──
 function sourceLabel(source: string, confidence?: number): string {
   const map: Record<string, string> = {
-    manual: '📋 注释', foreign_key: '🔑 外键',
+    manual: '✏️ 人工', manual_edit: '✏️ 人工', db_comment: '📋 注释',
+    foreign_key: '🔑 外键',
     auto_inferred: (confidence ?? 1) >= 0.8 ? '🤖 LLM' : '⚠️ 退化',
     name_pattern: '🔤 命名', ai_inferred: '🤖 LLM', rule_inferred: '⚙️ 规则',
   }
@@ -385,7 +386,8 @@ function sourceLabel(source: string, confidence?: number): string {
 }
 function sourceTag(source: string): string {
   const map: Record<string, string> = {
-    manual: 'success', foreign_key: 'warning', auto_inferred: 'processing',
+    manual: 'success', manual_edit: 'success', db_comment: 'processing',
+    foreign_key: 'warning', auto_inferred: 'processing',
     name_pattern: 'processing', ai_inferred: 'processing', rule_inferred: 'default',
   }
   return map[source] || 'default'

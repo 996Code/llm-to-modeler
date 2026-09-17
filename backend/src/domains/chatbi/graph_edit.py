@@ -178,11 +178,11 @@ def add_relationship(
         join_type=join_type,
         on=normalized_on,
         type=cardinality,
-        source="manual",
+        source="manual_edit",  # 十六审 7.4: 管理员编辑独立来源
         confidence=1.0,
     ))
     try:
-        version = semantic.save_content(db, ds_id, content, source="manual",
+        version = semantic.save_content(db, ds_id, content, source="manual_edit",
                                         expected_version=expected_version)
     except Exception as e:
         if 'VersionConflict' in type(e).__name__:
@@ -256,7 +256,7 @@ def delete_relationship(
             404, f"未找到匹配关系 {from_table} → {target_table}")
 
     try:
-        version = semantic.save_content(db, ds_id, content, source="manual",
+        version = semantic.save_content(db, ds_id, content, source="manual_edit",
                                         expected_version=expected_version)
     except Exception as e:
         if 'VersionConflict' in type(e).__name__:

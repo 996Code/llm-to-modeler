@@ -184,7 +184,7 @@ class TestScanPipeline:
         # 表级: 注释 → manual/1.0;无注释 → 退化表名
         orders = _model(content, "biz_orders")
         users = _model(content, "biz_users")
-        assert orders.display_name == "业务订单表" and orders.source == "manual"
+        assert orders.display_name == "业务订单表" and orders.source == "db_comment"  # 十六审 7.4: DB注释独立来源
         assert orders.confidence == 1.0
         assert users.display_name == "biz_users" and users.confidence == 0.5
 
@@ -192,7 +192,7 @@ class TestScanPipeline:
         by_name = {c.name: c for c in orders.columns}
         assert by_name["total_amount"].data_type == "NUMERIC(10,2)"
         assert by_name["total_amount"].display_name == "订单总金额"
-        assert by_name["total_amount"].source == "manual"
+        assert by_name["total_amount"].source == "db_comment"  # 十六审 7.4: DB注释独立来源
         assert by_name["total_amount"].confidence == 1.0
         assert by_name["total_amount"].semantic_type == "measure"
         assert by_name["id"].semantic_type == "key"          # 主键

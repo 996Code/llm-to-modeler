@@ -308,7 +308,7 @@ def _build_content(introspected: dict) -> SemanticModelContent:
         for c in tinfo["columns"]:
             comment = (c.get("comment") or "").strip()
             if comment:
-                display_name, c_source, c_conf = comment, "manual", 1.0
+                display_name, c_source, c_conf = comment, "db_comment", 1.0
             else:
                 # 退化: 列名即展示名,等 LLM 富化阶段升级
                 display_name, c_source, c_conf = c["name"], "auto_inferred", 0.5
@@ -326,7 +326,7 @@ def _build_content(introspected: dict) -> SemanticModelContent:
         # 表 display_name: 优先注释,否则表名
         t_comment = (tinfo.get("comment") or "").strip()
         if t_comment:
-            t_display, t_source, t_conf = t_comment, "manual", 1.0
+            t_display, t_source, t_conf = t_comment, "db_comment", 1.0
         else:
             t_display, t_source, t_conf = table_name, "auto_inferred", 0.5
 
@@ -434,7 +434,7 @@ def _enrich_with_llm(content: SemanticModelContent, llm,
     """扫描后用 LLM 给无注释的列补中文 display_name(原地 patch)。
 
     移植要点(逐点保留):
-      - 有注释的列不动(source=manual);只补 source=auto_inferred 且
+      - 有注释的列不动(source=db_comment);只补 source=auto_inferred 且
         confidence=0.5(退化列名)的列 → 补完升 source=auto_inferred, confidence=0.8
       - 跳过系统表;全量优先(≤200 表一次发),超过分批每批 100 张
       - LLM 失败/返回非法 → 降级保持退化列名,不阻塞扫描
@@ -1073,7 +1073,7 @@ def mark_manual_edits(old: SemanticModelContent | None,
             continue  # 新表: 无对比基准
         if (new_m.display_name != old_m.display_name
                 or new_m.description != old_m.description):
-            new_m.source = "manual"
+            new_m.source = "manual_edit"  # 十六审 7.4: 管理员编辑独立来源
             new_m.confidence = 1.0
             marked += 1
         old_cols = {c.name: c for c in old_m.columns}
@@ -1083,7 +1083,7 @@ def mark_manual_edits(old: SemanticModelContent | None,
                 continue  # 新列
             if (new_c.display_name != old_c.display_name
                     or new_c.description != old_c.description):
-                new_c.source = "manual"
+                new_c.source = "manual_edit"
                 new_c.confidence = 1.0
                 marked += 1
     return marked

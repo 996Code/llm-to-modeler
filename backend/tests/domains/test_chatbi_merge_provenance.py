@@ -157,7 +157,7 @@ class TestStaleRelationshipValidation:
         from domains.chatbi.tasks import _merge_rescan
 
         old = SemanticModelContent(models=[
-            Model(name="orders", display_name="orders", columns=[_col("id")], relationships=[
+            Model(name="orders", display_name="orders", columns=[_col("id"), _col("uid"), _col("gid")], relationships=[
                 Relationship(name="r_valid", target_model="users",
                              join_type="LEFT", on="orders.uid=users.id",
                              type="N:1", source="manual"),
@@ -170,7 +170,7 @@ class TestStaleRelationshipValidation:
         ])
         # 新扫描: gone_table 已从数据库删除
         new_scan = SemanticModelContent(models=[
-            Model(name="orders", display_name="orders", columns=[_col("id")]),
+            Model(name="orders", display_name="orders", columns=[_col("id"), _col("uid")]),
             Model(name="users", display_name="users", columns=[_col("id")]),
         ])
         merged = _merge_rescan(old, new_scan)

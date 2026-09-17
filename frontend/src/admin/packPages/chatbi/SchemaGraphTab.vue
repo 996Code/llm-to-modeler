@@ -348,7 +348,7 @@ function nextFrame(): Promise<void> {
 }
 
 function relSourceLabel(s: string): string {
-  return { manual: '人工标注', fk: '外键推断', llm: 'LLM 推断', auto_inferred: '自动推断' }[s] || s || '-'
+  return { manual: '人工标注', manual_edit: '人工标注', db_comment: '数据库注释', fk: '外键推断', llm: 'LLM 推断', auto_inferred: '自动推断' }[s] || s || '-'
 }
 
 function nodeEdges(nodeId: string) {

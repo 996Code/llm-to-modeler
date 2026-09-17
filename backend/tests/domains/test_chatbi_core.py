@@ -315,7 +315,7 @@ class TestMergeRescan:
                 Column(name='id', display_name='旧ID', data_type='INT', source='manual'),
                 Column(name='amt', display_name='旧auto', data_type='NUM', source='ai_inferred'),
             ], metrics=[
-                Metric(name='m_manual', display_name='M', formula='SUM(x)', type='single', source='manual'),
+                Metric(name='m_manual', display_name='M', formula='SUM(amt)', type='single', source='manual'),
             ], relationships=[
                 Relationship(name='r_manual', target_model='u', join_type='LEFT', on='x=y', type='N:1', source='manual'),
                 Relationship(name='r_gone', target_model='gone', join_type='LEFT', on='x=z', type='N:1', source='foreign_key'),

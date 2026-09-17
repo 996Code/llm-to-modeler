@@ -23,7 +23,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from sdk.pack_api import admin_required
 from sdk.relational_store import PackRelationalDB
@@ -111,7 +111,7 @@ class DatasourceUpdate(BaseModel):
 
 class SemanticContentIn(BaseModel):
     content: dict
-    expected_version: int | None = None   # 九审 7.2: 版本前置条件                      # SemanticModelContent JSON(人工校正)
+    expected_version: int | None = Field(default=None, ge=0)  # 十六审 7.8                      # SemanticModelContent JSON(人工校正)
 
 
 class JoinPathIn(BaseModel):
@@ -278,7 +278,7 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
     """人工校正 → F9 注入防御校验 → 人工标注打标 → 落新版本 → 重建索引。
 
     人工标注打标(源 semantic_models.py:269-297 的 PATCH 语义): 与当前版本
-    diff, 被修改的表/列 display_name/description 置 source=manual,
+    diff, 被修改的表/列 display_name/description 置 source=manual_edit,
     confidence=1.0——防止下次全量重扫时 _enrich_with_llm(只挑
     auto_inferred/0.5 的列)把 LLM 推断名覆盖掉人工校正名。
     """
@@ -288,11 +288,11 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
         content = SemanticModelContent.model_validate(body.content)
     except Exception as e:
         raise HTTPException(400, f"语义层结构校验失败: {e}")
-    # 人工修改打标: 与当前版本对比, 变化的表/列 → manual/1.0
+    # 人工修改打标: 与当前版本对比, 变化的表/列 → manual_edit/1.0
     current = semantic.load_current_content(_db(), ds_id)
     marked = semantic.mark_manual_edits(current, content)
     if marked:
-        logger.info("人工校正打标: %d 处表/列标注 → manual/1.0", marked)
+        logger.info("人工校正打标: %d 处表/列标注 → manual_edit/1.0", marked)
     # F9 注入防御(源 semantic_models.py PATCH 对 formula/condition 校验):
     # schema 层不校验, API 层是唯一关口, 执行层三层校验是终极防线
     for model in content.models:
@@ -317,7 +317,7 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
                                 f"(首次创建传 0; 当前"
                                 f" {'v' + str(existing_v) if existing_v else '无版本'})")
     try:
-        ver = semantic.save_content(_db(), ds_id, content, source="manual",
+        ver = semantic.save_content(_db(), ds_id, content, source="manual_edit",
                                     expected_version=body.expected_version)
     except Exception as e:
         if "VersionConflict" in type(e).__name__ or "conflict" in str(e).lower():
