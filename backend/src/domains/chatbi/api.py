@@ -125,6 +125,7 @@ class GraphRelationshipIn(BaseModel):
     join_type: Literal["INNER", "LEFT", "RIGHT", "FULL"] = "LEFT"
     on: str                       # JOIN ON 条件(表.列 = 表.列 [AND ...])
     cardinality: Literal["N:1", "1:N", "1:1", "N:N"] = "N:1"
+    expected_version: int | None = None  # 十一审 7.3: 语义版本前置
 
 
 # ── 数据源管理(移植 data_sources.py 全集,密码永不回显) ────────
@@ -321,7 +322,7 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
     try:
         from domains.chatbi import indexing
         from domains.chatbi.llm_compat import LLMCompat
-        _rb = indexing.rebuild_index(content, ds_id, stores.get_vector(request.app.state),
+        _rb = indexing.guarded_rebuild(content, ds_id, stores.get_vector(request.app.state),
                                      stores.get_embedder(LLMCompat(request.app.state.llm_client)),
                                      db=_db())
         if _rb is not None and getattr(_rb, "error", None):
@@ -375,7 +376,7 @@ async def semantic_rollback(ds_id: str, version: int, request: Request):
     try:
         from domains.chatbi import indexing
         from domains.chatbi.llm_compat import LLMCompat
-        _rb = indexing.rebuild_index(content, ds_id, stores.get_vector(request.app.state),
+        _rb = indexing.guarded_rebuild(content, ds_id, stores.get_vector(request.app.state),
                                      stores.get_embedder(LLMCompat(request.app.state.llm_client)),
                                      db=_db())
         if _rb is not None and getattr(_rb, "error", None):
@@ -524,12 +525,16 @@ async def get_graph(ds_id: str, request: Request = None):
     content = semantic.load_current_content(_db(), ds_id)
     if content is None:
         raise HTTPException(404, "该数据源尚未扫描语义层")
-    return schema_graph.get_schema_graph(content,
+    _vis = schema_graph.get_schema_graph(content,
         community_algorithm=str(_graph_setting(request, "graph_community_algorithm", "label_propagation")),
         max_join_path_hops=int(_graph_setting(request, "graph_max_join_path_hops", 4)),
         expand_max_total=int(_graph_setting(request, "graph_expand_max_total", 10)),
         expand_use_community=bool(_graph_setting(request, "graph_expand_use_community", True)),
         ).to_vis_data()
+    # 十一审 7.3: 图谱编辑需要版本前置——GET 返回当前语义版本
+    _, _ds_ver = semantic.load_content(_db(), ds_id)
+    _vis["semanticVersion"] = _ds_ver
+    return _vis
 
 
 @router.get("/datasources/{ds_id}/graph/subgraph", dependencies=[Depends(admin_required)])
@@ -633,7 +638,7 @@ def _graph_index_rebuilder(request: Request, ds_id: str, content):
     def _rebuild():
         from domains.chatbi import indexing, stores
         from domains.chatbi.llm_compat import LLMCompat
-        _rb = indexing.rebuild_index(
+        _rb = indexing.guarded_rebuild(
             content, ds_id,
             stores.get_vector(request.app.state),
             stores.get_embedder(LLMCompat(request.app.state.llm_client)),
@@ -656,6 +661,7 @@ async def graph_add_relationship(ds_id: str, body: GraphRelationshipIn, request:
     try:
         result = graph_edit.add_relationship(
             _db(), ds_id,
+            expected_version=body.expected_version,
             from_table=body.from_table, target_table=body.target_table,
             join_type=body.join_type, on=body.on, cardinality=body.cardinality)
     except graph_edit.GraphEditError as e:
@@ -678,12 +684,13 @@ async def graph_add_relationship(ds_id: str, body: GraphRelationshipIn, request:
 
 @router.delete("/datasources/{ds_id}/graph/relationship", dependencies=[Depends(admin_required)])
 async def graph_delete_relationship(ds_id: str, from_table: str, target_table: str, on: str = "",
-                                     request: Request = None):
+                                     expected_version: int | None = None, request: Request = None):
     """删除图谱关系——正反向一起清理,写回语义层新版本 + 重建索引 + 审计。"""
     from domains.chatbi import graph_edit, semantic
     try:
         result = graph_edit.delete_relationship(
-            _db(), ds_id, from_table=from_table, target_table=target_table, on=on)
+            _db(), ds_id, from_table=from_table, target_table=target_table, on=on,
+            expected_version=expected_version)
     except graph_edit.GraphEditError as e:
         raise HTTPException(e.status, e.message)
     content = semantic.load_current_content(_db(), ds_id)

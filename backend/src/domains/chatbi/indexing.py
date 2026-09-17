@@ -254,7 +254,7 @@ def guarded_rebuild(content, data_source_id, store, embedder, db,
         result = rebuild_index(content, data_source_id, store, embedder, db)
         # 构建后复查: 构建期间 current 变了 → 用最新版补建一次
         _, cur_v = semantic.load_content(db, data_source_id)
-        if cur_v is not None and hasattr(content, 'version') and            getattr(content, 'version', 0) != cur_v:
+        if cur_v is not None and expected_version is not None and cur_v != expected_version:
             from domains.chatbi import semantic as _sem
             latest_content, _ = _sem.load_content(db, data_source_id)
             if latest_content is not None:

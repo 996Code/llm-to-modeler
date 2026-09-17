@@ -114,6 +114,7 @@ def _start_refresh_scheduler(manager, app_state) -> None:
                 manager.submit("chatbi.refresh_semantics", payload={},
                                dedupe_key="chatbi:refresh:all")
                 _loop._last_refresh = now   # 九审 7.4: submit成功后才推进
+                _loop._refresh_fail_count = 0  # 十审 7.5: 成功清零(连续计数)
                 logger.info("元数据定时刷新已提交 (周期 %gh)", hours)
             except Exception as e:
                 # 九审 7.4: 失败短退避(下一个30s tick重试), 不丢完整周期
@@ -138,6 +139,10 @@ def stop_refresh_scheduler() -> None:
         _refresh_stop.set()
     if _refresh_thread is not None and _refresh_thread.is_alive():
         _refresh_thread.join(timeout=5)
+        # 十一审 7.7: join 后确认退出——未退出保留引用, 拒绝新 scheduler
+        if _refresh_thread.is_alive():
+            logger.error('chatbi scheduler 5s 内未退出——保留引用, 拒绝新 scheduler')
+            return  # 不清引用(防空线程+新线程双跑)
     _refresh_thread = None
     _refresh_stop = None
 
@@ -188,7 +193,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             from domains.chatbi import indexing, stores
             store = stores.get_vector(app_state)
             embedder = stores.get_embedder(llm)
-            rb = indexing.rebuild_index(content, ds_id, store, embedder, db=db)
+            rb = indexing.guarded_rebuild(content, ds_id, store, embedder, db=db)
             if rb is not None and getattr(rb, "error", None):
                 raise RuntimeError(rb.error)   # RebuildResult.error 契约(五审5.2)
             indexed = rb.indexed_count
@@ -302,7 +307,12 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
     results = []
     for info in datasources.list_datasources(db, active_only=True):
         try:
-            current = semantic.load_current_content(db, info.id)
+            # 十一审 7.2 P0: content 和 revision 必须同一次读取——
+            # 此前 current 用 load_current_content(只有content), 版本号
+            # 在扫描后另查, 管理员扫描期间写入会产生"旧content+新版本号"
+            _loaded = semantic.load_content(db, info.id)
+            current, current_version = (_loaded if _loaded[0] is not None
+                                        else (None, None))
             if current is None:
                 # 从未扫描过: 首次扫描必须手动(需要 LLM 富化), 跳过
                 results.append({"datasource_id": info.id, "ok": True,
@@ -317,19 +327,8 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 infer_metrics=bool(settings.get("scan_metric_inference", True)),
                 datasource_id=info.id, persist=False)
             merged = _merge_content(current, new_content)
-            # 6.3 修复: struct_changed 必须比较数据库行版本——
-            # content.version 是内容 schema 版本(恒为1), 之前拿它和
-            # DB 行版本比较, DB 到 v2 后永远"已变化", 跳过优化失效
-            prev_db_version = None
-            try:
-                with db.connect() as conn:
-                    _row = conn.execute(
-                        "SELECT version FROM chatbi_semantic_models "
-                        "WHERE data_source_id = ? AND is_current = 1",
-                        (info.id,)).fetchone()
-                    prev_db_version = _row["version"] if _row else 0
-            except Exception:
-                prev_db_version = None
+            # 十一审 7.2: 直接用同快照的 current_version, 不再另查
+            prev_db_version = current_version
             # 十审 7.1: 传 expected_version——此前 refresh 不带版本前置,
             # 旧快照可静默覆盖管理员的新编辑(报告复现: Admin-A v2 被
             # Refresh-from-v1 v3 覆盖)。冲突时基于最新版重试一次。
@@ -339,14 +338,20 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                                                 source="refresh",
                                                 expected_version=prev_db_version)
             except _VCE:
-                # 冲突: 有并发人工/图谱写入——重新加载 current, 重新 merge
+                # 冲突: 有并发人工/图谱写入——重新加载 current, 用未污染
+                # 的 new_content(扫描结果)重新 merge(十一审 7.2: 不能复用
+                # 旧 merged——merge 会原地修改 new_content, 旧的关系/指标
+                # 已被污染, 复用可能复活管理员刚删除的内容)
                 logger.info("刷新版本冲突 ds=%s, 基于最新版重试", info.id)
-                from domains.chatbi import semantic as _sem_r
-                _retry = _sem_r.load_content(db, info.id)
+                _retry = semantic.load_content(db, info.id)
                 if _retry and _retry[0] is not None:
-                    _retry_content = _merge_content(_retry[0], new_content)
+                    _re_scanned = semantic.scan_datasource(
+                        llm=None, db=db, connect_info=_connect_info(info),
+                        infer_metrics=bool(settings.get("scan_metric_inference", True)),
+                        datasource_id=info.id, persist=False)
+                    _retry_merged = _merge_content(_retry[0], _re_scanned)
                     version = semantic.save_content(
-                        db, info.id, _retry_content, source="refresh",
+                        db, info.id, _retry_merged, source="refresh",
                         expected_version=_retry[1])
                 else:
                     raise  # 无法重试(无 current)
@@ -389,7 +394,7 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                 from domains.chatbi import stores as cb_stores
                 llm = runtime.get_llm(app_state) if app_state else None
                 if llm is not None:
-                    _rb = indexing.rebuild_index(
+                    _rb = indexing.guarded_rebuild(
                         content=final_content, data_source_id=info.id,
                         store=cb_stores.get_vector(app_state),
                         embedder=cb_stores.get_embedder(llm), db=db)
@@ -409,7 +414,7 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                     logger.warning("索引构建期间 current 并发变更 v%s→v%s, 重载重建",
                                    final_version, _recheck[1])
                     final_content, final_version = _recheck
-                    _rb = indexing.rebuild_index(
+                    _rb = indexing.guarded_rebuild(
                         content=final_content, data_source_id=info.id,
                         store=cb_stores.get_vector(app_state),
                         embedder=cb_stores.get_embedder(llm), db=db)
@@ -519,7 +524,7 @@ def _make_index_rebuilder(app_state, datasource_id: str):
         return None
 
     def _rebuild(content, data_source_id, **_kw):
-        result = indexing.rebuild_index(
+        result = indexing.guarded_rebuild(
             content=content, data_source_id=data_source_id,
             store=store, embedder=embedder, db=db)
         # rebuild_index 的失败契约是返回 RebuildResult(error=...) 而非抛

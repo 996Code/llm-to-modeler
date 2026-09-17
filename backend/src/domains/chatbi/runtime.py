@@ -30,6 +30,7 @@ def get_pack_db() -> PackRelationalDB:
 
 
 def _migrate_single_current(db: PackRelationalDB) -> None:
+    """存量双 current 修复(幂等; 表不存在时安全跳过)."""
     """十审 7.4: 存量双 current 修复——建唯一索引前, 收敛 current 到最高版本.
 
     此前版本允许产生双 is_current=1; 直接 CREATE UNIQUE INDEX 会失败.
@@ -67,10 +68,12 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
     from domains.chatbi.m4 import M4_DDL
     from domains.chatbi.query_stats import QUERY_STATS_DDL
     from domains.chatbi.graph_infer import WATERMARK_DDL
-    _migrate_single_current(db)  # 十审 7.4: 先修复存量双 current 再建唯一索引
+    # 十一审 7.1 P0 修复: 先建表(含唯一索引的幂等DDL), 再做存量迁移——
+    # 此前迁移在建表前, 全新库查不存在的表直接 UndefinedTable 崩启动
     db.init_schema(list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
                    + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
                    + list(QUERY_STATS_DDL) + list(WATERMARK_DDL))
+    _migrate_single_current(db)  # 建表后修复存量双 current(幂等)
 
 
 def get_settings_reader(ctx_or_state) -> Any:

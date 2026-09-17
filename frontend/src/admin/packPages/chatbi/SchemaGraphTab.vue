@@ -178,6 +178,7 @@ const graphData = ref<{ nodes: any[]; edges: any[] } | null>(null)
 const selectedNode = ref<any>(null)
 const selectedEdge = ref<any>(null)
 const mode = ref<'browse' | 'edit'>('browse')
+const semanticVersion = ref<number | null>(null)  // 图谱编辑的版本前置
 
 // 影响分析
 const impactLoading = ref('')
@@ -252,6 +253,7 @@ async function addRelationship() {
       join_type: addRelForm.joinType,
       on,
       cardinality: addRelForm.cardinality,
+      expected_version: semanticVersion.value,  // 十一审 7.3: 版本前置
     })
     if (data.index_rebuilt === false) {
       message.warning(`关系已添加(语义层 v${data.version}), 但索引重建失败——检索可能滞后, 手动重扫可修复`)
@@ -261,7 +263,7 @@ async function addRelationship() {
     showAddRel.value = false
     await loadGraph()
   } catch (e: any) {
-    message.error(e?.response?.data?.detail || '添加失败')
+    message.warning(e?.response?.status === 409 ? '图谱已被其他管理员更新——请刷新后重试' : (e?.response?.data?.detail || '添加失败'))
   } finally {
     addRelLoading.value = false
   }
@@ -274,8 +276,10 @@ async function deleteRelationship(edge: any) {
   if (!window.confirm(`删除关系 ${edge.source} → ${edge.target}? (反向关系一并删除)`)) return
   try {
     const { data } = await chatbiApi.delete(`/datasources/${dsId.value}/graph/relationship`, {
-      params: { from_table: edge.source, target_table: edge.target, on: edge.on || '' },
+      params: { from_table: edge.source, target_table: edge.target, on: edge.on || '',
+                expected_version: semanticVersion.value },
     })
+    semanticVersion.value = data.version
     const n = (data.removed_forward || 0) + (data.removed_reverse || 0)
     if (data.index_rebuilt === false) {
       message.warning(`已删除 ${n} 条关系(语义层 v${data.version}), 但索引重建失败——手动重扫可修复`)
@@ -286,7 +290,7 @@ async function deleteRelationship(edge: any) {
     selectedEdge.value = null
     await loadGraph()
   } catch (e: any) {
-    message.error(e?.response?.data?.detail || '删除失败')
+    message.warning(e?.response?.status === 409 ? '图谱已被其他管理员更新——请刷新后重试' : (e?.response?.data?.detail || '删除失败'))
   }
 }
 
@@ -323,6 +327,7 @@ async function loadGraph() {
   try {
     const { data } = await chatbiApi.get(`/datasources/${dsId.value}/graph`)
     graphData.value = data
+    semanticVersion.value = data.semanticVersion ?? null  // 十一审 7.3
     // 等容器真正可见(切 Tab 首次挂载时 v-if 已保证, 但 keep 场景/首帧
     // 布局未稳定时 offsetWidth 可能为 0)——双 rAF 确保布局完成再量尺寸
     await nextFrame()
