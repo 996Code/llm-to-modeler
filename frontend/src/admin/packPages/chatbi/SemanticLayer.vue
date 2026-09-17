@@ -453,7 +453,7 @@ async function persist(okMsg: string) {
   try {
     const { data } = await chatbiApi.put(
       `/datasources/${dsId.value}/semantic-models`,
-      { content: content.value, expected_version: version.value || null })
+      { content: content.value, expected_version: version.value ?? 0 })
     version.value = data.version
     if (data.index_rebuilt === false) {
       message.warning(`${okMsg} (v${data.version}) — 但索引重建失败: ${data.warning || '请重扫恢复'}`)
@@ -566,7 +566,7 @@ async function doRollback(toVersion: number) {
   try {
     const { data } = await chatbiApi.post('/semantic-rollback', null, {
       params: { ds_id: dsId.value, version: toVersion,
-                expected_current_version: version.value || undefined } })
+                expected_current_version: version.value ?? 0 } })
     if (data.index_rebuilt === false) {
       message.warning(`已回滚到 v${toVersion} — 但索引重建失败: ${data.warning || '请重扫恢复'}`)
     } else {

@@ -1114,13 +1114,15 @@ def save_content(db, datasource_id: str, content: SemanticModelContent,
             "WHERE data_source_id = ? ORDER BY version DESC LIMIT 1",
             (datasource_id,)).fetchone()
         # 获锁后校验 expected_version(九审 7.2: 旧快照提交 → 领域异常而非静默覆盖)
-        if expected_version is not None and row:
-            if int(row["version"]) != expected_version:
-                from domains.chatbi.graph_infer import VersionConflictError
-                raise VersionConflictError(
-                    expected_version=expected_version,
-                    current_version=int(row["version"]),
-                    pending_updates={},)
+        # 十五审 7.5: 空状态统一视作 actual=0——expected 与 actual 始终比较
+        # (此前只在 row 存在时校验, expected=7 在空状态可绕过 CAS 创建 v1)
+        actual_version = int(row["version"]) if row else 0
+        if expected_version is not None and expected_version != actual_version:
+            from domains.chatbi.graph_infer import VersionConflictError
+            raise VersionConflictError(
+                expected_version=expected_version,
+                current_version=actual_version,
+                pending_updates={},)
         if row:
             latest_version = int(row["version"])
             try:

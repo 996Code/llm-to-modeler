@@ -507,6 +507,12 @@ def _merge_content(old, new):
             continue  # 新表: 用扫描退化值, 等下次 LLM 富化
         new_m.display_name = old_m.display_name or new_m.display_name
         new_m.description = old_m.description or new_m.description
+        # 十五审 7.2: 表级 provenance 原子保留(此前只保值不保来源,
+        # refresh 后下次 rescan 会把人工表名当 auto 覆盖)
+        if 'manual' in (getattr(old_m, 'source', '') or ''):
+            new_m.source = old_m.source
+            if hasattr(old_m, 'confidence') and old_m.confidence is not None:
+                new_m.confidence = old_m.confidence
         # 指标/关系保留(I1): 刷新扫描(llm=None)只产规则 simple 指标 +
         # 外键/命名关系, 直接用会静默丢掉 LLM composite 指标(如 GMV)与
         # ai_inferred/implicit_mining 关系——语义层逐周期向裸结构退化。
@@ -540,66 +546,97 @@ def _merge_content(old, new):
 
 
 def _merge_rescan(old, new):
-    """重扫专用 merge(十四审 7.2): 来源感知——manual 保留, auto 可更新.
+    """重扫专用 merge(十五审重构): 来源感知 + provenance 原子保留 + 集合去重.
 
-    与 refresh 的 _merge_content 不同: 重扫的核心目的就是重新执行 LLM
-    富化(中文名/指标/示例问题), 不能像 refresh 那样旧值全覆盖.
-    分治规则:
-      - 列 display_name/description: 旧 source=manual → 保留; 否则用新
-      - 列 semantic_type/source/confidence: 旧 manual → 保留; 否则用新
-      - 指标: 旧 manual 保留; 旧 auto 用新替换; 新增的加入; 已删的移除
-      - 关系: 旧 manual 保留; 旧 fk/ai/named 本次仍存在用新值,
-        本次没有的不复活; 新增的加入
-      - sample_questions: 用新生成(重扫核心目的)
+    十四审版本的问题(十五审 P0/P1):
+      P0: 保留人工 display_name 时不保留 source/confidence → 来源被
+          悄悄降回 auto → 第二次重扫把人工值当 auto 覆盖(数据丢失链)
+      P1: manual/auto 同名指标直接拼接 → 重复项
+      P1: manual 关系不校验 target 是否仍存在 → 幽灵节点
+
+    分治规则(十五审版):
+      表级: 旧 manual → 原子保留 {display_name, description, source, confidence}
+      列级: 旧 manual → 原子保留 {display_name, description, semantic_type, source, confidence}
+      指标: 按 name 去重, manual 优先; 新 auto 同名丢弃
+      关系: manual 保留但校验 target_model 仍存在于新扫描(不存在则丢弃);
+            auto 不复活已删的
+      calculated_fields: 保留旧的(扫描不产此项, 不能清空)
+      sample_questions: 用新生成(重扫目的)
     """
     old_models = {m.name: m for m in old.models}
+    # 新扫描的全部表名集合(校验 manual 关系 target 用)
+    new_table_names = {m.name for m in new.models}
 
     for new_m in new.models:
-        old_m = old_models.get(new_m.name)  # 用 name 作 key(不是 Model 对象)
+        old_m = old_models.get(new_m.name)
         if old_m is None:
             continue  # 新表: 全部用扫描新值
 
-        # 表级 display_name/description: 旧 manual 保留
+        # ── 表级: manual 原子保留(值+来源+置信度, 十五审 P0) ──
         old_src = getattr(old_m, 'source', '') or ''
         if 'manual' in old_src:
-            new_m.display_name = old_m.display_name or new_m.display_name
+            if old_m.display_name:
+                new_m.display_name = old_m.display_name
             if old_m.description:
                 new_m.description = old_m.description
+            # 来源和置信度必须与显示值一起迁移(不能只复制一半)
+            new_m.source = old_m.source
+            if hasattr(old_m, 'confidence') and old_m.confidence is not None:
+                new_m.confidence = old_m.confidence
 
-        # 列级: 按 source 分治
+        # ── 列级: manual 原子保留 ──
         old_cols = {c.name: c for c in old_m.columns}
+        new_col_names = {c.name for c in new_m.columns}
         for c in new_m.columns:
             old_c = old_cols.get(c.name)
             if old_c is None:
                 continue  # 新列用新值
             col_src = getattr(old_c, 'source', '') or ''
             if 'manual' in col_src:
-                c.display_name = old_c.display_name or c.display_name
+                if old_c.display_name:
+                    c.display_name = old_c.display_name
                 if old_c.description:
                     c.description = old_c.description
                 if old_c.semantic_type:
                     c.semantic_type = old_c.semantic_type
+                # provenance 原子保留(十五审 P0)
+                c.source = old_c.source
+                if hasattr(old_c, 'confidence') and old_c.confidence is not None:
+                    c.confidence = old_c.confidence
             # auto 来源: 保留新扫描值(重扫的更新目的)
 
-        # 指标: manual 保留, auto 用新
+        # ── 指标: 按 name 去重, manual 优先(十五审 P1 7.3) ──
         if old_m.metrics:
             old_manual_metrics = {m.name: m for m in old_m.metrics
                                   if 'manual' in (getattr(m, 'source', '') or '')}
-            new_m.metrics = list(old_manual_metrics.values()) + list(new_m.metrics or [])
+            # 新 auto 指标中, 同名被 manual 压制; 不同名的加入
+            merged_metrics = list(old_manual_metrics.values())
+            manual_names = set(old_manual_metrics.keys())
+            for nm in (new_m.metrics or []):
+                if nm.name not in manual_names:
+                    merged_metrics.append(nm)
+            new_m.metrics = merged_metrics
 
-        # 关系: manual 保留; auto 按新扫描为准(不复活已删的)
+        # ── 关系: manual 保留但校验 target 存在(十五审 P1 7.4) ──
         if old_m.relationships:
-            old_manual_rels = [r for r in old_m.relationships
-                               if r.source == 'manual']
-            new_rel_keys = {(r.name, r.target_model) for r in (new_m.relationships or [])}
-            # 旧 auto 关系本次仍存在的用旧值(FK 不变), 不存在的自然消失
+            valid_manual_rels = []
+            dropped_rels = []
             for r in old_m.relationships:
-                if r.source != 'manual' and (r.name, r.target_model) not in new_rel_keys:
-                    continue  # 已删的 FK 不复活(不加入)
-            new_m.relationships = old_manual_rels + list(new_m.relationships or [])
+                if r.source == 'manual':
+                    if r.target_model in new_table_names:
+                        valid_manual_rels.append(r)
+                    else:
+                        dropped_rels.append(r.name)
+            if dropped_rels:
+                logger.warning("rescan merge: 丢弃指向已删表的人工关系 %s (table=%s)",
+                               dropped_rels, new_m.name)
+            new_m.relationships = valid_manual_rels + list(new_m.relationships or [])
+
+        # ── calculated_fields: 保留旧的(扫描不产此项, 不能清空) ──
+        if hasattr(old_m, 'calculated_fields') and old_m.calculated_fields:
+            new_m.calculated_fields = list(old_m.calculated_fields)
 
     # 示例问题: 用新生成(重扫目的)
-    # new.sample_questions 已是最新扫描值, 不覆盖
     return new
 
 

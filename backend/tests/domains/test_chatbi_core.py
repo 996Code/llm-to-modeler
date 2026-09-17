@@ -330,6 +330,14 @@ class TestMergeRescan:
             ], relationships=[
                 Relationship(name='r_fk', target_model='v', join_type='LEFT', on='x=w', type='N:1', source='foreign_key'),
             ]),
+            # r_manual 的 target='u'——必须存在于新扫描中(否则被正确丢弃)
+            Model(name='u', display_name='U', columns=[
+                Column(name='id', display_name='ID', data_type='INT'),
+            ]),
+            # r_fk 的 target='v'
+            Model(name='v', display_name='V', columns=[
+                Column(name='id', display_name='ID', data_type='INT'),
+            ]),
         ])
         merged = _merge_rescan(old, new)
         m = merged.models[0]
