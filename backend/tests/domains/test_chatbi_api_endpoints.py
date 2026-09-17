@@ -188,3 +188,46 @@ class TestRollbackValidation:
         r = c.post("/semantic-rollback",
                    params={"ds_id": ds_id, "version": 1})
         assert r.status_code == 428
+
+
+class TestCardinalityValidation:
+    """十四审 7.1: 四种合法基数全部可提交."""
+
+    def test_all_four_cardinalities_accepted(self, client, ds_id):
+        c, db = client
+        from domains.chatbi import semantic
+        _, cur_v = semantic.load_content(db, ds_id)
+        for card in ("N:1", "1:N", "1:1", "N:N"):
+            r = c.post(f"/datasources/{ds_id}/graph/relationship",
+                       json={"from_table": "orders", "target_table": "users",
+                             "on": "orders.user_id = users.id",
+                             "cardinality": card,
+                             "expected_version": cur_v})
+            assert r.status_code in (200, 409), \
+                f"cardinality {card} → {r.status_code}: {r.text[:80]}"
+            if r.status_code == 200:
+                # delete it for next iteration
+                c.delete(f"/datasources/{ds_id}/graph/relationship",
+                         params={"from_table": "orders", "target_table": "users",
+                                 "on": "orders.user_id = users.id",
+                                 "expected_version": r.json()["version"]})
+                _, cur_v = semantic.load_content(db, ds_id)
+
+    def test_invalid_cardinality_422(self, client, ds_id):
+        c, _ = client
+        r = c.post(f"/datasources/{ds_id}/graph/relationship",
+                   json={"from_table": "o", "target_table": "u",
+                         "on": "o.x=u.y", "cardinality": "M:N",
+                         "expected_version": 1})
+        assert r.status_code == 422
+
+
+class TestFirstPutRequiresExpected:
+    """十四审 7.4: 首次 PUT 也必须带 expected(=0)."""
+
+    def test_first_put_without_expected_428(self, client, ds_id):
+        """已有版本时缺 expected → 428(不是只在有版本时才拒绝)."""
+        c, _ = client
+        r = c.put(f"/datasources/{ds_id}/semantic-models",
+                  json={"content": {"models": []}})
+        assert r.status_code == 428

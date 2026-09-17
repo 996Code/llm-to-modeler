@@ -124,7 +124,7 @@ class GraphRelationshipIn(BaseModel):
     target_table: str
     join_type: Literal["INNER", "LEFT", "RIGHT", "FULL"] = "LEFT"
     on: str                       # JOIN ON 条件(表.列 = 表.列 [AND ...])
-    cardinality: Literal["N:1", "1:1", "N:N"] = "N:1"
+    cardinality: Literal["N:1", "1:N", "1:1", "N:N"] = "N:1"
     expected_version: int | None = None  # 十三审 7.2: 必填(API层强制428)
 
 
@@ -311,10 +311,11 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
     if body.expected_version is None:
         from domains.chatbi import semantic as _sem_chk
         _, existing_v = _sem_chk.load_content(_db(), ds_id)
-        if existing_v is not None:
-            # 十二审 8.4: 已有版本缺 expected → 拒绝(不是warning)
-            raise HTTPException(428, f"更新已有语义版本必须携带 expected_version "
-                                    f"(当前 v{existing_v})——请先 GET 获取最新版本")
+        # 十四审 7.4: 首次创建也必须带 expected=0(删除 None 双重语义;
+        # 首次 PUT vs 首次 scan 竞态时无条件覆盖漏洞)
+        raise HTTPException(428, "语义更新必须携带 expected_version"
+                                f"(首次创建传 0; 当前"
+                                f" {'v' + str(existing_v) if existing_v else '无版本'})")
     try:
         ver = semantic.save_content(_db(), ds_id, content, source="manual",
                                     expected_version=body.expected_version)
@@ -349,8 +350,6 @@ async def semantic_diff(ds_id: str, from_version: int, to_version: int):
     except ValueError as e:
         raise HTTPException(404, str(e))
     except Exception as e:
-        if 'VersionConflict' in type(e).__name__:
-            raise HTTPException(409, "回滚期间版本被并发修改——请刷新后重试")
         raise
 
 

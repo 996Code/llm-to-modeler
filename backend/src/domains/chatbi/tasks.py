@@ -190,9 +190,12 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             infer_metrics=bool(settings.get("scan_metric_inference", True)),
             progress_cb=progress, datasource_id=ds_id,
             persist=False)  # 不在内部保存——由外部 CAS 保存
-        # rescan 时保留旧标注(同 refresh 的 merge 逻辑)
+        # 十四审 7.2: rescan 用来源感知 merge(不是 refresh 粗 merge)——
+        # refresh 的 _merge_content 旧值全覆盖会吞掉重扫的新 LLM 名/指标/
+        # 问题(重扫的核心目的就是重新富化); rescan 按 source 分治:
+        #   manual/人工标注 → 保留旧值; auto(LLM/规则推断) → 允许新值替换
         if _pre and _pre[0] is not None:
-            content = _merge_content(_pre[0], content)
+            content = _merge_rescan(_pre[0], content)
         try:
             version = semantic.save_content(db, ds_id, content,
                                             source="scan",
@@ -206,7 +209,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                 infer_metrics=bool(settings.get("scan_metric_inference", True)),
                 progress_cb=progress, datasource_id=ds_id, persist=False)
             if _retry and _retry[0] is not None:
-                content = _merge_content(_retry[0], _re_scan)
+                content = _merge_rescan(_retry[0], _re_scan)  # 来源感知
                 version = semantic.save_content(db, ds_id, content,
                                                 source="scan",
                                                 expected_version=_retry[1])
@@ -533,6 +536,70 @@ def _merge_content(old, new):
             if old_c.confidence:
                 c.confidence = old_c.confidence
     new.sample_questions = old.sample_questions or new.sample_questions
+    return new
+
+
+def _merge_rescan(old, new):
+    """重扫专用 merge(十四审 7.2): 来源感知——manual 保留, auto 可更新.
+
+    与 refresh 的 _merge_content 不同: 重扫的核心目的就是重新执行 LLM
+    富化(中文名/指标/示例问题), 不能像 refresh 那样旧值全覆盖.
+    分治规则:
+      - 列 display_name/description: 旧 source=manual → 保留; 否则用新
+      - 列 semantic_type/source/confidence: 旧 manual → 保留; 否则用新
+      - 指标: 旧 manual 保留; 旧 auto 用新替换; 新增的加入; 已删的移除
+      - 关系: 旧 manual 保留; 旧 fk/ai/named 本次仍存在用新值,
+        本次没有的不复活; 新增的加入
+      - sample_questions: 用新生成(重扫核心目的)
+    """
+    old_models = {m.name: m for m in old.models}
+
+    for new_m in new.models:
+        old_m = old_models.get(new_m)
+        if old_m is None:
+            continue  # 新表: 全部用扫描新值
+
+        # 表级 display_name/description: 旧 manual 保留
+        old_src = getattr(old_m, 'source', '') or ''
+        if 'manual' in old_src:
+            new_m.display_name = old_m.display_name or new_m.display_name
+            if old_m.description:
+                new_m.description = old_m.description
+
+        # 列级: 按 source 分治
+        old_cols = {c.name: c for c in old_m.columns}
+        for c in new_m.columns:
+            old_c = old_cols.get(c.name)
+            if old_c is None:
+                continue  # 新列用新值
+            col_src = getattr(old_c, 'source', '') or ''
+            if 'manual' in col_src:
+                c.display_name = old_c.display_name or c.display_name
+                if old_c.description:
+                    c.description = old_c.description
+                if old_c.semantic_type:
+                    c.semantic_type = old_c.semantic_type
+            # auto 来源: 保留新扫描值(重扫的更新目的)
+
+        # 指标: manual 保留, auto 用新
+        if old_m.metrics:
+            old_manual_metrics = {m.name: m for m in old_m.metrics
+                                  if 'manual' in (getattr(m, 'source', '') or '')}
+            new_m.metrics = list(old_manual_metrics.values()) + list(new_m.metrics or [])
+
+        # 关系: manual 保留; auto 按新扫描为准(不复活已删的)
+        if old_m.relationships:
+            old_manual_rels = [r for r in old_m.relationships
+                               if r.source == 'manual']
+            new_rel_keys = {(r.name, r.target_model) for r in (new_m.relationships or [])}
+            # 旧 auto 关系本次仍存在的用旧值(FK 不变), 不存在的自然消失
+            for r in old_m.relationships:
+                if r.source != 'manual' and (r.name, r.target_model) not in new_rel_keys:
+                    continue  # 已删的 FK 不复活(不加入)
+            new_m.relationships = old_manual_rels + list(new_m.relationships or [])
+
+    # 示例问题: 用新生成(重扫目的)
+    # new.sample_questions 已是最新扫描值, 不覆盖
     return new
 
 
