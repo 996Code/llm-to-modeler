@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -32,6 +33,7 @@ from domains.chatbi.stores import (
     PackRelationalDB,
     VectorRecord,
     get_or_create_scope,
+    register_chunk_identities,
 )
 
 logger = logging.getLogger(__name__)
@@ -218,6 +220,10 @@ def build_index(
         logger.warning("build_index upsert 失败, 跳过索引: %s", e)
         return IndexResult(indexed_count=0, error=str(e))
 
+    # 十九审 6.1: 身份真源落 PG——超长 chunk_id 截断后业务身份以
+    # chatbi_chunk_identities 反查恢复, 不再依赖不可逆主键解码
+    register_chunk_identities(db, scope, records, doc_id)
+
     logger.info("build_index: 索引 %d 条 (data_source=%s)", len(records), data_source_id)
     return IndexResult(indexed_count=len(records))
 
@@ -285,6 +291,8 @@ def rebuild_index(
     db: Optional[PackRelationalDB] = None,
     scope: Optional[str] = None,
     revision: Optional[int] = None,
+    published_grace_seconds: int = 600,
+    unfinished_ttl_seconds: int = 86400,
 ) -> RebuildResult:
     """语义层变更后重建索引。
 
@@ -324,7 +332,9 @@ def rebuild_index(
     # ── 十七审 7.7: revision 发布路径(带版本号的调用方) ──
     if revision is not None:
         return _rebuild_with_revision(
-            content, data_source_id, store, embedder, scope, db, revision)
+            content, data_source_id, store, embedder, scope, db, revision,
+            published_grace_seconds=published_grace_seconds,
+            unfinished_ttl_seconds=unfinished_ttl_seconds)
 
     # ── legacy 路径: 删旧 + 建新(无版本号的兼容调用方) ──
     # 1. 删旧: 该 scope 的语义层分区(同数据源维度, few-shot 分区不受影响)
@@ -375,6 +385,8 @@ def _rebuild_with_revision(
     scope: str,
     db: Optional[PackRelationalDB],
     revision: int,
+    published_grace_seconds: int = 600,
+    unfinished_ttl_seconds: int = 86400,
 ) -> RebuildResult:
     """revision namespace 发布: 建新分区 → 原子翻转指针 → 延迟清理旧分区。
 
@@ -388,10 +400,22 @@ def _rebuild_with_revision(
     分区也由同一 GC 回收(按记录的 doc_id 删)。
     """
     from domains.chatbi.stores import (get_active_doc_id, set_active_doc_id,
-                                       record_index_build, gc_index_builds)
+                                       record_index_build, gc_index_builds,
+                                       _ensure_build_ledger)
 
     prev_doc = get_active_doc_id(db, scope) if db is not None else None
     new_doc = f"{DOC_SCHEMA}_r{revision}"
+
+    # 十九审 6.5: 升级回填——active 指针已存在(如 schema_r17)但台账无行时
+    # 补一条 published, 否则旧 revision 向量永远无法被 GC
+    if db is not None and prev_doc:
+        m = re.match(rf"^{re.escape(DOC_SCHEMA)}_r(\d+)$", prev_doc or "")
+        if m:
+            try:
+                _ensure_build_ledger(db, scope, int(m.group(1)), prev_doc,
+                                     status="published")
+            except Exception as e:
+                logger.warning("升级回填台账失败(scope=%s): %s", scope[:8], e)
 
     # 1. 构建意图落账(GC 依据: 崩溃/让路的半成品分区按 doc_id 可回收)
     if db is not None:
@@ -444,7 +468,9 @@ def _rebuild_with_revision(
         # 首次 revision 发布时, legacy "schema" 无版本分区按 version=0 落账
         if prev_doc == DOC_SCHEMA:
             record_index_build(db, scope, 0, DOC_SCHEMA, status="published")
-        deleted = gc_index_builds(db, scope, store, keep_generations=2)
+        deleted = gc_index_builds(db, scope, store, keep_generations=2,
+                                  published_grace_seconds=published_grace_seconds,
+                                  unfinished_ttl_seconds=unfinished_ttl_seconds)
     except Exception as e:
         logger.info("rebuild_index(revision) 旧分区 GC 失败(无害, 下次重试): %s", e)
 

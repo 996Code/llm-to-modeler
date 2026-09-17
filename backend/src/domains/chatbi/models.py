@@ -227,6 +227,19 @@ CHATBI_DDL = [
         holder TEXT NOT NULL,
         expires_at TEXT NOT NULL
     )""",
+    # 十九审 6.1: chunk 身份反查表——超长 chunk_id 截断后业务身份
+    # (type/name/owner_model)以 PG 为真源恢复, 不再依赖不可逆主键解码
+    """CREATE TABLE IF NOT EXISTS chatbi_chunk_identities (
+        scope TEXT NOT NULL,
+        chunk_id TEXT NOT NULL,
+        doc_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        owner_model TEXT,
+        PRIMARY KEY (scope, chunk_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_chatbi_chunk_ident_doc "
+    "ON chatbi_chunk_identities(scope, doc_id)",
 ]
 
 

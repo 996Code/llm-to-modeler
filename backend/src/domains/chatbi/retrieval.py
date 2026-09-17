@@ -178,11 +178,12 @@ def retrieve(
 
     # 多 scope(无 ds 限定的跨源检索)→ 逐 scope 召回后按分数合并截断
     candidates: List[SearchResult] = []
+    candidates_by_scope: Dict[str, List[SearchResult]] = {}
     pointer_errors = 0
     for sc in scopes:
         # 十八审 7.7: 读 active 指针——"无记录"回退 legacy 分区(未迁移);
         # "读取失败"不静默回退(伪装未迁移可能读到过期/空索引), 单 scope
-        # 跳过并计数, 全部失败 → fail-closed 返回明确原因
+        # 跳过并计数, 全部失败 → fail-closed
         try:
             from domains.chatbi.stores import get_active_doc_id
             doc = get_active_doc_id(db, sc) or DOC_SCHEMA
@@ -191,13 +192,15 @@ def retrieve(
             logger.error("retrieve 读 active 指针失败 (scope=%s): %s", sc[:8], e)
             continue
         try:
-            candidates.extend(store.search_records(
+            sc_hits = store.search_records(
                 sc,
                 query_vec,
                 top_k=top_k,
                 score_threshold=score_threshold,
                 doc_id=doc,
-            ))
+            )
+            candidates.extend(sc_hits)
+            candidates_by_scope[sc] = sc_hits
         except Exception as e:
             # 单 scope 检索失败不拖垮跨源合并(与源实现 search 返回空的宁缺毋滥一致)
             logger.warning("retrieve search 失败 (scope=%s): %s", sc[:8], e)
@@ -205,6 +208,21 @@ def retrieve(
         logger.error("retrieve: 全部 scope 的 active 指针读取失败, fail-closed")
         return RetrievalResult(
             no_match_reason="索引活跃版本状态不可用(存储异常), 已停止检索以避免读到过期索引")
+
+    # 十九审 6.1: 命中身份从 PG 反查恢复(超长 chunk_id 截断不可逆,
+    # type/name/owner_model 以 chatbi_chunk_identities 为真源)。按各自
+    # scope 反查——同 chunk_id 在不同数据源可指不同对象; 缺行回退解码。
+    if candidates:
+        from domains.chatbi.stores import lookup_chunk_identities
+        for sc, sc_hits in candidates_by_scope.items():
+            ident = lookup_chunk_identities(db, sc,
+                                            [h.record.id for h in sc_hits])
+            if not ident:
+                continue
+            for h in sc_hits:
+                m = ident.get(h.record.id)
+                if m:
+                    h.record.metadata = dict(m)
     candidates.sort(key=lambda r: r.score, reverse=True)
     candidates = candidates[:top_k]
 

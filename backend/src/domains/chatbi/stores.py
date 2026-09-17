@@ -403,7 +403,7 @@ def clear_scope(db: PackRelationalDB, data_source_id: str) -> None:
 # 构建中途崩溃 → 指针未动, 读者仍读旧分区; 残余分区是垃圾不影响正确性。
 
 def ensure_index_revision_schema(db: PackRelationalDB) -> None:
-    """幂等建 active 指针表 + builds 台账(老部署升级路径;新部署由 CHATBI_DDL 覆盖)。"""
+    """幂等建 active 指针表 + builds 台账 + chunk 身份表(老部署升级路径)。"""
     with db.connect() as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS chatbi_index_revisions ("
@@ -419,6 +419,97 @@ def ensure_index_revision_schema(db: PackRelationalDB) -> None:
             "status TEXT NOT NULL DEFAULT 'building', "
             "updated_at TEXT NOT NULL, "
             "PRIMARY KEY (scope, version))")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS chatbi_chunk_identities ("
+            "scope TEXT NOT NULL, "
+            "chunk_id TEXT NOT NULL, "
+            "doc_id TEXT NOT NULL, "
+            "type TEXT NOT NULL, "
+            "name TEXT NOT NULL, "
+            "owner_model TEXT, "
+            "PRIMARY KEY (scope, chunk_id))")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chatbi_chunk_ident_doc "
+            "ON chatbi_chunk_identities(scope, doc_id)")
+
+
+def register_chunk_identities(db: Optional[PackRelationalDB], scope: str,
+                              records: List[VectorRecord], doc_id: str) -> None:
+    """索引写入时登记 chunk → 业务身份(十九审 6.1 的身份真源)。
+
+    超长 chunk_id 截断不可逆, 完整 type/name/owner_model 以 PG 为准——
+    检索命中经 lookup_chunk_identities 恢复身份, 不再依赖主键反解。
+    失败仅告警: 身份表缺失时解码回退仍可服务短键。
+    """
+    if db is None or not records:
+        return
+    try:
+        ensure_index_revision_schema(db)
+        with db.connect() as conn:
+            for rec in records:
+                rtype = rec.metadata.get("type")
+                name = rec.metadata.get("name")
+                if not (rtype and name):
+                    continue
+                cid = ChatBIVectorStore._chunk_id(rec)
+                conn.execute(
+                    "INSERT INTO chatbi_chunk_identities "
+                    "(scope, chunk_id, doc_id, type, name, owner_model) "
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (scope, chunk_id) DO UPDATE SET "
+                    "doc_id = EXCLUDED.doc_id, type = EXCLUDED.type, "
+                    "name = EXCLUDED.name, owner_model = EXCLUDED.owner_model",
+                    (scope, cid, doc_id, rtype, name,
+                     rec.metadata.get("owner_model")))
+    except Exception as e:
+        logger.warning("chunk 身份登记失败(scope=%s): %s", scope[:8], e)
+
+
+def lookup_chunk_identities(db: Optional[PackRelationalDB], scope: str,
+                            chunk_ids: List[str]) -> Dict[str, dict]:
+    """批量反查 chunk 身份(检索命中回填 metadata 用)。失败返回空(回退解码)。"""
+    if db is None or not chunk_ids:
+        return {}
+    try:
+        with db.connect() as conn:
+            out: Dict[str, dict] = {}
+            # chunk_ids 来自单次召回(top_k ≤ 100 量级), 分批 IN 查询
+            for i in range(0, len(chunk_ids), 200):
+                batch = chunk_ids[i:i + 200]
+                marks = ",".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"SELECT chunk_id, type, name, owner_model "
+                    f"FROM chatbi_chunk_identities "
+                    f"WHERE scope = ? AND chunk_id IN ({marks})",
+                    [scope, *batch]).fetchall()
+                for r in rows:
+                    meta = {"type": r["type"], "name": r["name"]}
+                    if r["owner_model"]:
+                        meta["owner_model"] = r["owner_model"]
+                    out[r["chunk_id"]] = meta
+            return out
+    except Exception as e:
+        logger.warning("chunk 身份反查失败(scope=%s): %s", scope[:8], e)
+        return {}
+
+
+def delete_chunk_identities(db: Optional[PackRelationalDB], scope: str,
+                            doc_id: Optional[str] = None) -> None:
+    """清理 chunk 身份行(GC 按分区删; 数据源删除按整 scope 删)。"""
+    if db is None:
+        return
+    try:
+        with db.connect() as conn:
+            if doc_id is None:
+                conn.execute(
+                    "DELETE FROM chatbi_chunk_identities WHERE scope = ?",
+                    (scope,))
+            else:
+                conn.execute(
+                    "DELETE FROM chatbi_chunk_identities "
+                    "WHERE scope = ? AND doc_id = ?", (scope, doc_id))
+    except Exception as e:
+        logger.warning("chunk 身份清理失败(scope=%s): %s", scope[:8], e)
 
 
 def get_active_doc_id(db: Optional[PackRelationalDB],
@@ -497,37 +588,102 @@ def record_index_build(db: PackRelationalDB, scope: str, version: int,
             (scope, version, doc_id, status, _now()))
 
 
-def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,
-                    keep_generations: int = 2) -> int:
-    """回收过旧分区: 保留最近 keep_generations 代(含 active), 更旧的删向量+删台账。
+def _ensure_build_ledger(db: PackRelationalDB, scope: str, version: int,
+                         doc_id: str, status: str) -> None:
+    """幂等补台账行(不存在才插入; 不覆盖已有状态)。
 
-    十八审 6.7: 翻转后立即删上一代会撞上"已读旧指针的在途查询"——
-    保留两代(active + prev)后, 同一刷新周期内的在途读者必然还在保留窗内。
-    building/yielded 残余(崩溃/让路)同样按台账回收。返回删除的向量条数。
+    十九审 6.5: 升级前已有 active 指针(如 schema_r17)但无台账行——
+    首次新式发布时按指针回填, 否则旧 revision 向量永远无法被 GC。
     """
+    ensure_index_revision_schema(db)
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO chatbi_index_builds "
+            "(scope, version, doc_id, status, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (scope, version) DO NOTHING",
+            (scope, version, doc_id, status, _now()))
+
+
+def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,
+                    keep_generations: int = 2,
+                    published_grace_seconds: int = 600,
+                    unfinished_ttl_seconds: int = 86400) -> int:
+    """回收过旧分区(十九审 6.3 重设计)。
+
+    保留集合 = active 分区 ∪ 最近 keep_generations 个 status='published'
+    的成功代际——按台账成功记录算代际, 不按版本号减法(失败版本造成
+    间隔时, 旧算法会删掉最后一个成功旧代、留下失败半成品)。
+
+    删除条件(时间宽限, 数据库时钟):
+      - 保留集之外 published: updated_at 早于 now-grace 才删——刚翻出
+        保留窗的分区, 给已读到旧指针的在途查询一个真实时间窗;
+      - building/yielded(崩溃/让路半成品): 早于 now-TTL 才删。
+    时间基准取数据库 now()(不信任各 worker 本地时钟); 台账时间不可解析
+    时宁可保留(不误删)。
+    返回删除的向量条数。
+    """
+    ensure_index_revision_schema(db)
     with db.connect() as conn:
         active = conn.execute(
-            "SELECT version FROM chatbi_index_revisions WHERE scope = ?",
-            (scope,)).fetchone()
+            "SELECT active_doc_id FROM chatbi_index_revisions "
+            "WHERE scope = ?", (scope,)).fetchone()
         if not active:
             return 0
-        active_v = int(active["version"])
-        # 保留最近 keep_generations 代(active 与 prev): 删除 ≤ active-N 代
-        stale = conn.execute(
-            "SELECT version, doc_id FROM chatbi_index_builds "
-            "WHERE scope = ? AND version <= ?",
-            (scope, active_v - keep_generations)).fetchall()
+        active_doc = active["active_doc_id"]
+        pub = conn.execute(
+            "SELECT doc_id FROM chatbi_index_builds "
+            "WHERE scope = ? AND status = 'published' "
+            "ORDER BY version DESC LIMIT ?",
+            (scope, keep_generations)).fetchall()
+        keep = {active_doc, *(r["doc_id"] for r in pub)}
+        now_row = conn.execute(
+            "SELECT to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS n"
+        ).fetchone()
+        candidates = conn.execute(
+            "SELECT version, doc_id, status, updated_at FROM chatbi_index_builds "
+            "WHERE scope = ?",
+            (scope,)).fetchall()
+        db_now = _parse_iso(now_row["n"] if now_row else None)
+        victims = []
+        for row in candidates:
+            if row["doc_id"] in keep:
+                continue
+            ts = _parse_iso(row["updated_at"])
+            if db_now is None or ts is None:
+                continue   # 时钟不可得/时间不可解析 → 宁可留(不误删)
+            age = (db_now - ts).total_seconds()
+            limit = (unfinished_ttl_seconds
+                     if row["status"] in ("building", "yielded")
+                     else published_grace_seconds)
+            if age >= limit:
+                victims.append(row)
         deleted = 0
-        for row in stale:
+        for row in victims:
             try:
                 deleted += store.delete_doc(scope, row["doc_id"])
                 conn.execute(
                     "DELETE FROM chatbi_index_builds "
                     "WHERE scope = ? AND version = ?",
                     (scope, int(row["version"])))
+                # 身份表同步清理(同分区不再可命中)
+                delete_chunk_identities(db, scope, row["doc_id"])
             except Exception as e:
                 logger.info("GC 分区 %s 失败(下次重试): %s", row["doc_id"], e)
         return deleted
+
+
+def _parse_iso(value):
+    """容错解析台账时间戳(ISO; 失败返回 None → 调用方宁可保留)。"""
+    if not value:
+        return None
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(value).replace(" ", "T")
+                                      .replace("+00", "+00:00")
+                                      .replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def delete_data_source_storage(db: PackRelationalDB, sdk_store: Any,
@@ -551,8 +707,13 @@ def delete_data_source_storage(db: PackRelationalDB, sdk_store: Any,
                 conn.execute(
                     "DELETE FROM chatbi_index_revisions WHERE scope = ?",
                     (scope,))
+                conn.execute(
+                    "DELETE FROM chatbi_index_builds WHERE scope = ?",
+                    (scope,))
         except Exception:
             pass
+        # 十九审 6.1: chunk 身份表按 scope 全清(collection 已不存在)
+        delete_chunk_identities(db, scope, doc_id=None)
     delete_fewshot_examples(db, data_source_id)
     clear_scope(db, data_source_id)
     return scope
