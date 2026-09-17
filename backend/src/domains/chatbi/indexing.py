@@ -358,6 +358,7 @@ def rebuild_index(
             data_source_id=data_source_id,
             store=store,
             embedder=embedder,
+            db=db,
             scope=scope,
         )
     except Exception as e:
@@ -428,8 +429,8 @@ def _rebuild_with_revision(
     try:
         built = build_index(
             content=content, data_source_id=data_source_id,
-            store=store, embedder=embedder, scope=scope, doc_id=new_doc,
-            revision=revision)
+            store=store, embedder=embedder, db=db, scope=scope,
+            doc_id=new_doc, revision=revision)
     except Exception as e:
         logger.warning("rebuild_index(revision) 构建失败(指针未动): %s", e)
         return RebuildResult(error=str(e))

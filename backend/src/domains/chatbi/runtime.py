@@ -3,10 +3,13 @@
 职责: pack 独立 schema 的 PackRelationalDB 单例 + 设置读取器 + LLM 取用,
 供 tools/api/tasks 共用,避免各自拼装。
 """
+import logging
 import threading
 from typing import Any
 
 from sdk.relational_store import PackRelationalDB
+
+logger = logging.getLogger(__name__)
 
 PACK_NAME = "chatbi"
 
@@ -70,16 +73,39 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
     from domains.chatbi.graph_infer import WATERMARK_DDL
     # 十一审 7.1 P0 修复: 先建表(含唯一索引的幂等DDL), 再做存量迁移——
     # 此前迁移在建表前, 全新库查不存在的表直接 UndefinedTable 崩启动
-    db.init_schema(list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
-                   + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
-                   + list(QUERY_STATS_DDL) + list(WATERMARK_DDL))
+    # 十九审 soak 发现: 多 worker 同时启动时并发 DDL 可能死锁
+    # (AccessExclusiveLock 互锁)——整组 DDL 带退避重试
+    import time as _time
+    ddl = (list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
+           + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
+           + list(QUERY_STATS_DDL) + list(WATERMARK_DDL))
+    for attempt in range(5):
+        try:
+            db.init_schema(ddl)
+            break
+        except Exception as e:
+            if "DeadlockDetected" in type(e).__name__ and attempt < 4:
+                wait = 3 * (attempt + 1)
+                logger.warning("启动建表死锁(多实例并发 DDL), %ds 后重试(%d/5): %s",
+                               wait, attempt + 1, e)
+                _time.sleep(wait)
+                continue
+            raise
     _migrate_single_current(db)  # 建表后修复存量双 current(幂等)
     # 十二审 8.1 P0: 唯一索引必须在迁移之后创建——CHATBI_DDL 不含它,
     # 旧库有双current时先建索引会 UniqueViolation 阻断启动
-    with db.connect() as conn:
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_semantic_current "
-            "ON chatbi_semantic_models(data_source_id) WHERE is_current = 1")
+    for attempt in range(5):
+        try:
+            with db.connect() as conn:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_semantic_current "
+                    "ON chatbi_semantic_models(data_source_id) WHERE is_current = 1")
+            break
+        except Exception as e:
+            if "DeadlockDetected" in type(e).__name__ and attempt < 4:
+                _time.sleep(3 * (attempt + 1))
+                continue
+            raise
 
 
 def get_settings_reader(ctx_or_state) -> Any:
