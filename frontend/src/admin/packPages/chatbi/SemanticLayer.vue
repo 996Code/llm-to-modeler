@@ -14,9 +14,10 @@
       </div>
     </div>
 
-    <!-- 待复核提示(十七审 7.6: merge 停用/冲突清单对管理员可见) -->
+    <!-- 待复核提示(十七审 7.6: merge 停用/冲突清单对管理员可见;
+         十八审 6.5/6.6: 报告版本对齐 + conflict/drop 统一字段) -->
     <a-alert v-if="reviewItems.length" type="warning" show-icon style="margin-bottom: 8px"
-             :message="`结构变化后有 ${reviewItems.length} 项语义被停用或存在属性冲突，请复核`">
+             :message="`结构变化后有 ${reviewItems.length} 项语义被停用或存在属性冲突，请复核（报告对应 v${reviewVersion}）`">
       <template #description>
         <div v-for="(item, i) in reviewItems" :key="i" style="font-size: 12px">
           · {{ reviewKindLabel(item.kind) }} <code>{{ item.table }}.{{ item.name }}</code> — {{ item.reason || item.detail }}
@@ -364,18 +365,21 @@ function selectTable(m: any) { selected.value = m }
 
 // ── 待复核清单(十七审 7.6): refresh/rescan 停用的人工项与属性冲突 ──
 const reviewItems = ref<any[]>([])
+const reviewVersion = ref(0)
 function reviewKindLabel(kind: string): string {
   return ({ metric: '指标', relationship: '关系', calculated_field: '计算字段',
-            db_comment_removed: '数据库注释' } as any)[kind] || kind
+            db_comment_removed: '数据库注释', relationship_conflict: '关系属性冲突' } as any)[kind] || kind
 }
 async function loadReview() {
-  if (!dsId.value) { reviewItems.value = []; return }
+  if (!dsId.value) { reviewItems.value = []; reviewVersion.value = 0; return }
   try {
     const { data } = await chatbiApi.get(`/datasources/${dsId.value}/semantic-review`)
     const r = data?.report || {}
+    reviewVersion.value = data?.version || 0
     reviewItems.value = [...(r.dropped_items || []), ...(r.conflicts || [])]
   } catch {
     reviewItems.value = []   // 拉取失败不阻塞页面
+    reviewVersion.value = 0
   }
 }
 

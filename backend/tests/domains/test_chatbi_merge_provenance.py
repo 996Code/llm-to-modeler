@@ -8,6 +8,7 @@ from domains.chatbi.models import (
     SemanticModelContent, Model, Column, Metric, Relationship,
     CalculatedField,
 )
+from domains.chatbi.stores import SearchResult
 
 
 def _col(name, source="auto_inferred", **kw):
@@ -729,30 +730,57 @@ class TestPersistedManualEditRefreshChain:
                                   expected_version=1)
 
 
-# ── 索引 revision namespace(十七审 7.7)───────────────────────────
+# ── 索引 revision namespace(十七审 7.7 / 十八审 P0-2)──────────────
 
 class _FakeVectorStore:
-    """ChatBIVectorStore 替身: 记录 doc_id 分区内容, 支持按分区删/查."""
+    """真实 Milvus 语义替身: collection 全局主键(chunk_id) + doc_id 过滤字段。
+
+    十八审 P0-2: 旧替身把 doc_id 当物理分区(dict[doc_id] → list), 掩盖了
+    "upsert 同主键跨 revision 覆盖"的存储真相。本替身逐条以 chunk_id 为主键
+    upsert(覆盖同主键行并改写其 doc_id), search/delete 按 doc_id 标量过滤——
+    与 sdk MilvusVectorStore 的行为一致。
+    """
 
     def __init__(self):
-        self.partitions: dict[str, list] = {}   # doc_id → records
-        self.fail_upsert = False
+        self.rows: dict[str, dict] = {}    # chunk_id → {record, doc_id}
+        self.fail_upsert_at: int | None = None   # 第 N 条 upsert 时失败(部分成功)
+        self._upsert_count = 0
 
     def upsert_records(self, scope, records, doc_id):
-        if self.fail_upsert:
-            raise RuntimeError("milvus down")
-        self.partitions.setdefault(doc_id, [])
-        self.partitions[doc_id].extend(records)
+        from domains.chatbi.stores import ChatBIVectorStore
+        for i, rec in enumerate(records):
+            if (self.fail_upsert_at is not None
+                    and self._upsert_count + i >= self.fail_upsert_at):
+                raise RuntimeError("milvus upsert 中途失败(部分成功)")
+            cid = ChatBIVectorStore._chunk_id(rec)
+            self.rows[cid] = {"record": rec, "doc_id": doc_id}
+        self._upsert_count += len(records)
         return len(records)
 
     def delete_doc(self, scope, doc_id):
-        n = len(self.partitions.get(doc_id, []))
-        self.partitions.pop(doc_id, None)
-        return n
+        cids = [c for c, v in self.rows.items() if v["doc_id"] == doc_id]
+        for c in cids:
+            del self.rows[c]
+        return len(cids)
 
     def search_records(self, scope, query_vector, top_k=5,
                        score_threshold=0.0, doc_id=None):
-        return list(self.partitions.get(doc_id, []))[:top_k]
+        from domains.chatbi.stores import ChatBIVectorStore, VectorRecord
+        out = []
+        for cid, v in self.rows.items():
+            if doc_id is not None and v["doc_id"] != doc_id:
+                continue
+            # 命中行 metadata 按真实回解码路径重建(与生产 search 一致)
+            out.append(SearchResult(
+                record=VectorRecord(
+                    id=cid, vector=query_vector,
+                    metadata=ChatBIVectorStore.decode_chunk_id(cid),
+                    text=v["record"].text),
+                score=1.0))
+        return out[:top_k]
+
+    def count_doc(self, doc_id):
+        return sum(1 for v in self.rows.values() if v["doc_id"] == doc_id)
 
 
 class _FakeEmbedder:
@@ -808,7 +836,7 @@ class TestIndexRevisionNamespace:
             row = conn.execute(
                 "SELECT active_doc_id FROM chatbi_index_revisions").fetchone()
         assert row["active_doc_id"] == "schema_r10"
-        assert "schema_r10" in store.partitions
+        assert store.count_doc("schema_r10") == 1
 
         # v11 发布 → r10 分区被延迟清理
         r2 = rebuild_index(_idx_content("b"), ds, store, _FakeEmbedder(),
@@ -818,8 +846,9 @@ class TestIndexRevisionNamespace:
             row = conn.execute(
                 "SELECT active_doc_id FROM chatbi_index_revisions").fetchone()
         assert row["active_doc_id"] == "schema_r11"
-        assert "schema_r10" not in store.partitions, "旧分区未清理"
-        assert "schema_r11" in store.partitions
+        # 两代 grace: 发布 r11 后 r10 仍保留(r12 发布后才 GC)
+        assert store.count_doc("schema_r10") == 1, "grace 窗内的上一代被误删"
+        assert store.count_doc("schema_r11") == 1
 
     def test_failed_build_keeps_old_active(self, pg_engine):
         from domains.chatbi.indexing import rebuild_index
@@ -831,7 +860,7 @@ class TestIndexRevisionNamespace:
         assert rebuild_index(_idx_content("a"), ds, store, _FakeEmbedder(),
                              db=pg_engine, revision=10).error is None
         # v11 构建失败 → 指针不动, r10 分区仍可读
-        store.fail_upsert = True
+        store.fail_upsert_at = 0
         r11 = rebuild_index(_idx_content("b"), ds, store, _FakeEmbedder(),
                             db=pg_engine, revision=11)
         assert r11.error is not None
@@ -867,3 +896,335 @@ class TestIndexRevisionNamespace:
         from domains.chatbi.stores import get_active_doc_id
         # 未发布过 revision 的 scope → None → 调用方回退 legacy "schema"
         assert get_active_doc_id(pg_engine, "never-indexed-scope") is None
+
+
+# ════════════════════════════════════════════════════════════════
+# 十八审反例回归: 人工 composite / revision 物理隔离 / 同名指标 /
+# conflict 契约 / 报告生命周期 / 调度租约
+# ════════════════════════════════════════════════════════════════
+
+class TestManualCompositePreservation:
+    """P0-1: 人工 composite 在 refresh/rescan 不得静默消失."""
+
+    def _old(self, factors=None, source="manual_edit"):
+        return SemanticModelContent(models=[
+            Model(name="orders", display_name="o", columns=[
+                _col("amount"), _col("id"),
+            ], metrics=[
+                Metric(name="amount_sum", display_name="合计",
+                       formula="SUM(amount)", type="single",
+                       source="rule_inferred"),
+                Metric(name="margin", display_name="人工毛利",
+                       formula="amount_sum / id_count", type="composite",
+                       factor_metric_names=list(factors or
+                                                ["amount_sum", "id_count"]),
+                       source=source),
+            ]),
+        ])
+
+    def _scan(self):
+        return SemanticModelContent(models=[
+            Model(name="orders", display_name="o", columns=[
+                _col("amount"), _col("id"),
+            ], metrics=[
+                Metric(name="amount_sum", display_name="合计",
+                       formula="SUM(amount)", type="single",
+                       source="rule_inferred"),
+                Metric(name="id_count", display_name="单数",
+                       formula="COUNT(id)", type="single",
+                       source="rule_inferred"),
+            ]),
+        ])
+
+    @pytest.mark.parametrize("merge_name", ["_merge_content", "_merge_rescan"])
+    def test_manual_composite_kept(self, merge_name):
+        from domains.chatbi import tasks
+        merged = getattr(tasks, merge_name)(self._old(), self._scan())
+        metrics = {m.name: m for m in merged.models[0].metrics}
+        assert "margin" in metrics, "人工 composite 被静默删除(P0-1)"
+        assert metrics["margin"].source == "manual_edit"
+        assert metrics["margin"].display_name == "人工毛利"
+
+    def test_manual_composite_suppresses_same_name_auto(self):
+        """同名 auto composite 不得顶替人工版."""
+        from domains.chatbi.tasks import _merge_content
+        scan = self._scan()
+        scan.models[0].metrics.append(Metric(
+            name="margin", display_name="自动毛利",
+            formula="amount_sum / id_count", type="composite",
+            factor_metric_names=["amount_sum", "id_count"],
+            source="auto_inferred"))
+        merged = _merge_content(self._old(), scan)
+        winners = [m for m in merged.models[0].metrics if m.name == "margin"]
+        assert len(winners) == 1 and winners[0].source == "manual_edit"
+
+    def test_manual_composite_broken_closure_reported(self):
+        """factor 引用已删指标 → 停用进复核(不静默)."""
+        from domains.chatbi.tasks import _merge_content, _new_report
+        old = self._old(factors=["amount_sum", "ghost"])
+        report = _new_report()
+        merged = _merge_content(old, self._scan(), report=report)
+        names = {m.name for m in merged.models[0].metrics}
+        assert "margin" not in names
+        drops = [d for d in report["dropped_items"] if d["name"] == "margin"]
+        assert drops and "ghost" in drops[0]["reason"], "失效必须进复核清单"
+        assert report["requires_review"] is True
+
+
+class TestRevisionPhysicalIsolation:
+    """P0-2: 全局主键语义下的故障注入(十八审 6.2 矩阵)."""
+
+    def _ds_row(self, db, ds_id):
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM chatbi_data_sources WHERE id = ?",
+                (ds_id,)).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO chatbi_data_sources "
+                    "(id, name, db_type, host, port, database, username, "
+                    "encrypted_password, is_active, scan_status, "
+                    "scan_progress, scan_stage, scan_error, created_at, "
+                    "updated_at) VALUES (?, 't', 'postgresql', 'h', 1, 'd', "
+                    "'u', 'p', 1, 'idle', 0, '', '', ?, ?)",
+                    (ds_id, "2026-01-01T00:00:00", "2026-01-01T00:00:00"))
+
+    @staticmethod
+    def _content2():
+        """两表内容(部分 upsert 注入用: 第一条成功后失败)."""
+        return SemanticModelContent(models=[
+            Model(name="a", display_name="表A", columns=[_col("id")]),
+            Model(name="b", display_name="表B", columns=[_col("id")]),
+        ])
+
+    def test_partial_upsert_failure_old_active_intact(self, pg_engine):
+        """v11 第一条 upsert 成功后失败 → active r10 分区必须完好.
+
+        旧实现(doc_id 假分区/主键不含 rev)下, r11 的第一条会覆盖 r10 的
+        同主键行并把 doc_id 改成 r11——active 被掏空. 主键含 rev 后,
+        r11 的行是新主键, 不触碰 r10.
+        """
+        from domains.chatbi.indexing import rebuild_index
+        ds = "iso-ds-1"
+        self._ds_row(pg_engine, ds)
+        store = _FakeVectorStore()
+        assert rebuild_index(self._content2(), ds, store, _FakeEmbedder(),
+                             db=pg_engine, revision=10).error is None
+        assert store.count_doc("schema_r10") == 2
+        # v11 部分成功: 第一条(model:a)写完后失败
+        store.fail_upsert_at = 1
+        r11 = rebuild_index(_idx_content("b"), ds, store, _FakeEmbedder(),
+                            db=pg_engine, revision=11)
+        assert r11.error is not None
+        # 关键断言: r10 两行都在, 读者无感知
+        assert store.count_doc("schema_r10") == 2, "active 分区被部分掏空"
+        assert store.search_records("s", [0.1], doc_id="schema_r10"), \
+            "active 分区在构建失败后不可检索"
+
+    def test_upsert_success_pointer_failure_old_active_intact(self, pg_engine,
+                                                              monkeypatch):
+        """upsert 全部成功但指针翻转失败 → 旧 active 完好(不删不翻)."""
+        from domains.chatbi.indexing import rebuild_index
+        import domains.chatbi.stores as stores_mod
+        ds = "iso-ds-2"
+        self._ds_row(pg_engine, ds)
+        store = _FakeVectorStore()
+        assert rebuild_index(self._content2(), ds, store, _FakeEmbedder(),
+                             db=pg_engine, revision=10).error is None
+
+        def _boom(*a, **kw):
+            raise RuntimeError("pointer write failed")
+        monkeypatch.setattr(stores_mod, "set_active_doc_id", _boom)
+        r11 = rebuild_index(self._content2(), ds, store, _FakeEmbedder(),
+                            db=pg_engine, revision=11)
+        assert r11.error is not None
+        monkeypatch.undo()
+        from domains.chatbi.stores import get_active_doc_id
+        with pg_engine.connect() as conn:
+            from domains.chatbi.stores import get_or_create_scope
+        assert get_active_doc_id(pg_engine, get_or_create_scope(pg_engine, ds)) \
+            == "schema_r10"
+        assert store.count_doc("schema_r10") == 2, "指针失败后旧分区被破坏"
+        assert store.search_records("s", [0.1], doc_id="schema_r10")
+
+    def test_reader_old_pointer_survives_flip_and_gc(self, pg_engine):
+        """发布 r12 后 GC 只删 ≤r10: 读 r11 旧指针的在途查询不受影响."""
+        from domains.chatbi.indexing import rebuild_index
+        ds = "iso-ds-3"
+        self._ds_row(pg_engine, ds)
+        store = _FakeVectorStore()
+        for rev in (10, 11, 12):
+            assert rebuild_index(self._content2(), ds, store, _FakeEmbedder(),
+                                 db=pg_engine, revision=rev).error is None
+        assert store.count_doc("schema_r12") == 2      # active
+        assert store.count_doc("schema_r11") == 2, "grace 窗内的上一代被删"
+        assert store.search_records("s", [0.1], doc_id="schema_r11"), \
+            "持有旧指针的在途查询撞上了 GC"
+        assert store.count_doc("schema_r10") == 0      # 两代外被回收
+
+    def test_same_revision_repair_idempotent(self, pg_engine):
+        """同 revision 重建(修复)不产生重复行(主键天然幂等)."""
+        from domains.chatbi.indexing import rebuild_index
+        ds = "iso-ds-4"
+        self._ds_row(pg_engine, ds)
+        store = _FakeVectorStore()
+        rebuild_index(self._content2(), ds, store, _FakeEmbedder(),
+                      db=pg_engine, revision=10)
+        rebuild_index(self._content2(), ds, store, _FakeEmbedder(),
+                      db=pg_engine, revision=10)
+        assert store.count_doc("schema_r10") == 2, "同 revision 修复产生重复"
+
+    def test_building_orphan_reclaimed_by_gc(self, pg_engine):
+        """崩溃残余(building 状态)分区在两代后被 GC 回收."""
+        from domains.chatbi.indexing import rebuild_index
+        from domains.chatbi.stores import (record_index_build,
+                                           get_or_create_scope)
+        ds = "iso-ds-5"
+        self._ds_row(pg_engine, ds)
+        store = _FakeVectorStore()
+        scope = get_or_create_scope(pg_engine, ds)
+        # 模拟崩溃: 构建意图落账 + 向量写了一半, 指针从未翻转
+        record_index_build(pg_engine, scope, 9, "schema_r9", status="building")
+        store.upsert_records(scope, [], doc_id="schema_r9")
+        # 正常发布 r10, r11(GC 阈值 ≤ active-2=9 → r9 被回收)
+        for rev in (10, 11):
+            rebuild_index(self._content2(), ds, store, _FakeEmbedder(),
+                          db=pg_engine, revision=rev)
+        with pg_engine.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM chatbi_index_builds "
+                "WHERE scope = ? AND version = 9", (scope,)).fetchone()
+        assert int(row["n"]) == 0, "building 孤儿台账未回收"
+
+
+class TestCrossTableSameNameMetric:
+    """P1 6.3: 跨表同名 metric 不互相覆盖; 检索 metadata 带 owner_model."""
+
+    def test_same_name_metrics_both_indexed_with_owner(self, pg_engine):
+        from domains.chatbi.indexing import build_index
+        from domains.chatbi.stores import get_or_create_scope
+        ds = "dup-ds-1"
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_data_sources "
+                "(id, name, db_type, host, port, database, username, "
+                "encrypted_password, is_active, scan_status, scan_progress, "
+                "scan_stage, scan_error, created_at, updated_at) "
+                "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
+                "'idle', 0, '', '', ?, ?)",
+                (ds, "2026-01-01T00:00:00", "2026-01-01T00:00:00"))
+        content = SemanticModelContent(models=[
+            Model(name="orders", display_name="订单", columns=[_col("amount")],
+                  metrics=[Metric(name="amount_sum", display_name="订单额合计",
+                                 formula="SUM(amount)", type="single",
+                                 source="rule_inferred")]),
+            Model(name="refunds", display_name="退款", columns=[_col("amount")],
+                  metrics=[Metric(name="amount_sum", display_name="退款额合计",
+                                 formula="SUM(amount)", type="single",
+                                 source="rule_inferred")]),
+        ])
+        store = _FakeVectorStore()
+        result = build_index(content, ds, store, _FakeEmbedder(), db=pg_engine)
+        assert result.indexed_count == 4   # 2 model + 2 metric
+        # 同名指标两条都在(物理主键含 owner)
+        metric_hits = store.search_records("s", [0.1], doc_id="schema")
+        owners = sorted(h.record.metadata.get("owner_model")
+                        for h in metric_hits
+                        if h.record.metadata.get("type") == "metric")
+        assert owners == ["orders", "refunds"], \
+            f"跨表同名指标被覆盖: {owners}"
+        # 同 revision 语义下两条 metric 主键不同
+        cids = sorted(h.record.id for h in metric_hits
+                      if h.record.metadata.get("type") == "metric")
+        assert cids == ["metric:orders:amount_sum",
+                        "metric:refunds:amount_sum"]
+
+
+class TestConflictReportContract:
+    """P1 6.6: conflict 条目与 dropped_items 字段统一(前端同一模板)."""
+
+    def test_conflict_item_has_kind_name_reason(self):
+        from domains.chatbi.tasks import _new_report, _report_conflict
+        report = _new_report()
+        _report_conflict(report, "orders", "manual_rel", "fk_rel",
+                         "ON 等价但属性不同")
+        c = report["conflicts"][0]
+        assert c["kind"] == "relationship_conflict"
+        assert c["name"] == "manual_rel"
+        assert c["reason"] == "ON 等价但属性不同"
+        assert c["manual"] == "manual_rel" and c["auto"] == "fk_rel"
+        # 前端模板字段 (item.kind/table/name/reason) 全部可解析
+        assert c["table"] == "orders"
+
+
+class TestReportLifecycle:
+    """P1 6.5: 报告可被干净 merge 清除(版本对齐), 数据源删除清理行."""
+
+    def test_clean_merge_overwrites_stale_report(self, pg_engine):
+        from domains.chatbi.tasks import (save_merge_report, get_merge_report,
+                                          _new_report, _report_drop)
+        report = _new_report()
+        _report_drop(report, "metric", "orders", "old", "missing_column: gone")
+        save_merge_report(pg_engine, "life-ds-1", 5, report)
+        assert get_merge_report(pg_engine, "life-ds-1")["report"]["requires_review"]
+        # 后续干净 merge(空报告)覆盖 → 告警消失, 版本对齐
+        save_merge_report(pg_engine, "life-ds-1", 6, _new_report())
+        saved = get_merge_report(pg_engine, "life-ds-1")
+        assert saved["version"] == 6
+        assert saved["report"]["dropped_items"] == []
+        assert saved["report"]["requires_review"] is False
+
+    def test_datasource_delete_cleans_report(self, pg_engine):
+        from domains.chatbi.tasks import (save_merge_report, get_merge_report,
+                                          _new_report, _report_drop)
+        from datetime import datetime, timezone
+        ds = "life-ds-2"
+        now = datetime.now(timezone.utc).isoformat()
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_data_sources "
+                "(id, name, db_type, host, port, database, username, "
+                "encrypted_password, is_active, created_at, updated_at) "
+                "VALUES (?, 't', 'pg', 'h', 1, 'd', 'u', 'p', 1, ?, ?)",
+                (ds, now, now))
+        report = _new_report()
+        _report_drop(report, "metric", "t", "m", "r")
+        save_merge_report(pg_engine, ds, 3, report)
+        assert get_merge_report(pg_engine, ds) is not None
+        with pg_engine.connect() as conn:   # 模拟删除端点的级联清理
+            conn.execute(
+                "DELETE FROM chatbi_merge_reports WHERE data_source_id = ?",
+                (ds,))
+        assert get_merge_report(pg_engine, ds) is None
+
+
+class TestSchedulerLease:
+    """P1 6.4: 跨进程租约——同时只有一个持有者, 过期可抢占."""
+
+    def test_lease_exclusive_and_reclaim(self, pg_engine):
+        from domains.chatbi.tasks import acquire_lease
+        assert acquire_lease(pg_engine, "refresh_semantics",
+                             holder="worker-a", ttl_seconds=300)
+        # 他人未过期 → 拒绝
+        assert not acquire_lease(pg_engine, "refresh_semantics",
+                                 holder="worker-b", ttl_seconds=300)
+        # 本人续期 → 成功
+        assert acquire_lease(pg_engine, "refresh_semantics",
+                             holder="worker-a", ttl_seconds=300)
+        # 过期后他人抢占
+        from datetime import datetime, timedelta, timezone
+        expired = (datetime.now(timezone.utc)
+                   - timedelta(seconds=1)).isoformat()
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "UPDATE chatbi_scheduler_leases SET expires_at = ? "
+                "WHERE task_type = ?", (expired, "refresh_semantics"))
+        assert acquire_lease(pg_engine, "refresh_semantics",
+                             holder="worker-b", ttl_seconds=300)
+
+    def test_lease_independent_per_task_type(self, pg_engine):
+        from domains.chatbi.tasks import acquire_lease
+        assert acquire_lease(pg_engine, "health_check",
+                             holder="worker-a", ttl_seconds=120)
+        assert acquire_lease(pg_engine, "purge_stats",
+                             holder="worker-b", ttl_seconds=900)

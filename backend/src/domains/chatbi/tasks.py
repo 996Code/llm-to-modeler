@@ -70,6 +70,12 @@ def _start_refresh_scheduler(manager, app_state) -> None:
         _loop._last_purge = 0.0   # 留存清理按小时级执行(四审 5.4: 每 30s 一次 DELETE 过频)
         while not _refresh_stop.wait(30):
             now = _now_ts()
+            from domains.chatbi.runtime import get_pack_db as _get_db
+            try:
+                _lease_db = _get_db()
+            except Exception as e:   # db 不可用 → 本轮跳过定时动作
+                logger.warning("调度器取 pack db 失败(本轮跳过): %s", e)
+                continue
             # 统计留存清理(每小时一次; 设置 retention 缺省 90 天, 0=关)
             if now - _loop._last_purge >= 3600:
                 _loop._last_purge = now
@@ -78,10 +84,11 @@ def _start_refresh_scheduler(manager, app_state) -> None:
                                     .get("query_stats_retention_days", 90))
                     if retention > 0:
                         from domains.chatbi.query_stats import purge_stats
-                        from domains.chatbi.runtime import get_pack_db
-                        purged = purge_stats(get_pack_db(), retention)
-                        if purged:
-                            logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
+                        # 十八审 6.4: 跨进程租约——多 worker 只有一个执行
+                        if acquire_lease(_lease_db, "purge_stats", ttl_seconds=900):
+                            purged = purge_stats(_lease_db, retention)
+                            if purged:
+                                logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
                 except Exception as e:
                     logger.warning("查询统计清理失败(下轮重试): %s", e)
             # 健康巡检: 设置周期(缺省 300s)
@@ -94,11 +101,13 @@ def _start_refresh_scheduler(manager, app_state) -> None:
                 _loop._last_health = now
                 try:
                     from domains.chatbi import datasources as ds_mod
-                    from domains.chatbi.runtime import get_pack_db
-                    ds_mod.check_all_health(
-                        get_pack_db(),
-                        max_failures=int(_load_settings(app_state)
-                                         .get("health_check_max_failures", 3)))
+                    # 十八审 6.4: 租约防止多 worker 重复计数停用
+                    if acquire_lease(_lease_db, "health_check",
+                                     ttl_seconds=max(120, health_iv // 2)):
+                        ds_mod.check_all_health(
+                            _lease_db,
+                            max_failures=int(_load_settings(app_state)
+                                             .get("health_check_max_failures", 3)))
                 except Exception as e:
                     logger.warning("健康巡检失败(下轮重试): %s", e)
             # 元数据刷新: 设置周期
@@ -109,6 +118,12 @@ def _start_refresh_scheduler(manager, app_state) -> None:
             if hours <= 0:
                 continue
             if now - _loop._last_refresh < hours * 3600:
+                continue
+            # 十八审 6.4: 跨进程租约——同时到期的多个 worker 只有一个提交;
+            # 未抢到的也推进本地时钟(该周期由持有者负责)
+            if not acquire_lease(_lease_db, "refresh_semantics",
+                                 ttl_seconds=900):
+                _loop._last_refresh = now
                 continue
             try:
                 manager.submit("chatbi.refresh_semantics", payload={},
@@ -150,6 +165,62 @@ def stop_refresh_scheduler() -> None:
 def _now_ts() -> float:
     import time
     return time.monotonic()   # 九审 7.4: 单调时钟, 不受 wall clock 跳变影响
+
+
+# ── 十八审 6.4: 定时任务跨进程租约(多 worker 唯一性) ──────────────
+
+_SCHEDULER_HOLDER = None
+
+
+def _scheduler_holder() -> str:
+    """本进程的租约持有者标识(主机:进程)。"""
+    global _SCHEDULER_HOLDER
+    if _SCHEDULER_HOLDER is None:
+        import os
+        import socket
+        import uuid
+        _SCHEDULER_HOLDER = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
+    return _SCHEDULER_HOLDER
+
+
+def acquire_lease(db, task_type: str, holder: str | None = None,
+                  ttl_seconds: int = 300) -> bool:
+    """抢占/续期定时任务租约(单语句原子; PG 行锁 / SQLite 库锁)。
+
+    语义:
+      - 无记录 → 插入, 本持有者获得;
+      - 持有者是本人 → 无条件续期;
+      - 持有者是他人且未过期 → 不动, 返回 False(别的 worker 在做);
+      - 已过期 → 抢占(持有者换成本人)。
+    任何异常返回 False(租约不可用时宁可跳过本轮, 不重复执行)。
+    """
+    holder = holder or _scheduler_holder()
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=ttl_seconds)).isoformat()
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases ("
+                "task_type TEXT PRIMARY KEY, holder TEXT NOT NULL, "
+                "expires_at TEXT NOT NULL)")
+            # CTE 把"现在"作为可绑定值, 让 ON CONFLICT 的 WHERE 能比较过期
+            conn.execute(
+                "WITH n(nowv) AS (VALUES (?)) "
+                "INSERT INTO chatbi_scheduler_leases (task_type, holder, expires_at) "
+                "SELECT ?, ?, ? FROM n "
+                "ON CONFLICT (task_type) DO UPDATE SET "
+                "holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
+                "WHERE chatbi_scheduler_leases.holder = EXCLUDED.holder "
+                "   OR chatbi_scheduler_leases.expires_at <= (SELECT nowv FROM n)",
+                (now.isoformat(), task_type, holder, expires))
+            row = conn.execute(
+                "SELECT holder FROM chatbi_scheduler_leases WHERE task_type = ?",
+                (task_type,)).fetchone()
+        return bool(row and row["holder"] == holder)
+    except Exception as e:
+        logger.warning("租约 %s 获取失败(跳过本轮防重复): %s", task_type, e)
+        return False
 
 
 def _task_scan_datasource(handle, app_state=None) -> dict:
@@ -218,8 +289,10 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                                                 expected_version=_retry[1])
             else:
                 raise
+        # 十八审 6.5: 每次 merge 后都写报告(含空报告)——干净刷新清掉旧告警,
+        # 报告版本与语义版本对齐, 解决后不再永久显示
+        save_merge_report(db, ds_id, version, merge_report)
         if merge_report.get("requires_review"):
-            save_merge_report(db, ds_id, version, merge_report)
             _log_report(handle, merge_report, f"重扫 v{version}")
         # 向量索引重建 (对标 _run_scan_background 尾部 rebuild_index;
         # 失败降级不阻塞——RAG 检索可用全表降级路径)
@@ -405,8 +478,9 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
                         expected_version=_retry[1])
                 else:
                     raise  # 无法重试(无 current)
+            # 十八审 6.5: 每次 merge 后都写报告(含空)——版本对齐+旧告警可清
+            save_merge_report(db, info.id, version, merge_report)
             if merge_report.get("requires_review"):
-                save_merge_report(db, info.id, version, merge_report)
                 _log_report(handle, merge_report, f"刷新 v{version}")
             struct_changed = (prev_db_version is None
                               or version != prev_db_version)
@@ -551,9 +625,16 @@ def _report_drop(report, kind, table, name, reason):
 
 
 def _report_conflict(report, table, manual, auto, detail):
-    """记录一个人工/自动属性冲突(人工已保留, 管理员可复核)。"""
-    report["conflicts"].append(
-        {"table": table, "manual": manual, "auto": auto, "detail": detail})
+    """记录一个人工/自动属性冲突(人工已保留, 管理员可复核)。
+
+    十八审 6.6: 字段与 dropped_items 统一(kind/name/reason)——前端同一
+    模板渲染, 不再出现空 kind 和 "table." 残缺定位; manual/auto 额外保留
+    供详情展示。
+    """
+    report["conflicts"].append({
+        "kind": "relationship_conflict", "table": table,
+        "name": manual, "reason": detail,
+        "manual": manual, "auto": auto})
     report["requires_review"] = True
 
 
@@ -700,14 +781,20 @@ def _merge_metrics(old_m, new_m, all_tables, new_content, report,
         taken.add(nm.name)
 
     # ── 3) 旧 composite(人工排前: 同名时人工版本胜出) ──
+    # 十八审 P0-1: 此前守卫 `met.name in manual_names` 对人工 composite 恒真
+    # (它的名字一开始就被收进 manual_names)——自己跳过自己, refresh/rescan
+    # 静默删除页面创建的人工复合指标且不进复核。manual_names 只用于压制
+    # 同名 auto 项, 不得压制人工 composite 本身。
     old_comps = [m for m in old_metrics if _is_composite(m)]
     old_comps.sort(key=lambda m: 0 if (getattr(m, 'source', '') or '')
                    in _MANUAL_SOURCES else 1)
     for met in old_comps:
         src = (getattr(met, 'source', '') or '')
         is_manual = src in _MANUAL_SOURCES
-        if met.name in taken or met.name in manual_names:
-            continue  # 同名已被占(或人工占位), auto 版本让路
+        if met.name in taken:
+            continue  # 同名已被占(人工 simple/新扫描/先前 composite)
+        if not is_manual and met.name in manual_names:
+            continue  # 同名人工占位(即使其已停用), auto 版本让路
         err = _metric_valid(met, table_name, table_cols, all_tables, taken)
         if err:
             if is_manual:

@@ -114,6 +114,7 @@ def build_index(
     db: Optional[PackRelationalDB] = None,
     scope: Optional[str] = None,
     doc_id: str = DOC_SCHEMA,
+    revision: Optional[int] = None,
 ) -> IndexResult:
     """把 SemanticModelContent 索引进向量库。
 
@@ -151,22 +152,22 @@ def build_index(
     if not content.models:
         return IndexResult(indexed_count=0)
 
-    # 收集所有可索引对象 → (id, type, name, text)
-    # id 命名规则: <data_source_id>:<type>:<name>
-    # 确保全局唯一;物理 chunk_id 由适配层编码为 "type:name"
-    # (scope 已隔离数据源, 见 stores.ChatBIVectorStore._chunk_id)
-    items: list[tuple[str, str, str, str]] = []
+    # 收集所有可索引对象 → (id, type, name, owner_model, text)
+    # id 命名规则: <data_source_id>:<type>[:<owner_model>]:<name>
+    # 物理 chunk_id 由适配层编码(type/owner/rev 进主键, 见 stores._chunk_id):
+    #   十八审 P1 6.3: metric 必须带 owner model——跨表同名指标否则互相覆盖
+    items: list[tuple[str, str, str, Optional[str], str]] = []
     for model in content.models:
         text = model_to_text(model)
         rid = f"{data_source_id}:model:{model.name}"
-        items.append((rid, "model", model.name, text))
-        # metric 依附于 model, 以 model 为单位组织
+        items.append((rid, "model", model.name, None, text))
+        # metric 依附于 model, 以 model 为单位组织(owner 进身份)
         for metric in model.metrics:
             mtext = metric_to_text(metric)
-            mid = f"{data_source_id}:metric:{metric.name}"
-            items.append((mid, "metric", metric.name, mtext))
+            mid = f"{data_source_id}:metric:{model.name}:{metric.name}"
+            items.append((mid, "metric", metric.name, model.name, mtext))
 
-    texts = [t for _, _, _, t in items]
+    texts = [t for _, _, _, _, t in items]
 
     # 批量 embed
     # 一次调用 embedder.embed 批量处理所有文本, 比逐条调用快
@@ -178,17 +179,23 @@ def build_index(
         return IndexResult(indexed_count=0, error=str(e))
 
     # 组装 VectorRecord + 批量 upsert
-    # metadata 中包含 data_source_id 和 type, 供适配层编码与结果展示
+    # metadata 中包含 data_source_id/type/name/owner_model/rev,
+    # 供适配层主键编码与检索结果定位(owner_model 让纯指标命中直接归表)
     records = []
-    for (rid, rtype, name, text), vec in zip(items, vectors):
+    for (rid, rtype, name, owner, text), vec in zip(items, vectors):
+        meta = {
+            "data_source_id": data_source_id,
+            "type": rtype,
+            "name": name,
+        }
+        if owner:
+            meta["owner_model"] = owner
+        if revision is not None:
+            meta["rev"] = revision
         records.append(VectorRecord(
             id=rid,
             vector=vec,
-            metadata={
-                "data_source_id": data_source_id,
-                "type": rtype,
-                "name": name,
-            },
+            metadata=meta,
             text=text,  # 原文保留, 调试/缓存用
         ))
 
@@ -371,20 +378,34 @@ def _rebuild_with_revision(
 ) -> RebuildResult:
     """revision namespace 发布: 建新分区 → 原子翻转指针 → 延迟清理旧分区。
 
-    指针翻转失败/让路时, 本次构建的分区成为无主垃圾(不影响正确性,
-    下次成功发布的清理只删"当时的旧分区", 不追历史垃圾——崩溃残余
-    分区靠数据源删除/手工清理兜底)。
+    十八审 P0-2: 物理隔离由 chunk_id 主键保证(revision + owner model 进键,
+    见 stores._chunk_id)——同一对象在新旧 revision 是不同主键行, upsert 新
+    分区不再触碰旧分区; 指针翻转失败时旧 active 分区完好无损。
+
+    清理策略(十八审 6.7): 不在翻转后立即删上一分区(读到旧指针的在途查询
+    可能撞上删除)——保留两代(active + prev), 发布 rN 时只 GC version ≤ N-2
+    的分区; 构建意图先落 chatbi_index_builds(building), 崩溃残余的半成品
+    分区也由同一 GC 回收(按记录的 doc_id 删)。
     """
-    from domains.chatbi.stores import get_active_doc_id, set_active_doc_id
+    from domains.chatbi.stores import (get_active_doc_id, set_active_doc_id,
+                                       record_index_build, gc_index_builds)
 
     prev_doc = get_active_doc_id(db, scope) if db is not None else None
     new_doc = f"{DOC_SCHEMA}_r{revision}"
 
-    # 1. 全量构建到独立分区(不碰任何现存分区)
+    # 1. 构建意图落账(GC 依据: 崩溃/让路的半成品分区按 doc_id 可回收)
+    if db is not None:
+        try:
+            record_index_build(db, scope, revision, new_doc, status="building")
+        except Exception as e:
+            logger.warning("rebuild_index(revision) 构建意图落账失败: %s", e)
+
+    # 2. 全量构建到独立分区(物理主键含 revision, 不碰任何现存分区)
     try:
         built = build_index(
             content=content, data_source_id=data_source_id,
-            store=store, embedder=embedder, scope=scope, doc_id=new_doc)
+            store=store, embedder=embedder, scope=scope, doc_id=new_doc,
+            revision=revision)
     except Exception as e:
         logger.warning("rebuild_index(revision) 构建失败(指针未动): %s", e)
         return RebuildResult(error=str(e))
@@ -393,7 +414,7 @@ def _rebuild_with_revision(
                        built.error)
         return RebuildResult(error=built.error)
 
-    # 2. 原子翻转 active 指针(仅更高 version 生效)
+    # 3. 原子翻转 active 指针(仅更高 version 生效)
     if db is None:
         logger.warning("rebuild_index(revision) 无 db 无法翻转指针, "
                        "新分区 %s 未发布", new_doc)
@@ -401,28 +422,34 @@ def _rebuild_with_revision(
     try:
         became_active = set_active_doc_id(db, scope, new_doc, revision)
     except Exception as e:
-        logger.warning("rebuild_index(revision) 指针翻转失败(读者继续用旧分区): %s", e)
+        logger.warning("rebuild_index(revision) 指针翻转失败(旧分区完好): %s", e)
         return RebuildResult(indexed_count=built.indexed_count,
                              error=f"active 指针翻转失败: {e}")
 
     if not became_active:
         # 晚完成的旧任务: 已有更新 revision 发布, 本次让路。
-        # 不删除任何分区——另一 worker 可能刚发布了同版本分区。
+        # 分区留待 GC(不立即删——另一 worker 可能刚发布了同版本分区)。
+        try:
+            record_index_build(db, scope, revision, new_doc, status="yielded")
+        except Exception:
+            pass
         logger.info("rebuild_index(revision) v%s 让路(已有更新版本发布)",
                     revision)
         return RebuildResult(indexed_count=built.indexed_count)
 
-    # 3. 延迟清理: 翻转成功后删上一分区(含 legacy "schema" 无版本分区)。
-    #    清理失败无害——旧分区只是垃圾, 读者已按指针读新分区。
+    # 4. 发布成功: 标记 + 两代 grace GC(旧 active 的在途读者不受影响)
     deleted = 0
-    if prev_doc and prev_doc != new_doc:
-        try:
-            deleted = store.delete_doc(scope, prev_doc)
-        except Exception as e:
-            logger.info("rebuild_index(revision) 旧分区清理失败(无害): %s", e)
+    try:
+        record_index_build(db, scope, revision, new_doc, status="published")
+        # 首次 revision 发布时, legacy "schema" 无版本分区按 version=0 落账
+        if prev_doc == DOC_SCHEMA:
+            record_index_build(db, scope, 0, DOC_SCHEMA, status="published")
+        deleted = gc_index_builds(db, scope, store, keep_generations=2)
+    except Exception as e:
+        logger.info("rebuild_index(revision) 旧分区 GC 失败(无害, 下次重试): %s", e)
 
     logger.info(
-        "rebuild_index(revision): v%s 分区 %s 发布 (删旧 %d, 建 %d, ds=%s)",
+        "rebuild_index(revision): v%s 分区 %s 发布 (GC %d, 建 %d, ds=%s)",
         revision, new_doc, deleted, built.indexed_count, data_source_id,
     )
     return RebuildResult(deleted_count=deleted,

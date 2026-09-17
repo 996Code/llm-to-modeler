@@ -177,6 +177,12 @@ async def delete_datasource(ds_id: str, request: Request):
         conn.execute("DELETE FROM chatbi_query_stats WHERE data_source_id = ?", (ds_id,))
         # 证据水位级联(八审 6.6: 删除数据源无 watermark 孤儿)
         conn.execute("DELETE FROM chatbi_graph_watermarks WHERE data_source_id = ?", (ds_id,))
+        # merge 报告级联(十八审 6.5: 不留孤儿告警行)
+        conn.execute("DELETE FROM chatbi_merge_reports WHERE data_source_id = ?", (ds_id,))
+        # 索引构建台账级联(collection 已被 drop, 台账行随之作废)
+        conn.execute("DELETE FROM chatbi_index_builds WHERE scope IN "
+                     "(SELECT scope_id FROM chatbi_data_sources WHERE id = ?)",
+                     (ds_id,))
     try:
         stores.delete_data_source_storage(db, stores.get_vector(request.app.state), ds_id)
     except Exception as e:
@@ -344,6 +350,10 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
         if "VersionConflict" in type(e).__name__ or "conflict" in str(e).lower():
             raise HTTPException(409, "内容已被其他管理员更新——请重新加载后再保存")
         raise
+    # 十八审 6.5: 人工保存 = 管理员已介入, 旧 merge 报告按 superseded 清除
+    # (空报告对齐新版本, 页面告警消失)
+    from domains.chatbi.tasks import save_merge_report, _new_report
+    save_merge_report(_db(), ds_id, ver, _new_report())
     # 人工校正后重建向量索引(源 semantic_models.py:345-362;失败降级不阻塞)
     index_rebuilt, index_warning = True, None
     try:
@@ -410,6 +420,9 @@ async def semantic_rollback(ds_id: str, version: int, request: Request,
         if 'VersionConflict' in type(e).__name__:
             raise HTTPException(409, "回滚期间版本被并发修改——请刷新后重试")
         raise
+    # 十八审 6.5: 回滚 = 管理员显式选择历史状态, 旧 merge 报告清除对齐
+    from domains.chatbi.tasks import save_merge_report, _new_report
+    save_merge_report(_db(), ds_id, ver, _new_report())
     # 回滚后重建索引(源 semantic_models.py:196-214;失败降级不阻塞)
     index_rebuilt, index_warning = True, None
     try:

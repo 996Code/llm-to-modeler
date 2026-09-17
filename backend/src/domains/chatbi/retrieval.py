@@ -178,21 +178,33 @@ def retrieve(
 
     # 多 scope(无 ds 限定的跨源检索)→ 逐 scope 召回后按分数合并截断
     candidates: List[SearchResult] = []
+    pointer_errors = 0
     for sc in scopes:
+        # 十八审 7.7: 读 active 指针——"无记录"回退 legacy 分区(未迁移);
+        # "读取失败"不静默回退(伪装未迁移可能读到过期/空索引), 单 scope
+        # 跳过并计数, 全部失败 → fail-closed 返回明确原因
         try:
-            # 十七审 7.7: 读 active 指针指向的 revision 分区(无指针 =
-            # legacy "schema" 分区, 兼容未升级索引)
             from domains.chatbi.stores import get_active_doc_id
+            doc = get_active_doc_id(db, sc) or DOC_SCHEMA
+        except Exception as e:
+            pointer_errors += 1
+            logger.error("retrieve 读 active 指针失败 (scope=%s): %s", sc[:8], e)
+            continue
+        try:
             candidates.extend(store.search_records(
                 sc,
                 query_vec,
                 top_k=top_k,
                 score_threshold=score_threshold,
-                doc_id=get_active_doc_id(db, sc) or DOC_SCHEMA,
+                doc_id=doc,
             ))
         except Exception as e:
             # 单 scope 检索失败不拖垮跨源合并(与源实现 search 返回空的宁缺毋滥一致)
             logger.warning("retrieve search 失败 (scope=%s): %s", sc[:8], e)
+    if pointer_errors and pointer_errors == len(scopes):
+        logger.error("retrieve: 全部 scope 的 active 指针读取失败, fail-closed")
+        return RetrievalResult(
+            no_match_reason="索引活跃版本状态不可用(存储异常), 已停止检索以避免读到过期索引")
     candidates.sort(key=lambda r: r.score, reverse=True)
     candidates = candidates[:top_k]
 
@@ -211,7 +223,7 @@ def retrieve(
 
 
 def _candidates_to_models(candidates: List[SearchResult]) -> List[Dict[str, Any]]:
-    """SearchResult → 简化 dict 列表。"""
+    """SearchResult → 简化 dict 列表(owner_model 透传, 纯指标命中直接归表)."""
     return [
         {
             "id": c.record.id,
@@ -219,6 +231,8 @@ def _candidates_to_models(candidates: List[SearchResult]) -> List[Dict[str, Any]
             "type": c.record.metadata.get("type", "model"),
             "score": c.score,
             "text": c.record.text,
+            **({"owner_model": c.record.metadata["owner_model"]}
+               if c.record.metadata.get("owner_model") else {}),
         }
         for c in candidates
     ]
@@ -310,6 +324,8 @@ def _llm_refine(
             "score": c.score,
             "text": c.record.text,
             "llm_selected": True,
+            **({"owner_model": c.record.metadata["owner_model"]}
+               if c.record.metadata.get("owner_model") else {}),
         }
         for c in candidates
         if c.record.metadata.get("name", c.record.id) in selected_names

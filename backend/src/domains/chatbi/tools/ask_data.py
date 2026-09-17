@@ -245,9 +245,11 @@ class AskDataTool(CompositeTool):
             # 无召回原因(源 agent.py:238-242 fail-closed 消费点):
             # 后续"无种子且无继承"时用它终止, 不再随机选表/空 schema 硬跑
             no_match_reason = getattr(rc["retrieval"], "no_match_reason", None)
-            # 指标命中拆分(反查所属表用)
-            state["hit_metric_names"] = [m["name"] for m in all_hits
-                                         if m.get("type") == "metric"]
+            # 指标命中拆分(反查所属表用; 十八审 6.3: 带上 owner_model——
+            # 纯指标命中直接定位所属表, 不再按 name 扫全库反查扩多表)
+            state["hit_metrics"] = [
+                {"name": m["name"], "owner_model": m.get("owner_model")}
+                for m in all_hits if m.get("type") == "metric"]
             # 一站式产物直接复用(与后续步骤的重复构建避免)
             state["schema_context"] = rc["schema_context"]
             state["allowed_columns"] = rc["allowed_columns"]
@@ -269,10 +271,16 @@ class AskDataTool(CompositeTool):
         prev_tables = (sess.get("prev_tables") if sess else None) or []
         merged = _inherit_prev_tables(prev_tables, list(seed_tables), content)
         # 指标命中反查所属表(用户问"GMV"可能只召回 metric 记录, 补入所属表)
-        if not merged and state.get("hit_metric_names"):
-            metric_names = state["hit_metric_names"]
+        # 十八审 6.3: 有 owner_model 直接定位; 无(legacy 索引行)退回按名反查
+        if not merged and state.get("hit_metrics"):
+            by_owner = {h["owner_model"] for h in state["hit_metrics"]
+                        if h.get("owner_model")}
+            name_only = [h["name"] for h in state["hit_metrics"]
+                         if not h.get("owner_model")]
             for model in content.models:
-                if any(m.name in metric_names for m in model.metrics):
+                if model.name in by_owner or (
+                        name_only
+                        and any(m.name in name_only for m in model.metrics)):
                     if model.name not in merged:
                         merged.append(model.name)
 

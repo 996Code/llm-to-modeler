@@ -159,17 +159,61 @@ class ChatBIVectorStore:
 
     @staticmethod
     def _chunk_id(rec: VectorRecord) -> str:
-        """VectorRecord → SDK chunk_id(≤64 字符)。
+        """VectorRecord → SDK chunk_id(物理主键, ≤64 字符)。
 
-        schema 记录: metadata 带 type/name → "type:name"
-        (源 id 的 ds 前缀由 per-scope collection 隔离取代);
-        few-shot 记录: rec.id 即 example_id(md5 hex,天然无冒号)。
+        十八审 P0-2/P1: chunk_id 是 Milvus 全局主键, doc_id 只是过滤字段——
+        主键必须包含 revision 与 metric 的 owner model, 否则:
+          - 新 revision upsert 直接覆盖旧 active 行(隔离不存在);
+          - 跨表同名 metric 相互覆盖(121 表库 312 实例仅 190 唯一名)。
+
+        格式:
+          model:   model:{name}[@rN]
+          metric:  metric:{owner_model}:{name}[@rN]   (owner 进键)
+          few-shot: rec.id(md5 hex, 无冒号)
+        超长: 截断 name 尾部 + 8 位短哈希保唯一(解码仍能还原 type/owner,
+        name 退化为前缀+哈希——极少见, 检索主通道 text 不受影响)。
         """
         rtype = rec.metadata.get("type")
         name = rec.metadata.get("name")
-        if rtype and name:
-            return f"{rtype}:{name}"
-        return rec.id
+        if not (rtype and name):
+            return rec.id
+        owner = rec.metadata.get("owner_model")
+        rev = rec.metadata.get("rev")
+        parts = [rtype]
+        if rtype == "metric":
+            parts.append(owner or "_")
+        parts.append(name)
+        cid = ":".join(parts)
+        if rev:
+            cid = f"{cid}@r{rev}"
+        if len(cid) > 64:
+            import hashlib
+            digest = hashlib.md5(cid.encode()).hexdigest()[:8]
+            cid = f"{cid[:55]}#{digest}"
+        return cid
+
+    @staticmethod
+    def decode_chunk_id(chunk_id: str) -> Dict[str, Any]:
+        """chunk_id → metadata(检索命中反解; 与 _chunk_id 互逆)。
+
+        兼容三种形态: 新格式(带 @rN / metric 三段)、legacy 两段、
+        few-shot 无冒号(返回空 metadata, 由 fewshot 层解析 text)。
+        """
+        if ":" not in chunk_id:
+            return {}
+        core, sep, rev = chunk_id.rpartition("@")
+        if not sep:              # rpartition 无匹配时整串落第三段, 先判 sep
+            core, rev = chunk_id, ""
+        parts = core.split(":")
+        meta: Dict[str, Any] = {"type": parts[0]}
+        if chunk_id.startswith("metric:") and len(parts) >= 3:
+            meta["owner_model"] = parts[1]
+            meta["name"] = ":".join(parts[2:])
+        else:
+            meta["name"] = ":".join(parts[1:])
+        if rev.startswith("r"):
+            meta["rev"] = rev
+        return meta
 
     def upsert_records(self, scope: str, records: List[VectorRecord],
                        doc_id: str) -> int:
@@ -202,11 +246,7 @@ class ChatBIVectorStore:
             if score < score_threshold:   # 阈值后置过滤(宁缺毋滥)
                 continue
             chunk_id = str(h.get("chunkId") or "")
-            if ":" in chunk_id:
-                rtype, _, name = chunk_id.partition(":")
-                metadata = {"type": rtype, "name": name}
-            else:
-                metadata = {}
+            metadata = self.decode_chunk_id(chunk_id)
             out.append(SearchResult(
                 record=VectorRecord(
                     id=chunk_id,
@@ -363,7 +403,7 @@ def clear_scope(db: PackRelationalDB, data_source_id: str) -> None:
 # 构建中途崩溃 → 指针未动, 读者仍读旧分区; 残余分区是垃圾不影响正确性。
 
 def ensure_index_revision_schema(db: PackRelationalDB) -> None:
-    """幂等建 active 指针表(老部署升级路径;新部署由 CHATBI_DDL 覆盖)。"""
+    """幂等建 active 指针表 + builds 台账(老部署升级路径;新部署由 CHATBI_DDL 覆盖)。"""
     with db.connect() as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS chatbi_index_revisions ("
@@ -371,12 +411,25 @@ def ensure_index_revision_schema(db: PackRelationalDB) -> None:
             "active_doc_id TEXT NOT NULL, "
             "version INTEGER NOT NULL, "
             "updated_at TEXT NOT NULL)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS chatbi_index_builds ("
+            "scope TEXT NOT NULL, "
+            "version INTEGER NOT NULL, "
+            "doc_id TEXT NOT NULL, "
+            "status TEXT NOT NULL DEFAULT 'building', "
+            "updated_at TEXT NOT NULL, "
+            "PRIMARY KEY (scope, version))")
 
 
 def get_active_doc_id(db: Optional[PackRelationalDB],
                       scope: str) -> Optional[str]:
     """读 scope 当前生效的语义索引分区 doc_id(无记录 → None, 调用方
-    回退 legacy "schema" 分区)。任何异常按 None 处理(读路径不崩)。"""
+    回退 legacy "schema" 分区)。
+
+    十八审 6.7: 表不存在(未迁移老部署)按 None 处理; 其它数据库异常
+    上抛——读方必须区分"没有指针"与"读不到指针", 不得静默回退旧分区
+    伪装成未迁移。
+    """
     if db is None:
         return None
     try:
@@ -385,8 +438,12 @@ def get_active_doc_id(db: Optional[PackRelationalDB],
                 "SELECT active_doc_id FROM chatbi_index_revisions "
                 "WHERE scope = ?", (scope,)).fetchone()
         return (row or {}).get("active_doc_id") or None
-    except Exception:
-        return None
+    except Exception as e:
+        msg = str(e).lower()
+        if ("does not exist" in msg or "undefined table" in msg
+                or "no such table" in msg):
+            return None
+        raise
 
 
 def set_active_doc_id(db: PackRelationalDB, scope: str, doc_id: str,
@@ -419,6 +476,58 @@ def set_active_doc_id(db: PackRelationalDB, scope: str, doc_id: str,
             "SELECT active_doc_id FROM chatbi_index_revisions "
             "WHERE scope = ?", (scope,)).fetchone()
         return bool(row and row["active_doc_id"] == doc_id)
+
+
+def record_index_build(db: PackRelationalDB, scope: str, version: int,
+                       doc_id: str, status: str) -> None:
+    """记录/更新一次索引构建(building → published/yielded)。
+
+    GC 的台账: 让路、崩溃、半成品的分区都按 (scope, version) 记录,
+    延迟回收时按 doc_id 删向量; 失败上抛由调用方降级。
+    """
+    ensure_index_revision_schema(db)
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO chatbi_index_builds "
+            "(scope, version, doc_id, status, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (scope, version) DO UPDATE SET "
+            "doc_id = EXCLUDED.doc_id, status = EXCLUDED.status, "
+            "updated_at = EXCLUDED.updated_at",
+            (scope, version, doc_id, status, _now()))
+
+
+def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,
+                    keep_generations: int = 2) -> int:
+    """回收过旧分区: 保留最近 keep_generations 代(含 active), 更旧的删向量+删台账。
+
+    十八审 6.7: 翻转后立即删上一代会撞上"已读旧指针的在途查询"——
+    保留两代(active + prev)后, 同一刷新周期内的在途读者必然还在保留窗内。
+    building/yielded 残余(崩溃/让路)同样按台账回收。返回删除的向量条数。
+    """
+    with db.connect() as conn:
+        active = conn.execute(
+            "SELECT version FROM chatbi_index_revisions WHERE scope = ?",
+            (scope,)).fetchone()
+        if not active:
+            return 0
+        active_v = int(active["version"])
+        # 保留最近 keep_generations 代(active 与 prev): 删除 ≤ active-N 代
+        stale = conn.execute(
+            "SELECT version, doc_id FROM chatbi_index_builds "
+            "WHERE scope = ? AND version <= ?",
+            (scope, active_v - keep_generations)).fetchall()
+        deleted = 0
+        for row in stale:
+            try:
+                deleted += store.delete_doc(scope, row["doc_id"])
+                conn.execute(
+                    "DELETE FROM chatbi_index_builds "
+                    "WHERE scope = ? AND version = ?",
+                    (scope, int(row["version"])))
+            except Exception as e:
+                logger.info("GC 分区 %s 失败(下次重试): %s", row["doc_id"], e)
+        return deleted
 
 
 def delete_data_source_storage(db: PackRelationalDB, sdk_store: Any,

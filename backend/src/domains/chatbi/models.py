@@ -202,6 +202,16 @@ CHATBI_DDL = [
         version INTEGER NOT NULL,
         updated_at TEXT NOT NULL
     )""",
+    # 十八审 6.7: 索引构建台账——building/published/yielded 全记录,
+    # 两代 grace 后按 doc_id 回收(含崩溃残余与让路半成品)
+    """CREATE TABLE IF NOT EXISTS chatbi_index_builds (
+        scope TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        doc_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'building',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (scope, version)
+    )""",
     # 十七审 7.6: merge 停用/冲突报告——refresh/rescan 落库后写入,
     # 语义页面经 GET /datasources/{id}/semantic/review 展示待复核清单
     """CREATE TABLE IF NOT EXISTS chatbi_merge_reports (
@@ -209,6 +219,13 @@ CHATBI_DDL = [
         version INTEGER NOT NULL,
         report TEXT NOT NULL,
         updated_at TEXT NOT NULL
+    )""",
+    # 十八审 6.4: 定时任务跨进程租约——refresh/health/purge 在多 worker
+    # 部署下只有一个持有者执行(过期可被抢占)
+    """CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases (
+        task_type TEXT PRIMARY KEY,
+        holder TEXT NOT NULL,
+        expires_at TEXT NOT NULL
     )""",
 ]
 

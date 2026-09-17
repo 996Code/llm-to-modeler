@@ -293,11 +293,11 @@ class TestIndexing:
         scope = get_scope(db, DS1)
         assert scope is not None and is_scope_id_safe(scope)
         rows = store._sdk.rows[scope]
-        assert set(rows) == {"model:orders", "model:users", "metric:gmv"}
+        assert set(rows) == {"model:orders", "model:users", "metric:orders:gmv"}
         assert rows["model:orders"]["doc_id"] == DOC_SCHEMA
         # 表文本/指标文本分类正确(维度/表名/列名/指标的文本化处理)
         assert "表名orders" in rows["model:orders"]["text"]
-        assert "SUM(total_amount)" in rows["metric:gmv"]["text"]
+        assert "SUM(total_amount)" in rows["metric:orders:gmv"]["text"]
         # 建库维度探测与 embedder 维度缓存一致
         assert store._sdk.collections[scope] == 8
         assert embedder.dim == 8
