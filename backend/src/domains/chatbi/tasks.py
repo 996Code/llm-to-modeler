@@ -99,17 +99,21 @@ def _start_refresh_scheduler(manager, app_state) -> None:
                 _loop._last_gc = now
                 try:
                     if acquire_lease(_lease_db, "index_gc", ttl_seconds=900):
+                        # 二十审 8.1: 此前引用未定义的 runtime 且异常被
+                        # 裸 except 吞掉——周期 GC 从未真正执行
                         _gc_store = None
                         try:
                             from domains.chatbi import stores as _cb_stores
-                            _gc_llm = runtime.get_llm(app_state) \
-                                if app_state else None
                             _gc_store = _cb_stores.get_vector(app_state)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning("周期索引 GC 取向量设施失败"
+                                           "(本轮跳过): %s", e)
                         if _gc_store is not None:
-                            _run_periodic_index_gc(_lease_db, app_state,
-                                                   _gc_store)
+                            try:
+                                _run_periodic_index_gc(_lease_db, app_state,
+                                                       _gc_store)
+                            except Exception as e:
+                                logger.error("周期索引 GC 执行失败: %s", e)
                 except Exception as e:
                     logger.warning("周期索引 GC 失败(下轮重试): %s", e)
             # 健康巡检: 设置周期(缺省 300s)
@@ -223,39 +227,31 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
                 "CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases ("
                 "task_type TEXT PRIMARY KEY, holder TEXT NOT NULL, "
                 "expires_at TEXT NOT NULL)")
-            # 二十审 9.6: 旧部署的 ISO 格式租约不再无条件删除——滚动
-            # 升级时旧实例可能仍持有有效租约(无条件删=双执行窗口)。
-            # 兼容解析过期时间: 确认过期的才清理; 仍有效的转成 epoch
-            # 格式保留持有权(新实例只能等它过期, 不会双执行)。
-            try:
-                legacy = conn.execute(
-                    "SELECT task_type, expires_at FROM chatbi_scheduler_leases "
-                    "WHERE expires_at !~ '^[0-9]+$'").fetchall()
-            except Exception:
-                legacy = []
-            from datetime import datetime
-            for row in legacy or []:
-                parsed = None
-                try:
-                    parsed = datetime.fromisoformat(
-                        str(row["expires_at"]).replace("Z", "+00:00"))
-                except Exception:
-                    pass
-                try:
-                    if parsed is None or parsed <= datetime.now().astimezone():
-                        # 过期/完全不可解析 → 清理残留
-                        conn.execute(
-                            "DELETE FROM chatbi_scheduler_leases "
-                            "WHERE task_type = ? AND expires_at = ?",
-                            (row["task_type"], row["expires_at"]))
-                    else:
-                        conn.execute(
-                            "UPDATE chatbi_scheduler_leases SET expires_at = ? "
-                            "WHERE task_type = ? AND expires_at = ?",
-                            (str(int(parsed.timestamp() * 1000)),
-                             row["task_type"], row["expires_at"]))
-                except Exception:
-                    pass   # 迁移失败不影响本次获取(守卫按 epoch 格式判定)
+            # 二十审 9.6 + 二十一审 5.6: 旧部署 ISO 租约的迁移全程用
+            # 数据库时钟(此前 datetime.now().astimezone() 又依赖了工作
+            # 进程本地钟)。三步:
+            #   1) 可解析且未过期 → 原地转 epoch 保留持有权(旧实例继续
+            #      有效, 新实例只能等它过期, 不双执行);
+            #   2) 可解析且已过期 → 删除;
+            #   3) 不可解析 → 保留并告警(fail-closed, 不猜测)。
+            conn.execute(
+                "UPDATE chatbi_scheduler_leases SET expires_at = "
+                "(extract(epoch FROM expires_at::timestamptz)*1000)::bigint::text "
+                "WHERE expires_at !~ '^[0-9]+$' "
+                "  AND expires_at ~ '^\\d{4}-' "
+                "  AND expires_at::timestamptz > now()")
+            conn.execute(
+                "DELETE FROM chatbi_scheduler_leases "
+                "WHERE expires_at !~ '^[0-9]+$' "
+                "  AND expires_at ~ '^\\d{4}-' "
+                "  AND expires_at::timestamptz <= now()")
+            _unparsable = conn.execute(
+                "SELECT task_type, expires_at FROM chatbi_scheduler_leases "
+                "WHERE expires_at !~ '^[0-9]+$'").fetchall()
+            for row in _unparsable or []:
+                logger.error("租约 %s 的过期时间不可解析(%r), fail-closed "
+                             "保留——请人工核查", row["task_type"],
+                             row["expires_at"])
             # now 由数据库给出并直接参与比较(跨主机时钟偏差免疫)
             conn.execute(
                 "WITH n AS (SELECT (extract(epoch FROM now())*1000)::bigint AS nowms) "
@@ -342,8 +338,38 @@ class RunLease:
 
     @property
     def owned(self) -> bool:
-        """写前 fencing 检查: 心跳线程确认仍持有租约。"""
+        """快速判定: 本地心跳标记(二十审 10: 进程暂停窗口内可能过期,
+        关键写入的强检查用 assert_owned())."""
         return self.acquired
+
+    def assert_owned(self) -> bool:
+        """数据库层 fencing(二十审 10): 当前 holder 仍是本持有者且未过期。
+
+        本地 bool 在进程暂停/心跳延迟窗口内可能失真——关键写入(语义
+        落库/索引发布/报告保存)前用 DB 实查。查询失败按"不持有"处理
+        (fail-closed: 宁可不写也不能在失租窗口双写)。
+        """
+        if not self.acquired:
+            return False
+        try:
+            with self.db.connect() as conn:
+                row = conn.execute(
+                    "SELECT holder FROM chatbi_scheduler_leases "
+                    "WHERE task_type = ? AND holder = ? "
+                    "AND expires_at ~ '^[0-9]+$' "
+                    "AND expires_at::bigint > "
+                    "(extract(epoch FROM now())*1000)::bigint",
+                    (self.task_type, self.holder)).fetchone()
+            ok = row is not None
+            if not ok:
+                logger.error("fencing: 租约 %s 已易主/过期(本地标记=%s)——"
+                             "拒绝写入", self.task_type, self.holder)
+                self.acquired = False
+            return ok
+        except Exception as e:
+            logger.error("fencing 检查失败(按失租处理): %s", e)
+            self.acquired = False
+            return False
 
     def heartbeat(self) -> bool:
         """同步续租点(兼容既有调用); 返回 False = 租约已丢。"""
@@ -455,9 +481,9 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             infer_metrics=bool(settings.get("scan_metric_inference", True)),
             progress_cb=progress, datasource_id=ds_id,
             persist=False)  # 不在内部保存——由外部 CAS 保存
-        # 写前 fencing(二十审 9.2): 独立心跳维持租约; owned=False 说明
-        # 已被接管/失租, 本任务不得再落库(继续写必然双写者)
-        if not lease.owned:
+        # 写前 fencing(二十审 9.2/10): DB 实查——本地 bool 在进程暂停
+        # 窗口内可能失真, 落库前必须以数据库 holder 为准
+        if not lease.assert_owned():
             from services.task_manager import PermanentTaskError
             raise PermanentTaskError(
                 "扫描执行期租约被其他实例接管(本任务停滞超时)——中止落库")
@@ -499,7 +525,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                        f"待复核清单可能与当前版本不一致")
         # 向量索引重建 (对标 _run_scan_background 尾部 rebuild_index;
         # 失败降级不阻塞——RAG 检索可用全表降级路径)
-        if not lease.owned:
+        if not lease.assert_owned():
             from services.task_manager import PermanentTaskError
             raise PermanentTaskError("索引重建前 fencing 失败(租约已失)——中止")
         indexed = 0
@@ -528,7 +554,14 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             scanned_at=_now_iso())
         handle.log(f"扫描完成: {len(content.models)} 张表, 向量索引 {indexed} 条"
                    + (" (索引降级)" if index_status != "ok" else ""))
+        # 二十审 7.4 根本修复: 重扫后索引失败 = 新语义落库但检索仍在
+        # 用旧版本索引(漂移)——与 refresh 同口径 ok=False, 任务中心如实
+        # 可见, 修复后下一轮 refresh 的 pointer-lag 自愈可补建
+        _idx_ok = index_status in ("ok", "skipped")
         return {"models": len(content.models), "indexed": indexed,
+                "ok": _idx_ok,
+                **({} if _idx_ok else {
+                    "error": index_warning or "索引重建失败"}),
                 "index_rebuild": index_status,
                 **({"index_warning": index_warning} if index_warning else {}),
                 # 十七审 7.6: 停用/冲突清单进任务结果(任务中心可见)
@@ -656,7 +689,7 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
     写租约被占(该 ds 正被 scan/其他实例处理)→ 本轮跳过该数据源,
     不视为整体失败。
     """
-    from domains.chatbi import semantic, datasources, indexing
+    from domains.chatbi import runtime, semantic, datasources, indexing
     for row in datasources.list_datasources(db, active_only=True):
         if not lease.heartbeat():
             from services.task_manager import PermanentTaskError
@@ -674,7 +707,7 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                             "detail": "该数据源正被其他写任务处理, 本轮跳过"})
             continue
         try:
-            if not write_lease.owned or not lease.owned:
+            if not write_lease.assert_owned() or not lease.assert_owned():
                 results.append({"datasource_id": info.id, "ok": False,
                                 "error": "刷新写前 fencing 失败(租约已失)"})
                 continue
@@ -706,7 +739,7 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
             # Refresh-from-v1 v3 覆盖)。冲突时基于最新版重试一次。
             from domains.chatbi.graph_infer import VersionConflictError as _VCE
             # 二十审 9.2: 写前 fencing——语义落库是本数据源最关键的写入点
-            if not write_lease.owned:
+            if not write_lease.assert_owned():
                 results.append({"datasource_id": info.id, "ok": False,
                                 "error": "写前 fencing 失败(数据源写租约已失)"
                                          "——本数据源本轮未写入"})
@@ -760,13 +793,33 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                                 "error": "图谱演进乐观锁冲突(有并发语义写入), "
                                          "下轮刷新自动重试"})
                 continue
-            # 九审 7.6: 结构与图谱都无变化 → 跳过全量重建(此前 struct_changed
-            # 算了但没用, 240周期仍重建240次)——只在 error/conflict 之后
+            # 九审 7.6: 结构与图谱都无变化 → 跳过全量重建(240周期不再重建)
+            # 二十审 P0-2 自愈: 跳过前必须检查 active 指针是否落后——
+            # 此前 v4/r3 漂移后, 后续 unchanged 刷新全部走快路, 漂移
+            # 永不自愈。落后 → 不跳过, 走下方对齐当前版本的补建。
             if not struct_changed and evolve.get("versions_written", 0) == 0:
-                results.append({"datasource_id": info.id, "version": version,
-                                "ok": True, "changed": False,
-                                "detail": "结构无变化且无新图谱证据, 跳过索引重建"})
-                continue
+                _cur_rev = None
+                try:
+                    _scope_row = datasources.get_datasource(db, info.id)
+                    _sc = getattr(_scope_row, "scope_id", "") if _scope_row else ""
+                    if _sc:
+                        from domains.chatbi.stores import get_active_doc_id
+                        import re as _re_l
+                        _doc = get_active_doc_id(db, _sc)
+                        _m = (_re_l.match(r"schema_r(\d+)", _doc or "")
+                              if _doc else None)
+                        _cur_rev = int(_m.group(1)) if _m else None
+                except Exception as _e:
+                    logger.warning("pointer lag 检查失败(按需补建处理): %s", _e)
+                if _cur_rev is not None and _cur_rev >= version:
+                    results.append({"datasource_id": info.id, "version": version,
+                                    "ok": True, "changed": False,
+                                    "detail": "结构无变化且无新图谱证据, 跳过索引重建"})
+                    continue
+                logger.warning("检测到索引漂移 semantic v%s vs active r%s——"
+                               "本轮补建(ds=%s)", version, _cur_rev, info.id[:8])
+                handle.log(f"⚠ 检测到索引漂移(语义 v{version}, 索引 r{_cur_rev})"
+                           f"——自动补建当前版本索引")
             # 六审 P1.C 修复: 演化可能写出 v+2/v+3——最终索引必须对齐
             # 演化后的 current, 不再用演化前的 merged 覆盖(旧关系内容)
             # 6.7: 同一次读取获得 content+version(防并发窗口 content 与
@@ -793,7 +846,10 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                 else:
                     index_status = "skipped"
             except Exception as e:
-                logger.warning("刷新后索引重建失败(降级, 手动重扫可修复): %s", e)
+                # 二十审 7.4: 索引落后不能伪装纯成功——任务日志可见 +
+                # 数据源结果 ok=False(任务中心不再是"已成功 100%")
+                logger.warning("刷新后索引重建失败: %s", e)
+                handle.log(f"⚠ 索引重建失败 ds={info.id[:8]}…: {str(e)[:160]}")
                 index_status = "degraded"
                 index_warning = f"语义已写 v{final_version}, 索引落后——手动重扫可修复"
             # 6.4 修复: 索引期间若 current 被并发变更(人工编辑/回滚), 刚建的
@@ -818,8 +874,15 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                 index_warning = f"并发校验失败: {str(e)[:120]}"
             if index_warning:
                 logger.warning("刷新索引降级 ds=%s: %s", info.id, index_warning)
+            # 二十审 7.4 根本修复: 索引 degraded = 本轮"语义已发布但
+            # 检索仍在用旧索引"——这不是成功, ok=False 让任务中心如实
+            # 显示失败(此前只加日志, 任务仍是"已成功 100%"= 修表面)
+            _idx_ok = index_status in ("ok", "skipped")
             results.append({"datasource_id": info.id, "version": final_version,
-                            "models": len(final_content.models), "ok": True,
+                            "models": len(final_content.models),
+                            "ok": _idx_ok,
+                            **({} if _idx_ok else {
+                                "error": index_warning or "索引重建失败"}),
                             "index_rebuild": index_status,
                             **({"index_warning": index_warning} if index_warning else {}),
                             # 十七审 7.6: 停用/冲突清单进任务结果
@@ -1044,12 +1107,35 @@ def _merge_metrics(old_m, new_m, all_tables, new_content, report,
     for nm in (new_m.metrics or []):
         if nm.name in manual_names or nm.name in taken:
             continue
-        # 运行时命中计数随名继承(十九审真实环境发现: 同名规则指标
-        # 以新对象顶替旧项时 co_occurrence 被静默清零)
+        # 二十审 P0-1: 同名同式规则指标的语义标注原子继承。
+        # refresh(llm=None) 的规则指标基于退化列名生成("amount合计");
+        # 列中文标注在 merge 里恢复了, 但新指标对象不回溯——同名旧项
+        # 的中文名被静默顶替(真实环境 104 处退化)。同名+同公式+同
+        # 条件+同类型 = 同一指标的新结构副本, display_name/description/
+        # co_occurrence 是语义标注, 必须随旧项继承; 公式/条件/类型
+        # 变化则属于真实结构变化, 用新值并记入复核清单(不静默)。
         old_counterpart = old_by_name.get(nm.name)
-        if old_counterpart is not None and getattr(old_counterpart,
-                                                   'co_occurrence', 0):
-            nm.co_occurrence = old_counterpart.co_occurrence
+        if old_counterpart is not None:
+            if getattr(old_counterpart, 'co_occurrence', 0):
+                nm.co_occurrence = old_counterpart.co_occurrence
+            same_expr = ((old_counterpart.formula or '') == (nm.formula or '')
+                         and (old_counterpart.condition or None)
+                         == (nm.condition or None)
+                         and (old_counterpart.type or 'single')
+                         == (nm.type or 'single'))
+            if same_expr:
+                if old_counterpart.display_name:
+                    nm.display_name = old_counterpart.display_name
+                if old_counterpart.description:
+                    nm.description = old_counterpart.description
+            elif (getattr(old_counterpart, 'source', '')
+                  in _MANUAL_SOURCES) or old_counterpart.display_name:
+                # 旧项有语义标注但表达式变了 → 管理员可见, 不静默
+                _report_conflict(
+                    report, new_m.name, old_counterpart.name, nm.name,
+                    f"同名指标表达式变化: 旧「{old_counterpart.display_name}"
+                    f"」({old_counterpart.formula}) → 新「{nm.display_name}」"
+                    f"({nm.formula}), 已采用新公式")
         merged.append(nm)
         taken.add(nm.name)
 

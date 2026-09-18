@@ -1225,12 +1225,34 @@ def delete_by_datasource(db, datasource_id: str) -> int:
 _COL_DIFF_ATTRS = ("data_type", "semantic_type", "display_name")
 
 
+def _diff_named_items(old_items: list, new_items: list, key: str,
+                      attrs: tuple) -> dict:
+    """按名称对比集合项(指标/计算字段), 输出增删改(含属性级明细)。"""
+    old_map = {i.get(key): i for i in (old_items or [])}
+    new_map = {i.get(key): i for i in (new_items or [])}
+    added = sorted(set(new_map) - set(old_map))
+    removed = sorted(set(old_map) - set(new_map))
+    changed = []
+    for name in sorted(set(old_map) & set(new_map)):
+        diffs = {a: {"old": old_map[name].get(a), "new": new_map[name].get(a)}
+                 for a in attrs
+                 if old_map[name].get(a) != new_map[name].get(a)}
+        if diffs:
+            changed.append({key: name, "changes": diffs})
+    return {"added": added, "removed": removed, "changed": changed,
+            "has_changes": bool(added or removed or changed)}
+
+
 def diff_semantic_contents(old: dict | None, new: dict | None) -> dict:
     """对比两个语义层 content 的差异(纯函数,不依赖 DB;移植)。
 
     表级: 新增/删除/变更表;列级: 变更表里的增/删/改列(data_type/semantic_type)。
     display_name/description 是人工/LLM 标注,不参与列级 diff(不代表结构变化),
     但表级顶层字段变化也算变更。排序输出保证结果稳定。
+
+    二十审 9(第二十一轮 P1): diff 必须覆盖完整语义契约——metrics/
+    relationships/calculated_fields/sample_questions 不再不可见(此前
+    104 处指标改名在页面显示"两个版本无差异")。
     """
     old_models = {m["name"]: m for m in (old or {}).get("models", [])}
     new_models = {m["name"]: m for m in (new or {}).get("models", [])}
@@ -1249,18 +1271,52 @@ def diff_semantic_contents(old: dict | None, new: dict | None) -> dict:
             old_models[name].get(k) != new_models[name].get(k)
             for k in ("display_name", "description", "source", "confidence")
         )
-        if col_diff["has_column_changes"] or top_changed:
-            changed_models.append({"table": name, **col_diff})
+        metric_diff = _diff_named_items(
+            old_models[name].get("metrics"), new_models[name].get("metrics"),
+            "name", ("display_name", "formula", "condition", "type",
+                     "source", "factor_metric_names"))
+        rel_diff = _diff_named_items(
+            old_models[name].get("relationships"),
+            new_models[name].get("relationships"),
+            "name", ("target_model", "on", "join_type", "type",
+                     "source", "confidence"))
+        calc_diff = _diff_named_items(
+            old_models[name].get("calculated_fields"),
+            new_models[name].get("calculated_fields"),
+            "name", ("display_name", "formula"))
+        sub_changed = (col_diff["has_column_changes"] or top_changed
+                       or metric_diff["has_changes"] or rel_diff["has_changes"]
+                       or calc_diff["has_changes"])
+        if sub_changed:
+            changed_models.append({"table": name, **col_diff,
+                                   **({"metrics": metric_diff}
+                                      if metric_diff["has_changes"] else {}),
+                                   **({"relationships": rel_diff}
+                                      if rel_diff["has_changes"] else {}),
+                                   **({"calculated_fields": calc_diff}
+                                      if calc_diff["has_changes"] else {})})
         else:
             unchanged.append(name)
 
+    # 示例问题(顶层集合, 直接集合差)
+    old_q = sorted((old or {}).get("sample_questions") or [])
+    new_q = sorted((new or {}).get("sample_questions") or [])
+    sample_questions_diff = {
+        "added": [q for q in new_q if q not in old_q],
+        "removed": [q for q in old_q if q not in new_q],
+    }
+    sample_questions_diff["has_changes"] = bool(
+        sample_questions_diff["added"] or sample_questions_diff["removed"])
+
     # has_changes 是元数据刷新判断是否写新版本的依据
-    has_changes = bool(added or removed or changed_models)
+    has_changes = bool(added or removed or changed_models
+                       or sample_questions_diff["has_changes"])
     return {
         "added_models": added,
         "removed_models": removed,
         "changed_models": changed_models,
         "unchanged_models": unchanged,
+        "sample_questions": sample_questions_diff,
         "has_changes": has_changes,
     }
 

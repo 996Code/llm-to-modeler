@@ -1462,7 +1462,7 @@ class TestExecutionLease:
         with pg_engine.connect() as conn:
             conn.execute(
                 "UPDATE chatbi_scheduler_leases "
-                "SET expires_at = ((extract(epoch FROM now()) - 1)*1000)::text "
+                "SET expires_at = (((extract(epoch FROM now()) - 1)*1000)::bigint)::text "
                 "WHERE task_type = 'run:scan:ds-y'")
         b = RunLease(pg_engine, "run:scan:ds-y", holder="task:b", ttl_seconds=300)
         assert b.acquire() is True, "过期租约未被接管"
@@ -1705,3 +1705,227 @@ class TestGcDbClockLedger:
             row["n"].replace("+00", "+00:00"))
         drift = abs((now_db - ts).total_seconds())
         assert drift < 5, f"台账时间与数据库时钟偏差 {drift}s(用了本地时钟)"
+
+
+# ════════════════════════════════════════════════════════════════
+# 二十一审反例回归: 中文名保真/公式变化可见/pointer-lag自愈/周期GC真实执行
+# ════════════════════════════════════════════════════════════════
+
+class TestRuleMetricDisplayNamePreservation:
+    """P0-1: refresh 不得退化规则指标中文展示名(真实 104 处退化复现)."""
+
+    def test_refresh_keeps_chinese_display_name(self):
+        """旧列「订单金额」+ 旧指标「订单金额合计」→ 新结构退化为
+        amount/amount合计 → refresh 后中文指标名必须保留."""
+        from domains.chatbi.tasks import _merge_content
+        old = SemanticModelContent(models=[
+            Model(name="orders", display_name="订单表", columns=[
+                _col("amount", source="db_comment", display_name="订单金额"),
+            ], metrics=[
+                Metric(name="amount_sum", display_name="订单金额合计",
+                       formula="SUM(amount)", type="single",
+                       source="rule_inferred", co_occurrence=5),
+            ]),
+        ])
+        # refresh 的结构扫描: 列/指标名暂时是英文退化名(llm=None)
+        scan = SemanticModelContent(models=[
+            Model(name="orders", display_name="orders", columns=[
+                _col("amount"),
+            ], metrics=[
+                Metric(name="amount_sum", display_name="amount合计",
+                       formula="SUM(amount)", type="single",
+                       source="rule_inferred"),
+            ]),
+        ])
+        merged = _merge_content(old, scan)
+        met = merged.models[0].metrics[0]
+        assert met.display_name == "订单金额合计", \
+            f"中文指标名被退化: {met.display_name!r}"
+        assert met.co_occurrence == 5
+        assert met.formula == "SUM(amount)"
+
+    def test_formula_change_visible_in_report(self):
+        """同名指标公式变化 → 不静默沿用, 进复核清单."""
+        from domains.chatbi.tasks import _merge_content, _new_report
+        old = SemanticModelContent(models=[
+            Model(name="orders", display_name="o", columns=[
+                _col("amount"), _col("count"),
+            ], metrics=[
+                Metric(name="amount_sum", display_name="订单金额合计",
+                       formula="SUM(amount)", type="single",
+                       source="rule_inferred"),
+            ]),
+        ])
+        scan = SemanticModelContent(models=[
+            Model(name="orders", display_name="o", columns=[
+                _col("amount"), _col("count"),
+            ], metrics=[
+                Metric(name="amount_sum", display_name="amount合计",
+                       formula="SUM(amount) / count", type="single",
+                       source="rule_inferred"),
+            ]),
+        ])
+        report = _new_report()
+        _merge_content(old, scan, report=report)
+        met = next(m for m in merged_metrics(report, scan_or=None)) \
+            if False else None
+        # 公式变化 → conflicts 记录 + 采用新公式
+        assert any("amount_sum" in (c.get("manual") or "")
+                   for c in report["conflicts"]), \
+            f"公式变化未进复核: {report['conflicts']}"
+
+
+class TestPointerLagSelfHeal:
+    """P0-2 自愈: unchanged refresh 遇 pointer lag 不得走快路跳过."""
+
+    def _ds_row(self, db, ds_id):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_data_sources "
+                "(id, name, db_type, host, port, database, username, "
+                "encrypted_password, is_active, scan_status, scan_progress, "
+                "scan_stage, scan_error, scope_id, created_at, updated_at) "
+                "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
+                "'done', 100, '', '', ?, ?, ?)",
+                (ds_id, "scope-lag-1", now, now))
+
+    def test_unchanged_refresh_does_not_skip_when_lagging(self, pg_engine,
+                                                          monkeypatch):
+        """semantic v5 / active r3 → unchanged refresh 必须继续走补建,
+        结果里不得出现"跳过索引重建"."""
+        from domains.chatbi.stores import set_active_doc_id
+        from domains.chatbi import semantic
+        from domains.chatbi.tasks import _refresh_all_datasources
+        ds = "lag-ds-1"
+        self._ds_row(pg_engine, ds)
+        content = SemanticModelContent(models=[
+            Model(name="t1", display_name="T", columns=[_col("id")]),
+        ])
+        v = semantic.save_content(pg_engine, ds, content, source="scan",
+                                  expected_version=0)
+        assert v == 1
+        # 语义推进到 v2(索引未跟随) → active r1, semantic v2, lag=1
+        content2 = SemanticModelContent(models=[
+            Model(name="t1", display_name="T2", columns=[
+                _col("id"), _col("amount"),
+            ]),
+        ])
+        v2 = semantic.save_content(pg_engine, ds, content2, source="manual_edit",
+                                   expected_version=1)
+        assert v2 == 2
+        set_active_doc_id(pg_engine, "scope-lag-1", "schema_r1", 1)  # 滞后
+
+        class _H:
+            task_id = "test-handle"
+            payload = {}
+
+            def log(self, msg, **kw):
+                print("LOG:", msg)
+
+            def set_progress(self, *a, **k):
+                pass
+
+        handle = _H()
+        results = []
+        lease = type("L", (), {
+            "heartbeat": lambda self: True,
+            "assert_owned": lambda self: True,
+            "owned": True,
+        })()
+        app_state = types.SimpleNamespace()   # llm 取不到 → 索引 skipped(可接受)
+        settings = {"scan_metric_inference": False}
+        monkeypatch.setattr(
+            "domains.chatbi.datasources.list_datasources",
+            lambda db, active_only=False: [type("R", (), {"id": ds})()])
+        monkeypatch.setattr(
+            "domains.chatbi.datasources.get_datasource",
+            lambda db, i, decrypt=False: type(
+                "I", (), {"id": ds, "name": "t",
+                          "connection_kwargs": lambda self: {
+                              "host": "x", "port": 1, "user": "u",
+                              "password": "p", "database": "d"},
+                          "db_type": "postgresql",
+                          "scope_id": "scope-lag-1"})())
+        # refresh 的结构内省不真连库: 固定返回与 v2 同构的新扫描
+        scan_content = SemanticModelContent(models=[
+            Model(name="t1", display_name="T2", columns=[
+                _col("id"), _col("amount"),
+            ]),
+        ])
+        monkeypatch.setattr(
+            "domains.chatbi.semantic.scan_datasource",
+            lambda **kw: scan_content)
+        # 二十审 7.4: 补建在 llm=None 下走 skipped(无向量设施), 但本测试
+        # 环境 scanned 内容与 v2 指纹一致 → try rebuild llm=None → skipped
+        # → ok=True; 关键断言: 未走"跳过索引重建"快路(自愈分支生效)
+        try:
+            _refresh_all_datasources(handle, app_state, pg_engine,
+                                     settings, results, lease)
+        except RuntimeError as e:
+            # degraded→ok=False 时 refresh 会 raise(任务可见失败)——同样
+            # 证明未走快路
+            assert "索引" in str(e) or "刷新" in str(e), str(e)
+        assert results, "无结果"
+        r = results[0]
+        assert "跳过索引重建" not in (r.get("detail") or ""), \
+            "lag 存在却走了跳过快路(自愈失效)"
+
+
+import types  # noqa: E402
+
+
+class TestPeriodicGcRealExecution:
+    """P1(二十一审 8): 周期 GC 必须真正执行, 不得被裸 except 吞掉."""
+
+    def test_periodic_gc_cleans_expired_ledger(self, pg_engine):
+        """插入过期 building 台账(不发新版本) → 周期 GC 主动清理."""
+        from datetime import datetime, timedelta, timezone
+        from domains.chatbi.stores import (record_index_build,
+                                           set_active_doc_id)
+        set_active_doc_id(pg_engine, "pgc-scope", "schema_r10", 10)
+        record_index_build(pg_engine, "pgc-scope", 9, "schema_r9",
+                           status="building")
+        old_ts = (datetime.now(timezone.utc)
+                  - timedelta(seconds=90000)).isoformat()
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "UPDATE chatbi_index_builds SET updated_at = ? "
+                "WHERE scope = 'pgc-scope' AND version = 9", (old_ts,))
+
+        class _Store:
+            def __init__(self):
+                self.deleted = []
+
+            def delete_doc(self, scope, doc_id):
+                self.deleted.append(doc_id)
+                return 1
+
+        store = _Store()
+
+        class _AS:
+            pass
+
+        # _run_periodic_index_gc 需要 settings/app_state(空 namespace 走缺省)
+        from domains.chatbi.tasks import _run_periodic_index_gc
+        deleted = _run_periodic_index_gc(pg_engine, _AS(), store)
+        # pgc-scope 已在 index_revisions 登记(set_active_doc_id)——
+        # 周期 GC 的全 scope 遍历必须清掉它(二十审 9.5/二十一审 8:
+        # 不依赖新版本发布事件)
+        assert deleted == 1, \
+            f"周期 GC 未清理过期 building(删除 {deleted}, 明细 {store.deleted})"
+        with pg_engine.connect() as conn:
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM chatbi_index_builds "
+                "WHERE scope = 'pgc-scope'").fetchone()
+        assert int(n["n"]) == 0
+
+    def test_gc_branch_no_silent_except(self):
+        """源码审查锚: 调度器 GC 分支不得存在裸 `except Exception: pass`."""
+        import inspect
+        from domains.chatbi import tasks
+        src = inspect.getsource(tasks._start_refresh_scheduler)
+        assert "except Exception:\n                            pass" not in src, \
+            "调度器 GC 分支仍有裸吞异常"
+        assert "_gc_llm" not in src, "GC 分支仍引用未定义/无用的 _gc_llm"

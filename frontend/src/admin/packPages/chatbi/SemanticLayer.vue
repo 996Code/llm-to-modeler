@@ -251,9 +251,35 @@
             <span v-if="t.added_columns?.length" class="sl-diff-col add">+ {{ t.added_columns.join(', ') }}</span>
             <span v-if="t.removed_columns?.length" class="sl-diff-col remove">- {{ t.removed_columns.join(', ') }}</span>
             <span v-if="t.changed_columns?.length" class="sl-diff-col change">~ {{ t.changed_columns.join(', ') }}</span>
+            <!-- 二十审 9: 指标/关系/计算字段变化可见(此前 104 处指标改名显示"无差异") -->
+            <div v-if="t.metrics" class="sl-diff-col change">
+              指标:
+              <span v-if="t.metrics.added?.length">+ {{ t.metrics.added.join(', ') }}</span>
+              <span v-if="t.metrics.removed?.length">- {{ t.metrics.removed.join(', ') }}</span>
+              <span v-for="c in t.metrics.changed" :key="c.name">
+                ~ {{ c.name }}<template v-for="(v, k) in c.changes" :key="k"> [{{ k }}: {{ v.old }} → {{ v.new }}]</template>
+              </span>
+            </div>
+            <div v-if="t.relationships" class="sl-diff-col change">
+              关系:
+              <span v-if="t.relationships.added?.length">+ {{ t.relationships.added.join(', ') }}</span>
+              <span v-if="t.relationships.removed?.length">- {{ t.relationships.removed.join(', ') }}</span>
+              <span v-for="c in t.relationships.changed" :key="c.name">~ {{ c.name }} </span>
+            </div>
+            <div v-if="t.calculated_fields" class="sl-diff-col change">
+              计算字段:
+              <span v-if="t.calculated_fields.added?.length">+ {{ t.calculated_fields.added.join(', ') }}</span>
+              <span v-if="t.calculated_fields.removed?.length">- {{ t.calculated_fields.removed.join(', ') }}</span>
+              <span v-for="c in t.calculated_fields.changed" :key="c.name">~ {{ c.name }} </span>
+            </div>
           </div>
         </div>
-        <div v-if="!diffResult.added_models?.length && !diffResult.removed_models?.length && !diffResult.changed_models?.length"
+        <div v-if="diffResult.sample_questions?.has_changes" class="sl-diff-section">
+          <div class="sl-diff-title change">示例问题变化</div>
+          <div class="sl-diff-col add">+ {{ diffResult.sample_questions.added.length }}</div>
+          <div class="sl-diff-col remove">- {{ diffResult.sample_questions.removed.length }}</div>
+        </div>
+        <div v-if="!diffResult.added_models?.length && !diffResult.removed_models?.length && !diffResult.changed_models?.length && !diffResult.sample_questions?.has_changes"
              class="muted sl-center">两个版本无差异</div>
       </template>
     </a-drawer>

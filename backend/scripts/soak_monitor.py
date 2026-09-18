@@ -37,13 +37,25 @@ if not DSN:
     print("SOAK_DATABASE_URL 未设置(fail-closed, 不再硬编码回退)", flush=True)
     sys.exit(2)
 
+_REPO = os.path.join(os.path.dirname(__file__), "..")
 try:
     GIT_COMMIT = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"],
-        capture_output=True, text=True, timeout=10,
-        cwd=os.path.join(os.path.dirname(__file__), "..")).stdout.strip()
+        capture_output=True, text=True, timeout=10, cwd=_REPO).stdout.strip()
 except Exception:
     GIT_COMMIT = "unknown"
+try:
+    GIT_DIRTY = bool(subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True, text=True, timeout=10, cwd=_REPO).stdout.strip())
+except Exception:
+    GIT_DIRTY = None
+import hashlib
+try:
+    SCRIPT_HASH = hashlib.sha256(open(os.path.abspath(__file__), "rb")
+                                 .read()).hexdigest()[:12]
+except Exception:
+    SCRIPT_HASH = "unknown"
 
 
 def now_iso():
@@ -74,8 +86,12 @@ def proc_metrics():
     pids, seen = [], set()
     for port in PORTS:
         try:
+            # 二十审 5.7: 只取 LISTEN 进程——":port" 无过滤会把连到该端口
+            # 的客户端(如 monitor 自己的出站连接)也算成服务进程
+            # 注意: "-ti" 与地址分开传时 lsof 解析异常(实测返回空),
+            # 必须合并为单个参数或用 "-t -i..." 分列
             pids += subprocess.run(
-                ["/usr/sbin/lsof", "-ti", f":{port}"],
+                ["/usr/sbin/lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
                 capture_output=True, text=True, timeout=10).stdout.split()
         except Exception:
             pass
@@ -110,8 +126,25 @@ def proc_metrics():
     return out
 
 
+def _verdict(snap_body) -> str:
+    """二十审 5.7: 每条快照给出明确结论, 不再只记录不判断。"""
+    problems = []
+    for d in snap_body["datasources"]:
+        if d.get("pointer_lag") not in (0, None):
+            problems.append(f"{d['ds']} pointer_lag={d['pointer_lag']}")
+        if d.get("requires_review"):
+            problems.append(f"{d['ds']} requires_review")
+    if snap_body.get("build_ledger", {}).get("building", 0) > 3:
+        problems.append("building 堆积")
+    for p in snap_body.get("processes", []):
+        if p.get("rss_kb") is not None and p["rss_kb"] > 8 * 1024 * 1024:
+            problems.append(f"pid{p['pid']} RSS>8GB")
+    return "FAIL: " + "; ".join(problems) if problems else "OK"
+
+
 def snapshot(db):
-    snap = {"ts": now_iso(), "commit": GIT_COMMIT}
+    snap = {"ts": now_iso(), "commit": GIT_COMMIT,
+            "git_dirty": GIT_DIRTY, "script_hash": SCRIPT_HASH}
     with db.connect() as conn:
         dss = conn.execute(
             "SELECT id, name, scope_id FROM chatbi_data_sources "
@@ -182,6 +215,7 @@ def snapshot(db):
         except OSError:
             log_errors[os.path.basename(p)] = None
     snap["log_errors"] = log_errors
+    snap["verdict"] = _verdict(snap)
     return snap
 
 
@@ -205,7 +239,8 @@ def main():
             procs = " ".join(
                 f"pid{p['pid']}:rss={p['rss_kb']},th={p['threads']},fd={p['fds']}"
                 for p in snap["processes"])
-            print(f"[{snap['ts'][:19]}] ok {procs}", flush=True)
+            print(f"[{snap['ts'][:19]}] {snap['verdict']} {procs}",
+                  flush=True)
         except Exception as e:
             print(f"[{now_iso()}] snapshot failed: {e}", flush=True)
         time.sleep(interval)
