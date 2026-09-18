@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -432,12 +433,27 @@ def ensure_index_revision_schema(db: PackRelationalDB) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chatbi_chunk_ident_doc "
             "ON chatbi_chunk_identities(scope, doc_id)")
-        # 老库升级: 二十审 9.7 身份表补 revision 列(幂等)
-        try:
-            conn.execute(
-                "ALTER TABLE chatbi_chunk_identities ADD COLUMN revision INTEGER")
-        except Exception:
-            pass  # 列已存在
+
+
+def _ensure_identity_revision_column(db: PackRelationalDB) -> None:
+    """身份表 revision 列迁移(二十审 9.7)——独立事务+预检。
+
+    同 chatbi.tasks.ensure_lease_token_column 的教训: ALTER 在列已存在
+    时报错会毒化所在事务, 吞异常后同事务后续语句全部 aborted; 预检
+    information_schema 替代 try/except。
+    """
+    try:
+        with db.connect() as conn:
+            has = conn.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'chatbi_chunk_identities' "
+                "AND column_name = 'revision'").fetchone()
+            if not has:
+                conn.execute("ALTER TABLE chatbi_chunk_identities "
+                             "ADD COLUMN revision INTEGER")
+    except Exception as e:
+        logger.warning("身份表 revision 列迁移失败: %s", e)
 
 
 def register_chunk_identities(db: Optional[PackRelationalDB], scope: str,
@@ -463,6 +479,7 @@ def register_chunk_identities(db: Optional[PackRelationalDB], scope: str,
     truncated: list = []
     try:
         ensure_index_revision_schema(db)
+        _ensure_identity_revision_column(db)
         with db.connect() as conn:
             for rec in records:
                 rtype = rec.metadata.get("type")
@@ -564,6 +581,27 @@ def get_active_doc_id(db: Optional[PackRelationalDB],
         raise
 
 
+def _set_active_on_conn(conn, scope: str, doc_id: str, version: int) -> bool:
+    """指针翻转核心(指定连接; 供 fenced 发布在同一租约事务内执行)。"""
+    cur = conn.execute(
+        "INSERT INTO chatbi_index_revisions "
+        "(scope, active_doc_id, version, updated_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT (scope) DO UPDATE SET "
+        "active_doc_id = EXCLUDED.active_doc_id, "
+        "version = EXCLUDED.version, "
+        "updated_at = EXCLUDED.updated_at "
+        "WHERE EXCLUDED.version > chatbi_index_revisions.version",
+        (scope, doc_id, version, _now()))
+    rowcount = getattr(cur, "rowcount", None)
+    if rowcount:
+        return True
+    row = conn.execute(
+        "SELECT active_doc_id FROM chatbi_index_revisions "
+        "WHERE scope = ?", (scope,)).fetchone()
+    return bool(row and row["active_doc_id"] == doc_id)
+
+
 def set_active_doc_id(db: PackRelationalDB, scope: str, doc_id: str,
                       version: int) -> bool:
     """原子翻转 active 指针; 仅当 version 高于现存值才生效。
@@ -574,30 +612,12 @@ def set_active_doc_id(db: PackRelationalDB, scope: str, doc_id: str,
     """
     ensure_index_revision_schema(db)
     with db.connect() as conn:
-        cur = conn.execute(
-            "INSERT INTO chatbi_index_revisions "
-            "(scope, active_doc_id, version, updated_at) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT (scope) DO UPDATE SET "
-            "active_doc_id = EXCLUDED.active_doc_id, "
-            "version = EXCLUDED.version, "
-            "updated_at = EXCLUDED.updated_at "
-            "WHERE EXCLUDED.version > chatbi_index_revisions.version",
-            (scope, doc_id, version, _now()))
-        # SQLite: 无匹配行时 rowcount 0(INSERT 成功为 1); PG 的 execute
-        # rowcount 对 DO UPDATE WHERE 不命中同样报 0——两种驱动口径一致
-        rowcount = getattr(cur, "rowcount", None)
-        if rowcount:
-            return True
-        # rowcount 不可靠的驱动: 回读确认
-        row = conn.execute(
-            "SELECT active_doc_id FROM chatbi_index_revisions "
-            "WHERE scope = ?", (scope,)).fetchone()
-        return bool(row and row["active_doc_id"] == doc_id)
+        return _set_active_on_conn(conn, scope, doc_id, version)
 
 
 def record_index_build(db: PackRelationalDB, scope: str, version: int,
-                       doc_id: str, status: str) -> None:
+                       doc_id: str, status: str,
+                       build_id: str | None = None) -> None:
     """记录/更新一次索引构建(building → published/yielded)。
 
     GC 的台账: 让路、崩溃、半成品的分区都按 (scope, version) 记录,
@@ -606,6 +626,7 @@ def record_index_build(db: PackRelationalDB, scope: str, version: int,
     不再用工作进程本地时钟——时钟漂移不再影响宽限/TTL 判定。
     """
     ensure_index_revision_schema(db)
+    build_id = build_id or f"{version}-{uuid.uuid4().hex[:8]}"
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO chatbi_index_builds "
@@ -615,6 +636,18 @@ def record_index_build(db: PackRelationalDB, scope: str, version: int,
             "doc_id = EXCLUDED.doc_id, status = EXCLUDED.status, "
             "updated_at = EXCLUDED.updated_at",
             (scope, version, doc_id, status))
+        # 二十四审 7: append-only 事件流——(scope,version) 状态表 UPSERT
+        # 折叠同版本重复重建, 事件表让每次 started/published/yielded
+        # 各留一条(同版本×10 重建 = 10 条事件, 不再被折叠成 1 行)
+        try:
+            conn.execute(
+                "INSERT INTO chatbi_index_build_events "
+                "(scope, build_id, version, event, created_at) "
+                "VALUES (?, ?, ?, ?, "
+                "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'))",
+                (scope, build_id, version, status))
+        except Exception as e:
+            logger.warning("构建事件写入失败(监控计数将缺失): %s", e)
 
 
 def _ensure_build_ledger(db: PackRelationalDB, scope: str, version: int,

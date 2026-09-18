@@ -221,12 +221,15 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
     任何异常返回 False(租约不可用时宁可跳过, 不重复执行)。
     """
     holder = holder or _scheduler_holder()
+    ensure_lease_token_column(db)
     try:
         with db.connect() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases ("
                 "task_type TEXT PRIMARY KEY, holder TEXT NOT NULL, "
-                "expires_at TEXT NOT NULL)")
+                "expires_at TEXT NOT NULL, token BIGINT)")
+            conn.execute(
+                "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq")
             # 二十审 9.6 + 二十一审 5.6: 旧部署 ISO 租约的迁移全程用
             # 数据库时钟(此前 datetime.now().astimezone() 又依赖了工作
             # 进程本地钟)。三步:
@@ -253,24 +256,70 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
                              "保留——请人工核查", row["task_type"],
                              row["expires_at"])
             # now 由数据库给出并直接参与比较(跨主机时钟偏差免疫)
+            # token 只在所有权变更时轮换(二十四审 6): 续租(同 holder)
+            # 保持旧 token——否则每次心跳轮换会让并发 fenced 写被误拒;
+            # 接管(不同 holder 或过期抢占)铸造新 token, 旧 writer 的旧
+            # token 从此永远无法通过写前校验
             conn.execute(
                 "WITH n AS (SELECT (extract(epoch FROM now())*1000)::bigint AS nowms) "
-                "INSERT INTO chatbi_scheduler_leases (task_type, holder, expires_at) "
-                "SELECT ?, ?, ((SELECT nowms FROM n) + ?)::text FROM n "
+                "INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at, token) "
+                "SELECT ?, ?, ((SELECT nowms FROM n) + ?)::text, "
+                "nextval('chatbi_lease_token_seq') FROM n "
                 "ON CONFLICT (task_type) DO UPDATE SET "
-                "holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
+                "holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at, "
+                "token = CASE WHEN chatbi_scheduler_leases.holder "
+                "                     = EXCLUDED.holder "
+                "             THEN chatbi_scheduler_leases.token "
+                "             ELSE nextval('chatbi_lease_token_seq') END "
                 "WHERE chatbi_scheduler_leases.holder = EXCLUDED.holder "
                 "   OR (chatbi_scheduler_leases.expires_at ~ '^[0-9]+$' "
                 "       AND chatbi_scheduler_leases.expires_at::bigint "
                 "           <= (SELECT nowms FROM n))",
                 (task_type, holder, int(ttl_seconds) * 1000))
             row = conn.execute(
-                "SELECT holder FROM chatbi_scheduler_leases WHERE task_type = ?",
-                (task_type,)).fetchone()
+                "SELECT holder, token FROM chatbi_scheduler_leases "
+                "WHERE task_type = ?", (task_type,)).fetchone()
         return bool(row and row["holder"] == holder)
     except Exception as e:
         logger.warning("租约 %s 获取失败(跳过本轮防重复): %s", task_type, e)
         return False
+
+
+def ensure_lease_token_column(db) -> None:
+    """租约表 token 列迁移(二十四审)。
+
+    必须在**独立事务**执行且用 information_schema 预检: PG 中 ALTER
+    报错会毒化当前事务(aborted), Python 吞异常救不回来——同事务后续
+    语句全部失败(实测: 列已存在时第二次调用起租约获取全挂)。
+    """
+    try:
+        with db.connect() as conn:
+            has = conn.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'chatbi_scheduler_leases' "
+                "AND column_name = 'token'").fetchone()
+            if not has:
+                conn.execute("ALTER TABLE chatbi_scheduler_leases "
+                             "ADD COLUMN token BIGINT")
+                conn.execute("CREATE SEQUENCE IF NOT EXISTS "
+                             "chatbi_lease_token_seq")
+    except Exception as e:
+        logger.warning("租约 token 列迁移失败: %s", e)
+
+
+def lease_token(db, task_type: str, holder: str):
+    """读当前 holder 的 fencing token(无/已易主返回 None)。"""
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT token FROM chatbi_scheduler_leases "
+                "WHERE task_type = ? AND holder = ?",
+                (task_type, holder)).fetchone()
+        return int(row["token"]) if row and row["token"] is not None else None
+    except Exception:
+        return None
 
 
 def release_lease(db, task_type: str, holder: str) -> bool:
@@ -303,6 +352,7 @@ class RunLease:
         self.holder = holder
         self.ttl_seconds = ttl_seconds
         self.acquired = False
+        self.token: int | None = None   # fencing token(二十四审 6)
         self._hb_stop: threading.Event | None = None
         self._hb_thread: threading.Thread | None = None
 
@@ -310,6 +360,7 @@ class RunLease:
         self.acquired = acquire_lease(self.db, self.task_type, self.holder,
                                       ttl_seconds=self.ttl_seconds)
         if self.acquired:
+            self.token = lease_token(self.db, self.task_type, self.holder)
             self._start_heartbeat()
         return self.acquired
 
@@ -393,8 +444,10 @@ class RunLease:
                 "AND expires_at ~ '^[0-9]+$' "
                 "AND expires_at::bigint > "
                 "(extract(epoch FROM now())*1000)::bigint "
-                "FOR UPDATE",
-                (self.task_type, self.holder)).fetchone()
+                + ("AND token = ? " if self.token is not None else "")
+                + "FOR UPDATE",
+                (self.task_type, self.holder)
+                + ((self.token,) if self.token is not None else ())).fetchone()
             if row is None:
                 logger.error("事务级 fencing: 租约 %s 已易主——写入被拒",
                              self.task_type)
@@ -559,14 +612,21 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             if _retry and _retry[0] is not None:
                 merge_report = _new_report()  # 以最终生效的 merge 报告为准
                 content = _merge_rescan(_retry[0], _re_scan, report=merge_report)
-                version = semantic.save_content(db, ds_id, content,
-                                                source="scan",
-                                                expected_version=_retry[1])
+                # 二十四审 6: 冲突重试同样 fenced(此前绕开 helper)
+                _ok, version = lease.execute_if_owned(
+                    lambda conn: semantic.save_content(
+                        db, ds_id, content, source="scan",
+                        expected_version=_retry[1], conn=conn))
+                if not _ok:
+                    from services.task_manager import PermanentTaskError
+                    raise PermanentTaskError(
+                        "重试落库被事务级 fencing 拒绝(租约已失)——中止")
             else:
                 raise
-        # 十八审 6.5/十九审 6.6: 每次 merge 后都写报告(含空报告)——干净刷新
-        # 清掉旧告警, 报告版本与语义版本对齐; 保存失败时任务结果可见
-        report_state = save_merge_report(db, ds_id, version, merge_report)
+        # 十八审 6.5 → 二十四审 6: 报告保存 fenced(失租旧任务不能再
+        # 写过期报告); 每次 merge 后都写(含空, 清旧告警+版本对齐)
+        report_state = save_merge_report_fenced(lease, db, ds_id, version,
+                                                merge_report)
         if merge_report.get("requires_review"):
             _log_report(handle, merge_report, f"重扫 v{version}")
         if report_state == REPORT_FAILED:
@@ -585,7 +645,8 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             store = stores.get_vector(app_state)
             embedder = stores.get_embedder(llm)
             rb = indexing.guarded_rebuild(content, ds_id, store, embedder, db=db,
-                                           expected_version=version)  # 十三审7.3
+                                           expected_version=version,
+                                           lease=lease)  # 十三审7.3/二十四审
             if rb is not None and getattr(rb, "error", None):
                 raise RuntimeError(rb.error)
             indexed = rb.indexed_count
@@ -837,9 +898,16 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                     merge_report = _new_report()  # 以最终生效的 merge 报告为准
                     _retry_merged = _merge_content(_retry[0], _re_scanned,
                                                    report=merge_report)
-                    version = semantic.save_content(
-                        db, info.id, _retry_merged, source="refresh",
-                        expected_version=_retry[1])
+                    # 二十四审 6: 冲突重试同样 fenced
+                    _ok, version = write_lease.execute_if_owned(
+                        lambda conn: semantic.save_content(
+                            db, info.id, _retry_merged, source="refresh",
+                            expected_version=_retry[1], conn=conn))
+                    if not _ok:
+                        results.append({"datasource_id": info.id, "ok": False,
+                                        "error": "重试落库被 fencing 拒绝"
+                                                 "(写租约已失)"})
+                        continue
                 else:
                     raise  # 无法重试(无 current)
             # 十八审 6.5/十九审 6.6/二十审 9.4/二十二审 8: 每次 merge 后
@@ -854,7 +922,8 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                            f"(语义 v{version} 已生效)——待复核清单可能过期")
             struct_changed = (prev_db_version is None
                               or version != prev_db_version)
-            evolve = _evolve_graph(db, info.id, merged, app_state=app_state)
+            evolve = _evolve_graph(db, info.id, merged, app_state=app_state,
+                                   lease=write_lease)
             # 十审 7.3: error/conflict 检查必须在 unchanged 快路之前——
             # 此前 unchanged 放在前面, evolve 返回 error+versions_written=0
             # 时错误被吞掉, 刷新仍报 ok=true(八轮修好的传播再次失效)
@@ -918,7 +987,8 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                         content=final_content, data_source_id=info.id,
                         store=cb_stores.get_vector(app_state),
                         embedder=cb_stores.get_embedder(llm), db=db,
-                        expected_version=final_version)  # 十二审8.2
+                        expected_version=final_version,
+                        lease=write_lease)  # 十二审8.2/二十四审
                     if _rb is not None and getattr(_rb, "error", None):
                         raise RuntimeError(f"索引重建失败: {_rb.error}")
                 else:
@@ -942,7 +1012,8 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                         content=final_content, data_source_id=info.id,
                         store=cb_stores.get_vector(app_state),
                         embedder=cb_stores.get_embedder(llm), db=db,
-                        expected_version=final_version)  # 十二审8.2
+                        expected_version=final_version,
+                        lease=write_lease)  # 十二审8.2/二十四审
                     if _rb is not None and getattr(_rb, "error", None):
                         index_status = "conflict"
                         index_warning = (f"并发语义变更(v{final_version}), "
@@ -1617,7 +1688,7 @@ def _log_report(handle, report: dict, version_label: str) -> None:
                    f"({version_label})——详情见语义层页面「待复核」提示")
 
 
-def _make_index_rebuilder(app_state, datasource_id: str):
+def _make_index_rebuilder(app_state, datasource_id: str, lease=None):
     """构造图谱演化的索引重建回调(I2: 演化落新版本后索引不漂移)。
 
     apply_confidence_updates 以关键字调用 rebuild_index(content=..., data_source_id=...);
@@ -1637,10 +1708,12 @@ def _make_index_rebuilder(app_state, datasource_id: str):
 
     def _rebuild(content, data_source_id, **_kw):
         # 十三审 7.3: 从 kwargs 取 expected_version(apply 传入了 new_version)
+        # 二十四审 6: lease 透传——演化触发的索引发布同样 fenced
         result = indexing.guarded_rebuild(
             content=content, data_source_id=data_source_id,
             store=store, embedder=embedder, db=db,
-            expected_version=_kw.get('expected_version'))
+            expected_version=_kw.get('expected_version'),
+            lease=lease)
         # rebuild_index 的失败契约是返回 RebuildResult(error=...) 而非抛
         # 异常(五审 5.2)——error 非空时 raise, 让调用方的 except/
         # on_index_error 降级路径真实生效, 不再谎报成功
@@ -1699,7 +1772,8 @@ def _graph_sync_targets(store, result: dict, data_source_id=None) -> set:
     return targets
 
 
-def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
+def _evolve_graph(db, datasource_id: str, content, app_state=None,
+                  lease=None) -> dict:
     """图谱置信度演化 (SEM-003;graph_infer 移植栈的接线点):
     查询历史(fewshot 示例 SQL) → 频繁 JOIN 表对挖掘 → confidence 提升 →
     乐观锁写回语义层新版本。
@@ -1826,6 +1900,13 @@ def _evolve_graph(db, datasource_id: str, content, app_state=None) -> dict:
             except Exception as e:
                 logger.warning("水位推进失败(无语义变更, 影响有限): %s", e)
         return result  # 无新证据 → 不写版本(幂等)
+
+    # 二十四审 6: 演化写前租约检查(语义写由 apply 的 expected_version
+    # CAS 二线兜底; 失租时按冲突让路, 不覆盖)
+    if lease is not None and not lease.assert_owned():
+        logger.warning("图谱演化写前 fencing 失败(租约已失)——本轮跳过 ds=%s",
+                       datasource_id[:8])
+        return {"versions_written": 0, "index_rebuild": "conflict"}
 
     # 乐观锁: 读当前版本号
     current_version = None

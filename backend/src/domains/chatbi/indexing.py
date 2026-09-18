@@ -266,7 +266,7 @@ def _get_build_lock(ds_id: str):
 
 
 def guarded_rebuild(content, data_source_id, store, embedder, db,
-                    expected_version=None):
+                    expected_version=None, lease=None):
     """带 datasource 级串行锁和版本前后复查的 rebuild_index 包装。
 
     十审 7.2: delete-then-build 无锁时, 旧版构建可在新版之后完成并
@@ -285,7 +285,7 @@ def guarded_rebuild(content, data_source_id, store, embedder, db,
                 return type('R', (), {'error': f'跳过过时构建 v{expected_version} (current v{cur_v})',
                                       'deleted_count': 0, 'indexed_count': 0})()
         result = rebuild_index(content, data_source_id, store, embedder, db,
-                               revision=expected_version)
+                               revision=expected_version, lease=lease)
         # 构建后复查: 构建期间 current 变了 → 用最新版补建一次
         _, cur_v = semantic.load_content(db, data_source_id)
         if cur_v is not None and expected_version is not None and cur_v != expected_version:
@@ -293,7 +293,8 @@ def guarded_rebuild(content, data_source_id, store, embedder, db,
             latest_content, _ = _sem.load_content(db, data_source_id)
             if latest_content is not None:
                 result = rebuild_index(latest_content, data_source_id,
-                                       store, embedder, db, revision=cur_v)
+                                       store, embedder, db, revision=cur_v,
+                                       lease=lease)
         return result
 
 
@@ -307,6 +308,7 @@ def rebuild_index(
     revision: Optional[int] = None,
     published_grace_seconds: int = 600,
     unfinished_ttl_seconds: int = 86400,
+    lease=None,
 ) -> RebuildResult:
     """语义层变更后重建索引。
 
@@ -348,7 +350,7 @@ def rebuild_index(
         return _rebuild_with_revision(
             content, data_source_id, store, embedder, scope, db, revision,
             published_grace_seconds=published_grace_seconds,
-            unfinished_ttl_seconds=unfinished_ttl_seconds)
+            unfinished_ttl_seconds=unfinished_ttl_seconds, lease=lease)
 
     # ── legacy 路径: 删旧 + 建新(无版本号的兼容调用方) ──
     # 1. 删旧: 该 scope 的语义层分区(同数据源维度, few-shot 分区不受影响)
@@ -402,6 +404,7 @@ def _rebuild_with_revision(
     revision: int,
     published_grace_seconds: int = 600,
     unfinished_ttl_seconds: int = 86400,
+    lease=None,
 ) -> RebuildResult:
     """revision namespace 发布: 建新分区 → 原子翻转指针 → 延迟清理旧分区。
 
@@ -415,16 +418,25 @@ def _rebuild_with_revision(
     分区也由同一 GC 回收(按记录的 doc_id 删)。
     """
     from domains.chatbi.stores import (get_active_doc_id, set_active_doc_id,
-                                       record_index_build, gc_index_builds,
-                                       _ensure_build_ledger)
+                                       _set_active_on_conn, record_index_build,
+                                       gc_index_builds, _ensure_build_ledger)
 
     prev_doc = get_active_doc_id(db, scope) if db is not None else None
-    new_doc = f"{DOC_SCHEMA}_r{revision}"
+    # 二十四审 6: 分区名含 fencing token——同版本两个 writer 各写各的
+    # 物理分区(旧 schema_r{v} 双写同一分区, version CAS 防不了同版本
+    # 内容交错)。token 只在租约接管时轮换, 同任务重试保持同分区。
+    build_token = getattr(lease, "token", None) if lease is not None else None
+    build_id = f"{revision}-t{build_token}" if build_token is not None \
+        else f"{revision}-admin"
+    new_doc = (f"{DOC_SCHEMA}_r{revision}_t{build_token}"
+               if build_token is not None else f"{DOC_SCHEMA}_r{revision}")
 
     # 十九审 6.5: 升级回填——active 指针已存在(如 schema_r17)但台账无行时
     # 补一条 published, 否则旧 revision 向量永远无法被 GC
     if db is not None and prev_doc:
-        m = re.match(rf"^{re.escape(DOC_SCHEMA)}_r(\d+)$", prev_doc or "")
+        # 二十四审: doc_id 可带 _t{token} 后缀(分区隔离)
+        m = re.match(rf"^{re.escape(DOC_SCHEMA)}_r(\d+)(?:_t\d+)?$",
+                     prev_doc or "")
         if m:
             try:
                 _ensure_build_ledger(db, scope, int(m.group(1)), prev_doc,
@@ -435,7 +447,8 @@ def _rebuild_with_revision(
     # 1. 构建意图落账(GC 依据: 崩溃/让路的半成品分区按 doc_id 可回收)
     if db is not None:
         try:
-            record_index_build(db, scope, revision, new_doc, status="building")
+            record_index_build(db, scope, revision, new_doc,
+                               status="building", build_id=build_id)
         except Exception as e:
             logger.warning("rebuild_index(revision) 构建意图落账失败: %s", e)
 
@@ -459,7 +472,19 @@ def _rebuild_with_revision(
                        "新分区 %s 未发布", new_doc)
         return RebuildResult(error="revision 发布需要 db 写 active 指针")
     try:
-        became_active = set_active_doc_id(db, scope, new_doc, revision)
+        if lease is not None:
+            # 二十四审 6: 发布在租约行锁事务内(FOR UPDATE + token 校验)
+            # ——embedding 期间失租的旧 writer 无法翻转指针
+            _ok, became_active = lease.execute_if_owned(
+                lambda conn: _set_active_on_conn(conn, scope, new_doc,
+                                                 revision))
+            if not _ok:
+                logger.warning("rebuild_index(revision) 指针发布被 "
+                               "fencing 拒绝(租约已失)——分区不发布")
+                return RebuildResult(indexed_count=built.indexed_count,
+                                     error="指针发布被 fencing 拒绝(租约已失)")
+        else:
+            became_active = set_active_doc_id(db, scope, new_doc, revision)
     except Exception as e:
         logger.warning("rebuild_index(revision) 指针翻转失败(旧分区完好): %s", e)
         return RebuildResult(indexed_count=built.indexed_count,
@@ -469,7 +494,8 @@ def _rebuild_with_revision(
         # 晚完成的旧任务: 已有更新 revision 发布, 本次让路。
         # 分区留待 GC(不立即删——另一 worker 可能刚发布了同版本分区)。
         try:
-            record_index_build(db, scope, revision, new_doc, status="yielded")
+            record_index_build(db, scope, revision, new_doc,
+                               status="yielded", build_id=build_id)
         except Exception:
             pass
         logger.info("rebuild_index(revision) v%s 让路(已有更新版本发布)",
@@ -479,7 +505,8 @@ def _rebuild_with_revision(
     # 4. 发布成功: 标记 + 两代 grace GC(旧 active 的在途读者不受影响)
     deleted = 0
     try:
-        record_index_build(db, scope, revision, new_doc, status="published")
+        record_index_build(db, scope, revision, new_doc,
+                           status="published", build_id=build_id)
         # 首次 revision 发布时, legacy "schema" 无版本分区按 version=0 落账
         if prev_doc == DOC_SCHEMA:
             record_index_build(db, scope, 0, DOC_SCHEMA, status="published")

@@ -2192,9 +2192,12 @@ class TestScanDegradedTerminalState:
             "domains.chatbi.tasks.RunLease.heartbeat", lambda self: True)
         monkeypatch.setattr(
             "domains.chatbi.tasks.RunLease.assert_owned", lambda self: True)
+        def _fenced(self, fn):
+            # 用真实连接执行(报告/语义落库走 fenced 路径需要 conn)
+            with pg_engine.connect() as c:
+                return True, fn(c)
         monkeypatch.setattr(
-            "domains.chatbi.tasks.RunLease.execute_if_owned",
-            lambda self, fn: (True, fn(None)))
+            "domains.chatbi.tasks.RunLease.execute_if_owned", _fenced)
 
         _real_save = semantic.save_content   # 先留原函数, 防自递归
 
@@ -2232,3 +2235,115 @@ class TestScanDegradedTerminalState:
                 "WHERE id = ?", (ds,)).fetchone()
         assert row["scan_status"] == "done_with_warning", \
             f"降级态被覆盖: {row['scan_status']}"
+
+
+# ════════════════════════════════════════════════════════════════
+# 二十四审反例回归: token fencing / 分区隔离 / 真实事件计数
+# ════════════════════════════════════════════════════════════════
+
+class TestLeaseTokenFencing:
+    """P1 6: 单调 token——接管后旧 token 无法通过写前校验."""
+
+    def test_token_rotates_only_on_takeover(self, pg_engine):
+        """续租保持 token, 接管轮换 token(轮换式设计缺陷的反例锚)."""
+        from domains.chatbi.tasks import RunLease, lease_token
+        key = "run:semantic_write:tok-1"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases WHERE task_type=?", (key,))
+        a = RunLease(pg_engine, key, holder="task:a", ttl_seconds=300)
+        b = RunLease(pg_engine, key, holder="task:b", ttl_seconds=300)
+        assert a.acquire() and a.token is not None
+        t1 = a.token
+        assert a.heartbeat()            # 续租
+        assert a.token == t1, "续租轮换了 token(并发 fenced 写会被误拒)"
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET expires_at='1' "
+                      "WHERE task_type=?", (key,))
+        assert b.acquire()              # 接管
+        assert b.token is not None and b.token > t1, "接管未铸造新 token"
+        a.release()
+        b.release()
+
+    def test_stale_token_rejected_after_takeover(self, pg_engine):
+        """接管后, 旧 writer 即便 holder 字段被手工改回也过不了 token."""
+        from domains.chatbi.tasks import RunLease
+        key = "run:semantic_write:tok-2"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases WHERE task_type=?", (key,))
+        a = RunLease(pg_engine, key, holder="task:old", ttl_seconds=300)
+        assert a.acquire()
+        # 模拟接管: 新 writer 拿走(token 轮换), 旧对象的 token 已过期
+        b = RunLease(pg_engine, key, holder="task:new", ttl_seconds=300)
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET expires_at='1' "
+                      "WHERE task_type=?", (key,))
+        assert b.acquire()
+        # 旧 writer 心跳发现失租 → acquired=False; 即使伪装 acquired,
+        # execute_if_owned 的 token WHERE 也拒绝
+        a.acquired = True               # 模拟心跳延迟未发现
+        ok, _ = a.execute_if_owned(lambda conn: "should-not-run")
+        assert ok is False, "旧 token 通过了写前校验"
+        a.release()
+        b.release()
+
+
+class TestBuildPartitionIsolation:
+    """P1 6: 同版本双 writer 各写各的物理分区(doc_id 含 token)."""
+
+    def test_doc_id_contains_token(self):
+        from domains.chatbi.indexing import _rebuild_with_revision, DOC_SCHEMA
+        import inspect
+        src = inspect.getsource(_rebuild_with_revision)
+        assert "_t{build_token}" in src, "分区名未含 build token"
+        assert "execute_if_owned" in src, "指针发布未走 fenced"
+
+    def test_same_version_rebuild_events_not_collapsed(self, pg_engine):
+        """P2 7: 同版本重建 10 次 → 事件表 10 条(状态表只 1 行)."""
+        from domains.chatbi.stores import record_index_build
+        import uuid as _uuid
+        for i in range(10):
+            record_index_build(pg_engine, "evt-scope", 42, "schema_r42_t7",
+                               status="published",
+                               build_id=f"42-t7-{_uuid.uuid4().hex[:6]}")
+        with pg_engine.connect() as c:
+            ev = c.execute(
+                "SELECT COUNT(*) AS n FROM chatbi_index_build_events "
+                "WHERE scope='evt-scope' AND version=42").fetchone()
+            st = c.execute(
+                "SELECT COUNT(*) AS n FROM chatbi_index_builds "
+                "WHERE scope='evt-scope' AND version=42").fetchone()
+        assert int(ev["n"]) == 10, f"事件被折叠: {ev['n']}"
+        assert int(st["n"]) == 1     # 状态表 UPSERT 折叠(设计如此)
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_build_events WHERE scope='evt-scope'")
+            c.execute("DELETE FROM chatbi_index_builds WHERE scope='evt-scope'")
+
+    def test_monitor_fail_on_repeated_rebuilds(self, pg_engine):
+        """monitor verdict: 1h 内 10 次构建事件 → FAIL(修复审计复现)."""
+        import os as _os
+        _os.environ.setdefault(
+            "SOAK_DATABASE_URL",
+            "postgresql://root:root@localhost:5432/llm_modeler_test_run")
+        import sys
+        sys.path.insert(0, 'scripts')
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "sm", "scripts/soak_monitor.py")
+        sm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sm)
+        import uuid as _uuid
+        for i in range(10):
+            from domains.chatbi.stores import record_index_build
+            record_index_build(pg_engine, "evt2", 42, "schema_r42_t7",
+                               status="published",
+                               build_id=f"42-t7-{_uuid.uuid4().hex[:6]}")
+        from sdk.relational_store import PackRelationalDB
+        db = PackRelationalDB('chatbi',
+                              database_url='postgresql://root:root@localhost:5432/llm_modeler_test_run')
+        snap = sm.snapshot(db)
+        assert snap["build_events_1h"].get("published", 0) >= 10
+        v = sm._verdict(snap, {})
+        assert v.startswith("FAIL"), f"10 次重建仍判 {v}"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_build_events WHERE scope='evt2'")
+            c.execute("DELETE FROM chatbi_index_builds WHERE scope='evt2'")

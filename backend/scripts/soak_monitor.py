@@ -246,14 +246,17 @@ def snapshot(db, _hist=None):
             for r in leases]
         total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()
         snap["tasks_total"] = int(total["n"])
-        # 1h 构建台账事件(真实 rebuild 证据: updated_at 近 1h 的行数
-        # 及 active 指针变化——不从 refresh 次数猜测)
-        builds = conn.execute(
-            "SELECT status, COUNT(*) AS n FROM chatbi_index_builds "
-            "WHERE updated_at >= to_char(now() - interval '1 hour', "
-            "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') GROUP BY status").fetchall()
-        snap["build_events_1h"] = {r["status"]: int(r["n"])
-                                   for r in builds}
+        # 1h 真实构建事件(二十四审 7: append-only 事件表——状态表
+        # (scope,version) UPSERT 会折叠同版本重复重建, 事件不会)
+        try:
+            events = conn.execute(
+                "SELECT event, COUNT(*) AS n FROM chatbi_index_build_events "
+                "WHERE created_at >= to_char(now() - interval '1 hour', "
+                "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') GROUP BY event").fetchall()
+            snap["build_events_1h"] = {r["event"]: int(r["n"])
+                                       for r in events}
+        except Exception:
+            snap["build_events_1h"] = {}   # 表尚未建(应用未启动过新版)
         # failed refresh 的错误分类(二十三审 5.4: 租约冲突=预期偶发,
         # 其它失败=真实故障)
         fails = conn.execute(

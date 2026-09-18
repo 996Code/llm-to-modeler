@@ -222,11 +222,27 @@ CHATBI_DDL = [
     )""",
     # 十八审 6.4: 定时任务跨进程租约——refresh/health/purge 在多 worker
     # 部署下只有一个持有者执行(过期可被抢占)
+    # 二十四审 6: token 单调递增(每次 acquire 发放新值)——旧 holder 即使
+    # 恢复, 其旧 token 也无法通过写前校验(真 fencing)
     """CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases (
         task_type TEXT PRIMARY KEY,
         holder TEXT NOT NULL,
-        expires_at TEXT NOT NULL
+        expires_at TEXT NOT NULL,
+        token BIGINT
     )""",
+    "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq",
+    # 二十四审 7: append-only 构建事件流——(scope,version) 状态表 UPSERT
+    # 会折叠同版本重复重建, 事件表每次 started/published/yielded 各留一条
+    """CREATE TABLE IF NOT EXISTS chatbi_index_build_events (
+        id BIGSERIAL PRIMARY KEY,
+        scope TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        event TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_chatbi_build_events_time "
+    "ON chatbi_index_build_events(created_at)",
     # 十九审 6.1: chunk 身份反查表——超长 chunk_id 截断后业务身份
     # (type/name/owner_model)以 PG 为真源恢复, 不再依赖不可逆主键解码
     """CREATE TABLE IF NOT EXISTS chatbi_chunk_identities (
