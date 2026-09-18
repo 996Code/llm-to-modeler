@@ -213,21 +213,33 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
                   ttl_seconds: int = 300) -> bool:
     """抢占/续期租约(十九审 6.6: 过期判定用数据库时钟, 不信本地钟)。
 
+    任何异常返回 False(租约不可用时宁可跳过, 不重复执行)。
+    二十六审 P1: token 列迁移失败 → 直接拒绝放行(fail-closed)。
+    二十八审 P1-A: UPSERT 改为 RETURNING——acquire 与本次 token 在
+    同一事务原子返回, 调用方(RunLease.acquire)不再"先 acquire 后
+    另行读 token"(两步间隙内租约可被接管+同 holder 重获, 读到的
+    已是别人的 token)。
+    """
+    tok = acquire_lease_token(db, task_type, holder, ttl_seconds)
+    return tok is not None
+
+
+def acquire_lease_token(db, task_type: str, holder: str | None = None,
+                        ttl_seconds: int = 300) -> int | None:
+    """抢占/续期租约并**原子返回本次生效的 token**(二十八审 P1-A)。
+
     expires_at 存 epoch 毫秒文本, 数值比较在 SQL 侧完成:
       - 无记录 → 插入, 本持有者获得;
-      - 持有者是本人 → 无条件续期(heartbeat 同原语);
-      - 持有者是他人且未过期 → 不动, 返回 False;
-      - 已过期(DB 时钟判定) → 抢占。
-    任何异常返回 False(租约不可用时宁可跳过, 不重复执行)。
-    二十六审 P1: token 列迁移失败 → 直接拒绝放行(fail-closed)——
-    迁移失败时 NULL token 兼容分支会让 fencing 降级运行, 宁可
-    本轮不执行任务也不能在无 token 保护下放行写入。
+      - 持有者是本人 → 无条件续期(heartbeat 同原语), token 不变;
+      - 持有者是他人且未过期 → 不动, 返回 None;
+      - 已过期(DB 时钟判定) → 抢占并铸造新 token。
+    返回 None = 未获得/未续上; 返回 token = 本次事务内生效的代际。
     """
     holder = holder or _scheduler_holder()
     if not ensure_lease_token_column(db):
         logger.error("租约 %s 拒绝获取: token 列迁移未完成(fencing "
                      "降级运行不安全, fail-closed 跳过本轮)", task_type)
-        return False
+        return None
     try:
         with db.connect() as conn:
             conn.execute(
@@ -237,10 +249,8 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
             conn.execute(
                 "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq")
             # 二十审 9.6 + 二十一审 5.6: 旧部署 ISO 租约的迁移全程用
-            # 数据库时钟(此前 datetime.now().astimezone() 又依赖了工作
-            # 进程本地钟)。三步:
-            #   1) 可解析且未过期 → 原地转 epoch 保留持有权(旧实例继续
-            #      有效, 新实例只能等它过期, 不双执行);
+            # 数据库时钟。三步:
+            #   1) 可解析且未过期 → 原地转 epoch 保留持有权;
             #   2) 可解析且已过期 → 删除;
             #   3) 不可解析 → 保留并告警(fail-closed, 不猜测)。
             conn.execute(
@@ -266,9 +276,11 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
             # 保持旧 token——否则每次心跳轮换会让并发 fenced 写被误拒;
             # 接管(不同 holder 或过期抢占)铸造新 token, 旧 writer 的旧
             # token 从此永远无法通过写前校验
-            conn.execute(
-                "WITH n AS (SELECT (extract(epoch FROM now())*1000)::bigint AS nowms) "
-                "INSERT INTO chatbi_scheduler_leases "
+            # 二十八审 P1-A: RETURNING 原子取回本次生效 token——UPSERT
+            # 与读取同事务, 消除"acquire 成功但另读 token"的换代间隙
+            row = conn.execute(
+                "WITH n AS (SELECT (extract(epoch FROM now())*1000)::bigint AS nowms), "
+                "up AS (INSERT INTO chatbi_scheduler_leases "
                 "(task_type, holder, expires_at, token) "
                 "SELECT ?, ?, ((SELECT nowms FROM n) + ?)::text, "
                 "nextval('chatbi_lease_token_seq') FROM n "
@@ -281,15 +293,24 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
                 "WHERE chatbi_scheduler_leases.holder = EXCLUDED.holder "
                 "   OR (chatbi_scheduler_leases.expires_at ~ '^[0-9]+$' "
                 "       AND chatbi_scheduler_leases.expires_at::bigint "
-                "           <= (SELECT nowms FROM n))",
-                (task_type, holder, int(ttl_seconds) * 1000))
-            row = conn.execute(
+                "           <= (SELECT nowms FROM n)) "
+                "RETURNING holder, token) "
+                "SELECT holder, token FROM up "
+                "UNION ALL "
                 "SELECT holder, token FROM chatbi_scheduler_leases "
-                "WHERE task_type = ?", (task_type,)).fetchone()
-        return bool(row and row["holder"] == holder)
+                "WHERE task_type = ? "
+                "  AND NOT EXISTS (SELECT 1 FROM up) "
+                "  AND holder = ? "
+                "  AND expires_at ~ '^[0-9]+$' "
+                "  AND expires_at::bigint > (SELECT nowms FROM n)",
+                (task_type, holder, int(ttl_seconds) * 1000,
+                 task_type, holder)).fetchone()
+        if row and row["holder"] == holder and row["token"] is not None:
+            return int(row["token"])
+        return None
     except Exception as e:
         logger.warning("租约 %s 获取失败(跳过本轮防重复): %s", task_type, e)
-        return False
+        return None
 
 
 def ensure_lease_token_column(db) -> bool:
@@ -402,30 +423,27 @@ class RunLease:
         self._hb_thread: threading.Thread | None = None
 
     def acquire(self) -> bool:
-        self.acquired = acquire_lease(self.db, self.task_type, self.holder,
-                                      ttl_seconds=self.ttl_seconds)
-        if self.acquired:
-            self.token = lease_token(self.db, self.task_type, self.holder)
+        """二十八审 P1-A: token 与 acquire 同事务原子返回。
+
+        此前"acquire 成功后另行读 token"存在换代间隙: 首读故障/暂停
+        期间租约被接管又由同 holder 重获, 二次读到的已是别人的 token,
+        据此删除会误删 successor(真实复现)。现在:
+          - acquire_lease_token 原子返回本次生效 token, 直接保存;
+          - 返回 None(未获得/未续上/token 异常)→ 拒绝执行, **不做
+            任何二次读取或删除**——未知代际的行宁可等 TTL 过期。
+        """
+        self.token = acquire_lease_token(self.db, self.task_type,
+                                         self.holder,
+                                         ttl_seconds=self.ttl_seconds)
+        self.acquired = self.token is not None
+        if not self.acquired:
             if self.token is None:
-                # 二十六审 P1: 拿到租约但读不到 fencing token(异常路径/
-                # 残留 NULL)——execute_if_owned 会退化为无 token 校验的
-                # 弱 fencing, fail-closed: 拒绝执行并释放刚拿到的行。
-                # 二十七审 P1: 清理按 holder 删可能误删同 holder 的
-                # 既有租约(ABA)——先重读行上的 token 再删, 读不到则
-                # 只标记失租等 TTL, 不做盲删
-                logger.error("执行期租约 %s 无 fencing token——拒绝执行"
-                             "(fail-closed)", self.task_type)
-                self.acquired = False
-                _tok = lease_token(self.db, self.task_type, self.holder)
-                if _tok is not None:
-                    release_lease(self.db, self.task_type, self.holder,
-                                  token=_tok)
-                else:
-                    logger.error("租约 %s token 二次读取仍为空——保留行"
-                                 "等 TTL 过期(不盲删)", self.task_type)
-                return False
-            self._start_heartbeat()
-        return self.acquired
+                logger.error("执行期租约 %s 未获得(或 token 不可知)——"
+                             "拒绝执行(fail-closed, 不二次读取/不删除)",
+                             self.task_type)
+            return False
+        self._start_heartbeat()
+        return True
 
     def _start_heartbeat(self):
         self._hb_stop = threading.Event()
@@ -498,8 +516,11 @@ class RunLease:
         FOR UPDATE 行锁使接管方的 UPDATE 阻塞到本事务提交/回滚为止,
         窗口关闭。注意: write_fn 必须短小(持锁期间接管方在等)。
         返回 (ok, write_result)。
+        二十八审 P2-E: 最后写屏障独立 fail-closed——token=None 直接
+        拒绝, SQL 永远带 token 条件(不再保留弱分支; 正常 acquire
+        已保证 token 非空, 这里防的是异常构造出的半状态)。
         """
-        if not self.acquired:
+        if not self.acquired or self.token is None:
             return False, None
         # write_fn 的异常(如 VersionConflictError)**原样上抛**——
         # 吞掉会破坏调用方的冲突重试; with 块异常退出自动回滚,
@@ -507,14 +528,12 @@ class RunLease:
         with self.db.connect() as conn:
             row = conn.execute(
                 "SELECT holder FROM chatbi_scheduler_leases "
-                "WHERE task_type = ? AND holder = ? "
+                "WHERE task_type = ? AND holder = ? AND token = ? "
                 "AND expires_at ~ '^[0-9]+$' "
                 "AND expires_at::bigint > "
                 "(extract(epoch FROM now())*1000)::bigint "
-                + ("AND token = ? " if self.token is not None else "")
-                + "FOR UPDATE",
-                (self.task_type, self.holder)
-                + ((self.token,) if self.token is not None else ())).fetchone()
+                "FOR UPDATE",
+                (self.task_type, self.holder, self.token)).fetchone()
             if row is None:
                 logger.error("事务级 fencing: 租约 %s 已易主——写入被拒",
                              self.task_type)
@@ -525,27 +544,37 @@ class RunLease:
     def heartbeat(self) -> bool:
         """同步续租点(兼容既有调用); 返回 False = 租约已丢。
 
-        二十七审 P1: 续租后必须校验 token 未变——acquire_lease 对同
-        holder 无条件续期, 若期间被他人接管又由同 holder(自动重试复用
-        task id)重新获得, 旧对象会静默续上新 token 的租约(ABA)。
-        token 变了 = 本对象已过代, 按失租处理。
+        二十八审 P2-D: token-aware 单条 UPDATE 原子续租——
+        WHERE 含 task_type+holder+token+未过期, 更新不到即失租。
+        此前"先按 holder 无条件续租再读 token 比对"会把同 holder
+        successor 的租约先延长一个本对象 TTL(真实复现: successor
+        5s 被延长约 115s), 阻塞真正的接管者。
         """
         if not self.acquired or self.token is None:
             return False
-        if acquire_lease(self.db, self.task_type, self.holder,
-                         ttl_seconds=self.ttl_seconds):
-            _tok = lease_token(self.db, self.task_type, self.holder)
-            if _tok == self.token:
-                return True
-            logger.error("执行期租约 %s token 已换代(%s→%s, 同 holder "
-                         "重试)——本对象过代, 任务应中止",
-                         self.task_type, self.token, _tok)
+        try:
+            with self.db.connect() as conn:
+                cur = conn.execute(
+                    "UPDATE chatbi_scheduler_leases "
+                    "SET expires_at = (((extract(epoch FROM now())*1000)"
+                    "::bigint + ?)::bigint)::text "
+                    "WHERE task_type = ? AND holder = ? AND token = ? "
+                    "AND expires_at ~ '^[0-9]+$' "
+                    "AND expires_at::bigint > "
+                    "(extract(epoch FROM now())*1000)::bigint",
+                    (int(self.ttl_seconds) * 1000, self.task_type,
+                     self.holder, self.token))
+                renewed = bool(getattr(cur, "rowcount", 0))
+        except Exception as e:
+            logger.error("执行期租约续租异常(视为失租): %s", e)
             self.acquired = False
             return False
-        logger.error("执行期租约 %s 丢失(被其他实例接管)——任务应中止: %s",
-                     self.task_type, self.holder)
-        self.acquired = False
-        return False
+        if not renewed:
+            logger.error("执行期租约 %s 已丢失/换代(按 holder+token 未续上)"
+                         "——任务应中止: %s", self.task_type, self.holder)
+            self.acquired = False
+            return False
+        return True
 
     def release(self) -> None:
         if self._hb_stop is not None:

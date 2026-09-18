@@ -191,10 +191,47 @@ class ConversationStore:
     ]
 
     def _init_db(self):
-        """建表/建索引(幂等,``IF NOT EXISTS``)。"""
-        with self._get_conn() as conn:
-            for stmt in self._DDL:
-                conn.execute(stmt)
+        """建表/建索引(幂等,``IF NOT EXISTS``)。
+
+        二十八审 P1-C: 多实例同时冷启动时, 两个进程在同一事务循环里
+        执行 CREATE/ALTER 会在 public.call_logs 等表上以不同顺序取
+        AccessExclusiveLock, 产生 deadlock——一个实例 DeadlockDetected
+        直接退出(连续 2 次复现)。修复:
+          1) advisory lock 串行化整段迁移——并发启动的实例排队执行,
+             后到者看到表已建好, 语句全部 no-op;
+          2) 对 deadlock/serialization failure 有界重试(锁等待被
+             抢占等残余竞态的兜底);
+          3) 仍失败则抛出(启动 fail-fast, 不静默降级)。
+        """
+        import time as _time
+        # advisory lock key: 任意固定 bigint(仅用于会话存储迁移互斥)
+        _LOCK_KEY = 0x636F6E76736D6967  # "convsmig"
+        attempts = 5
+        for attempt in range(1, attempts + 1):
+            try:
+                with self._get_conn() as conn:
+                    # session 级 advisory lock: 连接关闭自动释放, 无需
+                    # 显式 unlock(异常也不会泄漏锁)
+                    conn.execute("SELECT pg_advisory_lock(?)", (_LOCK_KEY,))
+                    try:
+                        for stmt in self._DDL:
+                            conn.execute(stmt)
+                    finally:
+                        conn.execute("SELECT pg_advisory_unlock(?)",
+                                     (_LOCK_KEY,))
+                return
+            except Exception as e:
+                msg = str(e)
+                retryable = ("deadlock" in msg.lower()
+                             or "DeadlockDetected" in type(e).__name__
+                             or "could not serialize" in msg.lower())
+                if attempt < attempts and retryable:
+                    logger.warning(
+                        "ConversationStore DDL 迁移并发冲突(第 %d/%d 次), "
+                        "退避后重试: %s", attempt, attempts, msg[:120])
+                    _time.sleep(0.5 * attempt)
+                    continue
+                raise
 
     # ── Conversations(session_meta 表) ─────────────────────────
 

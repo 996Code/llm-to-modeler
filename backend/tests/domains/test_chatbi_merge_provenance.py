@@ -2611,6 +2611,329 @@ class TestLegacyBuildsMigration:
 
 
 # ════════════════════════════════════════════════════════════════
+# 二十八审反例回归: acquire原子token/ack原子CTE/heartbeat原子续租
+# ════════════════════════════════════════════════════════════════
+
+class TestAcquireTokenAtomicity:
+    """P1-A: acquire 与 token 同事务原子返回; 首读失败不二次读删.
+
+    此前 acquire 成功后另行读 token, 首读 None 后又读"当前 token"
+    并删除——间隙内租约被接管+同 holder 重获时, 读到的已是 successor
+    的 token, 旧对象据此删除会误删新代租约(真实复现 token=223)。
+    """
+
+    def test_acquire_returns_token_atomically(self, pg_engine):
+        """acquire 直接返回本次生效 token(无需二次读取)."""
+        from domains.chatbi.tasks import RunLease, acquire_lease_token
+        key = "run:semantic_write:atom-1"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        tok = acquire_lease_token(pg_engine, key, holder="task:a",
+                                  ttl_seconds=300)
+        assert tok is not None, "acquire 未原子返回 token"
+        a = RunLease(pg_engine, key, holder="task:a", ttl_seconds=300)
+        assert a.acquire() and a.token == tok, (
+            "RunLease.acquire 的 token 与原子返回不一致(走了二次读取)")
+        a.release()
+
+    def test_no_delete_when_token_unreadable(self, pg_engine, monkeypatch):
+        """token 不可知时: 拒绝执行且**不删除任何行**(不二次读取)."""
+        import domains.chatbi.tasks as tasks_mod
+        key = "run:semantic_write:atom-2"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        # 同 holder 已有 successor 租约(模拟重试对象)
+        cur = tasks_mod.RunLease(pg_engine, key, holder="task:same",
+                                 ttl_seconds=300)
+        assert cur.acquire() and cur.token is not None
+        t_successor = cur.token
+        # 旧对象 acquire: 同 holder 续租语义会成功(这是合法续租,
+        # token 不变); 真正要防的是"token 不可知仍执行/删除"——
+        # 用 acquire_lease_token 返回 None 模拟异常路径
+        old = tasks_mod.RunLease(pg_engine, key, holder="task:same",
+                                 ttl_seconds=300)
+        monkeypatch.setattr(tasks_mod, "acquire_lease_token",
+                            lambda *a, **kw: None)
+        assert old.acquire() is False, "token 不可知仍开始执行"
+        assert old.acquired is False and old.token is None
+        # 关键: 拒绝执行后没有任何删除动作, successor 行完好
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT token FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+        assert row is not None and int(row["token"]) == t_successor, (
+            "旧对象 acquire 失败时删除了 successor 租约(ABA)")
+        cur.release()
+
+    def test_interleaved_takeover_token_not_misread(self, pg_engine):
+        """确定性交错: 旧 acquire → 接管 → 同 holder 重获——旧对象的
+        token 停留在旧代, 不会读到/删到 successor(原子 RETURNING)."""
+        from domains.chatbi.tasks import RunLease
+        key = "run:semantic_write:atom-3"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        old = RunLease(pg_engine, key, holder="task:same-retry",
+                       ttl_seconds=300)
+        assert old.acquire() and old.token is not None
+        t_old = old.token
+        # 接管 → 过期 → 同 holder 重获
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET expires_at='1' "
+                      "WHERE task_type=?", (key,))
+        other = RunLease(pg_engine, key, holder="task:other",
+                         ttl_seconds=300)
+        assert other.acquire()
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET expires_at='1' "
+                      "WHERE task_type=?", (key,))
+        retry = RunLease(pg_engine, key, holder="task:same-retry",
+                         ttl_seconds=300)
+        assert retry.acquire() and retry.token > t_old
+        # 旧对象 token 仍是旧代(不是二次读取的 successor)
+        assert old.token == t_old, "旧对象 token 被二次读取污染"
+        old.acquired = True
+        old.release()      # 按旧 token 删——删不到 successor
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT token FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+        assert row is not None and int(row["token"]) == retry.token
+        retry.release()
+        other.release()
+
+
+class TestHeartbeatTokenAwareRenew:
+    """P2-D: token-aware 单条 UPDATE 原子续租——不先按 holder 续后验.
+
+    此前旧 heartbeat 会先把同 holder successor 的租约延长一个旧 TTL
+    (真实复现: successor 5s 被延长约 115s), 再发现 token 换代返回 False。
+    """
+
+    def test_old_heartbeat_does_not_extend_successor(self, pg_engine):
+        from domains.chatbi.tasks import RunLease
+        key = "run:semantic_write:hbtok-1"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        old = RunLease(pg_engine, key, holder="task:same",
+                       ttl_seconds=300)
+        assert old.acquire() and old.token is not None
+        # successor: 其他 holder 接管(轮换 token) → 过期 → 同 holder 重获
+        # (直接同 holder 过期重获不会轮换 token——续租语义保持旧值)
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET expires_at='1' "
+                      "WHERE task_type=?", (key,))
+        other = RunLease(pg_engine, key, holder="task:other",
+                         ttl_seconds=300)
+        assert other.acquire() and other.token > old.token
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET expires_at='1' "
+                      "WHERE task_type=?", (key,))
+        succ = RunLease(pg_engine, key, holder="task:same",
+                        ttl_seconds=5)
+        assert succ.acquire() and succ.token > old.token, (
+            f"同 holder 重获未铸造新 token: {succ.token} vs {old.token}")
+        # 记录 successor 当前 expiry
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT expires_at FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+        succ_expiry_before = int(row["expires_at"])
+        # 旧对象 heartbeat: 必须失败, 且不得延长 successor 的 expiry
+        old.acquired = True
+        assert old.heartbeat() is False, "旧对象续租成功(ABA)"
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT expires_at FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+        after = int(row["expires_at"])
+        assert after <= succ_expiry_before + 1000, (
+            f"旧 heartbeat 延长了 successor 租约({succ_expiry_before}"
+            f"→{after}, 应最多时钟抖动)")
+        succ.release()
+        old.release()
+        other.release()
+
+    def test_own_heartbeat_renews(self, pg_engine):
+        """本人续租正常(token 匹配的 UPDATE 生效)."""
+        from domains.chatbi.tasks import RunLease
+        key = "run:semantic_write:hbtok-2"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        a = RunLease(pg_engine, key, holder="task:a", ttl_seconds=300)
+        try:
+            assert a.acquire()
+            assert a.heartbeat() is True, "本人 token 匹配续租失败"
+            assert a.token is not None
+        finally:
+            a.release()
+
+
+class TestExecuteIfOwnedTokenFailClosed:
+    """P2-E: execute_if_owned 在 token=None 时独立拒绝(最后写屏障)."""
+
+    def test_token_none_rejected(self, pg_engine):
+        from domains.chatbi.tasks import RunLease
+        key = "run:semantic_write:exetok-1"
+        a = RunLease(pg_engine, key, holder="task:x", ttl_seconds=300)
+        a.acquired = True          # 异常构造的半状态: acquired 但无 token
+        a.token = None
+        ok, res = a.execute_if_owned(lambda conn: "should-not-run")
+        assert ok is False, "token=None 的半状态通过了写屏障"
+
+
+class TestAcknowledgeAtomicConcurrent:
+    """P1-B: acknowledge 的删除集合与审计集合原子绑定.
+
+    此前 SELECT 后全表 DELETE: READ COMMITTED 下并发新告警在 SELECT
+    后 DELETE 前提交, 会被删掉但不进 ack 表(真实复现: 永久消失)。
+    """
+
+    def test_concurrent_new_alert_not_lost(self, pg_engine):
+        """确定性交错: acknowledge 进行中并发插入新告警——新告警
+        必须存活(不进本次 ack, 留在待处理表)."""
+        import threading
+        from domains.chatbi.stores import (
+            acknowledge_index_event_failures, list_index_event_failures)
+        scope = "ack-atomic"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_event_failures "
+                      "WHERE scope LIKE ?", (scope + "%",))
+            c.execute("DELETE FROM chatbi_index_event_failure_acks "
+                      "WHERE scope LIKE ?", (scope + "%",))
+            c.execute(
+                "INSERT INTO chatbi_index_event_failures "
+                "(scope, build_id, version, event, failures, last_error, "
+                "updated_at) VALUES (?, 'old', 7, 'published', 1, 'e', "
+                "'2026-09-18T00:00:00+00:00')", (scope,))
+        # 在 acknowledge 的 DELETE 与 INSERT ack 之间注入并发新告警:
+        # 用触发器在 DELETE 时挂起(pgl_sleep), 主线程插入新告警
+        with pg_engine.connect() as c:
+            c.execute(
+                "CREATE OR REPLACE FUNCTION _ack_guard() RETURNS trigger "
+                "AS $$ BEGIN "
+                "  PERFORM pg_sleep(1.5); "
+                "  RETURN OLD; END $$ LANGUAGE plpgsql")
+            c.execute("DROP TRIGGER IF EXISTS trg_ack ON "
+                      "chatbi_index_event_failures")
+            c.execute(
+                "CREATE TRIGGER trg_ack BEFORE DELETE ON "
+                "chatbi_index_event_failures FOR EACH ROW "
+                "EXECUTE FUNCTION _ack_guard()")
+        box = {}
+
+        def _ack():
+            try:
+                box["res"] = acknowledge_index_event_failures(
+                    pg_engine, "ops-x", "并发测试")
+            except Exception as e:
+                box["res"] = f"EXC: {e}"
+
+        t = threading.Thread(target=_ack)
+        t.start()
+        import time
+        time.sleep(0.5)     # 此时 ack 事务正挂在 DELETE 触发器上
+        # 并发新告警提交(在 ack 的 DELETE 语句快照之后)
+        with pg_engine.connect() as c:
+            c.execute(
+                "INSERT INTO chatbi_index_event_failures "
+                "(scope, build_id, version, event, failures, last_error, "
+                "updated_at) VALUES (?, 'new', 8, 'building', 1, 'e', "
+                "'2026-09-18T00:01:00+00:00')", (scope,))
+        t.join()
+        # 清触发器
+        with pg_engine.connect() as c:
+            c.execute("DROP TRIGGER IF EXISTS trg_ack ON "
+                      "chatbi_index_event_failures")
+            c.execute("DROP FUNCTION IF EXISTS _ack_guard()")
+        cleared, acked = box["res"]
+        assert cleared == acked, f"删除/审计数不一致: {box['res']}"
+        # 旧告警已确认; 新告警必须仍在待处理表(未被静默吞掉)
+        pending = {i["build_id"] for i in
+                   list_index_event_failures(pg_engine)
+                   if i["scope"] == scope}
+        assert "new" in pending, (
+            f"并发新告警被静默删除(既不在待处理表也不在审计表): "
+            f"pending={pending}")
+        with pg_engine.connect() as c:
+            acked_bids = {r["build_id"] for r in c.execute(
+                "SELECT build_id FROM chatbi_index_event_failure_acks "
+                "WHERE scope=?", (scope,)).fetchall()}
+        assert "new" not in acked_bids, "新告警未经确认进了审计表"
+        # 清理
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_event_failures "
+                      "WHERE scope LIKE ?", (scope + "%",))
+            c.execute("DELETE FROM chatbi_index_event_failure_acks "
+                      "WHERE scope LIKE ?", (scope + "%",))
+
+    def test_every_deleted_row_has_ack(self, pg_engine):
+        """正常路径: 每条被删记录都有对应 ack(原子 CTE 保证)."""
+        from domains.chatbi.stores import (
+            acknowledge_index_event_failures)
+        scope = "ack-atomic-2"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_event_failures "
+                      "WHERE scope=?", (scope,))
+            c.execute("DELETE FROM chatbi_index_event_failure_acks "
+                      "WHERE scope=?", (scope,))
+            for i in range(5):
+                c.execute(
+                    "INSERT INTO chatbi_index_event_failures "
+                    "(scope, build_id, version, event, failures, "
+                    "last_error, updated_at) VALUES (?, ?, 7, 'published', "
+                    "1, 'e', '2026-09-18T00:00:00+00:00')",
+                    (scope, f"b{i}"))
+        cleared, acked = acknowledge_index_event_failures(
+            pg_engine, "ops-y", "")
+        assert cleared == 5 and acked == 5
+        with pg_engine.connect() as c:
+            n_ack = c.execute(
+                "SELECT COUNT(*) AS n FROM chatbi_index_event_failure_acks "
+                "WHERE scope=?", (scope,)).fetchone()
+            n_left = c.execute(
+                "SELECT COUNT(*) AS n FROM chatbi_index_event_failures "
+                "WHERE scope=?", (scope,)).fetchone()
+        assert int(n_ack["n"]) == 5 and int(n_left["n"]) == 0
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_event_failure_acks "
+                      "WHERE scope=?", (scope,))
+
+
+class TestConcurrentColdStartDDL:
+    """P1-C: 多实例并发冷启动 DDL 不再 deadlock(advisory lock 串行)."""
+
+    def test_concurrent_init_db_all_healthy(self):
+        """4 个并发 ConversationStore 初始化全部成功(真实 PG)."""
+        import sys
+        sys.path.insert(0, "src") if False else None
+        import threading
+        from services.conversation_store import ConversationStore
+        url = ("postgresql://root:root@localhost:5432/"
+               "llm_modeler_test_run")
+        results = {}
+
+        def worker(i):
+            try:
+                ConversationStore(database_url=url)
+                results[i] = "ok"
+            except Exception as e:
+                results[i] = f"FAIL:{type(e).__name__}:{str(e)[:80]}"
+
+        ts = [threading.Thread(target=worker, args=(i,))
+              for i in range(4)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        assert all(v == "ok" for v in results.values()), results
+
+
+# ════════════════════════════════════════════════════════════════
 # 二十六审反例回归: 迁移失败 fail-closed / 事件写失败可观测
 # ════════════════════════════════════════════════════════════════
 
@@ -2669,31 +2992,39 @@ class TestLeaseMigrationFailClosed:
                       "WHERE task_type=?", (key,))
 
     def test_runlease_rejects_null_token(self, pg_engine, monkeypatch):
-        """acquire 成功但 token 读不到 → 拒绝执行(fail-closed).
+        """acquire 的 token 不可知 → 拒绝执行且不删除任何行(fail-closed).
 
-        二十七审: 二次读 token 仍为空时不盲删(按 holder 删可能误删
-        同 holder 既有租约, ABA)——保留行等 TTL 过期, 本对象不执行。
+        二十八审 P1-A: acquire 与 token 原子返回——token 不可知时
+        直接拒绝, 不做任何二次读取或删除(按 holder 删可能误删同
+        holder 既有租约, ABA)。
         """
         import domains.chatbi.tasks as tasks_mod
         key = "run:semantic_write:nulltok2"
         with pg_engine.connect() as c:
             c.execute("DELETE FROM chatbi_scheduler_leases "
                       "WHERE task_type=?", (key,))
-        # acquire_lease 正常, 但 lease_token 恒返回 None(异常路径)
-        monkeypatch.setattr(tasks_mod, "lease_token",
-                            lambda *a, **kw: None)
+        # 先造一个同 holder 的既有租约(模拟重试对象持有的行)
+        cur = tasks_mod.RunLease(pg_engine, key, holder="task:x",
+                                 ttl_seconds=300)
+        assert cur.acquire() and cur.token is not None
+        # 旧对象 acquire: 原子返回 None(token 不可知的异常路径)
         lease = tasks_mod.RunLease(pg_engine, key, holder="task:x",
                                    ttl_seconds=300)
+        # 直接验证: acquire_lease_token 返回 None 时 acquire 拒绝
+        # 且不触碰行(用真实函数的 None 分支——monkeypatch 模块函数)
+        monkeypatch.setattr(tasks_mod, "acquire_lease_token",
+                            lambda *a, **kw: None)
         assert lease.acquire() is False, "无 token 仍开始执行(弱 fencing)"
         assert lease.acquired is False
         assert lease.token is None
-        # 不盲删: 行保留等 TTL(不阻塞——TTL 后可被接管), 但本对象
+        # 不盲删: 既有行保留等 TTL(不阻塞——TTL 后可被接管), 本对象
         # 拒绝执行已达到 fail-closed 目的
         with pg_engine.connect() as c:
             row = c.execute(
-                "SELECT holder FROM chatbi_scheduler_leases "
+                "SELECT holder, token FROM chatbi_scheduler_leases "
                 "WHERE task_type=?", (key,)).fetchone()
             assert row is not None, "token 不可读时行被盲删(ABA 风险)"
+            assert int(row["token"]) == cur.token, "既有租约被破坏"
             # 清理: 直接按行删(测试自身造的行)
             c.execute("DELETE FROM chatbi_scheduler_leases "
                       "WHERE task_type=?", (key,))

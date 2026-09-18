@@ -788,26 +788,28 @@ def acknowledge_index_event_failures(db: PackRelationalDB, who: str,
                                      note: str = "") -> tuple[int, int]:
     """确认并清除全部事件失败告警(二十七审 P2: 受控恢复流程)。
 
-    单事务两步: 先把每行失败计数留档进 chatbi_index_event_failure_acks
-    (确认人/说明/原次数/时间), 再清空计数表。留档失败则整体回滚——
-    只清不留档等于抹记录, 违反"不自动静默清零"的约束。
+    二十八审 P1-B: 删除集合与审计集合必须原子绑定——此前先 SELECT
+    逐条写 ack 再无条件 DELETE 全表, READ COMMITTED 下每条语句取
+    新快照, SELECT 后 DELETE 前提交的并发新告警会被删掉但不进 ack
+    (真实复现: 新告警既不在待处理表也不在审计表, 永久消失)。
+    现在用单条 CTE: DELETE ... RETURNING 的行集直接 INSERT 进
+    ack 表——每条被删的记录必然有一条审计, 反之亦然。
     Returns: (cleared_rows, acked_rows)。
     """
     ensure_index_revision_schema(db)
     with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT scope, build_id, event, failures "
-            "FROM chatbi_index_event_failures").fetchall()
-        for r in rows:
-            conn.execute(
-                "INSERT INTO chatbi_index_event_failure_acks "
-                "(scope, build_id, event, failures, acknowledged_by, "
-                "note, acknowledged_at) VALUES (?, ?, ?, ?, ?, ?, "
-                "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'))",
-                (r["scope"], r["build_id"], r["event"], int(r["failures"]),
-                 who, note))
-        n = len(rows)
-        conn.execute("DELETE FROM chatbi_index_event_failures")
+        cur = conn.execute(
+            "WITH cleared AS ("
+            "  DELETE FROM chatbi_index_event_failures "
+            "  RETURNING scope, build_id, event, failures) "
+            "INSERT INTO chatbi_index_event_failure_acks "
+            "(scope, build_id, event, failures, acknowledged_by, note, "
+            "acknowledged_at) "
+            "SELECT scope, build_id, event, failures, ?, ?, "
+            "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') "
+            "FROM cleared RETURNING 1",
+            (who, note))
+        n = len(getattr(cur, "fetchall", lambda: [])() or [])
     if n:
         logger.info("事件失败告警已确认清除: %d 行(确认人=%s, note=%r)",
                     n, who, note[:80])
