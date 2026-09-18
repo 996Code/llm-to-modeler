@@ -56,12 +56,12 @@ def _ps_fields(pid: int, fmt: str):
         out = subprocess.run(
             ["ps", "-o", fmt, "-p", str(pid)],
             capture_output=True, text=True, timeout=10).stdout
-        lines = [l for l in out.splitlines() if l.strip()]
-        if len(lines) >= 2 and lines[1].strip().isdigit():
-            return int(lines[1].strip())
+        lines = [l.strip() for l in out.splitlines() if l.strip()]
+        # 去掉可能的表头行, 取最后一个数字行(ps 输出尾部有空白填充行)
+        digits = [l for l in lines if l.isdigit()]
+        return int(digits[-1]) if digits else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 def proc_metrics():
@@ -80,7 +80,7 @@ def proc_metrics():
         except Exception:
             pass
     for pid in pids:
-        if pid in seen or not pid.isdigit():
+        if pid in seen or not pid.isdigit() or int(pid) == os.getpid():
             continue
         seen.add(pid)
         rss = _ps_fields(int(pid), "rss=")
