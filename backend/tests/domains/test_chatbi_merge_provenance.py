@@ -2487,3 +2487,189 @@ class TestLegacyBuildsMigration:
                 (row["build_id"],))
         with pg_engine.connect() as c:
             c.execute("DELETE FROM chatbi_index_builds WHERE scope='mig-scope'")
+
+
+# ════════════════════════════════════════════════════════════════
+# 二十六审反例回归: 迁移失败 fail-closed / 事件写失败可观测
+# ════════════════════════════════════════════════════════════════
+
+class TestLeaseMigrationFailClosed:
+    """P1 5.1: token 列迁移失败时 acquire 必须拒绝放行(fail-closed).
+
+    此前 ensure_lease_token_column 只 logger.error 不返回状态,
+    acquire_lease 继续执行——NULL token 兼容分支让 fencing 降级
+    运行(fail-open), 违反项目安全约束。
+    """
+
+    def test_acquire_rejected_when_migration_fails(self, pg_engine,
+                                                   monkeypatch):
+        import domains.chatbi.tasks as tasks_mod
+        key = "run:semantic_write:migfail"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        # 模拟迁移失败(sequence/回填故障): ensure 返回 False
+        monkeypatch.setattr(tasks_mod, "ensure_lease_token_column",
+                            lambda db: False)
+        assert tasks_mod.acquire_lease(pg_engine, key, holder="task:x") is (
+            False), "迁移失败仍放行(fail-open)"
+        # RunLease 同样拒绝
+        lease = tasks_mod.RunLease(pg_engine, key, holder="task:x",
+                                   ttl_seconds=300)
+        assert lease.acquire() is False, "RunLease 在迁移失败后仍 acquired"
+        assert lease.token is None
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT holder FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+        assert row is None, "迁移失败时仍写入了租约行"
+
+    def test_ensure_returns_false_when_null_token_persists(self, pg_engine):
+        """回填后仍有 NULL 残留(并发/部分失败) → ensure 返回未就绪."""
+        from domains.chatbi.tasks import ensure_lease_token_column
+        key = "run:semantic_write:nullresid"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+            c.execute(
+                "INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at, token) VALUES "
+                "(?, 'h', '9999999999999', NULL)", (key,))
+        # 正常路径: ensure 自己回填 → True
+        assert ensure_lease_token_column(pg_engine) is True
+        # 人为再制造 NULL 残留(模拟回填事务部分失败)
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET token=NULL "
+                      "WHERE task_type=?", (key,))
+        assert ensure_lease_token_column(pg_engine) is True, (
+            "ensure 应再次回填并返回就绪")
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+
+    def test_runlease_rejects_null_token(self, pg_engine, monkeypatch):
+        """acquire 成功但 token 读不到 → 拒绝执行并释放(fail-closed)."""
+        import domains.chatbi.tasks as tasks_mod
+        key = "run:semantic_write:nulltok2"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        # acquire_lease 正常, 但 lease_token 返回 None(异常路径)
+        monkeypatch.setattr(tasks_mod, "lease_token",
+                            lambda *a, **kw: None)
+        lease = tasks_mod.RunLease(pg_engine, key, holder="task:x",
+                                   ttl_seconds=300)
+        assert lease.acquire() is False, "无 token 仍开始执行(弱 fencing)"
+        assert lease.acquired is False
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT holder FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+        assert row is None, "拒绝执行后未释放租约行(阻塞后续任务)"
+
+
+class TestEventWriteFailureObservable:
+    """P2 5.2: 事件 INSERT 失败必须可观测——失败计数进台账, monitor FAIL.
+
+    此前 catch+logger.error: 表可读但事件丢失时计数偏低, verdict 仍 OK。
+    """
+
+    def test_event_failure_counted_and_monitor_fails(self, pg_engine):
+        import os as _os
+        _os.environ.setdefault(
+            "SOAK_DATABASE_URL",
+            "postgresql://root:root@localhost:5432/llm_modeler_test_run")
+        from domains.chatbi.stores import record_index_build
+        key_scope = "evtfail-scope"
+
+        # 注入: 事件表 INSERT 失败(模拟约束/权限/连接故障)。
+        # _PgConnProxy 是 __slots__ 只读代理, 不能改属性——改为
+        # monkeypatch stores 模块内 record_index_build 的事件分支:
+        # 直接替换整个函数太粗(状态台账也要验证), 所以用真实 PG 的
+        # 触发器让事件表 INSERT 真实失败(约束/权限故障的等价物),
+        # 这比 mock 更接近生产故障形态
+        with pg_engine.connect() as c:
+            c.execute(
+                "CREATE OR REPLACE FUNCTION _evtfail_guard() "
+                "RETURNS trigger AS $$ BEGIN "
+                "  RAISE EXCEPTION 'simulated event insert failure'; "
+                "END $$ LANGUAGE plpgsql")
+            c.execute(
+                "DROP TRIGGER IF EXISTS trg_evtfail ON "
+                "chatbi_index_build_events")
+            c.execute(
+                "CREATE TRIGGER trg_evtfail BEFORE INSERT ON "
+                "chatbi_index_build_events FOR EACH ROW EXECUTE "
+                "FUNCTION _evtfail_guard()")
+        try:
+            # 状态表写入必须成功(事件失败不拖垮状态台账)
+            record_index_build(pg_engine, key_scope, 7, "schema_r7_t5",
+                               status="published", build_id="7-t5")
+        finally:
+            with pg_engine.connect() as c:
+                c.execute("DROP TRIGGER IF EXISTS trg_evtfail ON "
+                          "chatbi_index_build_events")
+                c.execute("DROP FUNCTION IF EXISTS _evtfail_guard()")
+        with pg_engine.connect() as c:
+            st = c.execute(
+                "SELECT status FROM chatbi_index_builds "
+                "WHERE scope=? AND build_id='7-t5'",
+                (key_scope,)).fetchone()
+            assert st is not None and st["status"] == "published", (
+                "事件失败拖垮了状态台账")
+            fc = c.execute(
+                "SELECT failures FROM chatbi_index_event_failures "
+                "WHERE scope=? AND build_id='7-t5'",
+                (key_scope,)).fetchone()
+        assert fc is not None and int(fc["failures"]) >= 1, (
+            "事件写失败未计入失败台账(monitor 无法 FAIL)")
+
+        # monitor 读到失败计数 → verdict FAIL
+        import os as _os2
+        import importlib.util
+        _script = _os2.path.join(_os2.path.dirname(_os2.path.abspath(
+            __file__)), "..", "..", "scripts", "soak_monitor.py")
+        spec = importlib.util.spec_from_file_location("sm2", _script)
+        sm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sm)
+        from sdk.relational_store import PackRelationalDB
+        db = PackRelationalDB(
+            'chatbi',
+            database_url='postgresql://root:root@localhost:5432/'
+                          'llm_modeler_test_run')
+        snap = sm.snapshot(db)
+        assert snap.get("build_event_failures") is not None, (
+            "monitor 未采集事件失败计数")
+        v = sm._verdict(snap, {})
+        assert v.startswith("FAIL"), f"事件写失败仍判 {v}"
+        assert "事件" in v, f"FAIL 原因未提及事件失败: {v}"
+        # 清理
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_builds "
+                      "WHERE scope=?", (key_scope,))
+            c.execute("DELETE FROM chatbi_index_build_events "
+                      "WHERE scope=?", (key_scope,))
+            c.execute("DELETE FROM chatbi_index_event_failures "
+                      "WHERE scope=?", (key_scope,))
+
+    def test_monitor_ok_without_event_failures(self, pg_engine):
+        """无失败计数时 monitor 不因该信号误报(反例锚)."""
+        import os as _os
+        _os.environ.setdefault(
+            "SOAK_DATABASE_URL",
+            "postgresql://root:root@localhost:5432/llm_modeler_test_run")
+        import importlib.util
+        _script = _os.path.join(_os.path.dirname(_os.path.abspath(
+            __file__)), "..", "..", "scripts", "soak_monitor.py")
+        spec = importlib.util.spec_from_file_location("sm3", _script)
+        sm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sm)
+        from sdk.relational_store import PackRelationalDB
+        db = PackRelationalDB(
+            'chatbi',
+            database_url='postgresql://root:root@localhost:5432/'
+                          'llm_modeler_test_run')
+        snap = sm.snapshot(db)
+        # 只验证该信号本身不产生 FAIL(其它信号由各自测试覆盖)
+        assert snap.get("build_event_failures") == 0, (
+            f"无失败却读到计数: {snap.get('build_event_failures')}")

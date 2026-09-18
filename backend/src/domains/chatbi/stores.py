@@ -433,6 +433,20 @@ def ensure_index_revision_schema(db: PackRelationalDB) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chatbi_build_events_time "
             "ON chatbi_index_build_events(created_at)")
+        # 二十六审 P2: 事件写入失败计数表——record_index_build 的事件
+        # INSERT 失败时在此 UPSERT 计数(独立事务, 不与状态表同事务回滚),
+        # soak monitor 读到 >0 即 FAIL。此前 catch+logger.error 让
+        # "表可读但事件丢失"伪装成正常(计数偏低仍判 OK)。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS chatbi_index_event_failures ("
+            "scope TEXT NOT NULL, "
+            "build_id TEXT NOT NULL, "
+            "version INTEGER NOT NULL, "
+            "event TEXT NOT NULL, "
+            "failures INTEGER NOT NULL DEFAULT 0, "
+            "last_error TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL, "
+            "PRIMARY KEY (scope, build_id, event))")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS chatbi_chunk_identities ("
             "scope TEXT NOT NULL, "
@@ -677,14 +691,21 @@ def record_index_build(db: PackRelationalDB, scope: str, version: int,
                        build_id: str | None = None) -> None:
     """记录/更新一次索引构建(building → published/yielded)。
 
-    GC 的台账: 让路、崩溃、半成品的分区都按 (scope, version) 记录,
+    GC 的台账: 让路、崩溃、半成品的分区都按 (scope, build_id) 记录,
     延迟回收时按 doc_id 删向量; 失败上抛由调用方降级。
     二十审 9.3: updated_at 由数据库 now() 生成(与 GC 比较同源),
     不再用工作进程本地时钟——时钟漂移不再影响宽限/TTL 判定。
+    二十六审 P2: 事件 INSERT 失败不再静默——独立事务 UPSERT 进
+    chatbi_index_event_failures(状态表事务不受影响), monitor 读到
+    计数即 FAIL。事件表是重建计数的唯一真源, 丢失=监控失明。
     """
     ensure_index_revision_schema(db)
     _migrate_builds_table(db)
     build_id = build_id or f"{version}-{uuid.uuid4().hex[:8]}"
+    # 二十六审 P2: 事件 INSERT 与状态表 UPSERT 分属独立事务——事件失败
+    # 发生在同一事务时会毒化/回滚状态写入(实测: 触发器 RAISE 让状态
+    # UPSERT 一起消失), 台账是 GC 的依据, 不能被事件失败拖垮; 事件
+    # 失败改为独立事务计数(chatbi_index_event_failures), monitor FAIL。
     with db.connect() as conn:
         # 二十五审 6.2: 同一 build 实例的状态推进(building→published)
         # 在自己行上 UPSERT; 不同 token 的同版本 build 各占一行
@@ -698,18 +719,45 @@ def record_index_build(db: PackRelationalDB, scope: str, version: int,
             "version = EXCLUDED.version, "
             "updated_at = EXCLUDED.updated_at",
             (scope, build_id, version, doc_id, status))
-        # 二十四审 7: append-only 事件流——(scope,version) 状态表 UPSERT
-        # 折叠同版本重复重建, 事件表让每次 started/published/yielded
-        # 各留一条(同版本×10 重建 = 10 条事件, 不再被折叠成 1 行)
-        try:
+    # 二十四审 7: append-only 事件流——(scope,version) 状态表 UPSERT
+    # 折叠同版本重复重建, 事件表让每次 started/published/yielded
+    # 各留一条(同版本×10 重建 = 10 条事件, 不再被折叠成 1 行)
+    try:
+        with db.connect() as conn:
             conn.execute(
                 "INSERT INTO chatbi_index_build_events "
                 "(scope, build_id, version, event, created_at) "
                 "VALUES (?, ?, ?, ?, "
                 "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'))",
                 (scope, build_id, version, status))
-        except Exception as e:
-            logger.error("构建事件写入失败(监控计数将缺失): %s", e)
+    except Exception as e:
+        logger.error("构建事件写入失败(计入失败台账, monitor 将 FAIL): %s", e)
+        _record_event_failure(db, scope, build_id, version, status, e)
+
+
+def _record_event_failure(db: PackRelationalDB, scope: str, build_id: str,
+                          version: int, event: str, err: Exception) -> None:
+    """事件写失败 → 独立事务 UPSERT 失败计数(二十六审 P2)。
+
+    必须在状态表事务**之外**执行: 事件失败发生在调用方事务内时, 该
+    事务可能已因异常毒化(同 ensure_lease_token_column 的教训),
+    再借同连接写只会一起失败; 新连接/新事务保证计数落盘。
+    计数表本身写失败(库级故障)时无更深处可写——ERROR 日志兜底。
+    """
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_index_event_failures "
+                "(scope, build_id, version, event, failures, last_error, "
+                "updated_at) VALUES (?, ?, ?, ?, 1, ?, "
+                "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')) "
+                "ON CONFLICT (scope, build_id, event) DO UPDATE SET "
+                "failures = chatbi_index_event_failures.failures + 1, "
+                "last_error = EXCLUDED.last_error, "
+                "updated_at = EXCLUDED.updated_at",
+                (scope, build_id, version, event, str(err)[:200]))
+    except Exception as e2:
+        logger.error("事件失败计数写入也失败(库级故障, 人工核查): %s", e2)
 
 
 def _ensure_build_ledger(db: PackRelationalDB, scope: str, version: int,

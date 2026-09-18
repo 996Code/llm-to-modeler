@@ -219,9 +219,15 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
       - 持有者是他人且未过期 → 不动, 返回 False;
       - 已过期(DB 时钟判定) → 抢占。
     任何异常返回 False(租约不可用时宁可跳过, 不重复执行)。
+    二十六审 P1: token 列迁移失败 → 直接拒绝放行(fail-closed)——
+    迁移失败时 NULL token 兼容分支会让 fencing 降级运行, 宁可
+    本轮不执行任务也不能在无 token 保护下放行写入。
     """
     holder = holder or _scheduler_holder()
-    ensure_lease_token_column(db)
+    if not ensure_lease_token_column(db):
+        logger.error("租约 %s 拒绝获取: token 列迁移未完成(fencing "
+                     "降级运行不安全, fail-closed 跳过本轮)", task_type)
+        return False
     try:
         with db.connect() as conn:
             conn.execute(
@@ -286,12 +292,17 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
         return False
 
 
-def ensure_lease_token_column(db) -> None:
+def ensure_lease_token_column(db) -> bool:
     """租约表 token 列迁移(二十四审)。
 
     必须在**独立事务**执行且用 information_schema 预检: PG 中 ALTER
     报错会毒化当前事务(aborted), Python 吞异常救不回来——同事务后续
     语句全部失败(实测: 列已存在时第二次调用起租约获取全挂)。
+
+    二十六审 P1: 返回 bool(迁移是否就绪)。失败时 acquire_lease/
+    RunLease.acquire 拒绝放行——此前只 logger.error 后继续, NULL
+    token 兼容分支会让 fencing 降级运行(fail-open), 违反项目
+    fail-closed 约束。
     """
     try:
         with db.connect() as conn:
@@ -316,8 +327,21 @@ def ensure_lease_token_column(db) -> None:
                 "SELECT COUNT(*) AS n FROM bumped").fetchone()
             if row and int(row["n"]) > 0:
                 logger.info("租约 token 回填: %s 行", row["n"])
+        # 终态校验: 列存在且无 NULL 残留(回填事务可能因并发/故障
+        # 只部分生效)——有残留即未就绪, 调用方 fail-closed
+        with db.connect() as conn:
+            left = conn.execute(
+                "SELECT COUNT(*) AS n FROM chatbi_scheduler_leases "
+                "WHERE token IS NULL").fetchone()
+            if left and int(left["n"]) > 0:
+                logger.error("租约 token 回填后仍有 %s 行 NULL——"
+                             "迁移未就绪", left["n"])
+                return False
+        return True
     except Exception as e:
-        logger.error("租约 token 列迁移/回填失败(fencing 降级运行): %s", e)
+        logger.error("租约 token 列迁移/回填失败(fencing 不可用, "
+                     "acquire 将拒绝放行): %s", e)
+        return False
 
 
 def lease_token(db, task_type: str, holder: str):
@@ -372,6 +396,15 @@ class RunLease:
                                       ttl_seconds=self.ttl_seconds)
         if self.acquired:
             self.token = lease_token(self.db, self.task_type, self.holder)
+            if self.token is None:
+                # 二十六审 P1: 拿到租约但读不到 fencing token(异常路径/
+                # 残留 NULL)——execute_if_owned 会退化为无 token 校验的
+                # 弱 fencing, fail-closed: 拒绝执行并释放刚拿到的行
+                logger.error("执行期租约 %s 无 fencing token——拒绝执行"
+                             "(fail-closed)", self.task_type)
+                self.acquired = False
+                release_lease(self.db, self.task_type, self.holder)
+                return False
             self._start_heartbeat()
         return self.acquired
 
@@ -477,6 +510,16 @@ class RunLease:
                      self.task_type, self.holder)
         self.acquired = False
         return False
+
+    def release(self) -> None:
+        if self._hb_stop is not None:
+            self._hb_stop.set()
+        if self._hb_thread is not None:
+            self._hb_thread.join(timeout=5)
+            self._hb_thread = None
+        if self.acquired:
+            release_lease(self.db, self.task_type, self.holder)
+            self.acquired = False
 
     def release(self) -> None:
         if self._hb_stop is not None:

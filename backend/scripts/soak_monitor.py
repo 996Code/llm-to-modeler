@@ -173,6 +173,15 @@ def _verdict(snap_body, history) -> str:
         problems.append("构建事件表不可读("
                         + str(snap_body.get("build_events_error", "?")) + ")")
         ev = {}
+    # 二十六审 P2: 事件写失败计数 >0 = 事件流有洞(计数偏低, 不可信)——
+    # 立即 FAIL; 计数表不可读(升级窗口)也按可疑处理, 不静默放行
+    evf = snap_body.get("build_event_failures")
+    if evf is None:
+        problems.append("事件失败计数表不可读("
+                        + str(snap_body.get("build_event_failures_error", "?"))
+                        + ")")
+    elif evf > 0:
+        problems.append(f"{evf} 次构建事件写入失败(事件计数不可信)")
     rebuild_events = sum(ev.values())
     if rebuild_events > V_REBUILD_EVENTS_LIMIT:
         problems.append(f"1h内 {rebuild_events} 次索引构建事件(超阈值"
@@ -264,6 +273,19 @@ def snapshot(db, _hist=None):
             # 显式 FAIL 而非空集合(空集合会被 verdict 当作正常)
             snap["build_events_1h"] = None
             snap["build_events_error"] = str(e)[:80]
+        # 二十六审 P2: 事件写失败计数(record_index_build 的事件 INSERT
+        # 失败时 UPSERT)——表可读但事件丢失时计数偏低, verdict 仍会 OK;
+        # 失败计数是唯一能让这种"静默丢失"显形的信号, 读到即 FAIL
+        try:
+            evf = conn.execute(
+                "SELECT COALESCE(SUM(failures), 0) AS n "
+                "FROM chatbi_index_event_failures").fetchone()
+            snap["build_event_failures"] = int(evf["n"]) if evf else 0
+        except Exception as e:
+            # 老库无此表(升级窗口)按 0 处理: 表由 ensure_index_revision_schema
+            # 幂等创建, 正常部署必然存在; 缺失只可能是升级瞬间
+            snap["build_event_failures"] = None
+            snap["build_event_failures_error"] = str(e)[:80]
         # failed refresh 的错误分类(二十三审 5.4: 租约冲突=预期偶发,
         # 其它失败=真实故障)
         fails = conn.execute(

@@ -246,6 +246,19 @@ CHATBI_DDL = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_build_events_time "
     "ON chatbi_index_build_events(created_at)",
+    # 二十六审 P2: 事件写失败计数——record_index_build 的事件 INSERT 失败
+    # 时 UPSERT 此表(独立事务), soak monitor 读到 >0 即 FAIL(此前
+    # catch+logger.error 让"表可读但事件丢失"伪装成计数偏低仍 OK)
+    """CREATE TABLE IF NOT EXISTS chatbi_index_event_failures (
+        scope TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        event TEXT NOT NULL,
+        failures INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (scope, build_id, event)
+    )""",
     # 十九审 6.1: chunk 身份反查表——超长 chunk_id 截断后业务身份
     # (type/name/owner_model)以 PG 为真源恢复, 不再依赖不可逆主键解码
     """CREATE TABLE IF NOT EXISTS chatbi_chunk_identities (
