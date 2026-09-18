@@ -935,3 +935,40 @@ async def list_skills():
         "content": s.content,
         "references": {k: v for k, v in s.references.items()},
     } for s in skills.values()]}
+
+
+# ── 索引事件失败告警的确认/恢复(二十七审 P2) ──────────────────
+
+@router.get("/index-event-failures", dependencies=[Depends(admin_required)])
+async def get_index_event_failures():
+    """事件写失败告警清单(谁/何时/错什么)——运维确认前先看这里。"""
+    from domains.chatbi.stores import list_index_event_failures
+    return {"items": list_index_event_failures(_db())}
+
+
+@router.post("/index-event-failures/acknowledge",
+             dependencies=[Depends(admin_required)])
+async def acknowledge_index_event_failures(request: Request):
+    """确认并清除事件失败告警(受控, 可审计; 不自动静默清零)。
+
+    二十七审 P2: 失败计数是永久锁存告警——瞬时故障恢复后 monitor 仍
+    FAIL, 必须有明确的确认流程。要求:
+      - body.acknowledged_by 必填(确认人, 进审计行);
+      - body.note 可选(处置说明: 已修复/已补偿事件/误报);
+      - 清除动作本身写审计表(chatbi_index_event_failure_acks),
+        保留 scope/build_id/失败次数/确认人/说明/时间——告警清了,
+        记录不清。
+    """
+    from domains.chatbi.stores import acknowledge_index_event_failures
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    who = str(body.get("acknowledged_by") or "").strip()
+    note = str(body.get("note") or "").strip()
+    if not who:
+        raise HTTPException(400, "缺少 acknowledged_by(确认人必填, "
+                                 "进入审计记录)")
+    cleared, acked = acknowledge_index_event_failures(_db(), who, note)
+    return {"cleared": cleared, "acknowledged_rows": acked,
+            "acknowledged_by": who}

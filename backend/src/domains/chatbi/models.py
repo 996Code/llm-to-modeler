@@ -259,6 +259,18 @@ CHATBI_DDL = [
         updated_at TEXT NOT NULL,
         PRIMARY KEY (scope, build_id, event)
     )""",
+    # 二十七审 P2: 告警确认审计——acknowledge 清除失败计数时每行留档
+    # (确认人/说明/原次数/时间), 告警可恢复、记录不可抹
+    """CREATE TABLE IF NOT EXISTS chatbi_index_event_failure_acks (
+        id BIGSERIAL PRIMARY KEY,
+        scope TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        event TEXT NOT NULL,
+        failures INTEGER NOT NULL,
+        acknowledged_by TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        acknowledged_at TEXT NOT NULL
+    )""",
     # 十九审 6.1: chunk 身份反查表——超长 chunk_id 截断后业务身份
     # (type/name/owner_model)以 PG 为真源恢复, 不再依赖不可逆主键解码
     """CREATE TABLE IF NOT EXISTS chatbi_chunk_identities (

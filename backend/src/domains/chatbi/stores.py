@@ -447,6 +447,19 @@ def ensure_index_revision_schema(db: PackRelationalDB) -> None:
             "last_error TEXT NOT NULL, "
             "updated_at TEXT NOT NULL, "
             "PRIMARY KEY (scope, build_id, event))")
+        # 二十七审 P2: 告警确认审计表——acknowledge 清除失败计数时,
+        # 被清的每一行在此留档(确认人/说明/原失败次数), 告警可恢复、
+        # 记录不可抹——不自动静默清零的落地形态
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS chatbi_index_event_failure_acks ("
+            "id BIGSERIAL PRIMARY KEY, "
+            "scope TEXT NOT NULL, "
+            "build_id TEXT NOT NULL, "
+            "event TEXT NOT NULL, "
+            "failures INTEGER NOT NULL, "
+            "acknowledged_by TEXT NOT NULL, "
+            "note TEXT NOT NULL DEFAULT '', "
+            "acknowledged_at TEXT NOT NULL)")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS chatbi_chunk_identities ("
             "scope TEXT NOT NULL, "
@@ -758,6 +771,47 @@ def _record_event_failure(db: PackRelationalDB, scope: str, build_id: str,
                 (scope, build_id, version, event, str(err)[:200]))
     except Exception as e2:
         logger.error("事件失败计数写入也失败(库级故障, 人工核查): %s", e2)
+
+
+def list_index_event_failures(db: PackRelationalDB) -> list:
+    """当前未确认的事件失败告警清单(管理端 GET)。"""
+    ensure_index_revision_schema(db)
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT scope, build_id, version, event, failures, "
+            "last_error, updated_at FROM chatbi_index_event_failures "
+            "ORDER BY updated_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def acknowledge_index_event_failures(db: PackRelationalDB, who: str,
+                                     note: str = "") -> tuple[int, int]:
+    """确认并清除全部事件失败告警(二十七审 P2: 受控恢复流程)。
+
+    单事务两步: 先把每行失败计数留档进 chatbi_index_event_failure_acks
+    (确认人/说明/原次数/时间), 再清空计数表。留档失败则整体回滚——
+    只清不留档等于抹记录, 违反"不自动静默清零"的约束。
+    Returns: (cleared_rows, acked_rows)。
+    """
+    ensure_index_revision_schema(db)
+    with db.connect() as conn:
+        rows = conn.execute(
+            "SELECT scope, build_id, event, failures "
+            "FROM chatbi_index_event_failures").fetchall()
+        for r in rows:
+            conn.execute(
+                "INSERT INTO chatbi_index_event_failure_acks "
+                "(scope, build_id, event, failures, acknowledged_by, "
+                "note, acknowledged_at) VALUES (?, ?, ?, ?, ?, ?, "
+                "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'))",
+                (r["scope"], r["build_id"], r["event"], int(r["failures"]),
+                 who, note))
+        n = len(rows)
+        conn.execute("DELETE FROM chatbi_index_event_failures")
+    if n:
+        logger.info("事件失败告警已确认清除: %d 行(确认人=%s, note=%r)",
+                    n, who, note[:80])
+    return n, n
 
 
 def _ensure_build_ledger(db: PackRelationalDB, scope: str, version: int,

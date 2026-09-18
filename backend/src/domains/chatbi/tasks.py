@@ -357,13 +357,23 @@ def lease_token(db, task_type: str, holder: str):
         return None
 
 
-def release_lease(db, task_type: str, holder: str) -> bool:
-    """释放本人持有的租约(任务终态 finally 调用)。仅删自己的行。"""
+def release_lease(db, task_type: str, holder: str,
+                  token: int | None = None) -> bool:
+    """释放本人持有的租约(任务终态 finally 调用)。仅删自己的行。
+
+    二十七审 P1(holder ABA): token 非空时 DELETE 条件必须含 token——
+    自动重试复用同一 task id(holder 相同)时, 旧对象若只按 holder 删,
+    会误删同 holder 新 token 的租约(真实复现: 旧 147 → other →
+    同 holder 151, 旧 release 删掉 151)。token=None 仅限无 token 的
+    兼容路径(scheduler 级短租约, 无执行期 fencing 语义)。
+    """
     try:
         with db.connect() as conn:
             cur = conn.execute(
                 "DELETE FROM chatbi_scheduler_leases "
-                "WHERE task_type = ? AND holder = ?", (task_type, holder))
+                "WHERE task_type = ? AND holder = ? "
+                + ("AND token = ?" if token is not None else ""),
+                (task_type, holder) + ((token,) if token is not None else ()))
             return bool(getattr(cur, "rowcount", 0))
     except Exception as e:
         logger.warning("租约 %s 释放失败(等 TTL 过期): %s", task_type, e)
@@ -399,11 +409,20 @@ class RunLease:
             if self.token is None:
                 # 二十六审 P1: 拿到租约但读不到 fencing token(异常路径/
                 # 残留 NULL)——execute_if_owned 会退化为无 token 校验的
-                # 弱 fencing, fail-closed: 拒绝执行并释放刚拿到的行
+                # 弱 fencing, fail-closed: 拒绝执行并释放刚拿到的行。
+                # 二十七审 P1: 清理按 holder 删可能误删同 holder 的
+                # 既有租约(ABA)——先重读行上的 token 再删, 读不到则
+                # 只标记失租等 TTL, 不做盲删
                 logger.error("执行期租约 %s 无 fencing token——拒绝执行"
                              "(fail-closed)", self.task_type)
                 self.acquired = False
-                release_lease(self.db, self.task_type, self.holder)
+                _tok = lease_token(self.db, self.task_type, self.holder)
+                if _tok is not None:
+                    release_lease(self.db, self.task_type, self.holder,
+                                  token=_tok)
+                else:
+                    logger.error("租约 %s token 二次读取仍为空——保留行"
+                                 "等 TTL 过期(不盲删)", self.task_type)
                 return False
             self._start_heartbeat()
         return self.acquired
@@ -415,8 +434,7 @@ class RunLease:
         def _beat():
             while not self._hb_stop.wait(interval):
                 try:
-                    ok = acquire_lease(self.db, self.task_type, self.holder,
-                                       ttl_seconds=self.ttl_seconds)
+                    ok = self.heartbeat()
                 except Exception as e:
                     logger.error("执行期租约续租异常(视为失租): %s", e)
                     ok = False
@@ -443,18 +461,23 @@ class RunLease:
         本地 bool 在进程暂停/心跳延迟窗口内可能失真——关键写入(语义
         落库/索引发布/报告保存)前用 DB 实查。查询失败按"不持有"处理
         (fail-closed: 宁可不写也不能在失租窗口双写)。
+        二十七审 P1(holder ABA): 校验必须含 token——自动重试复用同一
+        task id 时 holder 相同, 只看 holder 会把同 holder 新 token 的
+        租约误判为自己持有(真实复现: 旧 147 → other → 同 holder 151,
+        旧 assert 返回 True)。
         """
-        if not self.acquired:
+        if not self.acquired or self.token is None:
             return False
         try:
             with self.db.connect() as conn:
                 row = conn.execute(
                     "SELECT holder FROM chatbi_scheduler_leases "
                     "WHERE task_type = ? AND holder = ? "
+                    "AND token = ? "
                     "AND expires_at ~ '^[0-9]+$' "
                     "AND expires_at::bigint > "
                     "(extract(epoch FROM now())*1000)::bigint",
-                    (self.task_type, self.holder)).fetchone()
+                    (self.task_type, self.holder, self.token)).fetchone()
             ok = row is not None
             if not ok:
                 logger.error("fencing: 租约 %s 已易主/过期(本地标记=%s)——"
@@ -500,12 +523,25 @@ class RunLease:
             return True, write_fn(conn)
 
     def heartbeat(self) -> bool:
-        """同步续租点(兼容既有调用); 返回 False = 租约已丢。"""
-        if not self.acquired:
+        """同步续租点(兼容既有调用); 返回 False = 租约已丢。
+
+        二十七审 P1: 续租后必须校验 token 未变——acquire_lease 对同
+        holder 无条件续期, 若期间被他人接管又由同 holder(自动重试复用
+        task id)重新获得, 旧对象会静默续上新 token 的租约(ABA)。
+        token 变了 = 本对象已过代, 按失租处理。
+        """
+        if not self.acquired or self.token is None:
             return False
         if acquire_lease(self.db, self.task_type, self.holder,
                          ttl_seconds=self.ttl_seconds):
-            return True
+            _tok = lease_token(self.db, self.task_type, self.holder)
+            if _tok == self.token:
+                return True
+            logger.error("执行期租约 %s token 已换代(%s→%s, 同 holder "
+                         "重试)——本对象过代, 任务应中止",
+                         self.task_type, self.token, _tok)
+            self.acquired = False
+            return False
         logger.error("执行期租约 %s 丢失(被其他实例接管)——任务应中止: %s",
                      self.task_type, self.holder)
         self.acquired = False
@@ -518,17 +554,11 @@ class RunLease:
             self._hb_thread.join(timeout=5)
             self._hb_thread = None
         if self.acquired:
-            release_lease(self.db, self.task_type, self.holder)
-            self.acquired = False
-
-    def release(self) -> None:
-        if self._hb_stop is not None:
-            self._hb_stop.set()
-        if self._hb_thread is not None:
-            self._hb_thread.join(timeout=5)
-            self._hb_thread = None
-        if self.acquired:
-            release_lease(self.db, self.task_type, self.holder)
+            # 二十七审 P1: 按 token 删——只按 holder 会误删同 holder
+            # 新 token 的租约(ABA); 删不到(token 已换代)说明租约早已
+            # 不属于本对象, 等 TTL 自然过期即可
+            release_lease(self.db, self.task_type, self.holder,
+                          token=self.token)
             self.acquired = False
 
 
