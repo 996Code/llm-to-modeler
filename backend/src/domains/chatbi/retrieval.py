@@ -209,20 +209,42 @@ def retrieve(
         return RetrievalResult(
             no_match_reason="索引活跃版本状态不可用(存储异常), 已停止检索以避免读到过期索引")
 
-    # 十九审 6.1: 命中身份从 PG 反查恢复(超长 chunk_id 截断不可逆,
-    # type/name/owner_model 以 chatbi_chunk_identities 为真源)。按各自
-    # scope 反查——同 chunk_id 在不同数据源可指不同对象; 缺行回退解码。
+    # 十九审 6.1 / 二十审 9.1: 身份表是截断键的唯一真源。
+    #  - 命中含截断键(#短哈希)且身份表无此行 → 丢弃(fail-closed, 禁止
+    #    用不可逆主键反解猜测 name/owner);
+    #  - 身份表查询故障(异常) → 只有截断键命中被丢弃, 短键仍可用解码
+    #    (二十审 9.1 要求的"不为截断内容猜测身份"与检索可用性平衡);
+    #  - 短键照常解码(可逆, 无猜测成分)。
     if candidates:
-        from domains.chatbi.stores import lookup_chunk_identities
+        from domains.chatbi.stores import (lookup_chunk_identities,
+                                           ChatBIVectorStore)
+        dropped_by_identity = 0
         for sc, sc_hits in candidates_by_scope.items():
-            ident = lookup_chunk_identities(db, sc,
-                                            [h.record.id for h in sc_hits])
-            if not ident:
-                continue
+            trunc_ids = [h.record.id for h in sc_hits if "#" in h.record.id]
+            try:
+                ident = lookup_chunk_identities(db, sc,
+                                                [h.record.id for h in sc_hits])
+            except Exception as e:
+                logger.error("retrieve 身份反查失败(scope=%s, 截断键 %d 条"
+                             "按丢弃处理): %s", sc[:8], len(trunc_ids), e)
+                ident = {}
+            kept_hits = []
             for h in sc_hits:
                 m = ident.get(h.record.id)
                 if m:
-                    h.record.metadata = dict(m)
+                    h.record.metadata = dict(m)   # 身份表行(含 rev)
+                    kept_hits.append(h)
+                elif "#" in h.record.id:
+                    dropped_by_identity += 1      # 截断键无真源 → 宁缺毋滥
+                else:
+                    h.record.metadata = ChatBIVectorStore.decode_chunk_id(
+                        h.record.id)
+                    kept_hits.append(h)
+            candidates_by_scope[sc] = kept_hits
+        if dropped_by_identity:
+            logger.warning("retrieve: %d 条截断键命中因身份真源缺失被丢弃"
+                           "(宁缺毋滥)", dropped_by_identity)
+        candidates = [h for hits in candidates_by_scope.values() for h in hits]
     candidates.sort(key=lambda r: r.score, reverse=True)
     candidates = candidates[:top_k]
 

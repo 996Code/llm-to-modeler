@@ -13,6 +13,7 @@ semantic_scanner 的进度回写机制。
 from __future__ import annotations
 
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ def _start_refresh_scheduler(manager, app_state) -> None:
         _loop._last_refresh = _now_ts()   # 启动即视为已刷新(避免重启风暴)
         _loop._last_health = 0.0
         _loop._last_purge = 0.0   # 留存清理按小时级执行(四审 5.4: 每 30s 一次 DELETE 过频)
+        _loop._last_gc = 120.0    # 二十审 9.5: 启动 ~2min 后先跑一轮 GC(清历史孤儿)
         while not _refresh_stop.wait(30):
             now = _now_ts()
             from domains.chatbi.runtime import get_pack_db as _get_db
@@ -91,6 +93,25 @@ def _start_refresh_scheduler(manager, app_state) -> None:
                                 logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
                 except Exception as e:
                     logger.warning("查询统计清理失败(下轮重试): %s", e)
+            # 索引台账 GC(二十审 9.5: 周期回收, 不再只依赖新版本发布事件;
+            # 租约互斥; grace/TTL/保留代际来自正式配置)
+            if now - _loop._last_gc >= 3600:
+                _loop._last_gc = now
+                try:
+                    if acquire_lease(_lease_db, "index_gc", ttl_seconds=900):
+                        _gc_store = None
+                        try:
+                            from domains.chatbi import stores as _cb_stores
+                            _gc_llm = runtime.get_llm(app_state) \
+                                if app_state else None
+                            _gc_store = _cb_stores.get_vector(app_state)
+                        except Exception:
+                            pass
+                        if _gc_store is not None:
+                            _run_periodic_index_gc(_lease_db, app_state,
+                                                   _gc_store)
+                except Exception as e:
+                    logger.warning("周期索引 GC 失败(下轮重试): %s", e)
             # 健康巡检: 设置周期(缺省 300s)
             try:
                 health_iv = int(_load_settings(app_state)
@@ -202,11 +223,39 @@ def acquire_lease(db, task_type: str, holder: str | None = None,
                 "CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases ("
                 "task_type TEXT PRIMARY KEY, holder TEXT NOT NULL, "
                 "expires_at TEXT NOT NULL)")
-            # 旧部署的 ISO 格式行一次性清除(epoch 格式迁移; TTL 分钟级,
-            # 无在途价值——不清则旧行永远无法被新格式守卫抢占)
-            conn.execute(
-                "DELETE FROM chatbi_scheduler_leases "
-                "WHERE expires_at !~ '^[0-9]+$'")
+            # 二十审 9.6: 旧部署的 ISO 格式租约不再无条件删除——滚动
+            # 升级时旧实例可能仍持有有效租约(无条件删=双执行窗口)。
+            # 兼容解析过期时间: 确认过期的才清理; 仍有效的转成 epoch
+            # 格式保留持有权(新实例只能等它过期, 不会双执行)。
+            try:
+                legacy = conn.execute(
+                    "SELECT task_type, expires_at FROM chatbi_scheduler_leases "
+                    "WHERE expires_at !~ '^[0-9]+$'").fetchall()
+            except Exception:
+                legacy = []
+            from datetime import datetime
+            for row in legacy or []:
+                parsed = None
+                try:
+                    parsed = datetime.fromisoformat(
+                        str(row["expires_at"]).replace("Z", "+00:00"))
+                except Exception:
+                    pass
+                try:
+                    if parsed is None or parsed <= datetime.now().astimezone():
+                        # 过期/完全不可解析 → 清理残留
+                        conn.execute(
+                            "DELETE FROM chatbi_scheduler_leases "
+                            "WHERE task_type = ? AND expires_at = ?",
+                            (row["task_type"], row["expires_at"]))
+                    else:
+                        conn.execute(
+                            "UPDATE chatbi_scheduler_leases SET expires_at = ? "
+                            "WHERE task_type = ? AND expires_at = ?",
+                            (str(int(parsed.timestamp() * 1000)),
+                             row["task_type"], row["expires_at"]))
+                except Exception:
+                    pass   # 迁移失败不影响本次获取(守卫按 epoch 格式判定)
             # now 由数据库给出并直接参与比较(跨主机时钟偏差免疫)
             conn.execute(
                 "WITH n AS (SELECT (extract(epoch FROM now())*1000)::bigint AS nowms) "
@@ -242,12 +291,13 @@ def release_lease(db, task_type: str, holder: str) -> bool:
 
 
 class RunLease:
-    """执行期分布式租约(十九审 6.4): claim → heartbeat → release(终态)。
+    """执行期分布式租约(十九审 6.4 / 二十审 9.2): claim → 独立心跳 → release。
 
-    十八审租约只包住 scheduler 的提交瞬间; 大库刷新超过 TTL 后另一
-    worker 可再提交重复任务。RunLease 绑定 task id, 任务执行中定期
-    heartbeat 续期; 丢失(执行超过 TTL 被接管)时 abort——继续跑必然与
-    接管者重复工作。所有任务终态必须 release(finally)。
+    二十审整改:
+      - 心跳改为**独立后台线程**(TTL/3 间隔续租), 不依赖业务步骤回调——
+        单步执行超过 TTL 时租约也能保活; 续约失败(被接管/DB 故障)时置
+        self.owned=False, 写前 fencing 检查据此拒绝继续写入;
+      - release 终止心跳线程并删租约行(终态 finally)。
     """
 
     def __init__(self, db, task_type: str, holder: str,
@@ -257,14 +307,46 @@ class RunLease:
         self.holder = holder
         self.ttl_seconds = ttl_seconds
         self.acquired = False
+        self._hb_stop: threading.Event | None = None
+        self._hb_thread: threading.Thread | None = None
 
     def acquire(self) -> bool:
         self.acquired = acquire_lease(self.db, self.task_type, self.holder,
                                       ttl_seconds=self.ttl_seconds)
+        if self.acquired:
+            self._start_heartbeat()
+        return self.acquired
+
+    def _start_heartbeat(self):
+        self._hb_stop = threading.Event()
+        interval = max(1.0, self.ttl_seconds / 3.0)
+
+        def _beat():
+            while not self._hb_stop.wait(interval):
+                try:
+                    ok = acquire_lease(self.db, self.task_type, self.holder,
+                                       ttl_seconds=self.ttl_seconds)
+                except Exception as e:
+                    logger.error("执行期租约续租异常(视为失租): %s", e)
+                    ok = False
+                if not ok:
+                    self.acquired = False
+                    logger.error("执行期租约 %s 丢失(被其他实例接管)——"
+                                 "写前 fencing 将拒绝后续写入: %s",
+                                 self.task_type, self.holder)
+                    return
+
+        self._hb_thread = threading.Thread(target=_beat, daemon=True,
+                                           name=f"lease-hb:{self.task_type}")
+        self._hb_thread.start()
+
+    @property
+    def owned(self) -> bool:
+        """写前 fencing 检查: 心跳线程确认仍持有租约。"""
         return self.acquired
 
     def heartbeat(self) -> bool:
-        """续租; 返回 False = 租约已丢(被接管), 调用方应尽快终止。"""
+        """同步续租点(兼容既有调用); 返回 False = 租约已丢。"""
         if not self.acquired:
             return False
         if acquire_lease(self.db, self.task_type, self.holder,
@@ -276,9 +358,50 @@ class RunLease:
         return False
 
     def release(self) -> None:
+        if self._hb_stop is not None:
+            self._hb_stop.set()
+        if self._hb_thread is not None:
+            self._hb_thread.join(timeout=5)
+            self._hb_thread = None
         if self.acquired:
             release_lease(self.db, self.task_type, self.holder)
             self.acquired = False
+
+
+def _run_periodic_index_gc(db, app_state, store) -> int:
+    """对所有 scope 执行索引台账 GC(二十审 9.5: 周期触发 + 配置化参数)。
+
+    store: ChatBIVectorStore 实例(调度器闭包的 app_state 可取时传入;
+    None = 向量设施不可用, 本轮跳过——台账清理无向量可删但仍应推进?)。
+    向量不可用时跳过整轮: 只删台账不删向量会造成"GC 后向量复活"的
+    不一致, 宁可等下一轮。
+    """
+    if store is None:
+        return 0
+    from domains.chatbi import stores as _stores
+    settings = _load_settings(app_state)
+    keep = int(settings.get("index_gc_keep_generations", 2))
+    grace = int(settings.get("index_gc_published_grace_seconds", 600))
+    ttl = int(settings.get("index_gc_unfinished_ttl_seconds", 86400))
+    deleted_total = 0
+    with db.connect() as conn:
+        scopes = [r["scope_id"] for r in conn.execute(
+            "SELECT scope_id FROM chatbi_data_sources "
+            "WHERE is_active = 1 AND scope_id != ''").fetchall()]
+        rows = conn.execute(
+            "SELECT DISTINCT scope FROM chatbi_index_revisions").fetchall()
+    all_scopes = sorted(set(scopes) | {r["scope"] for r in rows})
+    for sc in all_scopes:
+        try:
+            deleted_total += _stores.gc_index_builds(
+                db, sc, store, keep_generations=keep,
+                published_grace_seconds=grace,
+                unfinished_ttl_seconds=ttl)
+        except Exception as e:
+            logger.warning("周期 GC scope=%s 失败: %s", sc[:8], e)
+    if deleted_total:
+        logger.info("周期索引 GC: 回收 %d 条向量", deleted_total)
+    return deleted_total
 
 
 def _task_scan_datasource(handle, app_state=None) -> dict:
@@ -297,10 +420,10 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
 
     settings = _load_settings(app_state)
 
-    # 十九审 6.4: 执行期分布式租约——同数据源的扫描/刷新跨进程唯一
-    # (绑 task id; 手工触发与调度触发走同一 claim; TTL 15min+progress 心跳)
-    lease = RunLease(db, f"run:scan:{ds_id}", holder=f"task:{handle.task_id}",
-                     ttl_seconds=900)
+    # 二十审 9.2: scan/refresh 共用同一数据源写租约键——同一数据源
+    # 任意时刻只允许一个语义写任务(跨操作互斥, 不只同类互斥)
+    lease = RunLease(db, f"run:semantic_write:{ds_id}",
+                     holder=f"task:{handle.task_id}", ttl_seconds=900)
     if not lease.acquire():
         from services.task_manager import PermanentTaskError
         raise PermanentTaskError(
@@ -332,9 +455,9 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
             infer_metrics=bool(settings.get("scan_metric_inference", True)),
             progress_cb=progress, datasource_id=ds_id,
             persist=False)  # 不在内部保存——由外部 CAS 保存
-        # 十九审 6.4: 写阶段前的接管检查——扫描阶段超过 TTL 且租约被
-        # 其他实例接走时, 本任务不得再落库(继续跑必然重复工作)
-        if not lease.acquired:
+        # 写前 fencing(二十审 9.2): 独立心跳维持租约; owned=False 说明
+        # 已被接管/失租, 本任务不得再落库(继续写必然双写者)
+        if not lease.owned:
             from services.task_manager import PermanentTaskError
             raise PermanentTaskError(
                 "扫描执行期租约被其他实例接管(本任务停滞超时)——中止落库")
@@ -368,14 +491,17 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                 raise
         # 十八审 6.5/十九审 6.6: 每次 merge 后都写报告(含空报告)——干净刷新
         # 清掉旧告警, 报告版本与语义版本对齐; 保存失败时任务结果可见
-        report_persisted = save_merge_report(db, ds_id, version, merge_report)
+        report_state = save_merge_report(db, ds_id, version, merge_report)
         if merge_report.get("requires_review"):
             _log_report(handle, merge_report, f"重扫 v{version}")
-        if not report_persisted:
+        if report_state == REPORT_FAILED:
             handle.log(f"⚠ merge 报告保存失败(语义 v{version} 已生效)——"
                        f"待复核清单可能与当前版本不一致")
         # 向量索引重建 (对标 _run_scan_background 尾部 rebuild_index;
         # 失败降级不阻塞——RAG 检索可用全表降级路径)
+        if not lease.owned:
+            from services.task_manager import PermanentTaskError
+            raise PermanentTaskError("索引重建前 fencing 失败(租约已失)——中止")
         indexed = 0
         index_status = "ok"
         index_warning = None
@@ -410,7 +536,8 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                     "conflicts": merge_report["conflicts"],
                     "requires_review": True}
                    if merge_report.get("requires_review") else {}),
-                **({} if report_persisted else {"report_warning": True}),
+                **({"report_warning": True}
+                   if report_state == REPORT_FAILED else {}),
                 "datasource_id": ds_id}
     except Exception as e:
         datasources.update_datasource(db, ds_id, scan_status="failed",
@@ -522,7 +649,13 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
 
 def _refresh_all_datasources(handle, app_state, db, settings, results,
                              lease) -> dict:
-    """全量刷新主体(refresh 租约已持有; 每数据源迭代头 heartbeat)。"""
+    """全量刷新主体(全局调度租约已持有; 每数据源迭代头 heartbeat)。
+
+    二十审 9.2: 每个数据源的写操作额外持有 `run:semantic_write:{ds}`
+    写租约(与 scan 共键)——同一数据源的 refresh 与 scan 跨实例互斥。
+    写租约被占(该 ds 正被 scan/其他实例处理)→ 本轮跳过该数据源,
+    不视为整体失败。
+    """
     from domains.chatbi import semantic, datasources, indexing
     for row in datasources.list_datasources(db, active_only=True):
         if not lease.heartbeat():
@@ -533,7 +666,18 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
         # 的既有教训: 不解密直连必失败(fe_sendauth: no password supplied)。
         # 此前定时刷新自迁移以来一直在任务层静默失败(脚本验证绕过了本层)。
         info = datasources.get_datasource(db, row.id, decrypt=True) or row
+        write_lease = RunLease(db, f"run:semantic_write:{info.id}",
+                               holder=f"task:{handle.task_id}", ttl_seconds=900)
+        if not write_lease.acquire():
+            results.append({"datasource_id": info.id, "ok": True,
+                            "skipped": "write_lease_busy",
+                            "detail": "该数据源正被其他写任务处理, 本轮跳过"})
+            continue
         try:
+            if not write_lease.owned or not lease.owned:
+                results.append({"datasource_id": info.id, "ok": False,
+                                "error": "刷新写前 fencing 失败(租约已失)"})
+                continue
             # 十一审 7.2 P0: content 和 revision 必须同一次读取——
             # 此前 current 用 load_current_content(只有content), 版本号
             # 在扫描后另查, 管理员扫描期间写入会产生"旧content+新版本号"
@@ -561,6 +705,12 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
             # 旧快照可静默覆盖管理员的新编辑(报告复现: Admin-A v2 被
             # Refresh-from-v1 v3 覆盖)。冲突时基于最新版重试一次。
             from domains.chatbi.graph_infer import VersionConflictError as _VCE
+            # 二十审 9.2: 写前 fencing——语义落库是本数据源最关键的写入点
+            if not write_lease.owned:
+                results.append({"datasource_id": info.id, "ok": False,
+                                "error": "写前 fencing 失败(数据源写租约已失)"
+                                         "——本数据源本轮未写入"})
+                continue
             try:
                 version = semantic.save_content(db, info.id, merged,
                                                 source="refresh",
@@ -585,12 +735,13 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                         expected_version=_retry[1])
                 else:
                     raise  # 无法重试(无 current)
-            # 十八审 6.5/十九审 6.6: 每次 merge 后都写报告(含空)+失败可见
-            report_persisted = save_merge_report(db, info.id, version,
-                                                 merge_report)
+            # 十八审 6.5/十九审 6.6/二十审 9.4: 每次 merge 后都写报告(含
+            # 空); 仅 failed 告警——superseded 是正常乱序让路
+            report_state = save_merge_report(db, info.id, version,
+                                             merge_report)
             if merge_report.get("requires_review"):
                 _log_report(handle, merge_report, f"刷新 v{version}")
-            if not report_persisted:
+            if report_state == REPORT_FAILED:
                 handle.log(f"⚠ merge 报告保存失败 ds={info.id[:8]}… "
                            f"(语义 v{version} 已生效)——待复核清单可能过期")
             struct_changed = (prev_db_version is None
@@ -676,10 +827,13 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                                 "conflicts": merge_report["conflicts"],
                                 "requires_review": True}
                                if merge_report.get("requires_review") else {}),
-                            **({} if report_persisted else {"report_warning": True})})
+                            **({"report_warning": True}
+                               if report_state == REPORT_FAILED else {})})
         except Exception as e:
             logger.warning("自动刷新失败 %s: %s", info.name, e)
             results.append({"datasource_id": info.id, "ok": False, "error": str(e)[:200]})
+        finally:
+            write_lease.release()   # 二十审 9.2: 每数据源写租约终态释放
     # 九审 7.5: 汇总 partial failure——有失败时任务不能显示 succeeded
     failed = [r for r in results if not r.get("ok")]
     summary = {"refreshed": results,
@@ -1179,8 +1333,15 @@ def _merge_rescan(old, new, report=None):
 
 # ── merge 报告持久化(十七审 7.6: 任务结果 + 语义页面可见) ──────────
 
+# 报告保存结果三态(二十审 9.4): 只有 failed 触发告警;
+# superseded 是正常的乱序让路(旧任务报告被新版本淘汰), 只记审计
+REPORT_SAVED = "saved"
+REPORT_SUPERSEDED = "superseded"
+REPORT_FAILED = "failed"
+
+
 def save_merge_report(db, data_source_id: str, version: int,
-                      report: dict) -> bool:
+                      report: dict) -> str:
     """落 merge 报告(语义页面 review 接口的数据源)。
 
     十九审 6.2: UPSERT 带 version 守卫——报告必须单调不倒退。语义保存
@@ -1189,8 +1350,9 @@ def save_merge_report(db, data_source_id: str, version: int,
     以修正后的报告刷新自身版本是合法的。
 
     Returns:
-        True=写入生效; False=被更新版本守卫拒绝(乱序让路)或保存失败。
-        调用方据此把 report_warning 写进任务/API 结果(十九审 6.6)。
+        REPORT_SAVED=写入生效;
+        REPORT_SUPERSEDED=被更高版本正常淘汰(乱序让路, 非失败);
+        REPORT_FAILED=数据库异常(调用方应告警)。
     """
     import json
     try:
@@ -1206,18 +1368,20 @@ def save_merge_report(db, data_source_id: str, version: int,
                 (data_source_id, version, json.dumps(report, ensure_ascii=False),
                  _now_iso()))
             # DO UPDATE ... WHERE 不命中时行被跳过: psycopg rowcount=0
-            # → 乱序旧版本让路, 调用方按 False 处理(十九审 6.2)
+            # → 乱序旧版本让路(二十审 9.4: 这是正常并发结果, 非失败)
             if getattr(cur, "rowcount", 0):
-                return True
+                return REPORT_SAVED
             # rowcount 不可靠的驱动: 回读确认版本归属
             row = conn.execute(
                 "SELECT version FROM chatbi_merge_reports "
                 "WHERE data_source_id = ?", (data_source_id,)).fetchone()
-            return bool(row and int(row["version"]) == version)
+            return (REPORT_SAVED
+                    if row and int(row["version"]) == version
+                    else REPORT_SUPERSEDED)
     except Exception as e:
         logger.warning("merge 报告落库失败(ds=%s v%s): %s",
                        data_source_id, version, e)
-        return False
+        return REPORT_FAILED
 
 
 def get_merge_report(db, data_source_id: str):

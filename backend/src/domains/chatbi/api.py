@@ -353,8 +353,8 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
     # 十八审 6.5: 人工保存 = 管理员已介入, 旧 merge 报告按 superseded 清除
     # (空报告对齐新版本, 页面告警消失); 保存失败时响应可见(十九审 6.6)
     from domains.chatbi.tasks import save_merge_report, _new_report
-    report_persisted = save_merge_report(_db(), ds_id, ver, _new_report())
-    if not report_persisted:
+    report_state = save_merge_report(_db(), ds_id, ver, _new_report())
+    if report_state == "failed":
         logger.warning("人工保存后 merge 报告清除失败 ds=%s v%s——页面可能"
                        "显示过期待复核清单", ds_id, ver)
     # 人工校正后重建向量索引(源 semantic_models.py:345-362;失败降级不阻塞)
@@ -374,7 +374,8 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
            detail={"version": ver, "index_rebuilt": index_rebuilt})
     return {"ok": True, "version": ver, "index_rebuilt": index_rebuilt,
             **({"warning": index_warning} if index_warning else {}),
-            **({} if report_persisted else {"report_warning": "待复核清单清除失败, 页面可能显示过期报告"})}
+            **({"report_warning": "待复核清单清除失败, 页面可能显示过期报告"}
+               if report_state == "failed" else {})}
 
 
 @router.get("/semantic-diff", dependencies=[Depends(admin_required)])
@@ -427,8 +428,8 @@ async def semantic_rollback(ds_id: str, version: int, request: Request,
     # 十八审 6.5: 回滚 = 管理员显式选择历史状态, 旧 merge 报告清除对齐;
     # 失败可见(十九审 6.6)
     from domains.chatbi.tasks import save_merge_report, _new_report
-    report_persisted = save_merge_report(_db(), ds_id, ver, _new_report())
-    if not report_persisted:
+    report_state = save_merge_report(_db(), ds_id, ver, _new_report())
+    if report_state == "failed":
         logger.warning("回滚后 merge 报告清除失败 ds=%s v%s", ds_id, ver)
     # 回滚后重建索引(源 semantic_models.py:196-214;失败降级不阻塞)
     index_rebuilt, index_warning = True, None
@@ -448,7 +449,8 @@ async def semantic_rollback(ds_id: str, version: int, request: Request,
                    "index_rebuilt": index_rebuilt})
     return {"ok": True, "version": ver, "index_rebuilt": index_rebuilt,
             **({"warning": index_warning} if index_warning else {}),
-            **({} if report_persisted else {"report_warning": "待复核清单清除失败, 页面可能显示过期报告"})}
+            **({"report_warning": "待复核清单清除失败, 页面可能显示过期报告"}
+               if report_state == "failed" else {})}
 
 
 # ── 查询质量可观测(BI 维度; 复核报告 P1) ─────────────────────

@@ -236,6 +236,7 @@ CHATBI_DDL = [
         type TEXT NOT NULL,
         name TEXT NOT NULL,
         owner_model TEXT,
+        revision INTEGER,
         PRIMARY KEY (scope, chunk_id)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_chatbi_chunk_ident_doc "

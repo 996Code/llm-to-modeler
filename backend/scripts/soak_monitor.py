@@ -1,15 +1,21 @@
-"""ChatBI 迁移 soak 监控(十九审验收: 6~24h 真实定时刷新观察)。
+"""ChatBI 迁移 soak 监控(二十审 9.8 修复版)。
 
 每 5 分钟向 logs/soak-<date>.jsonl 追加一条快照:
+  - 元数据: git commit / 进程启动时间 / 配置摘要(二十审要求写入验收元数据)
   - 每数据源: semantic 当前版本 / active 索引指针 / merge 报告版本与告警
-  - build ledger 状态分布(孤儿增长观察) + chunk 身份行数
+  - build ledger 状态分布(孤儿增长观察) + chunk 身份行数(含含截断键计数)
   - scheduler 租约持有者(多进程唯一性观察)
   - 最近 1h 任务统计(refresh/scan 成功/失败) + 任务总数
-  - 两个 uvicorn 进程 RSS/线程数/fd(资源泄漏观察)
+  - 双实例 RSS/线程数/fd(二十审 9.8: 采样失败显式记 null, 不再伪装 0)
   - 两个实例日志的 ERROR 计数(累计)
 
+配置(全部必填, fail-closed):
+  SOAK_DATABASE_URL   PG 连接串(不再硬编码回退)
+  SOAK_PORTS          逗号分隔端口, 缺省 "18080,18081"
+  SOAK_INSTANCE_LOGS  逗号分隔日志路径, 缺省 /tmp/llm-modeler-{port}.log
+
 用法: venv/bin/python scripts/soak_monitor.py [--interval 300]
-停止: kill <pid>(写完当前快照即退出)
+停止: kill <pid>(SIGTERM 后当前快照写完即退)
 """
 import json
 import os
@@ -19,32 +25,54 @@ import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-os.environ.setdefault(
-    "DATABASE_URL", "postgresql://root:root@localhost:5432/llm_modeler_test")
 
-from sdk.relational_store import PackRelationalDB  # noqa: E402
+DSN = os.getenv("SOAK_DATABASE_URL", "").strip()
+PORTS = [p.strip() for p in
+         os.getenv("SOAK_PORTS", "18080,18081").split(",") if p.strip()]
+INSTANCE_LOGS = [l.strip() for l in
+                 os.getenv("SOAK_INSTANCE_LOGS", "").split(",") if l.strip()]
+if not INSTANCE_LOGS:
+    INSTANCE_LOGS = [f"/tmp/llm-modeler-{p}.log" for p in PORTS]
+if not DSN:
+    print("SOAK_DATABASE_URL 未设置(fail-closed, 不再硬编码回退)", flush=True)
+    sys.exit(2)
 
-LOG_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
-INSTANCE_LOGS = ["/tmp/llm-modeler-18080.log", "/tmp/llm-modeler-18081.log"]
+try:
+    GIT_COMMIT = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True, timeout=10,
+        cwd=os.path.join(os.path.dirname(__file__), "..")).stdout.strip()
+except Exception:
+    GIT_COMMIT = "unknown"
 
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def count_log_errors(path):
+def _ps_fields(pid: int, fmt: str):
+    """macOS/Linux 通用单字段采样; 失败返回 None(调用方记 null)。"""
     try:
-        with open(path, "rb") as f:
-            data = f.read()
-        return data.count(b"ERROR") , len(data.splitlines())
-    except OSError:
-        return 0, 0
+        out = subprocess.run(
+            ["ps", "-o", fmt, "-p", str(pid)],
+            capture_output=True, text=True, timeout=10).stdout
+        lines = [l for l in out.splitlines() if l.strip()]
+        if len(lines) >= 2 and lines[1].strip().isdigit():
+            return int(lines[1].strip())
+    except Exception:
+        pass
+    return None
 
 
 def proc_metrics():
+    """RSS(kb)/线程数/fd 数。
+
+    二十审 9.8: macOS 无 nlwp——线程数用 `ps -M` 数据行数; RSS 用
+    `ps -o rss=`; 任一采样失败显式记 None, 绝不伪装成 0。
+    """
     out = []
     pids, seen = [], set()
-    for port in ("18080", "18081"):
+    for port in PORTS:
         try:
             pids += subprocess.run(
                 ["/usr/sbin/lsof", "-ti", f":{port}"],
@@ -55,29 +83,36 @@ def proc_metrics():
         if pid in seen or not pid.isdigit():
             continue
         seen.add(pid)
-        # macOS: ps 取 rss/线程
+        rss = _ps_fields(int(pid), "rss=")
         try:
-            r = subprocess.run(
-                ["ps", "-o", "rss=,nlwp=", "-p", pid],
-                capture_output=True, text=True, timeout=10).stdout.split()
-            rss_kb, threads = (int(r[0]), int(r[1])) if len(r) >= 2 else (0, 0)
+            m = subprocess.run(["ps", "-M", "-p", str(pid)],
+                               capture_output=True, text=True,
+                               timeout=10).stdout.splitlines()
+            threads = max(0, len([l for l in m if l.strip()]) - 1)
         except Exception:
-            rss_kb, threads = 0, 0
+            threads = None
         try:
             fds = len(subprocess.run(
-                ["/usr/sbin/lsof", "-p", pid],
+                ["/usr/sbin/lsof", "-p", str(pid)],
                 capture_output=True, text=True, timeout=15).stdout.splitlines())
         except Exception:
-            fds = 0
-        out.append({"pid": int(pid), "rss_mb": round(rss_kb / 1024, 1),
-                    "threads": threads, "fds": fds})
+            fds = None
+        started = None
+        try:
+            lstart = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=10).stdout.strip()
+            started = lstart or None
+        except Exception:
+            pass
+        out.append({"pid": int(pid), "rss_kb": rss, "threads": threads,
+                    "fds": fds, "started": started})
     return out
 
 
-def snapshot(db: PackRelationalDB):
-    snap = {"ts": now_iso()}
+def snapshot(db):
+    snap = {"ts": now_iso(), "commit": GIT_COMMIT}
     with db.connect() as conn:
-        # 每数据源: 语义版本 / active 指针 / 报告
         dss = conn.execute(
             "SELECT id, name, scope_id FROM chatbi_data_sources "
             "WHERE is_active = 1").fetchall()
@@ -89,7 +124,8 @@ def snapshot(db: PackRelationalDB):
                 (ds["id"],)).fetchone()
             rev = conn.execute(
                 "SELECT active_doc_id, version FROM chatbi_index_revisions "
-                "WHERE scope = ?", (ds["scope_id"],)).fetchone() if ds["scope_id"] else None
+                "WHERE scope = ?",
+                (ds["scope_id"],)).fetchone() if ds["scope_id"] else None
             rep = conn.execute(
                 "SELECT version, report FROM chatbi_merge_reports "
                 "WHERE data_source_id = ?", (ds["id"],)).fetchone()
@@ -109,24 +145,23 @@ def snapshot(db: PackRelationalDB):
                 if sem and rev else None,
             })
         snap["datasources"] = per
-        # ledger 状态分布 + 身份行数
         ledger = conn.execute(
             "SELECT status, COUNT(*) AS n FROM chatbi_index_builds "
             "GROUP BY status").fetchall()
         snap["build_ledger"] = {r["status"]: int(r["n"]) for r in ledger}
         ident = conn.execute(
-            "SELECT scope, COUNT(*) AS n FROM chatbi_chunk_identities "
-            "GROUP BY scope").fetchall()
-        snap["chunk_identities"] = {r["scope"][:8]: int(r["n"]) for r in ident}
-        # 租约
+            "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE chunk_id LIKE '%#%') "
+            "AS trunc FROM chatbi_chunk_identities").fetchone()
+        snap["chunk_identities"] = {"total": int(ident["n"]),
+                                    "truncated": int(ident["trunc"])}
         leases = conn.execute(
             "SELECT task_type, holder, expires_at FROM chatbi_scheduler_leases"
         ).fetchall()
         snap["leases"] = [
             {"task": r["task_type"], "holder": r["holder"][-13:],
-             "expires_ms": int(r["expires_at"]) if str(r["expires_at"]).isdigit() else None}
+             "expires_ms": int(r["expires_at"])
+             if str(r["expires_at"]).isdigit() else None}
             for r in leases]
-        # 任务统计: 最近 1 小时 + 总量
         total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()
         snap["tasks_total"] = int(total["n"])
         recent = conn.execute(
@@ -138,8 +173,15 @@ def snapshot(db: PackRelationalDB):
             {"type": r["task_type"], "status": r["status"], "n": int(r["n"])}
             for r in recent]
     snap["processes"] = proc_metrics()
-    snap["log_errors"] = {
-        os.path.basename(p): count_log_errors(p) for p in INSTANCE_LOGS}
+    log_errors = {}
+    for p in INSTANCE_LOGS:
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+            log_errors[os.path.basename(p)] = data.count(b"ERROR")
+        except OSError:
+            log_errors[os.path.basename(p)] = None
+    snap["log_errors"] = log_errors
     return snap
 
 
@@ -147,17 +189,23 @@ def main():
     interval = 300
     if "--interval" in sys.argv:
         interval = int(sys.argv[sys.argv.index("--interval") + 1])
-    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True) if (LOG_DIR := os.path.join(
+        os.path.dirname(__file__), "..", "logs")) else None
     date = datetime.now(timezone.utc).strftime("%Y%m%d")
     out_path = os.path.join(LOG_DIR, f"soak-{date}.jsonl")
-    db = PackRelationalDB("chatbi")
-    print(f"soak monitor -> {out_path} every {interval}s", flush=True)
+    from sdk.relational_store import PackRelationalDB
+    db = PackRelationalDB("chatbi", database_url=DSN)
+    print(f"soak monitor -> {out_path} every {interval}s "
+          f"commit={GIT_COMMIT} ports={PORTS}", flush=True)
     while True:
         try:
             snap = snapshot(db)
             with open(out_path, "a") as f:
                 f.write(json.dumps(snap, ensure_ascii=False) + "\n")
-            print(f"[{snap['ts']}] ok", flush=True)
+            procs = " ".join(
+                f"pid{p['pid']}:rss={p['rss_kb']},th={p['threads']},fd={p['fds']}"
+                for p in snap["processes"])
+            print(f"[{snap['ts'][:19]}] ok {procs}", flush=True)
         except Exception as e:
             print(f"[{now_iso()}] snapshot failed: {e}", flush=True)
         time.sleep(interval)

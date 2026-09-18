@@ -189,3 +189,21 @@ groups:
         default: 3
         min: 1
         max: 20
+      - key: index_gc_keep_generations
+        type: int
+        label: 索引保留成功代际数(active 之外再保留几个已发布旧分区)
+        default: 2
+        min: 1
+        max: 10
+      - key: index_gc_published_grace_seconds
+        type: int
+        label: 翻出保留集的旧分区删除宽限(秒, 保护持旧指针的在途查询)
+        default: 600
+        min: 0
+        max: 86400
+      - key: index_gc_unfinished_ttl_seconds
+        type: int
+        label: 构建中/让路半成品分区回收 TTL(秒)
+        default: 86400
+        min: 300
+        max: 604800

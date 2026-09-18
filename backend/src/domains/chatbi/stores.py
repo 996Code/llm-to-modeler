@@ -188,8 +188,8 @@ class ChatBIVectorStore:
             cid = f"{cid}@r{rev}"
         if len(cid) > 64:
             import hashlib
-            digest = hashlib.md5(cid.encode()).hexdigest()[:8]
-            cid = f"{cid[:55]}#{digest}"
+            digest = hashlib.sha256(cid.encode()).hexdigest()[:16]
+            cid = f"{cid[:47]}#{digest}"
         return cid
 
     @staticmethod
@@ -427,22 +427,40 @@ def ensure_index_revision_schema(db: PackRelationalDB) -> None:
             "type TEXT NOT NULL, "
             "name TEXT NOT NULL, "
             "owner_model TEXT, "
+            "revision INTEGER, "
             "PRIMARY KEY (scope, chunk_id))")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chatbi_chunk_ident_doc "
             "ON chatbi_chunk_identities(scope, doc_id)")
+        # 老库升级: 二十审 9.7 身份表补 revision 列(幂等)
+        try:
+            conn.execute(
+                "ALTER TABLE chatbi_chunk_identities ADD COLUMN revision INTEGER")
+        except Exception:
+            pass  # 列已存在
 
 
 def register_chunk_identities(db: Optional[PackRelationalDB], scope: str,
-                              records: List[VectorRecord], doc_id: str) -> None:
+                              records: List[VectorRecord], doc_id: str,
+                              revision: Optional[int] = None
+                              ) -> tuple[bool, list]:
     """索引写入时登记 chunk → 业务身份(十九审 6.1 的身份真源)。
 
-    超长 chunk_id 截断不可逆, 完整 type/name/owner_model 以 PG 为准——
-    检索命中经 lookup_chunk_identities 恢复身份, 不再依赖主键反解。
-    失败仅告警: 身份表缺失时解码回退仍可服务短键。
+    二十审 9.1: 身份表是强真源——登记失败不再被调用方吞掉:
+      Returns:
+        (ok, truncated_ids): ok=False 表示登记抛错(调用方必须使构建失败,
+        禁止发布含截断主键的索引); truncated_ids 是发生截断的 chunk_id
+        (这些键不可逆, 检索侧必须依赖身份表, 不允许反解猜测)。
+
+    失败告警保留(诊断), 但不再静默吞错。
     """
     if db is None or not records:
-        return
+        # 无 db: 短键身份可由主键可逆解码恢复, 允许发布; 但含截断键时
+        # 身份无处登记 → 禁止(检索将无法恢复其身份)
+        has_trunc = any("#" in ChatBIVectorStore._chunk_id(r)
+                        for r in records) if records else False
+        return (not has_trunc), []
+    truncated: list = []
     try:
         ensure_index_revision_schema(db)
         with db.connect() as conn:
@@ -452,45 +470,54 @@ def register_chunk_identities(db: Optional[PackRelationalDB], scope: str,
                 if not (rtype and name):
                     continue
                 cid = ChatBIVectorStore._chunk_id(rec)
+                if "#" in cid:      # 截断标记(_chunk_id 的短哈希后缀)
+                    truncated.append(cid)
                 conn.execute(
                     "INSERT INTO chatbi_chunk_identities "
-                    "(scope, chunk_id, doc_id, type, name, owner_model) "
-                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "(scope, chunk_id, doc_id, type, name, owner_model, revision) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT (scope, chunk_id) DO UPDATE SET "
                     "doc_id = EXCLUDED.doc_id, type = EXCLUDED.type, "
-                    "name = EXCLUDED.name, owner_model = EXCLUDED.owner_model",
+                    "name = EXCLUDED.name, owner_model = EXCLUDED.owner_model, "
+                    "revision = EXCLUDED.revision",
                     (scope, cid, doc_id, rtype, name,
-                     rec.metadata.get("owner_model")))
+                     rec.metadata.get("owner_model"), revision))
+        return True, truncated
     except Exception as e:
         logger.warning("chunk 身份登记失败(scope=%s): %s", scope[:8], e)
+        return False, truncated
 
 
 def lookup_chunk_identities(db: Optional[PackRelationalDB], scope: str,
                             chunk_ids: List[str]) -> Dict[str, dict]:
-    """批量反查 chunk 身份(检索命中回填 metadata 用)。失败返回空(回退解码)。"""
+    """批量反查 chunk 身份(检索命中回填 metadata 用)。
+
+    二十审 9.1/9.7: 返回值区分"查到的身份行"; 检索侧对**截断键**缺失
+    身份行必须丢弃命中(fail-closed), 不允许用截断主键反解猜测——
+    判断依据由调用方完成(本函数只忠实返回"有没有")。失败抛给调用方,
+    不再静默返回空(与登记同口径: 身份链路故障必须可见)。
+    """
     if db is None or not chunk_ids:
         return {}
-    try:
-        with db.connect() as conn:
-            out: Dict[str, dict] = {}
-            # chunk_ids 来自单次召回(top_k ≤ 100 量级), 分批 IN 查询
-            for i in range(0, len(chunk_ids), 200):
-                batch = chunk_ids[i:i + 200]
-                marks = ",".join("?" for _ in batch)
-                rows = conn.execute(
-                    f"SELECT chunk_id, type, name, owner_model "
-                    f"FROM chatbi_chunk_identities "
-                    f"WHERE scope = ? AND chunk_id IN ({marks})",
-                    [scope, *batch]).fetchall()
-                for r in rows:
-                    meta = {"type": r["type"], "name": r["name"]}
-                    if r["owner_model"]:
-                        meta["owner_model"] = r["owner_model"]
-                    out[r["chunk_id"]] = meta
-            return out
-    except Exception as e:
-        logger.warning("chunk 身份反查失败(scope=%s): %s", scope[:8], e)
-        return {}
+    with db.connect() as conn:
+        out: Dict[str, dict] = {}
+        # chunk_ids 来自单次召回(top_k ≤ 100 量级), 分批 IN 查询
+        for i in range(0, len(chunk_ids), 200):
+            batch = chunk_ids[i:i + 200]
+            marks = ",".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT chunk_id, type, name, owner_model, revision "
+                f"FROM chatbi_chunk_identities "
+                f"WHERE scope = ? AND chunk_id IN ({marks})",
+                [scope, *batch]).fetchall()
+            for r in rows:
+                meta = {"type": r["type"], "name": r["name"]}
+                if r["owner_model"]:
+                    meta["owner_model"] = r["owner_model"]
+                if r["revision"] is not None:
+                    meta["rev"] = f"r{int(r['revision'])}"
+                out[r["chunk_id"]] = meta
+        return out
 
 
 def delete_chunk_identities(db: Optional[PackRelationalDB], scope: str,
@@ -575,17 +602,19 @@ def record_index_build(db: PackRelationalDB, scope: str, version: int,
 
     GC 的台账: 让路、崩溃、半成品的分区都按 (scope, version) 记录,
     延迟回收时按 doc_id 删向量; 失败上抛由调用方降级。
+    二十审 9.3: updated_at 由数据库 now() 生成(与 GC 比较同源),
+    不再用工作进程本地时钟——时钟漂移不再影响宽限/TTL 判定。
     """
     ensure_index_revision_schema(db)
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO chatbi_index_builds "
             "(scope, version, doc_id, status, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')) "
             "ON CONFLICT (scope, version) DO UPDATE SET "
             "doc_id = EXCLUDED.doc_id, status = EXCLUDED.status, "
             "updated_at = EXCLUDED.updated_at",
-            (scope, version, doc_id, status, _now()))
+            (scope, version, doc_id, status))
 
 
 def _ensure_build_ledger(db: PackRelationalDB, scope: str, version: int,
@@ -594,15 +623,16 @@ def _ensure_build_ledger(db: PackRelationalDB, scope: str, version: int,
 
     十九审 6.5: 升级前已有 active 指针(如 schema_r17)但无台账行——
     首次新式发布时按指针回填, 否则旧 revision 向量永远无法被 GC。
+    时间同 record_index_build 用数据库时钟(二十审 9.3)。
     """
     ensure_index_revision_schema(db)
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO chatbi_index_builds "
             "(scope, version, doc_id, status, updated_at) "
-            "VALUES (?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')) "
             "ON CONFLICT (scope, version) DO NOTHING",
-            (scope, version, doc_id, status, _now()))
+            (scope, version, doc_id, status))
 
 
 def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,

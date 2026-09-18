@@ -220,9 +220,23 @@ def build_index(
         logger.warning("build_index upsert 失败, 跳过索引: %s", e)
         return IndexResult(indexed_count=0, error=str(e))
 
-    # 十九审 6.1: 身份真源落 PG——超长 chunk_id 截断后业务身份以
-    # chatbi_chunk_identities 反查恢复, 不再依赖不可逆主键解码
-    register_chunk_identities(db, scope, records, doc_id)
+    # 十九审 6.1 / 二十审 9.1: 身份真源落 PG。截断键的存在使身份表成为
+    # 检索身份的唯一来源——登记失败(或含截断键且未能登记)必须让构建
+    # 失败, 禁止把"检索时无法恢复身份"的索引发布为 active(fail-closed)。
+    try:
+        registered, truncated_ids = register_chunk_identities(
+            db, scope, records, doc_id, revision=revision)
+    except Exception as e:
+        logger.error("chunk 身份登记异常(scope=%s): %s", scope[:8], e)
+        registered, truncated_ids = False, []
+    if not registered:
+        msg = ("chunk 身份登记失败——含截断主键的索引不允许发布"
+               f"(截断 {len(truncated_ids)} 条)")
+        logger.error("build_index: %s (data_source=%s)", msg, data_source_id)
+        return IndexResult(indexed_count=0, error=msg)
+    if truncated_ids:
+        logger.info("build_index: %d 条超长主键已登记身份真源",
+                    len(truncated_ids))
 
     logger.info("build_index: 索引 %d 条 (data_source=%s)", len(records), data_source_id)
     return IndexResult(indexed_count=len(records))

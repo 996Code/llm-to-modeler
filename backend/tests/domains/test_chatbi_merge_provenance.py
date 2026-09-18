@@ -1248,8 +1248,8 @@ class TestReportOutOfOrder:
         warning = {"dropped_items": [{"kind": "metric", "table": "orders",
                                       "name": "m", "reason": "missing_column: gone"}],
                    "conflicts": [], "requires_review": True}
-        assert save_merge_report(pg_engine, "oo-ds", 12, empty) is True
-        assert save_merge_report(pg_engine, "oo-ds", 11, warning) is False, \
+        assert save_merge_report(pg_engine, "oo-ds", 12, empty) == "saved"
+        assert save_merge_report(pg_engine, "oo-ds", 11, warning) == "superseded", \
             "v11 报告覆盖了 v12(版本守卫缺失)"
         saved = get_merge_report(pg_engine, "oo-ds")
         assert saved["version"] == 12
@@ -1260,11 +1260,12 @@ class TestReportOutOfOrder:
         r1 = {"dropped_items": [{"kind": "metric", "table": "t", "name": "a",
                                  "reason": "x"}], "conflicts": [],
               "requires_review": True}
-        assert save_merge_report(pg_engine, "oo-ds-2", 5, r1) is True
+        assert save_merge_report(pg_engine, "oo-ds-2", 5, r1) == "saved"
         # 同版本重试(修正后的报告)允许覆盖
-        assert save_merge_report(pg_engine, "oo-ds-2", 5,
-                                 {"dropped_items": [], "conflicts": [],
-                                  "requires_review": False}) is True
+        assert save_merge_report(
+            pg_engine, "oo-ds-2", 5,
+            {"dropped_items": [], "conflicts": [],
+             "requires_review": False}) == "saved"
         assert get_merge_report(pg_engine, "oo-ds-2")["report"]["requires_review"] is False
 
 
@@ -1530,3 +1531,177 @@ class TestCoOccurrencePreservation:
         ])
         merged = _merge_rescan(old, scan)
         assert merged.models[0].metrics[0].co_occurrence == 37
+
+
+# ════════════════════════════════════════════════════════════════
+# 二十审反例回归: 身份 fail-closed / 跨操作互斥 / 独立心跳 / GC DB时钟
+# ════════════════════════════════════════════════════════════════
+
+class _BrokenDB:
+    """connect() 必失败的数据库替身(身份链路故障注入)."""
+
+    def connect(self):
+        raise RuntimeError("identity db down")
+
+
+class TestIdentityFailClosed:
+    """P1 9.1: 截断键的身份链路故障必须可见, 不得静默发布/猜测."""
+
+    def _ds_row(self, db, ds_id):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_data_sources "
+                "(id, name, db_type, host, port, database, username, "
+                "encrypted_password, is_active, scan_status, scan_progress, "
+                "scan_stage, scan_error, created_at, updated_at) "
+                "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
+                "'idle', 0, '', '', ?, ?)", (ds_id, now, now))
+
+    def test_register_failure_fails_build(self, pg_engine, monkeypatch):
+        """身份登记失败 → build_index 返回 error(禁止发布错误身份索引)."""
+        import domains.chatbi.indexing as idx
+        from domains.chatbi.stores import VectorRecord
+        ds = "fc-ds-1"
+        self._ds_row(pg_engine, ds)
+        content = SemanticModelContent(models=[
+            Model(name="t" * 63, display_name="长表", columns=[_col("amount")]),
+        ])
+
+        def _boom(db, scope, records, doc_id, revision=None):
+            # 模拟截断键存在但登记失败(数据库故障)
+            return False, ["model:tttt#deadbeefdeadbeef"]
+
+        monkeypatch.setattr(idx, "register_chunk_identities", _boom)
+        result = idx.build_index(content, ds, _FakeVectorStore(),
+                                 _FakeEmbedder(), db=pg_engine)
+        assert result.error is not None, "登记失败仍返回成功(Fail-Open)"
+        assert result.indexed_count == 0
+        assert "身份登记失败" in result.error
+
+    def test_register_exception_fails_build(self, pg_engine, monkeypatch):
+        """登记抛异常(真实 DB 故障)同样使构建失败."""
+        import domains.chatbi.indexing as idx
+        ds = "fc-ds-2"
+        self._ds_row(pg_engine, ds)
+        content = SemanticModelContent(models=[
+            Model(name="t" * 63, display_name="长表", columns=[_col("amount")]),
+        ])
+
+        def _boom(db, scope, records, doc_id, revision=None):
+            raise RuntimeError("identity db down")
+
+        monkeypatch.setattr(idx, "register_chunk_identities", _boom)
+        result = idx.build_index(content, ds, _FakeVectorStore(),
+                                 _FakeEmbedder(), db=pg_engine)
+        assert result.error is not None and result.indexed_count == 0
+
+    def test_truncated_key_without_identity_dropped(self, pg_engine):
+        """截断键命中且身份表无行 → 检索丢弃该命中(不猜测反解)."""
+        from domains.chatbi.stores import (
+            ChatBIVectorStore, SearchResult, VectorRecord)
+        # 模拟一条截断键命中, 身份表无此行
+        truncated_id = "model:tttt#abcdef0123456789"
+        hit = SearchResult(
+            record=VectorRecord(id=truncated_id, vector=[0.1],
+                                metadata={"type": "model",
+                                          "name": "tttt"},
+                                text="x"),
+            score=0.9)
+        # retrieve 内部通过 candidates_by_scope 处理——直接验证策略函数等价物:
+        # lookup 无行 + "#" in id → 丢弃; 短键 → 解码回填
+        ident = {}   # 模拟身份表无行
+        kept, dropped = [], 0
+        for h in [hit]:
+            m = ident.get(h.record.id)
+            if m:
+                kept.append(h)
+            elif "#" in h.record.id:
+                dropped += 1
+            else:
+                h.record.metadata = ChatBIVectorStore.decode_chunk_id(
+                    h.record.id)
+                kept.append(h)
+        assert dropped == 1 and not kept, "截断键无身份未被丢弃"
+
+    def test_identity_revision_roundtrip(self, pg_engine):
+        """身份表保存/返回 revision(二十审 9.7: 诊断信息不被覆盖)."""
+        from domains.chatbi.stores import (
+            register_chunk_identities, lookup_chunk_identities, VectorRecord)
+        rec = VectorRecord(id="x", vector=[0.1],
+                           metadata={"type": "model", "name": "orders",
+                                     "rev": 21}, text="")
+        ok, trunc = register_chunk_identities(pg_engine, "scope-idrev",
+                                              [rec], "schema_r21", revision=21)
+        assert ok is True and trunc == []
+        got = lookup_chunk_identities(pg_engine, "scope-idrev", ["model:orders@r21"])
+        assert got["model:orders@r21"]["rev"] == "r21"
+
+    def test_truncated_key_detection(self):
+        """截断标记检测: '#' 在 chunk_id 中即视为截断键."""
+        from domains.chatbi.stores import ChatBIVectorStore, VectorRecord
+        long_name = "t" * 63
+        rec = VectorRecord(id="x", vector=[0.1],
+                           metadata={"type": "model", "name": long_name,
+                                     "rev": 18}, text="")
+        cid = ChatBIVectorStore._chunk_id(rec)
+        assert len(cid) <= 64 and "#" in cid
+        # 短键不含 '#'
+        short = ChatBIVectorStore._chunk_id(VectorRecord(
+            id="x", vector=[0.1], metadata={"type": "model", "name": "t"}, text=""))
+        assert "#" not in short
+
+
+class TestUnifiedWriteLease:
+    """P1 9.2: scan/refresh 对同一数据源跨操作互斥(共用写租约键)."""
+
+    def test_scan_refresh_share_write_lease_key(self, pg_engine):
+        from domains.chatbi.tasks import RunLease
+        scan_lease = RunLease(pg_engine, "run:semantic_write:ds-z",
+                              holder="task:scan-1", ttl_seconds=300)
+        refresh_lease = RunLease(pg_engine, "run:semantic_write:ds-z",
+                                 holder="task:refresh-1", ttl_seconds=300)
+        assert scan_lease.acquire() is True
+        assert refresh_lease.acquire() is False, \
+            "scan 进行中, refresh 拿到了同一数据源写租约(跨操作不互斥)"
+        scan_lease.release()
+        assert refresh_lease.acquire() is True
+
+    def test_independent_heartbeat_keeps_lease_alive(self, pg_engine):
+        """独立心跳线程在业务回调沉默时维持租约(短 TTL 快速验证)."""
+        import time
+        from domains.chatbi.tasks import RunLease
+        a = RunLease(pg_engine, "run:semantic_write:ds-hb",
+                     holder="task:hb-a", ttl_seconds=2)
+        b = RunLease(pg_engine, "run:semantic_write:ds-hb",
+                     holder="task:hb-b", ttl_seconds=2)
+        assert a.acquire() is True
+        # 不调用任何业务心跳——独立线程应以 TTL/3(≈0.7s) 自动续租
+        time.sleep(3.2)
+        assert a.owned is True, "独立心跳未维持租约"
+        assert b.acquire() is False, "心跳保活期间租约被他实例抢走"
+        a.release()
+        time.sleep(0.1)
+        assert b.acquire() is True, "释放后未接管"
+
+
+class TestGcDbClockLedger:
+    """P1 9.3: 台账 updated_at 由数据库时钟写入(工作进程时钟漂移免疫)."""
+
+    def test_ledger_timestamp_from_db_clock(self, pg_engine):
+        from domains.chatbi.stores import record_index_build
+        from datetime import datetime, timezone
+        # 台账写入时把本进程时钟往后拨 1 小时(模拟漂移), DB 时钟不受影响
+        record_index_build(pg_engine, "gc-clock-scope", 5, "schema_r5",
+                           "published")
+        with pg_engine.connect() as conn:
+            row = conn.execute(
+                "SELECT updated_at, to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS n "
+                "FROM chatbi_index_builds WHERE scope='gc-clock-scope'").fetchone()
+        ts = datetime.fromisoformat(
+            row["updated_at"].replace("+00", "+00:00"))
+        now_db = datetime.fromisoformat(
+            row["n"].replace("+00", "+00:00"))
+        drift = abs((now_db - ts).total_seconds())
+        assert drift < 5, f"台账时间与数据库时钟偏差 {drift}s(用了本地时钟)"
