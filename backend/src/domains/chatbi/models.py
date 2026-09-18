@@ -202,15 +202,18 @@ CHATBI_DDL = [
         version INTEGER NOT NULL,
         updated_at TEXT NOT NULL
     )""",
-    # 十八审 6.7: 索引构建台账——building/published/yielded 全记录,
-    # 两代 grace 后按 doc_id 回收(含崩溃残余与让路半成品)
+    # 十八审 6.7 / 二十五审 6.2: 索引构建实例台账——PK 为 (scope,
+    # build_id): 同版本多个 token 分区(token A 让路/token B 发布)各自
+    # 登记独立行, GC 按实例逐个回收(此前 (scope,version) UPSERT 折叠
+    # 导致孤儿分区无法登记)
     """CREATE TABLE IF NOT EXISTS chatbi_index_builds (
         scope TEXT NOT NULL,
+        build_id TEXT NOT NULL,
         version INTEGER NOT NULL,
         doc_id TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'building',
         updated_at TEXT NOT NULL,
-        PRIMARY KEY (scope, version)
+        PRIMARY KEY (scope, build_id)
     )""",
     # 十七审 7.6: merge 停用/冲突报告——refresh/rescan 落库后写入,
     # 语义页面经 GET /datasources/{id}/semantic/review 展示待复核清单

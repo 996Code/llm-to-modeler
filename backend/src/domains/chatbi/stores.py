@@ -415,11 +415,24 @@ def ensure_index_revision_schema(db: PackRelationalDB) -> None:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS chatbi_index_builds ("
             "scope TEXT NOT NULL, "
+            "build_id TEXT NOT NULL, "
             "version INTEGER NOT NULL, "
             "doc_id TEXT NOT NULL, "
             "status TEXT NOT NULL DEFAULT 'building', "
             "updated_at TEXT NOT NULL, "
-            "PRIMARY KEY (scope, version))")
+            "PRIMARY KEY (scope, build_id))")
+        # 二十五审 6.3: 事件表纳入幂等升级路径(老库不再依赖总 DDL)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS chatbi_index_build_events ("
+            "id BIGSERIAL PRIMARY KEY, "
+            "scope TEXT NOT NULL, "
+            "build_id TEXT NOT NULL, "
+            "version INTEGER NOT NULL, "
+            "event TEXT NOT NULL, "
+            "created_at TEXT NOT NULL)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chatbi_build_events_time "
+            "ON chatbi_index_build_events(created_at)")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS chatbi_chunk_identities ("
             "scope TEXT NOT NULL, "
@@ -615,6 +628,50 @@ def set_active_doc_id(db: PackRelationalDB, scope: str, doc_id: str,
         return _set_active_on_conn(conn, scope, doc_id, version)
 
 
+def _migrate_builds_table(db: PackRelationalDB) -> None:
+    """老 builds 表 (scope,version) PK → (scope,build_id)(二十五审 6.2)。
+
+    独立事务+information_schema/pg_constraint 预检(PG 事务毒化教训:
+    ALTER 报错会废掉同事务后续语句)。步骤: 补列 → 回填 legacy id →
+    NOT NULL → 换主键。
+    """
+    try:
+        with db.connect() as conn:
+            has_bid = conn.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = 'chatbi_index_builds' "
+                "AND column_name = 'build_id'").fetchone()
+            if not has_bid:
+                conn.execute("ALTER TABLE chatbi_index_builds "
+                             "ADD COLUMN build_id TEXT")
+                conn.execute(
+                    "UPDATE chatbi_index_builds SET build_id = "
+                    "'legacy-' || scope || '-v' || version "
+                    "WHERE build_id IS NULL")
+                conn.execute("ALTER TABLE chatbi_index_builds "
+                             "ALTER COLUMN build_id SET NOT NULL")
+        with db.connect() as conn:
+            old_pk = conn.execute(
+                "SELECT 1 FROM pg_constraint WHERE conname = "
+                "'chatbi_index_builds_pkey' AND conrelid = "
+                "'chatbi_index_builds'::regclass").fetchone()
+            # 检查现主键是否仍含 version(旧结构)
+            on_version = conn.execute(
+                "SELECT 1 FROM pg_index i JOIN pg_class c "
+                "ON i.indexrelid = c.oid "
+                "WHERE c.relname = 'chatbi_index_builds_pkey' "
+                "AND pg_get_indexdef(i.indexrelid) LIKE '%version%'"
+            ).fetchone()
+            if old_pk and on_version:
+                conn.execute("ALTER TABLE chatbi_index_builds "
+                             "DROP CONSTRAINT chatbi_index_builds_pkey")
+                conn.execute("ALTER TABLE chatbi_index_builds "
+                             "ADD PRIMARY KEY (scope, build_id)")
+    except Exception as e:
+        logger.error("builds 表迁移失败(GC 实例台账不可用): %s", e)
+
+
 def record_index_build(db: PackRelationalDB, scope: str, version: int,
                        doc_id: str, status: str,
                        build_id: str | None = None) -> None:
@@ -626,16 +683,21 @@ def record_index_build(db: PackRelationalDB, scope: str, version: int,
     不再用工作进程本地时钟——时钟漂移不再影响宽限/TTL 判定。
     """
     ensure_index_revision_schema(db)
+    _migrate_builds_table(db)
     build_id = build_id or f"{version}-{uuid.uuid4().hex[:8]}"
     with db.connect() as conn:
+        # 二十五审 6.2: 同一 build 实例的状态推进(building→published)
+        # 在自己行上 UPSERT; 不同 token 的同版本 build 各占一行
         conn.execute(
             "INSERT INTO chatbi_index_builds "
-            "(scope, version, doc_id, status, updated_at) "
-            "VALUES (?, ?, ?, ?, to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')) "
-            "ON CONFLICT (scope, version) DO UPDATE SET "
+            "(scope, build_id, version, doc_id, status, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, "
+            "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')) "
+            "ON CONFLICT (scope, build_id) DO UPDATE SET "
             "doc_id = EXCLUDED.doc_id, status = EXCLUDED.status, "
+            "version = EXCLUDED.version, "
             "updated_at = EXCLUDED.updated_at",
-            (scope, version, doc_id, status))
+            (scope, build_id, version, doc_id, status))
         # 二十四审 7: append-only 事件流——(scope,version) 状态表 UPSERT
         # 折叠同版本重复重建, 事件表让每次 started/published/yielded
         # 各留一条(同版本×10 重建 = 10 条事件, 不再被折叠成 1 行)
@@ -647,7 +709,7 @@ def record_index_build(db: PackRelationalDB, scope: str, version: int,
                 "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF'))",
                 (scope, build_id, version, status))
         except Exception as e:
-            logger.warning("构建事件写入失败(监控计数将缺失): %s", e)
+            logger.error("构建事件写入失败(监控计数将缺失): %s", e)
 
 
 def _ensure_build_ledger(db: PackRelationalDB, scope: str, version: int,
@@ -659,13 +721,15 @@ def _ensure_build_ledger(db: PackRelationalDB, scope: str, version: int,
     时间同 record_index_build 用数据库时钟(二十审 9.3)。
     """
     ensure_index_revision_schema(db)
+    _migrate_builds_table(db)
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO chatbi_index_builds "
-            "(scope, version, doc_id, status, updated_at) "
-            "VALUES (?, ?, ?, ?, to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')) "
-            "ON CONFLICT (scope, version) DO NOTHING",
-            (scope, version, doc_id, status))
+            "(scope, build_id, version, doc_id, status, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, "
+            "to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')) "
+            "ON CONFLICT (scope, build_id) DO NOTHING",
+            (scope, f"legacy-{scope}-v{version}", version, doc_id, status))
 
 
 def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,
@@ -678,6 +742,10 @@ def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,
     的成功代际——按台账成功记录算代际, 不按版本号减法(失败版本造成
     间隔时, 旧算法会删掉最后一个成功旧代、留下失败半成品)。
 
+    二十五审 6.2: 台账以 build 实例为粒度((scope,build_id) PK)——同版本
+    多个 token 分区各自成行, GC 逐实例回收(此前 (scope,version) 折叠
+    导致让路/孤儿分区无法登记, 物理向量永久泄漏)。
+
     删除条件(时间宽限, 数据库时钟):
       - 保留集之外 published: updated_at 早于 now-grace 才删——刚翻出
         保留窗的分区, 给已读到旧指针的在途查询一个真实时间窗;
@@ -687,6 +755,7 @@ def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,
     返回删除的向量条数。
     """
     ensure_index_revision_schema(db)
+    _migrate_builds_table(db)
     with db.connect() as conn:
         active = conn.execute(
             "SELECT active_doc_id FROM chatbi_index_revisions "
@@ -694,18 +763,21 @@ def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,
         if not active:
             return 0
         active_doc = active["active_doc_id"]
+        # 成功代际按 published 实例行取(同版本多行时 updated_at 新者优先,
+        # 去重后仍计一代——代际语义是"版本代", 不是"构建实例")
         pub = conn.execute(
-            "SELECT doc_id FROM chatbi_index_builds "
+            "SELECT DISTINCT ON (version) version, doc_id "
+            "FROM chatbi_index_builds "
             "WHERE scope = ? AND status = 'published' "
-            "ORDER BY version DESC LIMIT ?",
+            "ORDER BY version DESC, updated_at DESC LIMIT ?",
             (scope, keep_generations)).fetchall()
         keep = {active_doc, *(r["doc_id"] for r in pub)}
         now_row = conn.execute(
             "SELECT to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') AS n"
         ).fetchone()
         candidates = conn.execute(
-            "SELECT version, doc_id, status, updated_at FROM chatbi_index_builds "
-            "WHERE scope = ?",
+            "SELECT build_id, version, doc_id, status, updated_at "
+            "FROM chatbi_index_builds WHERE scope = ?",
             (scope,)).fetchall()
         db_now = _parse_iso(now_row["n"] if now_row else None)
         victims = []
@@ -727,8 +799,8 @@ def gc_index_builds(db: PackRelationalDB, scope: str, store: Any,
                 deleted += store.delete_doc(scope, row["doc_id"])
                 conn.execute(
                     "DELETE FROM chatbi_index_builds "
-                    "WHERE scope = ? AND version = ?",
-                    (scope, int(row["version"])))
+                    "WHERE scope = ? AND build_id = ?",
+                    (scope, row["build_id"]))
                 # 身份表同步清理(同分区不再可命中)
                 delete_chunk_identities(db, scope, row["doc_id"])
             except Exception as e:

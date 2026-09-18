@@ -305,8 +305,19 @@ def ensure_lease_token_column(db) -> None:
                              "ADD COLUMN token BIGINT")
                 conn.execute("CREATE SEQUENCE IF NOT EXISTS "
                              "chatbi_lease_token_seq")
+        # 二十五审 6.1: 存量 NULL 行回填(独立事务, 每行各发一个单调
+        # token)。对仍在跑的旧进程安全——旧代码从不校验 token; 新代码
+        # acquire 后读到非 NULL, 立即具备完整 fencing
+        with db.connect() as conn:
+            row = conn.execute(
+                "WITH bumped AS (UPDATE chatbi_scheduler_leases "
+                "SET token = nextval('chatbi_lease_token_seq') "
+                "WHERE token IS NULL RETURNING 1) "
+                "SELECT COUNT(*) AS n FROM bumped").fetchone()
+            if row and int(row["n"]) > 0:
+                logger.info("租约 token 回填: %s 行", row["n"])
     except Exception as e:
-        logger.warning("租约 token 列迁移失败: %s", e)
+        logger.error("租约 token 列迁移/回填失败(fencing 降级运行): %s", e)
 
 
 def lease_token(db, task_type: str, holder: str):

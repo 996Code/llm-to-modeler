@@ -168,7 +168,11 @@ def _verdict(snap_body, history) -> str:
     if lease_conflicts > V_FAILED_REFRESH_LIMIT:
         problems.append(f"1h内 {lease_conflicts} 次租约冲突(超阈值"
                         f"{V_FAILED_REFRESH_LIMIT}, 调度异常)")
-    ev = snap_body.get("build_events_1h") or {}
+    ev = snap_body.get("build_events_1h")
+    if ev is None:
+        problems.append("构建事件表不可读("
+                        + str(snap_body.get("build_events_error", "?")) + ")")
+        ev = {}
     rebuild_events = sum(ev.values())
     if rebuild_events > V_REBUILD_EVENTS_LIMIT:
         problems.append(f"1h内 {rebuild_events} 次索引构建事件(超阈值"
@@ -255,8 +259,11 @@ def snapshot(db, _hist=None):
                 "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') GROUP BY event").fetchall()
             snap["build_events_1h"] = {r["event"]: int(r["n"])
                                        for r in events}
-        except Exception:
-            snap["build_events_1h"] = {}   # 表尚未建(应用未启动过新版)
+        except Exception as e:
+            # 二十五审 6.3: 事件表不可读是监控失明, 不是"无事件"——
+            # 显式 FAIL 而非空集合(空集合会被 verdict 当作正常)
+            snap["build_events_1h"] = None
+            snap["build_events_error"] = str(e)[:80]
         # failed refresh 的错误分类(二十三审 5.4: 租约冲突=预期偶发,
         # 其它失败=真实故障)
         fails = conn.execute(

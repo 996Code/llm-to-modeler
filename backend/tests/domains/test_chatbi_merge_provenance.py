@@ -1353,19 +1353,24 @@ class TestGCSuccessGenerations:
 
     @staticmethod
     def _ledger(db, scope, version, doc, status, age_seconds=0):
-        """直接写台账(时间往回拨 age_seconds, 绕过真实构建)."""
+        """直接写台账(时间往回拨 age_seconds, 绕过真实构建).
+
+        二十五审 6.2: 新 PK (scope, build_id); build_id 从 doc 推导——
+        同一分区(同 doc)视为同一 build 实例, 状态推进 UPSERT 同行。
+        """
         from datetime import datetime, timedelta, timezone
         ts = (datetime.now(timezone.utc)
               - timedelta(seconds=age_seconds)).isoformat()
         with db.connect() as conn:
             conn.execute(
                 "INSERT INTO chatbi_index_builds "
-                "(scope, version, doc_id, status, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT (scope, version) DO UPDATE SET "
+                "(scope, build_id, version, doc_id, status, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (scope, build_id) DO UPDATE SET "
                 "doc_id = EXCLUDED.doc_id, status = EXCLUDED.status, "
+                "version = EXCLUDED.version, "
                 "updated_at = EXCLUDED.updated_at",
-                (scope, version, doc, status, ts))
+                (scope, f"bid-{doc}", version, doc, status, ts))
 
     def test_gap_versions_keep_last_success(self, pg_engine):
         """审计反例: r10 published, r11/r12 building(失败), r13 published
@@ -2313,7 +2318,9 @@ class TestBuildPartitionIsolation:
                 "SELECT COUNT(*) AS n FROM chatbi_index_builds "
                 "WHERE scope='evt-scope' AND version=42").fetchone()
         assert int(ev["n"]) == 10, f"事件被折叠: {ev['n']}"
-        assert int(st["n"]) == 1     # 状态表 UPSERT 折叠(设计如此)
+        # 二十五审 6.2: 状态台账也按实例登记——10 个 build_id = 10 行
+        # (此前 (scope,version) 折叠成 1 行, 让路/孤儿分区无法进 GC)
+        assert int(st["n"]) == 10, f"状态台账仍在折叠: {st['n']}"
         with pg_engine.connect() as c:
             c.execute("DELETE FROM chatbi_index_build_events WHERE scope='evt-scope'")
             c.execute("DELETE FROM chatbi_index_builds WHERE scope='evt-scope'")
@@ -2324,11 +2331,11 @@ class TestBuildPartitionIsolation:
         _os.environ.setdefault(
             "SOAK_DATABASE_URL",
             "postgresql://root:root@localhost:5432/llm_modeler_test_run")
-        import sys
-        sys.path.insert(0, 'scripts')
+        import sys, os as _os2
+        _script = _os2.path.join(_os2.path.dirname(_os2.path.abspath(
+            __file__)), "..", "..", "scripts", "soak_monitor.py")
         import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "sm", "scripts/soak_monitor.py")
+        spec = importlib.util.spec_from_file_location("sm", _script)
         sm = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sm)
         import uuid as _uuid
@@ -2347,3 +2354,136 @@ class TestBuildPartitionIsolation:
         with pg_engine.connect() as c:
             c.execute("DELETE FROM chatbi_index_build_events WHERE scope='evt2'")
             c.execute("DELETE FROM chatbi_index_builds WHERE scope='evt2'")
+
+
+# ════════════════════════════════════════════════════════════════
+# 二十五审反例回归: NULL token 回填 / 同版本双实例 GC / legacy 迁移
+# ════════════════════════════════════════════════════════════════
+
+class TestNullTokenBackfill:
+    """P1 6.1: 存量 NULL token 行必须被回填, 旧 holder 也有真 fencing."""
+
+    def test_null_token_backfilled_on_ensure(self, pg_engine):
+        from domains.chatbi.tasks import ensure_lease_token_column, RunLease
+        key = "run:semantic_write:nulltok"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases WHERE task_type=?", (key,))
+            # 直接造旧格式行(token=NULL, 模拟旧部署残留)
+            c.execute(
+                "INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at) VALUES (?, 'legacy-holder', "
+                "'9999999999999')", (key,))
+        ensure_lease_token_column(pg_engine)
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT token FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+        assert row["token"] is not None, "NULL token 未回填(旧holder无fencing)"
+        # 旧 holder 以新代码续租 → RunLease 拿到非 NULL token
+        a = RunLease(pg_engine, key, holder="legacy-holder", ttl_seconds=300)
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET expires_at='1' "
+                      "WHERE task_type=?", (key,))
+        assert a.acquire() and a.token is not None
+        a.release()
+
+
+class TestSameVersionMultiBuildGC:
+    """P1 6.2: 同版本 token A(让路)/token B(发布) 各自成行, A 的分区被回收."""
+
+    def test_sibling_token_partition_recycled(self, pg_engine):
+        from datetime import datetime, timedelta, timezone
+        from domains.chatbi.stores import (record_index_build,
+                                           set_active_doc_id,
+                                           get_or_create_scope)
+        from datetime import datetime as _dt
+
+        class _Store:
+            def __init__(self):
+                self.deleted = []
+
+            def delete_doc(self, scope, doc_id):
+                self.deleted.append(doc_id)
+                return 1
+
+        ds = "sib-ds"
+        from datetime import datetime, timezone as _tz
+        now = _dt.now(_tz.utc).isoformat()
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_data_sources "
+                "(id, name, db_type, host, port, database, username, "
+                "encrypted_password, is_active, scan_status, scan_progress, "
+                "scan_stage, scan_error, scope_id, created_at, updated_at) "
+                "VALUES (?, 't', 'pg', 'h', 1, 'd', 'u', 'p', 1, 'done', 100, "
+                "'', '', 'sib-scope', ?, ?)", (ds, now, now))
+        # token A: 让路(旧 writer), 已过 TTL
+        record_index_build(pg_engine, "sib-scope", 21, "schema_r21_t7",
+                           status="yielded", build_id="21-t7")
+        old_ts = (datetime.now(timezone.utc)
+                  - timedelta(seconds=90000)).isoformat()
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_index_builds SET updated_at=? "
+                      "WHERE build_id='21-t7'", (old_ts,))
+        # token B: 发布并成为 active
+        record_index_build(pg_engine, "sib-scope", 21, "schema_r21_t9",
+                           status="published", build_id="21-t9")
+        set_active_doc_id(pg_engine, "sib-scope", "schema_r21_t9", 21)
+
+        store = _Store()
+        from domains.chatbi.stores import gc_index_builds
+        gc_index_builds(pg_engine, "sib-scope", store, keep_generations=2,
+                        published_grace_seconds=600,
+                        unfinished_ttl_seconds=86400)
+        assert "schema_r21_t7" in store.deleted,(
+            f"让路兄弟分区未被回收(孤儿泄漏): {store.deleted}")
+        assert "schema_r21_t9" not in store.deleted, "active 分区被误删"
+        with pg_engine.connect() as c:
+            n = c.execute("SELECT COUNT(*) AS n FROM chatbi_index_builds "
+                          "WHERE scope='sib-scope' AND build_id='21-t7'").fetchone()
+        assert int(n["n"]) == 0, "回收后台账行未删"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_builds WHERE scope='sib-scope'")
+            c.execute("DELETE FROM chatbi_index_build_events WHERE scope='sib-scope'")
+            c.execute("DELETE FROM chatbi_index_revisions WHERE scope='sib-scope'")
+            c.execute("DELETE FROM chatbi_data_sources WHERE id='sib-ds'")
+
+
+class TestLegacyBuildsMigration:
+    """P1 6.2: 旧 (scope,version) PK 表自动迁移到 (scope,build_id)."""
+
+    def test_migration_rewrites_pk_and_backfills(self, pg_engine):
+        # 造旧结构表(模拟老库): drop 新表, 建 (scope,version) PK + 旧行
+        with pg_engine.connect() as c:
+            c.execute("DROP TABLE IF EXISTS chatbi_index_builds")
+            c.execute(
+                "CREATE TABLE chatbi_index_builds ("
+                "scope TEXT NOT NULL, version INTEGER NOT NULL, "
+                "doc_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'building', "
+                "updated_at TEXT NOT NULL, PRIMARY KEY (scope, version))")
+            c.execute(
+                "INSERT INTO chatbi_index_builds "
+                "(scope, version, doc_id, status, updated_at) "
+                "VALUES ('mig-scope', 18, 'schema_r18', 'published', "
+                "'2026-09-18T00:00:00+00:00')")
+        from domains.chatbi.stores import _migrate_builds_table
+        _migrate_builds_table(pg_engine)
+        with pg_engine.connect() as c:
+            cols = c.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='chatbi_index_builds'").fetchall()
+            assert "build_id" in [r["column_name"] for r in cols]
+            row = c.execute(
+                "SELECT build_id FROM chatbi_index_builds "
+                "WHERE scope='mig-scope'").fetchone()
+            assert row and row["build_id"], "legacy 行 build_id 未回填"
+            # 新 PK 生效: 同 build_id 推进不炸
+            c.execute(
+                "INSERT INTO chatbi_index_builds "
+                "(scope, build_id, version, doc_id, status, updated_at) "
+                "VALUES ('mig-scope', ?, 18, 'schema_r18_t3', 'published', "
+                "'2026-09-18T01:00:00+00:00') "
+                "ON CONFLICT (scope, build_id) DO NOTHING",
+                (row["build_id"],))
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_index_builds WHERE scope='mig-scope'")
