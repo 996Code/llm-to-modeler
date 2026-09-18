@@ -372,32 +372,35 @@ class RunLease:
             return False
 
     def execute_if_owned(self, write_fn):
-        """事务级 fencing(二十二审 8): 租约检查与写入同事务执行。
+        """事务级 fencing(二十三审: 行锁版): SELECT ... FOR UPDATE。
 
-        write_fn(conn) 在同一连接上下文里执行写入; 进入前先在同一
-        事务内核对 holder+未过期——check 与 write 之间不再存在可被
-        接管的间隙(TOCTOU 关闭)。返回 (ok, write_result)。
+        二十二审的普通 SELECT 在 READ COMMITTED 下不锁租约行——
+        审计已复现: 检查通过后 write_fn 内暂停, 新 writer 从另一连接
+        UPDATE holder 提交, 旧 writer 恢复后 stale 写入仍落库。
+        FOR UPDATE 行锁使接管方的 UPDATE 阻塞到本事务提交/回滚为止,
+        窗口关闭。注意: write_fn 必须短小(持锁期间接管方在等)。
+        返回 (ok, write_result)。
         """
         if not self.acquired:
             return False, None
-        try:
-            with self.db.connect() as conn:
-                row = conn.execute(
-                    "SELECT holder FROM chatbi_scheduler_leases "
-                    "WHERE task_type = ? AND holder = ? "
-                    "AND expires_at ~ '^[0-9]+$' "
-                    "AND expires_at::bigint > "
-                    "(extract(epoch FROM now())*1000)::bigint",
-                    (self.task_type, self.holder)).fetchone()
-                if row is None:
-                    logger.error("事务级 fencing: 租约 %s 已易主——写入被拒",
-                                 self.task_type)
-                    self.acquired = False
-                    return False, None
-                return True, write_fn(conn)
-        except Exception as e:
-            logger.error("事务级 fencing 执行失败(写入未确认): %s", e)
-            return False, None
+        # write_fn 的异常(如 VersionConflictError)**原样上抛**——
+        # 吞掉会破坏调用方的冲突重试; with 块异常退出自动回滚,
+        # 半途写入不会残留
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT holder FROM chatbi_scheduler_leases "
+                "WHERE task_type = ? AND holder = ? "
+                "AND expires_at ~ '^[0-9]+$' "
+                "AND expires_at::bigint > "
+                "(extract(epoch FROM now())*1000)::bigint "
+                "FOR UPDATE",
+                (self.task_type, self.holder)).fetchone()
+            if row is None:
+                logger.error("事务级 fencing: 租约 %s 已易主——写入被拒",
+                             self.task_type)
+                self.acquired = False
+                return False, None
+            return True, write_fn(conn)
 
     def heartbeat(self) -> bool:
         """同步续租点(兼容既有调用); 返回 False = 租约已丢。"""
@@ -456,6 +459,16 @@ def _run_periodic_index_gc(db, app_state, store) -> int:
     if deleted_total:
         logger.info("周期索引 GC: 回收 %d 条向量", deleted_total)
     return deleted_total
+
+
+class IndexRebuildDegraded(RuntimeError):
+    """扫描/语义已成功落库, 但索引重建失败(二十三审 5.2)。
+
+    与结构性失败的区别: 数据源终态是 done_with_warning 而非 failed——
+    语义版本可用, 检索暂用旧索引, 下轮 refresh 的 pointer-lag 自愈
+    可补建。任务终态仍为 failed(错误可见), 但外层 except 不得把
+    数据源行已写好的 warning 状态覆盖成 failed。
+    """
 
 
 def _task_scan_datasource(handle, app_state=None) -> dict:
@@ -524,9 +537,17 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         if _pre and _pre[0] is not None:
             content = _merge_rescan(_pre[0], content, report=merge_report)
         try:
-            version = semantic.save_content(db, ds_id, content,
-                                            source="scan",
-                                            expected_version=_pre_version)
+            # 二十三审 8: 语义落库与租约行锁同事务(fenced)——检查后失租的
+            # 写入被数据库拒绝; VersionConflictError 等领域异常原样上抛
+            # 走下方冲突重试
+            _ok, version = lease.execute_if_owned(
+                lambda conn: semantic.save_content(
+                    db, ds_id, content, source="scan",
+                    expected_version=_pre_version, conn=conn))
+            if not _ok:
+                from services.task_manager import PermanentTaskError
+                raise PermanentTaskError(
+                    "语义落库被事务级 fencing 拒绝(租约已失)——中止")
         except VersionConflictError:
             handle.log("扫描版本冲突(扫描期间有并发语义写入)——"
                        "基于最新版重试一次")
@@ -601,7 +622,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                 db, ds_id, scan_status="done_with_warning",
                 scan_progress=100, scan_stage=_detail[:480],
                 scan_error=index_warning or "索引重建失败")
-            raise RuntimeError(_detail)
+            raise IndexRebuildDegraded(_detail)
         return {"models": len(content.models), "indexed": indexed,
                 "ok": True, "index_rebuild": index_status,
                 # 十七审 7.6: 停用/冲突清单进任务结果(任务中心可见)
@@ -612,6 +633,11 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                 **({"report_warning": True}
                    if report_state == REPORT_FAILED else {}),
                 "datasource_id": ds_id}
+    except IndexRebuildDegraded:
+        # 数据源行已是 done_with_warning(语义可用+修复指引)——
+        # 外层不得覆盖成 failed(二十三审 5.2: 此前 RuntimeError 走
+        # 通用分支, warning 态永远到不了生产终态)
+        raise
     except Exception as e:
         datasources.update_datasource(db, ds_id, scan_status="failed",
                                       scan_error=str(e)[:500])
@@ -778,16 +804,24 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
             # 旧快照可静默覆盖管理员的新编辑(报告复现: Admin-A v2 被
             # Refresh-from-v1 v3 覆盖)。冲突时基于最新版重试一次。
             from domains.chatbi.graph_infer import VersionConflictError as _VCE
-            # 二十审 9.2: 写前 fencing——语义落库是本数据源最关键的写入点
+            # 廉价早退(真正的保证在下方 fenced 落库: 租约行锁+写入同事务)
             if not write_lease.assert_owned():
                 results.append({"datasource_id": info.id, "ok": False,
                                 "error": "写前 fencing 失败(数据源写租约已失)"
                                          "——本数据源本轮未写入"})
                 continue
             try:
-                version = semantic.save_content(db, info.id, merged,
-                                                source="refresh",
-                                                expected_version=prev_db_version)
+                # 二十三审 8: fenced 落库——租约行锁与语义写入同事务,
+                # 失租写入被数据库拒绝; VCE 原样上抛走重试
+                _ok, version = write_lease.execute_if_owned(
+                    lambda conn: semantic.save_content(
+                        db, info.id, merged, source="refresh",
+                        expected_version=prev_db_version, conn=conn))
+                if not _ok:
+                    results.append({"datasource_id": info.id, "ok": False,
+                                    "error": "写前 fencing 失败(数据源写租约已失)"
+                                             "——本数据源本轮未写入"})
+                    continue
             except _VCE:
                 # 冲突: 有并发人工/图谱写入——重新加载 current, 用未污染
                 # 的 new_content(扫描结果)重新 merge(十一审 7.2: 不能复用

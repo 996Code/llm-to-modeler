@@ -2058,3 +2058,177 @@ class TestTransactionalFencing:
             assert get_merge_report(pg_engine, "fence-ds-3") is not None
         finally:
             a.release()
+
+
+# ════════════════════════════════════════════════════════════════
+# 二十三审反例回归: fencing 穿透(barrier) / scan 降级终态 / verdict
+# ════════════════════════════════════════════════════════════════
+
+class TestFencingBarrier:
+    """P1 5.3: 检查通过后暂停→接管→旧写入——必须被行锁串行化或拒绝."""
+
+    def _clean(self, pg_engine, key, ds_id):
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases WHERE task_type=?", (key,))
+            c.execute("DELETE FROM chatbi_merge_reports WHERE data_source_id=?", (ds_id,))
+
+    def test_takeover_blocked_during_fenced_write(self, pg_engine):
+        """FOR UPDATE 行锁: 旧 writer 检查通过并在 write_fn 内暂停时,
+        接管方的 UPDATE 必须阻塞到旧 writer 事务结束(交错不可能)."""
+        import threading, time
+        from domains.chatbi.tasks import RunLease
+        key, ds = "run:semantic_write:f-bar1", "f-bar-ds1"
+        self._clean(pg_engine, key, ds)
+        a = RunLease(pg_engine, key, holder="task:old", ttl_seconds=300)
+        assert a.acquire()
+        barrier, box = threading.Event(), {}
+
+        def write_fn(conn):
+            barrier.set()
+            time.sleep(1.2)      # SELECT 已通过; 暂停窗口
+            conn.execute(
+                "INSERT INTO chatbi_merge_reports "
+                "(data_source_id, version, report, updated_at) "
+                "VALUES (?, 1, '{}', '2026-01-01T00:00:00+00:00')", (ds,))
+            return "committed"
+
+        def old_writer():
+            box["ok"], box["res"] = a.execute_if_owned(write_fn)
+
+        t = threading.Thread(target=old_writer)
+        t.start()
+        barrier.wait()           # 此时旧 writer 持租约行锁并暂停
+        t0 = time.time()
+        with pg_engine.connect() as c2:
+            c2.execute("UPDATE chatbi_scheduler_leases SET holder='task:new' "
+                       "WHERE task_type=?", (key,))
+        box["takeover_elapsed"] = time.time() - t0
+        t.join()
+        # 核心断言: 接管被行锁挡住 ≥ 暂停时长(交错窗口关闭)
+        assert box["takeover_elapsed"] >= 1.0, \
+            f"接管未阻塞({box['takeover_elapsed']:.2f}s), FOR UPDATE 未生效"
+        assert box["ok"] is True and box["res"] == "committed"
+        with pg_engine.connect() as c:
+            row = c.execute("SELECT version FROM chatbi_merge_reports "
+                            "WHERE data_source_id=?", (ds,)).fetchone()
+        # 旧写入在其合法持有期内提交(接管在其后)——不是 stale write
+        assert row is not None
+        self._clean(pg_engine, key, ds)
+
+    def test_write_rejected_when_takeover_precedes_check(self, pg_engine):
+        """接管发生在检查之前 → fenced 写入直接被拒(不落库)."""
+        from domains.chatbi.tasks import RunLease
+        key, ds = "run:semantic_write:f-bar2", "f-bar-ds2"
+        self._clean(pg_engine, key, ds)
+        a = RunLease(pg_engine, key, holder="task:old", ttl_seconds=300)
+        assert a.acquire()
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET holder='task:new' "
+                      "WHERE task_type=?", (key,))
+        ok, res = a.execute_if_owned(
+            lambda conn: conn.execute(
+                "INSERT INTO chatbi_merge_reports "
+                "(data_source_id, version, report, updated_at) "
+                "VALUES (?, 1, '{}', '2026-01-01T00:00:00+00:00')", (ds,)))
+        assert ok is False, "接管后检查仍通过"
+        with pg_engine.connect() as c:
+            row = c.execute("SELECT version FROM chatbi_merge_reports "
+                            "WHERE data_source_id=?", (ds,)).fetchone()
+        assert row is None, "被拒的写入落了库"
+        self._clean(pg_engine, key, ds)
+
+    def test_write_fn_exception_propagates(self, pg_engine):
+        """write_fn 领域异常(如 VCE)必须上抛, 不得被 fencing 吞掉."""
+        from domains.chatbi.tasks import RunLease
+        key = "run:semantic_write:f-bar3"
+        self._clean(pg_engine, key, "f-bar-ds3")
+        a = RunLease(pg_engine, key, holder="task:old", ttl_seconds=300)
+        assert a.acquire()
+        try:
+            def boom(conn):
+                raise KeyError("domain-error-must-propagate")
+            import pytest as _pytest
+            with _pytest.raises(KeyError):
+                a.execute_if_owned(boom)
+        finally:
+            a.release()
+            self._clean(pg_engine, key, "f-bar-ds3")
+
+
+class TestScanDegradedTerminalState:
+    """P1 5.2: 索引失败 → done_with_warning 不被外层覆盖为 failed."""
+
+    def test_index_failure_keeps_warning_state(self, pg_engine, monkeypatch):
+        """注入索引重建失败 → 任务抛 IndexRebuildDegraded, 数据源终态
+        保持 done_with_warning(语义已落库, 修复指引保留)."""
+        from datetime import datetime, timezone
+        from domains.chatbi import semantic, tasks
+        from domains.chatbi.datasources import _row_to_info
+
+        ds = "degraded-ds"
+        now = datetime.now(timezone.utc).isoformat()
+        from domains.chatbi.datasources import encrypt_password
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_data_sources "
+                "(id, name, db_type, host, port, database, username, "
+                "encrypted_password, is_active, scan_status, scan_progress, "
+                "scan_stage, scan_error, created_at, updated_at) "
+                "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', ?, 1, "
+                "'idle', 0, '', '', ?, ?)",
+                (ds, encrypt_password("p"), now, now))
+
+        content = SemanticModelContent(models=[
+            Model(name="t1", display_name="T", columns=[_col("id")]),
+        ])
+        monkeypatch.setattr(
+            "domains.chatbi.semantic.scan_datasource",
+            lambda **kw: content)
+        monkeypatch.setattr(
+            "domains.chatbi.tasks.RunLease.acquire", lambda self: True)
+        monkeypatch.setattr(
+            "domains.chatbi.tasks.RunLease.release", lambda self: None)
+        monkeypatch.setattr(
+            "domains.chatbi.tasks.RunLease.heartbeat", lambda self: True)
+        monkeypatch.setattr(
+            "domains.chatbi.tasks.RunLease.assert_owned", lambda self: True)
+        monkeypatch.setattr(
+            "domains.chatbi.tasks.RunLease.execute_if_owned",
+            lambda self, fn: (True, fn(None)))
+
+        _real_save = semantic.save_content   # 先留原函数, 防自递归
+
+        def _save(db, ds_id, content, source="scan",
+                  expected_version=None, conn=None):
+            return _real_save(pg_engine, ds_id, content, source=source,
+                              expected_version=expected_version)
+        monkeypatch.setattr(
+            "domains.chatbi.semantic.save_content",
+            lambda db, ds_id, c, **kw: _save(db, ds_id, c, **kw))
+
+        def _broken_rebuild(*a, **kw):
+            return type("R", (), {"error": "milvus down",
+                                  "deleted_count": 0, "indexed_count": 0})()
+        monkeypatch.setattr(
+            "domains.chatbi.indexing.guarded_rebuild", _broken_rebuild)
+
+        class _H:
+            task_id = "degraded-handle"
+            payload = {"datasource_id": ds}
+
+            def log(self, msg, **kw):
+                pass
+
+            def set_progress(self, *a, **k):
+                pass
+
+        import types as _t
+        app_state = _t.SimpleNamespace(llm_client=None)
+        with __import__("pytest").raises(tasks.IndexRebuildDegraded):
+            tasks._task_scan_datasource(_H(), app_state)
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT scan_status FROM chatbi_data_sources "
+                "WHERE id = ?", (ds,)).fetchone()
+        assert row["scan_status"] == "done_with_warning", \
+            f"降级态被覆盖: {row['scan_status']}"

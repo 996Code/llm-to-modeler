@@ -126,16 +126,27 @@ def proc_metrics():
     return out
 
 
-def _verdict(snap_body, history) -> str:
-    """每条快照给出明确结论(二十审 5.7 + 二十二审 5.7 扩展)。
+# verdict 阈值(环境变量可覆盖; 二十三审 5.4: 阈值不硬编码在逻辑里)
+V_RSS_LIMIT_KB = int(os.getenv(
+    "SOAK_RSS_LIMIT_KB", 8 * 1024 * 1024))
+V_RSS_DELTA_KB = int(os.getenv(
+    "SOAK_RSS_DELTA_KB", 2 * 1024 * 1024))
+V_BUILDING_PILE = int(os.getenv("SOAK_BUILDING_PILE", 3))
+V_FAILED_REFRESH_LIMIT = int(os.getenv("SOAK_FAILED_REFRESH_LIMIT", 2))
+V_REBUILD_EVENTS_LIMIT = int(os.getenv("SOAK_REBUILD_EVENTS_LIMIT", 6))
 
-    检查维度:
-      一致性: pointer_lag / requires_review / building 堆积
-      任务健康: 1h 内 degraded 或 failed 任务
-      效率: 无变化刷新仍全量重建(tasks_1h 中 succeeded refresh 数远超
-            周期应有个数——按 refresh 周期换算) / 重复 rebuild(身份表
-            total 突增 = 又做了全量 embedding)
-      资源: RSS 单点 8GB 上限 + 相对首帧增量 > 2GB(异常高水位)
+
+def _verdict(snap_body, history) -> str:
+    """每条快照明确结论(二十三审 5.4 重写: 只用事实, 不猜测)。
+
+    FAIL 条件(全部来自采集到的明确事实):
+      一致性: pointer_lag 非零 / requires_review / building 堆积
+      任务健康: 1h 内 failed refresh 超阈值(租约冲突属预期偶发,
+               持续失败才是故障——不逐条 WARN, 超限即 FAIL)
+      效率: 1h 构建台账事件(published+yielded+building 更新)超阈值
+            ——真实 rebuild 证据; no-op refresh 不产生台账事件,
+            次数本身不再作为判据(修复二十三审 5.4 误报)
+      资源: RSS 单点超限 / 相对首帧增量超限
     """
     problems = []
     for d in snap_body["datasources"]:
@@ -143,37 +154,38 @@ def _verdict(snap_body, history) -> str:
             problems.append(f"{d['ds']} pointer_lag={d['pointer_lag']}")
         if d.get("requires_review"):
             problems.append(f"{d['ds']} requires_review")
-    if snap_body.get("build_ledger", {}).get("building", 0) > 3:
+    if snap_body.get("build_ledger", {}).get("building", 0) > V_BUILDING_PILE:
         problems.append("building 堆积")
-    # 任务健康: degraded 留痕(refresh 结果里 index_rebuild=degraded 的
-    # 任务在 tasks 表 status=failed——按 failed 计数; succeeded 高频 +
-    # 身份表未增 = 无变化重复重建嫌疑)
-    for t in snap_body.get("tasks_1h", []):
-        if t["type"] == "chatbi.refresh_semantics" and t["status"] == "failed":
-            err_degraded = True   # failed 可能是租约冲突(正常)——降为 WARN
-    refresh_ok = sum(t["n"] for t in snap_body.get("tasks_1h", [])
-                     if t["type"] == "chatbi.refresh_semantics"
-                     and t["status"] == "succeeded")
-    # 周期(分钟)来自快照外配置; 默认按 6h=每 1h 1 次判断——超过 2 次
-    # 且身份行数未增长, 即重复重建嫌疑(二十二审 6 的症状)
-    ident_total = snap_body.get("chunk_identities", {}).get("total", 0)
-    prev_ident = history.get("prev_ident_total")
-    if refresh_ok > 3 and prev_ident is not None and ident_total == prev_ident:
-        problems.append(f"1h内 {refresh_ok} 次 refresh 且索引未变(重复重建嫌疑)")
-    history["prev_ident_total"] = ident_total
-    # 资源: 单点 + 增量
+    # 硬失败(非租约冲突)立即 FAIL; 租约冲突超阈值才 FAIL(双实例调度
+    # 竞争的输家, 偶发预期)
+    hard_failures = snap_body.get("refresh_hard_failures_1h", 0)
+    if hard_failures:
+        problems.append(f"1h内 {hard_failures} 个 refresh 硬失败"
+                        "(非租约冲突)")
+    lease_conflicts = sum(t["n"] for t in snap_body.get("tasks_1h", [])
+                          if t["type"] == "chatbi.refresh_semantics"
+                          and t["status"] == "failed") - hard_failures
+    if lease_conflicts > V_FAILED_REFRESH_LIMIT:
+        problems.append(f"1h内 {lease_conflicts} 次租约冲突(超阈值"
+                        f"{V_FAILED_REFRESH_LIMIT}, 调度异常)")
+    ev = snap_body.get("build_events_1h") or {}
+    rebuild_events = sum(ev.values())
+    if rebuild_events > V_REBUILD_EVENTS_LIMIT:
+        problems.append(f"1h内 {rebuild_events} 次索引构建事件(超阈值"
+                        f"{V_REBUILD_EVENTS_LIMIT}, 重复重建)")
     base_rss = history.get("base_rss") or {}
     for p in snap_body.get("processes", []):
         rss = p.get("rss_kb")
         if rss is None:
             continue
-        if rss > 8 * 1024 * 1024:
-            problems.append(f"pid{p['pid']} RSS>8GB")
+        if rss > V_RSS_LIMIT_KB:
+            problems.append(f"pid{p['pid']} RSS>{V_RSS_LIMIT_KB//1024//1024}GB")
         b = base_rss.get(p["pid"])
         if b is None:
             base_rss[p["pid"]] = rss
-        elif rss - b > 2 * 1024 * 1024:
-            problems.append(f"pid{p['pid']} RSS 较基线 +{(rss-b)//1024//1024}GB")
+        elif rss - b > V_RSS_DELTA_KB:
+            problems.append(
+                f"pid{p['pid']} RSS 较基线 +{(rss-b)//1024//1024}GB")
     history["base_rss"] = base_rss
     return "FAIL: " + "; ".join(problems) if problems else "OK"
 
@@ -234,6 +246,24 @@ def snapshot(db, _hist=None):
             for r in leases]
         total = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()
         snap["tasks_total"] = int(total["n"])
+        # 1h 构建台账事件(真实 rebuild 证据: updated_at 近 1h 的行数
+        # 及 active 指针变化——不从 refresh 次数猜测)
+        builds = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM chatbi_index_builds "
+            "WHERE updated_at >= to_char(now() - interval '1 hour', "
+            "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF') GROUP BY status").fetchall()
+        snap["build_events_1h"] = {r["status"]: int(r["n"])
+                                   for r in builds}
+        # failed refresh 的错误分类(二十三审 5.4: 租约冲突=预期偶发,
+        # 其它失败=真实故障)
+        fails = conn.execute(
+            "SELECT error FROM tasks WHERE task_type="
+            "'chatbi.refresh_semantics' AND status='failed' "
+            "AND created_at >= to_char(now() - interval '1 hour', "
+            "'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')").fetchall()
+        hard = [r["error"] or "" for r in fails
+                if "租约冲突" not in (r["error"] or "")]
+        snap["refresh_hard_failures_1h"] = len(hard)
         recent = conn.execute(
             "SELECT task_type, status, COUNT(*) AS n FROM tasks "
             "WHERE created_at >= to_char(now() - interval '1 hour', "

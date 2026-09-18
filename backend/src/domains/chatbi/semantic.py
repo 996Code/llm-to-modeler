@@ -1090,7 +1090,8 @@ def mark_manual_edits(old: SemanticModelContent | None,
 
 
 def save_content(db, datasource_id: str, content: SemanticModelContent,
-                 source: str = "manual", expected_version: int | None = None) -> int:
+                 source: str = "manual", expected_version: int | None = None,
+                 conn=None) -> int:
     """落新版本 + is_current 翻转,返回版本号(append-only)。
 
     - 版本号 = 该数据源当前最大版本 + 1,单调递增
@@ -1098,56 +1099,67 @@ def save_content(db, datasource_id: str, content: SemanticModelContent,
     - 内容指纹与当前最新版本完全一致 → 幂等返回原版本号,不产空版本
       (tasks.py 的自动刷新依赖此语义: 内容没变不落新版本)
     - source 仅记日志(DDL 无来源列;语义审计由调用方任务层负责)
+    - conn(二十三审 8): 外部传入已持有的连接(如 RunLease.execute_if_owned
+      的 fencing 事务)——租约行锁与语义落库同事务, 失租写入被数据库拒绝。
     """
     payload = json.dumps(content.model_dump(), ensure_ascii=False)
     fingerprint = json.dumps(content.model_dump(), ensure_ascii=False, sort_keys=True)
+    if conn is not None:
+        return _save_content_conn(conn, datasource_id, payload, fingerprint,
+                                  expected_version, source)
     with db.connect() as conn:
-        # 九审 7.2: 悲观锁 + 版本前置条件——多管理员/并发写不允许旧快照静默覆盖
-        try:
-            conn.execute(
-                "SELECT id FROM chatbi_data_sources WHERE id = ? FOR UPDATE",
-                (datasource_id,))
-        except Exception:
-            pass
-        row = conn.execute(
-            "SELECT version, content FROM chatbi_semantic_models "
-            "WHERE data_source_id = ? ORDER BY version DESC LIMIT 1",
-            (datasource_id,)).fetchone()
-        # 获锁后校验 expected_version(九审 7.2: 旧快照提交 → 领域异常而非静默覆盖)
-        # 十五审 7.5: 空状态统一视作 actual=0——expected 与 actual 始终比较
-        # (此前只在 row 存在时校验, expected=7 在空状态可绕过 CAS 创建 v1)
-        actual_version = int(row["version"]) if row else 0
-        if expected_version is not None and expected_version != actual_version:
-            from domains.chatbi.graph_infer import VersionConflictError
-            raise VersionConflictError(
-                expected_version=expected_version,
-                current_version=actual_version,
-                pending_updates={},)
-        if row:
-            latest_version = int(row["version"])
-            try:
-                latest_fp = json.dumps(json.loads(row["content"]),
-                                       ensure_ascii=False, sort_keys=True)
-            except Exception:
-                latest_fp = None   # 存量脏数据: 无法解析则视为有变化,正常落新版本
-            if latest_fp == fingerprint:
-                logger.info("save_content: 内容未变化 (数据源=%s), 幂等返回 v%d",
-                            datasource_id, latest_version)
-                return latest_version
-            # is_current 翻转(同事务)
-            conn.execute(
-                "UPDATE chatbi_semantic_models SET is_current = 0 "
-                "WHERE data_source_id = ? AND is_current = 1", (datasource_id,))
-        else:
-            latest_version = 0
-        new_version = latest_version + 1
+        return _save_content_conn(conn, datasource_id, payload, fingerprint,
+                                  expected_version, source)
+
+
+def _save_content_conn(conn, datasource_id: str, payload: str,
+                   fingerprint: str, expected_version, source: str) -> int:
+    # 九审 7.2: 悲观锁 + 版本前置条件——多管理员/并发写不允许旧快照静默覆盖
+    try:
         conn.execute(
-            "INSERT INTO chatbi_semantic_models "
-            "(id, data_source_id, version, content, is_current, created_at) "
-            "VALUES (?, ?, ?, ?, 1, ?)",
-            (str(uuid.uuid4()), datasource_id, new_version, payload, _now()))
-    logger.info("save_content(来源=%s): 数据源=%s 落版本 v%d (%d 张表)",
-                source, datasource_id, new_version, len(content.models))
+            "SELECT id FROM chatbi_data_sources WHERE id = ? FOR UPDATE",
+            (datasource_id,))
+    except Exception:
+        pass
+    row = conn.execute(
+        "SELECT version, content FROM chatbi_semantic_models "
+        "WHERE data_source_id = ? ORDER BY version DESC LIMIT 1",
+        (datasource_id,)).fetchone()
+    # 获锁后校验 expected_version(九审 7.2: 旧快照提交 → 领域异常而非静默覆盖)
+    # 十五审 7.5: 空状态统一视作 actual=0——expected 与 actual 始终比较
+    # (此前只在 row 存在时校验, expected=7 在空状态可绕过 CAS 创建 v1)
+    actual_version = int(row["version"]) if row else 0
+    if expected_version is not None and expected_version != actual_version:
+        from domains.chatbi.graph_infer import VersionConflictError
+        raise VersionConflictError(
+            expected_version=expected_version,
+            current_version=actual_version,
+            pending_updates={},)
+    if row:
+        latest_version = int(row["version"])
+        try:
+            latest_fp = json.dumps(json.loads(row["content"]),
+                                   ensure_ascii=False, sort_keys=True)
+        except Exception:
+            latest_fp = None   # 存量脏数据: 无法解析则视为有变化,正常落新版本
+        if latest_fp == fingerprint:
+            logger.info("save_content: 内容未变化 (数据源=%s), 幂等返回 v%d",
+                        datasource_id, latest_version)
+            return latest_version
+        # is_current 翻转(同事务)
+        conn.execute(
+            "UPDATE chatbi_semantic_models SET is_current = 0 "
+            "WHERE data_source_id = ? AND is_current = 1", (datasource_id,))
+    else:
+        latest_version = 0
+    new_version = latest_version + 1
+    conn.execute(
+        "INSERT INTO chatbi_semantic_models "
+        "(id, data_source_id, version, content, is_current, created_at) "
+        "VALUES (?, ?, ?, ?, 1, ?)",
+        (str(uuid.uuid4()), datasource_id, new_version, payload, _now()))
+    logger.info("save_content(来源=%s): 数据源=%s 落版本 v%d",
+                source, datasource_id, new_version)
     return new_version
 
 
