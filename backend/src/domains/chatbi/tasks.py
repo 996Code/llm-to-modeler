@@ -371,6 +371,34 @@ class RunLease:
             self.acquired = False
             return False
 
+    def execute_if_owned(self, write_fn):
+        """事务级 fencing(二十二审 8): 租约检查与写入同事务执行。
+
+        write_fn(conn) 在同一连接上下文里执行写入; 进入前先在同一
+        事务内核对 holder+未过期——check 与 write 之间不再存在可被
+        接管的间隙(TOCTOU 关闭)。返回 (ok, write_result)。
+        """
+        if not self.acquired:
+            return False, None
+        try:
+            with self.db.connect() as conn:
+                row = conn.execute(
+                    "SELECT holder FROM chatbi_scheduler_leases "
+                    "WHERE task_type = ? AND holder = ? "
+                    "AND expires_at ~ '^[0-9]+$' "
+                    "AND expires_at::bigint > "
+                    "(extract(epoch FROM now())*1000)::bigint",
+                    (self.task_type, self.holder)).fetchone()
+                if row is None:
+                    logger.error("事务级 fencing: 租约 %s 已易主——写入被拒",
+                                 self.task_type)
+                    self.acquired = False
+                    return False, None
+                return True, write_fn(conn)
+        except Exception as e:
+            logger.error("事务级 fencing 执行失败(写入未确认): %s", e)
+            return False, None
+
     def heartbeat(self) -> bool:
         """同步续租点(兼容既有调用); 返回 False = 租约已丢。"""
         if not self.acquired:
@@ -557,13 +585,25 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         # 二十审 7.4 根本修复: 重扫后索引失败 = 新语义落库但检索仍在
         # 用旧版本索引(漂移)——与 refresh 同口径 ok=False, 任务中心如实
         # 可见, 修复后下一轮 refresh 的 pointer-lag 自愈可补建
+        # 二十二审 7 根本修复: 索引失败 = 任务终态必须 failed。
+        # 此前正常 return {ok:false}——TaskManager 对正常返回一律标
+        # succeeded, 任务中心仍显示"已成功 100%", 失败只藏在 result
+        # JSON 里(审计: 不要把错误埋在 result)。语义已落库, 在异常
+        # 信息里说明状态与后果, 数据源行写 done_with_warning(区分
+        # 纯结构扫描失败与索引降级)。
         _idx_ok = index_status in ("ok", "skipped")
+        if not _idx_ok:
+            _detail = (f"扫描完成: {len(content.models)} 张表已入库, 但索引"
+                       f"重建失败——RAG 检索仍在用旧版本索引"
+                       f"({index_warning or '见任务日志'})。"
+                       f"手动重扫或等待下轮 refresh 自动补建可修复")
+            datasources.update_datasource(
+                db, ds_id, scan_status="done_with_warning",
+                scan_progress=100, scan_stage=_detail[:480],
+                scan_error=index_warning or "索引重建失败")
+            raise RuntimeError(_detail)
         return {"models": len(content.models), "indexed": indexed,
-                "ok": _idx_ok,
-                **({} if _idx_ok else {
-                    "error": index_warning or "索引重建失败"}),
-                "index_rebuild": index_status,
-                **({"index_warning": index_warning} if index_warning else {}),
+                "ok": True, "index_rebuild": index_status,
                 # 十七审 7.6: 停用/冲突清单进任务结果(任务中心可见)
                 **({"dropped_items": merge_report["dropped_items"],
                     "conflicts": merge_report["conflicts"],
@@ -768,10 +808,11 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                         expected_version=_retry[1])
                 else:
                     raise  # 无法重试(无 current)
-            # 十八审 6.5/十九审 6.6/二十审 9.4: 每次 merge 后都写报告(含
-            # 空); 仅 failed 告警——superseded 是正常乱序让路
-            report_state = save_merge_report(db, info.id, version,
-                                             merge_report)
+            # 十八审 6.5/十九审 6.6/二十审 9.4/二十二审 8: 每次 merge 后
+            # 都写报告(含空); 写入与数据源写租约同事务 fencing(失租拒写);
+            # 仅 failed 告警——superseded 是正常乱序让路
+            report_state = save_merge_report_fenced(
+                write_lease, db, info.id, version, merge_report)
             if merge_report.get("requires_review"):
                 _log_report(handle, merge_report, f"刷新 v{version}")
             if report_state == REPORT_FAILED:
@@ -800,11 +841,14 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
             if not struct_changed and evolve.get("versions_written", 0) == 0:
                 _cur_rev = None
                 try:
-                    _scope_row = datasources.get_datasource(db, info.id)
-                    _sc = getattr(_scope_row, "scope_id", "") if _scope_row else ""
+                    # 二十二审 6: 此前从 DataSourceInfo.scope_id 读——生产
+                    # dataclass 根本没有该字段, 恒得 None → 每轮误判漂移
+                    # 全量重建。scope 的正规契约是 stores.get_scope。
+                    from domains.chatbi.stores import (get_scope,
+                                                       get_active_doc_id)
+                    import re as _re_l
+                    _sc = get_scope(db, info.id)
                     if _sc:
-                        from domains.chatbi.stores import get_active_doc_id
-                        import re as _re_l
                         _doc = get_active_doc_id(db, _sc)
                         _m = (_re_l.match(r"schema_r(\d+)", _doc or "")
                               if _doc else None)
@@ -1425,6 +1469,45 @@ REPORT_SAVED = "saved"
 REPORT_SUPERSEDED = "superseded"
 REPORT_FAILED = "failed"
 
+
+def save_merge_report_fenced(lease, db, data_source_id: str, version: int,
+                             report: dict) -> str:
+    """merge 报告的租约同事务写入(二十二审 8)。
+
+    持有 write lease 时: 检查与写入同事务(失租拒写, TOCTOU 关闭)。
+    无 lease(API 人工路径/测试)退化为普通三态保存。
+    """
+    if lease is None:
+        return save_merge_report(db, data_source_id, version, report)
+    lease.db = lease.db or db   # 保险: 测试构造可能未填 db
+
+    def _write(conn):
+        import json
+        cur = conn.execute(
+            "INSERT INTO chatbi_merge_reports "
+            "(data_source_id, version, report, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (data_source_id) DO UPDATE SET "
+            "version = EXCLUDED.version, report = EXCLUDED.report, "
+            "updated_at = EXCLUDED.updated_at "
+            "WHERE EXCLUDED.version >= chatbi_merge_reports.version",
+            (data_source_id, version,
+             json.dumps(report, ensure_ascii=False), _now_iso()))
+        if getattr(cur, "rowcount", 0):
+            return REPORT_SAVED
+        row = conn.execute(
+            "SELECT version FROM chatbi_merge_reports "
+            "WHERE data_source_id = ?", (data_source_id,)).fetchone()
+        return (REPORT_SAVED
+                if row and int(row["version"]) == version
+                else REPORT_SUPERSEDED)
+
+    ok, result = lease.execute_if_owned(_write)
+    if ok:
+        return result
+    logger.warning("merge 报告被事务级 fencing 拒绝(ds=%s v%s)",
+                   data_source_id, version)
+    return REPORT_FAILED
 
 def save_merge_report(db, data_source_id: str, version: int,
                       report: dict) -> str:

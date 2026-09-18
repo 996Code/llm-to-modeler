@@ -3,6 +3,8 @@
 关键约束: fixture 模拟真实扫描来源——无数据库注释的表/列是
 auto_inferred(不依赖模型默认 manual), 这是十四审测试掩盖边界的根因.
 """
+import types
+
 import pytest
 from domains.chatbi.models import (
     SemanticModelContent, Model, Column, Metric, Relationship,
@@ -1839,15 +1841,21 @@ class TestPointerLagSelfHeal:
         monkeypatch.setattr(
             "domains.chatbi.datasources.list_datasources",
             lambda db, active_only=False: [type("R", (), {"id": ds})()])
+        # 二十二审 6.3: 用**真实** _row_to_info 构造 DataSourceInfo——
+        # 此前 mock 自造 scope_id 属性(生产 dataclass 没有), 测试通过
+        # 生产却每轮误判漂移。真实契约: scope 查询走 stores.get_scope。
+        from domains.chatbi.datasources import _row_to_info
+
+        def _real_get(db, i, decrypt=False):
+            with db.connect() as conn:
+                row = conn.execute(
+                    "SELECT * FROM chatbi_data_sources WHERE id = ?",
+                    (i,)).fetchone()
+            assert row is not None, "测试数据源行缺失"
+            return _row_to_info(dict(row))
+
         monkeypatch.setattr(
-            "domains.chatbi.datasources.get_datasource",
-            lambda db, i, decrypt=False: type(
-                "I", (), {"id": ds, "name": "t",
-                          "connection_kwargs": lambda self: {
-                              "host": "x", "port": 1, "user": "u",
-                              "password": "p", "database": "d"},
-                          "db_type": "postgresql",
-                          "scope_id": "scope-lag-1"})())
+            "domains.chatbi.datasources.get_datasource", _real_get)
         # refresh 的结构内省不真连库: 固定返回与 v2 同构的新扫描
         scan_content = SemanticModelContent(models=[
             Model(name="t1", display_name="T2", columns=[
@@ -1873,7 +1881,82 @@ class TestPointerLagSelfHeal:
             "lag 存在却走了跳过快路(自愈失效)"
 
 
-import types  # noqa: E402
+
+
+class TestUnchangedRefreshZeroRebuild:
+    """二十二审验收: 已对齐(v==r)时 unchanged refresh 必须零重建."""
+
+    def test_aligned_no_rebuild(self, pg_engine, monkeypatch):
+        from datetime import datetime, timezone
+        from domains.chatbi import semantic
+        from domains.chatbi.datasources import _row_to_info
+        from domains.chatbi.stores import set_active_doc_id
+        from domains.chatbi.tasks import _refresh_all_datasources
+
+        ds = "zero-rb-ds"
+        now = datetime.now(timezone.utc).isoformat()
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_data_sources "
+                "(id, name, db_type, host, port, database, username, "
+                "encrypted_password, is_active, scan_status, scan_progress, "
+                "scan_stage, scan_error, scope_id, created_at, updated_at) "
+                "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
+                "'done', 100, '', '', 'zero-rb-scope', ?, ?)", (ds, now, now))
+        content = SemanticModelContent(models=[
+            Model(name="t1", display_name="T", columns=[_col("id")]),
+        ])
+        assert semantic.save_content(pg_engine, ds, content,
+                                     expected_version=0) == 1
+        set_active_doc_id(pg_engine, "zero-rb-scope", "schema_r1", 1)  # 对齐
+
+        rebuild_calls = []
+        monkeypatch.setattr(
+            "domains.chatbi.indexing.guarded_rebuild",
+            lambda **kw: rebuild_calls.append(kw) or None)
+        scan_content = SemanticModelContent(models=[
+            Model(name="t1", display_name="T", columns=[_col("id")]),
+        ])
+        monkeypatch.setattr(
+            "domains.chatbi.semantic.scan_datasource",
+            lambda **kw: scan_content)
+
+        def _real_get(db, i, decrypt=False):
+            with db.connect() as conn:
+                row = conn.execute(
+                    "SELECT * FROM chatbi_data_sources WHERE id = ?",
+                    (i,)).fetchone()
+            return _row_to_info(dict(row))
+
+        monkeypatch.setattr(
+            "domains.chatbi.datasources.list_datasources",
+            lambda db, active_only=False: [
+                type("R", (), {"id": ds})()])
+        monkeypatch.setattr(
+            "domains.chatbi.datasources.get_datasource", _real_get)
+
+        class _H:
+            task_id = "zero-rb-handle"
+            payload = {}
+
+            def log(self, msg, **kw):
+                print("LOG:", msg)
+
+            def set_progress(self, *a, **k):
+                pass
+
+        lease = type("L", (), {
+            "heartbeat": lambda self: True,
+            "assert_owned": lambda self: True,
+            "owned": True,
+        })()
+        results = []
+        _refresh_all_datasources(_H(), types.SimpleNamespace(), pg_engine,
+                                 {"scan_metric_inference": False},
+                                 results, lease)
+        assert results and results[0].get("changed") is False, results
+        assert not rebuild_calls, \
+            f"已对齐却全量重建(二十二审 6 复发): {len(rebuild_calls)} 次"
 
 
 class TestPeriodicGcRealExecution:
@@ -1929,3 +2012,49 @@ class TestPeriodicGcRealExecution:
         assert "except Exception:\n                            pass" not in src, \
             "调度器 GC 分支仍有裸吞异常"
         assert "_gc_llm" not in src, "GC 分支仍引用未定义/无用的 _gc_llm"
+
+
+class TestTransactionalFencing:
+    """P1 8(二十二审): 检查后失租的写入必须被数据库拒绝(TOCTOU 关闭)."""
+
+    def test_fenced_report_write_rejected_when_lease_lost(self, pg_engine):
+        """报告 fenced 保存: 失租后调用 → 不写入, 返回 failed."""
+        from domains.chatbi.tasks import (RunLease,
+                                          save_merge_report_fenced,
+                                          get_merge_report, REPORT_FAILED)
+        a = RunLease(pg_engine, "run:semantic_write:ds-fence2",
+                     holder="task:old", ttl_seconds=300)
+        assert a.acquire() is True
+        # 模拟失租: 持有者被替换(心跳线程下一拍才会发现)
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "UPDATE chatbi_scheduler_leases SET holder = 'task:new' "
+                "WHERE task_type = 'run:semantic_write:ds-fence2'")
+        state = save_merge_report_fenced(
+            a, pg_engine, "fence-ds", 1,
+            {"dropped_items": [], "conflicts": [], "requires_review": False})
+        assert state == REPORT_FAILED, f"失租后仍写入: {state}"
+        assert get_merge_report(pg_engine, "fence-ds") is None, \
+            "被 fencing 拒绝的报告仍落了库"
+        # 归还清理
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "DELETE FROM chatbi_scheduler_leases "
+                "WHERE task_type = 'run:semantic_write:ds-fence2'")
+
+    def test_fenced_report_write_succeeds_when_owned(self, pg_engine):
+        from domains.chatbi.tasks import (RunLease,
+                                          save_merge_report_fenced,
+                                          get_merge_report, REPORT_SAVED)
+        a = RunLease(pg_engine, "run:semantic_write:ds-fence3",
+                     holder="task:ok", ttl_seconds=300)
+        assert a.acquire() is True
+        try:
+            state = save_merge_report_fenced(
+                a, pg_engine, "fence-ds-3", 1,
+                {"dropped_items": [], "conflicts": [],
+                 "requires_review": False})
+            assert state == REPORT_SAVED
+            assert get_merge_report(pg_engine, "fence-ds-3") is not None
+        finally:
+            a.release()

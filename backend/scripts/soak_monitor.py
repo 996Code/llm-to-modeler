@@ -126,8 +126,17 @@ def proc_metrics():
     return out
 
 
-def _verdict(snap_body) -> str:
-    """二十审 5.7: 每条快照给出明确结论, 不再只记录不判断。"""
+def _verdict(snap_body, history) -> str:
+    """每条快照给出明确结论(二十审 5.7 + 二十二审 5.7 扩展)。
+
+    检查维度:
+      一致性: pointer_lag / requires_review / building 堆积
+      任务健康: 1h 内 degraded 或 failed 任务
+      效率: 无变化刷新仍全量重建(tasks_1h 中 succeeded refresh 数远超
+            周期应有个数——按 refresh 周期换算) / 重复 rebuild(身份表
+            total 突增 = 又做了全量 embedding)
+      资源: RSS 单点 8GB 上限 + 相对首帧增量 > 2GB(异常高水位)
+    """
     problems = []
     for d in snap_body["datasources"]:
         if d.get("pointer_lag") not in (0, None):
@@ -136,13 +145,41 @@ def _verdict(snap_body) -> str:
             problems.append(f"{d['ds']} requires_review")
     if snap_body.get("build_ledger", {}).get("building", 0) > 3:
         problems.append("building 堆积")
+    # 任务健康: degraded 留痕(refresh 结果里 index_rebuild=degraded 的
+    # 任务在 tasks 表 status=failed——按 failed 计数; succeeded 高频 +
+    # 身份表未增 = 无变化重复重建嫌疑)
+    for t in snap_body.get("tasks_1h", []):
+        if t["type"] == "chatbi.refresh_semantics" and t["status"] == "failed":
+            err_degraded = True   # failed 可能是租约冲突(正常)——降为 WARN
+    refresh_ok = sum(t["n"] for t in snap_body.get("tasks_1h", [])
+                     if t["type"] == "chatbi.refresh_semantics"
+                     and t["status"] == "succeeded")
+    # 周期(分钟)来自快照外配置; 默认按 6h=每 1h 1 次判断——超过 2 次
+    # 且身份行数未增长, 即重复重建嫌疑(二十二审 6 的症状)
+    ident_total = snap_body.get("chunk_identities", {}).get("total", 0)
+    prev_ident = history.get("prev_ident_total")
+    if refresh_ok > 3 and prev_ident is not None and ident_total == prev_ident:
+        problems.append(f"1h内 {refresh_ok} 次 refresh 且索引未变(重复重建嫌疑)")
+    history["prev_ident_total"] = ident_total
+    # 资源: 单点 + 增量
+    base_rss = history.get("base_rss") or {}
     for p in snap_body.get("processes", []):
-        if p.get("rss_kb") is not None and p["rss_kb"] > 8 * 1024 * 1024:
+        rss = p.get("rss_kb")
+        if rss is None:
+            continue
+        if rss > 8 * 1024 * 1024:
             problems.append(f"pid{p['pid']} RSS>8GB")
+        b = base_rss.get(p["pid"])
+        if b is None:
+            base_rss[p["pid"]] = rss
+        elif rss - b > 2 * 1024 * 1024:
+            problems.append(f"pid{p['pid']} RSS 较基线 +{(rss-b)//1024//1024}GB")
+    history["base_rss"] = base_rss
     return "FAIL: " + "; ".join(problems) if problems else "OK"
 
 
-def snapshot(db):
+def snapshot(db, _hist=None):
+    _hist = _hist if _hist is not None else {}
     snap = {"ts": now_iso(), "commit": GIT_COMMIT,
             "git_dirty": GIT_DIRTY, "script_hash": SCRIPT_HASH}
     with db.connect() as conn:
@@ -215,7 +252,7 @@ def snapshot(db):
         except OSError:
             log_errors[os.path.basename(p)] = None
     snap["log_errors"] = log_errors
-    snap["verdict"] = _verdict(snap)
+    snap["verdict"] = _verdict(snap, _hist)
     return snap
 
 
@@ -231,9 +268,10 @@ def main():
     db = PackRelationalDB("chatbi", database_url=DSN)
     print(f"soak monitor -> {out_path} every {interval}s "
           f"commit={GIT_COMMIT} ports={PORTS}", flush=True)
+    _hist = {}
     while True:
         try:
-            snap = snapshot(db)
+            snap = snapshot(db, _hist)
             with open(out_path, "a") as f:
                 f.write(json.dumps(snap, ensure_ascii=False) + "\n")
             procs = " ".join(

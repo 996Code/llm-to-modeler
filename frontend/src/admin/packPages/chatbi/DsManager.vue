@@ -28,7 +28,11 @@
           <template #default="{ record }">
             <!-- 八审 6.5: 单一互斥链——此前两个独立 v-if, done 时第二条
                  的 v-else 兜底显示"未扫描", 出现"已扫描+未扫描"矛盾 -->
-            <template v-if="record.scanStatus === 'done'">
+            <template v-if="record.scanStatus === 'done_with_warning'">
+              <a-tag color="warning">⚠ 完成但索引降级</a-tag>
+              <a-tooltip :title="record.scanError || '索引重建失败'"><question-circle-outlined /></a-tooltip>
+            </template>
+            <template v-else-if="record.scanStatus === 'done'">
               <a-tag color="success">已扫描</a-tag>
               <span class="muted">{{ record.scanStage }}</span>
             </template>
@@ -48,11 +52,11 @@
                       @click="health(record)">健康</a-button>
             <a-button size="small" type="link" @click="showMetrics(record)">指标</a-button>
             <a-button size="small" type="link" :disabled="record.scanStatus === 'scanning'"
-                      @click="scan(record)">{{ record.scanStatus === 'done' ? '重新扫描' : '扫描' }}</a-button>
+                      @click="scan(record)">{{ ['done', 'done_with_warning'].includes(record.scanStatus) ? '重新扫描' : '扫描' }}</a-button>
             <a-button size="small" type="link" @click="viewSemantic(record)"
-                      :disabled="record.scanStatus !== 'done'">语义层</a-button>
+                      :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">语义层</a-button>
             <a-button size="small" type="link" @click="emit('open-graph', record.id)"
-                      :disabled="record.scanStatus !== 'done'">图谱</a-button>            <a-popconfirm title="删除数据源及其语义层/向量数据?" ok-text="删除" ok-type="danger"
+                      :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">图谱</a-button>            <a-popconfirm title="删除数据源及其语义层/向量数据?" ok-text="删除" ok-type="danger"
                           @confirm="removeDs(record)">
               <a-button size="small" type="link" danger>删除</a-button>
             </a-popconfirm>
@@ -170,7 +174,7 @@
 import { computed, defineEmits, defineExpose, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  DatabaseOutlined, HeartOutlined, PlusOutlined, SyncOutlined,
+  DatabaseOutlined, HeartOutlined, PlusOutlined, QuestionCircleOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 
