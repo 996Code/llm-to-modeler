@@ -5,6 +5,7 @@
 """
 import logging
 import threading
+import zlib
 from typing import Any
 
 from sdk.relational_store import PackRelationalDB
@@ -64,6 +65,11 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
 
     各栈 DDL 均为 CREATE TABLE IF NOT EXISTS, 重复执行无副作用;
     分散在各栈的懒建(如 datasources.init_store)保留作冗余兜底。
+    二十九审 P2-C: pack DDL 主动串行化——事务级 advisory lock
+    (key 按 pack 名派生, 各 pack 互不干扰)让并发实例排队执行整组
+    迁移, 后到者全部 no-op; 此前只靠 DeadlockDetected 退避重试
+    恢复(真实出现 3s 退避日志)。事务级锁在提交/回滚都自动释放,
+    异常不泄漏; deadlock 重试保留作兜底。
     """
     from domains.chatbi.models import CHATBI_DDL
     from domains.chatbi.stores import CHATBI_RETRIEVAL_DDL
@@ -71,17 +77,20 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
     from domains.chatbi.m4 import M4_DDL
     from domains.chatbi.query_stats import QUERY_STATS_DDL
     from domains.chatbi.graph_infer import WATERMARK_DDL
-    # 十一审 7.1 P0 修复: 先建表(含唯一索引的幂等DDL), 再做存量迁移——
-    # 此前迁移在建表前, 全新库查不存在的表直接 UndefinedTable 崩启动
-    # 十九审 soak 发现: 多 worker 同时启动时并发 DDL 可能死锁
-    # (AccessExclusiveLock 互锁)——整组 DDL 带退避重试
     import time as _time
+    # pack 名派生的 advisory lock key(固定 bigint, 仅用于 pack 迁移互斥)
+    _lock_key = 0x7061636B0000 + (zlib.crc32(PACK_NAME.encode()) & 0xFFFF)
     ddl = (list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
            + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
            + list(QUERY_STATS_DDL) + list(WATERMARK_DDL))
     for attempt in range(5):
         try:
-            db.init_schema(ddl)
+            with db.connect() as conn:
+                # 事务级 advisory lock: 事务结束自动释放(异常也释放)
+                conn.execute("SELECT pg_advisory_xact_lock(?)",
+                             (_lock_key,))
+                for stmt in ddl:
+                    conn.execute(stmt)
             break
         except Exception as e:
             if "DeadlockDetected" in type(e).__name__ and attempt < 4:

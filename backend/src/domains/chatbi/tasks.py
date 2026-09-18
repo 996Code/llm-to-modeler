@@ -313,6 +313,59 @@ def acquire_lease_token(db, task_type: str, holder: str | None = None,
         return None
 
 
+def claim_lease_token(db, task_type: str, holder: str,
+                      ttl_seconds: int = 900) -> int | None:
+    """执行期租约的**初次 claim**(二十九审 P2-A: 与 renew 分离)。
+
+    acquire_lease_token 的"同 holder 无条件续期"语义对 heartbeat 正确,
+    但对新的 RunLease 对象是漏洞: 两个对象用相同 key/holder 时都
+    acquire=True 且共享同一 token, 两个写屏障都通过(真实复现:
+    A/B 同时 execute_if_owned 执行)。TaskManager 正常路径每次
+    submit 生成新 UUID task id 所以未触发, 但原语必须自身具备
+    执行实例隔离。本函数:
+      - 任何未过期行(含同 holder)都拒绝 → 返回 None;
+      - 无行/已过期 → 插入/接管并**始终铸造新 token**(同 holder
+        过期重获也换新代, 旧对象的旧 token 立即作废);
+      - 原子 RETURNING 本次 token。
+    """
+    holder = holder or _scheduler_holder()
+    if not ensure_lease_token_column(db):
+        logger.error("租约 %s 拒绝获取: token 列迁移未完成(fencing "
+                     "降级运行不安全, fail-closed 跳过本轮)", task_type)
+        return None
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases ("
+                "task_type TEXT PRIMARY KEY, holder TEXT NOT NULL, "
+                "expires_at TEXT NOT NULL, token BIGINT)")
+            conn.execute(
+                "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq")
+            # 初次 claim: 只有无行或已过期行才允许进入; 同 holder 的
+            # 未过期行同样拒绝(两个执行对象不得共享代际)
+            row = conn.execute(
+                "WITH n AS (SELECT (extract(epoch FROM now())*1000)::bigint AS nowms), "
+                "up AS (INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at, token) "
+                "SELECT ?, ?, ((SELECT nowms FROM n) + ?)::text, "
+                "nextval('chatbi_lease_token_seq') FROM n "
+                "ON CONFLICT (task_type) DO UPDATE SET "
+                "holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at, "
+                "token = nextval('chatbi_lease_token_seq') "
+                "WHERE chatbi_scheduler_leases.expires_at ~ '^[0-9]+$' "
+                "  AND chatbi_scheduler_leases.expires_at::bigint "
+                "      <= (SELECT nowms FROM n) "
+                "RETURNING holder, token) "
+                "SELECT holder, token FROM up",
+                (task_type, holder, int(ttl_seconds) * 1000)).fetchone()
+        if row and row["holder"] == holder and row["token"] is not None:
+            return int(row["token"])
+        return None
+    except Exception as e:
+        logger.warning("租约 %s claim 失败(跳过本轮防重复): %s", task_type, e)
+        return None
+
+
 def ensure_lease_token_column(db) -> bool:
     """租约表 token 列迁移(二十四审)。
 
@@ -423,24 +476,25 @@ class RunLease:
         self._hb_thread: threading.Thread | None = None
 
     def acquire(self) -> bool:
-        """二十八审 P1-A: token 与 acquire 同事务原子返回。
+        """二十八审 P1-A + 二十九审 P2-A: 初次 claim, token 原子返回。
 
-        此前"acquire 成功后另行读 token"存在换代间隙: 首读故障/暂停
-        期间租约被接管又由同 holder 重获, 二次读到的已是别人的 token,
-        据此删除会误删 successor(真实复现)。现在:
-          - acquire_lease_token 原子返回本次生效 token, 直接保存;
-          - 返回 None(未获得/未续上/token 异常)→ 拒绝执行, **不做
-            任何二次读取或删除**——未知代际的行宁可等 TTL 过期。
+        - claim_lease_token: 任何未过期行(含同 holder)都拒绝——两个
+          执行对象用相同 key/holder 时只有一个 claim 成功(此前
+          acquire_lease_token 的"同 holder 无条件续期"语义会让两个
+          对象共享同一 token, 两个写屏障都通过);
+        - 过期接管(含同 holder 过期重获)始终铸造新 token——旧对象的
+          旧 token 立即作废;
+        - 返回 None(未获得/token 不可知)→ 拒绝执行, 不做任何二次
+          读取或删除——未知代际的行宁可等 TTL 过期。
         """
-        self.token = acquire_lease_token(self.db, self.task_type,
-                                         self.holder,
-                                         ttl_seconds=self.ttl_seconds)
+        self.token = claim_lease_token(self.db, self.task_type,
+                                       self.holder,
+                                       ttl_seconds=self.ttl_seconds)
         self.acquired = self.token is not None
         if not self.acquired:
-            if self.token is None:
-                logger.error("执行期租约 %s 未获得(或 token 不可知)——"
-                             "拒绝执行(fail-closed, 不二次读取/不删除)",
-                             self.task_type)
+            logger.error("执行期租约 %s 未获得(已有持有者/token 不可知)"
+                         "——拒绝执行(fail-closed, 不二次读取/不删除)",
+                         self.task_type)
             return False
         self._start_heartbeat()
         return True

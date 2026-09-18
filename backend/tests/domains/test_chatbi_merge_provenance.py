@@ -3,6 +3,7 @@
 关键约束: fixture 模拟真实扫描来源——无数据库注释的表/列是
 auto_inferred(不依赖模型默认 manual), 这是十四审测试掩盖边界的根因.
 """
+import os
 import types
 
 import pytest
@@ -2624,18 +2625,24 @@ class TestAcquireTokenAtomicity:
 
     def test_acquire_returns_token_atomically(self, pg_engine):
         """acquire 直接返回本次生效 token(无需二次读取)."""
-        from domains.chatbi.tasks import RunLease, acquire_lease_token
+        from domains.chatbi.tasks import RunLease, claim_lease_token
         key = "run:semantic_write:atom-1"
         with pg_engine.connect() as c:
             c.execute("DELETE FROM chatbi_scheduler_leases "
                       "WHERE task_type=?", (key,))
-        tok = acquire_lease_token(pg_engine, key, holder="task:a",
-                                  ttl_seconds=300)
-        assert tok is not None, "acquire 未原子返回 token"
-        a = RunLease(pg_engine, key, holder="task:a", ttl_seconds=300)
-        assert a.acquire() and a.token == tok, (
-            "RunLease.acquire 的 token 与原子返回不一致(走了二次读取)")
-        a.release()
+        tok = claim_lease_token(pg_engine, key, holder="task:a",
+                                ttl_seconds=300)
+        assert tok is not None, "claim 未原子返回 token"
+        # 同 holder 的第二个对象 claim 必须拒绝(二十九审 P2-A)
+        b = RunLease(pg_engine, key, holder="task:a", ttl_seconds=300)
+        assert b.acquire() is False, "同 holder 未过期重入 claim 成功"
+        # 第一个对象释放后, 同 holder 重获换新 token
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        tok2 = claim_lease_token(pg_engine, key, holder="task:a",
+                                 ttl_seconds=300)
+        assert tok2 is not None and tok2 > tok, "重获未铸造新 token"
 
     def test_no_delete_when_token_unreadable(self, pg_engine, monkeypatch):
         """token 不可知时: 拒绝执行且**不删除任何行**(不二次读取)."""
@@ -2649,12 +2656,12 @@ class TestAcquireTokenAtomicity:
                                  ttl_seconds=300)
         assert cur.acquire() and cur.token is not None
         t_successor = cur.token
-        # 旧对象 acquire: 同 holder 续租语义会成功(这是合法续租,
-        # token 不变); 真正要防的是"token 不可知仍执行/删除"——
-        # 用 acquire_lease_token 返回 None 模拟异常路径
+        # 旧对象 claim: 同 holder 未过期行必须拒绝(二十九审 P2-A);
+        # 再用 claim_lease_token 返回 None 模拟 token 不可知异常路径
         old = tasks_mod.RunLease(pg_engine, key, holder="task:same",
                                  ttl_seconds=300)
-        monkeypatch.setattr(tasks_mod, "acquire_lease_token",
+        assert old.acquire() is False, "同 holder 未过期重入仍执行"
+        monkeypatch.setattr(tasks_mod, "claim_lease_token",
                             lambda *a, **kw: None)
         assert old.acquire() is False, "token 不可知仍开始执行"
         assert old.acquired is False and old.token is None
@@ -2908,13 +2915,15 @@ class TestConcurrentColdStartDDL:
     """P1-C: 多实例并发冷启动 DDL 不再 deadlock(advisory lock 串行)."""
 
     def test_concurrent_init_db_all_healthy(self):
-        """4 个并发 ConversationStore 初始化全部成功(真实 PG)."""
-        import sys
-        sys.path.insert(0, "src") if False else None
+        """4 个并发 ConversationStore 初始化全部成功(真实 PG).
+
+        二十九审 P3-D: DSN 取 conftest 解析后的 TEST_DATABASE_URL,
+        不硬编码本机凭据(CI/其他开发机会失败, 也可能误碰非 pytest
+        管理的库)。
+        """
         import threading
         from services.conversation_store import ConversationStore
-        url = ("postgresql://root:root@localhost:5432/"
-               "llm_modeler_test_run")
+        url = os.environ["TEST_DATABASE_URL"]
         results = {}
 
         def worker(i):
@@ -2931,6 +2940,114 @@ class TestConcurrentColdStartDDL:
         for t in ts:
             t.join()
         assert all(v == "ok" for v in results.values()), results
+
+    def test_ddl_failure_releases_lock_and_raises_original(self, pg_engine):
+        """P2-B: DDL 异常 → 原始异常上抛 + advisory lock 归零(不泄漏).
+
+        此前 session 级锁 + finally 手工 unlock: DDL 报错使事务
+        aborted, unlock 语句本身抛 InFailedSqlTransaction 覆盖原始
+        异常, 且 session 锁留在池连接上直到池关闭(真实故障注入)。
+        事务级 pg_advisory_xact_lock 在回滚时自动释放。
+        """
+        import threading
+        from services import conversation_store as cs_mod
+        url = os.environ["TEST_DATABASE_URL"]
+        _LOCK_KEY = 0x636F6E76736D6967
+
+        def _granted():
+            with pg_engine.connect() as c:
+                row = c.execute(
+                    "SELECT COUNT(*) AS n FROM pg_locks "
+                    "WHERE locktype = 'advisory' "
+                    "AND classid = ? AND objid = ?",
+                    (_LOCK_KEY >> 32, _LOCK_KEY & 0xFFFFFFFF)).fetchone()
+                return int(row["n"])
+
+        # 注入: 第一条 DDL 抛 division by zero(真实故障形态)
+        real_ddl = cs_mod.ConversationStore._DDL
+        cs_mod.ConversationStore._DDL = [
+            "SELECT 1/0 AS boom"] + list(real_ddl)
+        raised = {}
+        try:
+            try:
+                ConversationStore = cs_mod.ConversationStore
+                ConversationStore(database_url=url)
+                raised["err"] = None
+            except Exception as e:
+                raised["err"] = e
+            # 原始异常可见(不被 InFailedSqlTransaction 覆盖)
+            assert raised["err"] is not None, "注入的 DDL 失败被吞"
+            assert "division by zero" in str(raised["err"]), (
+                f"原始异常被覆盖: {type(raised['err']).__name__}: "
+                f"{str(raised['err'])[:80]}")
+        finally:
+            cs_mod.ConversationStore._DDL = real_ddl
+        # 事务级锁已随回滚释放(不泄漏到池)
+        assert _granted() == 0, "advisory lock 泄漏(DDL 异常后未释放)"
+        # 下一次初始化不被残留锁阻塞(正常完成)
+        cs_mod.ConversationStore(database_url=url)
+        assert _granted() == 0
+
+
+class TestSameHolderReentry:
+    """P2-A(二十九审): 同 holder 的两个执行对象不得共享 token.
+
+    真实复现: A/B 用相同 key/holder 都 acquire=True、token 相同、
+    assert 都通过、两个 execute_if_owned 都执行。TaskManager 正常
+    路径每次 submit 生成新 UUID 所以未触发, 但原语必须自身具备
+    执行实例隔离。
+    """
+
+    def test_same_holder_unexpired_reentry_rejected(self, pg_engine):
+        """同 holder 未过期重入: 第二个对象 claim 必须拒绝."""
+        from domains.chatbi.tasks import RunLease
+        key = "run:semantic_write:reent-1"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        a = RunLease(pg_engine, key, holder="task:retry-same-id",
+                     ttl_seconds=300)
+        b = RunLease(pg_engine, key, holder="task:retry-same-id",
+                     ttl_seconds=300)
+        assert a.acquire() is True and a.token is not None
+        try:
+            assert b.acquire() is False, "同 holder 未过期重入 claim 成功"
+            assert b.token is None and b.acquired is False
+            # 两个写屏障只有一个能通过
+            ok_a, _ = a.execute_if_owned(
+                lambda conn: conn.execute("SELECT 1"))
+            ok_b, _ = b.execute_if_owned(
+                lambda conn: conn.execute("SELECT 1"))
+            assert ok_a is True and ok_b is False, (
+                f"双写屏障通过: A={ok_a} B={ok_b}")
+        finally:
+            a.release()
+
+    def test_same_holder_expired_reclaim_rotates_token(self, pg_engine):
+        """同 holder 过期重获: 始终铸造新 token(旧对象立即作废)."""
+        from domains.chatbi.tasks import RunLease
+        key = "run:semantic_write:reent-2"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+        a = RunLease(pg_engine, key, holder="task:retry-same-id",
+                     ttl_seconds=300)
+        assert a.acquire() and a.token is not None
+        t1 = a.token
+        with pg_engine.connect() as c:
+            c.execute("UPDATE chatbi_scheduler_leases SET expires_at='1' "
+                      "WHERE task_type=?", (key,))
+        b = RunLease(pg_engine, key, holder="task:retry-same-id",
+                     ttl_seconds=300)
+        assert b.acquire() is True, "过期后同 holder 重获失败"
+        assert b.token is not None and b.token > t1, (
+            f"同 holder 过期重获未换新 token: {b.token} vs {t1}")
+        # 旧对象立即作废(即使伪装 acquired)
+        a.acquired = True
+        assert a.assert_owned() is False, "旧对象凭旧 token 通过 assert"
+        ok, _ = a.execute_if_owned(lambda conn: "should-not-run")
+        assert ok is False, "旧对象写屏障通过(应作废)"
+        b.release()
 
 
 # ════════════════════════════════════════════════════════════════
@@ -3010,9 +3127,9 @@ class TestLeaseMigrationFailClosed:
         # 旧对象 acquire: 原子返回 None(token 不可知的异常路径)
         lease = tasks_mod.RunLease(pg_engine, key, holder="task:x",
                                    ttl_seconds=300)
-        # 直接验证: acquire_lease_token 返回 None 时 acquire 拒绝
+        # 直接验证: claim_lease_token 返回 None 时 acquire 拒绝
         # 且不触碰行(用真实函数的 None 分支——monkeypatch 模块函数)
-        monkeypatch.setattr(tasks_mod, "acquire_lease_token",
+        monkeypatch.setattr(tasks_mod, "claim_lease_token",
                             lambda *a, **kw: None)
         assert lease.acquire() is False, "无 token 仍开始执行(弱 fencing)"
         assert lease.acquired is False

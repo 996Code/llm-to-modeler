@@ -196,29 +196,31 @@ class ConversationStore:
         二十八审 P1-C: 多实例同时冷启动时, 两个进程在同一事务循环里
         执行 CREATE/ALTER 会在 public.call_logs 等表上以不同顺序取
         AccessExclusiveLock, 产生 deadlock——一个实例 DeadlockDetected
-        直接退出(连续 2 次复现)。修复:
-          1) advisory lock 串行化整段迁移——并发启动的实例排队执行,
-             后到者看到表已建好, 语句全部 no-op;
-          2) 对 deadlock/serialization failure 有界重试(锁等待被
-             抢占等残余竞态的兜底);
-          3) 仍失败则抛出(启动 fail-fast, 不静默降级)。
+        直接退出(连续 2 次复现)。
+        二十九审 P2-B: 改用**事务级** pg_advisory_xact_lock——此前
+        session 级锁 + finally 手工 unlock 在 DDL 报错(事务 aborted)
+        时 unlock 语句本身也失败: 原始异常被 InFailedSqlTransaction
+        覆盖(诊断失真), 且 session 锁泄漏在共享池连接上直到池关闭
+        (真实故障注入复现)。事务级锁在提交/回滚时都自动释放,
+        不需要也无法手工 unlock, 原始异常原样上抛。
+        重试只作兜底(锁等待被抢占等残余竞态), 次数/退避可配置。
         """
+        import os as _os
         import time as _time
         # advisory lock key: 任意固定 bigint(仅用于会话存储迁移互斥)
         _LOCK_KEY = 0x636F6E76736D6967  # "convsmig"
-        attempts = 5
+        attempts = int(_os.getenv("CONV_DDL_RETRY_ATTEMPTS", "5"))
+        backoff_base = float(_os.getenv("CONV_DDL_RETRY_BACKOFF_SECONDS",
+                                         "0.5"))
         for attempt in range(1, attempts + 1):
             try:
                 with self._get_conn() as conn:
-                    # session 级 advisory lock: 连接关闭自动释放, 无需
-                    # 显式 unlock(异常也不会泄漏锁)
-                    conn.execute("SELECT pg_advisory_lock(?)", (_LOCK_KEY,))
-                    try:
-                        for stmt in self._DDL:
-                            conn.execute(stmt)
-                    finally:
-                        conn.execute("SELECT pg_advisory_unlock(?)",
-                                     (_LOCK_KEY,))
+                    # 事务级 advisory lock: 事务提交/回滚自动释放,
+                    # 异常路径同样释放——无泄漏, 无手工 unlock
+                    conn.execute("SELECT pg_advisory_xact_lock(?)",
+                                 (_LOCK_KEY,))
+                    for stmt in self._DDL:
+                        conn.execute(stmt)
                 return
             except Exception as e:
                 msg = str(e)
@@ -229,7 +231,7 @@ class ConversationStore:
                     logger.warning(
                         "ConversationStore DDL 迁移并发冲突(第 %d/%d 次), "
                         "退避后重试: %s", attempt, attempts, msg[:120])
-                    _time.sleep(0.5 * attempt)
+                    _time.sleep(backoff_base * attempt)
                     continue
                 raise
 
