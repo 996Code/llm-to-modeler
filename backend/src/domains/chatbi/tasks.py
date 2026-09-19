@@ -323,20 +323,25 @@ def _migrate_lease_expiry(conn, db=None) -> None:
     """
     _has_valid = _pg_has_input_valid(conn)
     if _has_valid:
-        # PG16+: 显式 CASE 预检, 脏值永不进入 ::timestamptz
+        # PG16+: 确定性 CASE 预检(三十三审 P2)——invalid 输入走 ELSE
+        # FALSE 分支, 在 SQL 语义上永不进入 ::timestamptz; 此前的
+        # `valid(...) AND cast...` 依赖布尔子表达式求值顺序, 不是
+        # 可依赖的安全保证
         conn.execute(
             "UPDATE chatbi_scheduler_leases SET expires_at = "
             "(extract(epoch FROM expires_at::timestamptz)*1000)::bigint::text "
             "WHERE expires_at !~ '^[0-9]+$' "
             "  AND expires_at ~ '^\\d{4}-' "
-            "  AND pg_input_is_valid(expires_at, 'timestamptz') "
-            "  AND expires_at::timestamptz > now()")
+            "  AND CASE WHEN pg_input_is_valid(expires_at, 'timestamptz') "
+            "           THEN expires_at::timestamptz > now() "
+            "           ELSE FALSE END")
         conn.execute(
             "DELETE FROM chatbi_scheduler_leases "
             "WHERE expires_at !~ '^[0-9]+$' "
             "  AND expires_at ~ '^\\d{4}-' "
-            "  AND pg_input_is_valid(expires_at, 'timestamptz') "
-            "  AND expires_at::timestamptz <= now()")
+            "  AND CASE WHEN pg_input_is_valid(expires_at, 'timestamptz') "
+            "           THEN expires_at::timestamptz <= now() "
+            "           ELSE FALSE END")
     else:
         # 能力未知: fail-closed——不迁移任何候选行(候选行保留原样,
         # 进入下方告警清单), 绝不让可能非法的值进入 cast
@@ -351,7 +356,7 @@ def _migrate_lease_expiry(conn, db=None) -> None:
                      row["expires_at"])
 
 
-def _pg_has_input_valid(conn=None) -> bool:
+def _pg_has_input_valid(conn=None) -> bool | None:
     """当前连接是否提供 pg_input_is_valid(PG16+; 进程内缓存)。
 
     三十二审 P1:

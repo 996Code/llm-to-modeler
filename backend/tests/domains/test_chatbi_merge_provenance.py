@@ -3240,9 +3240,14 @@ class TestRetryConfigFailFast:
                            raising=False)
 
     def test_assembly_rejects_invalid_pack_config(self, monkeypatch):
-        """三十二审 P2: 非法配置在 pack 装配期被拒(不等首次请求)."""
+        """三十二审 P2: 非法配置在 pack 装配期被拒(不等首次请求).
+
+        三十三审 P1: create_registry 把 ValueError 包成
+        PackConfigurationError——loader 不吞, 传播到 lifespan。
+        """
         from domains.chatbi.runtime import validate_pack_runtime_config
         from domains.chatbi import runtime as rt
+        from sdk.pack_api import PackConfigurationError
         # 屏蔽版本探测(本测试只验证配置解析层)
         monkeypatch.setattr(rt, "_require_pg16", lambda: None)
         monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "1.9")
@@ -3251,13 +3256,45 @@ class TestRetryConfigFailFast:
             raise AssertionError("1.9 在装配期未被拒绝")
         except ValueError:
             pass
+        # create_registry 包装: ValueError → PackConfigurationError
+        from domains.chatbi import pack as chatbi_pack
+        try:
+            chatbi_pack.create_registry()
+            raise AssertionError("create_registry 未抛 PackConfigurationError")
+        except PackConfigurationError:
+            pass
         monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "5")
         validate_pack_runtime_config()   # 合法值通过
         monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
 
+    def test_loader_propagates_fatal_pack_error(self, monkeypatch):
+        """三十三审 P1: loader 对 PackConfigurationError 不吞——传播.
+
+        此前 catch-continue 让 ChatBI-only 部署以 0 pack/0 工具
+        "成功"启动(真实复现)。
+        """
+        import domains
+        from sdk.pack_api import PackConfigurationError
+        # 只加载 chatbi, 且让 create_registry 抛致命错误
+        monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "1.9")
+        try:
+            domains.load_all_packs(pack_names=["chatbi"])
+            raise AssertionError("致命配置错误被 loader 吞掉")
+        except PackConfigurationError:
+            pass
+        # 0 pack 路径: 名单内 pack 全部失败 → RuntimeError(文档承诺)
+        monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
+
     def test_pg16_required_at_assembly(self, monkeypatch):
-        """三十二审 P3: PG<16 在装配期被拒(硬性版本要求)."""
+        """三十三审 P2: PG<16 / 探测失败都在装配期被拒(fail-closed).
+
+        版本探测与 schema 初始化已拆开(不再走 get_pack_db)——
+        探测走底层 engine 只读查询; 查询失败 = fail-closed 抛
+        PackIncompatibleError(不再当"稍后再试"返回成功)。
+        """
+        from sdk.pack_api import PackIncompatibleError
         from domains.chatbi import runtime as rt
+        from sdk import relational_store as rs
 
         class _Row(dict):
             pass
@@ -3271,7 +3308,7 @@ class TestRetryConfigFailFast:
                 row.fetchone = lambda: row
                 return row
 
-        class _DB:
+        class _Engine:
             def __init__(self, version_num):
                 self._v = version_num
 
@@ -3283,22 +3320,34 @@ class TestRetryConfigFailFast:
                     yield _Conn(self._v)
                 return _c()
 
-        monkeypatch.setattr(rt, "get_pack_db",
-                            lambda: _DB(150000))   # PG15
+        class _FakeDB:
+            def __init__(self, engine):
+                self.engine = engine
+
+        # PG15 → PackIncompatibleError
+        monkeypatch.setattr(rs, "PackRelationalDB",
+                            lambda name: _FakeDB(_Engine(150000)))
         try:
             rt._require_pg16()
             raise AssertionError("PG15 未被版本校验拒绝")
-        except ValueError as e:
+        except PackIncompatibleError as e:
             assert "PostgreSQL" in str(e)
         # PG16 通过
-        monkeypatch.setattr(rt, "get_pack_db",
-                            lambda: _DB(160004))   # PG16.4
+        monkeypatch.setattr(rs, "PackRelationalDB",
+                            lambda name: _FakeDB(_Engine(160004)))
         rt._require_pg16()
-        # 探测失败(DB 未就绪)不硬拒——装配期跳过
-        def _fail_db():
-            raise ConnectionError("db not ready")
-        monkeypatch.setattr(rt, "get_pack_db", _fail_db)
-        rt._require_pg16()   # 不抛
+        # 探测失败(连接异常)→ fail-closed 抛错(不再当成功)
+        class _FailEngine:
+            def connect(self):
+                raise ConnectionError("db not ready")
+
+        monkeypatch.setattr(rs, "PackRelationalDB",
+                            lambda name: _FakeDB(_FailEngine()))
+        try:
+            rt._require_pg16()
+            raise AssertionError("探测失败未被拒绝(仍当成功)")
+        except PackIncompatibleError:
+            pass
 
 
 # ════════════════════════════════════════════════════════════════
@@ -3468,20 +3517,21 @@ class TestDateLikePoisonIsolation:
         """三十二审 P1 真实场景: 单连接池下, 脏租约存在时无关 key
         快速 claim 成功(不等待嵌套连接的 pool timeout).
 
-        复现条件(上轮真实复现): PG_POOL_MIN=1/MAX=1/TIMEOUT=1,
-        elapsed≈1.03s + date/time out of range。修复后探测复用已
-        持有连接, 无嵌套申请。
+        三十三审 P3: 不再运行期修改共享池私有字段(不等价于以
+        min/max=1 建池, 且污染同进程后续测试)——改用独立
+        PgEngine(min_size=1, max_size=1) 真实单连接池, finally
+        关闭。复现条件(上轮): PG_POOL_MIN=1/MAX=1/TIMEOUT=1,
+        elapsed≈1.03s + date/time out of range; 修复后探测复用
+        已持有连接, 无嵌套申请。
         """
         import time
+        from services.db import PgEngine
         from sdk.relational_store import PackRelationalDB
         import domains.chatbi.tasks as t
         url = os.environ["TEST_DATABASE_URL"]
+        # 独立单连接池(不碰 DSN 共享缓存)
         db = PackRelationalDB("chatbi", database_url=url)
-        # 单连接池: 直接限制共享池 max(独立 engine, 不影响其它测试)
-        try:
-            db.engine._pool._max_size = 1
-        except Exception:
-            pass
+        db.engine = PgEngine(url, min_size=1, max_size=1)
         t._PG_INPUT_VALID_CACHE = None
         poison = "audit:r32:pool1-poison"
         other = "audit:r32:pool1-other"
@@ -3502,9 +3552,12 @@ class TestDateLikePoisonIsolation:
                 f"pool=1 下 claim 耗时 {elapsed:.2f}s(疑似等待了嵌套"
                 f"连接的 pool timeout)")
         finally:
-            with db.connect() as c:
-                c.execute("DELETE FROM chatbi_scheduler_leases "
-                          "WHERE task_type IN (?, ?)", (poison, other))
+            try:
+                with db.connect() as c:
+                    c.execute("DELETE FROM chatbi_scheduler_leases "
+                               "WHERE task_type IN (?, ?)", (poison, other))
+            finally:
+                db.engine.close()   # 关闭独立池, 不泄漏连接
 
 
 # ════════════════════════════════════════════════════════════════

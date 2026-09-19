@@ -18,17 +18,24 @@ def create_registry(app_state=None) -> ToolRegistry:
     三十二审 P2: 装配期即校验 pack 运行配置(PACK_DDL_RETRY_* 等)
     ——非法值(如 attempts=1.9)在 pack 装配时抛 ValueError, 不再等
     首次业务请求才 500(fail-fast 名实相符)。
+    三十三审 P1: 校验失败改抛 PackConfigurationError——此前普通
+    ValueError 被平台 loader catch-continue 吞掉(真实复现: 即使
+    PACKS_ENABLED=chatbi, 服务仍以 0 pack/0 工具"成功"启动);
+    致命错误必须传播到 lifespan 让 Uvicorn 启动失败。
+    必需工具(ask_data/switch_chart)构造失败同样不吞——空 registry
+    会让"启用 chatbi"的 ready 不变量静默失效。
     """
+    from sdk.pack_api import PackConfigurationError
     from domains.chatbi.runtime import validate_pack_runtime_config
-    validate_pack_runtime_config()
-    registry = ToolRegistry()
     try:
-        from domains.chatbi.tools.ask_data import AskDataTool
-        from domains.chatbi.tools.switch_chart import SwitchChartTool
-        registry.register(AskDataTool(app_state))
-        registry.register(SwitchChartTool(app_state))
-    except Exception:
-        logger.exception("chatbi 工具注册失败")
+        validate_pack_runtime_config()
+    except ValueError as e:
+        raise PackConfigurationError(f"chatbi 运行配置非法: {e}") from e
+    registry = ToolRegistry()
+    from domains.chatbi.tools.ask_data import AskDataTool
+    from domains.chatbi.tools.switch_chart import SwitchChartTool
+    registry.register(AskDataTool(app_state))
+    registry.register(SwitchChartTool(app_state))
     return registry
 
 

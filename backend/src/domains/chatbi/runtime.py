@@ -133,37 +133,38 @@ def validate_pack_runtime_config() -> None:
 
 
 def _require_pg16() -> None:
-    """校验目标 PostgreSQL >= 16(装配期; 失败抛 ValueError)。
+    """校验目标 PostgreSQL >= 16(装配期; 不满足抛 PackIncompatibleError)。
 
-    探测失败(库不可达)不在装配期硬拒——部署顺序上 pack 装配可能
-    早于 DB 就绪; 版本确认延迟到首次真实连接(租约探测路径),
-    但 PG<16 一旦确认即 fail-closed(租约迁移跳过+告警), 不会
-    静默走不安全分支。
+    三十三审 P2: 版本探测与 schema 初始化拆开——此前 _require_pg16
+    走 get_pack_db()(连带全量 schema 迁移), 任何连接/权限/DDL/
+    迁移异常都被宽泛 except 当成"版本探测稍后再试"返回成功
+    (真实复现: 迁移失败仍 validate_returned_success=True)。
+    现在:
+      - 只读版本检查走底层 engine(不触发 pack schema 初始化);
+      - 版本查询本身失败 = fail-closed 抛错(平台 DB 在 lifespan
+        前段已探活, 装配期再失败不是正常部署顺序, 不能当
+        unknown 等价通过);
+      - PG<16 抛 PackIncompatibleError(loader 不吞, 服务启动失败)。
     """
+    from sdk.pack_api import PackIncompatibleError
+    from sdk import relational_store as _rs
     try:
-        db = get_pack_db()
-        with db.connect() as conn:
+        engine = _rs.PackRelationalDB(PACK_NAME).engine
+        with engine.connect() as conn:
             row = conn.execute(
                 "SELECT current_setting('server_version_num') AS v"
             ).fetchone()
     except Exception as e:
-        logger.warning("PostgreSQL 版本探测失败(装配期跳过, 首次"
-                       "连接时再确认): %s", e)
-        return
+        raise PackIncompatibleError(
+            f"chatbi 无法确认 PostgreSQL 版本(数据库不可达/权限"
+            f"不足): {e}——平台数据库应在启动前段已探活, 装配期"
+            f"失败不是正常部署顺序, 终止启动(fail-closed)") from e
     ver = int(row["v"]) if row else 0
     if ver < 160000:
-        raise ValueError(
+        raise PackIncompatibleError(
             f"chatbi 需要 PostgreSQL >= 16(当前 {ver // 10000}.{ver % 10000 // 100}, "
             f"server_version_num={ver})——租约脏数据隔离依赖 "
             f"pg_input_is_valid(PG16+)。请升级数据库或回退应用版本")
-
-
-def _retry_config(name: str, default: float, minimum: float) -> float:
-    """兼容保留(三十审 P2-C 引入)——三十一审 P1-A 起统一走
-    sdk.env_config 强类型 parser。次数类配置请用 parse_int_env。
-    """
-    from sdk.env_config import parse_float_env
-    return parse_float_env(name, default, minimum)
 
 
 def _migrate_single_current_on_conn(conn) -> None:

@@ -41,6 +41,7 @@ from typing import Any, List, Optional, Tuple
 
 from sdk.registry import ToolRegistry
 from sdk.prompt_loader import PromptLoader
+from sdk.pack_api import PackConfigurationError
 
 # 模块级 logger。Python 用 logging.getLogger(__name__),name 形如 "domains"。
 # 等价 Java 的 private static final Logger log = LoggerFactory.getLogger(...)。
@@ -303,6 +304,14 @@ def load_all_packs(
             if primary_prompt_loader is None and prompt_loader:
                 primary_prompt_loader = prompt_loader
 
+        except PackConfigurationError as e:
+            # 三十三审 P1: 致命配置/兼容性错误不吞——传播到 lifespan,
+            # 服务启动失败。此前 catch-continue 让 ChatBI-only 部署
+            # 以 0 pack/0 工具"成功"启动(真实复现), 假健康。
+            logger.error(
+                f"工具包 {pack_name} 致命配置/兼容性错误——终止启动"
+                f"(fail-fast): {e}")
+            raise
         except Exception as e:
             # 单个 pack 失败:打日志后跳过,不中断整体启动(尽力而为)。
             # 依赖检测未过的 pack 也走同一条跳过路径(见上方依赖闸门)。
@@ -316,6 +325,15 @@ def load_all_packs(
             "没有工具包提供 prompt_loader,二级路由将使用 DefaultPackRouter 中性框架。"
             "如需自定义 prompt,请在 pack.py 中实现 create_prompt_loader()。"
         )
+
+    # 三十三审 P1: 名单里的 pack 全部加载失败(依赖跳过/异常跳过)时,
+    # 按本函数文档承诺抛 RuntimeError——此前 0 pack 仍正常返回, 服务
+    # 以 0 工具宣告启动成功(真实复现: ChatBI-only + 非法配置)。
+    if not pack_routers:
+        raise RuntimeError(
+            f"名单中的工具包全部加载失败({len(pack_names)} 个): "
+            f"{sorted(pack_names)}——系统无工具可用, 终止启动"
+            f"(fail-closed)。详见上方各 pack 的失败日志")
 
     # 名单数含被依赖闸门跳过的;实际加载成功的以 pack_routers 的键为准
     logger.info(

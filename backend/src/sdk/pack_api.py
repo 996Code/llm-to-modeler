@@ -112,6 +112,22 @@ class DuplicateTaskError(RuntimeError):
     操作,异常属插件可见契约);平台 TaskManager 抛出本类型。"""
 
 
+# ── pack 装配契约异常(三十三审 P1)─────────────────────────
+
+class PackConfigurationError(RuntimeError):
+    """pack 的致命配置/兼容性错误——loader 不得吞掉, 必须传播到
+    lifespan 让服务启动失败。
+
+    与"可选依赖缺失"(dependency gate 跳过, 服务可降级运行)的
+    区别: 本异常表示 pack 声明了自己无法安全运行的状态(非法配置
+    值、不兼容的数据库版本等)。平台 loader 对本类型不 catch-continue。
+    """
+
+
+class PackIncompatibleError(PackConfigurationError):
+    """pack 与运行环境不兼容(如数据库版本低于硬性要求)。"""
+
+
 
 def user_id(request: Request, default: str = "anonymous") -> str:
     """读取请求用户身份(宿主网关注入的 X-User-Id,缺省 anonymous)。
