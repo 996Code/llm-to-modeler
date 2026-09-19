@@ -34,30 +34,14 @@ def get_pack_db() -> PackRelationalDB:
 
 
 def _migrate_single_current(db: PackRelationalDB) -> None:
-    """存量双 current 修复(幂等; 表不存在时安全跳过)."""
-    """十审 7.4: 存量双 current 修复——建唯一索引前, 收敛 current 到最高版本.
+    """存量双 current 修复(独立入口保留兼容; 幂等; 表不存在时安全跳过).
 
-    此前版本允许产生双 is_current=1; 直接 CREATE UNIQUE INDEX 会失败.
-    迁移规则: 每数据源保留 MAX(version) 的 current, 其余清零, 记日志.
+    三十审起 _init_pack_schema 已把本迁移纳入 migrate_locked 的
+    同一锁保护事务(_migrate_single_current_on_conn); 本函数保留
+    供旧调用/测试单独触发。
     """
     with db.connect() as conn:
-        # 找有多个 current 的数据源
-        dupes = conn.execute(
-            "SELECT data_source_id, COUNT(*) AS c "
-            "FROM chatbi_semantic_models WHERE is_current = 1 "
-            "GROUP BY data_source_id HAVING COUNT(*) > 1").fetchall()
-        for d in dupes:
-            ds_id = d["data_source_id"]
-            # 保留 MAX(version), 其余清零
-            conn.execute(
-                "UPDATE chatbi_semantic_models SET is_current = 0 "
-                "WHERE data_source_id = ? AND is_current = 1 "
-                "AND version < (SELECT MAX(version) FROM chatbi_semantic_models "
-                "               WHERE data_source_id = ? AND is_current = 1)",
-                (ds_id, ds_id))
-            import logging
-            logging.getLogger(__name__).warning(
-                "存量双 current 修复: ds=%s 收敛到最高版本", ds_id)
+        _migrate_single_current_on_conn(conn)
 
 
 def _init_pack_schema(db: PackRelationalDB) -> None:
@@ -70,6 +54,14 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
     迁移, 后到者全部 no-op; 此前只靠 DeadlockDetected 退避重试
     恢复(真实出现 3s 退避日志)。事务级锁在提交/回滚都自动释放,
     异常不泄漏; deadlock 重试保留作兜底。
+    三十审 P1-A: 改走 db.migrate_locked()——此前为加锁绕过
+    init_schema 直接用 connect() 执行 DDL, 但 connect() 只设置
+    search_path 不创建 schema, 全新库上无前缀 CREATE TABLE 静默
+    落入 public(真实 PG 复现)。migrate_locked 在同一锁保护事务内
+    完成 CREATE SCHEMA + search_path 定向 + 全部迁移。
+    三十审 P2/P3-D: _migrate_single_current 与唯一索引创建一并
+    纳入同一锁保护迁移序列(此前在锁外, "整段迁移被串行化"的
+    承诺不完整); retry 次数/退避配置化(PACK_DDL_RETRY_*).
     """
     from domains.chatbi.models import CHATBI_DDL
     from domains.chatbi.stores import CHATBI_RETRIEVAL_DDL
@@ -77,44 +69,85 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
     from domains.chatbi.m4 import M4_DDL
     from domains.chatbi.query_stats import QUERY_STATS_DDL
     from domains.chatbi.graph_infer import WATERMARK_DDL
+    import os as _os
     import time as _time
     # pack 名派生的 advisory lock key(固定 bigint, 仅用于 pack 迁移互斥)
     _lock_key = 0x7061636B0000 + (zlib.crc32(PACK_NAME.encode()) & 0xFFFF)
+    attempts = _retry_config("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
+    backoff_base = _retry_config("PACK_DDL_RETRY_BACKOFF_SECONDS",
+                                  3.0, minimum=0.0)
     ddl = (list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
            + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
            + list(QUERY_STATS_DDL) + list(WATERMARK_DDL))
-    for attempt in range(5):
+
+    def _migrate_all(conn):
+        # 基础 DDL(全部 CREATE ... IF NOT EXISTS, 幂等)
+        for stmt in ddl:
+            conn.execute(stmt)
+        # 十一审 7.1 P0: 先建表再做存量迁移(此前迁移在建表前,
+        # 全新库查不存在的表直接 UndefinedTable 崩启动)
+        _migrate_single_current_on_conn(conn)
+        # 十二审 8.1 P0: 唯一索引必须在迁移之后创建——旧库有双
+        # current 时先建索引会 UniqueViolation 阻断启动
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_semantic_current "
+            "ON chatbi_semantic_models(data_source_id) WHERE is_current = 1")
+
+    for attempt in range(1, attempts + 1):
         try:
-            with db.connect() as conn:
-                # 事务级 advisory lock: 事务结束自动释放(异常也释放)
-                conn.execute("SELECT pg_advisory_xact_lock(?)",
-                             (_lock_key,))
-                for stmt in ddl:
-                    conn.execute(stmt)
-            break
+            db.migrate_locked(_lock_key, _migrate_all)
+            return
         except Exception as e:
-            if "DeadlockDetected" in type(e).__name__ and attempt < 4:
-                wait = 3 * (attempt + 1)
-                logger.warning("启动建表死锁(多实例并发 DDL), %ds 后重试(%d/5): %s",
-                               wait, attempt + 1, e)
+            if ("DeadlockDetected" in type(e).__name__
+                    and attempt < attempts):
+                wait = backoff_base * attempt
+                logger.warning("启动建表死锁(多实例并发 DDL), %.1fs 后"
+                               "重试(%d/%d): %s", wait, attempt, attempts, e)
                 _time.sleep(wait)
                 continue
             raise
-    _migrate_single_current(db)  # 建表后修复存量双 current(幂等)
-    # 十二审 8.1 P0: 唯一索引必须在迁移之后创建——CHATBI_DDL 不含它,
-    # 旧库有双current时先建索引会 UniqueViolation 阻断启动
-    for attempt in range(5):
-        try:
-            with db.connect() as conn:
-                conn.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_chatbi_semantic_current "
-                    "ON chatbi_semantic_models(data_source_id) WHERE is_current = 1")
-            break
-        except Exception as e:
-            if "DeadlockDetected" in type(e).__name__ and attempt < 4:
-                _time.sleep(3 * (attempt + 1))
-                continue
-            raise
+
+
+def _retry_config(name: str, default: float, minimum: float) -> float:
+    """重试参数解析(env > 默认), 非法值 fail-fast(三十审 P2-C)。
+
+    attempts=0 会让 range(1, 1) 为空——整个迁移被静默跳过却返回
+    成功(fail-open); 非数字/NaN/Infinity/低于下限同样必须启动
+    失败并给出明确配置错误, 不能静默修正。
+    """
+    import math
+    import os
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        val = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"配置 {name}={raw!r} 不是数字——启动失败(fail-fast), "
+            f"合法范围 >= {minimum}, 缺省 {default}")
+    if math.isnan(val) or math.isinf(val) or val < minimum:
+        raise ValueError(
+            f"配置 {name}={raw!r} 非法(NaN/Infinity/低于下限 "
+            f"{minimum})——启动失败(fail-fast)")
+    return val
+
+
+def _migrate_single_current_on_conn(conn) -> None:
+    """存量双 current 修复(在迁移锁事务内执行; 幂等)."""
+    dupes = conn.execute(
+        "SELECT data_source_id, COUNT(*) AS c "
+        "FROM chatbi_semantic_models WHERE is_current = 1 "
+        "GROUP BY data_source_id HAVING COUNT(*) > 1").fetchall()
+    for d in dupes:
+        ds_id = d["data_source_id"]
+        conn.execute(
+            "UPDATE chatbi_semantic_models SET is_current = 0 "
+            "WHERE data_source_id = ? AND is_current = 1 "
+            "AND version < (SELECT MAX(version) FROM chatbi_semantic_models "
+            "               WHERE data_source_id = ? AND is_current = 1)",
+            (ds_id, ds_id))
+        logger.warning("存量双 current 修复: ds=%s 收敛到最高版本", ds_id)
 
 
 def get_settings_reader(ctx_or_state) -> Any:

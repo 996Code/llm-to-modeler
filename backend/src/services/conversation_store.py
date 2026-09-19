@@ -197,21 +197,39 @@ class ConversationStore:
         执行 CREATE/ALTER 会在 public.call_logs 等表上以不同顺序取
         AccessExclusiveLock, 产生 deadlock——一个实例 DeadlockDetected
         直接退出(连续 2 次复现)。
-        二十九审 P2-B: 改用**事务级** pg_advisory_xact_lock——此前
-        session 级锁 + finally 手工 unlock 在 DDL 报错(事务 aborted)
-        时 unlock 语句本身也失败: 原始异常被 InFailedSqlTransaction
-        覆盖(诊断失真), 且 session 锁泄漏在共享池连接上直到池关闭
-        (真实故障注入复现)。事务级锁在提交/回滚时都自动释放,
-        不需要也无法手工 unlock, 原始异常原样上抛。
-        重试只作兜底(锁等待被抢占等残余竞态), 次数/退避可配置。
+        二十九审 P2-B: 事务级 pg_advisory_xact_lock——DDL 报错使事务
+        aborted 时, 手工 unlock 语句本身抛 InFailedSqlTransaction 覆盖
+        原始异常且 session 锁泄漏在池连接上(真实故障注入复现); 事务级
+        锁在提交/回滚时都自动释放, 原始异常原样上抛。
+        三十审 P2-C: 重试参数 fail-fast 校验——attempts=0 会让
+        range(1,1) 为空, 整个 DDL 被静默跳过却返回成功(fail-open,
+        定向复现); 非数字/NaN/Infinity/负数同样必须启动失败。
         """
+        import math
         import os as _os
         import time as _time
         # advisory lock key: 任意固定 bigint(仅用于会话存储迁移互斥)
         _LOCK_KEY = 0x636F6E76736D6967  # "convsmig"
-        attempts = int(_os.getenv("CONV_DDL_RETRY_ATTEMPTS", "5"))
-        backoff_base = float(_os.getenv("CONV_DDL_RETRY_BACKOFF_SECONDS",
-                                         "0.5"))
+
+        def _cfg(name, default, minimum):
+            raw = _os.getenv(name)
+            if raw is None or raw.strip() == "":
+                return default
+            try:
+                val = float(raw)
+            except ValueError:
+                raise ValueError(
+                    f"配置 {name}={raw!r} 不是数字——启动失败"
+                    f"(fail-fast), 合法范围 >= {minimum}, 缺省 {default}")
+            if math.isnan(val) or math.isinf(val) or val < minimum:
+                raise ValueError(
+                    f"配置 {name}={raw!r} 非法(NaN/Infinity/低于下限 "
+                    f"{minimum})——启动失败(fail-fast)")
+            return val
+
+        attempts = int(_cfg("CONV_DDL_RETRY_ATTEMPTS", 5, minimum=1))
+        backoff_base = _cfg("CONV_DDL_RETRY_BACKOFF_SECONDS", 0.5,
+                            minimum=0.0)
         for attempt in range(1, attempts + 1):
             try:
                 with self._get_conn() as conn:

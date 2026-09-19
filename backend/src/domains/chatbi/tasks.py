@@ -248,29 +248,9 @@ def acquire_lease_token(db, task_type: str, holder: str | None = None,
                 "expires_at TEXT NOT NULL, token BIGINT)")
             conn.execute(
                 "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq")
-            # 二十审 9.6 + 二十一审 5.6: 旧部署 ISO 租约的迁移全程用
-            # 数据库时钟。三步:
-            #   1) 可解析且未过期 → 原地转 epoch 保留持有权;
-            #   2) 可解析且已过期 → 删除;
-            #   3) 不可解析 → 保留并告警(fail-closed, 不猜测)。
-            conn.execute(
-                "UPDATE chatbi_scheduler_leases SET expires_at = "
-                "(extract(epoch FROM expires_at::timestamptz)*1000)::bigint::text "
-                "WHERE expires_at !~ '^[0-9]+$' "
-                "  AND expires_at ~ '^\\d{4}-' "
-                "  AND expires_at::timestamptz > now()")
-            conn.execute(
-                "DELETE FROM chatbi_scheduler_leases "
-                "WHERE expires_at !~ '^[0-9]+$' "
-                "  AND expires_at ~ '^\\d{4}-' "
-                "  AND expires_at::timestamptz <= now()")
-            _unparsable = conn.execute(
-                "SELECT task_type, expires_at FROM chatbi_scheduler_leases "
-                "WHERE expires_at !~ '^[0-9]+$'").fetchall()
-            for row in _unparsable or []:
-                logger.error("租约 %s 的过期时间不可解析(%r), fail-closed "
-                             "保留——请人工核查", row["task_type"],
-                             row["expires_at"])
+            # ISO expiry 迁移(三十审 P1-B 抽出为共享原语
+            # _migrate_lease_expiry, claim/renew 两条路径都执行)
+            _migrate_lease_expiry(conn)
             # now 由数据库给出并直接参与比较(跨主机时钟偏差免疫)
             # token 只在所有权变更时轮换(二十四审 6): 续租(同 holder)
             # 保持旧 token——否则每次心跳轮换会让并发 fenced 写被误拒;
@@ -313,6 +293,40 @@ def acquire_lease_token(db, task_type: str, holder: str | None = None,
         return None
 
 
+def _migrate_lease_expiry(conn) -> None:
+    """租约表 ISO 过期时间迁移(共享原语, 三十审 P1-B)。
+
+    二十审 9.6 + 二十一审 5.6 的三步迁移(数据库时钟判定):
+      1) 可解析且未过期 → 原地转 epoch 保留持有权(旧实例继续
+         有效, 新实例只能等它过期, 不双执行);
+      2) 可解析且已过期 → 删除(允许本次 claim 接管);
+      3) 不可解析 → 保留并告警(fail-closed, 不猜测)。
+    此前这段只在 acquire_lease_token(renew 路径)里, 二十九审新增
+    的 claim_lease_token 没有复用——升级前遗留的过期 ISO 执行租约
+    永远无法被新 claim 接管(真实复现: '2020-01-01T00:00:00+00:00'
+    的行挡住 RunLease, 任务持续"另一实例执行中"失败)。
+    必须在租约行写入前调用(同一事务内)。
+    """
+    conn.execute(
+        "UPDATE chatbi_scheduler_leases SET expires_at = "
+        "(extract(epoch FROM expires_at::timestamptz)*1000)::bigint::text "
+        "WHERE expires_at !~ '^[0-9]+$' "
+        "  AND expires_at ~ '^\\d{4}-' "
+        "  AND expires_at::timestamptz > now()")
+    conn.execute(
+        "DELETE FROM chatbi_scheduler_leases "
+        "WHERE expires_at !~ '^[0-9]+$' "
+        "  AND expires_at ~ '^\\d{4}-' "
+        "  AND expires_at::timestamptz <= now()")
+    _unparsable = conn.execute(
+        "SELECT task_type, expires_at FROM chatbi_scheduler_leases "
+        "WHERE expires_at !~ '^[0-9]+$'").fetchall()
+    for row in _unparsable or []:
+        logger.error("租约 %s 的过期时间不可解析(%r), fail-closed "
+                     "保留——请人工核查", row["task_type"],
+                     row["expires_at"])
+
+
 def claim_lease_token(db, task_type: str, holder: str,
                       ttl_seconds: int = 900) -> int | None:
     """执行期租约的**初次 claim**(二十九审 P2-A: 与 renew 分离)。
@@ -327,6 +341,9 @@ def claim_lease_token(db, task_type: str, holder: str,
       - 无行/已过期 → 插入/接管并**始终铸造新 token**(同 holder
         过期重获也换新代, 旧对象的旧 token 立即作废);
       - 原子 RETURNING 本次 token。
+    三十审 P1-B: 先执行 ISO expiry 迁移(与 renew 路径共享同一
+    原语)——过期 ISO 行被删除后本次 claim 可接管; 未来 ISO 保留
+    持有权; 不可解析 fail-closed 告警。
     """
     holder = holder or _scheduler_holder()
     if not ensure_lease_token_column(db):
@@ -341,6 +358,9 @@ def claim_lease_token(db, task_type: str, holder: str,
                 "expires_at TEXT NOT NULL, token BIGINT)")
             conn.execute(
                 "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq")
+            # ISO expiry 迁移(三十审 P1-B): 过期 ISO 删除 → 本次
+            # claim 可接管; 未来 ISO 转 epoch 保留持有权
+            _migrate_lease_expiry(conn)
             # 初次 claim: 只有无行或已过期行才允许进入; 同 holder 的
             # 未过期行同样拒绝(两个执行对象不得共享代际)
             row = conn.execute(

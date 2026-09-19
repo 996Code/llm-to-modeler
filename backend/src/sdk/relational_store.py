@@ -92,7 +92,14 @@ class PackRelationalDB:
 
     @contextmanager
     def connect(self) -> Iterator[Any]:
-        """借一条池连接并定向到本 pack 的 schema(事务级,结束自动还原)。"""
+        """借一条池连接并定向到本 pack 的 schema(事务级,结束自动还原)。
+
+        三十审 P1-A 注意: 本方法**只设置 search_path, 不创建 schema**。
+        PG 在首个 schema 不存在时会静默落到下一个(public)——全新库
+        上经此连接执行无前缀 CREATE TABLE 会把 pack 表建进 public,
+        schema 隔离失效。schema 的创建职责在 init_schema()/
+        migrate_locked(); 需要建表的迁移路径必须先确保 schema 存在。
+        """
         with self.engine.connect() as conn:
             # set_config 第 3 参 true = 事务级:借还/回滚后自动失效,
             # 池归还不残留跨 pack 的 search_path 污染
@@ -111,3 +118,32 @@ class PackRelationalDB:
                 conn.execute(stmt)
         logger.info("PackRelationalDB[%s]: schema ready (%d 条 DDL)",
                     self.pack_name, len(ddl_statements))
+
+    def migrate_locked(self, lock_key: int, migrate_fn) -> None:
+        """在事务级 advisory lock + schema 就绪保护下执行整段迁移。
+
+        三十审 P1-A: 此前 pack 侧为加锁绕过 init_schema 直接用
+        connect() 执行 DDL——但 connect() 只设置 search_path 不创建
+        schema, 全新库上所有无前缀 CREATE TABLE 静默落入 public
+        (真实 PG 复现: 表出现在 public, schema 隔离失效)。
+
+        本方法把三件事放进**同一事务**:
+          1) pg_advisory_xact_lock(lock_key): 并发实例排队(事务结束
+             自动释放, 异常不泄漏);
+          2) CREATE SCHEMA IF NOT EXISTS: schema 就绪(锁内创建, 无
+             并发窗口);
+          3) set_config search_path 事务级定向后执行 migrate_fn(conn)
+             ——migrate_fn 内的 DDL/数据迁移/索引全部落在 pack schema。
+
+        migrate_fn(conn) 的异常原样上抛(锁随事务回滚释放)。
+        """
+        with self.engine.connect() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (lock_key,))
+            conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
+            conn.execute(
+                "SELECT set_config('search_path', ?, true)",
+                (f"{self.schema},public",),
+            )
+            migrate_fn(conn)
+        logger.info("PackRelationalDB[%s]: locked migration done",
+                    self.pack_name)

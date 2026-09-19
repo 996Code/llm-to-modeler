@@ -3051,6 +3051,196 @@ class TestSameHolderReentry:
 
 
 # ════════════════════════════════════════════════════════════════
+# 三十审反例回归: 全新schema落表位置 / ISO expiry 三态 / 配置 fail-fast
+# ════════════════════════════════════════════════════════════════
+
+class TestFreshSchemaPlacement:
+    """P1-A: 全新库(schema 不存在)时 pack 表只能落在 pack schema.
+
+    真实复现: connect() 只设置 search_path 不创建 schema, 无前缀
+    CREATE TABLE 静默落入 public——schema 隔离失效。
+    """
+
+    def test_migrate_locked_creates_schema_and_places_tables(self):
+        """不存在的 schema: migrate_locked 锁内建 schema, 表落 pack
+        schema, public 中为 0."""
+        import uuid
+        from sdk.relational_store import PackRelationalDB
+        url = os.environ["TEST_DATABASE_URL"]
+        probe = f"r30t_{uuid.uuid4().hex[:8]}"
+        db = PackRelationalDB(probe, database_url=url)
+        try:
+            db.migrate_locked(
+                0x72333070726F62,
+                lambda conn: conn.execute(
+                    "CREATE TABLE IF NOT EXISTS audit_r30_probe (id TEXT)"))
+            with db.engine.connect() as c:
+                locs = c.execute(
+                    "SELECT table_schema FROM information_schema.tables "
+                    "WHERE table_name = 'audit_r30_probe'").fetchall()
+            schemas = [r["table_schema"] for r in locs]
+            assert schemas == [probe], (
+                f"表未落在 pack schema: {schemas}")
+            with db.engine.connect() as c:
+                in_public = c.execute(
+                    "SELECT COUNT(*) AS n FROM information_schema.tables "
+                    "WHERE table_schema = 'public' "
+                    "AND table_name = 'audit_r30_probe'").fetchone()
+            assert int(in_public["n"]) == 0, "表泄漏到 public"
+        finally:
+            with db.engine.connect() as c:
+                c.execute(f'DROP SCHEMA IF EXISTS "{probe}" CASCADE')
+
+    def test_init_pack_schema_on_fresh_schema(self):
+        """完整 _init_pack_schema 在全新 schema 上执行: 全部表落 chatbi
+        语义的 pack schema, public 无泄漏(用临时 pack 名隔离)."""
+        import uuid
+        from sdk.relational_store import PackRelationalDB
+        from domains.chatbi import runtime as rt
+        url = os.environ["TEST_DATABASE_URL"]
+        probe = f"r30p_{uuid.uuid4().hex[:8]}"
+        db = PackRelationalDB(probe, database_url=url)
+        try:
+            # 临时替换 PACK_NAME 派生的 lock key 不必要——migrate_locked
+            # 的 key 只需互斥; 直接跑完整迁移序列
+            rt._init_pack_schema(db)
+            with db.engine.connect() as c:
+                n_pack = c.execute(
+                    "SELECT COUNT(*) AS n FROM information_schema.tables "
+                    "WHERE table_schema = ?", (probe,)).fetchone()
+                n_public = c.execute(
+                    "SELECT COUNT(*) AS n FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_name LIKE "
+                    "'chatbi%'").fetchone()
+            assert int(n_pack["n"]) >= 15, (
+                f"pack schema 表数量异常: {n_pack['n']}")
+            assert int(n_public["n"]) == 0, "chatbi 表泄漏到 public"
+        finally:
+            with db.engine.connect() as c:
+                c.execute(f'DROP SCHEMA IF EXISTS "{probe}" CASCADE')
+
+
+class TestLegacyIsoExpiryClaim:
+    """P1-B: 旧 ISO 过期租约必须能被新 claim 接管(三态).
+
+    真实复现: '2020-01-01T00:00:00+00:00' 的过期 ISO 行挡住
+    RunLease, 任务持续"另一实例执行中"失败。
+    """
+
+    def test_expired_iso_claimable_with_new_token(self, pg_engine):
+        """过期 ISO → 删除并接管, 铸造新 token."""
+        from domains.chatbi.tasks import claim_lease_token
+        key = "run:semantic_write:iso30-exp"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+            c.execute(
+                "INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at) VALUES "
+                "(?, 'legacy-holder', '2020-01-01T00:00:00+00:00')",
+                (key,))
+        tok = claim_lease_token(pg_engine, key, holder="task:new",
+                                ttl_seconds=300)
+        assert tok is not None, "过期 ISO 租约无法接管(永久阻断)"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+
+    def test_future_iso_keeps_holder(self, pg_engine):
+        """未来 ISO → 转 epoch 保留持有权, 新 claim 拒绝."""
+        from domains.chatbi.tasks import claim_lease_token
+        key = "run:semantic_write:iso30-fut"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+            c.execute(
+                "INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at) VALUES "
+                "(?, 'legacy-holder', '2099-01-01T00:00:00+00:00')",
+                (key,))
+        tok = claim_lease_token(pg_engine, key, holder="task:new",
+                                ttl_seconds=300)
+        assert tok is None, "未来 ISO 被抢占(旧实例持有权丢失)"
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT expires_at FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+            assert row["expires_at"].isdigit(), (
+                f"未来 ISO 未转 epoch: {row['expires_at']}")
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+
+    def test_garbage_expiry_fail_closed(self, pg_engine):
+        """不可解析文本 → 保留原样 + 新 claim 拒绝(fail-closed)."""
+        from domains.chatbi.tasks import claim_lease_token
+        key = "run:semantic_write:iso30-bad"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+            c.execute(
+                "INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at) VALUES "
+                "(?, 'legacy-holder', 'not-a-date')", (key,))
+        tok = claim_lease_token(pg_engine, key, holder="task:new",
+                                ttl_seconds=300)
+        assert tok is None, "不可解析租约被接管(应 fail-closed)"
+        with pg_engine.connect() as c:
+            row = c.execute(
+                "SELECT expires_at FROM chatbi_scheduler_leases "
+                "WHERE task_type=?", (key,)).fetchone()
+            assert row["expires_at"] == "not-a-date", (
+                "不可解析值被改动(应保留原样)")
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type=?", (key,))
+
+
+class TestRetryConfigFailFast:
+    """P2-C: 重试配置非法值必须启动失败(attempts=0 是 fail-open)."""
+
+    def test_invalid_conv_retry_configs_raise(self, monkeypatch):
+        from services import conversation_store as cs_mod
+        for bad in ["0", "-3", "abc", "NaN", "Infinity"]:
+            monkeypatch.setenv("CONV_DDL_RETRY_ATTEMPTS", bad)
+            try:
+                cs_mod.ConversationStore._init_db(
+                    type("S", (), {"_get_conn": None,
+                                   "_DDL": []})())
+                raise AssertionError(
+                    f"CONV_DDL_RETRY_ATTEMPTS={bad!r} 未被拒绝")
+            except ValueError:
+                pass
+            except TypeError:
+                # _get_conn=None 在校验通过后才会触发——校验先于连接
+                raise AssertionError(
+                    f"非法配置 {bad!r} 通过了校验(走到了连接阶段)")
+        monkeypatch.delenv("CONV_DDL_RETRY_ATTEMPTS", raising=False)
+
+    def test_invalid_pack_retry_configs_raise(self, monkeypatch):
+        from domains.chatbi import runtime as rt
+        for bad in ["0", "-1", "xyz", "NaN", "Infinity"]:
+            monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", bad)
+            try:
+                rt._retry_config("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
+                raise AssertionError(
+                    f"PACK_DDL_RETRY_ATTEMPTS={bad!r} 未被拒绝")
+            except ValueError:
+                pass
+        monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
+
+    def test_valid_retry_configs_accepted(self, monkeypatch):
+        from domains.chatbi import runtime as rt
+        monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "3")
+        assert rt._retry_config("PACK_DDL_RETRY_ATTEMPTS", 5,
+                                minimum=1) == 3
+        monkeypatch.setenv("PACK_DDL_RETRY_BACKOFF_SECONDS", "0")
+        assert rt._retry_config("PACK_DDL_RETRY_BACKOFF_SECONDS",
+                                3.0, minimum=0.0) == 0
+        monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
+        monkeypatch.delenv("PACK_DDL_RETRY_BACKOFF_SECONDS",
+                           raising=False)
+
+
+# ════════════════════════════════════════════════════════════════
 # 二十六审反例回归: 迁移失败 fail-closed / 事件写失败可观测
 # ════════════════════════════════════════════════════════════════
 
