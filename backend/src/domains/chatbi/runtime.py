@@ -69,13 +69,16 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
     from domains.chatbi.m4 import M4_DDL
     from domains.chatbi.query_stats import QUERY_STATS_DDL
     from domains.chatbi.graph_infer import WATERMARK_DDL
-    import os as _os
+    from sdk.env_config import parse_int_env, parse_float_env
     import time as _time
     # pack 名派生的 advisory lock key(固定 bigint, 仅用于 pack 迁移互斥)
     _lock_key = 0x7061636B0000 + (zlib.crc32(PACK_NAME.encode()) & 0xFFFF)
-    attempts = _retry_config("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
-    backoff_base = _retry_config("PACK_DDL_RETRY_BACKOFF_SECONDS",
-                                  3.0, minimum=0.0)
+    # 三十一审 P1-A: 次数用严格 int parser(backoff 用 float)——
+    # 此前共用无类型 float helper, 合法配置 5 被解析成 5.0 进
+    # range() 抛 TypeError, 真实 Uvicorn 上 ChatBI 全部 API 500
+    attempts = parse_int_env("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
+    backoff_base = parse_float_env("PACK_DDL_RETRY_BACKOFF_SECONDS",
+                                   3.0, minimum=0.0)
     ddl = (list(CHATBI_DDL) + list(CHATBI_RETRIEVAL_DDL)
            + list(CHATBI_MEMORY_DDL) + list(M4_DDL)
            + list(QUERY_STATS_DDL) + list(WATERMARK_DDL))
@@ -109,28 +112,11 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
 
 
 def _retry_config(name: str, default: float, minimum: float) -> float:
-    """重试参数解析(env > 默认), 非法值 fail-fast(三十审 P2-C)。
-
-    attempts=0 会让 range(1, 1) 为空——整个迁移被静默跳过却返回
-    成功(fail-open); 非数字/NaN/Infinity/低于下限同样必须启动
-    失败并给出明确配置错误, 不能静默修正。
+    """兼容保留(三十审 P2-C 引入)——三十一审 P1-A 起统一走
+    sdk.env_config 强类型 parser。次数类配置请用 parse_int_env。
     """
-    import math
-    import os
-    raw = os.getenv(name)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        val = float(raw)
-    except ValueError:
-        raise ValueError(
-            f"配置 {name}={raw!r} 不是数字——启动失败(fail-fast), "
-            f"合法范围 >= {minimum}, 缺省 {default}")
-    if math.isnan(val) or math.isinf(val) or val < minimum:
-        raise ValueError(
-            f"配置 {name}={raw!r} 非法(NaN/Infinity/低于下限 "
-            f"{minimum})——启动失败(fail-fast)")
-    return val
+    from sdk.env_config import parse_float_env
+    return parse_float_env(name, default, minimum)
 
 
 def _migrate_single_current_on_conn(conn) -> None:

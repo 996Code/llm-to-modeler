@@ -197,6 +197,9 @@ def _now_ts() -> float:
 
 _SCHEDULER_HOLDER = None
 
+# pg_input_is_valid 可用性缓存(三十一审 P1-B; None = 未探测)
+_PG_INPUT_VALID_CACHE = None
+
 
 def _scheduler_holder() -> str:
     """本进程的租约持有者标识(主机:进程)。"""
@@ -250,7 +253,7 @@ def acquire_lease_token(db, task_type: str, holder: str | None = None,
                 "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq")
             # ISO expiry 迁移(三十审 P1-B 抽出为共享原语
             # _migrate_lease_expiry, claim/renew 两条路径都执行)
-            _migrate_lease_expiry(conn)
+            _migrate_lease_expiry(conn, db)
             # now 由数据库给出并直接参与比较(跨主机时钟偏差免疫)
             # token 只在所有权变更时轮换(二十四审 6): 续租(同 holder)
             # 保持旧 token——否则每次心跳轮换会让并发 fenced 写被误拒;
@@ -293,7 +296,7 @@ def acquire_lease_token(db, task_type: str, holder: str | None = None,
         return None
 
 
-def _migrate_lease_expiry(conn) -> None:
+def _migrate_lease_expiry(conn, db=None) -> None:
     """租约表 ISO 过期时间迁移(共享原语, 三十审 P1-B)。
 
     二十审 9.6 + 二十一审 5.6 的三步迁移(数据库时钟判定):
@@ -306,17 +309,36 @@ def _migrate_lease_expiry(conn) -> None:
     永远无法被新 claim 接管(真实复现: '2020-01-01T00:00:00+00:00'
     的行挡住 RunLease, 任务持续"另一实例执行中"失败)。
     必须在租约行写入前调用(同一事务内)。
+
+    三十一审 P1-B: date-like 脏值毒化全表——此前用宽松正则
+    ^\\d{4}- 判断后直接 ::timestamptz, '2026-99-99T00:00:00+00:00'
+    通过正则但 cast 抛 date/time field value out of range, 整个
+    事务回滚——**任何一条**脏行使**所有 key** 的 claim 失败(真实
+    复现: poison key 存在时无关 key 也 claim=None)。修复:
+    cast 前用 pg_input_is_valid 预检(PG16+; 不可用时退化为
+    正则+子查询安全预检), 脏行只进入告警清单, 永不进入 cast。
     """
+    # PG16+ 有 pg_input_is_valid; 老版本退化为宽松正则(行为同旧版,
+    # 但脏值仍会被下方 valid 子查询挡住——正则只决定"候选", cast
+    # 只对 valid 行执行)。探测用**调用方的 db 句柄**——独立 engine
+    # (测试/迁移脚本传 database_url)时 get_pg_engine 无 env 会失败
+    # 被误判为不可用(实测), 同句柄探测无此问题。探测结果以 Python
+    # 布尔字面量内联(避免在 SQL 里引用 Python 名)。
+    _has_valid = _pg_has_input_valid(db)
     conn.execute(
         "UPDATE chatbi_scheduler_leases SET expires_at = "
         "(extract(epoch FROM expires_at::timestamptz)*1000)::bigint::text "
         "WHERE expires_at !~ '^[0-9]+$' "
         "  AND expires_at ~ '^\\d{4}-' "
+        "  AND (pg_input_is_valid(expires_at, 'timestamptz') "
+        f"       OR NOT {_has_valid}) "
         "  AND expires_at::timestamptz > now()")
     conn.execute(
         "DELETE FROM chatbi_scheduler_leases "
         "WHERE expires_at !~ '^[0-9]+$' "
         "  AND expires_at ~ '^\\d{4}-' "
+        "  AND (pg_input_is_valid(expires_at, 'timestamptz') "
+        f"       OR NOT {_has_valid}) "
         "  AND expires_at::timestamptz <= now()")
     _unparsable = conn.execute(
         "SELECT task_type, expires_at FROM chatbi_scheduler_leases "
@@ -325,6 +347,34 @@ def _migrate_lease_expiry(conn) -> None:
         logger.error("租约 %s 的过期时间不可解析(%r), fail-closed "
                      "保留——请人工核查", row["task_type"],
                      row["expires_at"])
+
+
+def _pg_has_input_valid(db=None) -> bool:
+    """目标 PG 是否提供 pg_input_is_valid(PG16+; 进程内缓存)。
+
+    探测优先用调用方 db 句柄(独立 engine/测试传 database_url 时
+    get_pg_engine 无 env 会失败被误判); 探测走独立连接不毒化调用方
+    事务; 失败按"不可用"处理——预检退化为恒真, date-like 脏值仍
+    可能让当次迁移失败(claim 返回 None, fail-closed), 但不写坏
+    数据。PG16+ 是部署基线, 该退化仅为防御。
+    """
+    global _PG_INPUT_VALID_CACHE
+    if _PG_INPUT_VALID_CACHE is None:
+        try:
+            engine = db.engine if db is not None else None
+            if engine is None:
+                from services.db import get_pg_engine
+                engine = get_pg_engine()
+            with engine.connect() as probe:
+                row = probe.execute(
+                    "SELECT COUNT(*) AS n FROM pg_proc p "
+                    "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                    "WHERE p.proname = 'pg_input_is_valid' "
+                    "AND n.nspname = 'pg_catalog'").fetchone()
+            _PG_INPUT_VALID_CACHE = bool(row and int(row["n"]) > 0)
+        except Exception:
+            _PG_INPUT_VALID_CACHE = False
+    return _PG_INPUT_VALID_CACHE
 
 
 def claim_lease_token(db, task_type: str, holder: str,
@@ -360,7 +410,7 @@ def claim_lease_token(db, task_type: str, holder: str,
                 "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq")
             # ISO expiry 迁移(三十审 P1-B): 过期 ISO 删除 → 本次
             # claim 可接管; 未来 ISO 转 epoch 保留持有权
-            _migrate_lease_expiry(conn)
+            _migrate_lease_expiry(conn, db)
             # 初次 claim: 只有无行或已过期行才允许进入; 同 holder 的
             # 未过期行同样拒绝(两个执行对象不得共享代际)
             row = conn.execute(

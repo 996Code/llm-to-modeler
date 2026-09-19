@@ -3241,6 +3241,136 @@ class TestRetryConfigFailFast:
 
 
 # ════════════════════════════════════════════════════════════════
+# 三十一审反例回归: 合法配置真执行 / date-like 脏租约隔离 / 小数拒绝
+# ════════════════════════════════════════════════════════════════
+
+class TestValidConfigRealExecution:
+    """P1-A: 合法 PACK_DDL_RETRY_ATTEMPTS=5 必须真正可执行(不是数值相等).
+
+    三十一审真实复现: float 解析让 range(1, 5.0+1) 抛 TypeError,
+    真实 Uvicorn 上 ChatBI 全部 API 500 而 /health 仍 200。
+    """
+
+    def test_valid_attempts_full_migration(self, monkeypatch):
+        """PACK_DDL_RETRY_ATTEMPTS=5 + 完整 _init_pack_schema 真执行."""
+        import uuid
+        from sdk.relational_store import PackRelationalDB
+        from domains.chatbi import runtime as rt
+        monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "5")
+        monkeypatch.setenv("PACK_DDL_RETRY_BACKOFF_SECONDS", "0.1")
+        url = os.environ["TEST_DATABASE_URL"]
+        probe = f"r31t_{uuid.uuid4().hex[:8]}"
+        db = PackRelationalDB(probe, database_url=url)
+        try:
+            rt._init_pack_schema(db)   # 不抛 = range() 类型正确
+            with db.engine.connect() as c:
+                n_pack = c.execute(
+                    "SELECT COUNT(*) AS n FROM information_schema.tables "
+                    "WHERE table_schema = ?", (probe,)).fetchone()
+            assert int(n_pack["n"]) >= 15, (
+                f"迁移未真正执行: {n_pack['n']} 表")
+        finally:
+            with db.engine.connect() as c:
+                c.execute(f'DROP SCHEMA IF EXISTS "{probe}" CASCADE')
+        monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
+        monkeypatch.delenv("PACK_DDL_RETRY_BACKOFF_SECONDS",
+                           raising=False)
+
+    def test_int_parser_strict_types(self, monkeypatch):
+        """parse_int_env 返回 int; 小数/科学计数拒绝."""
+        from sdk.env_config import parse_int_env
+        monkeypatch.setenv("R31_TEST_INT", "5")
+        v = parse_int_env("R31_TEST_INT", 3, minimum=1)
+        assert v == 5 and type(v) is int, f"类型回归: {type(v)}"
+        for bad in ["1.9", "5.0", "1e3", "0x10"]:
+            monkeypatch.setenv("R31_TEST_INT", bad)
+            try:
+                parse_int_env("R31_TEST_INT", 3, minimum=1)
+                raise AssertionError(f"{bad!r} 未被 int parser 拒绝")
+            except ValueError:
+                pass
+        monkeypatch.delenv("R31_TEST_INT", raising=False)
+
+    def test_conv_attempts_fraction_rejected(self, monkeypatch):
+        """P3-C: CONV_DDL_RETRY_ATTEMPTS=1.9 必须拒绝(不静默截断)."""
+        from services import conversation_store as cs_mod
+        monkeypatch.setenv("CONV_DDL_RETRY_ATTEMPTS", "1.9")
+        try:
+            cs_mod.ConversationStore._init_db(
+                type("S", (), {"_get_conn": None, "_DDL": []})())
+            raise AssertionError("1.9 被静默截断(未拒绝)")
+        except ValueError:
+            pass
+        monkeypatch.delenv("CONV_DDL_RETRY_ATTEMPTS", raising=False)
+
+
+class TestDateLikePoisonIsolation:
+    """P1-B: date-like 脏租约只阻断自身 key, 不毒化全表 claim.
+
+    真实复现: '2026-99-99T00:00:00+00:00' 通过宽松正则但 cast 抛
+    out of range, 整个事务回滚——任何一条脏行使所有 key 失败。
+    """
+
+    def test_poison_row_isolated_to_own_key(self, pg_engine):
+        from domains.chatbi.tasks import claim_lease_token
+        poison = "audit:r31:poison-t"
+        other = "audit:r31:unrelated-t"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type IN (?, ?)", (poison, other))
+            c.execute(
+                "INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at) VALUES "
+                "(?, 'h', '2026-99-99T00:00:00+00:00')", (poison,))
+        try:
+            # 无关 key 的 claim 必须成功(不被毒化)
+            tok = claim_lease_token(pg_engine, other, holder="task:x",
+                                   ttl_seconds=300)
+            assert tok is not None, "date-like 脏行毒化了无关 key"
+            # poison 行保留原样(fail-closed, 不被改动)
+            with pg_engine.connect() as c:
+                row = c.execute(
+                    "SELECT expires_at FROM chatbi_scheduler_leases "
+                    "WHERE task_type = ?", (poison,)).fetchone()
+            assert row["expires_at"] == "2026-99-99T00:00:00+00:00", (
+                "脏行被改动(应保留原样)")
+            # poison 自身 key 的 claim 拒绝(脏行只阻断自身)
+            tok2 = claim_lease_token(pg_engine, poison, holder="task:x",
+                                     ttl_seconds=300)
+            assert tok2 is None, "脏 key 的 claim 不该成功"
+        finally:
+            with pg_engine.connect() as c:
+                c.execute("DELETE FROM chatbi_scheduler_leases "
+                          "WHERE task_type IN (?, ?)", (poison, other))
+
+    def test_more_date_like_poisons_isolated(self, pg_engine):
+        """更多 date-like 变体: 超范围月/日、非日期文本、超长数字."""
+        from domains.chatbi.tasks import claim_lease_token
+        poisons = [
+            "2026-13-01T00:00:00+00:00",
+            "2026-99-99T00:00:00+00:00",
+            "2026-01-32T00:00:00+00:00",
+            "9999-99-99",
+        ]
+        other = "audit:r31:unrelated-v"
+        with pg_engine.connect() as c:
+            for i, p in enumerate(poisons):
+                c.execute(
+                    "INSERT INTO chatbi_scheduler_leases "
+                    "(task_type, holder, expires_at) VALUES "
+                    "(?, 'h', ?)", (f"audit:r31:poison-v{i}", p))
+        try:
+            tok = claim_lease_token(pg_engine, other, holder="task:x",
+                                    ttl_seconds=300)
+            assert tok is not None, (
+                f"date-like 变体毒化无关 key: {poisons}")
+        finally:
+            with pg_engine.connect() as c:
+                c.execute("DELETE FROM chatbi_scheduler_leases "
+                          "WHERE task_type LIKE 'audit:r31:%'")
+
+
+# ════════════════════════════════════════════════════════════════
 # 二十六审反例回归: 迁移失败 fail-closed / 事件写失败可观测
 # ════════════════════════════════════════════════════════════════
 

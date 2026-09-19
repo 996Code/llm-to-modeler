@@ -204,32 +204,17 @@ class ConversationStore:
         三十审 P2-C: 重试参数 fail-fast 校验——attempts=0 会让
         range(1,1) 为空, 整个 DDL 被静默跳过却返回成功(fail-open,
         定向复现); 非数字/NaN/Infinity/负数同样必须启动失败。
+        三十一审 P1-A/P3-C: 统一走 sdk.env_config 强类型 parser——
+        此前本类用 float()+int() 截断, `1.9` 被静默变成 1; 次数
+        必须严格整数字符串。
         """
-        import math
-        import os as _os
+        from sdk.env_config import parse_int_env, parse_float_env
         import time as _time
         # advisory lock key: 任意固定 bigint(仅用于会话存储迁移互斥)
         _LOCK_KEY = 0x636F6E76736D6967  # "convsmig"
-
-        def _cfg(name, default, minimum):
-            raw = _os.getenv(name)
-            if raw is None or raw.strip() == "":
-                return default
-            try:
-                val = float(raw)
-            except ValueError:
-                raise ValueError(
-                    f"配置 {name}={raw!r} 不是数字——启动失败"
-                    f"(fail-fast), 合法范围 >= {minimum}, 缺省 {default}")
-            if math.isnan(val) or math.isinf(val) or val < minimum:
-                raise ValueError(
-                    f"配置 {name}={raw!r} 非法(NaN/Infinity/低于下限 "
-                    f"{minimum})——启动失败(fail-fast)")
-            return val
-
-        attempts = int(_cfg("CONV_DDL_RETRY_ATTEMPTS", 5, minimum=1))
-        backoff_base = _cfg("CONV_DDL_RETRY_BACKOFF_SECONDS", 0.5,
-                            minimum=0.0)
+        attempts = parse_int_env("CONV_DDL_RETRY_ATTEMPTS", 5, minimum=1)
+        backoff_base = parse_float_env("CONV_DDL_RETRY_BACKOFF_SECONDS",
+                                       0.5, minimum=0.0)
         for attempt in range(1, attempts + 1):
             try:
                 with self._get_conn() as conn:
