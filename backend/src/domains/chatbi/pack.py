@@ -13,7 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 def create_registry(app_state=None) -> ToolRegistry:
-    """工具注册表(app_state 由装配层注入;工具内懒建 pack 存储)。"""
+    """工具注册表(app_state 由装配层注入;工具内懒建 pack 存储)。
+
+    三十二审 P2: 装配期即校验 pack 运行配置(PACK_DDL_RETRY_* 等)
+    ——非法值(如 attempts=1.9)在 pack 装配时抛 ValueError, 不再等
+    首次业务请求才 500(fail-fast 名实相符)。
+    """
+    from domains.chatbi.runtime import validate_pack_runtime_config
+    validate_pack_runtime_config()
     registry = ToolRegistry()
     try:
         from domains.chatbi.tools.ask_data import AskDataTool

@@ -111,6 +111,53 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
             raise
 
 
+def validate_pack_runtime_config() -> None:
+    """pack 运行配置的启动期校验(三十二审 P2: fail-fast 名实相符)。
+
+    此前 PACK_DDL_RETRY_* 只在首次访问 pack DB(_init_pack_schema)
+    时才解析——非法值(如 attempts=1.9)让服务正常启动, 首次业务
+    请求才 500, 与代码注释声称的"启动失败(fail-fast)"不符。
+    本函数在 pack 装配阶段(create_registry)调用, 非法配置直接
+    阻止 pack 就绪——错误在启动日志可见, 不等流量进来才发现。
+
+    三十二审 P3: PostgreSQL 16 为硬性运行要求(租约脏数据隔离
+    依赖 pg_input_is_valid, PG15 及以下无该函数且无法用
+    `fn() OR TRUE` 绕过解析期 UndefinedFunction)。装配期探测
+    目标库版本, 不满足直接阻止 pack 就绪——比名义 fallback
+    (运行期静默退化成不安全分支)诚实且安全。
+    """
+    from sdk.env_config import parse_int_env, parse_float_env
+    parse_int_env("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
+    parse_float_env("PACK_DDL_RETRY_BACKOFF_SECONDS", 3.0, minimum=0.0)
+    _require_pg16()
+
+
+def _require_pg16() -> None:
+    """校验目标 PostgreSQL >= 16(装配期; 失败抛 ValueError)。
+
+    探测失败(库不可达)不在装配期硬拒——部署顺序上 pack 装配可能
+    早于 DB 就绪; 版本确认延迟到首次真实连接(租约探测路径),
+    但 PG<16 一旦确认即 fail-closed(租约迁移跳过+告警), 不会
+    静默走不安全分支。
+    """
+    try:
+        db = get_pack_db()
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT current_setting('server_version_num') AS v"
+            ).fetchone()
+    except Exception as e:
+        logger.warning("PostgreSQL 版本探测失败(装配期跳过, 首次"
+                       "连接时再确认): %s", e)
+        return
+    ver = int(row["v"]) if row else 0
+    if ver < 160000:
+        raise ValueError(
+            f"chatbi 需要 PostgreSQL >= 16(当前 {ver // 10000}.{ver % 10000 // 100}, "
+            f"server_version_num={ver})——租约脏数据隔离依赖 "
+            f"pg_input_is_valid(PG16+)。请升级数据库或回退应用版本")
+
+
 def _retry_config(name: str, default: float, minimum: float) -> float:
     """兼容保留(三十审 P2-C 引入)——三十一审 P1-A 起统一走
     sdk.env_config 强类型 parser。次数类配置请用 parse_int_env。

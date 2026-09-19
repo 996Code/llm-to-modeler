@@ -3216,11 +3216,11 @@ class TestRetryConfigFailFast:
         monkeypatch.delenv("CONV_DDL_RETRY_ATTEMPTS", raising=False)
 
     def test_invalid_pack_retry_configs_raise(self, monkeypatch):
-        from domains.chatbi import runtime as rt
-        for bad in ["0", "-1", "xyz", "NaN", "Infinity"]:
+        from sdk.env_config import parse_int_env
+        for bad in ["0", "-1", "xyz", "NaN", "Infinity", "1.9"]:
             monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", bad)
             try:
-                rt._retry_config("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
+                parse_int_env("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
                 raise AssertionError(
                     f"PACK_DDL_RETRY_ATTEMPTS={bad!r} 未被拒绝")
             except ValueError:
@@ -3228,16 +3228,77 @@ class TestRetryConfigFailFast:
         monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
 
     def test_valid_retry_configs_accepted(self, monkeypatch):
-        from domains.chatbi import runtime as rt
+        from sdk.env_config import parse_int_env, parse_float_env
         monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "3")
-        assert rt._retry_config("PACK_DDL_RETRY_ATTEMPTS", 5,
-                                minimum=1) == 3
+        v = parse_int_env("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
+        assert v == 3 and type(v) is int
         monkeypatch.setenv("PACK_DDL_RETRY_BACKOFF_SECONDS", "0")
-        assert rt._retry_config("PACK_DDL_RETRY_BACKOFF_SECONDS",
-                                3.0, minimum=0.0) == 0
+        assert parse_float_env("PACK_DDL_RETRY_BACKOFF_SECONDS",
+                               3.0, minimum=0.0) == 0
         monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
         monkeypatch.delenv("PACK_DDL_RETRY_BACKOFF_SECONDS",
                            raising=False)
+
+    def test_assembly_rejects_invalid_pack_config(self, monkeypatch):
+        """三十二审 P2: 非法配置在 pack 装配期被拒(不等首次请求)."""
+        from domains.chatbi.runtime import validate_pack_runtime_config
+        from domains.chatbi import runtime as rt
+        # 屏蔽版本探测(本测试只验证配置解析层)
+        monkeypatch.setattr(rt, "_require_pg16", lambda: None)
+        monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "1.9")
+        try:
+            validate_pack_runtime_config()
+            raise AssertionError("1.9 在装配期未被拒绝")
+        except ValueError:
+            pass
+        monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "5")
+        validate_pack_runtime_config()   # 合法值通过
+        monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
+
+    def test_pg16_required_at_assembly(self, monkeypatch):
+        """三十二审 P3: PG<16 在装配期被拒(硬性版本要求)."""
+        from domains.chatbi import runtime as rt
+
+        class _Row(dict):
+            pass
+
+        class _Conn:
+            def __init__(self, version_num):
+                self._v = version_num
+
+            def execute(self, sql, *a):
+                row = _Row(v=self._v)
+                row.fetchone = lambda: row
+                return row
+
+        class _DB:
+            def __init__(self, version_num):
+                self._v = version_num
+
+            def connect(self):
+                import contextlib
+
+                @contextlib.contextmanager
+                def _c():
+                    yield _Conn(self._v)
+                return _c()
+
+        monkeypatch.setattr(rt, "get_pack_db",
+                            lambda: _DB(150000))   # PG15
+        try:
+            rt._require_pg16()
+            raise AssertionError("PG15 未被版本校验拒绝")
+        except ValueError as e:
+            assert "PostgreSQL" in str(e)
+        # PG16 通过
+        monkeypatch.setattr(rt, "get_pack_db",
+                            lambda: _DB(160004))   # PG16.4
+        rt._require_pg16()
+        # 探测失败(DB 未就绪)不硬拒——装配期跳过
+        def _fail_db():
+            raise ConnectionError("db not ready")
+        monkeypatch.setattr(rt, "get_pack_db", _fail_db)
+        rt._require_pg16()   # 不抛
 
 
 # ════════════════════════════════════════════════════════════════
@@ -3368,6 +3429,82 @@ class TestDateLikePoisonIsolation:
             with pg_engine.connect() as c:
                 c.execute("DELETE FROM chatbi_scheduler_leases "
                           "WHERE task_type LIKE 'audit:r31:%'")
+
+    def test_probe_unknown_fail_closed_no_cast(self, pg_engine, monkeypatch):
+        """三十二审 P1: 探测未知(异常/无连接)→ 不迁移任何候选行,
+        脏值绝不进 cast——fail-closed 而非退化恒真分支."""
+        import domains.chatbi.tasks as t
+        poison = "audit:r32:probe-unknown"
+        other = "audit:r32:probe-other"
+        with pg_engine.connect() as c:
+            c.execute("DELETE FROM chatbi_scheduler_leases "
+                      "WHERE task_type IN (?, ?)", (poison, other))
+            # 一条未来 ISO(合法候选, 探测正常时会转 epoch)
+            c.execute(
+                "INSERT INTO chatbi_scheduler_leases "
+                "(task_type, holder, expires_at) VALUES "
+                "(?, 'h', '2099-01-01T00:00:00+00:00')", (poison,))
+        # 注入探测异常: 不缓存, 返回 None(未知)
+        monkeypatch.setattr(t, "_pg_has_input_valid",
+                            lambda conn=None: None)
+        try:
+            # 无关 key 的 claim 仍成功(fail-closed 只跳过迁移)
+            tok = t.claim_lease_token(pg_engine, other,
+                                      holder="task:x", ttl_seconds=300)
+            assert tok is not None, "探测未知毒化了无关 key"
+            # 候选行保留原样(未迁移——探测未知时不 cast)
+            with pg_engine.connect() as c:
+                row = c.execute(
+                    "SELECT expires_at FROM chatbi_scheduler_leases "
+                    "WHERE task_type = ?", (poison,)).fetchone()
+            assert row["expires_at"] == "2099-01-01T00:00:00+00:00", (
+                "探测未知时候选行被迁移(应 fail-closed 保留)")
+        finally:
+            with pg_engine.connect() as c:
+                c.execute("DELETE FROM chatbi_scheduler_leases "
+                          "WHERE task_type IN (?, ?)", (poison, other))
+
+    def test_pool1_poison_isolation(self):
+        """三十二审 P1 真实场景: 单连接池下, 脏租约存在时无关 key
+        快速 claim 成功(不等待嵌套连接的 pool timeout).
+
+        复现条件(上轮真实复现): PG_POOL_MIN=1/MAX=1/TIMEOUT=1,
+        elapsed≈1.03s + date/time out of range。修复后探测复用已
+        持有连接, 无嵌套申请。
+        """
+        import time
+        from sdk.relational_store import PackRelationalDB
+        import domains.chatbi.tasks as t
+        url = os.environ["TEST_DATABASE_URL"]
+        db = PackRelationalDB("chatbi", database_url=url)
+        # 单连接池: 直接限制共享池 max(独立 engine, 不影响其它测试)
+        try:
+            db.engine._pool._max_size = 1
+        except Exception:
+            pass
+        t._PG_INPUT_VALID_CACHE = None
+        poison = "audit:r32:pool1-poison"
+        other = "audit:r32:pool1-other"
+        try:
+            with db.connect() as c:
+                c.execute("DELETE FROM chatbi_scheduler_leases "
+                          "WHERE task_type IN (?, ?)", (poison, other))
+                c.execute(
+                    "INSERT INTO chatbi_scheduler_leases "
+                    "(task_type, holder, expires_at) VALUES "
+                    "(?, 'h', '2026-99-99T00:00:00+00:00')", (poison,))
+            t0 = time.time()
+            tok = t.claim_lease_token(db, other, holder="task:x",
+                                      ttl_seconds=300)
+            elapsed = time.time() - t0
+            assert tok is not None, "pool=1 下无关 key claim 失败"
+            assert elapsed < 0.5, (
+                f"pool=1 下 claim 耗时 {elapsed:.2f}s(疑似等待了嵌套"
+                f"连接的 pool timeout)")
+        finally:
+            with db.connect() as c:
+                c.execute("DELETE FROM chatbi_scheduler_leases "
+                          "WHERE task_type IN (?, ?)", (poison, other))
 
 
 # ════════════════════════════════════════════════════════════════
