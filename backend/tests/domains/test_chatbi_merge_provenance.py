@@ -3493,6 +3493,64 @@ class TestHotReloadAtomicity:
             for i in range(len(order) - 1))
         assert not nested, f"装配临界区出现交错: {order}"
 
+    def test_toggle_and_assemble_same_lock(self):
+        """三十四审自查: toggle(set_enabled)与装配必须在同一锁内.
+
+        此前 set_enabled 在锁外——两个管理员交错时, A 的回滚会
+        覆盖 B 刚写入的状态(B 正在锁内按旧 snapshot 装配, 状态
+        文件却被 A 改掉)。
+        """
+        import threading
+        import time
+        from services.pack_manager import hot_reload_lock
+        order = []
+        lock = hot_reload_lock()
+
+        def admin(i):
+            with lock:
+                order.append(f"{i}-toggle")
+                time.sleep(0.05)
+                order.append(f"{i}-assemble")
+
+        ta = threading.Thread(target=admin, args=("a",))
+        tb = threading.Thread(target=admin, args=("b",))
+        ta.start()
+        tb.start()
+        ta.join()
+        tb.join()
+        # 每个管理员的 toggle 和 assemble 相邻(不被对方插入)
+        assert order in (
+            ["a-toggle", "a-assemble", "b-toggle", "b-assemble"],
+            ["b-toggle", "b-assemble", "a-toggle", "a-assemble"]), (
+            f"toggle/装配交错: {order}")
+
+    def test_admin_toggle_code_in_lock(self):
+        """静态防回退锚: admin toggle 端点的 set_enabled 在锁内.
+
+        set_enabled 挪回锁外会重新打开交错窗口。
+        """
+        import inspect
+        from api import admin as admin_mod
+        fn = None
+        for _name, obj in inspect.getmembers(admin_mod,
+                                             inspect.isfunction):
+            try:
+                body = inspect.getsource(obj)
+            except (OSError, TypeError):
+                continue
+            if ("set_enabled" in body and "assemble_packs" in body
+                    and "hot_reload_lock" in body):
+                fn = obj
+                break
+        assert fn is not None, "未找到 toggle 端点(含 set_enabled + assemble)"
+        body = inspect.getsource(fn)
+        lock_pos = body.find("with hot_reload_lock():")
+        toggle_pos = body.find("set_enabled(name, enabled)")
+        assemble_pos = body.find("assemble_packs(")
+        assert 0 <= lock_pos < toggle_pos, (
+            "set_enabled 不在 hot_reload_lock 内(交错窗口重新打开)")
+        assert toggle_pos < assemble_pos, "装配不在 toggle 之后"
+
     def test_pg16_required_at_assembly(self, monkeypatch):
         """三十三审 P2: PG<16 / 探测失败都在装配期被拒(fail-closed).
 

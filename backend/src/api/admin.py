@@ -501,25 +501,21 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
                 f"请在 .env 配置或在插件设置页补配后重试。",
             )
 
-    changed = pack_state.set_enabled(name, enabled)
-    # 审计留痕:插件启停改变引擎装配面与对外路由,失败时只看状态文件无法还原
-    # "何时被谁改过",记一条 info(成功/失败由后续 hot-reload 日志与状态文件共同佐证)
-    logger.info(f"pack toggled: {name} enabled={enabled} changed={changed}")
-    result = {"changed": changed, **_packs_payload(request)}
-    # 无论状态是否变化都重新装配:装配幂等(importlib 有模块缓存,开销毫秒级),
-    # 且能自愈"上次状态已落盘但装配失败"的残留(否则引擎与状态不一致要到重启才恢复)
-    # app 透传:同步挂载/卸载该 pack 的自有 API 路由
-    #
-    # 三十四审 P2: 热切换原子性——
-    #   1) 装配总锁: 两个管理员并发启停时, "读 enabled 集合 → 装配 →
-    #      挂 API/任务"整段串行化(此前只有 PackState 文件锁和 API
-    #      mount 局部锁, 两个 assemble 可交错, 状态文件/registry/
-    #      handler/routes 不一定来自同一份 snapshot);
-    #   2) 失败回滚: 装配失败时恢复 toggled 前的状态文件(此前状态
-    #      已落盘但引擎还是旧装配——"State saved but hot-reload
-    #      failed"的半成功态, 状态文件与运行态不一致到重启)。
+    # 三十四审 P2(自查补强): toggle 本身也必须进装配总锁——
+    # 此前 set_enabled 在锁外, 两个管理员交错时 A 的回滚会覆盖 B
+    # 刚写入的状态(B 正在锁内按旧 snapshot 装配, 状态文件却被 A
+    # 改掉)。锁内完成 "toggle → 装配 → 失败回滚" 整段, 状态文件
+    # 与装配 snapshot 严格同源。
     from services.pack_manager import hot_reload_lock
     with hot_reload_lock():
+        changed = pack_state.set_enabled(name, enabled)
+        # 审计留痕:插件启停改变引擎装配面与对外路由,失败时只看状态文件无法还原
+        # "何时被谁改过",记一条 info(成功/失败由后续 hot-reload 日志与状态文件共同佐证)
+        logger.info(f"pack toggled: {name} enabled={enabled} changed={changed}")
+        result = {"changed": changed, **_packs_payload(request)}
+        # 无论状态是否变化都重新装配:装配幂等(importlib 有模块缓存,开销毫秒级),
+        # 且能自愈"上次状态已落盘但装配失败"的残留(否则引擎与状态不一致要到重启才恢复)
+        # app 透传:同步挂载/卸载该 pack 的自有 API 路由
         try:
             summary = assemble_packs(
                 request.app.state, sorted(pack_state.enabled_names()),
