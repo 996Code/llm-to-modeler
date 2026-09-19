@@ -3545,7 +3545,7 @@ class TestHotReloadAtomicity:
         assert fn is not None, "未找到 toggle 端点(含 set_enabled + assemble)"
         body = inspect.getsource(fn)
         lock_pos = body.find("with hot_reload_lock():")
-        toggle_pos = body.find("set_enabled(name, enabled)")
+        toggle_pos = body.find("set_enabled(")
         assemble_pos = body.find("assemble_packs(")
         assert 0 <= lock_pos < toggle_pos, (
             "set_enabled 不在 hot_reload_lock 内(交错窗口重新打开)")
@@ -4282,3 +4282,365 @@ class TestEventFailureAcknowledgement:
         exc = asyncio.run(_call())
         assert exc is not None and exc.status_code == 400, (
             f"缺确认人未被拒绝: {exc}")
+
+
+# ════════════════════════════════════════════════════════════════
+# 三十六审回归: 真事务化装配 / route 提交原子性 / 磁盘权威 CAS / 多 worker
+# ════════════════════════════════════════════════════════════════
+
+class TestAssembleTransaction:
+    """P1-A: commit 失败不留半装配运行态(register_tasks 静默不注册注入).
+
+    审计注入: chatbi register_tasks 静默不注册必需 handler →
+    最终 critical 断言抛 PackConfigurationError, 但旧 registry/
+    routers/_loaded_packs/handlers 已被替换(runtime 污染)。
+    事务化后: 断言在 Prepare 段(staging)失败, 运行态零触碰。
+    """
+
+    def _build_app_state(self):
+        from types import SimpleNamespace
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {"chatbi.refresh_semantics": lambda h: None}
+                self._handler_meta = {"chatbi.refresh_semantics": {"packName": "chatbi"}}
+                self.store = None
+
+            def reset_handlers(self):
+                self._handlers.clear()
+                self._handler_meta.clear()
+
+        tm = _TM()
+        state = SimpleNamespace(task_manager=tm)
+        state._loaded_packs = ["chatbi"]
+        state.registry = object()
+        state.pack_configs = {"chatbi": {}}
+        state.pack_routers = {"chatbi": object()}
+        state.pack_tools = {"chatbi": ["ask_data", "switch_chart"]}
+        state.pack_dependency_status = {}
+        return state, tm
+
+    def test_handler_failure_preserves_runtime(self, monkeypatch):
+        from sdk.pack_api import PackConfigurationError
+        from services import pack_manager as pm
+        import domains.chatbi.pack as pack_mod
+
+        state, tm = self._build_app_state()
+        old_registry = state.registry
+        old_handlers = dict(tm._handlers)
+        old_loaded = list(state._loaded_packs)
+
+        def _silent_register(manager, app_state=None):
+            pass   # 静默不注册任何 handler
+
+        monkeypatch.setattr(pack_mod, "register_tasks", _silent_register)
+        try:
+            pm.assemble_packs(state, ["chatbi"], app=None)
+            raise AssertionError("handler 缺失仍装配成功")
+        except PackConfigurationError:
+            pass
+        # 运行态零污染: registry/handlers/loaded 全部保持旧值
+        assert state.registry is old_registry, (
+            "Prepare 失败后 registry 被替换(半装配)")
+        assert dict(tm._handlers) == old_handlers, (
+            "Prepare 失败后 handlers 被清空/替换(半装配)")
+        assert state._loaded_packs == old_loaded, (
+            "Prepare 失败后 _loaded_packs 被替换(半装配)")
+
+    def test_commit_failure_rolls_back_runtime(self, monkeypatch):
+        """commit 段注入失败(nodes.configure 抛错)→ 快照回滚旧运行态."""
+        from sdk.pack_api import PackConfigurationError
+        from services import pack_manager as pm
+        from engine import nodes
+
+        state, tm = self._build_app_state()
+        # nodes.configure 需要的 app_state 成员
+        state.llm_client = object()
+        state.asset_client = object()
+        state.conversation_manager = object()
+        old_registry = state.registry
+        old_handlers = dict(tm._handlers)
+
+        def _broken_configure(**kwargs):
+            raise RuntimeError("simulated commit failure")
+
+        monkeypatch.setattr(nodes, "configure", _broken_configure)
+        try:
+            pm.assemble_packs(state, ["chatbi"], app=None)
+            raise AssertionError("commit 失败仍装配成功")
+        except RuntimeError:
+            pass
+        # app.state 引用未被替换(commit 第一步就失败, 回滚后保持旧值)
+        assert state.registry is old_registry, (
+            "commit 失败后 registry 未回滚(半装配)")
+        assert dict(tm._handlers) == old_handlers, (
+            "commit 失败后 handlers 未保持旧值")
+
+
+class TestRouteCommitAtomicity:
+    """P1-B: include_router 提交失败不丢旧路由.
+
+    审计注入: router factory 成功但 include_router 抛 RuntimeError →
+    旧 route 已被 _unmount_all 卸掉(old_routes_survive=False)。
+    事务化后: 展开在临时 app 上进行, 真实 app 只做一次性列表替换。
+    """
+
+    def test_include_failure_preserves_old_routes(self, monkeypatch):
+        from fastapi import FastAPI
+        from services.pack_api_mount import mount_pack_routers
+        import domains.chatbi.pack as pack_mod
+
+        app = FastAPI()
+        mount_pack_routers(app, ["chatbi"])
+        old_routes = list(app.router.routes)
+        assert old_routes, "初始挂载无 route"
+
+        # factory 成功返回一个 router, 但 include_router 展开时炸:
+        # 用一个 include 时抛错的假 router
+        class _PoisonRouter:
+            def routes(self):
+                return []
+
+        from fastapi import APIRouter
+        poison = APIRouter()
+
+        @poison.get("/boom")
+        def _boom():
+            return {}
+
+        # 让 FastAPI.include_router 在展开 poison 时抛错: monkeypatch
+        # staged app 的 include_router 不可行(内部调用), 改为直接
+        # monkeypatch services.pack_api_mount 内的 FastAPI 构造——
+        # 更直接: monkeypatch commit_routes 的 app.router.routes 赋值
+        # 不可行。真实路径: build_staged_routes 用临时 FastAPI 展开,
+        # 展开失败(构造/导入)发生在触碰真实 app 前。这里注入 factory
+        # 返回的 router 带 property 使 include 时抛错。
+        class _ExplodingRouter(APIRouter):
+            @property
+            def routes(self):
+                raise RuntimeError("simulated include failure")
+
+            @routes.setter
+            def routes(self, v):
+                pass
+
+        _real_create = pack_mod.create_api_router
+        monkeypatch.setattr(
+            pack_mod, "create_api_router", lambda: _ExplodingRouter())
+        try:
+            try:
+                mount_pack_routers(app, ["chatbi"])
+                raise AssertionError("include 失败仍挂载成功")
+            except RuntimeError:
+                pass
+            survived = all(r in app.router.routes for r in old_routes)
+            assert survived, "旧 ChatBI API 被卸掉(提交应原子)"
+            from services.pack_api_mount import mounted_packs
+            assert "chatbi" in mounted_packs(app), "挂载记录被破坏"
+        finally:
+            pack_mod.create_api_router = _real_create
+
+
+class TestPackStateDiskAuthoritativeCAS:
+    """P2-A: 磁盘权威 CAS 的四类反例(三十六审 4.3).
+
+    A. stale no-op: B 持旧内存, 磁盘已被 A 改; B 显式反向操作
+       必须按磁盘判定 changed 并落盘(不再 changed=False)。
+    B. 历史触碰: B 曾动过 KG(旧算法终身 _touched), fresh A 后来
+       启用 KG; B 写无关 pack 不得把 KG 覆盖回 disabled。
+    C. 同 pack 冲突: A 禁→B(旧内存)再禁 → changed=False 磁盘不变;
+       A 启→B(旧内存)再禁 → changed=True 落盘禁用。
+    D. 多轮交替: A/B 交替写不同 pack, 全部保留。
+    """
+
+    PACKS = ["chatbi", "knowledge_graph", "njmind_form"]
+
+    def _tmp_state(self):
+        import tempfile, os, shutil
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "state.json")
+        return path, tmpdir
+
+    def test_stale_noop_reverse_applies(self):
+        import json
+        from services.pack_state import PackState
+        path, tmpdir = self._tmp_state()
+        try:
+            b = PackState(path, self.PACKS)            # B 先起(内存 KG enabled)
+            a = PackState(path, self.PACKS)
+            a.set_enabled("knowledge_graph", False)   # A 禁用 → 磁盘 disabled
+            assert b.is_enabled("knowledge_graph")     # B 旧内存仍 enabled
+            changed = b.set_enabled("knowledge_graph", True)
+            disk = json.load(open(path))
+            assert changed is True, (
+                "stale 实例的反向操作被误判 no-op(changed=False)")
+            assert "knowledge_graph" in disk["enabled"], (
+                "磁盘未应用 stale 实例的显式启用")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_historical_touch_not_sticky(self):
+        import json
+        from services.pack_state import PackState
+        path, tmpdir = self._tmp_state()
+        try:
+            b = PackState(path, self.PACKS)
+            b.set_enabled("knowledge_graph", False)   # B 曾禁 KG
+            a = PackState(path, self.PACKS)            # fresh A
+            a.set_enabled("knowledge_graph", True)     # A 启用 KG
+            b.set_enabled("njmind_form", False)        # B 写无关 pack
+            disk = json.load(open(path))
+            assert "knowledge_graph" in disk["enabled"], (
+                "B 的历史触碰把 KG 覆盖回 disabled(丢 A 的更新)")
+            assert "njmind_form" not in disk["enabled"], (
+                "B 本次操作丢失")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_same_pack_conflict_disk_wins(self):
+        import json
+        from services.pack_state import PackState
+        path, tmpdir = self._tmp_state()
+        try:
+            a = PackState(path, self.PACKS)
+            a.set_enabled("knowledge_graph", False)
+            b = PackState(path, self.PACKS)            # B 见到 disabled
+            a.set_enabled("knowledge_graph", True)     # A 又启用
+            changed = b.set_enabled("knowledge_graph", False)
+            disk = json.load(open(path))
+            # B 旧内存=disabled, 磁盘=enabled → 按磁盘判 changed=True
+            assert changed is True, "同 pack 冲突按旧内存误判 no-op"
+            assert "knowledge_graph" not in disk["enabled"], (
+                "磁盘未应用 B 的禁用")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_alternating_writes_all_preserved(self):
+        import json
+        from services.pack_state import PackState
+        path, tmpdir = self._tmp_state()
+        try:
+            a = PackState(path, self.PACKS)
+            b = PackState(path, self.PACKS)
+            a.set_enabled("njmind_form", False)
+            b.set_enabled("knowledge_graph", False)
+            a.set_enabled("knowledge_graph", True)
+            disk = json.load(open(path))
+            assert "njmind_form" not in disk["enabled"], "A 的禁用丢失"
+            assert "knowledge_graph" in disk["enabled"], (
+                "A 的重新启用被 B 的旧快照覆盖")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_persist_after_mem_toggle(self):
+        """toggle 内存暂存 → runtime commit 后 persist() 落盘(失败零落盘)."""
+        import json
+        import os
+        from services.pack_state import PackState
+        path, tmpdir = self._tmp_state()
+        try:
+            a = PackState(path, self.PACKS)
+            changed = a.set_enabled(
+                "knowledge_graph", False, persist=False)
+            assert changed is True
+            assert not os.path.exists(path), (
+                "persist=False 仍落盘(失败路径会留下错位文件)")
+            a.persist()
+            disk = json.load(open(path))
+            assert "knowledge_graph" not in disk["enabled"], (
+                "persist() 未落盘内存变更")
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestMultiWorkerGuard:
+    """P2-B: 共享状态文件的进程数 > 1 时动态管理被拒(503)."""
+
+    def test_count_holders_detects_second_process(self):
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        from services.pack_state import count_state_file_holders
+
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "state.json")
+        try:
+            # 本进程注册
+            from services.pack_state import register_state_holder
+            register_state_holder(path)
+            # 起一个真实子进程也注册同一状态文件
+            code = (
+                "import sys, time; sys.path.insert(0, 'src');"
+                "from services.pack_state import register_state_holder;"
+                f"register_state_holder({path!r});"
+                "print('ready', flush=True);"
+                "time.sleep(30)"
+            )
+            proc = subprocess.Popen(
+                [sys.executable, "-c", code],
+                stdout=subprocess.PIPE, text=True)
+            try:
+                proc.stdout.readline()   # 等 ready
+                time.sleep(0.3)
+                holders = count_state_file_holders(path)
+                assert holders >= 2, (
+                    f"双进程未检出(holders={holders})——多 worker "
+                    f"检测失效")
+            finally:
+                proc.kill()
+                proc.wait()
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_toggle_rejected_when_multi_worker(self, monkeypatch):
+        """holders>1 时 toggle/recheck 返回 503(不进装配)."""
+        from fastapi.testclient import TestClient
+        from api import admin as admin_mod
+
+        called = {"assemble": 0}
+
+        def _fake_assemble(*a, **kw):
+            called["assemble"] += 1
+            return {"loaded": [], "tools": 0}
+
+        monkeypatch.setattr(
+            "services.pack_manager.assemble_packs", _fake_assemble)
+        import services.pack_state as ps_mod
+        monkeypatch.setattr(
+            ps_mod, "count_state_file_holders", lambda p: 2)
+
+        # 构造最小 request
+        from types import SimpleNamespace
+        from fastapi import FastAPI
+
+        app = FastAPI()
+        app.state.pack_state = SimpleNamespace(
+            state_path="/tmp/x.json",
+            is_discovered=lambda n: True,
+            enabled_names=lambda: {"chatbi"},
+        )
+
+        from fastapi.testclient import TestClient
+        c = TestClient(app)
+
+        class _Req:
+            pass
+
+        # 直接调 _reject_multi_worker 验证 503
+        from fastapi import HTTPException
+        req = SimpleNamespace(app=app)
+        try:
+            admin_mod._reject_multi_worker(req)
+            raise AssertionError("多 worker 未被拒绝")
+        except HTTPException as e:
+            assert e.status_code == 503, f"期望 503, 得到 {e.status_code}"
+        assert called["assemble"] == 0, "被拒后仍触发了装配"

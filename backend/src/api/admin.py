@@ -465,6 +465,26 @@ async def admin_disable_pack(name: str, request: Request):
     return _toggle_pack(request, name, False)
 
 
+def _reject_multi_worker(request: Request) -> None:
+    """三十六审 P2-B: 动态 pack 管理只支持单 worker。
+
+    多 worker 时管理请求只落到一个 worker, 其他 worker 的 registry/
+    nodes/handlers/routes 不会自动重装配——即使状态文件完全正确,
+    后续请求打到不同 worker 会看到不同工具集。检测状态文件持有者
+    数(PID 心跳), > 1 时拒绝动态管理(503), 提示重启为单 worker
+    或改用 PACKS_ENABLED + 滚动重启。
+    """
+    from services.pack_state import count_state_file_holders
+    holders = count_state_file_holders(
+        request.app.state.pack_state.state_path)
+    if holders > 1:
+        raise HTTPException(
+            503,
+            f"检测到 {holders} 个进程共享插件状态文件——动态启停/重检"
+            f"只支持单 worker 部署(多 worker 的其他进程不会同步热切换)。"
+            f"请用单 worker 重启, 或改用 PACKS_ENABLED 配置 + 滚动重启。")
+
+
 def _toggle_pack(request: Request, name: str, enabled: bool):
     """启停共同实现:校验 → 改状态(落盘) → 热装配 → 返回最新列表。
 
@@ -506,9 +526,15 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     # 刚写入的状态(B 正在锁内按旧 snapshot 装配, 状态文件却被 A
     # 改掉)。锁内完成 "toggle → 装配 → 失败回滚" 整段, 状态文件
     # 与装配 snapshot 严格同源。
+    # 三十六审 P1-A(持久化后置): 状态先改内存不落盘, runtime commit
+    # 成功后才持久化——此前 set_enabled 先落盘, 装配失败后回滚再落
+    # 一次盘, 中间窗口崩溃会留下"文件已改/运行态未变"的错位; 现在
+    # 文件只在 runtime 确认切换后写一次, 失败路径零落盘。
     from services.pack_manager import hot_reload_lock
+    _reject_multi_worker(request)
     with hot_reload_lock():
-        changed = pack_state.set_enabled(name, enabled)
+        changed = pack_state.set_enabled(
+            name, enabled, persist=False)
         # 审计留痕:插件启停改变引擎装配面与对外路由,失败时只看状态文件无法还原
         # "何时被谁改过",记一条 info(成功/失败由后续 hot-reload 日志与状态文件共同佐证)
         logger.info(f"pack toggled: {name} enabled={enabled} changed={changed}")
@@ -523,18 +549,22 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
             )
             result["loaded"] = summary["loaded"]
             result["toolCount"] = summary["tools"]
+            # runtime commit 成功 → 现在才持久化(失败路径零落盘)
+            if changed:
+                pack_state.persist()
         except Exception as e:
-            # 回滚本次 toggle(只回滚 changed 的那个 pack; 其它并发
+            # 回滚本次 toggle 的内存态(未落盘, 无文件回滚; 其它并发
             # 管理员的变更不在本请求职责内)
             if changed:
                 try:
-                    pack_state.set_enabled(name, not enabled)
+                    pack_state.set_enabled(
+                        name, not enabled, persist=False)
                     logger.warning(
                         f"hot-reload 失败, 已回滚 {name} enabled="
-                        f"{not enabled}(状态文件与运行态保持一致)")
+                        f"{not enabled}(内存态与运行态保持一致, 状态文件未变)")
                 except Exception as rollback_err:
                     logger.error(
-                        f"hot-reload 失败且回滚也失败(状态文件可能与"
+                        f"hot-reload 失败且回滚也失败(内存态可能与"
                         f"运行态不一致, 建议重启): {rollback_err}")
             logger.exception(f"hot-reload packs failed after toggling {name}")
             raise HTTPException(503, f"State rolled back, hot-reload failed: {e}")
@@ -673,6 +703,7 @@ async def admin_recheck_pack(name: str, request: Request):
     from services.pack_dependency import clear_probe_cache, evaluate_pack, probe_enabled
     from services.pack_manager import assemble_packs, hot_reload_lock
 
+    _reject_multi_worker(request)
     clear_probe_cache(name)
     cfg = load_pack_configs(pack_names=[name]).get(name) or {}
     dep = evaluate_pack(

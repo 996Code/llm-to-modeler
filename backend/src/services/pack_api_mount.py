@@ -14,12 +14,21 @@ pack.py 可选导出 ``create_api_router() -> APIRouter``(不带前缀),本模�
   - 禁用的 pack 不挂载(依赖检测未过的 pack 也不会出现在加载名单里,
     它的 API 自然不存在——返回 404,这正是"依赖未配置 → 插件不可用"的
     外在表现之一)。
+
+【三十六审 P1-B: route 展开与提交分离】
+  三十五审的两阶段只保护"router 构造失败"; commit 段仍是
+  _unmount_all → 逐个 app.include_router——include_router 中途抛错时
+  旧 route 已被卸掉(真实注入: old_routes_survive=False)。
+  现在 build_staged_routes 在**临时 FastAPI** 上展开全部 route 对象
+  (构造/导入/展开的任何失败都发生在触碰真实 app 之前), commit_routes
+  只做"一次性列表替换 + 挂载记录替换"——纯赋值, 不可能中途失败留下
+  半卸载状态。
 """
 import importlib
 import inspect
 import logging
 import threading
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +60,88 @@ def _call_router_factory(factory, app: Any):
     return factory(app) if takes_app else factory()
 
 
+def build_staged_routes(app: Any, pack_names: List[str]
+                        ) -> Tuple[List[Any], Dict[str, List[Any]]]:
+    """Prepare: 构建并展开全部新 route(不触碰真实 app 的任何状态)。
+
+    在临时 FastAPI 实例上逐 pack include_router, 收集展开后的 route
+    对象列表与挂载记录。router 构造/import/展开的任何失败都发生在
+    这里——真实 app.router.routes 尚未被修改。
+
+    Raises:
+        PackConfigurationError: critical pack 的 import/构造失败。
+    """
+    from fastapi import FastAPI
+    from sdk.pack_api import PackConfigurationError, critical_packs
+
+    # 禁用临时 app 的默认路由(openapi.json/docs/redoc)——否则会被
+    # 当成 pack route 追加进真实 app, 每次 mount 泄漏 4 条
+    staged_app = FastAPI(
+        openapi_url=None, docs_url=None, redoc_url=None)
+    staged_mounted: Dict[str, List[Any]] = {}
+    for name in sorted(set(pack_names)):
+        try:
+            module = importlib.import_module(f"domains.{name}.pack")
+        except ImportError as e:
+            if name in critical_packs():
+                raise PackConfigurationError(
+                    f"chatbi pack 模块导入失败: {e}——critical "
+                    f"pack, 终止启动(fail-fast)") from e
+            # 加载名单里的 pack 理论上都能 import;真实导入错误要留痕
+            # (静默吞会把 pack 的代码问题伪装成"没有 API")
+            logger.warning(f"pack api mount: import domains.{name}.pack 失败: {e}")
+            continue
+        factory = getattr(module, "create_api_router", None)
+        if not callable(factory):
+            continue
+        try:
+            router = _call_router_factory(factory, app)
+        except Exception as e:
+            if name in critical_packs():
+                # 三十四审 P1-B: critical pack 的 API 挂载失败
+                # 终止启动——此前跳过让 ChatBI API 404 假健康
+                raise PackConfigurationError(
+                    f"chatbi API 路由构造失败: {e}——critical "
+                    f"pack, 终止启动(fail-fast)") from e
+            # 单 pack 路由构造失败只跳过该 pack,不拖垮整个装配
+            # (与 load_all_packs 的逐 pack 容错一致)
+            logger.exception(f"pack api mount: {name} 路由构造失败,已跳过")
+            continue
+        if router is None:
+            continue
+        before = set(map(id, staged_app.router.routes))
+        staged_app.include_router(
+            router, prefix=f"/api/packs/{name}", tags=[f"pack:{name}"])
+        staged_mounted[name] = [
+            r for r in staged_app.router.routes if id(r) not in before]
+    # 展开后的全部 route(顺序 = include 顺序, 与直接挂到真实 app 一致)
+    staged_routes: List[Any] = list(staged_app.router.routes)
+    return staged_routes, staged_mounted
+
+
+def commit_routes(app: Any, staged_routes: List[Any],
+                  staged_mounted: Dict[str, List[Any]]) -> List[str]:
+    """Commit: 一次性替换真实 app 的 pack 路由(纯赋值, 不可中途失败)。
+
+    三十六审 P1-B: 替换 = "旧 pack route 全部移除 + 新 route 一次性
+    追加"——用列表拼接构造新列表后整体赋值, 不存在"卸了一半挂了一半"
+    的中间态。mounted 记录同步替换。
+    """
+    with _MOUNT_LOCK:
+        mounted = getattr(app.state, MOUNTED_ATTR, None) or {}
+        old_routes = [r for routes in mounted.values() for r in routes]
+        # 保留非 pack 动态路由(平台静态路由), 移除旧 pack route, 追加新
+        app.router.routes = [
+            r for r in app.router.routes if r not in old_routes
+        ] + list(staged_routes)
+        setattr(app.state, MOUNTED_ATTR, dict(staged_mounted))
+        for name in sorted(staged_mounted):
+            logger.info(
+                f"pack api mounted: /api/packs/{name} "
+                f"({len(staged_mounted[name])} routes)")
+        return sorted(staged_mounted.keys())
+
+
 def mount_pack_routers(app: Any, pack_names: List[str]) -> List[str]:
     """为加载成功的 pack 挂载各自的 API router(两阶段: 先构建后切换).
 
@@ -66,63 +157,13 @@ def mount_pack_routers(app: Any, pack_names: List[str]) -> List[str]:
         import 或路由构造失败——三十四审 P1-B: 此前 catch-continue
         让服务在没有 ChatBI API 的情况下 ready(404 假健康)。
 
-    三十五审 P1-B(两阶段): 此前先 `_unmount_all` 再逐个构造/挂载——
-    新 router 构造失败时**旧 route 已被卸掉**(真实注入: old_route_
-    survives=False), 一次失败的热切换把仍在服务的旧 ChatBI API
-    直接卸掉。现在:
-      Prepare: 在临时列表中构建全部新 router(构造失败在卸旧之前
-      发生, 旧 route 完好);
-      Commit: 全部构建成功后一次性 卸旧 → 挂新 → 记录。
+    三十五审 P1-B(两阶段) + 三十六审 P1-B(route 提交原子化):
+    build_staged_routes 在临时 app 上展开(失败发生在卸旧之前);
+    commit_routes 只做一次性列表替换(include_router 的任何失败
+    都不可能发生在真实 app 上)。
     """
-    from sdk.pack_api import PackConfigurationError, critical_packs
-    with _MOUNT_LOCK:
-        # ── Prepare: 构建全部新 router(不触碰现有 routes) ──
-        staged: dict = {}
-        for name in sorted(set(pack_names)):
-            try:
-                module = importlib.import_module(f"domains.{name}.pack")
-            except ImportError as e:
-                if name in critical_packs():
-                    raise PackConfigurationError(
-                        f"chatbi pack 模块导入失败: {e}——critical "
-                        f"pack, 终止启动(fail-fast)") from e
-                # 加载名单里的 pack 理论上都能 import;真实导入错误要留痕
-                # (静默吞会把 pack 的代码问题伪装成"没有 API")
-                logger.warning(f"pack api mount: import domains.{name}.pack 失败: {e}")
-                continue
-            factory = getattr(module, "create_api_router", None)
-            if not callable(factory):
-                continue
-            try:
-                router = _call_router_factory(factory, app)
-            except Exception as e:
-                if name in critical_packs():
-                    # 三十四审 P1-B: critical pack 的 API 挂载失败
-                    # 终止启动——此前跳过让 ChatBI API 404 假健康
-                    raise PackConfigurationError(
-                        f"chatbi API 路由构造失败: {e}——critical "
-                        f"pack, 终止启动(fail-fast)") from e
-                # 单 pack 路由构造失败只跳过该 pack,不拖垮整个装配
-                # (与 load_all_packs 的逐 pack 容错一致)
-                logger.exception(f"pack api mount: {name} 路由构造失败,已跳过")
-                continue
-            if router is None:
-                continue
-            staged[name] = router
-
-        # ── Commit: 全部构建成功, 一次性切换(卸旧 → 挂新) ──
-        _unmount_all(app)
-        mounted: dict = {}
-        for name, router in staged.items():
-            prefix_routes_before = set(map(id, app.router.routes))
-            app.include_router(router, prefix=f"/api/packs/{name}", tags=[f"pack:{name}"])
-            # 记录本次 include 新增的 route 引用(卸载时按引用移除)
-            added = [r for r in app.router.routes if id(r) not in prefix_routes_before]
-            mounted[name] = added
-            logger.info(f"pack api mounted: /api/packs/{name} ({len(added)} routes)")
-
-        setattr(app.state, MOUNTED_ATTR, mounted)
-        return sorted(mounted.keys())
+    staged_routes, staged_mounted = build_staged_routes(app, pack_names)
+    return commit_routes(app, staged_routes, staged_mounted)
 
 
 def unmount_pack_routers(app: Any, pack_name: Optional[str] = None) -> None:

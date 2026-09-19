@@ -78,21 +78,21 @@ def assemble_packs(
         pack_names=pack_names, settings_store=settings_store, app_state=app_state
     )
 
-    # ── 三十五审 P1-B: 两阶段装配——Prepare(构建/验证)与 Commit(切换)分离 ──
-    # 此前装配沿途修改旧运行态(unload → _loaded_packs → nodes →
-    # app.state → handlers → routes), 中后段失败时 admin 只回滚
-    # PackState 文件, runtime 已是半装配新值(真实注入: 503 后
-    # registry/routers 已变)。现在:
-    #   Prepare: load_all_packs(纯构建, 无副作用) + critical 断言
-    #     (基于构建结果, 在任何运行态切换之前);
-    #   Commit: 断言通过后才执行 unload/nodes/app.state/handlers/
-    #     routes 的切换——commit 段的每步都是"替换引用"类操作,
-    #     mount_pack_routers 自身已两阶段化(构建全部 router 后
-    #     才卸旧挂新)。
-    # 注意 Prepare 段不查任务 handler: handler 注册本身是 Commit 段
-    # 动作(下方 register_tasks 循环), 冷启动时必然为空——在 Prepare
-    # 查它会让每次冷启动都误判 fail(e2e 真实链路暴露)。handler 完整性
-    # 由 Commit 段末尾的全量复核保证。
+    # ── 三十六审 P1-A: 真事务化——Prepare(全部可失败动作) / Commit(纯引用替换) ──
+    # 三十五审的"两阶段"只覆盖 load_all_packs + router 构造; commit 段仍
+    # 按顺序直接改在服务对象(unload → _loaded_packs → nodes → app.state
+    # → handlers → routes), 中后段失败时 runtime 已是半装配新值(真实注入:
+    # register_tasks 静默不注册 → 最终断言抛, 但 registry/routers/_loaded_
+    # packs/handlers 已全部被替换)。现在:
+    #   Prepare: load_all_packs + critical 断言(loaded/tools/api 名单) +
+    #     pack_configs 过滤 + register_tasks 到 **staging dict**(不动在服务
+    #     的 TaskManager) + critical 全量断言(含 handler) + router 构造与
+    #     route 展开(临时 router, 不动 app.router.routes);
+    #   Commit: 快照旧 runtime → 纯引用替换(nodes 全局/app.state/handlers/
+    #     routes/compressor) → 任一步异常按快照回滚。
+    #   unload 钩子后置到 commit 成功之后(旧 pack 的资源只在确认切换后
+    #     才释放; 释放失败不回滚装配——资源随进程退出回收, 但不再污染
+    #     在服务的运行态)。
     _assert_critical_packs_ready(
         app_state,
         {"loaded": sorted(pack_routers),
@@ -103,24 +103,6 @@ def assemble_packs(
         requested=list(pack_names or []),
         check_task_handlers=False)
 
-    # pack 可选钩子 unload():上次在载、本次不在载(禁用/依赖失联)的
-    # pack 释放自持资源(如数据库连接)。钩子异常只记日志——卸载清理
-    # 失败不能阻断装配(资源最终随进程退出回收)。
-    # (commit 段: 断言已通过, 开始切换运行态)
-    prev_loaded = set(getattr(app_state, "_loaded_packs", None) or [])
-    import importlib
-    for name in sorted(prev_loaded - set(pack_routers or {})):
-        try:
-            mod = importlib.import_module(f"domains.{name}.pack")
-            hook = getattr(mod, "unload", None)
-            if callable(hook):
-                try:
-                    hook()
-                except Exception:
-                    logger.exception(f"pack unload hook failed: {name}")
-        except ImportError:
-            pass
-    app_state._loaded_packs = sorted(pack_routers or {})
     # manifest 只保留"实际加载成功"的 pack:依赖被跳过的 pack 工具并不存在,
     # 若把它的 manifest 留在 pack_configs,/api/meta/packs 会把它暴露给
     # 前端欢迎页(声明了却不存在的工具集)。管理端插件中心走 load_pack_configs
@@ -129,6 +111,99 @@ def assemble_packs(
         name: cfg for name, cfg in load_pack_configs(pack_names=pack_names).items()
         if name in pack_routers
     }
+
+    # ── Prepare: register_tasks 到 staging(不动在服务的 TaskManager) ──
+    # 三十六审 P1-A: 此前 reset_handlers() → 逐 pack register_tasks 直接
+    # 操作在服务的 TaskManager, 钩子失败/静默不注册时旧 handlers 已被清空。
+    # 现在 Prepare 只把 handler 收集进 staged_handlers; commit 成功后才
+    # 一次性替换 TaskManager 内部表。scheduler 线程(chatbi register_tasks
+    # 内部启动)是进程级单例且幂等(_start_refresh_scheduler 已存活即跳过),
+    # 在 staging 阶段启动不影响旧 runtime——它读的是 settings/db, 不读
+    # handlers; 若 commit 失败回滚, 已存活的 scheduler 继续跑旧配置(与
+    # 切换前语义一致, 无需杀线程)。
+    task_manager = getattr(app_state, "task_manager", None)
+    staged_handlers: Dict[str, Any] = {}
+    staged_handler_meta: Dict[str, Dict[str, str]] = {}
+    if task_manager is not None:
+        import importlib
+        for pack_name in (pack_routers or {}):
+            try:
+                mod = importlib.import_module(f"domains.{pack_name}.pack")
+                hook = getattr(mod, "register_tasks", None)
+                if callable(hook):
+                    _collect_register_tasks(
+                        hook, pack_name, task_manager, app_state,
+                        staged_handlers, staged_handler_meta)
+            except ImportError:
+                continue
+
+    # ── Prepare: critical 全量断言(含 staging handler) ──
+    # 用 staging 容器做断言: handler 完整性在切换运行态之前验证。
+    _staged_tm = _StagedTaskManagerView(
+        staged_handlers,
+        store=getattr(task_manager, "store", None) if task_manager else None)
+    _assert_critical_packs_ready(
+        _StagedAppState(app_state, task_manager=_staged_tm),
+        {"loaded": sorted(pack_routers),
+         "pack_tools": pack_tools,
+         "api_mounted": sorted(pack_routers)},
+        requested=list(pack_names or []))
+
+    # ── Prepare: router 构造 + route 展开(不动 app.router.routes) ──
+    # 三十六审 P1-B: 此前 commit 段 _unmount_all → app.include_router,
+    # include_router 中途失败时旧 route 已被卸掉。现在先在临时 FastAPI
+    # 上展开全部 route 对象, commit 只做"一次性列表替换"。
+    staged_routes: List[Any] = []
+    staged_mounted: Dict[str, List[Any]] = {}
+    if app is not None:
+        from services.pack_api_mount import build_staged_routes
+        staged_routes, staged_mounted = build_staged_routes(
+            app, list(pack_routers.keys()))
+
+    # ── Commit: 快照旧 runtime → 纯引用替换 → 异常回滚 ──
+    snap = _runtime_snapshot(app_state, nodes, app)
+    try:
+        nodes.configure(
+            registry=registry,
+            llm_client=app_state.llm_client,
+            asset_client=app_state.asset_client,
+            conversation=app_state.conversation_manager,
+            prompt_loader=prompt_loader,
+            pack_routers=pack_routers,
+            pack_configs=pack_configs,
+        )
+        app_state.registry = registry
+        app_state.pack_configs = pack_configs
+        app_state.pack_routers = pack_routers
+        app_state.pack_tools = pack_tools
+        app_state.prompt_loader = prompt_loader
+        # 依赖检测状态(含被跳过的 pack;管理端插件中心"依赖未配置"徽标的数据源)
+        app_state.pack_dependency_status = dep_status
+        app_state._loaded_packs = sorted(pack_routers or {})
+
+        if task_manager is not None:
+            task_manager.reset_handlers()
+            task_manager._handlers.update(staged_handlers)
+            task_manager._handler_meta.update(staged_handler_meta)
+
+        if app is not None:
+            from services.pack_api_mount import commit_routes
+            commit_routes(app, staged_routes, staged_mounted)
+
+        # 刷新压缩侧重点：热切换后启用集变化，manifest compact_focus 声明
+        # 需重新聚合（与 main.lifespan 启动装配同一语义，覆盖启动时的初值）
+        compressor = getattr(app_state, "compressor", None)
+        if compressor is not None:
+            focus_parts = [
+                (cfg.get("domain") or {}).get("compact_focus", "").strip()
+                for cfg in (pack_configs or {}).values()
+                if (cfg.get("domain") or {}).get("compact_focus")
+            ]
+            compressor.set_compact_focus("；".join(focus_parts))
+    except Exception:
+        logger.exception("装配 commit 失败, 按快照回滚旧运行态")
+        _restore_runtime(app_state, nodes, app, snap)
+        raise
 
     # pack 可选钩子 enhance_asset_client(asset_client, upstream)：向通用
     # adapter 注入本 pack 的领域客户端（端点表/凭证策略/响应归一化归 pack，
@@ -146,84 +221,38 @@ def assemble_packs(
             except ImportError:
                 continue
 
-    # 重新注入节点模块全局:graph 对象不重建(见模块文档),
-    # 节点函数执行时读到的就是这套新依赖
-    nodes.configure(
-        registry=registry,
-        llm_client=app_state.llm_client,
-        asset_client=app_state.asset_client,
-        conversation=app_state.conversation_manager,
-        prompt_loader=prompt_loader,
-        pack_routers=pack_routers,
-        pack_configs=pack_configs,
-    )
+    # pack 可选钩子 unload():上次在载、本次不在载(禁用/依赖失联)的
+    # pack 释放自持资源(如数据库连接)。钩子异常只记日志——卸载清理
+    # 失败不能阻断装配(资源最终随进程退出回收)。
+    # 三十六审 P1-A: 后置到 commit 成功之后——旧 pack 的资源只在确认
+    # 切换后才释放, 释放失败不影响已提交的新运行态。
+    prev_loaded = set(getattr(app_state, "_loaded_packs", None) or [])
+    import importlib
+    for name in sorted(prev_loaded - set(pack_routers or {})):
+        try:
+            mod = importlib.import_module(f"domains.{name}.pack")
+            hook = getattr(mod, "unload", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception:
+                    logger.exception(f"pack unload hook failed: {name}")
+        except ImportError:
+            pass
 
-    # 替换 app.state 上的共享引用(meta/admin 路由按请求读取)
-    app_state.registry = registry
-    app_state.pack_configs = pack_configs
-    app_state.pack_routers = pack_routers
-    app_state.pack_tools = pack_tools
-    app_state.prompt_loader = prompt_loader
-    # 依赖检测状态(含被跳过的 pack;管理端插件中心"依赖未配置"徽标的数据源)
-    app_state.pack_dependency_status = dep_status
-
-    # pack 可选钩子 register_tasks(task_manager, app_state):注册后台任务
-    # handler。每次装配先清空再由在载 pack 重新注册——禁用的 pack 任务类型
-    # 随之失效(submit 会拒绝),与工具/路由的启停语义一致。
-    # app_state 透传给钩子:handler 运行期要取 llm_client / settings_store。
-    task_manager = getattr(app_state, "task_manager", None)
-    if task_manager is not None:
-        task_manager.reset_handlers()
-        # 监听者与 handler 同生命周期:register_tasks 重调前清空,
-        # 防热切换 N 次后同一终态回调挂 N 份
-        task_manager.reset_terminal_listeners()
-        import importlib
-        for pack_name in (pack_routers or {}):
-            try:
-                mod = importlib.import_module(f"domains.{pack_name}.pack")
-                hook = getattr(mod, "register_tasks", None)
-                if callable(hook):
-                    try:
-                        hook(task_manager, app_state)
-                    except TypeError:
-                        hook(task_manager)  # 兼容单参签名(无 app_state 诉求的 pack)
-            except ImportError:
-                continue
-
-    # pack 自有 HTTP API 动态挂载(先卸后挂;app 未提供时跳过,如部分测试态)
-    api_mounted: List[str] = []
-    if app is not None:
-        from services.pack_api_mount import mount_pack_routers
-        api_mounted = mount_pack_routers(app, list(pack_routers.keys()))
-
-    # 刷新压缩侧重点：热切换后启用集变化，manifest compact_focus 声明
-    # 需重新聚合（与 main.lifespan 启动装配同一语义，覆盖启动时的初值）
-    compressor = getattr(app_state, "compressor", None)
-    if compressor is not None:
-        focus_parts = [
-            (cfg.get("domain") or {}).get("compact_focus", "").strip()
-            for cfg in (pack_configs or {}).values()
-            if (cfg.get("domain") or {}).get("compact_focus")
-        ]
-        compressor.set_compact_focus("；".join(focus_parts))
-
+    api_mounted = sorted(staged_mounted.keys()) if app is not None else []
     total_tools = sum(len(v) for v in pack_tools.values())
     logger.info(
         f"packs assembled: {sorted(pack_routers)} , {total_tools} tools"
         f"{f' , pack api: {api_mounted}' if api_mounted else ''}"
     )
-    result = {
+    return {
         "loaded": sorted(pack_routers),
         "tools": total_tools,
         "pack_tools": pack_tools,
         "dependency_status": dep_status,
         "api_mounted": api_mounted,
     }
-    # commit 段末尾复核(API 已真实挂载后的最终态; Prepare 段的
-    # 预检在运行态切换之前, 双保险)
-    _assert_critical_packs_ready(app_state, result,
-                                  requested=list(pack_names or []))
-    return result
 
 
 # critical pack 契约(三十四审 P1-B): 启用即必须完整可用——
@@ -239,6 +268,134 @@ _CRITICAL_PACK_REQUIREMENTS = {
         "required_task_types": ("chatbi.refresh_semantics",),
     },
 }
+
+
+# ── 三十六审 P1-A: staging 容器(register_tasks 的 Prepare 收集目标) ──
+
+class _StagedTaskManagerView:
+    """给 register_tasks 钩子与 critical 断言看的"TaskManager 视图"。
+
+    只实现钩子实际用到的 register(task_type, handler, pack_name=)——
+    写入 staging dict, 不触碰在服务的 TaskManager。断言函数经
+    _handlers 属性读取 staging 内容。
+    """
+
+    def __init__(self, handlers: Dict[str, Any], store: Any = None):
+        self._handlers = handlers
+        self.store = store  # KG 启动收敛等只读钩子用(list_tasks)
+
+    def register(self, task_type, handler, pack_name: str = "") -> None:
+        self._handlers[task_type] = handler
+
+    def __getattr__(self, item):
+        raise AttributeError(
+            f"_StagedTaskManagerView 不支持成员 '{item}'"
+            f"(register_tasks 钩子只应调用 register/读 store)")
+
+
+class _StagedAppState:
+    """critical 断言用的 app_state 替身: task_manager 换成 staging 视图。"""
+
+    def __init__(self, real_app_state: Any, task_manager: Any):
+        self._real = real_app_state
+        self.task_manager = task_manager
+
+    def __getattr__(self, item):
+        return getattr(self._real, item)
+
+
+def _collect_register_tasks(hook, pack_name: str, task_manager: Any,
+                            app_state: Any,
+                            staged_handlers: Dict[str, Any],
+                            staged_handler_meta: Dict[str, Dict[str, str]]
+                            ) -> None:
+    """调用 register_tasks 钩子, 把 handler 收集进 staging dict。
+
+    钩子签名兼容: (manager, app_state) / (manager)。钩子内部异常直接
+    上抛——Prepare 段失败不切换运行态(critical pack 的钩子失败必须
+    fail-fast; 非 critical pack 的钩子异常由 loader 层语义兜底,
+    此处不吞)。
+    """
+    view = _StagedTaskManagerView(
+        staged_handlers,
+        store=getattr(task_manager, "store", None) if task_manager else None)
+    try:
+        hook(view, app_state)
+    except TypeError:
+        hook(view)  # 兼容单参签名(无 app_state 诉求的 pack)
+    # handler 元数据按 staging 内容重建(pack 归属)
+    for task_type in staged_handlers:
+        staged_handler_meta.setdefault(
+            task_type, {"packName": pack_name})
+
+
+def _runtime_snapshot(app_state: Any, nodes: Any, app: Any) -> Dict[str, Any]:
+    """commit 前抓取旧运行态快照(回滚用)。
+
+    三十六审 P1-A: commit 段即使理论上只剩引用替换, 也保留快照——
+    任何一步异常(含未来新增步骤)都按快照恢复, 不留半装配运行态。
+    """
+    snap: Dict[str, Any] = {
+        "nodes": {
+            "registry": nodes._registry,
+            "pack_routers": dict(nodes._pack_routers or {}),
+            "pack_configs": dict(nodes._pack_configs or {}),
+            "llm_client": nodes._llm_client,
+            "asset_client": nodes._asset_client,
+            "conversation": nodes._conversation,
+            "prompt_loader": nodes._prompt_loader,
+        },
+        "state": {
+            "registry": getattr(app_state, "registry", None),
+            "pack_configs": getattr(app_state, "pack_configs", None),
+            "pack_routers": getattr(app_state, "pack_routers", None),
+            "pack_tools": getattr(app_state, "pack_tools", None),
+            "prompt_loader": getattr(app_state, "prompt_loader", None),
+            "pack_dependency_status": getattr(
+                app_state, "pack_dependency_status", None),
+            "_loaded_packs": getattr(app_state, "_loaded_packs", None),
+        },
+    }
+    task_manager = getattr(app_state, "task_manager", None)
+    if task_manager is not None:
+        snap["handlers"] = dict(getattr(task_manager, "_handlers", {}) or {})
+        snap["handler_meta"] = dict(
+            getattr(task_manager, "_handler_meta", {}) or {})
+    if app is not None:
+        from services.pack_api_mount import MOUNTED_ATTR
+        snap["routes"] = list(getattr(app.router, "routes", None) or [])
+        snap["mounted"] = dict(
+            getattr(app.state, MOUNTED_ATTR, None) or {})
+    return snap
+
+
+def _restore_runtime(app_state: Any, nodes: Any, app: Any,
+                      snap: Dict[str, Any]) -> None:
+    """commit 失败后按快照恢复旧运行态(尽力而为, 恢复异常只记日志)。"""
+    try:
+        n = snap["nodes"]
+        nodes.configure(
+            registry=n["registry"],
+            llm_client=n["llm_client"],
+            asset_client=n["asset_client"],
+            conversation=n["conversation"],
+            prompt_loader=n["prompt_loader"],
+            pack_routers=n["pack_routers"],
+            pack_configs=n["pack_configs"],
+        )
+        for k, v in snap["state"].items():
+            setattr(app_state, k, v)
+        task_manager = getattr(app_state, "task_manager", None)
+        if task_manager is not None and "handlers" in snap:
+            task_manager.reset_handlers()
+            task_manager._handlers.update(snap["handlers"])
+            task_manager._handler_meta.update(snap["handler_meta"])
+        if app is not None and "routes" in snap:
+            from services.pack_api_mount import MOUNTED_ATTR
+            app.router.routes = list(snap["routes"])
+            setattr(app.state, MOUNTED_ATTR, snap["mounted"])
+    except Exception:
+        logger.exception("运行态快照恢复失败(建议重启进程恢复一致性)")
 
 
 def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any],
