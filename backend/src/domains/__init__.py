@@ -43,6 +43,10 @@ from sdk.registry import ToolRegistry
 from sdk.prompt_loader import PromptLoader
 from sdk.pack_api import PackConfigurationError
 
+# critical pack 名单(三十四审 P1-B)——与 services.pack_manager 的
+# _CRITICAL_PACKS 保持同一语义: 启用即必须完整可用
+_CRITICAL_PACKS = {"chatbi"}
+
 # 模块级 logger。Python 用 logging.getLogger(__name__),name 形如 "domains"。
 # 等价 Java 的 private static final Logger log = LoggerFactory.getLogger(...)。
 logger = logging.getLogger(__name__)
@@ -281,6 +285,13 @@ def load_all_packs(
         dep = evaluate_pack(pack_name, manifest, settings_store, use_probe=probe_enabled())
         dependency_status[pack_name] = dep
         if dep["status"] != "ok":
+            # 三十四审 P1-B: critical pack 的依赖失败必须终止——
+            # 此前跳过让多 pack 场景下服务无 ChatBI 继续 ready
+            if pack_name in _CRITICAL_PACKS:
+                raise PackConfigurationError(
+                    f"critical pack {pack_name} 依赖未满足"
+                    f"({dep['status']}): {dep['detail']}——终止启动"
+                    f"(fail-fast), 不允许无 ChatBI 的假 ready")
             logger.warning(
                 f"跳过工具包 {pack_name}(依赖未满足: {dep['status']}): {dep['detail']}"
             )

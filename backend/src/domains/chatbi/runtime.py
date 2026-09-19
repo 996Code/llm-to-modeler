@@ -125,11 +125,42 @@ def validate_pack_runtime_config() -> None:
     `fn() OR TRUE` 绕过解析期 UndefinedFunction)。装配期探测
     目标库版本, 不满足直接阻止 pack 就绪——比名义 fallback
     (运行期静默退化成不安全分支)诚实且安全。
+
+    三十四审 P1-A: schema migration 成为 startup 前置条件——
+    此前 _init_pack_schema 只在首次 get_pack_db()(首个 API 请求)
+    懒执行, 真实时序: startup complete 后首次 GET 才出现 locked
+    migration done。生产若 DDL 权限不足/迁移数据异常/索引失败,
+    服务先向编排系统宣告 ready, 首个用户收到 500(假完整)。
+    现在: 版本检查通过后**显式执行完整 schema 迁移**, 失败包装
+    PackConfigurationError 传播到 lifespan; 只有迁移成功才缓存
+    PackRelationalDB 单例(get_pack_db 后续调用全部 no-op)。
     """
     from sdk.env_config import parse_int_env, parse_float_env
     parse_int_env("PACK_DDL_RETRY_ATTEMPTS", 5, minimum=1)
     parse_float_env("PACK_DDL_RETRY_BACKOFF_SECONDS", 3.0, minimum=0.0)
     _require_pg16()
+    _migrate_schema_at_startup()
+
+
+def _migrate_schema_at_startup() -> None:
+    """装配期显式执行完整 schema 迁移(三十四审 P1-A)。
+
+    迁移失败(DDL 权限/数据异常/索引失败)包装成
+    PackConfigurationError——loader 不吞, 服务启动失败。
+    成功后 get_pack_db() 的单例缓存已就绪(本函数走 get_pack_db
+    触发首次初始化, 与后续请求共用同一单例)。
+    """
+    from sdk.pack_api import PackConfigurationError
+    try:
+        db = get_pack_db()   # 模块属性查找: 测试可 monkeypatch 替换
+    except PackConfigurationError:
+        raise
+    except Exception as e:
+        raise PackConfigurationError(
+            f"chatbi schema 迁移失败(DDL 权限/数据/索引): {e}——"
+            f"终止启动(fail-fast), 不允许 ready 后首个请求才失败"
+        ) from e
+    _ = db
 
 
 def _require_pg16() -> None:

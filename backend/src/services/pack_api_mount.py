@@ -60,7 +60,16 @@ def mount_pack_routers(app: Any, pack_names: List[str]) -> List[str]:
 
     Returns:
         实际挂载了 API 的 pack 名列表(无 create_api_router 的 pack 跳过)。
+
+    Raises:
+        PackConfigurationError: 名单内声明了 critical API 的 pack
+        (chatbi)路由构造失败——三十四审 P1-B: 此前 catch-continue
+        让服务在没有 ChatBI API 的情况下 ready(404 假健康)。
     """
+    # critical pack 的 API 挂载失败必须终止(三十四审 P1-B);
+    # 其它 pack 保持"路由构造失败只跳过"的尽力而为策略
+    from sdk.pack_api import PackConfigurationError
+    _CRITICAL_API_PACKS = {"chatbi"}
     with _MOUNT_LOCK:
         _unmount_all(app)
 
@@ -69,6 +78,10 @@ def mount_pack_routers(app: Any, pack_names: List[str]) -> List[str]:
             try:
                 module = importlib.import_module(f"domains.{name}.pack")
             except ImportError as e:
+                if name in _CRITICAL_API_PACKS:
+                    raise PackConfigurationError(
+                        f"chatbi pack 模块导入失败: {e}——critical "
+                        f"pack, 终止启动(fail-fast)") from e
                 # 加载名单里的 pack 理论上都能 import;真实导入错误要留痕
                 # (静默吞会把 pack 的代码问题伪装成"没有 API")
                 logger.warning(f"pack api mount: import domains.{name}.pack 失败: {e}")
@@ -79,6 +92,12 @@ def mount_pack_routers(app: Any, pack_names: List[str]) -> List[str]:
             try:
                 router = _call_router_factory(factory, app)
             except Exception as e:
+                if name in _CRITICAL_API_PACKS:
+                    # 三十四审 P1-B: critical pack 的 API 挂载失败
+                    # 终止启动——此前跳过让 ChatBI API 404 假健康
+                    raise PackConfigurationError(
+                        f"chatbi API 路由构造失败: {e}——critical "
+                        f"pack, 终止启动(fail-fast)") from e
                 # 单 pack 路由构造失败只跳过该 pack,不拖垮整个装配
                 # (与 load_all_packs 的逐 pack 容错一致)
                 logger.exception(f"pack api mount: {name} 路由构造失败,已跳过")

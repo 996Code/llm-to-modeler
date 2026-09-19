@@ -3285,6 +3285,214 @@ class TestRetryConfigFailFast:
         # 0 pack 路径: 名单内 pack 全部失败 → RuntimeError(文档承诺)
         monkeypatch.delenv("PACK_DDL_RETRY_ATTEMPTS", raising=False)
 
+
+# ════════════════════════════════════════════════════════════════
+# 三十四审反例回归: schema migration 前置 / critical 契约 / 热切换原子性
+# ════════════════════════════════════════════════════════════════
+
+class TestSchemaMigrationStartupGate:
+    """P1-A: schema migration 是 startup/readiness 前置条件.
+
+    此前 _init_pack_schema 只在首个 API 请求(get_pack_db)懒执行——
+    startup complete 后首个 GET 才出现 locked migration done;
+    DDL 权限不足时服务先 ready, 首个用户 500(假完整)。
+    """
+
+    def test_migration_runs_at_assembly(self, monkeypatch):
+        """validate_pack_runtime_config 触发 get_pack_db(迁移)且失败包装."""
+        from domains.chatbi import runtime as rt
+        from sdk.pack_api import PackConfigurationError
+        called = {}
+
+        def _fake_get():
+            called["n"] = called.get("n", 0) + 1
+            return object()
+
+        monkeypatch.setattr(rt, "get_pack_db", _fake_get)
+        monkeypatch.setattr(rt, "_require_pg16", lambda: None)
+        rt.validate_pack_runtime_config()
+        assert called.get("n") == 1, "装配期未执行 schema 初始化"
+
+        # 迁移失败 → PackConfigurationError(不是裸异常被 loader 吞)
+        def _fail_get():
+            raise RuntimeError("permission denied for schema public")
+
+        monkeypatch.setattr(rt, "get_pack_db", _fail_get)
+        try:
+            rt.validate_pack_runtime_config()
+            raise AssertionError("迁移失败未包装成致命异常")
+        except PackConfigurationError as e:
+            assert "迁移失败" in str(e)
+
+    def test_migration_permission_error_wrapped(self, monkeypatch):
+        """权限类迁移失败 → PackConfigurationError(真实 PG 形态).
+
+        真实 Uvicorn 验证: 只读用户连无权限库, migrate_locked 的
+        CREATE SCHEMA 抛 psycopg InsufficientPrivilege——
+        get_pack_db 内部 _init_pack_schema 传播该异常, 本函数
+        包装成 PackConfigurationError。
+        """
+        from domains.chatbi import runtime as rt
+        from sdk.pack_api import PackConfigurationError
+
+        def _perm_denied():
+            raise PermissionError(
+                "permission denied for schema public")
+
+        monkeypatch.setattr(rt, "get_pack_db", _perm_denied)
+        try:
+            rt._migrate_schema_at_startup()
+            raise AssertionError("权限失败未阻止装配")
+        except PackConfigurationError as e:
+            assert "迁移失败" in str(e)
+
+
+class TestCriticalPackContract:
+    """P1-B: critical pack 任一必需组件失败都终止(不允许部分 ChatBI).
+
+    此前多 pack 场景: chatbi 失败 + 其它 pack 正常 → 服务照常
+    ready(真实注入: loaded 只有 knowledge_graph)。
+    """
+
+    def test_tool_constructor_failure_blocks_multipack(self):
+        """多 pack 下 chatbi 工具构造失败 → 终止(不静默跳过)."""
+        import domains
+        from sdk.pack_api import PackConfigurationError
+        import domains.chatbi.tools.ask_data as ask_mod
+
+        class _Broken:
+            def __init__(self, *a, **kw):
+                raise RuntimeError("simulated tool failure")
+
+        real = ask_mod.AskDataTool
+        ask_mod.AskDataTool = _Broken
+        try:
+            try:
+                domains.load_all_packs(
+                    pack_names=["chatbi", "knowledge_graph"])
+                raise AssertionError("chatbi 失败被多 pack 容错吞掉")
+            except PackConfigurationError:
+                pass
+        finally:
+            ask_mod.AskDataTool = real
+
+    def test_dependency_gate_failure_blocks_multipack(self, monkeypatch):
+        """多 pack 下 chatbi 依赖闸门失败 → 终止."""
+        import domains
+        from sdk.pack_api import PackConfigurationError
+        import services.pack_dependency as pd
+
+        real = pd.evaluate_pack
+
+        def _fail_chatbi(name, *a, **kw):
+            if name == "chatbi":
+                return {"status": "missing", "missing": ["llm"],
+                        "detail": "simulated dep missing"}
+            return real(name, *a, **kw)
+
+        monkeypatch.setattr(pd, "evaluate_pack", _fail_chatbi)
+        try:
+            domains.load_all_packs(
+                pack_names=["chatbi", "knowledge_graph"])
+            raise AssertionError("chatbi 依赖失败被跳过")
+        except PackConfigurationError:
+            pass
+
+    def test_api_mount_failure_blocks(self, monkeypatch):
+        """chatbi API 路由构造失败 → mount 终止(不 catch-continue)."""
+        import types
+        from sdk.pack_api import PackConfigurationError
+        from services.pack_api_mount import mount_pack_routers
+        import domains.chatbi.pack as pack_mod
+
+        def _broken():
+            raise RuntimeError("simulated api router failure")
+
+        monkeypatch.setattr(pack_mod, "create_api_router", _broken)
+        app = types.SimpleNamespace(
+            state=types.SimpleNamespace(),
+            router=types.SimpleNamespace(routes=[]))
+        app.include_router = lambda *a, **kw: None
+        try:
+            mount_pack_routers(app, ["chatbi", "knowledge_graph"])
+            raise AssertionError("chatbi API 失败被跳过")
+        except PackConfigurationError:
+            pass
+
+    def test_assembly_completeness_assertions(self):
+        """assemble 末尾的 ready 不变量断言(handler/API/工具)."""
+        import types
+        from sdk.pack_api import PackConfigurationError
+        from services.pack_manager import _assert_critical_packs_ready
+
+        ok_state = types.SimpleNamespace(
+            task_manager=types.SimpleNamespace(
+                _handlers={"chatbi.refresh_semantics": lambda h: None}))
+        result = {
+            "loaded": ["chatbi"],
+            "pack_tools": {"chatbi": ["ask_data", "switch_chart"]},
+            "api_mounted": ["chatbi"],
+        }
+        _assert_critical_packs_ready(ok_state, result)   # 完整通过
+
+        # handler 缺失
+        bad_state = types.SimpleNamespace(
+            task_manager=types.SimpleNamespace(_handlers={}))
+        try:
+            _assert_critical_packs_ready(bad_state, result)
+            raise AssertionError("handler 缺失未被发现")
+        except PackConfigurationError:
+            pass
+        # API 未挂载
+        r2 = dict(result)
+        r2["api_mounted"] = []
+        try:
+            _assert_critical_packs_ready(ok_state, r2)
+            raise AssertionError("API 未挂载未被发现")
+        except PackConfigurationError:
+            pass
+        # 工具缺失
+        r3 = dict(result)
+        r3["pack_tools"] = {"chatbi": ["ask_data"]}
+        try:
+            _assert_critical_packs_ready(ok_state, r3)
+            raise AssertionError("工具缺失未被发现")
+        except PackConfigurationError:
+            pass
+
+
+class TestHotReloadAtomicity:
+    """P2: 多管理员热切换——装配总锁 + 失败回滚状态文件."""
+
+    def test_hot_reload_lock_serializes(self):
+        """hot_reload_lock 串行化并发装配(进程内互斥)."""
+        import threading
+        import time
+        from services.pack_manager import hot_reload_lock
+        order = []
+        lock = hot_reload_lock()
+
+        def _worker(i):
+            with lock:
+                order.append(f"enter{i}")
+                time.sleep(0.05)
+                order.append(f"exit{i}")
+
+        ts = [threading.Thread(target=_worker, args=(i,))
+              for i in range(3)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        # 串行化: 每个临界区不交错(enter 后紧跟同编号 exit)
+        for i in range(3):
+            assert order.index(f"enter{i}") < order.index(f"exit{i}")
+        # 任意时刻只有一个临界区: enter/exit 严格交替
+        nested = any(
+            order[i].startswith("enter") and order[i + 1].startswith("enter")
+            for i in range(len(order) - 1))
+        assert not nested, f"装配临界区出现交错: {order}"
+
     def test_pg16_required_at_assembly(self, monkeypatch):
         """三十三审 P2: PG<16 / 探测失败都在装配期被拒(fail-closed).
 

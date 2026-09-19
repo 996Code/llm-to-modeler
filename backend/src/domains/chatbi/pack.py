@@ -22,8 +22,11 @@ def create_registry(app_state=None) -> ToolRegistry:
     ValueError 被平台 loader catch-continue 吞掉(真实复现: 即使
     PACKS_ENABLED=chatbi, 服务仍以 0 pack/0 工具"成功"启动);
     致命错误必须传播到 lifespan 让 Uvicorn 启动失败。
-    必需工具(ask_data/switch_chart)构造失败同样不吞——空 registry
-    会让"启用 chatbi"的 ready 不变量静默失效。
+    三十四审 P1-B: 必需工具(ask_data/switch_chart)构造异常同样
+    包装成 PackConfigurationError——普通 RuntimeError/TypeError 到
+    loader 后仍会被多 pack 容错吞掉(真实注入复现: chatbi 失败
+    + knowledge_graph 正常时服务照常 ready), critical pack 的
+    任一必需组件失败都必须终止启动。
     """
     from sdk.pack_api import PackConfigurationError
     from domains.chatbi.runtime import validate_pack_runtime_config
@@ -32,10 +35,17 @@ def create_registry(app_state=None) -> ToolRegistry:
     except ValueError as e:
         raise PackConfigurationError(f"chatbi 运行配置非法: {e}") from e
     registry = ToolRegistry()
-    from domains.chatbi.tools.ask_data import AskDataTool
-    from domains.chatbi.tools.switch_chart import SwitchChartTool
-    registry.register(AskDataTool(app_state))
-    registry.register(SwitchChartTool(app_state))
+    try:
+        from domains.chatbi.tools.ask_data import AskDataTool
+        from domains.chatbi.tools.switch_chart import SwitchChartTool
+        registry.register(AskDataTool(app_state))
+        registry.register(SwitchChartTool(app_state))
+    except PackConfigurationError:
+        raise
+    except Exception as e:
+        raise PackConfigurationError(
+            f"chatbi 必需工具(ask_data/switch_chart)构造失败: {e}"
+            f"——critical pack, 终止启动(fail-fast)") from e
     return registry
 
 

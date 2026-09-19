@@ -25,9 +25,24 @@ graph.py 构建图时把节点函数(nodes.classify_intent_node 等模块级函�
 Bean 定义换掉,持旧引用的在途调用用完即弃,新调用全部走新容器。
 """
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# 热切换装配总锁(三十四审 P2): "读 enabled 集合 → 装配 → 挂 API/任务"
+# 整段串行化——此前只有 PackState 文件锁和 API mount 局部锁, 两个
+# 管理员并发启停时两个 assemble 可交错, 最终的状态文件/registry/
+# 任务 handler/API routes 不一定来自同一份 enabled snapshot。
+# 进程内锁: 当前部署形态为单 worker 多进程各自持有独立内存态,
+# 状态文件由 PackState 自身的文件锁保护跨进程写安全; 若未来
+# 多 worker 均可触发热切换, 需升级为跨进程锁(见 admin.py 注释)。
+_HOT_RELOAD_LOCK = threading.Lock()
+
+
+def hot_reload_lock():
+    """热切换装配总锁上下文(admin 启停 API 使用)。"""
+    return _HOT_RELOAD_LOCK
 
 
 def assemble_packs(
@@ -171,10 +186,66 @@ def assemble_packs(
         f"packs assembled: {sorted(pack_routers)} , {total_tools} tools"
         f"{f' , pack api: {api_mounted}' if api_mounted else ''}"
     )
-    return {
+    result = {
         "loaded": sorted(pack_routers),
         "tools": total_tools,
         "pack_tools": pack_tools,
         "dependency_status": dep_status,
         "api_mounted": api_mounted,
     }
+    _assert_critical_packs_ready(app_state, result)
+    return result
+
+
+# critical pack 契约(三十四审 P1-B): 启用即必须完整可用——
+# 任一必需组件缺失都终止启动/装配, 不允许"部分 ChatBI"的假 ready
+_CRITICAL_PACKS = {
+    "chatbi": {
+        "required_tools": ("ask_data", "switch_chart"),
+        "requires_api": True,
+        "required_task_types": ("chatbi.refresh_semantics",),
+    },
+}
+
+
+def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any]) -> None:
+    """critical pack 完整性断言(三十四审 P1-B)。
+
+    启用名单(loaded)含 critical pack 时, 以下不变量必须全部成立,
+    否则抛 PackConfigurationError 终止:
+      - pack 在 loaded(依赖闸门/import/registry 失败会让它不在);
+      - 必需工具已注册(ask_data/switch_chart);
+      - API 已挂载(requires_api);
+      - 必需任务 handler 已注册(chatbi.refresh_semantics)。
+    依赖闸门跳过/工具构造失败等路径在 loader 层已被 critical
+    包装拦截; 本断言兜住"装配结果不完整"的残余路径(如任务
+    handler 注册静默失败)。
+    """
+    from sdk.pack_api import PackConfigurationError
+    loaded = set(result.get("loaded") or [])
+    pack_tools = result.get("pack_tools") or {}
+    api_mounted = set(result.get("api_mounted") or [])
+    # 启用名单 = 本次装配请求的 pack(loaded 是成功子集);
+    # critical 判定以 loaded 为准——没进 loaded 的 critical pack
+    # 已在 loader 层抛错(依赖闸门除外, 见下)
+    task_manager = getattr(app_state, "task_manager", None)
+    for pack_name, req in _CRITICAL_PACKS.items():
+        if pack_name not in loaded:
+            continue   # 未启用或已被 loader 拦截
+        missing_tools = [t for t in req["required_tools"]
+                         if t not in (pack_tools.get(pack_name) or [])]
+        if missing_tools:
+            raise PackConfigurationError(
+                f"critical pack {pack_name} 缺少必需工具: {missing_tools}"
+                f"——终止启动(fail-fast)")
+        if req.get("requires_api") and pack_name not in api_mounted:
+            raise PackConfigurationError(
+                f"critical pack {pack_name} 的 API 未挂载"
+                f"——终止启动(fail-fast)")
+        if task_manager is not None:
+            handlers = getattr(task_manager, "_handlers", {}) or {}
+            for tt in req.get("required_task_types", ()):
+                if tt not in handlers:
+                    raise PackConfigurationError(
+                        f"critical pack {pack_name} 的任务 handler "
+                        f"{tt} 未注册——终止启动(fail-fast)")

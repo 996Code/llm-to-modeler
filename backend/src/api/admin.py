@@ -509,15 +509,39 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     # 无论状态是否变化都重新装配:装配幂等(importlib 有模块缓存,开销毫秒级),
     # 且能自愈"上次状态已落盘但装配失败"的残留(否则引擎与状态不一致要到重启才恢复)
     # app 透传:同步挂载/卸载该 pack 的自有 API 路由
-    try:
-        summary = assemble_packs(
-            request.app.state, sorted(pack_state.enabled_names()), app=request.app
-        )
-        result["loaded"] = summary["loaded"]
-        result["toolCount"] = summary["tools"]
-    except Exception as e:
-        logger.exception(f"hot-reload packs failed after toggling {name}")
-        raise HTTPException(503, f"State saved but hot-reload failed: {e}")
+    #
+    # 三十四审 P2: 热切换原子性——
+    #   1) 装配总锁: 两个管理员并发启停时, "读 enabled 集合 → 装配 →
+    #      挂 API/任务"整段串行化(此前只有 PackState 文件锁和 API
+    #      mount 局部锁, 两个 assemble 可交错, 状态文件/registry/
+    #      handler/routes 不一定来自同一份 snapshot);
+    #   2) 失败回滚: 装配失败时恢复 toggled 前的状态文件(此前状态
+    #      已落盘但引擎还是旧装配——"State saved but hot-reload
+    #      failed"的半成功态, 状态文件与运行态不一致到重启)。
+    from services.pack_manager import hot_reload_lock
+    with hot_reload_lock():
+        try:
+            summary = assemble_packs(
+                request.app.state, sorted(pack_state.enabled_names()),
+                app=request.app
+            )
+            result["loaded"] = summary["loaded"]
+            result["toolCount"] = summary["tools"]
+        except Exception as e:
+            # 回滚本次 toggle(只回滚 changed 的那个 pack; 其它并发
+            # 管理员的变更不在本请求职责内)
+            if changed:
+                try:
+                    pack_state.set_enabled(name, not enabled)
+                    logger.warning(
+                        f"hot-reload 失败, 已回滚 {name} enabled="
+                        f"{not enabled}(状态文件与运行态保持一致)")
+                except Exception as rollback_err:
+                    logger.error(
+                        f"hot-reload 失败且回滚也失败(状态文件可能与"
+                        f"运行态不一致, 建议重启): {rollback_err}")
+            logger.exception(f"hot-reload packs failed after toggling {name}")
+            raise HTTPException(503, f"State rolled back, hot-reload failed: {e}")
     return result
 
 
