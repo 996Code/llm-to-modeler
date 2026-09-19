@@ -663,11 +663,15 @@ async def admin_recheck_pack(name: str, request: Request):
 
     依赖满足且该 pack 处于启用态时顺触发热装配(把之前因依赖缺失
     而没加载进引擎的 pack 现场加载,含挂载其 API)——补配后无需重启。
+
+    三十五审 P2: 热装配段进入 hot_reload_lock——与 toggle 共用
+    同一把锁, 两个管理员一个 toggle 一个 recheck 并发时装配
+    不交错(此前 recheck 无锁, 是另一条无串行化的热装配入口)。
     """
     pack_state = _pack_or_404(request, name)
     from domains import load_pack_configs
     from services.pack_dependency import clear_probe_cache, evaluate_pack, probe_enabled
-    from services.pack_manager import assemble_packs
+    from services.pack_manager import assemble_packs, hot_reload_lock
 
     clear_probe_cache(name)
     cfg = load_pack_configs(pack_names=[name]).get(name) or {}
@@ -678,15 +682,16 @@ async def admin_recheck_pack(name: str, request: Request):
 
     result: Dict[str, Any] = {"name": name, "dependency": dep, "reloaded": False}
     if dep["status"] == "ok" and pack_state.is_enabled(name):
-        try:
-            summary = assemble_packs(
-                request.app.state, sorted(pack_state.enabled_names()), app=request.app
-            )
-            result["reloaded"] = name in summary["loaded"]
-            result["loaded"] = summary["loaded"]
-        except Exception as e:
-            logger.exception(f"recheck 后热装配失败: {name}")
-            raise HTTPException(503, f"Dependency ok but hot-reload failed: {e}")
+        with hot_reload_lock():
+            try:
+                summary = assemble_packs(
+                    request.app.state, sorted(pack_state.enabled_names()), app=request.app
+                )
+                result["reloaded"] = name in summary["loaded"]
+                result["loaded"] = summary["loaded"]
+            except Exception as e:
+                logger.exception(f"recheck 后热装配失败: {name}")
+                raise HTTPException(503, f"Dependency ok but hot-reload failed: {e}")
         # 只有真触发了热装配才用装配结果刷新——刚才是全量重探测的结论;
         # 探测失败时绝不能用装配缓存的旧 ok 覆盖(那正是故障期,谎报 ok
         # 会让"重新检测"这个诊断手段在最需要时给出相反结论)。

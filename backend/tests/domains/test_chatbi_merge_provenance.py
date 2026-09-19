@@ -3551,6 +3551,185 @@ class TestHotReloadAtomicity:
             "set_enabled 不在 hot_reload_lock 内(交错窗口重新打开)")
         assert toggle_pos < assemble_pos, "装配不在 toggle 之后"
 
+
+# ════════════════════════════════════════════════════════════════
+# 三十五审反例回归: critical 全异常域 / 两阶段装配 / 多 worker CAS
+# ════════════════════════════════════════════════════════════════
+
+class TestCriticalFullExceptionDomain:
+    """P1-A: critical pack 的**任何**加载阶段异常都终止.
+
+    真实注入(审计): load_pack('chatbi') 抛普通 RuntimeError、
+    knowledge_graph 正常时, 函数仍返回成功且 loaded 只有
+    knowledge_graph——普通异常分支 catch-continue 了 critical。
+    """
+
+    def test_ordinary_load_exception_blocks_multipack(self):
+        import domains
+        from sdk.pack_api import PackConfigurationError
+        real = domains.load_pack
+
+        def _broken(pack_name, app_state=None):
+            if pack_name == "chatbi":
+                raise RuntimeError(
+                    "simulated chatbi module/default-router failure")
+            return real(pack_name, app_state=app_state)
+
+        domains.load_pack = _broken
+        try:
+            try:
+                domains.load_all_packs(
+                    pack_names=["chatbi", "knowledge_graph"])
+                raise AssertionError(
+                    "critical 普通加载异常被多 pack 容错吞掉")
+            except PackConfigurationError:
+                pass
+        finally:
+            domains.load_pack = real
+
+    def test_assert_receives_requested(self):
+        """断言接收 requested: requested 含 critical 而 loaded 不含
+        时必须失败(此前只看 loaded, 被跳过的 critical 直接漏检)."""
+        import types
+        from sdk.pack_api import PackConfigurationError
+        from services.pack_manager import _assert_critical_packs_ready
+        state = types.SimpleNamespace(
+            task_manager=types.SimpleNamespace(
+                _handlers={"chatbi.refresh_semantics": lambda h: None}))
+        result = {
+            "loaded": ["knowledge_graph"],   # chatbi 被某路径跳过
+            "pack_tools": {"knowledge_graph": ["kb_search"]},
+            "api_mounted": ["knowledge_graph"],
+        }
+        try:
+            _assert_critical_packs_ready(
+                state, result, requested=["chatbi", "knowledge_graph"])
+            raise AssertionError("requested 含 chatbi 但 loaded 不含, 未失败")
+        except PackConfigurationError:
+            pass
+
+    def test_critical_list_single_source(self):
+        """critical 名单单一真相源: 三处引用同一 sdk 函数."""
+        import inspect
+        from sdk.pack_api import critical_packs
+        assert critical_packs() == frozenset({"chatbi"})
+        from domains import critical_packs as dom_cp
+        assert dom_cp is critical_packs, "domains 未复用 sdk 真相源"
+        # pack_api_mount 不再持有本地名单副本
+        import services.pack_api_mount as m
+        src = inspect.getsource(m)
+        assert "_CRITICAL_API_PACKS" not in src, (
+            "pack_api_mount 仍有本地 critical 名单副本")
+        import services.pack_manager as pm
+        assert not hasattr(pm, "_CRITICAL_PACKS"), (
+            "pack_manager 仍有旧名单(应只有 requirements 明细)")
+
+
+class TestTwoPhaseAssembly:
+    """P1-B: 两阶段装配——新 router 构造失败时旧 route 完好.
+
+    真实注入(审计): mount 先 _unmount_all 再构造, 新 ChatBI
+    router 失败时旧 route 已消失(old_route_survives=False)。
+    """
+
+    def test_old_routes_survive_new_router_failure(self, monkeypatch):
+        from fastapi import FastAPI
+        from sdk.pack_api import PackConfigurationError
+        from services.pack_api_mount import mount_pack_routers
+        import domains.chatbi.pack as pack_mod
+
+        app = FastAPI()
+        mount_pack_routers(app, ["chatbi"])
+        old_routes = list(app.router.routes)
+        assert old_routes, "初始挂载无 route"
+
+        def _broken():
+            raise RuntimeError("simulated new router failure")
+
+        _real_create = pack_mod.create_api_router
+        monkeypatch.setattr(pack_mod, "create_api_router", _broken)
+        try:
+            try:
+                mount_pack_routers(app, ["chatbi", "knowledge_graph"])
+                raise AssertionError("构造失败仍返回成功")
+            except PackConfigurationError:
+                pass
+            survived = all(r in app.router.routes for r in old_routes)
+            assert survived, "旧 ChatBI API 被卸掉(应两阶段保护)"
+        finally:
+            pack_mod.create_api_router = _real_create
+
+    def test_assemble_precheck_before_runtime_mutation(self):
+        """assemble 的 critical 预检在运行态切换之前(Prepare 段).
+
+        静态防回退锚: _assert_critical_packs_ready 的首次调用
+        必须出现在 nodes.configure / unload 之前。
+        """
+        import inspect
+        from services import pack_manager as pm
+        src = inspect.getsource(pm.assemble_packs)
+        precheck = src.find("_assert_critical_packs_ready")
+        configure = src.find("nodes.configure(")
+        # commit 段第一条真实运行态操作 = unload 钩子循环的 prev_loaded
+        # (不能用裸 "unload"——Prepare 段注释里也提到该词, 会误中)
+        unload = src.find("prev_loaded")
+        assert 0 < precheck < configure, (
+            "critical 预检不在 nodes.configure 之前(Prepare 段缺失)")
+        assert 0 < precheck < unload, (
+            "critical 预检不在 unload 之前(Prepare 段缺失)")
+
+
+class TestRecheckSharesLock:
+    """P2: recheck 与 toggle 共用同一装配锁."""
+
+    def test_recheck_uses_hot_reload_lock(self):
+        import inspect
+        from api import admin as admin_mod
+        src = None
+        for _n, obj in inspect.getmembers(admin_mod, inspect.isfunction):
+            try:
+                body = inspect.getsource(obj)
+            except (OSError, TypeError):
+                continue
+            if ("assemble_packs" in body
+                    and "clear_probe_cache" in body):
+                src = body
+                break
+        assert src is not None, "未找到 recheck 端点"
+        assert "hot_reload_lock" in src, (
+            "recheck 未使用 hot_reload_lock(无锁热装配入口)")
+
+
+class TestPackStateMultiWorkerCAS:
+    """P2: 两个独立 PackState 实例(多 worker)不丢更新.
+
+    真实复现(审计): worker A 禁用 X, worker B 基于旧快照禁用 Y,
+    磁盘上 X 又回来了(后写者覆盖)。
+    """
+
+    def test_two_writers_no_lost_update(self):
+        import json
+        import os
+        import tempfile
+        from services.pack_state import PackState
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "state.json")
+        packs = ["chatbi", "knowledge_graph", "njmind_form"]
+        try:
+            a = PackState(path, packs)
+            b = PackState(path, packs)   # worker B: 同一起点
+            a.set_enabled("knowledge_graph", False)
+            b.set_enabled("njmind_form", False)   # B 基于旧快照
+            disk = json.load(open(path))
+            assert "knowledge_graph" not in disk["enabled"], (
+                "A 的禁用被 B 覆盖丢失(stale writer)")
+            assert "njmind_form" not in disk["enabled"], (
+                "B 的变更丢失")
+            assert disk.get("revision", 0) >= 2, "revision 未递增"
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_pg16_required_at_assembly(self, monkeypatch):
         """三十三审 P2: PG<16 / 探测失败都在装配期被拒(fail-closed).
 

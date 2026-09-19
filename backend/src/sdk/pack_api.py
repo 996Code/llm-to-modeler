@@ -128,6 +128,24 @@ class PackIncompatibleError(PackConfigurationError):
     """pack 与运行环境不兼容(如数据库版本低于硬性要求)。"""
 
 
+# ── critical pack 契约(三十五审 P1-A: 单一真相源)──────────
+# 此前 critical 名单散落在 domains/__init__、pack_manager、
+# pack_api_mount 三处各自复制——新增 critical pack 或修改语义时
+# 必须同步三处, 漏一处就是"部分 ChatBI 假 ready"的窗口。
+# 所有模块(包括 domains 和 services)一律从本函数读取。
+
+def critical_packs() -> frozenset:
+    """critical pack 名单(启用即必须完整可用, 任一必需组件失败
+    终止启动/装配)。
+
+    语义: critical pack 的依赖失败、import 失败、registry/router/
+    handler 构造失败、schema 迁移失败、**任何加载阶段**的普通
+    异常都必须终止——不允许"部分 critical pack"的假 ready。
+    其它可选 pack 保持尽力而为策略。
+    """
+    return frozenset({"chatbi"})
+
+
 
 def user_id(request: Request, default: str = "anonymous") -> str:
     """读取请求用户身份(宿主网关注入的 X-User-Id,缺省 anonymous)。

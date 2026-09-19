@@ -78,9 +78,35 @@ def assemble_packs(
         pack_names=pack_names, settings_store=settings_store, app_state=app_state
     )
 
+    # ── 三十五审 P1-B: 两阶段装配——Prepare(构建/验证)与 Commit(切换)分离 ──
+    # 此前装配沿途修改旧运行态(unload → _loaded_packs → nodes →
+    # app.state → handlers → routes), 中后段失败时 admin 只回滚
+    # PackState 文件, runtime 已是半装配新值(真实注入: 503 后
+    # registry/routers 已变)。现在:
+    #   Prepare: load_all_packs(纯构建, 无副作用) + critical 断言
+    #     (基于构建结果, 在任何运行态切换之前);
+    #   Commit: 断言通过后才执行 unload/nodes/app.state/handlers/
+    #     routes 的切换——commit 段的每步都是"替换引用"类操作,
+    #     mount_pack_routers 自身已两阶段化(构建全部 router 后
+    #     才卸旧挂新)。
+    # 注意 Prepare 段不查任务 handler: handler 注册本身是 Commit 段
+    # 动作(下方 register_tasks 循环), 冷启动时必然为空——在 Prepare
+    # 查它会让每次冷启动都误判 fail(e2e 真实链路暴露)。handler 完整性
+    # 由 Commit 段末尾的全量复核保证。
+    _assert_critical_packs_ready(
+        app_state,
+        {"loaded": sorted(pack_routers),
+         "pack_tools": pack_tools,
+         # API 挂载在 commit 段执行; 此处先按"将挂载名单"预检
+         # (mount 阶段对 critical 失败会抛, 双保险)
+         "api_mounted": sorted(pack_routers)},
+        requested=list(pack_names or []),
+        check_task_handlers=False)
+
     # pack 可选钩子 unload():上次在载、本次不在载(禁用/依赖失联)的
     # pack 释放自持资源(如数据库连接)。钩子异常只记日志——卸载清理
     # 失败不能阻断装配(资源最终随进程退出回收)。
+    # (commit 段: 断言已通过, 开始切换运行态)
     prev_loaded = set(getattr(app_state, "_loaded_packs", None) or [])
     import importlib
     for name in sorted(prev_loaded - set(pack_routers or {})):
@@ -193,13 +219,20 @@ def assemble_packs(
         "dependency_status": dep_status,
         "api_mounted": api_mounted,
     }
-    _assert_critical_packs_ready(app_state, result)
+    # commit 段末尾复核(API 已真实挂载后的最终态; Prepare 段的
+    # 预检在运行态切换之前, 双保险)
+    _assert_critical_packs_ready(app_state, result,
+                                  requested=list(pack_names or []))
     return result
 
 
 # critical pack 契约(三十四审 P1-B): 启用即必须完整可用——
 # 任一必需组件缺失都终止启动/装配, 不允许"部分 ChatBI"的假 ready
-_CRITICAL_PACKS = {
+# 三十五审 P1-A: 名单从 sdk.pack_api.critical_packs() 单一真相源
+# 读取(此前三个模块各自复制, 漏同步即窗口); 必需组件明细仍在此处
+from sdk.pack_api import critical_packs
+
+_CRITICAL_PACK_REQUIREMENTS = {
     "chatbi": {
         "required_tools": ("ask_data", "switch_chart"),
         "requires_api": True,
@@ -208,30 +241,44 @@ _CRITICAL_PACKS = {
 }
 
 
-def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any]) -> None:
-    """critical pack 完整性断言(三十四审 P1-B)。
+def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any],
+                                  requested: Optional[List[str]] = None,
+                                  check_task_handlers: bool = True
+                                  ) -> None:
+    """critical pack 完整性断言(三十四审 P1-B / 三十五审 P1-A)。
 
-    启用名单(loaded)含 critical pack 时, 以下不变量必须全部成立,
-    否则抛 PackConfigurationError 终止:
-      - pack 在 loaded(依赖闸门/import/registry 失败会让它不在);
-      - 必需工具已注册(ask_data/switch_chart);
-      - API 已挂载(requires_api);
-      - 必需任务 handler 已注册(chatbi.refresh_semantics)。
-    依赖闸门跳过/工具构造失败等路径在 loader 层已被 critical
-    包装拦截; 本断言兜住"装配结果不完整"的残余路径(如任务
-    handler 注册静默失败)。
+    三十五审 P1-A: 断言同时接收 **requested**(本次装配请求/启用的
+    pack 名单)与 loaded(成功子集)——此前只看 loaded, critical pack
+    被任何路径跳过后 `continue` 直接漏检(真实注入: loaded 只有
+    knowledge_graph 时函数返回成功)。requested 含 critical 而
+    loaded 不含时必须失败。
+    其余不变量: 必需工具已注册 / API 已挂载 / 任务 handler 已注册。
+
+    check_task_handlers: 任务 handler 注册是 Commit 段动作(register_tasks
+    循环), Prepare 段调用时须传 False(冷启动时 handler 尚未注册,
+    在 Prepare 查它会把正常启动误判为 fail); Commit 段末尾的全量
+    复核用默认 True。
     """
     from sdk.pack_api import PackConfigurationError
     loaded = set(result.get("loaded") or [])
     pack_tools = result.get("pack_tools") or {}
     api_mounted = set(result.get("api_mounted") or [])
-    # 启用名单 = 本次装配请求的 pack(loaded 是成功子集);
-    # critical 判定以 loaded 为准——没进 loaded 的 critical pack
-    # 已在 loader 层抛错(依赖闸门除外, 见下)
+    requested_set = set(requested) if requested is not None else loaded
     task_manager = getattr(app_state, "task_manager", None)
-    for pack_name, req in _CRITICAL_PACKS.items():
+    for pack_name in critical_packs():
+        if pack_name not in requested_set:
+            continue   # 本次未请求/未启用
         if pack_name not in loaded:
-            continue   # 未启用或已被 loader 拦截
+            # requested 含 critical 但 loaded 不含——被某条路径跳过
+            # (loader 层已拦截大多数, 此处兜底残余路径)
+            raise PackConfigurationError(
+                f"critical pack {pack_name} 在 requested"
+                f"({sorted(requested_set)})中但未成功加载"
+                f"(loaded={sorted(loaded)})——终止(fail-fast), "
+                f"不允许部分 ChatBI 的假 ready")
+        req = _CRITICAL_PACK_REQUIREMENTS.get(pack_name)
+        if not req:
+            continue
         missing_tools = [t for t in req["required_tools"]
                          if t not in (pack_tools.get(pack_name) or [])]
         if missing_tools:
@@ -242,7 +289,7 @@ def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any]) -> None
             raise PackConfigurationError(
                 f"critical pack {pack_name} 的 API 未挂载"
                 f"——终止启动(fail-fast)")
-        if task_manager is not None:
+        if check_task_handlers and task_manager is not None:
             handlers = getattr(task_manager, "_handlers", {}) or {}
             for tt in req.get("required_task_types", ()):
                 if tt not in handlers:

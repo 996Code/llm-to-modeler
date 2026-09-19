@@ -25,7 +25,17 @@ PACKS_ENABLED(env)只能"改配置重启生效"。本模块把启停状态变成
 
 【线程安全】
   threading.Lock 保护读改写。单进程 uvicorn 下足够;切换是低频管理操作。
+  三十五审 P2(多 worker): 落盘改为 **文件锁 + revision CAS**——
+  两个 worker 各持独立 PackState 实例时, 旧实现后写者直接覆盖
+  前者的变更(真实复现: worker A 禁用 X, worker B 基于旧快照
+  写入, 磁盘上 X 又回来了)。现在:
+    - 落盘前在 OS 级文件锁(fcntl)内重读磁盘 revision;
+    - 磁盘 revision > 内存 revision(他人已写入)→ 先把磁盘上
+      他人新增的变更合并进内存(只合并本实例没动过的 pack),
+      再写回递增后的 revision——stale writer 不再丢更新;
+    - 读侧构造时记录磁盘 revision, 作为后续 CAS 基准。
 """
+import fcntl
 import json
 import logging
 import os
@@ -74,6 +84,10 @@ class PackState:
         # _read_file 的产物(文件不存在/损坏时保持空默认)
         self._file_known: Set[str] = set()
         self._file_has_known = False
+        # 三十五审 P2: 磁盘 revision(CAS 基准) + 本实例触碰过的 pack
+        # (合并他人变更时, 触碰过的以本实例为准)
+        self._revision: int = 0
+        self._touched: Set[str] = set()
 
         persisted = self._read_file()
         if persisted is not None:
@@ -172,6 +186,9 @@ class PackState:
                     self._enabled.add(name)
                 else:
                     self._enabled.discard(name)
+                # 三十五审 P2: 记录触碰(CAS 合并时本实例动过的
+                # pack 以本实例为准)
+                self._touched.add(name)
                 self._write_file_locked()
             return changed
 
@@ -182,8 +199,10 @@ class PackState:
 
         文件损坏(半截 JSON)时告警并重置——状态文件只影响启停开关,
         重建成本低于人工修复。
+        三十五审 P2: 同时记录磁盘 revision(后续 CAS 的基准)。
         """
         if not self._path.exists():
+            self._revision = 0
             return None
         try:
             with open(self._path, encoding="utf-8") as f:
@@ -196,9 +215,12 @@ class PackState:
             known = data.get("known")
             self._file_has_known = isinstance(known, list)
             self._file_known = {str(n) for n in known} if self._file_has_known else set(names)
+            # revision(旧格式无此字段 = 0)
+            self._revision = int(data.get("revision") or 0)
             return {str(n) for n in names}
         except Exception as e:
             logger.warning(f"pack 状态文件损坏,将按默认重新初始化({self._path}): {e}")
+            self._revision = 0
             return None
 
     def _known_names(self) -> Set[str]:
@@ -206,18 +228,64 @@ class PackState:
         return getattr(self, "_file_known", set())
 
     def _write_file_locked(self):
-        """落盘当前 enabled + known 集合(调用方须已持有锁)。原子写:tmp + os.replace。
+        """落盘当前 enabled + known 集合(调用方须已持有线程锁)。
 
         known = 出现过的全部 pack(含禁用), 供下次启动区分
         "新发现"(known 外, 默认启用)与"显式禁用"(known 内且不在 enabled)。
+        原子写:tmp + os.replace(崩溃不会留下半截 JSON)。
+
+        三十五审 P2(多 worker): OS 级文件锁 + revision CAS——
+        两个 worker 各持独立实例时, 后写者直接覆盖会丢前者的变更
+        (真实复现: A 禁用 X, B 基于旧快照写入, 磁盘上 X 又回来)。
+        现在落盘前在 fcntl 文件锁内重读磁盘 revision:
+          - 磁盘 revision > 内存 revision(他人已写入): 把磁盘上
+            他人对**本实例未触碰的 pack** 的变更合并进内存
+            (本实例触碰过的 pack 以本实例为准——它是在他人写入
+            之后做的显式操作), 再写回递增后的 revision;
+          - 否则直接写 revision+1。
         """
-        known = set(self._enabled) | set(self._discovered)
-        payload = {
-            "version": _STATE_VERSION,
-            "enabled": sorted(self._enabled),
-            "known": sorted(known),
-        }
-        tmp = self._path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self._path)
+        lock_path = self._path.with_suffix(".lock")
+        with open(lock_path, "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                disk_rev = 0
+                disk_enabled: Set[str] = set()
+                if self._path.exists():
+                    try:
+                        with open(self._path, encoding="utf-8") as f:
+                            data = json.load(f)
+                        disk_rev = int(data.get("revision") or 0)
+                        disk_enabled = {str(n) for n in data.get("enabled") or []}
+                    except Exception:
+                        disk_enabled = set()
+                if disk_rev > getattr(self, "_revision", 0):
+                    # 他人已写入: 合并他人对未触碰 pack 的变更。
+                    # mine = 本实例显式动过的 pack(以本实例为准);
+                    # 其余 pack 的启停以磁盘(他人最新写入)为准。
+                    mine = getattr(self, "_touched", set())
+                    for n in self._discovered:
+                        if n in mine:
+                            continue
+                        if n in disk_enabled:
+                            self._enabled.add(n)      # 他人启用 → 并入
+                        else:
+                            self._enabled.discard(n)  # 他人禁用 → 移除
+                    logger.info(
+                        "pack 状态 CAS 合并: 磁盘 revision %d > 内存 %d"
+                        "(他人变更已合并)", disk_rev,
+                        getattr(self, "_revision", 0))
+                self._revision = max(disk_rev,
+                                      getattr(self, "_revision", 0)) + 1
+                known = set(self._enabled) | set(self._discovered)
+                payload = {
+                    "version": _STATE_VERSION,
+                    "revision": self._revision,
+                    "enabled": sorted(self._enabled),
+                    "known": sorted(known),
+                }
+                tmp = self._path.with_suffix(".tmp")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, self._path)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)

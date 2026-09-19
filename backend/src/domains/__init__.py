@@ -41,11 +41,7 @@ from typing import Any, List, Optional, Tuple
 
 from sdk.registry import ToolRegistry
 from sdk.prompt_loader import PromptLoader
-from sdk.pack_api import PackConfigurationError
-
-# critical pack 名单(三十四审 P1-B)——与 services.pack_manager 的
-# _CRITICAL_PACKS 保持同一语义: 启用即必须完整可用
-_CRITICAL_PACKS = {"chatbi"}
+from sdk.pack_api import PackConfigurationError, critical_packs
 
 # 模块级 logger。Python 用 logging.getLogger(__name__),name 形如 "domains"。
 # 等价 Java 的 private static final Logger log = LoggerFactory.getLogger(...)。
@@ -287,7 +283,7 @@ def load_all_packs(
         if dep["status"] != "ok":
             # 三十四审 P1-B: critical pack 的依赖失败必须终止——
             # 此前跳过让多 pack 场景下服务无 ChatBI 继续 ready
-            if pack_name in _CRITICAL_PACKS:
+            if pack_name in critical_packs():
                 raise PackConfigurationError(
                     f"critical pack {pack_name} 依赖未满足"
                     f"({dep['status']}): {dep['detail']}——终止启动"
@@ -324,7 +320,20 @@ def load_all_packs(
                 f"(fail-fast): {e}")
             raise
         except Exception as e:
-            # 单个 pack 失败:打日志后跳过,不中断整体启动(尽力而为)。
+            # 三十五审 P1-A: critical pack 的**任何**加载阶段异常
+            # (模块 import 的非 ImportError、create_prompt_loader、
+            # create_router/DefaultPackRouter、registry 遍历/合并、
+            # 未来新增但忘记主动包装的代码)都必须包装重抛——
+            # 此前 catch-continue 让多 pack 场景下 ChatBI 被跳过而
+            # 服务照常 ready(真实注入: loaded 只有 knowledge_graph)。
+            if pack_name in critical_packs():
+                logger.error(
+                    f"critical pack {pack_name} 加载异常——终止启动"
+                    f"(fail-fast), 不允许部分 ChatBI 的假 ready: {e}")
+                raise PackConfigurationError(
+                    f"critical pack {pack_name} 加载失败: {e}"
+                    f"——任一必需组件异常都终止启动") from e
+            # 单个可选 pack 失败:打日志后跳过,不中断整体启动(尽力而为)。
             # 依赖检测未过的 pack 也走同一条跳过路径(见上方依赖闸门)。
             logger.error(f"跳过工具包 {pack_name}: {e}")
             continue
