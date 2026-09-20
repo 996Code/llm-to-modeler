@@ -475,6 +475,11 @@ def _reject_multi_worker(request: Request) -> None:
     或改用 PACKS_ENABLED + 滚动重启。
     """
     from services.pack_state import count_state_file_holders
+    # 三十八审预审(声称3): degraded 进程拒绝管理操作(重启是唯一出路)
+    if getattr(request.app.state, "pack_runtime_degraded", False):
+        raise HTTPException(
+            503, "Process is degraded (previous rollback failed)—"
+                 "restart required before further pack management.")
     holders = count_state_file_holders(
         request.app.state.pack_state.state_path)
     if holders != 1:
@@ -546,11 +551,18 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
         assemble_packs, finalize_assembly, hot_reload_lock,
         rollback_assembly)
     _reject_multi_worker(request)
+    # 三十八审预审(声称1): degraded 进程拒绝后续管理操作——
+    # 置位后唯一出路是重启(或运维确认恢复), 不能继续 toggle/recheck
+    if getattr(request.app.state, "pack_runtime_degraded", False):
+        raise HTTPException(
+            503, "Process is degraded (previous rollback failed)—"
+                 "restart required before further pack management.")
     with hot_reload_lock():
         changed = pack_state.set_enabled(
             name, enabled, persist=False)
         logger.info(f"pack toggled: {name} enabled={enabled} changed={changed}")
         result = {"changed": changed, **_packs_payload(request)}
+        summary = None
         try:
             summary = assemble_packs(
                 request.app.state, sorted(pack_state.enabled_names()),
@@ -562,11 +574,16 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
             if changed:
                 pack_state.persist()
                 # 磁盘确认 → finalize(生命周期/unload 等不可逆副作用)
+                # 三十八审预审(声称2): finalize 失败(critical scheduler
+                # 启动失败)时磁盘已持久化新状态——不能走"回滚到旧态"
+                # (会与磁盘分裂), 而是进入 degraded: runtime 保持新装配
+                # (handler/工具已就位, 只是缺 scheduler), 磁盘保持新值,
+                # 响应如实报错。重启后按磁盘状态装配即恢复完整。
                 finalize_assembly(request.app.state, summary["_tx"])
         except Exception as e:
-            rollback_ok = True
-            if changed:
-                # 回滚内存态(pending 一并清空——失败请求不留未提交意图)
+            if summary is not None and changed:
+                # assemble 已 commit(有事务 handle)才谈得上快照回滚
+                rollback_ok = True
                 try:
                     pack_state.set_enabled(
                         name, not enabled, persist=False)
@@ -574,7 +591,6 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
                 except Exception as rollback_err:
                     logger.error(
                         f"hot-reload 失败且内存回滚也失败: {rollback_err}")
-                # 按快照确定性回滚 runtime(不重跑装配)
                 try:
                     rollback_ok = rollback_assembly(
                         request.app.state, summary["_tx"])
@@ -592,12 +608,41 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
                     logger.error(
                         f"hot-reload 失败且快照回滚失败——进程已降级"
                         f"(degraded), 建议重启恢复一致性")
-            logger.exception(f"hot-reload packs failed after toggling {name}")
-            if not rollback_ok:
+                if not rollback_ok:
+                    logger.exception(
+                        f"hot-reload packs failed after toggling {name}")
+                    raise HTTPException(
+                        503,
+                        f"Rollback FAILED after hot-reload error: {e}. "
+                        f"Process is degraded—restart required.")
+            elif summary is not None and not changed:
+                # no-op toggle 但 finalize 失败: 磁盘没写过, runtime 是
+                # 新装配(与磁盘一致)——degraded + 如实报错
+                request.app.state.pack_runtime_degraded = True
+                logger.exception(
+                    f"finalize 失败(no-op toggle): {name}")
                 raise HTTPException(
-                    503,
-                    f"Rollback FAILED after hot-reload error: {e}. "
-                    f"Process is degraded—restart required.")
+                    503, f"Finalize failed: {e}. Process is degraded—"
+                         f"restart required.")
+            else:
+                # assemble 自身失败(Prepare/commit 抛): 无事务 handle,
+                # commit 失败路径已在 assemble 内部按快照回滚; 内存态
+                # 反向恢复即可, 磁盘从未写入
+                if changed:
+                    try:
+                        pack_state.set_enabled(
+                            name, not enabled, persist=False)
+                        pack_state.clear_pending_ops()
+                    except Exception as rollback_err:
+                        request.app.state.pack_runtime_degraded = True
+                        logger.error(
+                            f"assemble 失败且内存回滚也失败(进程降级): "
+                            f"{rollback_err}")
+                logger.exception(
+                    f"hot-reload packs failed after toggling {name}")
+                raise HTTPException(
+                    503, f"State rolled back, hot-reload failed: {e}")
+            logger.exception(f"hot-reload packs failed after toggling {name}")
             raise HTTPException(503, f"State rolled back, hot-reload failed: {e}")
     return result
 

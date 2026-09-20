@@ -295,6 +295,25 @@ app.add_middleware(
 from api.auth import AuthMiddleware
 app.add_middleware(AuthMiddleware)
 
+
+# 三十八审预审(声称3): degraded 进程拒绝业务流量——热切换回滚失败后
+# runtime 与状态分裂, 继续接业务请求会用错误的工具集/路由处理用户输入。
+# 中间件在认证之后挂: /health 放行(探针必须能看到 degraded 503),
+# 其余请求 503 + 提示重启。唯一出路是重启(或运维确认恢复后手动清标志)。
+from starlette.requests import Request as _Req
+from starlette.responses import JSONResponse as _JResp
+
+
+@app.middleware("http")
+async def degraded_guard(request: _Req, call_next):
+    if getattr(request.app.state, "pack_runtime_degraded", False):
+        if request.url.path not in ("/api/health", "/health", "/"):
+            return _JResp(
+                {"detail": "Process is degraded (pack hot-reload "
+                           "rollback failed)—restart required."},
+                status_code=503)
+    return await call_next(request)
+
 # 管理端鉴权实现注册进 SDK(依赖倒置:pack 经 sdk.pack_api.admin_required
 # 使用,SDK 不反向 import api 层;装配期注册一次)
 from api.admin import require_admin as _require_admin
