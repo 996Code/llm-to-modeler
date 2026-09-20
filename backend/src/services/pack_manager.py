@@ -448,8 +448,12 @@ def _start_pack_lifecycle(app_state: Any, pack_routers: Dict[str, Any],
     for pack_name in (pack_routers or {}):
         try:
             if pack_name == "chatbi":
-                from domains.chatbi.tasks import _start_refresh_scheduler
-                _start_refresh_scheduler(task_manager, app_state)
+                # scheduler 循环经 manager.submit 提交刷新任务——
+                # 无 TaskManager 的测试态不起线程(起了也是无限重试)
+                if task_manager is not None:
+                    from domains.chatbi.tasks import (
+                        _start_refresh_scheduler)
+                    _start_refresh_scheduler(task_manager, app_state)
             elif pack_name == "knowledge_graph":
                 from domains.knowledge_graph import tasks as kg_tasks
                 kg_tasks._app_state = app_state
