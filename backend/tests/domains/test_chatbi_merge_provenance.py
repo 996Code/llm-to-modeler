@@ -5697,3 +5697,138 @@ class TestSchedulerReadiness:
         finally:
             ct.stop_refresh_scheduler()
             ct._scheduler_state.clear()
+
+
+# ════════════════════════════════════════════════════════════════
+# 四十一审回归: 合法卸载 readiness / register-close 交错 / 部署开关
+# ════════════════════════════════════════════════════════════════
+
+class TestSchedulerUnloadReadiness:
+    """P2: 合法卸载 chatbi 后 scheduler 不参与 readiness.
+
+    审计反例: 禁用 chatbi(合法 unload 停 scheduler)→ health 503
+    "scheduler thread dead"——按设计关闭可选 pack 被误判为平台故障。
+    """
+
+    def test_unload_stop_keeps_health_green(self):
+        """unload 路径的 stop → health 200; 手动/异常 stop → 503."""
+        import time
+        from types import SimpleNamespace
+        import domains.chatbi.tasks as ct
+        from fastapi.testclient import TestClient
+        import main
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        c = TestClient(main.app)
+        state = SimpleNamespace(task_manager=_TM())
+        try:
+            ct._scheduler_state.clear()
+            ct.stop_refresh_scheduler()
+            # 启动 → 200
+            ct._start_refresh_scheduler(_TM(), state)
+            time.sleep(0.3)
+            assert c.get("/api/health").status_code == 200
+            # 异常/手动死亡(非卸载) → 503
+            ct.stop_refresh_scheduler(stopped_by="manual")
+            assert c.get("/api/health").status_code == 503
+            # 重启 + 合法卸载停止 → 200
+            ct._start_refresh_scheduler(_TM(), state)
+            time.sleep(0.3)
+            ct.stop_refresh_scheduler(stopped_by="unload")
+            assert c.get("/api/health").status_code == 200
+        finally:
+            ct.stop_refresh_scheduler()
+            ct._scheduler_state.clear()
+
+    def test_threshold_invalid_falls_back(self, monkeypatch):
+        """P3: 非法阈值回退缺省 5, 不在请求路径抛 ValueError."""
+        from api import health as h
+        monkeypatch.setenv("SCHEDULER_FAIL_THRESHOLD", "not-a-number")
+        h._SCHEDULER_FAIL_THRESHOLD_CACHE = -1
+        assert h._scheduler_fail_threshold() == 5
+        monkeypatch.setenv("SCHEDULER_FAIL_THRESHOLD", "-3")
+        h._SCHEDULER_FAIL_THRESHOLD_CACHE = -1
+        assert h._scheduler_fail_threshold() == 5
+        monkeypatch.setenv("SCHEDULER_FAIL_THRESHOLD", "10")
+        h._SCHEDULER_FAIL_THRESHOLD_CACHE = -1
+        assert h._scheduler_fail_threshold() == 10
+
+
+class TestHolderRegisterCloseRace:
+    """P2: register 与最后 close 交错不产生孤儿句柄."""
+
+    def test_interleaved_close_register(self):
+        """barrier 暂停 close 的 unregister, 交错 register.
+
+        修复前: register 复用正在关闭的线程 → close 完成后
+        refcount>0 + 线程死 + 表缺失的孤儿句柄。
+        修复后: register 在锁内看到 stopping/表已移除 → 新建完整线程。
+        """
+        import os
+        import shutil
+        import tempfile
+        import threading
+        import time
+        from services import pack_state as ps
+
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "s.json")
+        try:
+            h0 = ps.register_state_holder(path)
+            old_thread = h0._thread
+
+            in_unregister = threading.Event()
+            release = threading.Event()
+
+            def _gated_unregister(unregister=False):
+                in_unregister.set()
+                release.wait(5)
+            h0._unregister_slot = _gated_unregister
+
+            tA = threading.Thread(target=h0.close)
+            tA.start()
+            assert in_unregister.wait(2)
+            # 交错: close 暂停在 unregister(锁外), 此时 register
+            hB = ps.register_state_holder(path)
+            release.set()
+            tA.join(5)
+            time.sleep(0.3)
+
+            # B 拿到新建线程(非正在关闭的旧线程), 状态完整
+            assert hB._thread is not old_thread, "复用了正在关闭的线程"
+            assert hB._thread.is_alive(), "新句柄线程已死(孤儿)"
+            assert ps.count_state_file_holders(path) == 1, "槽位缺失"
+            assert hB._thread_key in ps._HOLDER_THREADS, "线程表缺失"
+            assert not old_thread.is_alive()
+            # B 的 close 正常
+            hB.close()
+            time.sleep(0.2)
+            assert ps.count_state_file_holders(path) == 0
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestDynamicMgmtDeploymentSwitch:
+    """P2: PACK_DYNAMIC_PACK_MGMT=off 时管理入口 fail-closed."""
+
+    def test_off_mode_rejects(self, monkeypatch):
+        from fastapi import HTTPException
+        from api import admin as admin_mod
+
+        monkeypatch.setenv("PACK_DYNAMIC_PACK_MGMT", "off")
+        reason = admin_mod._dynamic_pack_mgmt_disabled_reason()
+        assert reason, "off 模式应返回拒绝原因"
+
+    def test_default_on_allows(self, monkeypatch):
+        from api import admin as admin_mod
+
+        monkeypatch.delenv("PACK_DYNAMIC_PACK_MGMT", raising=False)
+        assert admin_mod._dynamic_pack_mgmt_disabled_reason() == ""

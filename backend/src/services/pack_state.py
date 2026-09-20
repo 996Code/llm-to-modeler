@@ -536,7 +536,14 @@ class StateHolderHandle:
                 _HOLDER_REFCOUNT[self._thread_key] = remaining
                 return
             _HOLDER_REFCOUNT.pop(self._thread_key, None)
-        # 最后一个引用: 注销槽位(立即, 不等进程退出)
+            # 四十一审 P2: 持锁期间标记 stopping 并从线程表移除——
+            # 此前 stop/join/移表在锁外, close 释放锁后 register 仍能
+            # 看到"alive"的旧线程并复用, close 随后 stop 它, 产生
+            # 持引用但线程已死/槽位已清的孤儿句柄。表先移除,
+            # register 在锁内就只会新建完整线程。
+            _HOLDER_THREADS.pop(self._thread_key, None)
+            self._thread._holder_stopping = True
+        # 注销槽位(立即, 不等进程退出; 锁外——内部有自己的文件锁)
         if self._unregister_slot is not None:
             try:
                 self._unregister_slot(unregister=True)
@@ -549,7 +556,6 @@ class StateHolderHandle:
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=timeout)
-        _HOLDER_THREADS.pop(self._thread_key, None)
 
 
 # 同路径 handle 引用计数 + 并发保护(四十审 P2: register/close 竞态)
@@ -645,7 +651,8 @@ def register_state_holder(state_path: str) -> "StateHolderHandle":
     # 也要拿同一把不可重入锁, 持锁构造会死锁)
     with _HOLDER_LOCK:
         existing = _HOLDER_THREADS.get(thread_key)
-        if existing is not None and existing.is_alive():
+        if (existing is not None and existing.is_alive()
+                and not getattr(existing, "_holder_stopping", False)):
             reuse = existing
         else:
             reuse = None

@@ -15,14 +15,38 @@
     从 app.state 读保证版本和 main.py 始终同步，避免硬编码。
 """
 
+import logging
 import os
 
 from fastapi import APIRouter, Request
+
+logger = logging.getLogger(__name__)
 from fastapi.responses import JSONResponse
 
 # 创建路由器，tags=["health"] 让这些接口在 /docs 文档里归到 health 分组
 # 类比 Spring：@RestController + 在 controller 类上打标签
 router = APIRouter(tags=["health"])
+
+# 四十一审 P3: SCHEDULER_FAIL_THRESHOLD 启动期解析一次——
+# 非法值(非整数/<1)回退缺省 5 并告警, 不在请求路径抛 ValueError
+_SCHEDULER_FAIL_THRESHOLD_CACHE: int = -1
+
+
+def _scheduler_fail_threshold() -> int:
+    global _SCHEDULER_FAIL_THRESHOLD_CACHE
+    if _SCHEDULER_FAIL_THRESHOLD_CACHE >= 0:
+        return _SCHEDULER_FAIL_THRESHOLD_CACHE
+    raw = os.getenv("SCHEDULER_FAIL_THRESHOLD", "5")
+    try:
+        v = int(raw)
+        if v < 1:
+            raise ValueError
+    except ValueError:
+        logger.warning(
+            "SCHEDULER_FAIL_THRESHOLD 非法(%r), 回退缺省 5", raw)
+        v = 5
+    _SCHEDULER_FAIL_THRESHOLD_CACHE = v
+    return v
 
 
 # 别名：/api/health——嵌入场景宿主经统一前缀代理探测（宿主前缀 /<mount>/api/* 剥前缀
@@ -69,12 +93,15 @@ async def health_check(request: Request):
     # 四十审 P2(readiness 聚合): chatbi scheduler 线程死亡或持续失败
     # 时 health 必须变红——此前只查 degraded, 线程死了定时刷新/巡检
     # 全停而 health 仍 200。阈值可配(SCHEDULER_FAIL_THRESHOLD, 缺省 5)。
+    # 四十一审 P2: 合法卸载(stopped_by_unload)不参与 readiness——
+    # 禁用一个可选 pack 不能摘除整个平台流量; 只有"仍启用但线程
+    # 死亡/持续失败"才 503。
     try:
         from domains.chatbi.tasks import scheduler_status
         ss = scheduler_status()
-        threshold = int(os.getenv("SCHEDULER_FAIL_THRESHOLD", "5"))
-        if ss.get("ever_started") and (
-                not ss["alive"] or ss["consecutive_failures"] >= threshold):
+        if ss.get("ever_started") and not ss.get("stopped_by_unload") and (
+                not ss["alive"]
+                or ss["consecutive_failures"] >= _scheduler_fail_threshold()):
             return JSONResponse(
                 {
                     "status": "degraded",

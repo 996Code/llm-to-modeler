@@ -70,7 +70,7 @@ def unload() -> None:
     # 十审 7.6: 先停调度线程再 reset(停止窗口内不访问已重置资源)
     try:
         from domains.chatbi.tasks import stop_refresh_scheduler
-        stop_refresh_scheduler()
+        stop_refresh_scheduler(stopped_by='unload')
     except Exception as e:
         logger.warning("chatbi scheduler 停止失败: %s", e)
     from domains.chatbi import stores

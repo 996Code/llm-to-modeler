@@ -101,6 +101,7 @@ def _start_refresh_scheduler(manager, app_state) -> None:
     _refresh_thread = threading.Thread(target=_loop, name="chatbi-metadata-refresh",
                                        daemon=True)
     _scheduler_state["ever_started"] = True   # 四十审 P2: 区分未启动 vs 死亡
+    _scheduler_state["stopped_by_unload"] = False  # 四十一审 P2: 重启清卸载标记
     _refresh_thread.start()
     logger.info("chatbi scheduler started: health (from settings) + metadata refresh (from settings)")
 
@@ -218,6 +219,7 @@ def scheduler_status() -> dict:
     return {
         "alive": t is not None and t.is_alive(),
         "ever_started": _scheduler_state.get("ever_started", False),
+        "stopped_by_unload": _scheduler_state.get("stopped_by_unload", False),
         "consecutive_failures": _scheduler_state.get(
             "consecutive_failures", 0),
         "last_error": _scheduler_state.get("last_error"),
@@ -231,9 +233,16 @@ def scheduler_status() -> dict:
     }
 
 
-def stop_refresh_scheduler() -> None:
-    """停止调度线程(pack unload 时调用; 九审 7.4 生命周期完整化)."""
+def stop_refresh_scheduler(stopped_by: str = "manual") -> None:
+    """停止调度线程(pack unload 时调用; 九审 7.4 生命周期完整化).
+
+    stopped_by: 停止来源——"unload"(合法 pack 卸载, scheduler 不再
+    参与 readiness) / "manual"(测试/运维手动)。四十一审 P2: 合法
+    卸载停止的 scheduler 不是"死亡", health 不应据此摘除流量。
+    """
     global _refresh_thread, _refresh_stop
+    if stopped_by == "unload":
+        _scheduler_state["stopped_by_unload"] = True
     if _refresh_stop is not None:
         _refresh_stop.set()
     if _refresh_thread is not None and _refresh_thread.is_alive():

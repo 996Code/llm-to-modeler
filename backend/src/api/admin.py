@@ -465,6 +465,25 @@ async def admin_disable_pack(name: str, request: Request):
     return _toggle_pack(request, name, False)
 
 
+def _dynamic_pack_mgmt_disabled_reason() -> str:
+    """四十一审 P2: 部署级动态管理开关(PACK_DYNAMIC_PACK_MGMT)。
+
+    多副本/多 Pod 非共享状态卷时, 各副本 holders=1, 代码无法区分
+    "真单副本"与"非共享卷多副本"(fail-open)。部署清单显式声明:
+      on(缺省) = 单副本/共享卷, 动态管理可用
+      off      = 多副本非共享卷, toggle/recheck 一律拒绝(503),
+                 只允许 PACKS_ENABLED + 滚动重启
+    Returns:
+        空串 = 允许; 非空 = 拒绝原因。
+    """
+    import os as _os
+    mode = _os.getenv("PACK_DYNAMIC_PACK_MGMT", "on").strip().lower()
+    if mode in ("off", "false", "0", "no"):
+        return ("动态插件管理已被部署配置禁用(PACK_DYNAMIC_PACK_MGMT=off, "
+                "多副本部署)——请使用 PACKS_ENABLED + 滚动重启")
+    return ""
+
+
 def _reject_multi_worker(request: Request) -> None:
     """三十六审 P2-B: 动态 pack 管理只支持单 worker。
 
@@ -474,6 +493,10 @@ def _reject_multi_worker(request: Request) -> None:
     数(PID 心跳), > 1 时拒绝动态管理(503), 提示重启为单 worker
     或改用 PACKS_ENABLED + 滚动重启。
     """
+    # 四十一审 P2: 部署级禁用(多副本非共享卷 fail-closed)
+    disabled_reason = _dynamic_pack_mgmt_disabled_reason()
+    if disabled_reason:
+        raise HTTPException(503, disabled_reason)
     from services.pack_state import count_state_file_holders
     # 三十八审预审(声称3): degraded 进程拒绝管理操作(重启是唯一出路)
     if getattr(request.app.state, "pack_runtime_degraded", False):
