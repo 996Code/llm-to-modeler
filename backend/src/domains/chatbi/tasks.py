@@ -51,8 +51,9 @@ def register_tasks(manager, app_state=None) -> None:
 
 _refresh_thread = None
 _refresh_stop = None
-# 调度器运行状态(三十九审 P1-D: 模块级, scheduler_status 读取)
-_scheduler_state = {"tick_failures": 0, "last_tick": None}
+# 调度器运行状态(三十九审 P1-D / 四十审 P2: 模块级, scheduler_status 读取)
+_scheduler_state = {"consecutive_failures": 0, "last_error": None,
+                   "last_attempt": None, "last_success": None}
 
 
 def _start_refresh_scheduler(manager, app_state) -> None:
@@ -80,18 +81,26 @@ def _start_refresh_scheduler(manager, app_state) -> None:
             # (元数据刷新/健康巡检/留存清理/GC 全部静默停止, health 仍绿)。
             # 屏障记录失败计数后继续下一 tick; 存活/计数经
             # scheduler_status() 暴露给 health detail。
+            # 四十审 P2: 状态记录用 wall time(运维可读, scheduler_status
+            # 用 time.time 求差); 周期判断仍用 _now_ts(monotonic, 抗跳变)
+            import time as _wt
+            _scheduler_state["last_attempt"] = _wt.time()
             try:
                 _scheduler_tick(_loop, manager, app_state)
-                _scheduler_state["last_tick"] = _now_ts()
-                _scheduler_state["tick_failures"] = 0   # 成功清零
+                _scheduler_state["last_success"] = _wt.time()
+                _scheduler_state["consecutive_failures"] = 0
+                _scheduler_state["last_error"] = None
             except Exception as e:
-                _scheduler_state["tick_failures"] += 1
+                _scheduler_state["consecutive_failures"] = (
+                    _scheduler_state.get("consecutive_failures", 0) + 1)
+                _scheduler_state["last_error"] = str(e)[:200]
                 logger.error(
-                    "调度器 tick 未捕获异常(第%d次, 线程继续): %s",
-                    _scheduler_state["tick_failures"], e)
+                    "调度器 tick 失败(连续第%d次, 线程继续): %s",
+                    _scheduler_state["consecutive_failures"], e)
 
     _refresh_thread = threading.Thread(target=_loop, name="chatbi-metadata-refresh",
                                        daemon=True)
+    _scheduler_state["ever_started"] = True   # 四十审 P2: 区分未启动 vs 死亡
     _refresh_thread.start()
     logger.info("chatbi scheduler started: health (from settings) + metadata refresh (from settings)")
 
@@ -102,9 +111,11 @@ def _scheduler_tick(_loop, manager, app_state) -> None:
     from domains.chatbi.runtime import get_pack_db as _get_db
     try:
         _lease_db = _get_db()
-    except Exception as e:   # db 不可用 → 本轮跳过定时动作
-        logger.warning("调度器取 pack db 失败(本轮跳过): %s", e)
-        return
+    except Exception as e:
+        # 四十审 P2: DB 不可用算**失败 tick**(上抛给屏障计数)——
+        # 此前静默 return 被屏障当成功, 连续 DB 故障时 detail 反而 ok
+        logger.warning("调度器取 pack db 失败(本 tick 失败): %s", e)
+        raise
     # 统计留存清理(每小时一次; 设置 retention 缺省 90 天, 0=关)
     if now - _loop._last_purge >= 3600:
         _loop._last_purge = now
@@ -202,10 +213,21 @@ def scheduler_status() -> dict:
     静默停止而 health 仍绿。
     """
     t = _refresh_thread
+    import time as _time
+    now = _time.time()
     return {
         "alive": t is not None and t.is_alive(),
-        "tick_failures": _scheduler_state["tick_failures"],
-        "last_tick": _scheduler_state["last_tick"],
+        "ever_started": _scheduler_state.get("ever_started", False),
+        "consecutive_failures": _scheduler_state.get(
+            "consecutive_failures", 0),
+        "last_error": _scheduler_state.get("last_error"),
+        # 可运维时间(四十审 P2: 裸 monotonic 值无法定位实际时间)
+        "last_attempt_ago_s": (
+            round(now - _scheduler_state["last_attempt"], 1)
+            if _scheduler_state.get("last_attempt") else None),
+        "last_success_ago_s": (
+            round(now - _scheduler_state["last_success"], 1)
+            if _scheduler_state.get("last_success") else None),
     }
 
 

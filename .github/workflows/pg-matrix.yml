@@ -1,6 +1,9 @@
-# 三十九审 P3: PG15/PG16 真实进程矩阵(CI 持续证据)
-# PG15 → chatbi 版本门禁必须拒绝启动(退出码非 0)
+# 四十审 P2: PG15/PG16 真实进程矩阵(CI 持续证据)
+# PG15 → chatbi 版本门禁必须拒绝启动(预期退出码, 非超时)
 # PG16 → migration-before-ready 必须通过(health 200)
+# 四十审修复: 拒绝 timeout 124(服务运行到超时=门禁回归, 是假阳性);
+# 断言精确门禁错误(PackIncompatibleError + PostgreSQL 版本信息),
+# 不再用泛化 "PostgreSQL" 匹配; requirements 安装失败直接失败。
 name: pg-matrix
 on:
   push:
@@ -28,12 +31,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install deps
+      - name: Install deps (no fallback)
         working-directory: backend
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt 2>/dev/null || pip install fastapi uvicorn
-      - name: PG15 must reject startup
+          pip install -r requirements.txt
+      - name: PG15 must be rejected by version gate
         working-directory: backend
         env:
           DATABASE_URL: postgresql://root:root@localhost:15432/matrix15
@@ -42,19 +45,27 @@ jobs:
           LLM_BASE_URL: http://127.0.0.1:9/v1
           LLM_API_KEY: x
         run: |
-          # 期望启动失败(退出码非 0)——PG16 门禁 fail-closed
           set +e
           timeout 60 python -m uvicorn main:app --port 18071 --app-dir src \
             > /tmp/pg15_boot.log 2>&1
           code=$?
           set -e
           echo "exit_code=$code"
+          # 四十审 P2: 124 = 服务运行到超时 = 门禁没拒绝(回归), 必须失败
+          if [ "$code" -eq 124 ]; then
+            echo "FAIL: PG15 服务运行到超时(版本门禁未拒绝——回归)"
+            cat /tmp/pg15_boot.log; exit 1
+          fi
           if [ "$code" -eq 0 ]; then
             echo "FAIL: PG15 启动成功(应被版本门禁拒绝)"; exit 1
           fi
-          grep -q "PostgreSQL" /tmp/pg15_boot.log || {
-            echo "FAIL: 日志无版本门禁信息"; cat /tmp/pg15_boot.log; exit 1; }
-          echo "PASS: PG15 拒绝启动"
+          # 精确断言: 版本门禁异常 + PostgreSQL 版本上下文
+          # (泛化 "PostgreSQL" 会匹配正常启动日志, 造成假阳性)
+          grep -q "PackIncompatibleError\|无法确认 PostgreSQL 版本\|PostgreSQL 16" \
+            /tmp/pg15_boot.log || {
+            echo "FAIL: 日志无精确版本门禁错误(退出码 $code 非预期来源)"
+            cat /tmp/pg15_boot.log; exit 1; }
+          echo "PASS: PG15 被版本门禁拒绝(退出码 $code)"
 
   pg16-ready:
     runs-on: ubuntu-latest
@@ -74,11 +85,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install deps
+      - name: Install deps (no fallback)
         working-directory: backend
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt 2>/dev/null || pip install fastapi uvicorn
+          pip install -r requirements.txt
       - name: PG16 migration-before-ready
         working-directory: backend
         env:
@@ -88,15 +99,23 @@ jobs:
           LLM_BASE_URL: http://127.0.0.1:9/v1
           LLM_API_KEY: x
         run: |
+          cleanup() { kill ${UVPID:-0} 2>/dev/null || true; }
+          trap cleanup EXIT
           python -m uvicorn main:app --port 18072 --app-dir src \
             > /tmp/pg16_boot.log 2>&1 &
           UVPID=$!
+          ready=0
           for i in $(seq 1 50); do
-            curl -sf http://127.0.0.1:18072/api/health > /dev/null 2>&1 && break
+            curl -sf http://127.0.0.1:18072/api/health > /dev/null 2>&1 \
+              && { ready=1; break; }
             sleep 1
           done
-          if ! curl -sf http://127.0.0.1:18072/api/health > /dev/null; then
-            echo "FAIL: PG16 未就绪"; cat /tmp/pg16_boot.log; kill $UVPID; exit 1
+          if [ "$ready" -ne 1 ]; then
+            echo "FAIL: PG16 未就绪"; cat /tmp/pg16_boot.log; exit 1
           fi
-          echo "PASS: PG16 migration-before-ready"
-          kill $UVPID
+          # 四十审 P2: ready 后进程必须仍存活(不能 ready 即退)
+          sleep 3
+          if ! kill -0 $UVPID 2>/dev/null; then
+            echo "FAIL: PG16 ready 后进程退出"; cat /tmp/pg16_boot.log; exit 1
+          fi
+          echo "PASS: PG16 migration-before-ready 且持续运行"

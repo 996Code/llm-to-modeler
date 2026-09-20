@@ -529,15 +529,18 @@ async def health_detail_ep(request: Request):
         if not ss["alive"]:
             components["scheduler"] = {
                 "status": "fail", "detail": "刷新线程已死亡(定时动作全部停止)"}
-        elif ss["tick_failures"] > 0:
+        elif ss["consecutive_failures"] > 0:
             components["scheduler"] = {
                 "status": "fail",
-                "detail": f"连续 tick 失败 {ss['tick_failures']} 次"
-                          f"(最近成功: {ss['last_tick']})"}
+                "detail": f"连续失败 {ss['consecutive_failures']} 次"
+                          f"(最近成功 {ss['last_success_ago_s']}s 前): "
+                          f"{ss['last_error']}"}
         else:
             components["scheduler"] = {
                 "status": "ok",
-                "detail": f"alive, 最近 tick: {ss['last_tick']}"}
+                "detail": (f"alive, 最近成功 {ss['last_success_ago_s']}s 前"
+                           if ss["last_success_ago_s"] is not None
+                           else "alive, 尚未完成首个 tick")}
     except Exception as e:
         components["scheduler"] = {"status": "fail",
                                   "detail": f"状态读取失败: {e}"}

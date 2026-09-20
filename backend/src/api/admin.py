@@ -601,31 +601,42 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
                          f"(disk/memory/runtime), process is degraded—"
                          f"restart required.")
             if stage == "ASSEMBLED" and changed:
-                # persist 失败: 磁盘未写, 按旧快照确定性回滚
-                rollback_ok = True
+                # persist 失败: 磁盘未写, 按旧快照确定性回滚。
+                # 四十审 P1: 内存补偿与 runtime 回滚**分开记录**——
+                # 此前 set_enabled/clear_pending_ops 失败只记日志,
+                # rollback_ok 仍为 True, 接口谎报 State rolled back
+                # 而 memory 已留新值(与 runtime/disk 分裂, health 仍绿)。
+                memory_rollback_ok = True
                 try:
                     pack_state.set_enabled(
                         name, not enabled, persist=False)
                     pack_state.clear_pending_ops()
                 except Exception as rollback_err:
+                    memory_rollback_ok = False
                     logger.error(
-                        f"hot-reload 失败且内存回滚也失败: {rollback_err}")
+                        f"hot-reload 失败且内存回滚也失败"
+                        f"(进程将降级): {rollback_err}")
+                runtime_rollback_ok = True
                 try:
-                    rollback_ok = rollback_assembly(
+                    runtime_rollback_ok = rollback_assembly(
                         request.app.state, summary["_tx"])
                 except Exception as rollback_err:
-                    rollback_ok = False
+                    runtime_rollback_ok = False
                     logger.error(f"快照回滚异常: {rollback_err}")
-                if not rollback_ok:
-                    # 回滚失败: 进入 degraded——health 暴露, 拒绝后续
-                    # 管理/业务操作直到重启(不能谎称已回滚)
+                if not (memory_rollback_ok and runtime_rollback_ok):
+                    # 任一回滚失败: 进入 degraded——health 暴露, 拒绝
+                    # 后续管理/业务操作直到重启(不能谎称已回滚)
                     request.app.state.pack_runtime_degraded = True
                     logger.exception(
-                        f"hot-reload 失败且快照回滚失败——进程已降级"
+                        f"hot-reload 失败且回滚不完整"
+                        f"(memory={memory_rollback_ok}, "
+                        f"runtime={runtime_rollback_ok})——进程已降级"
                         f"(degraded), 建议重启恢复一致性")
                     raise HTTPException(
                         503,
-                        f"Rollback FAILED after hot-reload error: {e}. "
+                        f"Rollback FAILED after hot-reload error: {e} "
+                        f"(memory_rollback={memory_rollback_ok}, "
+                        f"runtime_rollback={runtime_rollback_ok}). "
                         f"Process is degraded—restart required.")
                 logger.warning(
                     f"hot-reload/persist 失败, 已按快照回滚 {name} "

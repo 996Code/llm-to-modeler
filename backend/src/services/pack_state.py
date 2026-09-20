@@ -500,52 +500,61 @@ _HOLDER_THREADS: Dict[str, "threading.Thread"] = {}
 
 
 class StateHolderHandle:
-    """holder 生命周期句柄(三十八审 P3 / 三十九审 P2-B 完整契约)。
+    """holder 生命周期句柄(三十八审 P3 / 三十九审 P2-B / 四十审 P2)。
 
     close(): 引用计数减一 → 最后一个引用时立即注销槽位
     (_write_slot(unregister=True)) + 停心跳线程 + 从线程表移除 +
-    atexit.unregister(进程退出不再重建目录); 幂等(重复 close 无害)。
-    同路径多个 handle 共享心跳线程, 关闭一个不影响其他持有者。
+    注销**共享的** atexit callback(进程退出不再重建目录); 幂等。
+
+    四十审 P2(callback 所有权): atexit callback 绑定到**共享线程对象**
+    (thread._shared_atexit_cb), 每个 thread_key 只注册一次——此前每个
+    handle 各持一个 cb, 非最后 close 不注销自己的, 残留 cb 在进程退出
+    时 mkdir 重建已删除的目录。现在 handle 不再各自持 cb, 最后一个
+    close 注销线程对象上的唯一 cb。
     """
 
     def __init__(self, thread_key: str, stop_event, thread,
-                 unregister_slot=None, atexit_cb=None):
+                 unregister_slot=None):
         self._thread_key = thread_key
         self._stop_event = stop_event
         self._thread = thread
         self._unregister_slot = unregister_slot   # 注销槽位的回调
-        self._atexit_cb = atexit_cb               # 需要解除的 atexit
         self._closed = False
-        # 引用计数: 同路径共享线程的活跃 handle 数
-        _HOLDER_REFCOUNT[thread_key] = (
-            _HOLDER_REFCOUNT.get(thread_key, 0) + 1)
+        with _HOLDER_LOCK:
+            # 引用计数: 同路径共享线程的活跃 handle 数
+            _HOLDER_REFCOUNT[thread_key] = (
+                _HOLDER_REFCOUNT.get(thread_key, 0) + 1)
 
     def close(self, timeout: float = 5.0) -> None:
         if self._closed:
             return   # 幂等
         self._closed = True
-        remaining = _HOLDER_REFCOUNT.get(self._thread_key, 0) - 1
-        if remaining > 0:
-            # 还有其他活跃 handle 共享这条心跳线程——只减引用
-            _HOLDER_REFCOUNT[self._thread_key] = remaining
-            return
-        _HOLDER_REFCOUNT.pop(self._thread_key, None)
+        with _HOLDER_LOCK:
+            remaining = _HOLDER_REFCOUNT.get(self._thread_key, 0) - 1
+            if remaining > 0:
+                # 还有其他活跃 handle 共享这条心跳线程——只减引用
+                _HOLDER_REFCOUNT[self._thread_key] = remaining
+                return
+            _HOLDER_REFCOUNT.pop(self._thread_key, None)
         # 最后一个引用: 注销槽位(立即, 不等进程退出)
         if self._unregister_slot is not None:
             try:
                 self._unregister_slot(unregister=True)
             except OSError:
                 logger.warning("pack 状态持有者注销失败", exc_info=True)
-        if self._atexit_cb is not None:
-            _atexit_mod.unregister(self._atexit_cb)
+        # 注销共享 atexit callback(绑在线程对象上, 每个 key 只有一个)
+        shared_cb = getattr(self._thread, "_shared_atexit_cb", None)
+        if shared_cb is not None:
+            _atexit_mod.unregister(shared_cb)
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=timeout)
         _HOLDER_THREADS.pop(self._thread_key, None)
 
 
-# 同路径 handle 引用计数(三十九审 P2-B)
+# 同路径 handle 引用计数 + 并发保护(四十审 P2: register/close 竞态)
 _HOLDER_REFCOUNT: Dict[str, int] = {}
+_HOLDER_LOCK = threading.Lock()
 
 import atexit as _atexit_mod
 
@@ -620,9 +629,6 @@ def register_state_holder(state_path: str) -> "StateHolderHandle":
                 raise
 
     _write_slot()
-    _atexit_cb = _write_slot
-    atexit.register(_atexit_cb, unregister=True)
-
     stop_event = threading.Event()
 
     def _heartbeat() -> None:
@@ -634,20 +640,30 @@ def register_state_holder(state_path: str) -> "StateHolderHandle":
                 logger.warning("pack 状态持有者心跳刷新失败", exc_info=True)
 
     # 同实例(进程)同路径只起一条心跳线程; 已注册时返回共享 handle
-    # (引用计数语义: 每个 handle close 一次, 最后一个才真正停)
-    existing = _HOLDER_THREADS.get(thread_key)
-    if existing is not None and existing.is_alive():
-        return StateHolderHandle(
-            thread_key, existing._stop_event, existing,
-            unregister_slot=_write_slot, atexit_cb=_atexit_cb)
-    t = threading.Thread(target=_heartbeat, daemon=True,
-                         name=f"pack-state-holder-{pid}")
-    t._stop_event = stop_event
-    t.start()
-    _HOLDER_THREADS[thread_key] = t
+    # (引用计数语义: 每个 handle close 一次, 最后一个才真正停)。
+    # 锁只保护线程表/引用计数的读写——handle 构造在锁外(其 __init__
+    # 也要拿同一把不可重入锁, 持锁构造会死锁)
+    with _HOLDER_LOCK:
+        existing = _HOLDER_THREADS.get(thread_key)
+        if existing is not None and existing.is_alive():
+            reuse = existing
+        else:
+            reuse = None
+            t = threading.Thread(target=_heartbeat, daemon=True,
+                                 name=f"pack-state-holder-{pid}")
+            t._stop_event = stop_event
+            # 四十审 P2: atexit callback 绑定共享线程对象——每个
+            # thread_key 只注册一次, 最后一个 close 注销它(此前每个
+            # handle 各持一个, 非最后 close 残留自己的 cb, 退出时
+            # 重建已删除目录)
+            t._shared_atexit_cb = _write_slot
+            _atexit_mod.register(_write_slot, unregister=True)
+            t.start()
+            _HOLDER_THREADS[thread_key] = t
+    target_thread = reuse if reuse is not None else t
     return StateHolderHandle(
-        thread_key, stop_event, t,
-        unregister_slot=_write_slot, atexit_cb=_atexit_cb)
+        thread_key, target_thread._stop_event, target_thread,
+        unregister_slot=_write_slot)
 
 
 # 实例身份单例(三十九审 P1-C)

@@ -15,6 +15,8 @@
     从 app.state 读保证版本和 main.py 始终同步，避免硬编码。
 """
 
+import os
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
@@ -64,6 +66,31 @@ async def health_check(request: Request):
             status_code=503,
             headers={"Cache-Control": "no-store"},
         )
+    # 四十审 P2(readiness 聚合): chatbi scheduler 线程死亡或持续失败
+    # 时 health 必须变红——此前只查 degraded, 线程死了定时刷新/巡检
+    # 全停而 health 仍 200。阈值可配(SCHEDULER_FAIL_THRESHOLD, 缺省 5)。
+    try:
+        from domains.chatbi.tasks import scheduler_status
+        ss = scheduler_status()
+        threshold = int(os.getenv("SCHEDULER_FAIL_THRESHOLD", "5"))
+        if ss.get("ever_started") and (
+                not ss["alive"] or ss["consecutive_failures"] >= threshold):
+            return JSONResponse(
+                {
+                    "status": "degraded",
+                    "service": "LLM Form Modeler",
+                    "version": request.app.version,
+                    "detail": ("chatbi scheduler thread dead"
+                               if not ss["alive"] else
+                               f"chatbi scheduler failing "
+                               f"({ss['consecutive_failures']}x): "
+                               f"{ss['last_error']}"),
+                },
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+    except ImportError:
+        pass   # chatbi 未启用(测试态)——不阻塞 health
     return JSONResponse(
         {
             "status": "healthy",

@@ -5278,7 +5278,10 @@ class TestSchedulerBarrier:
     def test_scheduler_status_shape(self):
         from domains.chatbi import tasks as ct
         st = ct.scheduler_status()
-        assert set(st) >= {"alive", "tick_failures", "last_tick"}, st
+        # 四十审 P2: 字段升级为 consecutive_failures/last_error/
+        # last_*_ago_s(wall time 差值)+ ever_started
+        assert set(st) >= {"alive", "consecutive_failures", "last_error",
+                            "last_attempt_ago_s", "last_success_ago_s"}, st
 
     def test_health_detail_includes_scheduler(self):
         import inspect
@@ -5428,3 +5431,269 @@ class TestKGRecoveryRetry:
             assert pm._KG_RECOVERY_DONE is True, "成功后未置 done"
         finally:
             pm._KG_RECOVERY_DONE = False
+
+
+# ════════════════════════════════════════════════════════════════
+# 四十审回归: 编排入口级组合故障 / holder callback 所有权 / scheduler 语义
+# ════════════════════════════════════════════════════════════════
+
+class TestToggleMemoryRollbackFailure:
+    """P1: persist 失败 + 内存补偿失败 → 不谎报, degraded.
+
+    审计反例: runtime 回滚成功但内存留新值, 响应仍称
+    State rolled back 且 health 绿。修复: memory/runtime 分开记录,
+    任一失败 degraded。
+    """
+
+    def test_memory_rollback_failure_degrades(self):
+        from types import SimpleNamespace
+        from fastapi import FastAPI
+        from fastapi import HTTPException
+        import api.admin as admin_mod
+        from services.pack_state import PackState
+        import tempfile, os
+
+        tmpdir = tempfile.mkdtemp()
+        ps = PackState(os.path.join(tmpdir, "s.json"),
+                       ["chatbi", "knowledge_graph", "leave_application",
+                        "njmind_form"])
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        app = FastAPI()
+        app.state.pack_state = ps
+        app.state.pack_state_holder = None
+        app.state.task_manager = _TM()
+        app.state.llm_client = object()
+        app.state.asset_client = None
+        app.state.conversation_manager = object()
+        app.state._loaded_packs = ["chatbi", "knowledge_graph",
+                                    "leave_application", "njmind_form"]
+
+        # 注入: persist 炸 + 反向 set_enabled 炸
+        def _boom_persist():
+            raise OSError("disk persist boom")
+        ps.persist = _boom_persist
+        _orig_set = ps.set_enabled
+        _flag = {"toggled": False}
+
+        def _boom_set(name, enabled, persist=True):
+            if not persist and name == "knowledge_graph" and not enabled:
+                _flag["toggled"] = True
+                return _orig_set(name, enabled, persist=False)
+            if not persist and _flag.get("toggled"):
+                raise RuntimeError("memory rollback boom")
+            return _orig_set(name, enabled, persist=persist)
+        ps.set_enabled = _boom_set
+
+        req = SimpleNamespace(app=app)
+        try:
+            admin_mod._toggle_pack(req, "knowledge_graph", False)
+            raise AssertionError("应抛 503")
+        except HTTPException as e:
+            detail = str(e.detail)
+            lied = ("State rolled back" in detail
+                    and "Rollback FAILED" not in detail)
+            degraded = getattr(app.state, "pack_runtime_degraded", False)
+            assert not lied, f"仍谎报已回滚: {detail[:80]}"
+            assert degraded, "内存回滚失败未 degraded"
+            # 内存确实留新值(与 runtime/disk 分裂)——但状态已如实暴露
+            assert "knowledge_graph" not in ps.enabled_names()
+
+    def test_both_rollbacks_ok_reports_rolled_back(self):
+        """正常回滚路径(两项都成功)仍返回 State rolled back."""
+        from types import SimpleNamespace
+        from fastapi import FastAPI
+        from fastapi import HTTPException
+        import api.admin as admin_mod
+        from services.pack_state import PackState
+        import tempfile, os
+
+        tmpdir = tempfile.mkdtemp()
+        ps = PackState(os.path.join(tmpdir, "s.json"),
+                       ["chatbi", "knowledge_graph", "leave_application",
+                        "njmind_form"])
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        app = FastAPI()
+        app.state.pack_state = ps
+        app.state.pack_state_holder = None
+        app.state.task_manager = _TM()
+        app.state.llm_client = object()
+        app.state.asset_client = None
+        app.state.conversation_manager = object()
+        app.state._loaded_packs = ["chatbi", "knowledge_graph",
+                                    "leave_application", "njmind_form"]
+
+        def _boom_persist():
+            raise OSError("disk full")
+        ps.persist = _boom_persist
+
+        req = SimpleNamespace(app=app)
+        try:
+            admin_mod._toggle_pack(req, "knowledge_graph", False)
+            raise AssertionError("应抛 503")
+        except HTTPException as e:
+            assert "State rolled back" in str(e.detail), (
+                "正常回滚路径不应误报 FAILED")
+            assert not getattr(app.state, "pack_runtime_degraded", False)
+            # 三方回旧
+            assert "knowledge_graph" in ps.enabled_names()
+            assert "knowledge_graph" in app.state._loaded_packs
+
+
+class TestHolderCallbackOwnership:
+    """P2: 多 handle 的 atexit callback 所有权(绑共享线程)."""
+
+    def test_multi_handle_no_atexit_rebuild(self):
+        """双 handle 依次 close + 删目录 + atexit → 不重建."""
+        import atexit
+        import os
+        import pathlib
+        import shutil
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "s.json")
+        src_dir = pathlib.Path(__file__).resolve().parents[2] / "src"
+        code = (
+            "import sys, atexit; sys.path.insert(0, "
+            f"{str(src_dir)!r});"
+            "from services.pack_state import register_state_holder;"
+            f"h1 = register_state_holder({path!r});"
+            f"h2 = register_state_holder({path!r});"
+            "h1.close(); h2.close();"
+            "print('closed', flush=True);"
+            "atexit._run_exitfuncs();"
+            "print('exitfuncs done', flush=True);"
+            "import time as _t; _t.sleep(0.3)"
+        )
+        r = subprocess.run([sys.executable, "-c", code],
+                           capture_output=True, text=True, timeout=30)
+        assert "closed" in r.stdout and "exitfuncs done" in r.stdout, r.stderr
+        shutil.rmtree(tmpdir)
+        time.sleep(0.5)
+        assert not os.path.exists(tmpdir), (
+            "多 handle 全关后 atexit 仍重建目录")
+
+    def test_concurrent_register_close(self):
+        """并发 register/close 无死锁无泄漏(锁保护)."""
+        import os
+        import shutil
+        import tempfile
+        import threading
+        from services.pack_state import (
+            register_state_holder, count_state_file_holders)
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "s.json")
+        handles = []
+        try:
+            def _worker():
+                for _ in range(20):
+                    h = register_state_holder(path)
+                    handles.append(h)
+            threads = [threading.Thread(target=_worker)
+                       for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            # 全部关闭
+            for h in handles:
+                h.close()
+            import time
+            time.sleep(0.3)
+            assert count_state_file_holders(path) == 0, (
+                "并发关闭后槽位未清零")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestSchedulerReadiness:
+    """P2: DB 失败算失败 + readiness 聚合(ever_started 语义)."""
+
+    def test_db_failure_counts_as_failure(self):
+        """tick 的 DB 获取失败上抛(屏障计数), 不再算成功."""
+        from types import SimpleNamespace
+        import domains.chatbi.tasks as ct
+        import domains.chatbi.runtime as rt
+
+        _orig = rt.get_pack_db
+
+        def _boom():
+            raise RuntimeError("db down")
+        rt.get_pack_db = _boom
+        try:
+            loop_state = SimpleNamespace(
+                _last_purge=0.0, _last_gc=0.0,
+                _last_health=0.0, _last_refresh=0.0)
+            try:
+                ct._scheduler_tick(loop_state, None, None)
+                raise AssertionError("DB 失败被吞(算成功 tick)")
+            except RuntimeError:
+                pass   # 上抛给屏障 = 失败计数
+        finally:
+            rt.get_pack_db = _orig
+
+    def test_readiness_lifecycle(self):
+        """ever_started 语义: 未启动不阻塞; 启动后死亡/持续失败变红."""
+        import domains.chatbi.tasks as ct
+        from fastapi.testclient import TestClient
+        import main
+        import time
+        from types import SimpleNamespace
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        c = TestClient(main.app)
+        state = SimpleNamespace(task_manager=_TM())
+        try:
+            # 未启动: health 200
+            ct._scheduler_state.clear()
+            ct.stop_refresh_scheduler()
+            r = c.get("/api/health")
+            assert r.status_code == 200, "未启动不应阻塞 health"
+
+            # 真实启动: 200
+            ct._start_refresh_scheduler(_TM(), state)
+            time.sleep(0.3)
+            r = c.get("/api/health")
+            assert r.status_code == 200, "运行中应为 200"
+
+            # 停止(死亡): 503
+            ct.stop_refresh_scheduler()
+            r = c.get("/api/health")
+            assert r.status_code == 503, "启动后死亡应为 503"
+
+            # 重启: 200
+            ct._start_refresh_scheduler(_TM(), state)
+            time.sleep(0.3)
+            r = c.get("/api/health")
+            assert r.status_code == 200, "重启后应为 200"
+        finally:
+            ct.stop_refresh_scheduler()
+            ct._scheduler_state.clear()
