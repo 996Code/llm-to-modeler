@@ -521,6 +521,26 @@ async def health_detail_ep(request: Request):
     LLM 网关/数据源加密凭据 + 各业务库最近健康状态。
     """
     components: dict = {}
+    # 调度器(三十九审 P1-D): 线程存活/连续 tick 失败/最近 tick——
+    # 线程死亡或持续失败必须可见, 不能 health 绿而定时不跑
+    try:
+        from domains.chatbi.tasks import scheduler_status
+        ss = scheduler_status()
+        if not ss["alive"]:
+            components["scheduler"] = {
+                "status": "fail", "detail": "刷新线程已死亡(定时动作全部停止)"}
+        elif ss["tick_failures"] > 0:
+            components["scheduler"] = {
+                "status": "fail",
+                "detail": f"连续 tick 失败 {ss['tick_failures']} 次"
+                          f"(最近成功: {ss['last_tick']})"}
+        else:
+            components["scheduler"] = {
+                "status": "ok",
+                "detail": f"alive, 最近 tick: {ss['last_tick']}"}
+    except Exception as e:
+        components["scheduler"] = {"status": "fail",
+                                  "detail": f"状态读取失败: {e}"}
     # 向量库: 真实 ping(委托 SDK list_collections; 四审 P1——此前找
     # 不到可调方法时默认 ok, 配置错了也绿)。探针不可用 = fail, 不默认成功
     try:

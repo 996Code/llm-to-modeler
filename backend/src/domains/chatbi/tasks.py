@@ -51,6 +51,8 @@ def register_tasks(manager, app_state=None) -> None:
 
 _refresh_thread = None
 _refresh_stop = None
+# 调度器运行状态(三十九审 P1-D: 模块级, scheduler_status 读取)
+_scheduler_state = {"tick_failures": 0, "last_tick": None}
 
 
 def _start_refresh_scheduler(manager, app_state) -> None:
@@ -73,106 +75,138 @@ def _start_refresh_scheduler(manager, app_state) -> None:
         _loop._last_purge = 0.0   # 留存清理按小时级执行(四审 5.4: 每 30s 一次 DELETE 过频)
         _loop._last_gc = 120.0    # 二十审 9.5: 启动 ~2min 后先跑一轮 GC(清历史孤儿)
         while not _refresh_stop.wait(30):
-            now = _now_ts()
-            from domains.chatbi.runtime import get_pack_db as _get_db
+            # 三十九审 P1-D: tick 顶层异常屏障——此前 acquire_lease 等个别
+            # 调用在保护块外, 一次瞬时 DB 异常逃出 _loop 会永久杀死线程
+            # (元数据刷新/健康巡检/留存清理/GC 全部静默停止, health 仍绿)。
+            # 屏障记录失败计数后继续下一 tick; 存活/计数经
+            # scheduler_status() 暴露给 health detail。
             try:
-                _lease_db = _get_db()
-            except Exception as e:   # db 不可用 → 本轮跳过定时动作
-                logger.warning("调度器取 pack db 失败(本轮跳过): %s", e)
-                continue
-            # 统计留存清理(每小时一次; 设置 retention 缺省 90 天, 0=关)
-            if now - _loop._last_purge >= 3600:
-                _loop._last_purge = now
-                try:
-                    retention = int(_load_settings(app_state)
-                                    .get("query_stats_retention_days", 90))
-                    if retention > 0:
-                        from domains.chatbi.query_stats import purge_stats
-                        # 十八审 6.4: 跨进程租约——多 worker 只有一个执行
-                        if acquire_lease(_lease_db, "purge_stats", ttl_seconds=900):
-                            purged = purge_stats(_lease_db, retention)
-                            if purged:
-                                logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
-                except Exception as e:
-                    logger.warning("查询统计清理失败(下轮重试): %s", e)
-            # 索引台账 GC(二十审 9.5: 周期回收, 不再只依赖新版本发布事件;
-            # 租约互斥; grace/TTL/保留代际来自正式配置)
-            if now - _loop._last_gc >= 3600:
-                _loop._last_gc = now
-                try:
-                    if acquire_lease(_lease_db, "index_gc", ttl_seconds=900):
-                        # 二十审 8.1: 此前引用未定义的 runtime 且异常被
-                        # 裸 except 吞掉——周期 GC 从未真正执行
-                        _gc_store = None
-                        try:
-                            from domains.chatbi import stores as _cb_stores
-                            _gc_store = _cb_stores.get_vector(app_state)
-                        except Exception as e:
-                            logger.warning("周期索引 GC 取向量设施失败"
-                                           "(本轮跳过): %s", e)
-                        if _gc_store is not None:
-                            try:
-                                _run_periodic_index_gc(_lease_db, app_state,
-                                                       _gc_store)
-                            except Exception as e:
-                                logger.error("周期索引 GC 执行失败: %s", e)
-                except Exception as e:
-                    logger.warning("周期索引 GC 失败(下轮重试): %s", e)
-            # 健康巡检: 设置周期(缺省 300s)
-            try:
-                health_iv = int(_load_settings(app_state)
-                                .get("health_check_interval_seconds", 300))
-            except Exception:
-                health_iv = 300
-            if health_iv > 0 and now - _loop._last_health >= health_iv:
-                _loop._last_health = now
-                try:
-                    from domains.chatbi import datasources as ds_mod
-                    # 十八审 6.4: 租约防止多 worker 重复计数停用
-                    if acquire_lease(_lease_db, "health_check",
-                                     ttl_seconds=max(120, health_iv // 2)):
-                        ds_mod.check_all_health(
-                            _lease_db,
-                            max_failures=int(_load_settings(app_state)
-                                             .get("health_check_max_failures", 3)))
-                except Exception as e:
-                    logger.warning("健康巡检失败(下轮重试): %s", e)
-            # 元数据刷新: 设置周期
-            try:
-                hours = float(_load_settings(app_state).get("metadata_refresh_hours", 6))
-            except Exception:
-                hours = 6
-            # TODO(soak-diag): 定位 refresh 未触发, 收完撤
-            if hours <= 0:
-                continue
-            if now - _loop._last_refresh < hours * 3600:
-                continue
-            # 十八审 6.4: 跨进程租约——同时到期的多个 worker 只有一个提交;
-            # 未抢到的也推进本地时钟(该周期由持有者负责)
-            if not acquire_lease(_lease_db, "refresh_semantics",
-                                 ttl_seconds=900):
-                _loop._last_refresh = now
-                continue
-            try:
-                manager.submit("chatbi.refresh_semantics", payload={},
-                               dedupe_key="chatbi:refresh:all")
-                _loop._last_refresh = now   # 九审 7.4: submit成功后才推进
-                _loop._refresh_fail_count = 0  # 十审 7.5: 成功清零(连续计数)
-                logger.info("元数据定时刷新已提交 (周期 %gh)", hours)
+                _scheduler_tick(_loop, manager, app_state)
+                _scheduler_state["last_tick"] = _now_ts()
+                _scheduler_state["tick_failures"] = 0   # 成功清零
             except Exception as e:
-                # 九审 7.4: 失败短退避(下一个30s tick重试), 不丢完整周期
-                _loop._refresh_fail_count = getattr(_loop, '_refresh_fail_count', 0) + 1
-                if _loop._refresh_fail_count <= 10:  # 最多 ~5分钟 内重试
-                    logger.warning("元数据定时刷新提交失败(第%d次, 下tick重试): %s",
-                                   _loop._refresh_fail_count, e)
-                else:
-                    _loop._last_refresh = now  # 放弃本周期
-                    logger.error("元数据定时刷新连续失败10次, 跳过本周期: %s", e)
+                _scheduler_state["tick_failures"] += 1
+                logger.error(
+                    "调度器 tick 未捕获异常(第%d次, 线程继续): %s",
+                    _scheduler_state["tick_failures"], e)
 
     _refresh_thread = threading.Thread(target=_loop, name="chatbi-metadata-refresh",
                                        daemon=True)
     _refresh_thread.start()
     logger.info("chatbi scheduler started: health (from settings) + metadata refresh (from settings)")
+
+
+def _scheduler_tick(_loop, manager, app_state) -> None:
+    """单个调度 tick(三十九审 P1-D 从 _loop 抽出, 便于顶层屏障与测试)。"""
+    now = _now_ts()
+    from domains.chatbi.runtime import get_pack_db as _get_db
+    try:
+        _lease_db = _get_db()
+    except Exception as e:   # db 不可用 → 本轮跳过定时动作
+        logger.warning("调度器取 pack db 失败(本轮跳过): %s", e)
+        return
+    # 统计留存清理(每小时一次; 设置 retention 缺省 90 天, 0=关)
+    if now - _loop._last_purge >= 3600:
+        _loop._last_purge = now
+        try:
+            retention = int(_load_settings(app_state)
+                            .get("query_stats_retention_days", 90))
+            if retention > 0:
+                from domains.chatbi.query_stats import purge_stats
+                # 十八审 6.4: 跨进程租约——多 worker 只有一个执行
+                if acquire_lease(_lease_db, "purge_stats", ttl_seconds=900):
+                    purged = purge_stats(_lease_db, retention)
+                    if purged:
+                        logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
+        except Exception as e:
+            logger.warning("查询统计清理失败(下轮重试): %s", e)
+    # 索引台账 GC(二十审 9.5: 周期回收, 不再只依赖新版本发布事件;
+    # 租约互斥; grace/TTL/保留代际来自正式配置)
+    if now - _loop._last_gc >= 3600:
+        _loop._last_gc = now
+        try:
+            if acquire_lease(_lease_db, "index_gc", ttl_seconds=900):
+                # 二十审 8.1: 此前引用未定义的 runtime 且异常被
+                # 裸 except 吞掉——周期 GC 从未真正执行
+                _gc_store = None
+                try:
+                    from domains.chatbi import stores as _cb_stores
+                    _gc_store = _cb_stores.get_vector(app_state)
+                except Exception as e:
+                    logger.warning("周期索引 GC 取向量设施失败"
+                                   "(本轮跳过): %s", e)
+                if _gc_store is not None:
+                    try:
+                        _run_periodic_index_gc(_lease_db, app_state,
+                                               _gc_store)
+                    except Exception as e:
+                        logger.error("周期索引 GC 执行失败: %s", e)
+        except Exception as e:
+            logger.warning("周期索引 GC 失败(下轮重试): %s", e)
+    # 健康巡检: 设置周期(缺省 300s)
+    try:
+        health_iv = int(_load_settings(app_state)
+                        .get("health_check_interval_seconds", 300))
+    except Exception:
+        health_iv = 300
+    if health_iv > 0 and now - _loop._last_health >= health_iv:
+        _loop._last_health = now
+        try:
+            from domains.chatbi import datasources as ds_mod
+            # 十八审 6.4: 租约防止多 worker 重复计数停用
+            if acquire_lease(_lease_db, "health_check",
+                             ttl_seconds=max(120, health_iv // 2)):
+                ds_mod.check_all_health(
+                    _lease_db,
+                    max_failures=int(_load_settings(app_state)
+                                     .get("health_check_max_failures", 3)))
+        except Exception as e:
+            logger.warning("健康巡检失败(下轮重试): %s", e)
+    # 元数据刷新: 设置周期
+    try:
+        hours = float(_load_settings(app_state).get("metadata_refresh_hours", 6))
+    except Exception:
+        hours = 6
+    # TODO(soak-diag): 定位 refresh 未触发, 收完撤
+    if hours <= 0:
+        return
+    if now - _loop._last_refresh < hours * 3600:
+        return
+    # 十八审 6.4: 跨进程租约——同时到期的多个 worker 只有一个提交;
+    # 未抢到的也推进本地时钟(该周期由持有者负责)
+    if not acquire_lease(_lease_db, "refresh_semantics",
+                         ttl_seconds=900):
+        _loop._last_refresh = now
+        return
+    try:
+        manager.submit("chatbi.refresh_semantics", payload={},
+                       dedupe_key="chatbi:refresh:all")
+        _loop._last_refresh = now   # 九审 7.4: submit成功后才推进
+        _loop._refresh_fail_count = 0  # 十审 7.5: 成功清零(连续计数)
+        logger.info("元数据定时刷新已提交 (周期 %gh)", hours)
+    except Exception as e:
+        # 九审 7.4: 失败短退避(下一个30s tick重试), 不丢完整周期
+        _loop._refresh_fail_count = getattr(_loop, '_refresh_fail_count', 0) + 1
+        if _loop._refresh_fail_count <= 10:  # 最多 ~5分钟 内重试
+            logger.warning("元数据定时刷新提交失败(第%d次, 下tick重试): %s",
+                           _loop._refresh_fail_count, e)
+        else:
+            _loop._last_refresh = now  # 放弃本周期
+            logger.error("元数据定时刷新连续失败10次, 跳过本周期: %s", e)
+
+def scheduler_status() -> dict:
+    """调度器运行状态(三十九审 P1-D: health detail / readiness 暴露)。
+
+    线程死亡或持续 tick 失败必须可见——此前 health 只查
+    pack_runtime_degraded, 线程被一次异常杀死后所有定时动作
+    静默停止而 health 仍绿。
+    """
+    t = _refresh_thread
+    return {
+        "alive": t is not None and t.is_alive(),
+        "tick_failures": _scheduler_state["tick_failures"],
+        "last_tick": _scheduler_state["last_tick"],
+    }
 
 
 def stop_refresh_scheduler() -> None:

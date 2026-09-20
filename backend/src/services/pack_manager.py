@@ -30,6 +30,14 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+class AssemblyRollbackFailedError(RuntimeError):
+    """装配 commit 失败且内部快照恢复也存在失败组件(三十九审 P1-B)。
+
+    调用方(admin toggle/recheck)捕获后必须置 degraded——runtime 可能
+    残留半装配状态, 不能谎称已回滚。
+    """
+
 # 热切换装配总锁(三十四审 P2): "读 enabled 集合 → 装配 → 挂 API/任务"
 # 整段串行化——此前只有 PackState 文件锁和 API mount 局部锁, 两个
 # 管理员并发启停时两个 assemble 可交错, 最终的状态文件/registry/
@@ -239,9 +247,17 @@ def assemble_packs(
                         hook(asset_client, app_state.upstream)
                 except ImportError:
                     continue
-    except Exception:
+    except Exception as commit_err:
         logger.exception("装配 commit 失败, 按快照回滚旧运行态")
-        _restore_runtime(app_state, nodes, app, snap)
+        # 三十九审 P1-B: 内部快照恢复的失败必须传播——此前忽略
+        # _restore_runtime 的 False, 上层拿不到 summary 便假设"内部
+        # 已回滚", 谎报 State rolled back 而 runtime 实际留新值。
+        # 恢复失败时抛结构化异常, 调用方据此进入 degraded。
+        restored = _restore_runtime(app_state, nodes, app, snap)
+        if not restored:
+            raise AssemblyRollbackFailedError(
+                f"commit 失败且快照恢复存在失败组件(原错误: "
+                f"{commit_err})——runtime 可能残留半装配状态") from commit_err
         raise
 
     api_mounted = sorted(staged_mounted.keys()) if app is not None else []
@@ -564,12 +580,17 @@ _KG_RECOVERY_DONE = False
 
 
 def _run_kg_startup_recovery_once(kg_tasks: Any, task_manager: Any) -> None:
-    """KG stale-importing 收敛, 每进程只执行一次(startup-only)。"""
+    """KG stale-importing 收敛, 成功后每进程只执行一次(startup-only)。
+
+    三十九审 P2-C: 只在 recovery **成功后**置 done——此前先置位,
+    首次瞬时异常被非 critical 分支吞掉后永久跳过(数据收敛丢失)。
+    失败保持未完成, 下次显式 recheck/装配重试。
+    """
     global _KG_RECOVERY_DONE
     if _KG_RECOVERY_DONE:
         return
-    _KG_RECOVERY_DONE = True
     kg_tasks._recover_stale_importing(task_manager)
+    _KG_RECOVERY_DONE = True   # 成功才置位
 
 
 def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any],

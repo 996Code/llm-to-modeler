@@ -455,8 +455,13 @@ def count_state_file_holders(state_path: str) -> int:
     注册一个带 PID 的槽位, 退出时注销(atexit + 心跳超时兜底)。
     槽位数 > 1 时管理端 toggle/recheck 拒绝(503)。
 
-    心跳文件格式(每行一个): {"pid": N, "ts": epoch_seconds}
-    判活: PID 存活(os.kill 0)且 ts 距今 < STALE_SECONDS。
+    心跳文件格式(每行一个): {"id": 实例UUID, "ts": epoch_seconds}
+    判活: ts 距今 < STALE_SECONDS(纯心跳新鲜度)。
+
+    三十九审 P1-C: 槽位键从 PID 改为**每实例随机 UUID**——容器/Pod
+    的主进程 PID 通常都是 1, 同 PID 会互相覆盖槽位(fail-open);
+    os.kill 也无法探测其他 PID namespace 的进程。UUID 键 + 心跳
+    时间判活对同机多进程与多容器(共享卷)同样有效。
     """
     reg_path = Path(state_path).with_suffix(".holders")
     if not reg_path.exists():
@@ -472,15 +477,10 @@ def count_state_file_holders(state_path: str) -> int:
                     continue
                 try:
                     entry = json.loads(line)
-                    pid = int(entry.get("pid") or 0)
                     ts = float(entry.get("ts") or 0)
                 except (ValueError, TypeError):
                     continue
                 if now - ts > _HOLDER_STALE_SECONDS:
-                    continue
-                try:
-                    os.kill(pid, 0)   # 探活(信号 0 = 不发送, 只探测)
-                except (OSError, ProcessLookupError):
                     continue
                 alive += 1
         return alive
@@ -500,48 +500,87 @@ _HOLDER_THREADS: Dict[str, "threading.Thread"] = {}
 
 
 class StateHolderHandle:
-    """holder 生命周期句柄(三十八审 P3)。
+    """holder 生命周期句柄(三十八审 P3 / 三十九审 P2-B 完整契约)。
 
-    close(): 停心跳线程 + 注销槽位 + 从线程表移除——测试 teardown /
-    lifespan shutdown 显式调用; 关闭后目录不会被心跳重建。
+    close(): 引用计数减一 → 最后一个引用时立即注销槽位
+    (_write_slot(unregister=True)) + 停心跳线程 + 从线程表移除 +
+    atexit.unregister(进程退出不再重建目录); 幂等(重复 close 无害)。
+    同路径多个 handle 共享心跳线程, 关闭一个不影响其他持有者。
     """
 
-    def __init__(self, thread_key: str, stop_event, thread):
+    def __init__(self, thread_key: str, stop_event, thread,
+                 unregister_slot=None, atexit_cb=None):
         self._thread_key = thread_key
         self._stop_event = stop_event
         self._thread = thread
+        self._unregister_slot = unregister_slot   # 注销槽位的回调
+        self._atexit_cb = atexit_cb               # 需要解除的 atexit
+        self._closed = False
+        # 引用计数: 同路径共享线程的活跃 handle 数
+        _HOLDER_REFCOUNT[thread_key] = (
+            _HOLDER_REFCOUNT.get(thread_key, 0) + 1)
 
     def close(self, timeout: float = 5.0) -> None:
+        if self._closed:
+            return   # 幂等
+        self._closed = True
+        remaining = _HOLDER_REFCOUNT.get(self._thread_key, 0) - 1
+        if remaining > 0:
+            # 还有其他活跃 handle 共享这条心跳线程——只减引用
+            _HOLDER_REFCOUNT[self._thread_key] = remaining
+            return
+        _HOLDER_REFCOUNT.pop(self._thread_key, None)
+        # 最后一个引用: 注销槽位(立即, 不等进程退出)
+        if self._unregister_slot is not None:
+            try:
+                self._unregister_slot(unregister=True)
+            except OSError:
+                logger.warning("pack 状态持有者注销失败", exc_info=True)
+        if self._atexit_cb is not None:
+            _atexit_mod.unregister(self._atexit_cb)
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=timeout)
         _HOLDER_THREADS.pop(self._thread_key, None)
 
 
+# 同路径 handle 引用计数(三十九审 P2-B)
+_HOLDER_REFCOUNT: Dict[str, int] = {}
+
+import atexit as _atexit_mod
+
+
 def register_state_holder(state_path: str) -> "StateHolderHandle":
-    """注册本进程为状态文件持有者(启动时调用一次)。
+    """注册本实例为状态文件持有者(启动时调用一次)。
 
-    写入 {pid, ts} 槽位并启动后台心跳线程(每 10s 刷新 ts);
-    atexit 注销。多 worker 检测(count_state_file_holders)据此拒绝
-    动态管理。
+    写入 {id: 实例UUID, ts} 槽位并启动后台心跳线程(每 10s 刷新 ts);
+    atexit 注销。多实例检测(count_state_file_holders)据此拒绝动态管理。
 
-    三十七审 P2: 注册失败抛 OSError(fail-closed); 同一
-    (pid, state_path) 只起一条心跳线程。
-    三十八审 P3: 返回 handle(close 停线程/注销/移除线程表)——
-    测试 teardown 与 lifespan shutdown 显式关闭, 已删除的临时目录
-    不再被心跳重建。
+    三十七审 P2: 注册失败抛 OSError(fail-closed)。
+    三十八审 P3: 返回 handle(close 停线程/注销/移除线程表)。
+    三十九审 P1-C: 槽位键 = 每实例随机 UUID(容器/Pod 主进程 PID 都是 1,
+    同 PID 会互相覆盖; os.kill 也探不到其他 PID namespace)——hostname/
+    PID 仅作诊断字段。三十九审 P2-B: close 有引用计数/即时注销/
+    atexit.unregister/幂等; 同进程同路径仍只起一条心跳线程
+    (thread_key 用 UUID, 每个实例一个——测试同进程多次构造时
+    复用进程级首个 UUID 的线程)。
     """
     import atexit
     import time
+    import uuid as _uuid
 
     reg_path = Path(state_path).with_suffix(".holders")
     reg_path.parent.mkdir(parents=True, exist_ok=True)
+    # 实例身份: 进程级单例 UUID(同进程多次构造共享, 跨进程/容器唯一)
+    global _INSTANCE_ID
+    if _INSTANCE_ID is None:
+        _INSTANCE_ID = str(_uuid.uuid4())
+    instance_id = _INSTANCE_ID
     pid = os.getpid()
-    thread_key = f"{pid}:{state_path}"
+    thread_key = f"{instance_id}:{state_path}"
 
     def _write_slot(unregister: bool = False) -> None:
-        # 三十七审 P2: 注册/注销失败上抛(fail-closed); 心跳刷新失败
-        # 只记日志(瞬时 IO 抖动不应杀进程, 过期槽位由 STALE 兜底)
+        # 注册/注销失败上抛(fail-closed); 心跳刷新失败只记日志
         reg_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = Path(state_path).with_suffix(".lock")
         try:
@@ -557,13 +596,17 @@ def register_state_holder(state_path: str) -> "StateHolderHandle":
                                     continue
                                 try:
                                     e = json.loads(line)
-                                    if int(e.get("pid") or 0) != pid:
+                                    if str(e.get("id") or "") != instance_id:
                                         lines.append(line)
                                 except (ValueError, TypeError):
                                     continue
                     if not unregister:
-                        lines.append(json.dumps(
-                            {"pid": pid, "ts": time.time()}))
+                        lines.append(json.dumps({
+                            "id": instance_id,
+                            "ts": time.time(),
+                            "pid": pid,          # 诊断字段(不参与判活)
+                            "host": _hostname(),
+                        }))
                     tmp = reg_path.with_suffix(".tmp")
                     with open(tmp, "w", encoding="utf-8") as f:
                         f.write("\n".join(lines) + ("\n" if lines else ""))
@@ -577,7 +620,8 @@ def register_state_holder(state_path: str) -> "StateHolderHandle":
                 raise
 
     _write_slot()
-    atexit.register(_write_slot, unregister=True)
+    _atexit_cb = _write_slot
+    atexit.register(_atexit_cb, unregister=True)
 
     stop_event = threading.Event()
 
@@ -589,15 +633,30 @@ def register_state_holder(state_path: str) -> "StateHolderHandle":
             except OSError:
                 logger.warning("pack 状态持有者心跳刷新失败", exc_info=True)
 
-    # 三十七审 P2: 按 (pid, state_path) 去重——同进程多次构造 PackState
-    # (测试/临时实例)不再各起一条永久心跳线程; 已注册时返回可用的
-    # handle(共享同一 stop event, 任一 close 即停)
+    # 同实例(进程)同路径只起一条心跳线程; 已注册时返回共享 handle
+    # (引用计数语义: 每个 handle close 一次, 最后一个才真正停)
     existing = _HOLDER_THREADS.get(thread_key)
     if existing is not None and existing.is_alive():
-        return StateHolderHandle(thread_key, existing._stop_event, existing)
+        return StateHolderHandle(
+            thread_key, existing._stop_event, existing,
+            unregister_slot=_write_slot, atexit_cb=_atexit_cb)
     t = threading.Thread(target=_heartbeat, daemon=True,
                          name=f"pack-state-holder-{pid}")
     t._stop_event = stop_event
     t.start()
     _HOLDER_THREADS[thread_key] = t
-    return StateHolderHandle(thread_key, stop_event, t)
+    return StateHolderHandle(
+        thread_key, stop_event, t,
+        unregister_slot=_write_slot, atexit_cb=_atexit_cb)
+
+
+# 实例身份单例(三十九审 P1-C)
+_INSTANCE_ID = None
+
+
+def _hostname() -> str:
+    import socket
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""

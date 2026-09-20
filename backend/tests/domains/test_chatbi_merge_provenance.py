@@ -5170,3 +5170,261 @@ class TestHolderClose:
         finally:
             if os.path.exists(tmpdir):
                 shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# 三十九审回归: 事务阶段状态机/rollback 传播/scheduler 屏障/holder 契约
+# ════════════════════════════════════════════════════════════════
+
+class TestTransactionStages:
+    """P1-A: persist 成功 + finalize 失败 → 保持新状态 + degraded."""
+
+    def test_finalize_failure_keeps_new_state(self, monkeypatch):
+        import json
+        import os
+        import tempfile
+        import shutil
+        from types import SimpleNamespace
+        from services import pack_manager as pm
+        from services.pack_state import PackState
+        from domains.chatbi import tasks as chatbi_tasks
+        from sdk.pack_api import PackConfigurationError
+
+        def _boom(manager, app_state):
+            raise RuntimeError("scheduler boom")
+        monkeypatch.setattr(
+            chatbi_tasks, "_start_refresh_scheduler", _boom)
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            ps = PackState(os.path.join(tmpdir, "s.json"),
+                           ["chatbi", "leave_application", "njmind_form"])
+            state = SimpleNamespace(task_manager=_TM())
+            state.llm_client = object()
+            state.asset_client = None
+            state.conversation_manager = object()
+
+            # toggle 流程: 内存改 → assemble → persist → finalize(炸)
+            ps.set_enabled("leave_application", False, persist=False)
+            summary = pm.assemble_packs(
+                state, sorted(ps.enabled_names()), app=None)
+            ps.persist()
+            disk = json.load(open(ps.state_path))["enabled"]
+            try:
+                pm.finalize_assembly(state, summary["_tx"])
+                raise AssertionError("finalize 应抛")
+            except PackConfigurationError:
+                pass
+            # 三方保持新状态(磁盘/内存/runtime), 不回滚
+            assert "leave_application" not in disk, f"磁盘被回滚: {disk}"
+            assert "leave_application" not in ps.enabled_names()
+            assert "leave_application" not in state._loaded_packs
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_assemble_rollback_failure_propagates(self, monkeypatch):
+        """P1-B: commit 失败 + 内部恢复失败 → AssemblyRollbackFailedError."""
+        from types import SimpleNamespace
+        from services import pack_manager as pm
+        from engine import nodes
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        state = SimpleNamespace(task_manager=_TM())
+        state.llm_client = object()
+        state.asset_client = None
+        state.conversation_manager = object()
+
+        def _broken(**kw):
+            raise RuntimeError("configure always boom")
+        monkeypatch.setattr(nodes, "configure", _broken)
+        try:
+            pm.assemble_packs(state, ["chatbi"], app=None)
+            raise AssertionError("应抛 AssemblyRollbackFailedError")
+        except pm.AssemblyRollbackFailedError:
+            pass   # 上层据此 degraded
+
+
+class TestSchedulerBarrier:
+    """P1-D: tick 异常屏障 + scheduler_status 暴露."""
+
+    def test_tick_exception_doesnt_kill_barrier_semantics(self):
+        """tick 内未捕获异常会传播到 _loop 的屏障(线程不死)."""
+        import inspect
+        from domains.chatbi import tasks as ct
+        src = inspect.getsource(ct)
+        loop_start = src.find("while not _refresh_stop.wait(30):")
+        seg = src[loop_start:loop_start + 800]
+        assert "_scheduler_tick(_loop, manager, app_state)" in seg, (
+            "循环未调用抽出的 tick(屏障缺失)")
+        assert "except Exception" in seg, "tick 调用无异常屏障"
+
+    def test_scheduler_status_shape(self):
+        from domains.chatbi import tasks as ct
+        st = ct.scheduler_status()
+        assert set(st) >= {"alive", "tick_failures", "last_tick"}, st
+
+    def test_health_detail_includes_scheduler(self):
+        import inspect
+        from domains.chatbi import api as cb_api
+        src = inspect.getsource(cb_api)
+        assert "scheduler_status" in src, (
+            "health detail 未暴露 scheduler 组件")
+
+    def test_tick_survives_lease_error(self):
+        """tick 内 acquire_lease 抛 → 异常传播(屏障捕获), 不静默."""
+        from types import SimpleNamespace
+        from domains.chatbi import tasks as ct
+
+        def _boom_lease(*a, **kw):
+            raise RuntimeError("transient lease DB error")
+        orig = ct.acquire_lease
+        ct.acquire_lease = _boom_lease
+        try:
+            loop_state = SimpleNamespace(
+                _last_purge=0.0, _last_gc=0.0,
+                _last_health=0.0, _last_refresh=0.0)
+            try:
+                ct._scheduler_tick(loop_state, None, None)
+                raise AssertionError("lease 异常应传播到屏障")
+            except RuntimeError:
+                pass
+        finally:
+            ct.acquire_lease = orig
+
+
+class TestHolderUUIDIdentity:
+    """P1-C/P2-B: UUID 身份 + close 完整契约."""
+
+    def test_two_handles_refcount(self):
+        import os
+        import tempfile
+        import time
+        import shutil
+        from services.pack_state import (
+            register_state_holder, count_state_file_holders)
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "s.json")
+        try:
+            h1 = register_state_holder(path)
+            h2 = register_state_holder(path)
+            assert count_state_file_holders(path) == 1
+            h1.close()   # 关一个: 另一个仍活
+            time.sleep(0.2)
+            assert count_state_file_holders(path) == 1, (
+                "关闭一个共享 handle 不应注销槽位")
+            assert h2._thread.is_alive()
+            h2.close()
+            h2.close()   # 幂等
+            time.sleep(0.2)
+            assert count_state_file_holders(path) == 0, "全关后槽位未注销"
+            assert not h2._thread.is_alive()
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_close_no_atexit_rebuild(self):
+        """close + 删目录 + 子进程退出 → 目录不重建."""
+        import os
+        import shutil
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        import pathlib
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "s.json")
+        src_dir = pathlib.Path(__file__).resolve().parents[2] / "src"
+        code = (
+            "import sys, time; sys.path.insert(0, "
+            f"{str(src_dir)!r});"
+            "from services.pack_state import register_state_holder;"
+            f"h = register_state_holder({path!r});"
+            "h.close(); print('closed', flush=True); time.sleep(0.5)"
+        )
+        r = subprocess.run([sys.executable, "-c", code],
+                           capture_output=True, text=True)
+        assert "closed" in r.stdout, r.stderr
+        shutil.rmtree(tmpdir)
+        time.sleep(1)
+        assert not os.path.exists(tmpdir), (
+            "close 后 atexit 仍重建目录")
+
+    def test_two_processes_distinct_uuid(self):
+        """两个独立进程(模拟容器)各自 UUID, count=2."""
+        import os
+        import shutil
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        import pathlib
+        from services.pack_state import count_state_file_holders
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "s.json")
+        src_dir = pathlib.Path(__file__).resolve().parents[2] / "src"
+        code = (
+            "import sys, time; sys.path.insert(0, "
+            f"{str(src_dir)!r});"
+            "from services.pack_state import register_state_holder;"
+            f"register_state_holder({path!r});"
+            "print('ready', flush=True); time.sleep(20)"
+        )
+        procs = [subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE, text=True) for _ in range(2)]
+        try:
+            for p in procs:
+                p.stdout.readline()
+            time.sleep(0.5)
+            assert count_state_file_holders(path) == 2, (
+                "双进程未按 UUID 计数(身份碰撞)")
+        finally:
+            for p in procs:
+                p.kill(); p.wait()
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestKGRecoveryRetry:
+    """P2-C: recovery 失败不置 done, 重试到成功."""
+
+    def test_first_failure_retries(self, monkeypatch):
+        from services import pack_manager as pm
+        from domains.knowledge_graph import tasks as kg_tasks
+
+        calls = []
+
+        def _flaky(m):
+            calls.append("run")
+            if len(calls) == 1:
+                raise RuntimeError("transient recovery error")
+
+        monkeypatch.setattr(kg_tasks, "_recover_stale_importing", _flaky)
+        pm._KG_RECOVERY_DONE = False
+        try:
+            try:
+                pm._run_kg_startup_recovery_once(kg_tasks, None)
+            except RuntimeError:
+                pass
+            assert pm._KG_RECOVERY_DONE is False, (
+                "首次失败就置 done(永不重试)")
+            pm._run_kg_startup_recovery_once(kg_tasks, None)
+            assert calls == ["run", "run"], "第二次未重试"
+            assert pm._KG_RECOVERY_DONE is True, "成功后未置 done"
+        finally:
+            pm._KG_RECOVERY_DONE = False

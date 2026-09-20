@@ -1,0 +1,102 @@
+# 三十九审 P3: PG15/PG16 真实进程矩阵(CI 持续证据)
+# PG15 → chatbi 版本门禁必须拒绝启动(退出码非 0)
+# PG16 → migration-before-ready 必须通过(health 200)
+name: pg-matrix
+on:
+  push:
+    branches: [main]
+    paths: ['backend/**', '.github/workflows/pg-matrix.yml']
+  pull_request:
+    paths: ['backend/**', '.github/workflows/pg-matrix.yml']
+
+jobs:
+  pg15-rejected:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: matrix15
+        ports: ["15432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U root"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt 2>/dev/null || pip install fastapi uvicorn
+      - name: PG15 must reject startup
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://root:root@localhost:15432/matrix15
+          FERNET_KEY: NG6ewZrFKK1Is3v4IGClrakyBGYcjnfKSRfbqzllkwk=
+          PACK_STATE_PATH: /tmp/m15.json
+          LLM_BASE_URL: http://127.0.0.1:9/v1
+          LLM_API_KEY: x
+        run: |
+          # 期望启动失败(退出码非 0)——PG16 门禁 fail-closed
+          set +e
+          timeout 60 python -m uvicorn main:app --port 18071 --app-dir src \
+            > /tmp/pg15_boot.log 2>&1
+          code=$?
+          set -e
+          echo "exit_code=$code"
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: PG15 启动成功(应被版本门禁拒绝)"; exit 1
+          fi
+          grep -q "PostgreSQL" /tmp/pg15_boot.log || {
+            echo "FAIL: 日志无版本门禁信息"; cat /tmp/pg15_boot.log; exit 1; }
+          echo "PASS: PG15 拒绝启动"
+
+  pg16-ready:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: root
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: matrix16
+        ports: ["15433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U root"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt 2>/dev/null || pip install fastapi uvicorn
+      - name: PG16 migration-before-ready
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://root:root@localhost:15433/matrix16
+          FERNET_KEY: NG6ewZrFKK1Is3v4IGClrakyBGYcjnfKSRfbqzllkwk=
+          PACK_STATE_PATH: /tmp/m16.json
+          LLM_BASE_URL: http://127.0.0.1:9/v1
+          LLM_API_KEY: x
+        run: |
+          python -m uvicorn main:app --port 18072 --app-dir src \
+            > /tmp/pg16_boot.log 2>&1 &
+          UVPID=$!
+          for i in $(seq 1 50); do
+            curl -sf http://127.0.0.1:18072/api/health > /dev/null 2>&1 && break
+            sleep 1
+          done
+          if ! curl -sf http://127.0.0.1:18072/api/health > /dev/null; then
+            echo "FAIL: PG16 未就绪"; cat /tmp/pg16_boot.log; kill $UVPID; exit 1
+          fi
+          echo "PASS: PG16 migration-before-ready"
+          kill $UVPID
