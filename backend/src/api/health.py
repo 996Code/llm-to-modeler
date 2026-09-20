@@ -48,7 +48,22 @@ async def health_check(request: Request):
     响应头 Cache-Control: no-store —— 健康检查响应禁止被网关/浏览器缓存：
     曾出现网关对 200 做协商缓存回 304，宿主探测的 fetch 把缓存拼成 200
     误判健康（后端已挂入口仍显示）。no-store 让每次探测都拿到实时状态。
+
+    三十八审 P1-A(降级可见): 热切换回滚失败时 app.state.pack_runtime_
+    degraded 被置位——health 如实返回 503 degraded(不能继续谎报
+    healthy 让流量打进分裂的 runtime), 直到重启恢复。
     """
+    if getattr(request.app.state, "pack_runtime_degraded", False):
+        return JSONResponse(
+            {
+                "status": "degraded",
+                "service": "LLM Form Modeler",
+                "version": request.app.version,
+                "detail": "pack hot-reload rollback failed—restart required",
+            },
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
     return JSONResponse(
         {
             "status": "healthy",

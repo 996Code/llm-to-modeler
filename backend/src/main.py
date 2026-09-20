@@ -140,6 +140,9 @@ async def lifespan(app: FastAPI):
         scan_pack_dirs(),
     )
     app.state.pack_state = pack_state
+    # 三十八审 P3: 保存 holder 句柄(lifespan shutdown 显式停心跳线程)
+    app.state.pack_state_holder = getattr(
+        pack_state, "holder", None)
 
     # 会话管理器：封装会话上下文（历史消息、压缩历史）的读写
     conversation_manager = ConversationManager(store=conv_store)
@@ -165,8 +168,13 @@ async def lifespan(app: FastAPI):
     # 共用同一条装配路径,保证冷启动与热切换行为一致。
     # 兼刷新 compressor 的 compact_focus(app.state.compressor 已就位)
     # app 透传:装配末尾动态挂载各 pack 的自有 API 路由(/api/packs/{name})
-    from services.pack_manager import assemble_packs
-    assemble_packs(app.state, sorted(pack_state.enabled_names()), app=app)
+    # 三十八审 P2-B: 冷启动的 finalize(生命周期启动/unload)在装配返回后
+    # 立即执行——冷启动无"persist 失败回滚"问题(状态文件在装配前已读),
+    # 与热切换的"persist 成功后 finalize"语义一致。
+    from services.pack_manager import assemble_packs, finalize_assembly
+    _summary = assemble_packs(
+        app.state, sorted(pack_state.enabled_names()), app=app)
+    finalize_assembly(app.state, _summary["_tx"])
 
     # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）
     # build_graph 装配节点（classify_intent/execute_tool/handle_result）并编译
@@ -208,6 +216,14 @@ async def lifespan(app: FastAPI):
 
     # === 关闭阶段（@PreDestroy 等价物）===
     logger.info("Shutting down...")
+    # 三十八审 P3: 停 holder 心跳线程(在卸载钩子之前——心跳会重建
+    # 状态目录, 先停再清理)
+    try:
+        _holder = getattr(app.state, "pack_state_holder", None)
+        if _holder is not None:
+            _holder.close()
+    except Exception:
+        logger.warning("pack state holder close failed", exc_info=True)
     try:
         task_manager.close()  # 关闭后台任务线程池(在跑任务下次启动标 interrupted)
     except Exception:

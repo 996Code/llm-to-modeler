@@ -534,26 +534,23 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     # 改掉)。锁内完成 "toggle → 装配 → 失败回滚" 整段, 状态文件
     # 与装配 snapshot 严格同源。
     # 三十六审 P1-A(持久化后置): 状态先改内存不落盘, runtime commit
-    # 成功后才持久化——此前 set_enabled 先落盘, 装配失败后回滚再落
-    # 一次盘, 中间窗口崩溃会留下"文件已改/运行态未变"的错位; 现在
-    # 文件只在 runtime 确认切换后写一次, 失败路径零落盘。
-    # 三十七审 P1-A(事务化): persist 写盘失败也必须回滚 runtime——
-    # 此前 catch 块只反向改内存, 已提交的新装配残留(503 但 runtime
-    # 是新值, 与日志声称的"内存态与运行态保持一致"相反)。现在
-    # persist 失败时用反向装配恢复旧运行态, 四方(响应/内存/磁盘/
-    # runtime)一致。
-    from services.pack_manager import hot_reload_lock
+    # 成功后才持久化——文件只在 runtime 确认切换后写一次, 失败路径零落盘。
+    # 三十八审 P1-A(事务化): assemble 返回事务 handle; persist 失败按
+    # **快照确定性回滚**(不再重跑完整装配——反向 assemble 会重新执行
+    # 依赖检测/hook, 本身可能失败, 失败后 runtime 与状态分裂); 回滚
+    # 失败进入 degraded(app.state.pack_runtime_degraded=True, health
+    # 暴露, 管理端拒绝后续操作), 响应如实报告。
+    # 三十八审 P2-B(finalize 后置): lifecycle/unload 只在 persist 成功
+    # 后执行——persist 失败时外部副作用尚未发生, 无需撤销。
+    from services.pack_manager import (
+        assemble_packs, finalize_assembly, hot_reload_lock,
+        rollback_assembly)
     _reject_multi_worker(request)
     with hot_reload_lock():
         changed = pack_state.set_enabled(
             name, enabled, persist=False)
-        # 审计留痕:插件启停改变引擎装配面与对外路由,失败时只看状态文件无法还原
-        # "何时被谁改过",记一条 info(成功/失败由后续 hot-reload 日志与状态文件共同佐证)
         logger.info(f"pack toggled: {name} enabled={enabled} changed={changed}")
         result = {"changed": changed, **_packs_payload(request)}
-        # 无论状态是否变化都重新装配:装配幂等(importlib 有模块缓存,开销毫秒级),
-        # 且能自愈"上次状态已落盘但装配失败"的残留(否则引擎与状态不一致要到重启才恢复)
-        # app 透传:同步挂载/卸载该 pack 的自有 API 路由
         try:
             summary = assemble_packs(
                 request.app.state, sorted(pack_state.enabled_names()),
@@ -564,37 +561,43 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
             # runtime commit 成功 → 现在才持久化(失败路径零落盘)
             if changed:
                 pack_state.persist()
+                # 磁盘确认 → finalize(生命周期/unload 等不可逆副作用)
+                finalize_assembly(request.app.state, summary["_tx"])
         except Exception as e:
-            # 回滚本次 toggle 的内存态(未落盘, 无文件回滚; 其它并发
-            # 管理员的变更不在本请求职责内)
+            rollback_ok = True
             if changed:
+                # 回滚内存态(pending 一并清空——失败请求不留未提交意图)
                 try:
                     pack_state.set_enabled(
                         name, not enabled, persist=False)
+                    pack_state.clear_pending_ops()
                 except Exception as rollback_err:
                     logger.error(
-                        f"hot-reload 失败且回滚也失败(内存态可能与"
-                        f"运行态不一致, 建议重启): {rollback_err}")
-            # 三十七审 P1-A: persist 失败(写盘 OSError)时 runtime 已是新
-            # 装配——用反向装配恢复旧运行态, 不留"503 但 runtime 已切换"
-            # 的分裂。反向装配本身失败则如实报告(建议重启)。
-            rollback_ok = True
-            if changed:
+                        f"hot-reload 失败且内存回滚也失败: {rollback_err}")
+                # 按快照确定性回滚 runtime(不重跑装配)
                 try:
-                    assemble_packs(
-                        request.app.state,
-                        sorted(pack_state.enabled_names()),
-                        app=request.app)
+                    rollback_ok = rollback_assembly(
+                        request.app.state, summary["_tx"])
                 except Exception as rollback_err:
                     rollback_ok = False
+                    logger.error(f"快照回滚异常: {rollback_err}")
+                if rollback_ok:
+                    logger.warning(
+                        f"hot-reload/persist 失败, 已按快照回滚 {name} "
+                        f"enabled={not enabled}(内存、运行态与状态文件一致)")
+                else:
+                    # 回滚失败: 进入 degraded——health 暴露, 拒绝后续
+                    # 管理/业务操作直到重启(不能谎称已回滚)
+                    request.app.state.pack_runtime_degraded = True
                     logger.error(
-                        f"持久化失败且反向装配也失败(runtime 与状态文件"
-                        f"不一致, 建议重启): {rollback_err}")
-            if changed and rollback_ok:
-                logger.warning(
-                    f"hot-reload/persist 失败, 已回滚 {name} enabled="
-                    f"{not enabled}(内存态、运行态与状态文件保持一致)")
+                        f"hot-reload 失败且快照回滚失败——进程已降级"
+                        f"(degraded), 建议重启恢复一致性")
             logger.exception(f"hot-reload packs failed after toggling {name}")
+            if not rollback_ok:
+                raise HTTPException(
+                    503,
+                    f"Rollback FAILED after hot-reload error: {e}. "
+                    f"Process is degraded—restart required.")
             raise HTTPException(503, f"State rolled back, hot-reload failed: {e}")
     return result
 
@@ -748,6 +751,10 @@ async def admin_recheck_pack(name: str, request: Request):
                 )
                 result["reloaded"] = name in summary["loaded"]
                 result["loaded"] = summary["loaded"]
+                # 三十八审 P2-B: finalize 在装配成功后执行——recheck 不改
+                # 启停状态(无 persist), 生命周期/unload 直接 finalize
+                from services.pack_manager import finalize_assembly
+                finalize_assembly(request.app.state, summary["_tx"])
             except Exception as e:
                 logger.exception(f"recheck 后热装配失败: {name}")
                 raise HTTPException(503, f"Dependency ok but hot-reload failed: {e}")

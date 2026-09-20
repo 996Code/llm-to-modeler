@@ -4851,8 +4851,12 @@ class TestUnloadAfterDisable:
         state.asset_client = object()
         state.conversation_manager = object()
 
-        # 只装配 njmind_form(禁用 KG)
-        pm.assemble_packs(state, ["njmind_form"], app=None)
+        # 只装配 njmind_form(禁用 KG); unload 在 finalize 段执行
+        # (三十八审 P2-B: 外部副作用等 runtime+磁盘确认后)
+        summary = pm.assemble_packs(state, ["njmind_form"], app=None)
+        assert unload_calls == [], (
+            f"finalize 前 unload 不应执行: {unload_calls}")
+        pm.finalize_assembly(state, summary["_tx"])
         assert unload_calls == ["kg"], (
             f"禁用 KG 后 unload 未执行: {unload_calls}")
         assert state._loaded_packs == ["njmind_form"]
@@ -4907,3 +4911,262 @@ class TestHolderFailClosed:
             assert n == -1, f"检测失效应返回 -1(fail-closed), 得到 {n}"
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ════════════════════════════════════════════════════════════════
+# 三十八审回归: 快照回滚/恢复隔离/lifecycle 可见/finalize 边界/撤销
+# ════════════════════════════════════════════════════════════════
+
+class TestSnapshotRollback:
+    """P1-A: persist 失败按快照确定性回滚(不重跑装配)."""
+
+    def _state(self):
+        from types import SimpleNamespace
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {"old.handler": lambda h: None}
+                self._handler_meta = {"old.handler": {"packName": "x"}}
+                self.store = None
+
+            def reset_handlers(self):
+                self._handlers.clear()
+                self._handler_meta.clear()
+
+        state = SimpleNamespace(task_manager=_TM())
+        state._loaded_packs = ["chatbi", "leave_application"]
+        state.registry = "OLD"
+        state.llm_client = object()
+        # asset_client 须可 setattr(_restore_runtime 恢复 _config_api)
+        state.asset_client = SimpleNamespace(_config_api=None)
+        state.conversation_manager = object()
+        return state
+
+    def test_rollback_no_full_assemble(self, monkeypatch):
+        """persist 失败 → rollback_assembly 直接恢复, 不重跑装配."""
+        from services import pack_manager as pm
+        state = self._state()
+        summary = pm.assemble_packs(
+            state, ["chatbi", "njmind_form"], app=None)
+        assert state._loaded_packs == ["chatbi", "njmind_form"]
+
+        # 注入: 反向装配一定失败(证明 rollback 没走它)
+        def _boom_assemble(*a, **kw):
+            raise RuntimeError("assemble must not be called")
+        monkeypatch.setattr(pm, "assemble_packs", _boom_assemble)
+
+        ok = pm.rollback_assembly(state, summary["_tx"])
+        assert ok is True
+        assert state._loaded_packs == ["chatbi", "leave_application"], (
+            "快照回滚未恢复 loaded")
+        assert state.registry == "OLD"
+        assert "old.handler" in state.task_manager._handlers
+
+    def test_rollback_failed_returns_false(self, monkeypatch):
+        """恢复组件失败 → rollback 返回 False(调用方进入 degraded)."""
+        from services import pack_manager as pm
+        from engine import nodes
+        state = self._state()
+        summary = pm.assemble_packs(
+            state, ["chatbi", "njmind_form"], app=None)
+
+        # 注入: nodes.configure 恢复时抛错
+        def _broken_configure(**kw):
+            raise RuntimeError("restore boom")
+        monkeypatch.setattr(nodes, "configure", _broken_configure)
+        ok = pm.rollback_assembly(state, summary["_tx"])
+        monkeypatch.undo()
+        assert ok is False, "恢复失败应返回 False(degraded 信号)"
+
+
+class TestRestoreIsolation:
+    """P1-B: 任一恢复 setter 抛错, 其他组件仍恢复(独立 compensator)."""
+
+    def _setup(self):
+        from types import SimpleNamespace
+
+        class _Compressor:
+            def __init__(self):
+                self._compact_focus = "OLD_FOCUS"
+
+            def set_compact_focus(self, focus):
+                self._compact_focus = focus
+                raise RuntimeError("setter always fails")
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {"old": lambda h: None}
+                self._handler_meta = {"old": {"packName": "x"}}
+                self.store = None
+
+            def reset_handlers(self):
+                self._handlers.clear()
+                self._handler_meta.clear()
+
+        comp = _Compressor()
+        state = SimpleNamespace(task_manager=_TM(), compressor=comp)
+        state._loaded_packs = ["chatbi"]
+        state.registry = "OLD"
+        state.llm_client = object()
+        state.asset_client = object()
+        state.conversation_manager = object()
+        return state, comp
+
+    def test_compressor_failure_doesnt_block_handlers(self):
+        """compressor setter 抛错 → handlers 仍恢复(独立 compensator).
+
+        commit 的 set_compact_focus 抛错 → assemble 整体抛且内部已按
+        快照回滚; 旧实现单一 try 里恢复再抛会阻断 handlers/routes。
+        """
+        from services import pack_manager as pm
+        state, comp = self._setup()
+        try:
+            pm.assemble_packs(state, ["chatbi"], app=None)
+            raise AssertionError("compressor setter 抛错仍装配成功")
+        except RuntimeError:
+            pass
+        # assemble 内部已调 _restore_runtime; handlers 应已恢复
+        assert "old" in state.task_manager._handlers, (
+            "compressor 恢复失败阻断了 handlers 恢复")
+        # compressor 用直接赋值恢复(不走已知失败的 setter)
+        assert comp._compact_focus == "OLD_FOCUS", (
+            f"compressor focus 未恢复: {comp._compact_focus}")
+
+
+class TestLifecycleFailureVisible:
+    """P2-A: critical scheduler 启动失败 → 装配失败(fail-fast)."""
+
+    def test_scheduler_failure_fails_assembly(self, monkeypatch):
+        from services import pack_manager as pm
+        from sdk.pack_api import PackConfigurationError
+        from domains.chatbi import tasks as chatbi_tasks
+
+        def _boom(manager, app_state):
+            raise RuntimeError("scheduler boom")
+        monkeypatch.setattr(
+            chatbi_tasks, "_start_refresh_scheduler", _boom)
+
+        from types import SimpleNamespace
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        state = SimpleNamespace(task_manager=_TM())
+        state.llm_client = object()
+        state.asset_client = object()
+        state.conversation_manager = object()
+
+        summary = pm.assemble_packs(state, ["chatbi"], app=None)
+        try:
+            pm.finalize_assembly(state, summary["_tx"])
+            raise AssertionError("scheduler 失败仍 finalize 成功")
+        except PackConfigurationError:
+            pass
+
+    def test_kg_recovery_runs_once(self, monkeypatch):
+        """P2-B: KG stale recovery 每进程只执行一次(startup-only)."""
+        from services import pack_manager as pm
+        from domains.knowledge_graph import tasks as kg_tasks
+        from types import SimpleNamespace
+
+        calls = []
+        monkeypatch.setattr(
+            kg_tasks, "_recover_stale_importing",
+            lambda m: calls.append("run"))
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        state = SimpleNamespace(task_manager=_TM())
+        state.llm_client = object()
+        state.asset_client = object()
+        state.conversation_manager = object()
+
+        calls = []
+        monkeypatch.setattr(
+            kg_tasks, "_recover_stale_importing",
+            lambda m: calls.append("run"))
+
+        # 直接测 once guard: 连续两次调用只执行一次
+        # (不走 assemble——KG 依赖在测试环境未配置, loader 会跳过)
+        pm._KG_RECOVERY_DONE = False
+        pm._run_kg_startup_recovery_once(kg_tasks, None)
+        pm._run_kg_startup_recovery_once(kg_tasks, None)
+        assert calls == ["run"], (
+            f"KG recovery 应只执行一次(实际 {calls})")
+
+
+class TestEnhancerDetach:
+    """P2-C: 禁用 njmind_form 后 config_api 被撤销(整体替换)."""
+
+    def test_disable_revokes_config_api(self):
+        from types import SimpleNamespace
+
+        class _AssetClient:
+            def __init__(self):
+                self._config_api = None
+
+            def set_config_api(self, api):
+                self._config_api = api
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        asset = _AssetClient()
+        state = SimpleNamespace(task_manager=_TM(), asset_client=asset,
+                                upstream=object())
+        state.llm_client = object()
+        state.conversation_manager = object()
+
+        from services import pack_manager as pm
+        # 启用 njmind_form → config_api 注入
+        pm.assemble_packs(state, ["njmind_form"], app=None)
+        assert asset._config_api is not None, "启用后应注入"
+
+        # 禁用(切到 leave_application) → config_api 撤销为 None
+        pm.assemble_packs(state, ["leave_application"], app=None)
+        assert asset._config_api is None, (
+            f"禁用后 config_api 残留: {asset._config_api}")
+
+
+class TestHolderClose:
+    """P3: holder close 后线程退出, 目录不重建."""
+
+    def test_close_stops_thread_and_no_rebuild(self):
+        import os
+        import shutil
+        import tempfile
+        import time
+        from services.pack_state import register_state_holder
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "s.json")
+        try:
+            h = register_state_holder(path)
+            time.sleep(0.1)
+            h.close()
+            assert not h._thread.is_alive(), "close 后线程仍存活"
+            shutil.rmtree(tmpdir)
+            time.sleep(1)   # 短周期验证(close 后 wait 立即返回, 不会重建)
+            assert not os.path.exists(tmpdir), (
+                "close 后目录被心跳重建")
+        finally:
+            if os.path.exists(tmpdir):
+                shutil.rmtree(tmpdir, ignore_errors=True)

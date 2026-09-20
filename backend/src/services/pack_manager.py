@@ -170,6 +170,12 @@ def assemble_packs(
     snap = _runtime_snapshot(app_state, nodes, app)
 
     # ── Commit: 快照旧 runtime → 纯引用替换 → 异常回滚 ──
+    # 三十八审 P1-B: 回滚是**独立 compensator 链**(逐组件 try, 按 commit
+    # 逆序, 聚合全部错误)——此前单一 try 里任一恢复 setter 再抛错,
+    # 后续组件(handlers/routes)全部跳过。
+    # 三十八审 P2-B: lifecycle/unload 不再在 assemble 内执行——外部
+    # 副作用(scheduler 启动/连接释放/KG 数据收敛)不可逆, 必须等
+    # runtime 与磁盘状态都确认后才 finalize(见 finalize_assembly)。
     try:
         nodes.configure(
             registry=registry,
@@ -217,15 +223,20 @@ def assemble_packs(
         # 测试态 app_state 可能缺 upstream，一并守卫。
         # 三十七审 P1-C: 挪进 commit try 块——hook 抛错时按快照回滚
         # asset client 引用(与 nodes/app.state/handlers/routes 同边界)。
+        # 三十八审 P2-C: 按启用集合**整体替换**——先清空旧引用再逐 pack
+        # 注入, 禁用的 pack 的领域客户端不再残留(此前 njmind_form 禁用后
+        # _config_api 仍是它的 ModelerAPI)。
         if (getattr(app_state, "asset_client", None) is not None
                 and getattr(app_state, "upstream", None) is not None):
             import importlib
+            asset_client = app_state.asset_client
+            asset_client.set_config_api(None)   # 撤销旧 pack 的注入
             for pack_name in (pack_configs or {}):
                 try:
                     mod = importlib.import_module(f"domains.{pack_name}.pack")
                     hook = getattr(mod, "enhance_asset_client", None)
                     if callable(hook):
-                        hook(app_state.asset_client, app_state.upstream)
+                        hook(asset_client, app_state.upstream)
                 except ImportError:
                     continue
     except Exception:
@@ -233,17 +244,48 @@ def assemble_packs(
         _restore_runtime(app_state, nodes, app, snap)
         raise
 
-    # ── Post-commit: 生命周期启动(三十七审 P1-B) ──
-    # scheduler 启动与 KG 启动收敛只在 commit 成功后执行; 失败只记日志
-    # (生命周期启动失败不回滚装配——handler 已就位, scheduler 可在下次
-    # 装配或重启时补起)。
+    api_mounted = sorted(staged_mounted.keys()) if app is not None else []
+    total_tools = sum(len(v) for v in pack_tools.values())
+    logger.info(
+        f"packs assembled: {sorted(pack_routers)} , {total_tools} tools"
+        f"{f' , pack api: {api_mounted}' if api_mounted else ''}"
+    )
+    return {
+        "loaded": sorted(pack_routers),
+        "tools": total_tools,
+        "pack_tools": pack_tools,
+        "dependency_status": dep_status,
+        "api_mounted": api_mounted,
+        # 三十八审 P1-A: 返回事务 handle——persist 失败时按快照确定性
+        # 恢复(不重跑完整装配), finalize(生命周期/unload)由调用方在
+        # 磁盘确认后执行
+        "_tx": {
+            "snapshot": snap,
+            "pack_routers": pack_routers,
+            "task_manager": task_manager,
+            "app": app,
+        },
+    }
+
+
+def finalize_assembly(app_state: Any, tx: Dict[str, Any]) -> None:
+    """装配事务的 finalize 段(三十八审 P2-B): runtime 与磁盘都确认后执行。
+
+    外部不可逆副作用只在此时发生:
+      - lifecycle 启动(chatbi scheduler / KG _app_state 注入);
+      - unload 钩子(旧在载、新不在载的 pack 释放资源)。
+    调用方(main 冷启动 / admin persist 成功后)负责在 PackState 持久化
+    **之后**调用本函数——persist 失败时 finalize 尚未执行, 无需撤销。
+    """
+    snap = tx["snapshot"]
+    pack_routers = tx["pack_routers"]
+    task_manager = tx["task_manager"]
+    app = tx["app"]
+
+    # 生命周期启动(三十七审 P1-B / 三十八审 P2-A)
     _start_pack_lifecycle(app_state, pack_routers, task_manager)
 
-    # ── Post-commit: unload 钩子(三十七审 P1-D) ──
-    # 上次在载、本次不在载(禁用/依赖失联)的 pack 释放自持资源(如数据库
-    # 连接)。钩子异常只记日志——卸载清理失败不能阻断装配(资源最终随
-    # 进程退出回收)。差集基于**快照的 old_loaded**(commit 已把
-    # _loaded_packs 覆盖为新集合, 之后再读差集恒空——禁用后资源永不释放)。
+    # unload 钩子(三十七审 P1-D): 差集基于快照的 old_loaded
     old_loaded = set(snap["state"]["_loaded_packs"] or [])
     import importlib
     for name in sorted(old_loaded - set(pack_routers or {})):
@@ -258,26 +300,33 @@ def assemble_packs(
         except ImportError:
             pass
 
-    api_mounted = sorted(staged_mounted.keys()) if app is not None else []
-    total_tools = sum(len(v) for v in pack_tools.values())
-    logger.info(
-        f"packs assembled: {sorted(pack_routers)} , {total_tools} tools"
-        f"{f' , pack api: {api_mounted}' if api_mounted else ''}"
-    )
-    return {
-        "loaded": sorted(pack_routers),
-        "tools": total_tools,
-        "pack_tools": pack_tools,
-        "dependency_status": dep_status,
-        "api_mounted": api_mounted,
-    }
+
+def rollback_assembly(app_state: Any, tx: Dict[str, Any]) -> bool:
+    """按事务快照确定性回滚 runtime(三十八审 P1-A)。
+
+    persist 失败时使用——不再重跑一次完整装配(反向 assemble 会重新执行
+    依赖检测/hook/生命周期, 本身可能失败, 失败后 runtime 与状态分裂)。
+    快照恢复是纯引用替换, 确定性执行。
+
+    Returns:
+        True = 全部组件恢复成功; False = 有组件恢复失败(调用方必须进入
+        degraded 状态并拒绝后续流量, 不能谎称已回滚)。
+    """
+    return _restore_runtime(app_state, nodes_module(), tx["app"],
+                            tx["snapshot"])
+
+
+def nodes_module():
+    """延迟导入 engine.nodes(避免 services 层模块级反向依赖)。"""
+    from engine import nodes
+    return nodes
 
 
 # critical pack 契约(三十四审 P1-B): 启用即必须完整可用——
 # 任一必需组件缺失都终止启动/装配, 不允许"部分 ChatBI"的假 ready
 # 三十五审 P1-A: 名单从 sdk.pack_api.critical_packs() 单一真相源
 # 读取(此前三个模块各自复制, 漏同步即窗口); 必需组件明细仍在此处
-from sdk.pack_api import critical_packs
+from sdk.pack_api import critical_packs, PackConfigurationError
 
 _CRITICAL_PACK_REQUIREMENTS = {
     "chatbi": {
@@ -397,52 +446,83 @@ def _runtime_snapshot(app_state: Any, nodes: Any, app: Any) -> Dict[str, Any]:
 
 
 def _restore_runtime(app_state: Any, nodes: Any, app: Any,
-                      snap: Dict[str, Any]) -> None:
-    """commit 失败后按快照恢复旧运行态(尽力而为, 恢复异常只记日志)。"""
-    try:
-        n = snap["nodes"]
-        nodes.configure(
-            registry=n["registry"],
-            llm_client=n["llm_client"],
-            asset_client=n["asset_client"],
-            conversation=n["conversation"],
-            prompt_loader=n["prompt_loader"],
-            pack_routers=n["pack_routers"],
-            pack_configs=n["pack_configs"],
-        )
-        for k, v in snap["state"].items():
-            setattr(app_state, k, v)
-        compressor = getattr(app_state, "compressor", None)
-        if compressor is not None and "compact_focus" in snap:
-            compressor.set_compact_focus(snap["compact_focus"] or "")
-        asset_client = getattr(app_state, "asset_client", None)
-        if asset_client is not None and "asset_config_api" in snap:
-            asset_client.set_config_api(snap["asset_config_api"])
-        task_manager = getattr(app_state, "task_manager", None)
-        if task_manager is not None and "handlers" in snap:
+                      snap: Dict[str, Any]) -> bool:
+    """commit 失败后按快照恢复旧运行态(三十八审 P1-B: 独立 compensator 链)。
+
+    每个组件独立 try——任一恢复动作抛错不再阻断后续组件(handlers/
+    routes 必须尽力恢复); 全部错误聚合后返回。可直接赋值的字段直接
+    赋值(不走已知失败的 setter); 必须经 setter 的(compressor focus)
+    用 try 包裹。
+
+    Returns:
+        True = 全部恢复成功; False = 有组件恢复失败(调用方进入 degraded)。
+    """
+    errors: List[str] = []
+
+    def _step(name: str, fn) -> None:
+        try:
+            fn()
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+            logger.exception(f"运行态恢复失败(组件 {name})")
+
+    n = snap["nodes"]
+    _step("nodes", lambda: nodes.configure(
+        registry=n["registry"],
+        llm_client=n["llm_client"],
+        asset_client=n["asset_client"],
+        conversation=n["conversation"],
+        prompt_loader=n["prompt_loader"],
+        pack_routers=n["pack_routers"],
+        pack_configs=n["pack_configs"],
+    ))
+    _step("app.state", lambda: [
+        setattr(app_state, k, v) for k, v in snap["state"].items()])
+    compressor = getattr(app_state, "compressor", None)
+    if compressor is not None and "compact_focus" in snap:
+        # 直接赋值不走 setter——commit 失败可能正是 setter 抛错,
+        # 恢复时再调同一个 setter 会二次失败(三十八审 4.2 反例)
+        _step("compressor", lambda: setattr(
+            compressor, "_compact_focus", snap["compact_focus"]))
+    asset_client = getattr(app_state, "asset_client", None)
+    if asset_client is not None and "asset_config_api" in snap:
+        _step("asset_client", lambda: setattr(
+            asset_client, "_config_api", snap["asset_config_api"]))
+    task_manager = getattr(app_state, "task_manager", None)
+    if task_manager is not None and "handlers" in snap:
+        def _restore_handlers():
             task_manager.reset_handlers()
             task_manager._handlers.update(snap["handlers"])
             task_manager._handler_meta.update(snap["handler_meta"])
-        if app is not None and "routes" in snap:
+        _step("handlers", _restore_handlers)
+    if app is not None and "routes" in snap:
+        def _restore_routes():
             from services.pack_api_mount import MOUNTED_ATTR
             app.router.routes = list(snap["routes"])
             setattr(app.state, MOUNTED_ATTR, snap["mounted"])
-    except Exception:
-        logger.exception("运行态快照恢复失败(建议重启进程恢复一致性)")
+        _step("routes", _restore_routes)
+
+    if errors:
+        logger.error(
+            f"运行态快照恢复存在失败组件(建议重启): {errors}")
+        return False
+    return True
 
 
 def _start_pack_lifecycle(app_state: Any, pack_routers: Dict[str, Any],
                           task_manager: Any) -> None:
-    """commit 成功后的生命周期启动(三十七审 P1-B)。
+    """finalize 段的生命周期启动(三十七审 P1-B / 三十八审 P2-A)。
 
-    register_tasks 钩子里有两类"注册 handler 之外"的动作, 此前在
-    Prepare(staging)阶段就执行——失败装配也会启动 scheduler/执行
-    数据收敛。现在拆出来, 只在 commit 成功后运行:
+    只在 runtime 与磁盘状态都确认后执行(finalize_assembly 调用):
       - chatbi: _start_refresh_scheduler(元数据定时刷新线程)
       - knowledge_graph: _app_state 全局注入 + _recover_stale_importing
-        (启动收敛, 只在首次装配时执行)
-    生命周期启动失败只记日志——handler 已就位, scheduler/收敛可在
-    下次装配或重启时补起, 不回滚已提交的装配。
+        (启动收敛, startup-only——once guard 防止 recheck/无关 toggle
+        重复执行, 三十八审 4.4)
+
+    三十八审 P2-A(失败可见): critical pack(chatbi)的 scheduler 启动
+    失败不再静默——抛 PackConfigurationError 让装配失败(与 critical
+    契约一致: 启用即必须完整可用, scheduler 是定时刷新的必需组件)。
+    非 critical 的生命周期失败只记日志。
     """
     import importlib
     for pack_name in (pack_routers or {}):
@@ -458,9 +538,29 @@ def _start_pack_lifecycle(app_state: Any, pack_routers: Dict[str, Any],
                 from domains.knowledge_graph import tasks as kg_tasks
                 kg_tasks._app_state = app_state
                 if task_manager is not None:
-                    kg_tasks._recover_stale_importing(task_manager)
-        except Exception:
+                    _run_kg_startup_recovery_once(kg_tasks, task_manager)
+        except Exception as e:
+            if pack_name in critical_packs():
+                # critical 生命周期失败 = 假 ready(health 绿但定时刷新
+                # 不存在)——fail-fast, 不允许静默降级
+                raise PackConfigurationError(
+                    f"critical pack {pack_name} 生命周期启动失败: {e}"
+                    f"——终止(fail-fast)") from e
             logger.exception(f"pack 生命周期启动失败: {pack_name}")
+
+
+# KG 启动收敛的 once guard(三十八审 4.4: 注释称"只在首次装配执行",
+# 实际每次 assemble 都执行——recheck/无关 toggle 会重复跑数据收敛)
+_KG_RECOVERY_DONE = False
+
+
+def _run_kg_startup_recovery_once(kg_tasks: Any, task_manager: Any) -> None:
+    """KG stale-importing 收敛, 每进程只执行一次(startup-only)。"""
+    global _KG_RECOVERY_DONE
+    if _KG_RECOVERY_DONE:
+        return
+    _KG_RECOVERY_DONE = True
+    kg_tasks._recover_stale_importing(task_manager)
 
 
 def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any],

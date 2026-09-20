@@ -95,7 +95,8 @@ class PackState:
         persisted = self._read_file()
         # 三十六审 P2-B: 注册本进程为状态文件持有者(多 worker 检测的
         # 数据源; toggle/recheck 前查 count_state_file_holders)
-        register_state_holder(state_path)
+        # 三十八审 P3: 保存句柄(lifespan shutdown / 测试 teardown 显式 close)
+        self.holder = register_state_holder(state_path)
         # 三十七审 P1-A: 读到磁盘状态时同步 _last_seen_disk——
         # persist() 的合并基准。此前只在 _read_disk_locked(写路径)里
         # 设置, 构造读文件后仍为 None → 首次 persist 把 desired 全量
@@ -226,6 +227,16 @@ class PackState:
                     op for op in self._pending_ops if op[0] != name]
                 self._pending_ops.append((name, enabled))
             return changed
+
+    def clear_pending_ops(self) -> None:
+        """清空未提交的精确操作(三十八审 P1-A)。
+
+        失败请求的回滚路径调用——反向 set_enabled 会把回滚操作也记进
+        pending, 若不清空, 后续任何成功 persist 都会重放这些"失败请求
+        的意图"(净效果虽是回滚态, 但语义上未提交意图不该跨请求存活)。
+        """
+        with self._lock:
+            self._pending_ops = []
 
     def persist(self) -> None:
         """把 pending 的精确操作落盘(runtime commit 成功后调用)。
@@ -488,16 +499,37 @@ _HOLDER_STALE_SECONDS = 60
 _HOLDER_THREADS: Dict[str, "threading.Thread"] = {}
 
 
-def register_state_holder(state_path: str) -> None:
+class StateHolderHandle:
+    """holder 生命周期句柄(三十八审 P3)。
+
+    close(): 停心跳线程 + 注销槽位 + 从线程表移除——测试 teardown /
+    lifespan shutdown 显式调用; 关闭后目录不会被心跳重建。
+    """
+
+    def __init__(self, thread_key: str, stop_event, thread):
+        self._thread_key = thread_key
+        self._stop_event = stop_event
+        self._thread = thread
+
+    def close(self, timeout: float = 5.0) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+        _HOLDER_THREADS.pop(self._thread_key, None)
+
+
+def register_state_holder(state_path: str) -> "StateHolderHandle":
     """注册本进程为状态文件持有者(启动时调用一次)。
 
     写入 {pid, ts} 槽位并启动后台心跳线程(每 10s 刷新 ts);
     atexit 注销。多 worker 检测(count_state_file_holders)据此拒绝
     动态管理。
 
-    三十七审 P2: 注册失败抛 OSError(fail-closed——调用方 PackState
-    构造失败即启动失败, 不再 warning 后放行管理操作); 同一
+    三十七审 P2: 注册失败抛 OSError(fail-closed); 同一
     (pid, state_path) 只起一条心跳线程。
+    三十八审 P3: 返回 handle(close 停线程/注销/移除线程表)——
+    测试 teardown 与 lifespan shutdown 显式关闭, 已删除的临时目录
+    不再被心跳重建。
     """
     import atexit
     import time
@@ -547,22 +579,25 @@ def register_state_holder(state_path: str) -> None:
     _write_slot()
     atexit.register(_write_slot, unregister=True)
 
+    stop_event = threading.Event()
+
     def _heartbeat() -> None:
         import time as _t
-        while True:
-            _t.sleep(10)
+        while not stop_event.wait(10):
             try:
                 _write_slot()
             except OSError:
                 logger.warning("pack 状态持有者心跳刷新失败", exc_info=True)
 
-    import threading
     # 三十七审 P2: 按 (pid, state_path) 去重——同进程多次构造 PackState
-    # (测试/临时实例)不再各起一条永久心跳线程
+    # (测试/临时实例)不再各起一条永久心跳线程; 已注册时返回可用的
+    # handle(共享同一 stop event, 任一 close 即停)
     existing = _HOLDER_THREADS.get(thread_key)
     if existing is not None and existing.is_alive():
-        return
+        return StateHolderHandle(thread_key, existing._stop_event, existing)
     t = threading.Thread(target=_heartbeat, daemon=True,
                          name=f"pack-state-holder-{pid}")
+    t._stop_event = stop_event
     t.start()
     _HOLDER_THREADS[thread_key] = t
+    return StateHolderHandle(thread_key, stop_event, t)
