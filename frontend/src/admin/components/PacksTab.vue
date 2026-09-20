@@ -1,13 +1,22 @@
 <template>
   <div>
-    <a-alert type="info" show-icon style="margin: 14px 0 16px" class="pk-alert">
-      <template #icon><ThunderboltOutlined /></template>
-      <template #message>插件开关热生效,无需重启服务</template>
-      <template #description>
-        启停状态持久化在 <code>{{ payload?.stateFile ?? 'data/pack_state.json' }}</code>(初始来源:{{ sourceLabel }}),重启后保持。
-        依赖未配置的插件无法启用——可在插件"设置"里补配连接信息,或配好环境变量后点"重新检测"热加载。
-      </template>
-    </a-alert>
+    <!-- 说明收进右上角图标(点击弹 Popover), 不再占整行横幅 -->
+    <div class="pk-toolbar">
+      <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
+        <template #content>
+          <div class="pk-help">
+            <div class="pk-help-title"><ThunderboltOutlined /> 插件开关热生效,无需重启服务</div>
+            <div class="pk-help-body">
+              启停状态持久化在 <code>{{ payload?.stateFile ?? 'data/pack_state.json' }}</code>(初始来源:{{ sourceLabel }}),重启后保持。
+              依赖未配置的插件无法启用——可在插件"设置"里补配连接信息,或配好环境变量后点"重新检测"热加载。
+            </div>
+          </div>
+        </template>
+        <a class="pk-help-link" title="插件启停说明">
+          <QuestionCircleOutlined /> 说明
+        </a>
+      </a-popover>
+    </div>
 
     <div class="pk-grid">
       <div v-for="pack in payload?.items ?? []" :key="pack.name" class="pk-card" :class="{ off: !pack.enabled }">
@@ -77,7 +86,8 @@
 import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  AppstoreOutlined, RightOutlined, SettingOutlined, SyncOutlined, ThunderboltOutlined,
+  AppstoreOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined,
+  SyncOutlined, ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 import { AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
 import type { LoadSafely } from './loadSafely'
@@ -162,7 +172,13 @@ onMounted(load)
 </script>
 
 <style scoped>
-.pk-alert :deep(code) {
+/* 右上角说明入口(替代原整行横幅) */
+.pk-toolbar { display: flex; justify-content: flex-end; margin: 10px 2px 2px; }
+.pk-help-link { color: #94a3b8; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+.pk-help-link:hover { color: #2f54eb; }
+.pk-help-title { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; color: #2f54eb; }
+.pk-help-body { font-size: 12px; color: #64748b; line-height: 1.7; max-width: 380px; }
+.pk-help-body code {
   background: #f0f5ff; padding: 1px 6px; border-radius: 4px; font-size: 12px; color: #2f54eb;
 }
 .pk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
