@@ -80,19 +80,19 @@ def assemble_packs(
 
     # ── 三十六审 P1-A: 真事务化——Prepare(全部可失败动作) / Commit(纯引用替换) ──
     # 三十五审的"两阶段"只覆盖 load_all_packs + router 构造; commit 段仍
-    # 按顺序直接改在服务对象(unload → _loaded_packs → nodes → app.state
-    # → handlers → routes), 中后段失败时 runtime 已是半装配新值(真实注入:
+    # 按顺序直接改在服务对象(unload → _loaded_packs → nodes →
+    # app.state → handlers → routes), 中后段失败时 runtime 已是半装配新值(真实注入:
     # register_tasks 静默不注册 → 最终断言抛, 但 registry/routers/_loaded_
     # packs/handlers 已全部被替换)。现在:
     #   Prepare: load_all_packs + critical 断言(loaded/tools/api 名单) +
     #     pack_configs 过滤 + register_tasks 到 **staging dict**(不动在服务
     #     的 TaskManager) + critical 全量断言(含 handler) + router 构造与
-    #     route 展开(临时 router, 不动 app.router.routes);
+    #     route 展开(临时 router, 不动 app.router.routes) + enhancer 预演;
     #   Commit: 快照旧 runtime → 纯引用替换(nodes 全局/app.state/handlers/
-    #     routes/compressor) → 任一步异常按快照回滚。
-    #   unload 钩子后置到 commit 成功之后(旧 pack 的资源只在确认切换后
-    #     才释放; 释放失败不回滚装配——资源随进程退出回收, 但不再污染
-    #     在服务的运行态)。
+    #     routes/compressor/asset client) → 任一步异常按快照回滚;
+    #   Post-commit: unload 钩子对 old_loaded - new_loaded 差集执行
+    #     (三十七审 P1-D: 用快照的 old_loaded——此前在 _loaded_packs
+    #     被覆盖后才读 prev_loaded, 差集恒空, 禁用后资源永不释放)。
     _assert_critical_packs_ready(
         app_state,
         {"loaded": sorted(pack_routers),
@@ -116,11 +116,11 @@ def assemble_packs(
     # 三十六审 P1-A: 此前 reset_handlers() → 逐 pack register_tasks 直接
     # 操作在服务的 TaskManager, 钩子失败/静默不注册时旧 handlers 已被清空。
     # 现在 Prepare 只把 handler 收集进 staged_handlers; commit 成功后才
-    # 一次性替换 TaskManager 内部表。scheduler 线程(chatbi register_tasks
-    # 内部启动)是进程级单例且幂等(_start_refresh_scheduler 已存活即跳过),
-    # 在 staging 阶段启动不影响旧 runtime——它读的是 settings/db, 不读
-    # handlers; 若 commit 失败回滚, 已存活的 scheduler 继续跑旧配置(与
-    # 切换前语义一致, 无需杀线程)。
+    # 一次性替换 TaskManager 内部表。
+    # 三十七审 P1-B(副作用隔离): staging view 不再透传会触发生命周期的
+    # 调用——scheduler 启动(chatbi _start_refresh_scheduler)与 KG 的
+    # _recover_stale_importing 数据收敛都后移到 commit 成功之后
+    # (_start_pack_lifecycle)。prepare 失败时零生命周期副作用。
     task_manager = getattr(app_state, "task_manager", None)
     staged_handlers: Dict[str, Any] = {}
     staged_handler_meta: Dict[str, Dict[str, str]] = {}
@@ -160,8 +160,16 @@ def assemble_packs(
         staged_routes, staged_mounted = build_staged_routes(
             app, list(pack_routers.keys()))
 
-    # ── Commit: 快照旧 runtime → 纯引用替换 → 异常回滚 ──
+    # ── Prepare: enhancer 预演(三十七审 P1-C) ──
+    # enhance_asset_client 此前在 commit try/except 之外执行——hook 先改
+    # asset client 再抛错时, 新 runtime 与部分 client 状态同时残留。
+    # HttpAssetClient 的领域注入是 set_config_api(单一引用), 快照/恢复
+    # 该引用即可让 enhancer 进入事务边界; 预演阶段不执行 hook(它只对
+    # commit 后的新 pack_configs 有意义), 而是把执行挪进 commit try 块,
+    # 异常时按快照恢复 client 引用。
     snap = _runtime_snapshot(app_state, nodes, app)
+
+    # ── Commit: 快照旧 runtime → 纯引用替换 → 异常回滚 ──
     try:
         nodes.configure(
             registry=registry,
@@ -192,6 +200,8 @@ def assemble_packs(
 
         # 刷新压缩侧重点：热切换后启用集变化，manifest compact_focus 声明
         # 需重新聚合（与 main.lifespan 启动装配同一语义，覆盖启动时的初值）
+        # 三十七审 P1-C: compressor 进入事务边界——快照已含 compact_focus,
+        # set_compact_focus 抛错时与其他运行态一并回滚。
         compressor = getattr(app_state, "compressor", None)
         if compressor is not None:
             focus_parts = [
@@ -200,35 +210,43 @@ def assemble_packs(
                 if (cfg.get("domain") or {}).get("compact_focus")
             ]
             compressor.set_compact_focus("；".join(focus_parts))
+
+        # pack 可选钩子 enhance_asset_client(asset_client, upstream)：向通用
+        # adapter 注入本 pack 的领域客户端（端点表/凭证策略/响应归一化归 pack，
+        # adapter/传输层零领域知识）。无此钩子的 pack（如纯数据类）跳过；
+        # 测试态 app_state 可能缺 upstream，一并守卫。
+        # 三十七审 P1-C: 挪进 commit try 块——hook 抛错时按快照回滚
+        # asset client 引用(与 nodes/app.state/handlers/routes 同边界)。
+        if (getattr(app_state, "asset_client", None) is not None
+                and getattr(app_state, "upstream", None) is not None):
+            import importlib
+            for pack_name in (pack_configs or {}):
+                try:
+                    mod = importlib.import_module(f"domains.{pack_name}.pack")
+                    hook = getattr(mod, "enhance_asset_client", None)
+                    if callable(hook):
+                        hook(app_state.asset_client, app_state.upstream)
+                except ImportError:
+                    continue
     except Exception:
         logger.exception("装配 commit 失败, 按快照回滚旧运行态")
         _restore_runtime(app_state, nodes, app, snap)
         raise
 
-    # pack 可选钩子 enhance_asset_client(asset_client, upstream)：向通用
-    # adapter 注入本 pack 的领域客户端（端点表/凭证策略/响应归一化归 pack，
-    # adapter/传输层零领域知识）。无此钩子的 pack（如纯数据类）跳过；
-    # 测试态 app_state 可能缺 upstream，一并守卫。
-    if (getattr(app_state, "asset_client", None) is not None
-            and getattr(app_state, "upstream", None) is not None):
-        import importlib
-        for pack_name in (pack_configs or {}):
-            try:
-                mod = importlib.import_module(f"domains.{pack_name}.pack")
-                hook = getattr(mod, "enhance_asset_client", None)
-                if callable(hook):
-                    hook(app_state.asset_client, app_state.upstream)
-            except ImportError:
-                continue
+    # ── Post-commit: 生命周期启动(三十七审 P1-B) ──
+    # scheduler 启动与 KG 启动收敛只在 commit 成功后执行; 失败只记日志
+    # (生命周期启动失败不回滚装配——handler 已就位, scheduler 可在下次
+    # 装配或重启时补起)。
+    _start_pack_lifecycle(app_state, pack_routers, task_manager)
 
-    # pack 可选钩子 unload():上次在载、本次不在载(禁用/依赖失联)的
-    # pack 释放自持资源(如数据库连接)。钩子异常只记日志——卸载清理
-    # 失败不能阻断装配(资源最终随进程退出回收)。
-    # 三十六审 P1-A: 后置到 commit 成功之后——旧 pack 的资源只在确认
-    # 切换后才释放, 释放失败不影响已提交的新运行态。
-    prev_loaded = set(getattr(app_state, "_loaded_packs", None) or [])
+    # ── Post-commit: unload 钩子(三十七审 P1-D) ──
+    # 上次在载、本次不在载(禁用/依赖失联)的 pack 释放自持资源(如数据库
+    # 连接)。钩子异常只记日志——卸载清理失败不能阻断装配(资源最终随
+    # 进程退出回收)。差集基于**快照的 old_loaded**(commit 已把
+    # _loaded_packs 覆盖为新集合, 之后再读差集恒空——禁用后资源永不释放)。
+    old_loaded = set(snap["state"]["_loaded_packs"] or [])
     import importlib
-    for name in sorted(prev_loaded - set(pack_routers or {})):
+    for name in sorted(old_loaded - set(pack_routers or {})):
         try:
             mod = importlib.import_module(f"domains.{name}.pack")
             hook = getattr(mod, "unload", None)
@@ -334,6 +352,9 @@ def _runtime_snapshot(app_state: Any, nodes: Any, app: Any) -> Dict[str, Any]:
 
     三十六审 P1-A: commit 段即使理论上只剩引用替换, 也保留快照——
     任何一步异常(含未来新增步骤)都按快照恢复, 不留半装配运行态。
+    三十七审 P1-C: 补齐 compressor 的 compact_focus 与 asset client 的
+    领域注入引用(set_config_api 的单一引用)——enhancer/set_compact_focus
+    抛错时一并恢复。
     """
     snap: Dict[str, Any] = {
         "nodes": {
@@ -356,6 +377,12 @@ def _runtime_snapshot(app_state: Any, nodes: Any, app: Any) -> Dict[str, Any]:
             "_loaded_packs": getattr(app_state, "_loaded_packs", None),
         },
     }
+    compressor = getattr(app_state, "compressor", None)
+    if compressor is not None:
+        snap["compact_focus"] = getattr(compressor, "_compact_focus", None)
+    asset_client = getattr(app_state, "asset_client", None)
+    if asset_client is not None:
+        snap["asset_config_api"] = getattr(asset_client, "_config_api", None)
     task_manager = getattr(app_state, "task_manager", None)
     if task_manager is not None:
         snap["handlers"] = dict(getattr(task_manager, "_handlers", {}) or {})
@@ -385,6 +412,12 @@ def _restore_runtime(app_state: Any, nodes: Any, app: Any,
         )
         for k, v in snap["state"].items():
             setattr(app_state, k, v)
+        compressor = getattr(app_state, "compressor", None)
+        if compressor is not None and "compact_focus" in snap:
+            compressor.set_compact_focus(snap["compact_focus"] or "")
+        asset_client = getattr(app_state, "asset_client", None)
+        if asset_client is not None and "asset_config_api" in snap:
+            asset_client.set_config_api(snap["asset_config_api"])
         task_manager = getattr(app_state, "task_manager", None)
         if task_manager is not None and "handlers" in snap:
             task_manager.reset_handlers()
@@ -396,6 +429,34 @@ def _restore_runtime(app_state: Any, nodes: Any, app: Any,
             setattr(app.state, MOUNTED_ATTR, snap["mounted"])
     except Exception:
         logger.exception("运行态快照恢复失败(建议重启进程恢复一致性)")
+
+
+def _start_pack_lifecycle(app_state: Any, pack_routers: Dict[str, Any],
+                          task_manager: Any) -> None:
+    """commit 成功后的生命周期启动(三十七审 P1-B)。
+
+    register_tasks 钩子里有两类"注册 handler 之外"的动作, 此前在
+    Prepare(staging)阶段就执行——失败装配也会启动 scheduler/执行
+    数据收敛。现在拆出来, 只在 commit 成功后运行:
+      - chatbi: _start_refresh_scheduler(元数据定时刷新线程)
+      - knowledge_graph: _app_state 全局注入 + _recover_stale_importing
+        (启动收敛, 只在首次装配时执行)
+    生命周期启动失败只记日志——handler 已就位, scheduler/收敛可在
+    下次装配或重启时补起, 不回滚已提交的装配。
+    """
+    import importlib
+    for pack_name in (pack_routers or {}):
+        try:
+            if pack_name == "chatbi":
+                from domains.chatbi.tasks import _start_refresh_scheduler
+                _start_refresh_scheduler(task_manager, app_state)
+            elif pack_name == "knowledge_graph":
+                from domains.knowledge_graph import tasks as kg_tasks
+                kg_tasks._app_state = app_state
+                if task_manager is not None:
+                    kg_tasks._recover_stale_importing(task_manager)
+        except Exception:
+            logger.exception(f"pack 生命周期启动失败: {pack_name}")
 
 
 def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any],

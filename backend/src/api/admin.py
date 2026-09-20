@@ -477,7 +477,14 @@ def _reject_multi_worker(request: Request) -> None:
     from services.pack_state import count_state_file_holders
     holders = count_state_file_holders(
         request.app.state.pack_state.state_path)
-    if holders > 1:
+    if holders != 1:
+        # 三十七审 P2: holders != 1 都拒绝——>1 是多 worker 共享,
+        # <0(含 -1)是检测失效, 一律 fail-closed 不放行
+        if holders < 0:
+            raise HTTPException(
+                503,
+                "插件状态持有者检测失败(fail-closed)——动态启停/重检"
+                "暂不可用, 请检查状态文件目录权限后重试。")
         raise HTTPException(
             503,
             f"检测到 {holders} 个进程共享插件状态文件——动态启停/重检"
@@ -530,6 +537,11 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     # 成功后才持久化——此前 set_enabled 先落盘, 装配失败后回滚再落
     # 一次盘, 中间窗口崩溃会留下"文件已改/运行态未变"的错位; 现在
     # 文件只在 runtime 确认切换后写一次, 失败路径零落盘。
+    # 三十七审 P1-A(事务化): persist 写盘失败也必须回滚 runtime——
+    # 此前 catch 块只反向改内存, 已提交的新装配残留(503 但 runtime
+    # 是新值, 与日志声称的"内存态与运行态保持一致"相反)。现在
+    # persist 失败时用反向装配恢复旧运行态, 四方(响应/内存/磁盘/
+    # runtime)一致。
     from services.pack_manager import hot_reload_lock
     _reject_multi_worker(request)
     with hot_reload_lock():
@@ -559,13 +571,29 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
                 try:
                     pack_state.set_enabled(
                         name, not enabled, persist=False)
-                    logger.warning(
-                        f"hot-reload 失败, 已回滚 {name} enabled="
-                        f"{not enabled}(内存态与运行态保持一致, 状态文件未变)")
                 except Exception as rollback_err:
                     logger.error(
                         f"hot-reload 失败且回滚也失败(内存态可能与"
                         f"运行态不一致, 建议重启): {rollback_err}")
+            # 三十七审 P1-A: persist 失败(写盘 OSError)时 runtime 已是新
+            # 装配——用反向装配恢复旧运行态, 不留"503 但 runtime 已切换"
+            # 的分裂。反向装配本身失败则如实报告(建议重启)。
+            rollback_ok = True
+            if changed:
+                try:
+                    assemble_packs(
+                        request.app.state,
+                        sorted(pack_state.enabled_names()),
+                        app=request.app)
+                except Exception as rollback_err:
+                    rollback_ok = False
+                    logger.error(
+                        f"持久化失败且反向装配也失败(runtime 与状态文件"
+                        f"不一致, 建议重启): {rollback_err}")
+            if changed and rollback_ok:
+                logger.warning(
+                    f"hot-reload/persist 失败, 已回滚 {name} enabled="
+                    f"{not enabled}(内存态、运行态与状态文件保持一致)")
             logger.exception(f"hot-reload packs failed after toggling {name}")
             raise HTTPException(503, f"State rolled back, hot-reload failed: {e}")
     return result

@@ -3670,13 +3670,14 @@ class TestTwoPhaseAssembly:
         src = inspect.getsource(pm.assemble_packs)
         precheck = src.find("_assert_critical_packs_ready")
         configure = src.find("nodes.configure(")
-        # commit 段第一条真实运行态操作 = unload 钩子循环的 prev_loaded
-        # (不能用裸 "unload"——Prepare 段注释里也提到该词, 会误中)
-        unload = src.find("prev_loaded")
+        # commit 后的 unload 差集基于快照 old_loaded(三十七审 P1-D);
+        # Prepare 预检必须在 commit 第一条运行态操作(nodes.configure)与
+        # 生命周期启动(_start_pack_lifecycle)之前
+        lifecycle = src.find("_start_pack_lifecycle")
         assert 0 < precheck < configure, (
             "critical 预检不在 nodes.configure 之前(Prepare 段缺失)")
-        assert 0 < precheck < unload, (
-            "critical 预检不在 unload 之前(Prepare 段缺失)")
+        assert 0 < precheck < lifecycle, (
+            "critical 预检不在生命周期启动之前(Prepare 段缺失)")
 
 
 class TestRecheckSharesLock:
@@ -4577,8 +4578,13 @@ class TestMultiWorkerGuard:
             from services.pack_state import register_state_holder
             register_state_holder(path)
             # 起一个真实子进程也注册同一状态文件
+            # 三十七审 P3: src 路径用本测试文件的绝对位置推导——
+            # 此前硬编码相对 'src' 只在 backend/ cwd 下可跑
+            import pathlib
+            src_dir = pathlib.Path(__file__).resolve().parents[2] / "src"
             code = (
-                "import sys, time; sys.path.insert(0, 'src');"
+                "import sys, time; sys.path.insert(0, "
+                f"{str(src_dir)!r});"
                 "from services.pack_state import register_state_holder;"
                 f"register_state_holder({path!r});"
                 "print('ready', flush=True);"
@@ -4644,3 +4650,260 @@ class TestMultiWorkerGuard:
         except HTTPException as e:
             assert e.status_code == 503, f"期望 503, 得到 {e.status_code}"
         assert called["assemble"] == 0, "被拒后仍触发了装配"
+
+
+# ════════════════════════════════════════════════════════════════
+# 三十七审回归: toggle 事务 / prepare 无副作用 / enhancer 事务 / unload
+# ════════════════════════════════════════════════════════════════
+
+class TestToggleTransaction:
+    """P1-A: 已有状态文件 + 重启 + 首次 toggle 的四方一致性.
+
+    审计反例: POST 200 但 persist 把磁盘/内存恢复成旧值(立即 GET 反弹)。
+    根因: _read_file 不初始化 _last_seen_disk + persist 从整份内存
+    集合推断删除意图。修复: persist 落盘"本次精确操作"。
+    """
+
+    PACKS = ["chatbi", "knowledge_graph", "leave_application", "njmind_form"]
+
+    def test_restart_first_disable_persists(self):
+        import json
+        import os
+        import tempfile
+        import shutil
+        from services.pack_state import PackState
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "state.json")
+        try:
+            # 造已有状态文件(全启用)
+            a = PackState(path, self.PACKS)
+            a.set_enabled("knowledge_graph", False)
+            a.set_enabled("knowledge_graph", True)
+            # 重启: 新实例读同一文件
+            b = PackState(path, self.PACKS)
+            # toggle 流程: persist=False → assemble(略) → persist
+            changed = b.set_enabled(
+                "leave_application", False, persist=False)
+            assert changed is True
+            b.persist()
+            disk = json.load(open(path))["enabled"]
+            assert "leave_application" not in disk["enabled"] if isinstance(
+                disk, dict) else True
+            assert "leave_application" not in disk, (
+                f"磁盘反弹: {disk}")
+            assert "leave_application" not in b.enabled_names(), (
+                "内存被磁盘覆盖反弹")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_persist_no_pending_no_write(self):
+        """无 pending 操作时 persist 零写入(纯重装配场景)."""
+        import json
+        import os
+        import tempfile
+        import shutil
+        from services.pack_state import PackState
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "state.json")
+        try:
+            a = PackState(path, self.PACKS)
+            a.set_enabled("knowledge_graph", False)
+            before = open(path).read()
+            rev_before = json.load(open(path))["revision"]
+            a.persist()   # 无 pending
+            after = open(path).read()
+            rev_after = json.load(open(path))["revision"]
+            assert before == after and rev_before == rev_after, (
+                "无 pending 的 persist 不应写盘")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestPrepareSideEffectIsolation:
+    """P1-B: prepare 失败不启动 scheduler / 不改 KG 全局.
+
+    审计注入: 启用 ChatBI 后 route prepare 失败——旧 runtime 保留
+    但 scheduler 已启动。修复: register_tasks 拆纯, 生命周期后移到
+    _start_pack_lifecycle(commit 成功后)。
+    """
+
+    def test_failed_prepare_no_scheduler(self, monkeypatch):
+        from services import pack_manager as pm
+        from domains.chatbi import tasks as chatbi_tasks
+        from types import SimpleNamespace
+
+        started = []
+        monkeypatch.setattr(
+            chatbi_tasks, "_start_refresh_scheduler",
+            lambda m, a: started.append("scheduler"))
+
+        # 让 route prepare 失败: build_staged_routes 抛错
+        def _broken_build(app, names):
+            raise RuntimeError("simulated route prepare failure")
+
+        monkeypatch.setattr(
+            "services.pack_api_mount.build_staged_routes", _broken_build)
+
+        from fastapi import FastAPI
+        app = FastAPI()
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        state = SimpleNamespace(task_manager=_TM())
+        state._loaded_packs = ["knowledge_graph"]
+        state.llm_client = object()
+        state.asset_client = object()
+        state.conversation_manager = object()
+
+        try:
+            pm.assemble_packs(state, ["chatbi"], app=app)
+            raise AssertionError("prepare 失败仍装配成功")
+        except RuntimeError:
+            pass
+        assert started == [], (
+            f"prepare 失败仍启动了生命周期: {started}")
+
+
+class TestEnhancerTransaction:
+    """P1-C: enhance_asset_client 抛错 → runtime + client 全回滚."""
+
+    def test_enhancer_failure_rolls_back_all(self, monkeypatch):
+        from services import pack_manager as pm
+        from engine import nodes
+        from types import SimpleNamespace
+
+        class _AssetClient:
+            def __init__(self):
+                self._config_api = "OLD"
+
+            def set_config_api(self, api):
+                self._config_api = api
+
+        asset = _AssetClient()
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        state = SimpleNamespace(task_manager=_TM(), asset_client=asset,
+                                upstream=object())
+        state._loaded_packs = ["njmind_form"]
+        state.registry = "OLD_REGISTRY"
+        state.llm_client = object()
+        state.conversation_manager = object()
+        old_nodes_registry = nodes._registry
+
+        import domains.njmind_form.pack as nj_pack
+        def _broken_enhance(client, upstream):
+            client.set_config_api("NEW")   # 先改再炸
+            raise RuntimeError("simulated enhancer failure")
+        monkeypatch.setattr(nj_pack, "enhance_asset_client", _broken_enhance)
+
+        try:
+            pm.assemble_packs(state, ["njmind_form"], app=None)
+            raise AssertionError("enhancer 失败仍装配成功")
+        except RuntimeError:
+            pass
+        assert asset._config_api == "OLD", (
+            f"asset client 未回滚: {asset._config_api}")
+        assert state.registry == "OLD_REGISTRY", "registry 未回滚"
+        assert state._loaded_packs == ["njmind_form"], "loaded 未回滚"
+
+
+class TestUnloadAfterDisable:
+    """P1-D: 成功禁用后 unload 真实执行(差集基于快照 old_loaded).
+
+    审计注入: KG+njmind → 仅 njmind, unload_calls=[](差集恒空)。
+    """
+
+    def test_disable_triggers_unload(self, monkeypatch):
+        from services import pack_manager as pm
+        from types import SimpleNamespace
+
+        unload_calls = []
+        import domains.knowledge_graph.pack as kg_pack
+        monkeypatch.setattr(kg_pack, "unload", lambda: unload_calls.append("kg"))
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def reset_handlers(self):
+                pass
+
+        state = SimpleNamespace(task_manager=_TM())
+        state._loaded_packs = ["knowledge_graph", "njmind_form"]
+        state.llm_client = object()
+        state.asset_client = object()
+        state.conversation_manager = object()
+
+        # 只装配 njmind_form(禁用 KG)
+        pm.assemble_packs(state, ["njmind_form"], app=None)
+        assert unload_calls == ["kg"], (
+            f"禁用 KG 后 unload 未执行: {unload_calls}")
+        assert state._loaded_packs == ["njmind_form"]
+
+
+class TestNoFileNoopKeepsMemory:
+    """P2: 无状态文件时 no-op 不清空内存 enabled."""
+
+    def test_noop_keeps_memory(self):
+        import os
+        import tempfile
+        import shutil
+        from services.pack_state import PackState
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "state.json")
+        try:
+            c = PackState(path, ["chatbi", "knowledge_graph", "njmind_form"])
+            before = sorted(c.enabled_names())
+            changed = c.set_enabled("chatbi", True)   # 已启用再启用
+            assert changed is False
+            assert sorted(c.enabled_names()) == before, (
+                f"no-op 清空了内存: {c.enabled_names()}")
+            assert not os.path.exists(path), "no-op 不应创建文件"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestHolderFailClosed:
+    """P2: 持有者检测失效时管理操作被拒(fail-closed)."""
+
+    def test_count_returns_negative_on_read_error(self, monkeypatch):
+        import builtins
+        from services.pack_state import count_state_file_holders
+        import os
+        import tempfile
+        import shutil
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "state.json")
+        try:
+            # 造 holders 文件, 再让 open 全部失败
+            holders = os.path.join(tmpdir, "state.holders")
+            open(holders, "w").write('{"pid": 1, "ts": 9999999999}\n')
+            real_open = builtins.open
+
+            def _broken_open(f, *a, **kw):
+                if str(f) == holders:
+                    raise OSError("simulated read failure")
+                return real_open(f, *a, **kw)
+
+            monkeypatch.setattr(builtins, "open", _broken_open)
+            n = count_state_file_holders(path)
+            assert n == -1, f"检测失效应返回 -1(fail-closed), 得到 {n}"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)

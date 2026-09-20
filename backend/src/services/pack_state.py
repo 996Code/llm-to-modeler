@@ -96,6 +96,12 @@ class PackState:
         # 三十六审 P2-B: 注册本进程为状态文件持有者(多 worker 检测的
         # 数据源; toggle/recheck 前查 count_state_file_holders)
         register_state_holder(state_path)
+        # 三十七审 P1-A: 读到磁盘状态时同步 _last_seen_disk——
+        # persist() 的合并基准。此前只在 _read_disk_locked(写路径)里
+        # 设置, 构造读文件后仍为 None → 首次 persist 把 desired 全量
+        # 当"本实例变更", 无法表达删除(重启后首次 disable 被撤销)。
+        if persisted is not None:
+            self._last_seen_disk: Set[str] = set(persisted)
         if persisted is not None:
             self._source = "file"
             enabled: Set[str] = persisted
@@ -180,9 +186,10 @@ class PackState:
         Args:
             name: pack 名(必须已发现,否则抛 KeyError)。
             enabled: True 启用 / False 禁用。
-            persist: True(默认)立即落盘;False 只改内存, 由调用方在
-                runtime commit 成功后调 persist() 落盘(三十六审 P1-A:
-                toggle 的状态持久化后置到装配成功之后, 失败路径零落盘)。
+            persist: True(默认)立即落盘;False 只改内存并**记录本次精确
+                操作**(name, enabled), 由调用方在 runtime commit 成功后
+                调 persist() 落盘(三十六审 P1-A: toggle 的状态持久化
+                后置到装配成功之后, 失败路径零落盘)。
 
         Returns:
             状态是否发生变化(False = 磁盘最新状态本来就是目标值)。
@@ -191,6 +198,11 @@ class PackState:
         最新磁盘状态**, 不是本实例内存——stale 实例的显式反向操作
         (磁盘 disabled、请求 enable)会被正确判为 changed 并落盘,
         不再出现"changed=False 但磁盘与请求相悖"的三方认知分裂。
+
+        三十七审 P1-A: persist=False 时记录**本次精确操作**——persist()
+        落盘不再从整份内存集合推断删除意图(重启后 _last_seen_disk 为
+        None 的场景下, "desired 里存在"的项被当作 mine, 无法表达
+        "本次禁用了谁", 磁盘随即反弹)。
         """
         with self._lock:
             if name not in self._discovered:
@@ -205,17 +217,56 @@ class PackState:
                     self._enabled.add(name)
                 else:
                     self._enabled.discard(name)
+                # 三十七审 P1-A: 记录本次精确操作(persist 按操作落盘,
+                # 不从内存集合推断)
+                self._pending_ops: List[tuple] = getattr(
+                    self, "_pending_ops", [])
+                # 同 pack 重复操作只保留最后一个(净效果)
+                self._pending_ops = [
+                    op for op in self._pending_ops if op[0] != name]
+                self._pending_ops.append((name, enabled))
             return changed
 
     def persist(self) -> None:
-        """把内存态落盘(三十六审 P1-A: runtime commit 成功后调用)。
+        """把 pending 的精确操作落盘(runtime commit 成功后调用)。
 
-        磁盘权威: 落盘前在文件锁内重读磁盘, 以磁盘为基准应用本实例
-        自上次读盘以来的变更(即当前内存与"本实例上次见过的磁盘状态"
-        的差集——只含本实例的显式操作), revision 递增写回。
+        三十七审 P1-A: 落盘单位是**本次操作**(name, enabled), 不是
+        整份内存集合——在文件锁内重读磁盘, 逐条应用 pending 操作,
+        revision+1 写回。他人对其他 pack 的写入不受影响(磁盘权威);
+        本实例没有 pending 操作时不落盘(纯重装配场景零写入)。
+
+        磁盘从未落盘(rev=0 且无 known)时以**本实例内存**为基准再应用
+        操作——与 _set_enabled_disk_authoritative 的 base 语义一致:
+        env/all 初始态就是权威起点, 否则首次 persist 会把"内存有、
+        磁盘无"的 pack 全部落成禁用(空集起点 + 只减不增)。
         """
         with self._lock:
-            self._write_disk_state(self._enabled)
+            ops = list(getattr(self, "_pending_ops", []))
+            if not ops:
+                return
+            lock_path = self._path.with_suffix(".lock")
+            with open(lock_path, "w") as lf:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+                try:
+                    disk_enabled, disk_known, disk_rev = (
+                        self._read_disk_locked())
+                    if disk_rev > 0 or disk_known:
+                        base = set(disk_enabled)
+                    else:
+                        # 从未落盘: 本实例内存(env/all 起点)是权威基准
+                        base = set(self._enabled)
+                    new_enabled = set(base)
+                    for name, enabled in ops:
+                        if enabled:
+                            new_enabled.add(name)
+                        else:
+                            new_enabled.discard(name)
+                    self._write_disk_locked(
+                        new_enabled, disk_known, disk_rev)
+                    self._enabled = new_enabled & set(self._discovered)
+                    self._pending_ops = []
+                finally:
+                    fcntl.flock(lf, fcntl.LOCK_UN)
 
     # ── 持久化 ──────────────────────────────────────────
 
@@ -278,8 +329,12 @@ class PackState:
                 changed = (name in base) != enabled
                 if not changed:
                     # 基准已是目标状态: 只刷新内存缓存(他人可能已改过
-                    # 其他 pack), 不落盘不递增 revision
-                    self._sync_memory_from_disk(disk_enabled)
+                    # 其他 pack), 不落盘不递增 revision。
+                    # 三十七审 P2: 磁盘从未落盘(rev=0 且无 known)时
+                    # 内存是权威起点, 不能同步成空磁盘(否则 no-op 把
+                    # enabled 清空)——保持内存不变。
+                    if disk_rev > 0 or disk_known:
+                        self._sync_memory_from_disk(disk_enabled)
                     return False
                 new_enabled = set(base)
                 if enabled:
@@ -417,13 +472,20 @@ def count_state_file_holders(state_path: str) -> int:
                 except (OSError, ProcessLookupError):
                     continue
                 alive += 1
+        return alive
     except OSError:
-        return 0
-    return alive
+        # 三十七审 P2(fail-closed): 检测失效不能降级成"没有他人"——
+        # 返回 -1, 调用方对负数一律拒绝管理操作
+        logger.error(f"pack 状态持有者检测失败(fail-closed): {reg_path}")
+        return -1
 
 
 # 心跳过期阈值: 实例每 10s 刷新一次 ts, 60s 未刷新视为已死
 _HOLDER_STALE_SECONDS = 60
+
+# 已注册的 holder 线程(三十七审 P2: 按 (pid, state_path) 去重——
+# 同进程多次构造 PackState(测试/临时实例)不再各起一条永久心跳线程)
+_HOLDER_THREADS: Dict[str, "threading.Thread"] = {}
 
 
 def register_state_holder(state_path: str) -> None:
@@ -432,6 +494,10 @@ def register_state_holder(state_path: str) -> None:
     写入 {pid, ts} 槽位并启动后台心跳线程(每 10s 刷新 ts);
     atexit 注销。多 worker 检测(count_state_file_holders)据此拒绝
     动态管理。
+
+    三十七审 P2: 注册失败抛 OSError(fail-closed——调用方 PackState
+    构造失败即启动失败, 不再 warning 后放行管理操作); 同一
+    (pid, state_path) 只起一条心跳线程。
     """
     import atexit
     import time
@@ -439,11 +505,14 @@ def register_state_holder(state_path: str) -> None:
     reg_path = Path(state_path).with_suffix(".holders")
     reg_path.parent.mkdir(parents=True, exist_ok=True)
     pid = os.getpid()
+    thread_key = f"{pid}:{state_path}"
 
     def _write_slot(unregister: bool = False) -> None:
+        # 三十七审 P2: 注册/注销失败上抛(fail-closed); 心跳刷新失败
+        # 只记日志(瞬时 IO 抖动不应杀进程, 过期槽位由 STALE 兜底)
+        reg_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = Path(state_path).with_suffix(".lock")
         try:
-            reg_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path = Path(state_path).with_suffix(".lock")
             with open(lock_path, "w") as lf:
                 fcntl.flock(lf, fcntl.LOCK_EX)
                 try:
@@ -470,8 +539,10 @@ def register_state_holder(state_path: str) -> None:
                 finally:
                     fcntl.flock(lf, fcntl.LOCK_UN)
         except OSError:
-            logger.warning("pack 状态持有者注册失败(多 worker 检测降级)",
-                           exc_info=True)
+            if unregister:
+                logger.warning("pack 状态持有者注销失败", exc_info=True)
+            else:
+                raise
 
     _write_slot()
     atexit.register(_write_slot, unregister=True)
@@ -480,9 +551,18 @@ def register_state_holder(state_path: str) -> None:
         import time as _t
         while True:
             _t.sleep(10)
-            _write_slot()
+            try:
+                _write_slot()
+            except OSError:
+                logger.warning("pack 状态持有者心跳刷新失败", exc_info=True)
 
     import threading
+    # 三十七审 P2: 按 (pid, state_path) 去重——同进程多次构造 PackState
+    # (测试/临时实例)不再各起一条永久心跳线程
+    existing = _HOLDER_THREADS.get(thread_key)
+    if existing is not None and existing.is_alive():
+        return
     t = threading.Thread(target=_heartbeat, daemon=True,
-                         name="pack-state-holder")
+                         name=f"pack-state-holder-{pid}")
     t.start()
+    _HOLDER_THREADS[thread_key] = t

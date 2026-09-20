@@ -58,19 +58,16 @@ _app_state: Any = None
 
 
 def register_tasks(manager, app_state=None) -> None:
-    """装配钩子:注册任务类型(pack_manager 调用,带 app_state)。"""
-    global _app_state
-    _app_state = app_state
+    """装配钩子:注册任务类型(pack_manager 调用,带 app_state)。
+
+    三十七审 P1-B: 纯注册——_app_state 全局注入与启动收敛
+    (_recover_stale_importing)移到 pack_manager._start_pack_lifecycle
+    在 commit 成功后执行, 失败装配不再改全局/动业务数据。
+    """
     manager.register("kg.import_document", run_import_document,
                      pack_name=runtime.PACK_NAME)
     manager.register("kg.induce_schema", run_induce_schema,
                      pack_name=runtime.PACK_NAME)
-    # 防重占位/释放已下沉框架(dedupe_key),插件不再挂终态监听器。
-    # 启动收敛:进程重启后遗留 importing 状态的文档,其任务已被标
-    # interrupted,不会再有 handler 去收敛它——不处理就永远显示"导入中"。
-    # 只在首次装配(=启动)时执行,且排除当前确实在跑/排队的导入任务,
-    # 避免热切换误伤活任务。
-    _recover_stale_importing(manager)
 
 
 def _recover_stale_importing(manager) -> None:

@@ -44,7 +44,9 @@ def register_tasks(manager, app_state=None) -> None:
     manager.register("chatbi.refresh_semantics", _refresh, pack_name=PACK_NAME)
     manager.register("chatbi.memory.consolidate", _consolidate, pack_name=PACK_NAME)
     logger.info("chatbi tasks registered: scan_datasource / refresh_semantics / memory.consolidate")
-    _start_refresh_scheduler(manager, app_state)
+    # 三十七审 P1-B: scheduler 启动移出注册函数(纯注册)——由
+    # pack_manager._start_pack_lifecycle 在 commit 成功后调用,
+    # 失败装配不再启动 scheduler。
 
 
 _refresh_thread = None

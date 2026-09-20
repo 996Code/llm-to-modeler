@@ -284,6 +284,10 @@ def env(tmp_path, monkeypatch):
         llm_client=llm, settings_store=settings, task_manager=manager,
     )
     tasks.register_tasks(manager, app_state)
+    # 三十七审 P1-B: register_tasks 拆纯后 _app_state 注入移到
+    # pack_manager._start_pack_lifecycle; 本夹具不走 pack_manager,
+    # 手动注入(handler 运行期读它)
+    tasks._app_state = app_state
 
     yield SimpleNamespace(
         store=runtime.get_kg_store(app_state), settings=settings, graph=fake_graph,
