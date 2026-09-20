@@ -466,18 +466,27 @@ def _restore_runtime(app_state: Any, nodes: Any, app: Any,
             errors.append(f"{name}: {e}")
             logger.exception(f"运行态恢复失败(组件 {name})")
 
-    n = snap["nodes"]
-    _step("nodes", lambda: nodes.configure(
-        registry=n["registry"],
-        llm_client=n["llm_client"],
-        asset_client=n["asset_client"],
-        conversation=n["conversation"],
-        prompt_loader=n["prompt_loader"],
-        pack_routers=n["pack_routers"],
-        pack_configs=n["pack_configs"],
-    ))
-    _step("app.state", lambda: [
-        setattr(app_state, k, v) for k, v in snap["state"].items()])
+    # 快照键容错(三十八审自查 B2): 不完整/畸形快照(缺 nodes/state 键)
+    # 记为组件失败而不是 KeyError 崩溃——rollback 的契约是"要么恢复
+    # 成功, 要么返回 False", 调用方据此进入 degraded
+    n = snap.get("nodes") or {}
+    if n:
+        _step("nodes", lambda: nodes.configure(
+            registry=n["registry"],
+            llm_client=n["llm_client"],
+            asset_client=n["asset_client"],
+            conversation=n["conversation"],
+            prompt_loader=n["prompt_loader"],
+            pack_routers=n["pack_routers"],
+            pack_configs=n["pack_configs"],
+        ))
+    else:
+        errors.append("nodes: 快照缺失 nodes 键")
+    if "state" in snap:
+        _step("app.state", lambda: [
+            setattr(app_state, k, v) for k, v in snap["state"].items()])
+    else:
+        errors.append("app.state: 快照缺失 state 键")
     compressor = getattr(app_state, "compressor", None)
     if compressor is not None and "compact_focus" in snap:
         # 直接赋值不走 setter——commit 失败可能正是 setter 抛错,
