@@ -1,7 +1,11 @@
 <template>
   <div>
-    <!-- 说明收进右上角图标(点击弹 Popover), 不再占整行横幅 -->
+    <!-- 行标题 + 右侧说明入口同一行(说明不再独占一行) -->
     <div class="pk-toolbar">
+      <span class="pk-toolbar-title">
+        <AppstoreOutlined /> 插件
+        <a-tag v-if="payload" class="pk-toolbar-count">{{ enabledCount }}/{{ payload.items.length }} 启用</a-tag>
+      </span>
       <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
         <template #content>
           <div class="pk-help">
@@ -112,6 +116,11 @@ const sourceLabel = computed(() => {
   return '全部发现即启用'
 })
 
+// 行标题的启用计数(与左侧导航徽标同源语义)
+const enabledCount = computed(
+  () => payload.value?.items.filter(p => p.enabled).length ?? 0,
+)
+
 function depOk(pack: AdminPack): boolean {
   return !pack.dependency || pack.dependency.status === 'ok'
 }
@@ -172,8 +181,16 @@ onMounted(load)
 </script>
 
 <style scoped>
-/* 右上角说明入口(替代原整行横幅) */
-.pk-toolbar { display: flex; justify-content: flex-end; margin: 10px 2px 2px; }
+/* 行标题(左) + 说明入口(右)同一行; 说明不独占一行 */
+.pk-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 10px 2px 2px;
+}
+.pk-toolbar-title {
+  font-size: 14px; font-weight: 600; color: #334155;
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.pk-toolbar-count { margin-left: 2px; font-weight: 400; }
 .pk-help-link { color: #94a3b8; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
 .pk-help-link:hover { color: #2f54eb; }
 .pk-help-title { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; color: #2f54eb; }
