@@ -673,9 +673,11 @@ npm install && npm run dev
 
 ### 插件热启停
 
+- 部署契约是**单实例、单 Uvicorn worker**；当前不支持多副本或多 worker 热切换
 - 开关**热生效**：禁用的插件立即从工具注册表、`/api/meta/packs`、宿主插件列表中消失，无需重启服务（实现见 `src/services/pack_manager.py`——重新 `nodes.configure` 注入 + 替换 `app.state` 引用，graph 拓扑不变不重建）
 - 状态持久化在 `PACK_STATE_PATH`（默认 `data/pack_state.json`，随部署卷持久化），重启后保持
 - 优先级：**状态文件 > `PACKS_ENABLED` env > 全部发现**。管理端第一次切换后 env 即退化为"首次初始化默认值"
+- 所有插件默认都是可选的，包含 ChatBI；单个插件加载或健康异常不会阻断其它插件。插件可用 `runtime_contract` 声明自身必须完整具备的工具/API/任务，缺件时整包隔离而非留下半个插件；只有部署方显式设置 `PACKS_CRITICAL=pack_a,pack_b` 时，名单内且当前启用的插件才采用整次装配 fail-fast
 - 保护：不允许禁用最后一个启用的插件（引擎会无工具可用）
 
 ### 鉴权边界（重要）

@@ -44,7 +44,15 @@ pack.py 还可以实现这些**可选钩子**（平台在装配/卸载期调用�
 |------|------|
 | `create_api_router()` | 插件自有 HTTP API（挂 `/api/packs/{name}` 前缀,启停热挂卸） |
 | `register_tasks(mgr, app_state)` | 注册后台任务 handler（任务中心可见/可取消） |
+| `start(app_state, task_manager)` | commit 成功后启动插件自有后台资源/启动收敛 |
+| `health_status()` | 向平台 readiness 返回插件运行状态（可选） |
 | `unload()` | 清理（释放连接/注销 SDK 前缀等） |
+
+所有 pack（包括 ChatBI）默认可选并可独立启停。普通 pack 加载失败只跳过
+自身；`health_status()` 的异常作为平台健康响应中的 warning 暴露，不拉低
+整体 readiness。pack 可在 `config.yaml.runtime_contract` 中声明原子装配
+所需的工具、API 和任务类型；缺件时默认只隔离该 pack。部署确有强一致
+要求时才配置 `PACKS_CRITICAL`，把同一失败提升为整次装配 fail-fast。
 
 ### 3. 实现工具类
 

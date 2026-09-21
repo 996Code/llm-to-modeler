@@ -18,15 +18,9 @@ def create_registry(app_state=None) -> ToolRegistry:
     三十二审 P2: 装配期即校验 pack 运行配置(PACK_DDL_RETRY_* 等)
     ——非法值(如 attempts=1.9)在 pack 装配时抛 ValueError, 不再等
     首次业务请求才 500(fail-fast 名实相符)。
-    三十三审 P1: 校验失败改抛 PackConfigurationError——此前普通
-    ValueError 被平台 loader catch-continue 吞掉(真实复现: 即使
-    PACKS_ENABLED=chatbi, 服务仍以 0 pack/0 工具"成功"启动);
-    致命错误必须传播到 lifespan 让 Uvicorn 启动失败。
-    三十四审 P1-B: 必需工具(ask_data/switch_chart)构造异常同样
-    包装成 PackConfigurationError——普通 RuntimeError/TypeError 到
-    loader 后仍会被多 pack 容错吞掉(真实注入复现: chatbi 失败
-    + knowledge_graph 正常时服务照常 ready), critical pack 的
-    任一必需组件失败都必须终止启动。
+    校验/必需工具失败包装成 PackConfigurationError，表示本 pack 不可
+    安全运行。平台默认只跳过该可选 pack；部署显式把 chatbi 加入
+    PACKS_CRITICAL 时才阻断整次启动/装配。
     """
     from sdk.pack_api import PackConfigurationError
     from domains.chatbi.runtime import validate_pack_runtime_config
@@ -45,7 +39,7 @@ def create_registry(app_state=None) -> ToolRegistry:
     except Exception as e:
         raise PackConfigurationError(
             f"chatbi 必需工具(ask_data/switch_chart)构造失败: {e}"
-            f"——critical pack, 终止启动(fail-fast)") from e
+            f"——拒绝加载不完整的 chatbi pack") from e
     return registry
 
 
@@ -61,6 +55,40 @@ def register_tasks(manager, app_state=None) -> None:
     tasks.register_tasks(manager, app_state)
 
 
+def start(app_state, task_manager=None) -> None:
+    """启动 pack 自有生命周期资源。
+
+    平台只调用通用 ``start`` 钩子，不需要知道 ChatBI 有 scheduler。
+    """
+    if task_manager is None:
+        return
+    from domains.chatbi.tasks import _start_refresh_scheduler
+    _start_refresh_scheduler(task_manager, app_state)
+
+
+def health_status() -> dict:
+    """向平台 readiness 提供本 pack 的运行状态。"""
+    from domains.chatbi.tasks import (
+        scheduler_failure_threshold, scheduler_status)
+
+    status = scheduler_status()
+    if not status.get("ever_started") or status.get("stopped_by_unload"):
+        return {"status": "ok", "component": "scheduler"}
+    if not status.get("alive"):
+        return {
+            "status": "degraded",
+            "detail": "chatbi scheduler thread dead",
+        }
+    failures = status.get("consecutive_failures", 0)
+    if failures >= scheduler_failure_threshold():
+        return {
+            "status": "degraded",
+            "detail": (f"chatbi scheduler failing ({failures}x): "
+                       f"{status.get('last_error')}"),
+        }
+    return {"status": "ok", "component": "scheduler"}
+
+
 def unload() -> None:
     """卸载钩子: 释放 pack 单例(热切换/停机)。
 
@@ -68,11 +96,10 @@ def unload() -> None:
     + 向量前缀登记——比只清 runtime._db 更完整。
     """
     # 十审 7.6: 先停调度线程再 reset(停止窗口内不访问已重置资源)
-    try:
-        from domains.chatbi.tasks import stop_refresh_scheduler
-        stop_refresh_scheduler(stopped_by='unload')
-    except Exception as e:
-        logger.warning("chatbi scheduler 停止失败: %s", e)
+    from domains.chatbi.tasks import stop_refresh_scheduler
+    # 停止失败必须向平台传播：继续清缓存会让仍存活的线程访问已释放资源，
+    # 且 finalize 会误报卸载成功。平台会据此进入 degraded 并要求重启。
+    stop_refresh_scheduler(stopped_by='unload')
     from domains.chatbi import stores
     stores.reset_caches()
     logger.info("chatbi unloaded: runtime cache released + scheduler stopped")

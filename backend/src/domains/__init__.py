@@ -34,10 +34,11 @@ domains/ 目录,发现所有符合约定的子目录(工具包),动态导入并�
 移除 pack 只需删目录或改名(下划线开头会被跳过,见 _is_hidden 说明)。
 """
 import importlib
+import inspect
 import logging
 import os
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sdk.registry import ToolRegistry
 from sdk.prompt_loader import PromptLoader
@@ -46,6 +47,29 @@ from sdk.pack_api import PackConfigurationError, critical_packs
 # 模块级 logger。Python 用 logging.getLogger(__name__),name 形如 "domains"。
 # 等价 Java 的 private static final Logger log = LoggerFactory.getLogger(...)。
 logger = logging.getLogger(__name__)
+
+
+def _call_factory(factory, arg: Any):
+    """按可调用对象签名调用 pack 工厂，不吞工厂内部 ``TypeError``。
+
+    旧实现先传一个参数，捕获 ``TypeError`` 后再无参重试。这样会把
+    工厂内部真实的类型错误误判成签名不匹配，并可能让有副作用的工厂
+    执行两次。签名协商只决定调用形式，工厂执行期间抛出的异常原样向上
+    交给 pack 装配层处理。
+    """
+    try:
+        params = inspect.signature(factory).parameters.values()
+        accepts_positional = any(
+            p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                       inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                       inspect.Parameter.VAR_POSITIONAL)
+            for p in params
+        )
+    except (TypeError, ValueError):
+        # 少数 C 扩展/代理 callable 没有可检查签名。保持旧契约的
+        # 无参兼容，同时不通过捕获执行期 TypeError 来二次调用。
+        accepts_positional = False
+    return factory(arg) if accepts_positional else factory()
 
 
 def scan_pack_dirs() -> List[str]:
@@ -168,11 +192,8 @@ def load_pack(pack_name: str, app_state: Any = None) -> Tuple[ToolRegistry, Opti
         if not hasattr(module, 'create_registry'):
             raise AttributeError(f"{pack_name}.pack 缺少 create_registry 函数")
 
-        # 优先单参签名(可拿平台组件),TypeError 回退无参(保持旧契约兼容)
-        try:
-            registry = module.create_registry(app_state)
-        except TypeError:
-            registry = module.create_registry()
+        # 按签名兼容单参/无参工厂；工厂内部异常不应被误判为签名问题。
+        registry = _call_factory(module.create_registry, app_state)
 
         # 调用 create_prompt_loader(如果存在)— 返回 None 表示不需要自定义 prompt。
         # 这是可选契约,所以先 hasattr 判定再调用,缺失时给 None 默认值。
@@ -185,11 +206,7 @@ def load_pack(pack_name: str, app_state: Any = None) -> Tuple[ToolRegistry, Opti
         from sdk.pack_router import DefaultPackRouter
         router = None
         if hasattr(module, 'create_router'):
-            try:
-                router = module.create_router(registry)
-            except TypeError:
-                # 工厂签名不含参（如无参 create_router()），重试无参调用
-                router = module.create_router()
+            router = _call_factory(module.create_router, registry)
         if router is None:
             router = DefaultPackRouter(registry)
 
@@ -207,6 +224,7 @@ def load_all_packs(
     pack_names: Optional[List[str]] = None,
     settings_store=None,
     app_state: Any = None,
+    errors: Optional[Dict[str, str]] = None,
 ) -> Tuple[ToolRegistry, Optional[PromptLoader], dict, dict, dict]:
     """
     加载工具包,合并它们的 registry 成一个全局注册表。
@@ -220,6 +238,9 @@ def load_all_packs(
         settings_store: PackSettingsStore 实例(可选)。传入时依赖检测会把
             管理端设置页保存值纳入解析链(保存值 > env > 默认);None = 纯
             env 模式(部分测试场景)。依赖未满足的 pack 在 import 前被跳过。
+        errors: 可选的 pack → 原因输出字典。工厂/import/工具合并阶段的
+            可选 pack 失败会写入此处，供管理端和 health 暴露；不改变既有
+            五元组返回契约。
 
     Returns:
         (merged_registry, primary_prompt_loader, pack_routers, pack_tools,
@@ -281,13 +302,13 @@ def load_all_packs(
         dep = evaluate_pack(pack_name, manifest, settings_store, use_probe=probe_enabled())
         dependency_status[pack_name] = dep
         if dep["status"] != "ok":
-            # 三十四审 P1-B: critical pack 的依赖失败必须终止——
-            # 此前跳过让多 pack 场景下服务无 ChatBI 继续 ready
+            # 部署显式要求 fail-fast 的 pack 依赖失败时终止；默认可选
+            # pack 依赖失败只跳过自身。
             if pack_name in critical_packs():
                 raise PackConfigurationError(
-                    f"critical pack {pack_name} 依赖未满足"
+                    f"fail-fast pack {pack_name} 依赖未满足"
                     f"({dep['status']}): {dep['detail']}——终止启动"
-                    f"(fail-fast), 不允许无 ChatBI 的假 ready")
+                    f"(fail-fast)")
             logger.warning(
                 f"跳过工具包 {pack_name}(依赖未满足: {dep['status']}): {dep['detail']}"
             )
@@ -295,15 +316,28 @@ def load_all_packs(
 
         try:
             registry, prompt_loader, router = load_pack(pack_name, app_state=app_state)
-            pack_routers[pack_name] = router
-
-            # 合并工具:遍历该 pack 的所有工具,注册进全局 registry。
-            # 注意 tool.name 全局唯一,同名会覆盖 —— pack 之间工具名不能冲突。
-            pack_tools[pack_name] = []
-            for tool in registry.all():
+            # 先在 pack 边界内完成工具名校验，再一次性并入全局表。
+            # 可选 pack 后续失败时不能留下已经并入一半的工具，重复名称
+            # 也不能静默覆盖另一个 pack 的工具。
+            pack_tool_instances = registry.all()
+            pack_tool_names = []
+            pack_seen_names = set()
+            merged_names = {tool.name for tool in merged_registry.all()}
+            for tool in pack_tool_instances:
+                tool_name = getattr(tool, "name", None)
+                if not isinstance(tool_name, str) or not tool_name.strip():
+                    raise ValueError(
+                        f"工具包 {pack_name} 包含无效工具名: {tool_name!r}")
+                if tool_name in pack_seen_names or tool_name in merged_names:
+                    raise ValueError(
+                        f"工具包 {pack_name} 的工具名 {tool_name!r} 与已加载工具冲突")
+                pack_seen_names.add(tool_name)
+                pack_tool_names.append(tool_name)
+            for tool in pack_tool_instances:
                 merged_registry.register(tool)
-                pack_tools[pack_name].append(tool.name)
                 logger.debug(f"注册工具: {tool.name} (来自 {pack_name})")
+            pack_routers[pack_name] = router
+            pack_tools[pack_name] = pack_tool_names
 
             # 使用第一个 pack 的 prompt_loader 作为主要的。
             # 设计取舍:prompt_loader 只取一个而非合并,因为意图识别 prompt
@@ -312,30 +346,34 @@ def load_all_packs(
                 primary_prompt_loader = prompt_loader
 
         except PackConfigurationError as e:
-            # 三十三审 P1: 致命配置/兼容性错误不吞——传播到 lifespan,
-            # 服务启动失败。此前 catch-continue 让 ChatBI-only 部署
-            # 以 0 pack/0 工具"成功"启动(真实复现), 假健康。
+            # 对当前 pack 是致命错误，但 pack 默认可选：只跳过失败 pack。
+            # 部署方显式列入 PACKS_CRITICAL 时才提升为整次装配失败。
+            if pack_name in critical_packs():
+                logger.error(
+                    f"fail-fast 工具包 {pack_name} 配置/兼容性错误——"
+                    f"终止装配: {e}")
+                raise
             logger.error(
-                f"工具包 {pack_name} 致命配置/兼容性错误——终止启动"
-                f"(fail-fast): {e}")
-            raise
+                f"可选工具包 {pack_name} 配置/兼容性错误,已跳过: {e}")
+            if errors is not None:
+                errors[pack_name] = f"加载失败: {e}"
+            continue
         except Exception as e:
-            # 三十五审 P1-A: critical pack 的**任何**加载阶段异常
+            # PACKS_CRITICAL pack 的**任何**加载阶段异常
             # (模块 import 的非 ImportError、create_prompt_loader、
             # create_router/DefaultPackRouter、registry 遍历/合并、
             # 未来新增但忘记主动包装的代码)都必须包装重抛——
-            # 此前 catch-continue 让多 pack 场景下 ChatBI 被跳过而
-            # 服务照常 ready(真实注入: loaded 只有 knowledge_graph)。
             if pack_name in critical_packs():
                 logger.error(
-                    f"critical pack {pack_name} 加载异常——终止启动"
-                    f"(fail-fast), 不允许部分 ChatBI 的假 ready: {e}")
+                    f"fail-fast pack {pack_name} 加载异常——终止启动: {e}")
                 raise PackConfigurationError(
-                    f"critical pack {pack_name} 加载失败: {e}"
+                    f"fail-fast pack {pack_name} 加载失败: {e}"
                     f"——任一必需组件异常都终止启动") from e
             # 单个可选 pack 失败:打日志后跳过,不中断整体启动(尽力而为)。
             # 依赖检测未过的 pack 也走同一条跳过路径(见上方依赖闸门)。
             logger.error(f"跳过工具包 {pack_name}: {e}")
+            if errors is not None:
+                errors[pack_name] = f"加载失败: {e}"
             continue
 
     # 不再强制要求 prompt_loader — 二级路由有 DefaultPackRouter 兜底。

@@ -10,6 +10,13 @@ domain:
     追问继承上一轮的查询维度(如"年度呢?""按日对比")。
   compact_focus: 查询过的数据源与表、生成的 SQL、结果行数、命中的指标
 
+# 本 pack 的原子装配契约：缺任一组件时整包不进入运行态。默认可选模式
+# 只隔离 ChatBI 自身；部署显式加入 PACKS_CRITICAL 时才阻断整次装配。
+runtime_contract:
+  required_tools: [ask_data, switch_chart]
+  requires_api: true
+  required_task_types: [chatbi.refresh_semantics]
+
 artifact:
   type: data
   actions: [view_json]

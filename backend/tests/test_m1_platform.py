@@ -327,7 +327,7 @@ class TestLoadAllPacksDependencyGate:
         def fake_load_pack(pack_name, app_state=None):
             assert pack_name == "leave_application", "依赖缺失的 pack 不应被 import"
             reg = ToolRegistry()
-            reg.register(MagicMock(name="tool"))
+            reg.register(types.SimpleNamespace(name="tool"))
             return reg, None, MagicMock()
 
         monkeypatch.delenv("NOPE_A", raising=False)
@@ -343,6 +343,112 @@ class TestLoadAllPacksDependencyGate:
         assert dep_status["njmind_form"]["status"] == dep_mod.STATUS_MISSING
         assert sorted(dep_status["njmind_form"]["missing"]) == ["NOPE_A", "NOPE_B"]
         assert dep_status["leave_application"]["status"] == dep_mod.STATUS_OK
+
+    def test_optional_tool_name_conflict_does_not_partially_merge(self, monkeypatch):
+        """可选 pack 冲突时跳过整包，不污染已成功装配的工具。"""
+        import domains as domains_mod
+        from sdk.registry import ToolRegistry
+
+        def fake_load_pack_configs(pack_names=None):
+            return {name: {} for name in (pack_names or [])}
+
+        def fake_load_pack(pack_name, app_state=None):
+            reg = ToolRegistry()
+            reg.register(types.SimpleNamespace(name="same_tool"))
+            return reg, None, MagicMock()
+
+        monkeypatch.setattr(domains_mod, "load_pack_configs", fake_load_pack_configs)
+        monkeypatch.setattr(domains_mod, "load_pack", fake_load_pack)
+
+        errors = {}
+        registry, _, routers, tools, _ = domains_mod.load_all_packs(
+            pack_names=["leave_application", "njmind_form"], errors=errors)
+        assert sorted(routers) == ["leave_application"]
+        assert tools == {"leave_application": ["same_tool"]}
+        assert registry.get("same_tool") is not None
+        assert "工具名 'same_tool'" in errors["njmind_form"]
+
+
+class TestPackLoader:
+
+    def test_factory_internal_type_error_is_not_retried(self):
+        """工厂内部 TypeError 不应被误判成旧签名并执行第二次。"""
+        import sys
+        import domains as domains_mod
+
+        calls = []
+        module = types.ModuleType("domains.zz_factory_type_error.pack")
+
+        def broken_factory(app_state=None):
+            calls.append(app_state)
+            raise TypeError("factory body failed")
+
+        module.create_registry = broken_factory
+        package = types.ModuleType("domains.zz_factory_type_error")
+        sys.modules[module.__name__] = module
+        sys.modules[package.__name__] = package
+        try:
+            with pytest.raises(TypeError, match="factory body failed"):
+                domains_mod.load_pack("zz_factory_type_error", app_state=object())
+            assert len(calls) == 1
+        finally:
+            sys.modules.pop(module.__name__, None)
+            sys.modules.pop(package.__name__, None)
+
+
+class TestTaskRegistration:
+
+    def test_duplicate_task_type_is_rejected(self, task_manager):
+        from sdk.pack_api import TaskRegistrationError
+
+        task_manager.register("zz.same", lambda handle: None, pack_name="a")
+        with pytest.raises(TaskRegistrationError, match="重复注册"):
+            task_manager.register("zz.same", lambda handle: None, pack_name="b")
+
+    def test_task_hook_internal_type_error_is_not_retried(self):
+        from services.pack_manager import _collect_register_tasks
+
+        calls = []
+
+        def broken_hook(manager, app_state=None):
+            calls.append((manager, app_state))
+            raise TypeError("task hook body failed")
+
+        with pytest.raises(TypeError, match="task hook body failed"):
+            _collect_register_tasks(
+                broken_hook, "test", None, object(), {}, {})
+        assert len(calls) == 1
+
+    def test_legacy_handler_replace_does_not_reenter_private_lock(self):
+        """旧宿主 reset 若自行加锁，fallback 不能先持有同一私有锁。"""
+        import threading
+        from services.pack_manager import _replace_task_handlers
+
+        class LegacyManager:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self._handlers = {"old": object()}
+                self._handler_meta = {"old": {"packName": "old"}}
+
+            def reset_handlers(self):
+                with self._lock:
+                    self._handlers.clear()
+                    self._handler_meta.clear()
+
+        manager = LegacyManager()
+        finished = threading.Event()
+
+        def replace():
+            _replace_task_handlers(
+                manager, {"new": lambda handle: None},
+                {"new": {"packName": "new"}})
+            finished.set()
+
+        worker = threading.Thread(target=replace, daemon=True)
+        worker.start()
+        worker.join(timeout=1)
+        assert finished.is_set(), "fallback 对旧宿主私有锁发生自锁"
+        assert set(manager._handlers) == {"new"}
 
 
 # ── pack API 动态挂载 ─────────────────────────────────────────

@@ -7,6 +7,13 @@ domain:
     "根据产品手册回答…")类需求;需要基于已导入文档回答事实性问题时路由到本域
   compact_focus: 检索过的知识库名、查询到的实体与得出的结论
 
+# 本 pack 的原子装配契约。默认可选模式只隔离 KG 自身；部署显式加入
+# PACKS_CRITICAL 时，同一失败才提升为整次装配 fail-fast。
+runtime_contract:
+  required_tools: [kb_search]
+  requires_api: true
+  required_task_types: [kg.import_document, kg.induce_schema]
+
 admin:
   settings: settings.schema.yaml   # 声明式配置页(连接/抽取/检索参数)
   page: knowledge_graph            # 自定义管理页组件 key(前端注册表解析)

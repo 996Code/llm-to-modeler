@@ -60,7 +60,8 @@ def _call_router_factory(factory, app: Any):
     return factory(app) if takes_app else factory()
 
 
-def build_staged_routes(app: Any, pack_names: List[str]
+def build_staged_routes(app: Any, pack_names: List[str],
+                        errors: Optional[Dict[str, str]] = None
                         ) -> Tuple[List[Any], Dict[str, List[Any]]]:
     """Prepare: 构建并展开全部新 route(不触碰真实 app 的任何状态)。
 
@@ -69,15 +70,14 @@ def build_staged_routes(app: Any, pack_names: List[str]
     这里——真实 app.router.routes 尚未被修改。
 
     Raises:
-        PackConfigurationError: critical pack 的 import/构造失败。
+        PackConfigurationError: PACKS_CRITICAL pack 的 import/构造失败。
     """
     from fastapi import FastAPI
     from sdk.pack_api import PackConfigurationError, critical_packs
 
     # 禁用临时 app 的默认路由(openapi.json/docs/redoc)——否则会被
     # 当成 pack route 追加进真实 app, 每次 mount 泄漏 4 条
-    staged_app = FastAPI(
-        openapi_url=None, docs_url=None, redoc_url=None)
+    staged_routes: List[Any] = []
     staged_mounted: Dict[str, List[Any]] = {}
     for name in sorted(set(pack_names)):
         try:
@@ -85,11 +85,13 @@ def build_staged_routes(app: Any, pack_names: List[str]
         except ImportError as e:
             if name in critical_packs():
                 raise PackConfigurationError(
-                    f"chatbi pack 模块导入失败: {e}——critical "
-                    f"pack, 终止启动(fail-fast)") from e
+                    f"fail-fast pack {name} 模块导入失败: {e}——"
+                    f"终止启动(fail-fast)") from e
             # 加载名单里的 pack 理论上都能 import;真实导入错误要留痕
             # (静默吞会把 pack 的代码问题伪装成"没有 API")
             logger.warning(f"pack api mount: import domains.{name}.pack 失败: {e}")
+            if errors is not None:
+                errors[name] = f"API 模块导入失败: {e}"
             continue
         factory = getattr(module, "create_api_router", None)
         if not callable(factory):
@@ -98,24 +100,43 @@ def build_staged_routes(app: Any, pack_names: List[str]
             router = _call_router_factory(factory, app)
         except Exception as e:
             if name in critical_packs():
-                # 三十四审 P1-B: critical pack 的 API 挂载失败
+                # 部署显式要求 fail-fast 的 pack API 挂载失败
                 # 终止启动——此前跳过让 ChatBI API 404 假健康
                 raise PackConfigurationError(
-                    f"chatbi API 路由构造失败: {e}——critical "
-                    f"pack, 终止启动(fail-fast)") from e
+                    f"fail-fast pack {name} API 路由构造失败: {e}——"
+                    f"终止启动(fail-fast)") from e
             # 单 pack 路由构造失败只跳过该 pack,不拖垮整个装配
             # (与 load_all_packs 的逐 pack 容错一致)
             logger.exception(f"pack api mount: {name} 路由构造失败,已跳过")
+            if errors is not None:
+                errors[name] = f"API 路由构造失败: {e}"
             continue
         if router is None:
             continue
-        before = set(map(id, staged_app.router.routes))
-        staged_app.include_router(
-            router, prefix=f"/api/packs/{name}", tags=[f"pack:{name}"])
-        staged_mounted[name] = [
-            r for r in staged_app.router.routes if id(r) not in before]
-    # 展开后的全部 route(顺序 = include 顺序, 与直接挂到真实 app 一致)
-    staged_routes: List[Any] = list(staged_app.router.routes)
+        # 每个 pack 用独立临时 app 展开。某个可选 pack 的 include_router
+        # 中途失败时，其半展开 route 不会污染其它 pack 的 staging 结果。
+        pack_app = FastAPI(
+            openapi_url=None, docs_url=None, redoc_url=None)
+        try:
+            pack_app.include_router(
+                router, prefix=f"/api/packs/{name}", tags=[f"pack:{name}"])
+        except Exception as e:
+            if name in critical_packs():
+                raise PackConfigurationError(
+                    f"fail-fast pack {name} API 路由展开失败: {e}——"
+                    f"终止启动(fail-fast)") from e
+            if errors is None:
+                # 兼容直接调用 mount_pack_routers 的原子语义：调用方没有
+                # 请求逐 pack 错误收集时，展开失败就中止且保留旧路由。
+                raise
+            logger.exception(f"pack api mount: {name} 路由展开失败,已跳过")
+            if errors is not None:
+                errors[name] = f"API 路由展开失败: {e}"
+            continue
+        routes = list(pack_app.router.routes)
+        staged_mounted[name] = routes
+        staged_routes.extend(routes)
+    # 展开后的全部 route(顺序 = pack 名字典序, 与此前 staged app 一致)
     return staged_routes, staged_mounted
 
 
@@ -153,7 +174,7 @@ def mount_pack_routers(app: Any, pack_names: List[str]) -> List[str]:
         实际挂载了 API 的 pack 名列表(无 create_api_router 的 pack 跳过)。
 
     Raises:
-        PackConfigurationError: 名单内 critical pack(chatbi)的模块
+        PackConfigurationError: PACKS_CRITICAL 名单内 pack 的模块
         import 或路由构造失败——三十四审 P1-B: 此前 catch-continue
         让服务在没有 ChatBI API 的情况下 ready(404 假健康)。
 

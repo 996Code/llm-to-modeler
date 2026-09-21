@@ -70,10 +70,14 @@ def register_tasks(manager, app_state=None) -> None:
                      pack_name=runtime.PACK_NAME)
 
 
-def _recover_stale_importing(manager) -> None:
-    """把"没有存活任务支撑"的 importing 文档收敛为 failed(可重跑续传)。"""
+def _recover_stale_importing(manager) -> bool:
+    """收敛没有存活任务支撑的 importing 文档。
+
+    返回是否完成本次检查；失败不抛出到启动编排，但返回 False 让 pack
+    下次装配时重试，而不是被 once guard 永久跳过。
+    """
     if not _app_state:
-        return
+        return False
     try:
         active_doc_ids = set()
         for status in ("pending", "running"):
@@ -87,8 +91,10 @@ def _recover_stale_importing(manager) -> None:
         recovered = store.recover_importing_docs(active_doc_ids)
         if recovered:
             logger.info(f"启动收敛: {recovered} 个 importing 文档标记为 failed(任务已被中断)")
+        return True
     except Exception:
         logger.exception("启动收敛 importing 文档失败(不影响服务启动)")
+        return False
 
 
 # ── 提交入口(api 调用) ───────────────────────────────────────

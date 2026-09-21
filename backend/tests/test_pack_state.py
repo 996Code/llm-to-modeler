@@ -96,6 +96,22 @@ def test_toggle_noop_not_persisted(tmp_path, monkeypatch):
     assert not path.exists()
 
 
+def test_direct_persist_failure_restores_memory(tmp_path, monkeypatch):
+    """默认直写失败时，内存状态也必须回滚，避免半提交。"""
+    monkeypatch.delenv("PACKS_ENABLED", raising=False)
+    st = make_state(tmp_path)
+
+    def fail_write(_desired):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(st, "_write_disk_state", fail_write)
+    with pytest.raises(OSError, match="simulated disk failure"):
+        st.set_enabled("leave_application", False)
+
+    assert st.enabled_names() == set(PACKS)
+    assert not Path(st.state_path).exists()
+
+
 def test_stale_names_cleaned(tmp_path, monkeypatch):
     """文件引用了磁盘上已删除的 pack → 交集清洗,不报错。
 

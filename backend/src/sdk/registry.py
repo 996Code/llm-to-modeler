@@ -18,11 +18,16 @@ asset_client 等)不在注册时注入,而是在 execute 时通过 ToolContext �
 临时注入(类似方法参数传递,而非构造器注入)。
 
 【关键约定】
-- tool.name 必须全 Registry 内唯一(后注册的同名工具会覆盖先注册的)。
+- tool.name 必须全 Registry 内唯一。重复注册直接失败，避免一个 pack
+  静默覆盖另一个 pack 的工具。
 - describe_for_llm() 负责把工具清单序列化成给大模型看的中文文本。
 """
 from typing import Optional
 from sdk.tool import Tool
+
+
+class ToolRegistrationError(ValueError):
+    """工具名违反 Registry 唯一性约束。"""
 
 
 class ToolRegistry:
@@ -53,11 +58,17 @@ class ToolRegistry:
             tool: 工具实例(Tool 的子类实例,如 ToolA)。
 
         Note:
-            以 tool.name 为 key,若同名工具已存在会被静默覆盖。
+            以 tool.name 为 key。重复名称会抛出 ToolRegistrationError；
             注册发生在 pack 启动期(见 domains/*/pack.py),运行期不再修改。
         """
+        name = getattr(tool, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            raise ToolRegistrationError("tool.name 必须是非空字符串")
+        if name in self._tools:
+            raise ToolRegistrationError(
+                f"重复注册工具名 {name!r}; pack 工具名必须全局唯一")
         # 以工具的 name 属性作为唯一 key,类似 Java 的 map.put(tool.getName(), tool)
-        self._tools[tool.name] = tool
+        self._tools[name] = tool
 
     def all(self) -> list[Tool]:
         """返回所有已注册工具的列表(副本)。

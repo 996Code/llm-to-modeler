@@ -151,7 +151,7 @@ class TestPrefixIsolation:
         # 跑 pytest 时必失败(复核报告 P2: 测试对工作目录的依赖)。
         from pathlib import Path
         stores_py = Path(__file__).resolve().parents[2] / "src/domains/knowledge_graph/stores.py"
-        src = open(stores_py).read()
+        src = stores_py.read_text(encoding="utf-8")
         assert 'GRAPH_PREFIX = "kg_"' in src
         assert 'VECTOR_PREFIX = "kg"' in src
         assert 'register_prefix("kg"' in src

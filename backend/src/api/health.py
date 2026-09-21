@@ -16,7 +16,7 @@
 """
 
 import logging
-import os
+import importlib
 
 from fastapi import APIRouter, Request
 
@@ -27,26 +27,55 @@ from fastapi.responses import JSONResponse
 # 类比 Spring：@RestController + 在 controller 类上打标签
 router = APIRouter(tags=["health"])
 
-# 四十一审 P3: SCHEDULER_FAIL_THRESHOLD 启动期解析一次——
-# 非法值(非整数/<1)回退缺省 5 并告警, 不在请求路径抛 ValueError
-_SCHEDULER_FAIL_THRESHOLD_CACHE: int = -1
 
+def _loaded_pack_health(request: Request) -> tuple[bool, str | None]:
+    """调用已装配 pack 的可选 health_status 钩子。
 
-def _scheduler_fail_threshold() -> int:
-    global _SCHEDULER_FAIL_THRESHOLD_CACHE
-    if _SCHEDULER_FAIL_THRESHOLD_CACHE >= 0:
-        return _SCHEDULER_FAIL_THRESHOLD_CACHE
-    raw = os.getenv("SCHEDULER_FAIL_THRESHOLD", "5")
-    try:
-        v = int(raw)
-        if v < 1:
-            raise ValueError
-    except ValueError:
-        logger.warning(
-            "SCHEDULER_FAIL_THRESHOLD 非法(%r), 回退缺省 5", raw)
-        v = 5
-    _SCHEDULER_FAIL_THRESHOLD_CACHE = v
-    return v
+    平台只聚合插件结果，不识别任何具体领域或 scheduler 名称。未导出
+    health_status 的 pack 不参与检查。普通可选 pack 的异常/降级作为
+    warning 返回但不拉低平台 readiness；只有 PACKS_CRITICAL 显式声明
+    的 pack 才 fail-closed。这样单个可选插件故障不会摘除整个平台实例。
+    """
+    from sdk.pack_api import critical_packs
+    critical = critical_packs()
+    warnings = []
+    assembly_errors = getattr(
+        request.app.state, "_pack_assembly_errors", {}) or {}
+    for pack_name, error in sorted(assembly_errors.items()):
+        detail = f"pack {pack_name} assembly failed: {error}"
+        if pack_name in critical:
+            return False, detail
+        warnings.append(detail)
+    lifecycle_errors = getattr(
+        request.app.state, "_pack_lifecycle_errors", {}) or {}
+    for pack_name in sorted(getattr(request.app.state, "_loaded_packs", ()) or ()):
+        if pack_name in lifecycle_errors:
+            detail = (f"pack {pack_name} lifecycle failed: "
+                      f"{lifecycle_errors[pack_name]}")
+            if pack_name in critical:
+                return False, detail
+            warnings.append(detail)
+        try:
+            module = importlib.import_module(f"domains.{pack_name}.pack")
+            checker = getattr(module, "health_status", None)
+            if not callable(checker):
+                continue
+            result = checker()
+            if isinstance(result, dict):
+                status = result.get("status", "ok")
+                if status not in {"ok", "healthy", "disabled"}:
+                    detail = str(
+                        result.get("detail") or f"pack {pack_name}: {status}")
+                    if pack_name in critical:
+                        return False, detail
+                    warnings.append(detail)
+        except Exception as exc:
+            logger.exception("pack health check failed: %s", pack_name)
+            detail = f"pack {pack_name} health check failed: {exc}"
+            if pack_name in critical:
+                return False, detail
+            warnings.append(detail)
+    return True, "; ".join(warnings) if warnings else None
 
 
 # 别名：/api/health——嵌入场景宿主经统一前缀代理探测（宿主前缀 /<mount>/api/* 剥前缀
@@ -90,40 +119,27 @@ async def health_check(request: Request):
             status_code=503,
             headers={"Cache-Control": "no-store"},
         )
-    # 四十审 P2(readiness 聚合): chatbi scheduler 线程死亡或持续失败
-    # 时 health 必须变红——此前只查 degraded, 线程死了定时刷新/巡检
-    # 全停而 health 仍 200。阈值可配(SCHEDULER_FAIL_THRESHOLD, 缺省 5)。
-    # 四十一审 P2: 合法卸载(stopped_by_unload)不参与 readiness——
-    # 禁用一个可选 pack 不能摘除整个平台流量; 只有"仍启用但线程
-    # 死亡/持续失败"才 503。
-    try:
-        from domains.chatbi.tasks import scheduler_status
-        ss = scheduler_status()
-        if ss.get("ever_started") and not ss.get("stopped_by_unload") and (
-                not ss["alive"]
-                or ss["consecutive_failures"] >= _scheduler_fail_threshold()):
-            return JSONResponse(
-                {
-                    "status": "degraded",
-                    "service": "LLM Form Modeler",
-                    "version": request.app.version,
-                    "detail": ("chatbi scheduler thread dead"
-                               if not ss["alive"] else
-                               f"chatbi scheduler failing "
-                               f"({ss['consecutive_failures']}x): "
-                               f"{ss['last_error']}"),
-                },
-                status_code=503,
-                headers={"Cache-Control": "no-store"},
-            )
-    except ImportError:
-        pass   # chatbi 未启用(测试态)——不阻塞 health
+    ready, detail = _loaded_pack_health(request)
+    if not ready:
+        return JSONResponse(
+            {
+                "status": "degraded",
+                "service": "LLM Form Modeler",
+                "version": request.app.version,
+                "detail": detail,
+            },
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    body = {
+        "status": "healthy",
+        "service": "LLM Form Modeler",
+        "version": request.app.version,
+    }
+    if detail:
+        body["warnings"] = [detail]
     return JSONResponse(
-        {
-            "status": "healthy",
-            "service": "LLM Form Modeler",
-            "version": request.app.version,
-        },
+        body,
         headers={"Cache-Control": "no-store"},
     )
 

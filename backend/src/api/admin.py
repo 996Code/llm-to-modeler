@@ -415,6 +415,11 @@ def _packs_payload(request: Request) -> Dict[str, Any]:
 
     pack_state = request.app.state.pack_state
     pack_tools: Dict[str, List[str]] = getattr(request.app.state, "pack_tools", {}) or {}
+    loaded_packs = set(getattr(request.app.state, "_loaded_packs", ()) or ())
+    assembly_errors = getattr(
+        request.app.state, "_pack_assembly_errors", {}) or {}
+    lifecycle_errors = getattr(
+        request.app.state, "_pack_lifecycle_errors", {}) or {}
     # 全量 manifest(不过滤启停,供禁用中的 pack 也能展示声明信息)
     all_configs = load_pack_configs(pack_names=pack_state.discovered_names())
 
@@ -428,6 +433,9 @@ def _packs_payload(request: Request) -> Dict[str, Any]:
         items.append({
             "name": name,
             "enabled": pack_state.is_enabled(name),
+            "loaded": name in loaded_packs,
+            "runtimeError": (assembly_errors.get(name)
+                             or lifecycle_errors.get(name) or ""),
             "description": domain.get("description", ""),
             "fallback": domain.get("fallback", ""),
             "artifactType": (cfg.get("artifact", {}) or {}).get("type", "config"),
@@ -465,59 +473,12 @@ async def admin_disable_pack(name: str, request: Request):
     return _toggle_pack(request, name, False)
 
 
-def _dynamic_pack_mgmt_disabled_reason() -> str:
-    """四十一审 P2: 部署级动态管理开关(PACK_DYNAMIC_PACK_MGMT)。
-
-    多副本/多 Pod 非共享状态卷时, 各副本 holders=1, 代码无法区分
-    "真单副本"与"非共享卷多副本"(fail-open)。部署清单显式声明:
-      on(缺省) = 单副本/共享卷, 动态管理可用
-      off      = 多副本非共享卷, toggle/recheck 一律拒绝(503),
-                 只允许 PACKS_ENABLED + 滚动重启
-    Returns:
-        空串 = 允许; 非空 = 拒绝原因。
-    """
-    import os as _os
-    mode = _os.getenv("PACK_DYNAMIC_PACK_MGMT", "on").strip().lower()
-    if mode in ("off", "false", "0", "no"):
-        return ("动态插件管理已被部署配置禁用(PACK_DYNAMIC_PACK_MGMT=off, "
-                "多副本部署)——请使用 PACKS_ENABLED + 滚动重启")
-    return ""
-
-
-def _reject_multi_worker(request: Request) -> None:
-    """三十六审 P2-B: 动态 pack 管理只支持单 worker。
-
-    多 worker 时管理请求只落到一个 worker, 其他 worker 的 registry/
-    nodes/handlers/routes 不会自动重装配——即使状态文件完全正确,
-    后续请求打到不同 worker 会看到不同工具集。检测状态文件持有者
-    数(PID 心跳), > 1 时拒绝动态管理(503), 提示重启为单 worker
-    或改用 PACKS_ENABLED + 滚动重启。
-    """
-    # 四十一审 P2: 部署级禁用(多副本非共享卷 fail-closed)
-    disabled_reason = _dynamic_pack_mgmt_disabled_reason()
-    if disabled_reason:
-        raise HTTPException(503, disabled_reason)
-    from services.pack_state import count_state_file_holders
-    # 三十八审预审(声称3): degraded 进程拒绝管理操作(重启是唯一出路)
+def _reject_degraded_runtime(request: Request) -> None:
+    """运行态回滚失败后拒绝继续热切换，要求重启恢复一致状态。"""
     if getattr(request.app.state, "pack_runtime_degraded", False):
         raise HTTPException(
             503, "Process is degraded (previous rollback failed)—"
                  "restart required before further pack management.")
-    holders = count_state_file_holders(
-        request.app.state.pack_state.state_path)
-    if holders != 1:
-        # 三十七审 P2: holders != 1 都拒绝——>1 是多 worker 共享,
-        # <0(含 -1)是检测失效, 一律 fail-closed 不放行
-        if holders < 0:
-            raise HTTPException(
-                503,
-                "插件状态持有者检测失败(fail-closed)——动态启停/重检"
-                "暂不可用, 请检查状态文件目录权限后重试。")
-        raise HTTPException(
-            503,
-            f"检测到 {holders} 个进程共享插件状态文件——动态启停/重检"
-            f"只支持单 worker 部署(多 worker 的其他进程不会同步热切换)。"
-            f"请用单 worker 重启, 或改用 PACKS_ENABLED 配置 + 滚动重启。")
 
 
 def _toggle_pack(request: Request, name: str, enabled: bool):
@@ -573,18 +534,12 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     from services.pack_manager import (
         assemble_packs, finalize_assembly, hot_reload_lock,
         rollback_assembly)
-    _reject_multi_worker(request)
-    # 三十八审预审(声称1): degraded 进程拒绝后续管理操作——
-    # 置位后唯一出路是重启(或运维确认恢复), 不能继续 toggle/recheck
-    if getattr(request.app.state, "pack_runtime_degraded", False):
-        raise HTTPException(
-            503, "Process is degraded (previous rollback failed)—"
-                 "restart required before further pack management.")
+    _reject_degraded_runtime(request)
     with hot_reload_lock():
         changed = pack_state.set_enabled(
             name, enabled, persist=False)
         logger.info(f"pack toggled: {name} enabled={enabled} changed={changed}")
-        result = {"changed": changed, **_packs_payload(request)}
+        result = {"changed": changed}
         # 三十九审 P1-A: 事务阶段状态机——异常处理按阶段决策, 不再从
         # summary/changed 推断:
         #   ASSEMBLED  = runtime commit 完成(persist 未写盘)
@@ -603,6 +558,14 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
             result["loaded"] = summary["loaded"]
             result["toolCount"] = summary["tools"]
             stage = "ASSEMBLED"
+            # 可选 pack 失败会被装配层隔离，平台其它插件继续可用；但一次
+            # 显式 enable 不能因此谎报成功并把 enabled=true 落盘。
+            # 把它视为本次事务失败，按 assemble 快照恢复旧 runtime/内存。
+            if enabled and name not in summary["loaded"]:
+                reason = (summary.get("assembly_errors") or {}).get(
+                    name, "pack 未成功加载")
+                raise RuntimeError(
+                    f"Pack '{name}' enable failed and was isolated: {reason}")
             # runtime commit 成功 → 现在才持久化(失败路径零落盘)
             if changed:
                 pack_state.persist()
@@ -611,7 +574,7 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
             finalize_assembly(request.app.state, summary["_tx"])
             stage = "FINALIZED"
         except Exception as e:
-            if stage == "PERSISTED" or (stage == "ASSEMBLED" and not changed):
+            if stage == "PERSISTED":
                 # finalize 失败: 磁盘(或 no-op 时的内存)已是新状态——
                 # 保持新 memory/runtime/disk, 置 degraded(重启后按磁盘
                 # 装配即恢复完整), 不回滚
@@ -623,17 +586,20 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
                     503, f"Finalize failed: {e}. New state kept "
                          f"(disk/memory/runtime), process is degraded—"
                          f"restart required.")
-            if stage == "ASSEMBLED" and changed:
-                # persist 失败: 磁盘未写, 按旧快照确定性回滚。
+            if stage == "ASSEMBLED":
+                # persist 前失败(含显式 enable 后目标 pack 被隔离):磁盘未写,
+                # 按旧快照确定性回滚。changed=False 时内存本来就是目标态，
+                # 仍需回滚 assemble 已提交的 runtime，但无需反向切换内存。
                 # 四十审 P1: 内存补偿与 runtime 回滚**分开记录**——
-                # 此前 set_enabled/clear_pending_ops 失败只记日志,
+                # 此前 set_enabled/discard_unpersisted 失败只记日志,
                 # rollback_ok 仍为 True, 接口谎报 State rolled back
                 # 而 memory 已留新值(与 runtime/disk 分裂, health 仍绿)。
                 memory_rollback_ok = True
                 try:
-                    pack_state.set_enabled(
-                        name, not enabled, persist=False)
-                    pack_state.clear_pending_ops()
+                    if changed:
+                        pack_state.set_enabled(
+                            name, not enabled, persist=False)
+                    pack_state.discard_unpersisted()
                 except Exception as rollback_err:
                     memory_rollback_ok = False
                     logger.error(
@@ -681,20 +647,33 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
                 raise HTTPException(
                     503, f"Rollback FAILED during assembly: {e}. "
                          f"Process is degraded—restart required.")
+            memory_rollback_ok = True
+            memory_rollback_error = None
             if changed:
                 try:
                     pack_state.set_enabled(
                         name, not enabled, persist=False)
-                    pack_state.clear_pending_ops()
+                    pack_state.discard_unpersisted()
                 except Exception as rollback_err:
+                    memory_rollback_ok = False
+                    memory_rollback_error = rollback_err
                     request.app.state.pack_runtime_degraded = True
                     logger.error(
                         f"assemble 失败且内存回滚也失败(进程降级): "
                         f"{rollback_err}")
+            if not memory_rollback_ok:
+                raise HTTPException(
+                    503,
+                    f"Rollback FAILED during assembly error: {e} "
+                    f"(memory_rollback={memory_rollback_error}). "
+                    f"Process is degraded—restart required.")
             logger.exception(
                 f"hot-reload packs failed after toggling {name}")
             raise HTTPException(
                 503, f"State rolled back, hot-reload failed: {e}")
+        # 响应必须取 finalize 后的运行态；装配前快照会让禁用响应仍显示
+        # loaded=true、启用响应仍显示 loaded=false，管理页短暂展示反状态。
+        result.update(_packs_payload(request))
     return result
 
 
@@ -830,7 +809,7 @@ async def admin_recheck_pack(name: str, request: Request):
     from services.pack_dependency import clear_probe_cache, evaluate_pack, probe_enabled
     from services.pack_manager import assemble_packs, hot_reload_lock
 
-    _reject_multi_worker(request)
+    _reject_degraded_runtime(request)
     clear_probe_cache(name)
     cfg = load_pack_configs(pack_names=[name]).get(name) or {}
     dep = evaluate_pack(
@@ -854,6 +833,7 @@ async def admin_recheck_pack(name: str, request: Request):
                 )
                 result["reloaded"] = name in summary["loaded"]
                 result["loaded"] = summary["loaded"]
+                result["assemblyErrors"] = summary.get("assembly_errors", {})
                 stage = "ASSEMBLED"
                 # recheck 不改启停状态(无 persist), 生命周期/unload 直接 finalize
                 finalize_assembly(request.app.state, summary["_tx"])

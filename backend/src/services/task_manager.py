@@ -95,7 +95,7 @@ class TaskHandle:
 
 # 任务提交契约异常:定义权在 SDK(插件可见契约,见 sdk.pack_api),
 # 此处 re-export 维持平台内既有引用
-from sdk.pack_api import DuplicateTaskError  # noqa: F401,E402
+from sdk.pack_api import (DuplicateTaskError, TaskRegistrationError)  # noqa: F401,E402
 
 # submit 检查段与落库段之间的占位哨兵:并发提交在临界区内被拒;
 # _finish/释放逻辑只比对任务 id,哨兵不会误释放
@@ -145,22 +145,54 @@ class TaskManager:
 
     def register(self, task_type: str, handler: Callable[[TaskHandle], Any],
                  pack_name: str = "") -> None:
-        """注册任务类型。重名覆盖(热切换后 pack 重新注册是正常路径)。"""
-        self._handlers[task_type] = handler
-        self._handler_meta[task_type] = {"packName": pack_name}
+        """注册任务类型；同一装配内重名必须 fail-closed。
+
+        热切换会先调用 ``reset_handlers``，因此不需要靠静默覆盖来支持
+        重装配；静默覆盖会让两个 pack 的任务路由取决于加载顺序。
+        """
+        if not isinstance(task_type, str) or not task_type.strip():
+            raise TaskRegistrationError("task_type 必须是非空字符串")
+        if not callable(handler):
+            raise TaskRegistrationError(
+                f"任务 {task_type!r} 的 handler 必须可调用")
+        with self._lock:
+            if task_type in self._handlers:
+                raise TaskRegistrationError(
+                    f"重复注册任务类型 {task_type!r}; pack 任务名必须全局唯一")
+            self._handlers[task_type] = handler
+            self._handler_meta[task_type] = {"packName": pack_name}
         logger.debug(f"task handler registered: {task_type} (pack={pack_name})")
 
     def reset_handlers(self) -> None:
         """清空全部 handler(每次 assemble 前调用——禁用的 pack 类型随之失效)。"""
-        self._handlers.clear()
-        self._handler_meta.clear()
+        with self._lock:
+            self._handlers.clear()
+            self._handler_meta.clear()
+
+    def replace_handlers(self, handlers: Dict[str, Callable[[TaskHandle], Any]],
+                         metadata: Dict[str, Dict[str, str]]) -> None:
+        """在一个临界区替换整套 handler，避免读到热切换中间态。"""
+        with self._lock:
+            self._handlers = dict(handlers)
+            self._handler_meta = dict(metadata)
 
     def registered_types(self) -> List[Dict[str, str]]:
         """已注册任务类型清单(GET /api/tasks/types)。"""
-        return [
-            {"type": t, "packName": meta.get("packName", "")}
-            for t, meta in sorted(self._handler_meta.items())
-        ]
+        with self._lock:
+            return [
+                {"type": t, "packName": meta.get("packName", "")}
+                for t, meta in sorted(self._handler_meta.items())
+            ]
+
+    def has_handler(self, task_type: str) -> bool:
+        """线程安全地判断任务类型是否仍由当前装配提供。"""
+        with self._lock:
+            return task_type in self._handlers
+
+    def get_handler(self, task_type: str):
+        """线程安全地取得当前 handler 快照。"""
+        with self._lock:
+            return self._handlers.get(task_type)
 
     def add_terminal_listener(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         """注册终态监听者:任务到达终态(任何路径,含 pending 期取消)时回调。
@@ -230,12 +262,12 @@ class TaskManager:
             KeyError: 任务类型未注册(pack 被禁用/拼错名)。
             DuplicateTaskError: dedupe_key 已有活任务。
         """
-        if task_type not in self._handlers:
-            raise KeyError(f"未注册的任务类型: {task_type}")
         # dedupe 检查+占位必须在同一临界区:拆两段会出现 TOCTOU——两个
         # 并发同 key 提交都通过检查、双双落库(二次走查抓出的竞态)。
         # create_task(磁盘 IO)在锁外做,失败回滚占位不留死锁
         with self._lock:
+            if task_type not in self._handlers:
+                raise KeyError(f"未注册的任务类型: {task_type}")
             if dedupe_key:
                 existing = self._dedupe_keys.get(dedupe_key)
                 if existing:
@@ -290,7 +322,7 @@ class TaskManager:
         from datetime import datetime, timezone
         try:
             task = self._store.get_task(task_id)
-            handler = self._handlers.get(task["taskType"]) if task else None
+            handler = self.get_handler(task["taskType"]) if task else None
             if task is None or handler is None:
                 # 理论小概率:提交后 handler 被热切换清掉 → 按失败收尾
                 self._store.update_task(
@@ -390,7 +422,7 @@ class TaskManager:
                 task_id, level="warn",
                 message=f"错误为致命类(鉴权/欠费/配额),不自动续跑: {str(error)[:200]}")
             return False
-        if task.get("taskType") not in self._handlers:
+        if not self.has_handler(task.get("taskType")):
             return False  # 任务类型已下线
 
         now = datetime.now(timezone.utc)
@@ -427,7 +459,7 @@ class TaskManager:
             old = self._store.get_task(old_task_id)
             if not old or old["status"] in FINAL_STATUSES:
                 return  # 旧任务已被手动处理(取消等),续跑作废
-            if old["taskType"] not in self._handlers:
+            if not self.has_handler(old["taskType"]):
                 self._store.update_task(
                     old_task_id, status="failed",
                     error="任务类型已下线,自动续跑中止",

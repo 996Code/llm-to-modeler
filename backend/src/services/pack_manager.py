@@ -25,6 +25,7 @@ graph.py 构建图时把节点函数(nodes.classify_intent_node 等模块级函�
 Bean 定义换掉,持旧引用的在途调用用完即弃,新调用全部走新容器。
 """
 import logging
+import inspect
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -38,13 +39,32 @@ class AssemblyRollbackFailedError(RuntimeError):
     残留半装配状态, 不能谎称已回滚。
     """
 
-# 热切换装配总锁(三十四审 P2): "读 enabled 集合 → 装配 → 挂 API/任务"
-# 整段串行化——此前只有 PackState 文件锁和 API mount 局部锁, 两个
-# 管理员并发启停时两个 assemble 可交错, 最终的状态文件/registry/
-# 任务 handler/API routes 不一定来自同一份 enabled snapshot。
-# 进程内锁: 当前部署形态为单 worker 多进程各自持有独立内存态,
-# 状态文件由 PackState 自身的文件锁保护跨进程写安全; 若未来
-# 多 worker 均可触发热切换, 需升级为跨进程锁(见 admin.py 注释)。
+
+def _replace_task_handlers(task_manager: Any, handlers: Dict[str, Any],
+                           metadata: Dict[str, Dict[str, str]]) -> None:
+    """替换任务表；兼容旧宿主提供的 reset/update 鸭子协议。
+
+    平台内置 ``TaskManager`` 走单次锁内替换。嵌入式宿主或旧测试替身若
+    还没有新方法，则退回其既有接口；这条兼容路径不改变内置运行时的
+    原子性保证。
+    """
+    replace = getattr(task_manager, "replace_handlers", None)
+    if callable(replace):
+        replace(handlers, metadata)
+        return
+    reset = getattr(task_manager, "reset_handlers", None)
+    if not callable(reset):
+        raise AttributeError("task_manager 缺少 replace_handlers/reset_handlers")
+    # 旧宿主没有原子替换契约，只能沿用 reset/update。不要擅自持有它的
+    # 私有锁再调用 reset_handlers()：若 reset 内部也获取同一把非可重入锁，
+    # 会在装配线程中永久自锁。平台内置 TaskManager 始终走上面的原子路径。
+    reset()
+    task_manager._handlers.update(handlers)
+    task_manager._handler_meta.update(metadata)
+
+# 热切换装配总锁:"读 enabled 集合 → 装配 → 挂 API/任务"整段串行化。
+# 生产部署契约是单实例、单 Uvicorn worker；这把进程内锁仍用于隔离
+# 管理请求与后台任务线程在 handler/routes 替换期间的交错。
 _HOT_RELOAD_LOCK = threading.Lock()
 
 
@@ -57,6 +77,9 @@ def assemble_packs(
     app_state: Any,
     pack_names: Optional[List[str]] = None,
     app: Any = None,
+    *,
+    _assembly_errors: Optional[Dict[str, str]] = None,
+    _dependency_status: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """按启停名单装配 pack 依赖并热替换引擎/路由共享的引用。
 
@@ -82,9 +105,28 @@ def assemble_packs(
     from engine import nodes
 
     settings_store = getattr(app_state, "settings_store", None)
-    registry, prompt_loader, pack_routers, pack_tools, dep_status = load_all_packs(
-        pack_names=pack_names, settings_store=settings_store, app_state=app_state
-    )
+    assembly_errors = dict(_assembly_errors or {})
+    load_errors: Dict[str, str] = {}
+    load_kwargs = {
+        "pack_names": pack_names,
+        "settings_store": settings_store,
+        "app_state": app_state,
+    }
+    # 兼容嵌入宿主/旧测试替身的既有签名；平台实现通过 errors 输出
+    # “工厂/import/工具合并”阶段的逐 pack 失败原因。若不回传，冷启动
+    # 隔离后的管理页只能看到 enabled=true / loaded=false，却无法说明原因。
+    try:
+        supports_load_errors = "errors" in inspect.signature(
+            load_all_packs).parameters
+    except (TypeError, ValueError):
+        supports_load_errors = False
+    if supports_load_errors:
+        load_kwargs["errors"] = load_errors
+    registry, prompt_loader, pack_routers, pack_tools, dep_status = (
+        load_all_packs(**load_kwargs))
+    assembly_errors.update(load_errors)
+    merged_dep_status = dict(_dependency_status or {})
+    merged_dep_status.update(dep_status)
 
     # ── 三十六审 P1-A: 真事务化——Prepare(全部可失败动作) / Commit(纯引用替换) ──
     # 三十五审的"两阶段"只覆盖 load_all_packs + router 构造; commit 段仍
@@ -92,9 +134,9 @@ def assemble_packs(
     # app.state → handlers → routes), 中后段失败时 runtime 已是半装配新值(真实注入:
     # register_tasks 静默不注册 → 最终断言抛, 但 registry/routers/_loaded_
     # packs/handlers 已全部被替换)。现在:
-    #   Prepare: load_all_packs + critical 断言(loaded/tools/api 名单) +
+    #   Prepare: load_all_packs + 部署级 fail-fast 断言(loaded/tools/api 名单) +
     #     pack_configs 过滤 + register_tasks 到 **staging dict**(不动在服务
-    #     的 TaskManager) + critical 全量断言(含 handler) + router 构造与
+    #     的 TaskManager) + fail-fast 全量断言(含 handler) + router 构造与
     #     route 展开(临时 router, 不动 app.router.routes) + enhancer 预演;
     #   Commit: 快照旧 runtime → 纯引用替换(nodes 全局/app.state/handlers/
     #     routes/compressor/asset client) → 任一步异常按快照回滚;
@@ -106,7 +148,7 @@ def assemble_packs(
         {"loaded": sorted(pack_routers),
          "pack_tools": pack_tools,
          # API 挂载在 commit 段执行; 此处先按"将挂载名单"预检
-         # (mount 阶段对 critical 失败会抛, 双保险)
+         # (mount 阶段对 PACKS_CRITICAL 失败会抛, 双保险)
          "api_mounted": sorted(pack_routers)},
         requested=list(pack_names or []),
         check_task_handlers=False)
@@ -126,12 +168,12 @@ def assemble_packs(
     # 现在 Prepare 只把 handler 收集进 staged_handlers; commit 成功后才
     # 一次性替换 TaskManager 内部表。
     # 三十七审 P1-B(副作用隔离): staging view 不再透传会触发生命周期的
-    # 调用——scheduler 启动(chatbi _start_refresh_scheduler)与 KG 的
-    # _recover_stale_importing 数据收敛都后移到 commit 成功之后
+    # 调用——各 pack 的 start 钩子及其自有后台资源都后移到 commit 成功之后
     # (_start_pack_lifecycle)。prepare 失败时零生命周期副作用。
     task_manager = getattr(app_state, "task_manager", None)
     staged_handlers: Dict[str, Any] = {}
     staged_handler_meta: Dict[str, Dict[str, str]] = {}
+    task_errors: Dict[str, str] = {}
     if task_manager is not None:
         import importlib
         for pack_name in (pack_routers or {}):
@@ -142,31 +184,89 @@ def assemble_packs(
                     _collect_register_tasks(
                         hook, pack_name, task_manager, app_state,
                         staged_handlers, staged_handler_meta)
-            except ImportError:
-                continue
+            except Exception as e:
+                if pack_name in critical_packs():
+                    raise PackConfigurationError(
+                        f"fail-fast pack {pack_name} 任务注册失败: {e}——"
+                        f"终止装配") from e
+                logger.exception(
+                    "可选 pack %s 任务注册失败,将隔离整个 pack", pack_name)
+                task_errors[pack_name] = f"任务注册失败: {e}"
 
-    # ── Prepare: critical 全量断言(含 staging handler) ──
+    # ── Prepare: 部署级 fail-fast 全量断言(含 staging handler) ──
     # 用 staging 容器做断言: handler 完整性在切换运行态之前验证。
     _staged_tm = _StagedTaskManagerView(
         staged_handlers,
+        metadata=staged_handler_meta,
         store=getattr(task_manager, "store", None) if task_manager else None)
-    _assert_critical_packs_ready(
-        _StagedAppState(app_state, task_manager=_staged_tm),
-        {"loaded": sorted(pack_routers),
-         "pack_tools": pack_tools,
-         "api_mounted": sorted(pack_routers)},
-        requested=list(pack_names or []))
-
     # ── Prepare: router 构造 + route 展开(不动 app.router.routes) ──
     # 三十六审 P1-B: 此前 commit 段 _unmount_all → app.include_router,
     # include_router 中途失败时旧 route 已被卸掉。现在先在临时 FastAPI
     # 上展开全部 route 对象, commit 只做"一次性列表替换"。
     staged_routes: List[Any] = []
     staged_mounted: Dict[str, List[Any]] = {}
+    route_errors: Dict[str, str] = {}
     if app is not None:
         from services.pack_api_mount import build_staged_routes
-        staged_routes, staged_mounted = build_staged_routes(
-            app, list(pack_routers.keys()))
+        # 保持嵌入宿主/测试替身的旧二参签名兼容；平台实现支持 errors
+        # 收集时才传第三参。签名协商不靠捕获执行期 TypeError。
+        try:
+            supports_errors = "errors" in inspect.signature(
+                build_staged_routes).parameters
+        except (TypeError, ValueError):
+            supports_errors = False
+        if supports_errors:
+            staged_routes, staged_mounted = build_staged_routes(
+                app, list(pack_routers.keys()), errors=route_errors)
+        else:
+            staged_routes, staged_mounted = build_staged_routes(
+                app, list(pack_routers.keys()))
+
+    # pack 默认可选不等于允许“半个插件”留在运行态。API/任务 hook 抛错，
+    # 或 manifest 声明的运行契约不完整时，默认只隔离该 pack，再从剩余
+    # pack 重新 Prepare；PACKS_CRITICAL 中的 pack 仍直接 fail-fast。
+    contract_errors = _runtime_contract_failures(
+        pack_configs=pack_configs,
+        pack_tools=pack_tools,
+        api_mounted=(set(staged_mounted) if app is not None
+                     else set(pack_routers)),
+        task_handlers=staged_handlers,
+        task_handler_meta=staged_handler_meta,
+        check_api=app is not None,
+        check_tasks=task_manager is not None,
+    )
+    # 具体 hook 异常优先于派生的“组件缺失”结论，便于管理端/health 定位。
+    failed_packs = {**contract_errors, **task_errors, **route_errors}
+    if failed_packs:
+        critical_failed = sorted(set(failed_packs) & set(critical_packs()))
+        if critical_failed:
+            name = critical_failed[0]
+            raise PackConfigurationError(
+                f"fail-fast pack {name} 装配契约失败: {failed_packs[name]}")
+        assembly_errors.update(failed_packs)
+        remaining = [
+            name for name in pack_routers if name not in failed_packs]
+        if not remaining:
+            raise RuntimeError(
+                "所有可选 pack 都在完整性校验中失败，系统无可用工具包: "
+                f"{failed_packs}")
+        logger.error(
+            "隔离装配失败的可选 pack 并重试剩余集合: failed=%s remaining=%s",
+            failed_packs, remaining)
+        return assemble_packs(
+            app_state, remaining, app=app,
+            _assembly_errors=assembly_errors,
+            _dependency_status=merged_dep_status)
+
+    # 以真实 staging 结果做最终 fail-fast 断言，不能用“计划挂载名单”
+    # 代替实际 API/handler 结果。
+    _assert_critical_packs_ready(
+        _StagedAppState(app_state, task_manager=_staged_tm),
+        {"loaded": sorted(pack_routers),
+         "pack_tools": pack_tools,
+         "api_mounted": (sorted(staged_mounted)
+                         if app is not None else sorted(pack_routers))},
+        requested=list(pack_names or []))
 
     # ── Prepare: enhancer 预演(三十七审 P1-C) ──
     # enhance_asset_client 此前在 commit try/except 之外执行——hook 先改
@@ -200,13 +300,13 @@ def assemble_packs(
         app_state.pack_tools = pack_tools
         app_state.prompt_loader = prompt_loader
         # 依赖检测状态(含被跳过的 pack;管理端插件中心"依赖未配置"徽标的数据源)
-        app_state.pack_dependency_status = dep_status
+        app_state.pack_dependency_status = merged_dep_status
         app_state._loaded_packs = sorted(pack_routers or {})
+        app_state._pack_assembly_errors = assembly_errors
 
         if task_manager is not None:
-            task_manager.reset_handlers()
-            task_manager._handlers.update(staged_handlers)
-            task_manager._handler_meta.update(staged_handler_meta)
+            _replace_task_handlers(
+                task_manager, staged_handlers, staged_handler_meta)
 
         if app is not None:
             from services.pack_api_mount import commit_routes
@@ -270,7 +370,8 @@ def assemble_packs(
         "loaded": sorted(pack_routers),
         "tools": total_tools,
         "pack_tools": pack_tools,
-        "dependency_status": dep_status,
+        "dependency_status": merged_dep_status,
+        "assembly_errors": assembly_errors,
         "api_mounted": api_mounted,
         # 三十八审 P1-A: 返回事务 handle——persist 失败时按快照确定性
         # 恢复(不重跑完整装配), finalize(生命周期/unload)由调用方在
@@ -288,7 +389,7 @@ def finalize_assembly(app_state: Any, tx: Dict[str, Any]) -> None:
     """装配事务的 finalize 段(三十八审 P2-B): runtime 与磁盘都确认后执行。
 
     外部不可逆副作用只在此时发生:
-      - lifecycle 启动(chatbi scheduler / KG _app_state 注入);
+      - lifecycle 启动(由各 pack 的 start 钩子自持);
       - unload 钩子(旧在载、新不在载的 pack 释放资源)。
     调用方(main 冷启动 / admin persist 成功后)负责在 PackState 持久化
     **之后**调用本函数——persist 失败时 finalize 尚未执行, 无需撤销。
@@ -298,23 +399,44 @@ def finalize_assembly(app_state: Any, tx: Dict[str, Any]) -> None:
     task_manager = tx["task_manager"]
     app = tx["app"]
 
-    # 生命周期启动(三十七审 P1-B / 三十八审 P2-A)
-    _start_pack_lifecycle(app_state, pack_routers, task_manager)
+    old_loaded = set(snap["state"]["_loaded_packs"] or [])
+    new_loaded = set(pack_routers or {})
+    lifecycle_errors = set(
+        (getattr(app_state, "_pack_lifecycle_errors", {}) or {}).keys())
+    # start 不是隐式幂等契约。只启动本次新增 pack；此前 start 失败并
+    # 留有 lifecycle error 的 pack 允许在 recheck 时重试。否则切换任意
+    # 无关 pack 都会重复创建其它插件的线程/连接。
+    start_names = (new_loaded - old_loaded) | (new_loaded & lifecycle_errors)
+    _start_pack_lifecycle(
+        app_state, pack_routers, task_manager, start_names=start_names)
 
     # unload 钩子(三十七审 P1-D): 差集基于快照的 old_loaded
-    old_loaded = set(snap["state"]["_loaded_packs"] or [])
     import importlib
-    for name in sorted(old_loaded - set(pack_routers or {})):
+    unload_errors: Dict[str, str] = {}
+    for name in sorted(old_loaded - new_loaded):
         try:
             mod = importlib.import_module(f"domains.{name}.pack")
             hook = getattr(mod, "unload", None)
             if callable(hook):
                 try:
                     hook()
-                except Exception:
+                except Exception as e:
                     logger.exception(f"pack unload hook failed: {name}")
+                    unload_errors[name] = str(e)
         except ImportError:
             pass
+    if unload_errors:
+        lifecycle_errors = dict(
+            getattr(app_state, "_pack_lifecycle_errors", {}) or {})
+        lifecycle_errors.update({
+            name: f"卸载失败: {error}"
+            for name, error in unload_errors.items()
+        })
+        app_state._pack_lifecycle_errors = lifecycle_errors
+        raise RuntimeError(
+            "pack unload 未完整完成，进程需重启: "
+            + "; ".join(
+                f"{name}: {error}" for name, error in unload_errors.items()))
 
 
 def rollback_assembly(app_state: Any, tx: Dict[str, Any]) -> bool:
@@ -338,36 +460,38 @@ def nodes_module():
     return nodes
 
 
-# critical pack 契约(三十四审 P1-B): 启用即必须完整可用——
-# 任一必需组件缺失都终止启动/装配, 不允许"部分 ChatBI"的假 ready
-# 三十五审 P1-A: 名单从 sdk.pack_api.critical_packs() 单一真相源
-# 读取(此前三个模块各自复制, 漏同步即窗口); 必需组件明细仍在此处
+# 部署级 fail-fast pack 契约。名单来自 PACKS_CRITICAL，默认空；
+# 具体必需组件由 pack 自己的 config.yaml.runtime_contract 声明。
 from sdk.pack_api import critical_packs, PackConfigurationError
-
-_CRITICAL_PACK_REQUIREMENTS = {
-    "chatbi": {
-        "required_tools": ("ask_data", "switch_chart"),
-        "requires_api": True,
-        "required_task_types": ("chatbi.refresh_semantics",),
-    },
-}
 
 
 # ── 三十六审 P1-A: staging 容器(register_tasks 的 Prepare 收集目标) ──
 
 class _StagedTaskManagerView:
-    """给 register_tasks 钩子与 critical 断言看的"TaskManager 视图"。
+    """给 register_tasks 钩子与 fail-fast 断言看的 TaskManager 视图。
 
     只实现钩子实际用到的 register(task_type, handler, pack_name=)——
     写入 staging dict, 不触碰在服务的 TaskManager。断言函数经
     _handlers 属性读取 staging 内容。
     """
 
-    def __init__(self, handlers: Dict[str, Any], store: Any = None):
+    def __init__(self, handlers: Dict[str, Any],
+                 metadata: Optional[Dict[str, Dict[str, str]]] = None,
+                 store: Any = None):
         self._handlers = handlers
+        self._handler_meta = metadata if metadata is not None else {}
         self.store = store  # KG 启动收敛等只读钩子用(list_tasks)
 
     def register(self, task_type, handler, pack_name: str = "") -> None:
+        from sdk.pack_api import TaskRegistrationError
+        if not isinstance(task_type, str) or not task_type.strip():
+            raise TaskRegistrationError("task_type 必须是非空字符串")
+        if not callable(handler):
+            raise TaskRegistrationError(
+                f"任务 {task_type!r} 的 handler 必须可调用")
+        if task_type in self._handlers:
+            raise TaskRegistrationError(
+                f"重复注册任务类型 {task_type!r}; pack 任务名必须全局唯一")
         self._handlers[task_type] = handler
 
     def __getattr__(self, item):
@@ -377,7 +501,7 @@ class _StagedTaskManagerView:
 
 
 class _StagedAppState:
-    """critical 断言用的 app_state 替身: task_manager 换成 staging 视图。"""
+    """fail-fast 断言用 app_state 替身: task_manager 换成 staging 视图。"""
 
     def __init__(self, real_app_state: Any, task_manager: Any):
         self._real = real_app_state
@@ -395,21 +519,76 @@ def _collect_register_tasks(hook, pack_name: str, task_manager: Any,
     """调用 register_tasks 钩子, 把 handler 收集进 staging dict。
 
     钩子签名兼容: (manager, app_state) / (manager)。钩子内部异常直接
-    上抛——Prepare 段失败不切换运行态(critical pack 的钩子失败必须
-    fail-fast; 非 critical pack 的钩子异常由 loader 层语义兜底,
+    上抛——Prepare 段失败不切换运行态(PACKS_CRITICAL pack 的钩子
+    失败必须 fail-fast；普通 pack 的钩子异常由 loader 层语义兜底，
     此处不吞)。
     """
     view = _StagedTaskManagerView(
         staged_handlers,
+        metadata=staged_handler_meta,
         store=getattr(task_manager, "store", None) if task_manager else None)
     try:
+        params = inspect.signature(hook).parameters.values()
+        positional = [
+            p for p in params
+            if p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                          inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        accepts_app_state = bool(positional) and (
+            len(positional) >= 2 or any(
+                p.kind == inspect.Parameter.VAR_POSITIONAL for p in params))
+    except (TypeError, ValueError):
+        accepts_app_state = False
+    if accepts_app_state:
         hook(view, app_state)
-    except TypeError:
+    else:
         hook(view)  # 兼容单参签名(无 app_state 诉求的 pack)
     # handler 元数据按 staging 内容重建(pack 归属)
     for task_type in staged_handlers:
         staged_handler_meta.setdefault(
             task_type, {"packName": pack_name})
+
+
+def _runtime_contract_failures(
+    pack_configs: Dict[str, Any],
+    pack_tools: Dict[str, List[str]],
+    api_mounted: set[str],
+    task_handlers: Dict[str, Any],
+    task_handler_meta: Dict[str, Dict[str, str]],
+    *,
+    check_api: bool,
+    check_tasks: bool,
+) -> Dict[str, str]:
+    """校验各 pack 自声明的运行完整性，返回 pack → 原因。
+
+    ``runtime_contract`` 是 pack 自身的原子装配边界，不是平台的必选
+    插件名单。普通 pack 不满足时只隔离自身；部署显式列入
+    ``PACKS_CRITICAL`` 时由调用方把同一失败提升为整次装配失败。
+    """
+    failures: Dict[str, str] = {}
+    for pack_name, config in (pack_configs or {}).items():
+        contract = (config or {}).get("runtime_contract") or {}
+        if not contract:
+            continue
+        missing_tools = [
+            name for name in contract.get("required_tools", ())
+            if name not in (pack_tools.get(pack_name) or [])]
+        if missing_tools:
+            failures[pack_name] = f"缺少必需工具: {missing_tools}"
+            continue
+        if (check_api and contract.get("requires_api")
+                and pack_name not in api_mounted):
+            failures[pack_name] = "必需 API 未挂载"
+            continue
+        if check_tasks:
+            missing_tasks = [
+                name for name in contract.get("required_task_types", ())
+                if (name not in task_handlers
+                    or (task_handler_meta.get(name) or {}).get("packName")
+                    != pack_name)]
+            if missing_tasks:
+                failures[pack_name] = f"缺少必需任务 handler: {missing_tasks}"
+    return failures
 
 
 def _runtime_snapshot(app_state: Any, nodes: Any, app: Any) -> Dict[str, Any]:
@@ -440,6 +619,8 @@ def _runtime_snapshot(app_state: Any, nodes: Any, app: Any) -> Dict[str, Any]:
             "pack_dependency_status": getattr(
                 app_state, "pack_dependency_status", None),
             "_loaded_packs": getattr(app_state, "_loaded_packs", None),
+            "_pack_assembly_errors": getattr(
+                app_state, "_pack_assembly_errors", None),
         },
     }
     compressor = getattr(app_state, "compressor", None)
@@ -516,9 +697,8 @@ def _restore_runtime(app_state: Any, nodes: Any, app: Any,
     task_manager = getattr(app_state, "task_manager", None)
     if task_manager is not None and "handlers" in snap:
         def _restore_handlers():
-            task_manager.reset_handlers()
-            task_manager._handlers.update(snap["handlers"])
-            task_manager._handler_meta.update(snap["handler_meta"])
+            _replace_task_handlers(
+                task_manager, snap["handlers"], snap["handler_meta"])
         _step("handlers", _restore_handlers)
     if app is not None and "routes" in snap:
         def _restore_routes():
@@ -535,75 +715,49 @@ def _restore_runtime(app_state: Any, nodes: Any, app: Any,
 
 
 def _start_pack_lifecycle(app_state: Any, pack_routers: Dict[str, Any],
-                          task_manager: Any) -> None:
-    """finalize 段的生命周期启动(三十七审 P1-B / 三十八审 P2-A)。
+                          task_manager: Any,
+                          start_names: Optional[set[str]] = None) -> None:
+    """finalize 段调用每个 pack 自有的可选 ``start`` 钩子。
 
-    只在 runtime 与磁盘状态都确认后执行(finalize_assembly 调用):
-      - chatbi: _start_refresh_scheduler(元数据定时刷新线程)
-      - knowledge_graph: _app_state 全局注入 + _recover_stale_importing
-        (启动收敛, startup-only——once guard 防止 recheck/无关 toggle
-        重复执行, 三十八审 4.4)
-
-    三十八审 P2-A(失败可见): critical pack(chatbi)的 scheduler 启动
-    失败不再静默——抛 PackConfigurationError 让装配失败(与 critical
-    契约一致: 启用即必须完整可用, scheduler 是定时刷新的必需组件)。
-    非 critical 的生命周期失败只记日志。
+    平台只负责生命周期时序和部署级 fail-fast 语义；scheduler、启动
+    收敛或其他领域资源由 pack 自己实现，避免平台核心按 pack 名称分支。
     """
     import importlib
-    for pack_name in (pack_routers or {}):
+    lifecycle_errors = dict(
+        getattr(app_state, "_pack_lifecycle_errors", {}) or {})
+    # 已不在本次装配中的 pack 不保留旧错误。
+    lifecycle_errors = {
+        name: error for name, error in lifecycle_errors.items()
+        if name in (pack_routers or {})}
+    names = set(pack_routers or {}) if start_names is None else start_names
+    for pack_name in sorted(names):
         try:
-            if pack_name == "chatbi":
-                # scheduler 循环经 manager.submit 提交刷新任务——
-                # 无 TaskManager 的测试态不起线程(起了也是无限重试)
-                if task_manager is not None:
-                    from domains.chatbi.tasks import (
-                        _start_refresh_scheduler)
-                    _start_refresh_scheduler(task_manager, app_state)
-            elif pack_name == "knowledge_graph":
-                from domains.knowledge_graph import tasks as kg_tasks
-                kg_tasks._app_state = app_state
-                if task_manager is not None:
-                    _run_kg_startup_recovery_once(kg_tasks, task_manager)
+            mod = importlib.import_module(f"domains.{pack_name}.pack")
+            hook = getattr(mod, "start", None)
+            if callable(hook):
+                hook(app_state, task_manager)
+            lifecycle_errors.pop(pack_name, None)
         except Exception as e:
+            lifecycle_errors[pack_name] = str(e)
             if pack_name in critical_packs():
-                # critical 生命周期失败 = 假 ready(health 绿但定时刷新
-                # 不存在)——fail-fast, 不允许静默降级
+                # 部署显式要求 fail-fast 的 pack 生命周期失败。
+                app_state._pack_lifecycle_errors = lifecycle_errors
                 raise PackConfigurationError(
-                    f"critical pack {pack_name} 生命周期启动失败: {e}"
+                    f"fail-fast pack {pack_name} 生命周期启动失败: {e}"
                     f"——终止(fail-fast)") from e
             logger.exception(f"pack 生命周期启动失败: {pack_name}")
-
-
-# KG 启动收敛的 once guard(三十八审 4.4: 注释称"只在首次装配执行",
-# 实际每次 assemble 都执行——recheck/无关 toggle 会重复跑数据收敛)
-_KG_RECOVERY_DONE = False
-
-
-def _run_kg_startup_recovery_once(kg_tasks: Any, task_manager: Any) -> None:
-    """KG stale-importing 收敛, 成功后每进程只执行一次(startup-only)。
-
-    三十九审 P2-C: 只在 recovery **成功后**置 done——此前先置位,
-    首次瞬时异常被非 critical 分支吞掉后永久跳过(数据收敛丢失)。
-    失败保持未完成, 下次显式 recheck/装配重试。
-    """
-    global _KG_RECOVERY_DONE
-    if _KG_RECOVERY_DONE:
-        return
-    kg_tasks._recover_stale_importing(task_manager)
-    _KG_RECOVERY_DONE = True   # 成功才置位
+    app_state._pack_lifecycle_errors = lifecycle_errors
 
 
 def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any],
                                   requested: Optional[List[str]] = None,
                                   check_task_handlers: bool = True
                                   ) -> None:
-    """critical pack 完整性断言(三十四审 P1-B / 三十五审 P1-A)。
+    """部署级 fail-fast pack 完整性断言。
 
-    三十五审 P1-A: 断言同时接收 **requested**(本次装配请求/启用的
-    pack 名单)与 loaded(成功子集)——此前只看 loaded, critical pack
-    被任何路径跳过后 `continue` 直接漏检(真实注入: loaded 只有
-    knowledge_graph 时函数返回成功)。requested 含 critical 而
-    loaded 不含时必须失败。
+    断言同时接收 **requested**(本次装配请求/启用名单)与 loaded
+    (成功子集)。requested 含 PACKS_CRITICAL 中的 pack 而 loaded
+    不含时失败。默认名单为空，不对 ChatBI 或其它插件做特殊绑定。
     其余不变量: 必需工具已注册 / API 已挂载 / 任务 handler 已注册。
 
     check_task_handlers: 任务 handler 注册是 Commit 段动作(register_tasks
@@ -621,30 +775,35 @@ def _assert_critical_packs_ready(app_state: Any, result: Dict[str, Any],
         if pack_name not in requested_set:
             continue   # 本次未请求/未启用
         if pack_name not in loaded:
-            # requested 含 critical 但 loaded 不含——被某条路径跳过
+            # requested 含 fail-fast pack 但 loaded 不含——被某路径跳过
             # (loader 层已拦截大多数, 此处兜底残余路径)
             raise PackConfigurationError(
-                f"critical pack {pack_name} 在 requested"
+                f"fail-fast pack {pack_name} 在 requested"
                 f"({sorted(requested_set)})中但未成功加载"
-                f"(loaded={sorted(loaded)})——终止(fail-fast), "
-                f"不允许部分 ChatBI 的假 ready")
-        req = _CRITICAL_PACK_REQUIREMENTS.get(pack_name)
+                f"(loaded={sorted(loaded)})——终止装配")
+        from domains import load_pack_configs
+        manifest = load_pack_configs(pack_names=[pack_name]).get(pack_name) or {}
+        req = manifest.get("runtime_contract") or {}
         if not req:
             continue
-        missing_tools = [t for t in req["required_tools"]
+        missing_tools = [t for t in req.get("required_tools", ())
                          if t not in (pack_tools.get(pack_name) or [])]
         if missing_tools:
             raise PackConfigurationError(
-                f"critical pack {pack_name} 缺少必需工具: {missing_tools}"
+                f"fail-fast pack {pack_name} 缺少必需工具: {missing_tools}"
                 f"——终止启动(fail-fast)")
         if req.get("requires_api") and pack_name not in api_mounted:
             raise PackConfigurationError(
-                f"critical pack {pack_name} 的 API 未挂载"
+                f"fail-fast pack {pack_name} 的 API 未挂载"
                 f"——终止启动(fail-fast)")
         if check_task_handlers and task_manager is not None:
             handlers = getattr(task_manager, "_handlers", {}) or {}
+            handler_meta = getattr(task_manager, "_handler_meta", {}) or {}
             for tt in req.get("required_task_types", ()):
-                if tt not in handlers:
+                if (tt not in handlers
+                        or (handler_meta.get(tt) or {}).get("packName")
+                        != pack_name):
                     raise PackConfigurationError(
-                        f"critical pack {pack_name} 的任务 handler "
-                        f"{tt} 未注册——终止启动(fail-fast)")
+                        f"fail-fast pack {pack_name} 的任务 handler "
+                        f"{tt} 未由该 pack 注册——"
+                        f"终止启动(fail-fast)")

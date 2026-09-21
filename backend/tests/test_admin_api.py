@@ -5,6 +5,8 @@
 真实 PackState + 哑的 llm/asset/conversation 组件(assemble_packs 只做
 注入,不会真正调用它们)。
 """
+from pathlib import Path
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -216,10 +218,15 @@ def test_admin_pack_toggle_hot_reload(client):
     resp = client.post("/api/admin/packs/leave_application/disable", headers=_auth_headers())
     assert resp.status_code == 200
     assert resp.json()["loaded"] == ["njmind_form"]
+    disabled = {item["name"]: item for item in resp.json()["items"]}
+    assert disabled["leave_application"]["enabled"] is False
+    assert disabled["leave_application"]["loaded"] is False
     assert set(client.app.state.pack_tools) == {"njmind_form"}
     # 状态已持久化(文件存在且只含 njmind_form)
     import json
-    data = json.loads(open(client.app.state.pack_state.state_path, encoding="utf-8").read())
+    data = json.loads(
+        Path(client.app.state.pack_state.state_path).read_text(encoding="utf-8")
+    )
     assert data["enabled"] == ["njmind_form"]
     # meta 视角的 app.state.pack_configs 也被热替换
     assert set(client.app.state.pack_configs) == {"njmind_form"}
@@ -227,6 +234,9 @@ def test_admin_pack_toggle_hot_reload(client):
     # 重新启用 → 工具恢复
     resp = client.post("/api/admin/packs/leave_application/enable", headers=_auth_headers())
     assert resp.status_code == 200
+    enabled = {item["name"]: item for item in resp.json()["items"]}
+    assert enabled["leave_application"]["enabled"] is True
+    assert enabled["leave_application"]["loaded"] is True
     assert set(client.app.state.pack_tools) == {"njmind_form", "leave_application"}
 
 

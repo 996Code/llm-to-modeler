@@ -81,7 +81,7 @@ class FakeGraph:
 
     def upsert_batch(self, kb_id, doc_id, entities, relations):
         import datetime
-        now = datetime.datetime.utcnow().isoformat()
+        now = datetime.datetime.now(datetime.UTC).isoformat()
         for e in entities:
             key = (kb_id, e["normalized_name"])
             node = self.nodes.setdefault(key, {
@@ -307,6 +307,30 @@ def _wait(manager, task_id, timeout=10.0):
             return t
         time.sleep(0.02)
     raise AssertionError("任务未在超时内完成")
+
+
+def test_pack_reenable_runs_startup_recovery_again(monkeypatch):
+    """知识图谱热禁用后再启用必须重跑启动收敛。"""
+    from domains.knowledge_graph import pack, stores, tasks
+
+    calls = []
+    monkeypatch.setattr(pack, "_RECOVERY_DONE", False)
+    monkeypatch.setattr(
+        tasks, "_recover_stale_importing",
+        lambda manager: calls.append(manager) or True,
+    )
+    monkeypatch.setattr(stores, "reset_caches", lambda: None)
+
+    manager = object()
+    state = SimpleNamespace()
+    pack.start(state, manager)
+    pack.start(state, manager)
+    assert calls == [manager]
+
+    pack.unload()
+    pack.start(state, manager)
+    pack.start(state, manager)
+    assert calls == [manager, manager]
 
 
 def _make_doc(env, name: str, paragraphs: list):

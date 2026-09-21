@@ -140,20 +140,6 @@ async def lifespan(app: FastAPI):
         scan_pack_dirs(),
     )
     app.state.pack_state = pack_state
-    # 四十审 P2(部署约束): 多副本/多 Pod 非共享状态卷时, 各副本
-    # holders=1, 动态启停会 fail-open(其他副本 runtime 不同步)。
-    # 单副本部署(deploy/single)不受影响; 多副本必须走
-    # PACKS_ENABLED + 滚动重启, 或共享状态卷(此时 holders>1 会
-    # 自动拒绝动态管理)。启动日志显式提示该约束。
-    if os.getenv("UVICORN_WORKERS", "1") not in ("1", ""):
-        logger.warning(
-            "检测到多 worker/多副本部署形态——动态插件启停"
-            "(toggle/recheck)只保证单副本一致; 多副本请使用"
-            " PACKS_ENABLED + 滚动重启, 或共享 PACK_STATE_PATH"
-            "(共享时多实例会被自动拒绝动态管理)")
-    # 三十八审 P3: 保存 holder 句柄(lifespan shutdown 显式停心跳线程)
-    app.state.pack_state_holder = getattr(
-        pack_state, "holder", None)
 
     # 会话管理器：封装会话上下文（历史消息、压缩历史）的读写
     conversation_manager = ConversationManager(store=conv_store)
@@ -227,14 +213,6 @@ async def lifespan(app: FastAPI):
 
     # === 关闭阶段（@PreDestroy 等价物）===
     logger.info("Shutting down...")
-    # 三十八审 P3: 停 holder 心跳线程(在卸载钩子之前——心跳会重建
-    # 状态目录, 先停再清理)
-    try:
-        _holder = getattr(app.state, "pack_state_holder", None)
-        if _holder is not None:
-            _holder.close()
-    except Exception:
-        logger.warning("pack state holder close failed", exc_info=True)
     try:
         task_manager.close()  # 关闭后台任务线程池(在跑任务下次启动标 interrupted)
     except Exception:

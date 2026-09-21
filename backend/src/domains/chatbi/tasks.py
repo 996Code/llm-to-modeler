@@ -54,6 +54,26 @@ _refresh_stop = None
 # 调度器运行状态(三十九审 P1-D / 四十审 P2: 模块级, scheduler_status 读取)
 _scheduler_state = {"consecutive_failures": 0, "last_error": None,
                    "last_attempt": None, "last_success": None}
+_FAIL_THRESHOLD_CACHE = -1
+
+
+def scheduler_failure_threshold() -> int:
+    """读取 ChatBI scheduler 的 readiness 阈值(进程内缓存)。"""
+    global _FAIL_THRESHOLD_CACHE
+    if _FAIL_THRESHOLD_CACHE >= 0:
+        return _FAIL_THRESHOLD_CACHE
+    import os
+    raw = os.getenv("SCHEDULER_FAIL_THRESHOLD", "5")
+    try:
+        value = int(raw)
+        if value < 1:
+            raise ValueError
+    except ValueError:
+        logger.warning(
+            "SCHEDULER_FAIL_THRESHOLD 非法(%r), 回退缺省 5", raw)
+        value = 5
+    _FAIL_THRESHOLD_CACHE = value
+    return value
 
 
 def _start_refresh_scheduler(manager, app_state) -> None:
@@ -76,8 +96,7 @@ def _start_refresh_scheduler(manager, app_state) -> None:
         _loop._last_purge = 0.0   # 留存清理按小时级执行(四审 5.4: 每 30s 一次 DELETE 过频)
         _loop._last_gc = 120.0    # 二十审 9.5: 启动 ~2min 后先跑一轮 GC(清历史孤儿)
         while not _refresh_stop.wait(30):
-            # 三十九审 P1-D: tick 顶层异常屏障——此前 acquire_lease 等个别
-            # 调用在保护块外, 一次瞬时 DB 异常逃出 _loop 会永久杀死线程
+            # tick 顶层异常屏障: 单个任务异常不能逃出 _loop 并永久杀死线程
             # (元数据刷新/健康巡检/留存清理/GC 全部静默停止, health 仍绿)。
             # 屏障记录失败计数后继续下一 tick; 存活/计数经
             # scheduler_status() 暴露给 health detail。
@@ -109,6 +128,7 @@ def _start_refresh_scheduler(manager, app_state) -> None:
 def _scheduler_tick(_loop, manager, app_state) -> None:
     """单个调度 tick(三十九审 P1-D 从 _loop 抽出, 便于顶层屏障与测试)。"""
     now = _now_ts()
+    tick_errors = []
     from domains.chatbi.runtime import get_pack_db as _get_db
     try:
         _lease_db = _get_db()
@@ -119,42 +139,44 @@ def _scheduler_tick(_loop, manager, app_state) -> None:
         raise
     # 统计留存清理(每小时一次; 设置 retention 缺省 90 天, 0=关)
     if now - _loop._last_purge >= 3600:
-        _loop._last_purge = now
         try:
             retention = int(_load_settings(app_state)
                             .get("query_stats_retention_days", 90))
             if retention > 0:
                 from domains.chatbi.query_stats import purge_stats
-                # 十八审 6.4: 跨进程租约——多 worker 只有一个执行
-                if acquire_lease(_lease_db, "purge_stats", ttl_seconds=900):
-                    purged = purge_stats(_lease_db, retention)
-                    if purged:
-                        logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
+                purged = purge_stats(_lease_db, retention)
+                if purged:
+                    logger.info("查询统计留存清理: 删除 %d 条(>%d天)", purged, retention)
+            _loop._last_purge = now
         except Exception as e:
             logger.warning("查询统计清理失败(下轮重试): %s", e)
-    # 索引台账 GC(二十审 9.5: 周期回收, 不再只依赖新版本发布事件;
-    # 租约互斥; grace/TTL/保留代际来自正式配置)
+            tick_errors.append(f"query stats purge: {e}")
+    # 索引台账 GC:周期回收,不只依赖新版本发布事件。
     if now - _loop._last_gc >= 3600:
-        _loop._last_gc = now
         try:
-            if acquire_lease(_lease_db, "index_gc", ttl_seconds=900):
-                # 二十审 8.1: 此前引用未定义的 runtime 且异常被
-                # 裸 except 吞掉——周期 GC 从未真正执行
-                _gc_store = None
+            _gc_store = None
+            try:
+                from domains.chatbi import stores as _cb_stores
+                _gc_store = _cb_stores.get_vector(app_state)
+            except Exception as e:
+                logger.warning("周期索引 GC 取向量设施失败"
+                               "(本轮跳过): %s", e)
+            if _gc_store is not None:
                 try:
-                    from domains.chatbi import stores as _cb_stores
-                    _gc_store = _cb_stores.get_vector(app_state)
+                    _run_periodic_index_gc(_lease_db, app_state,
+                                           _gc_store)
                 except Exception as e:
-                    logger.warning("周期索引 GC 取向量设施失败"
-                                   "(本轮跳过): %s", e)
-                if _gc_store is not None:
-                    try:
-                        _run_periodic_index_gc(_lease_db, app_state,
-                                               _gc_store)
-                    except Exception as e:
-                        logger.error("周期索引 GC 执行失败: %s", e)
+                    logger.error("周期索引 GC 执行失败: %s", e)
+                    tick_errors.append(f"index GC: {e}")
+                else:
+                    _loop._last_gc = now
+            else:
+                # 向量设施是可选依赖；不可用不算 tick 失败，仍按正常
+                # 周期退避，避免每 30 秒重复探测和刷 WARNING。
+                _loop._last_gc = now
         except Exception as e:
             logger.warning("周期索引 GC 失败(下轮重试): %s", e)
+            tick_errors.append(f"index GC setup: {e}")
     # 健康巡检: 设置周期(缺省 300s)
     try:
         health_iv = int(_load_settings(app_state)
@@ -162,49 +184,44 @@ def _scheduler_tick(_loop, manager, app_state) -> None:
     except Exception:
         health_iv = 300
     if health_iv > 0 and now - _loop._last_health >= health_iv:
-        _loop._last_health = now
         try:
             from domains.chatbi import datasources as ds_mod
-            # 十八审 6.4: 租约防止多 worker 重复计数停用
-            if acquire_lease(_lease_db, "health_check",
-                             ttl_seconds=max(120, health_iv // 2)):
-                ds_mod.check_all_health(
-                    _lease_db,
-                    max_failures=int(_load_settings(app_state)
-                                     .get("health_check_max_failures", 3)))
+            ds_mod.check_all_health(
+                _lease_db,
+                max_failures=int(_load_settings(app_state)
+                                 .get("health_check_max_failures", 3)))
+            _loop._last_health = now
         except Exception as e:
             logger.warning("健康巡检失败(下轮重试): %s", e)
+            tick_errors.append(f"datasource health: {e}")
     # 元数据刷新: 设置周期
     try:
         hours = float(_load_settings(app_state).get("metadata_refresh_hours", 6))
     except Exception:
         hours = 6
-    # TODO(soak-diag): 定位 refresh 未触发, 收完撤
-    if hours <= 0:
-        return
-    if now - _loop._last_refresh < hours * 3600:
-        return
-    # 十八审 6.4: 跨进程租约——同时到期的多个 worker 只有一个提交;
-    # 未抢到的也推进本地时钟(该周期由持有者负责)
-    if not acquire_lease(_lease_db, "refresh_semantics",
-                         ttl_seconds=900):
-        _loop._last_refresh = now
-        return
-    try:
-        manager.submit("chatbi.refresh_semantics", payload={},
-                       dedupe_key="chatbi:refresh:all")
-        _loop._last_refresh = now   # 九审 7.4: submit成功后才推进
-        _loop._refresh_fail_count = 0  # 十审 7.5: 成功清零(连续计数)
-        logger.info("元数据定时刷新已提交 (周期 %gh)", hours)
-    except Exception as e:
-        # 九审 7.4: 失败短退避(下一个30s tick重试), 不丢完整周期
-        _loop._refresh_fail_count = getattr(_loop, '_refresh_fail_count', 0) + 1
-        if _loop._refresh_fail_count <= 10:  # 最多 ~5分钟 内重试
-            logger.warning("元数据定时刷新提交失败(第%d次, 下tick重试): %s",
-                           _loop._refresh_fail_count, e)
-        else:
-            _loop._last_refresh = now  # 放弃本周期
-            logger.error("元数据定时刷新连续失败10次, 跳过本周期: %s", e)
+    if hours > 0 and now - _loop._last_refresh >= hours * 3600:
+        try:
+            manager.submit("chatbi.refresh_semantics", payload={},
+                           dedupe_key="chatbi:refresh:all")
+            _loop._last_refresh = now   # 九审 7.4: submit成功后才推进
+            _loop._refresh_fail_count = 0  # 十审 7.5: 成功清零(连续计数)
+            logger.info("元数据定时刷新已提交 (周期 %gh)", hours)
+        except Exception as e:
+            # 九审 7.4: 失败短退避(下一个30s tick重试), 不丢完整周期
+            _loop._refresh_fail_count = getattr(
+                _loop, '_refresh_fail_count', 0) + 1
+            if _loop._refresh_fail_count <= 10:  # 最多 ~5分钟 内重试
+                logger.warning("元数据定时刷新提交失败(第%d次, 下tick重试): %s",
+                               _loop._refresh_fail_count, e)
+            else:
+                _loop._last_refresh = now  # 放弃本周期
+                logger.error("元数据定时刷新连续失败10次, 跳过本周期: %s", e)
+            tick_errors.append(f"metadata refresh submit: {e}")
+
+    if tick_errors:
+        # 交给 _loop 的统一屏障累计 consecutive_failures。各子任务仍已
+        # 完成自身日志和局部重试时间语义，单项失败不会阻断同 tick 的其它项。
+        raise RuntimeError("; ".join(tick_errors))
 
 def scheduler_status() -> dict:
     """调度器运行状态(三十九审 P1-D: health detail / readiness 暴露)。
@@ -241,8 +258,6 @@ def stop_refresh_scheduler(stopped_by: str = "manual") -> None:
     卸载停止的 scheduler 不是"死亡", health 不应据此摘除流量。
     """
     global _refresh_thread, _refresh_stop
-    if stopped_by == "unload":
-        _scheduler_state["stopped_by_unload"] = True
     if _refresh_stop is not None:
         _refresh_stop.set()
     if _refresh_thread is not None and _refresh_thread.is_alive():
@@ -250,9 +265,14 @@ def stop_refresh_scheduler(stopped_by: str = "manual") -> None:
         # 十一审 7.7: join 后确认退出——未退出保留引用, 拒绝新 scheduler
         if _refresh_thread.is_alive():
             logger.error('chatbi scheduler 5s 内未退出——保留引用, 拒绝新 scheduler')
-            return  # 不清引用(防空线程+新线程双跑)
+            raise RuntimeError(
+                "chatbi scheduler 5s 内未退出，插件卸载未完成")
     _refresh_thread = None
     _refresh_stop = None
+    if stopped_by == "unload":
+        # 只有线程确认退出后才声明为合法卸载。提前置位会把卸载失败
+        # 伪装成 stopped_by_unload，health 随后错误地报告正常。
+        _scheduler_state["stopped_by_unload"] = True
 
 
 def _now_ts() -> float:
@@ -260,108 +280,11 @@ def _now_ts() -> float:
     return time.monotonic()   # 九审 7.4: 单调时钟, 不受 wall clock 跳变影响
 
 
-# ── 十八审 6.4: 定时任务跨进程租约(多 worker 唯一性) ──────────────
-
-_SCHEDULER_HOLDER = None
+# ── 后台任务执行期租约与 fencing ───────────────────────────────
 
 # pg_input_is_valid 可用性缓存(三十二审 P1; None = 未确认/探测异常
 # ——只缓存真实查询结果, 瞬时错误不落缓存, 下次重试探测)
 _PG_INPUT_VALID_CACHE = None
-
-
-def _scheduler_holder() -> str:
-    """本进程的租约持有者标识(主机:进程)。"""
-    global _SCHEDULER_HOLDER
-    if _SCHEDULER_HOLDER is None:
-        import os
-        import socket
-        import uuid
-        _SCHEDULER_HOLDER = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
-    return _SCHEDULER_HOLDER
-
-
-def acquire_lease(db, task_type: str, holder: str | None = None,
-                  ttl_seconds: int = 300) -> bool:
-    """抢占/续期租约(十九审 6.6: 过期判定用数据库时钟, 不信本地钟)。
-
-    任何异常返回 False(租约不可用时宁可跳过, 不重复执行)。
-    二十六审 P1: token 列迁移失败 → 直接拒绝放行(fail-closed)。
-    二十八审 P1-A: UPSERT 改为 RETURNING——acquire 与本次 token 在
-    同一事务原子返回, 调用方(RunLease.acquire)不再"先 acquire 后
-    另行读 token"(两步间隙内租约可被接管+同 holder 重获, 读到的
-    已是别人的 token)。
-    """
-    tok = acquire_lease_token(db, task_type, holder, ttl_seconds)
-    return tok is not None
-
-
-def acquire_lease_token(db, task_type: str, holder: str | None = None,
-                        ttl_seconds: int = 300) -> int | None:
-    """抢占/续期租约并**原子返回本次生效的 token**(二十八审 P1-A)。
-
-    expires_at 存 epoch 毫秒文本, 数值比较在 SQL 侧完成:
-      - 无记录 → 插入, 本持有者获得;
-      - 持有者是本人 → 无条件续期(heartbeat 同原语), token 不变;
-      - 持有者是他人且未过期 → 不动, 返回 None;
-      - 已过期(DB 时钟判定) → 抢占并铸造新 token。
-    返回 None = 未获得/未续上; 返回 token = 本次事务内生效的代际。
-    """
-    holder = holder or _scheduler_holder()
-    if not ensure_lease_token_column(db):
-        logger.error("租约 %s 拒绝获取: token 列迁移未完成(fencing "
-                     "降级运行不安全, fail-closed 跳过本轮)", task_type)
-        return None
-    try:
-        with db.connect() as conn:
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases ("
-                "task_type TEXT PRIMARY KEY, holder TEXT NOT NULL, "
-                "expires_at TEXT NOT NULL, token BIGINT)")
-            conn.execute(
-                "CREATE SEQUENCE IF NOT EXISTS chatbi_lease_token_seq")
-            # ISO expiry 迁移(三十审 P1-B 抽出为共享原语
-            # _migrate_lease_expiry, claim/renew 两条路径都执行)
-            _migrate_lease_expiry(conn)
-            # now 由数据库给出并直接参与比较(跨主机时钟偏差免疫)
-            # token 只在所有权变更时轮换(二十四审 6): 续租(同 holder)
-            # 保持旧 token——否则每次心跳轮换会让并发 fenced 写被误拒;
-            # 接管(不同 holder 或过期抢占)铸造新 token, 旧 writer 的旧
-            # token 从此永远无法通过写前校验
-            # 二十八审 P1-A: RETURNING 原子取回本次生效 token——UPSERT
-            # 与读取同事务, 消除"acquire 成功但另读 token"的换代间隙
-            row = conn.execute(
-                "WITH n AS (SELECT (extract(epoch FROM now())*1000)::bigint AS nowms), "
-                "up AS (INSERT INTO chatbi_scheduler_leases "
-                "(task_type, holder, expires_at, token) "
-                "SELECT ?, ?, ((SELECT nowms FROM n) + ?)::text, "
-                "nextval('chatbi_lease_token_seq') FROM n "
-                "ON CONFLICT (task_type) DO UPDATE SET "
-                "holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at, "
-                "token = CASE WHEN chatbi_scheduler_leases.holder "
-                "                     = EXCLUDED.holder "
-                "             THEN chatbi_scheduler_leases.token "
-                "             ELSE nextval('chatbi_lease_token_seq') END "
-                "WHERE chatbi_scheduler_leases.holder = EXCLUDED.holder "
-                "   OR (chatbi_scheduler_leases.expires_at ~ '^[0-9]+$' "
-                "       AND chatbi_scheduler_leases.expires_at::bigint "
-                "           <= (SELECT nowms FROM n)) "
-                "RETURNING holder, token) "
-                "SELECT holder, token FROM up "
-                "UNION ALL "
-                "SELECT holder, token FROM chatbi_scheduler_leases "
-                "WHERE task_type = ? "
-                "  AND NOT EXISTS (SELECT 1 FROM up) "
-                "  AND holder = ? "
-                "  AND expires_at ~ '^[0-9]+$' "
-                "  AND expires_at::bigint > (SELECT nowms FROM n)",
-                (task_type, holder, int(ttl_seconds) * 1000,
-                 task_type, holder)).fetchone()
-        if row and row["holder"] == holder and row["token"] is not None:
-            return int(row["token"])
-        return None
-    except Exception as e:
-        logger.warning("租约 %s 获取失败(跳过本轮防重复): %s", task_type, e)
-        return None
 
 
 def _migrate_lease_expiry(conn, db=None) -> None:
@@ -372,8 +295,7 @@ def _migrate_lease_expiry(conn, db=None) -> None:
          有效, 新实例只能等它过期, 不双执行);
       2) 可解析且已过期 → 删除(允许本次 claim 接管);
       3) 不可解析 → 保留并告警(fail-closed, 不猜测)。
-    此前这段只在 acquire_lease_token(renew 路径)里, 二十九审新增
-    的 claim_lease_token 没有复用——升级前遗留的过期 ISO 执行租约
+    此前 claim_lease_token 没有复用这段迁移——升级前遗留的过期 ISO 执行租约
     永远无法被新 claim 接管(真实复现: '2020-01-01T00:00:00+00:00'
     的行挡住 RunLease, 任务持续"另一实例执行中"失败)。
     必须在租约行写入前调用(同一事务内)。
@@ -461,12 +383,8 @@ def claim_lease_token(db, task_type: str, holder: str,
                       ttl_seconds: int = 900) -> int | None:
     """执行期租约的**初次 claim**(二十九审 P2-A: 与 renew 分离)。
 
-    acquire_lease_token 的"同 holder 无条件续期"语义对 heartbeat 正确,
-    但对新的 RunLease 对象是漏洞: 两个对象用相同 key/holder 时都
-    acquire=True 且共享同一 token, 两个写屏障都通过(真实复现:
-    A/B 同时 execute_if_owned 执行)。TaskManager 正常路径每次
-    submit 生成新 UUID task id 所以未触发, 但原语必须自身具备
-    执行实例隔离。本函数:
+    初次 claim 与 heartbeat 续租必须是不同语义: 两个新的 RunLease
+    对象即使用相同 key/holder, 也不能共享同一 token。本函数:
       - 任何未过期行(含同 holder)都拒绝 → 返回 None;
       - 无行/已过期 → 插入/接管并**始终铸造新 token**(同 holder
         过期重获也换新代, 旧对象的旧 token 立即作废);
@@ -475,7 +393,6 @@ def claim_lease_token(db, task_type: str, holder: str,
     原语)——过期 ISO 行被删除后本次 claim 可接管; 未来 ISO 保留
     持有权; 不可解析 fail-closed 告警。
     """
-    holder = holder or _scheduler_holder()
     if not ensure_lease_token_column(db):
         logger.error("租约 %s 拒绝获取: token 列迁移未完成(fencing "
                      "降级运行不安全, fail-closed 跳过本轮)", task_type)
@@ -523,7 +440,7 @@ def ensure_lease_token_column(db) -> bool:
     报错会毒化当前事务(aborted), Python 吞异常救不回来——同事务后续
     语句全部失败(实测: 列已存在时第二次调用起租约获取全挂)。
 
-    二十六审 P1: 返回 bool(迁移是否就绪)。失败时 acquire_lease/
+    二十六审 P1: 返回 bool(迁移是否就绪)。失败时
     RunLease.acquire 拒绝放行——此前只 logger.error 后继续, NULL
     token 兼容分支会让 fencing 降级运行(fail-open), 违反项目
     fail-closed 约束。
@@ -568,36 +485,18 @@ def ensure_lease_token_column(db) -> bool:
         return False
 
 
-def lease_token(db, task_type: str, holder: str):
-    """读当前 holder 的 fencing token(无/已易主返回 None)。"""
-    try:
-        with db.connect() as conn:
-            row = conn.execute(
-                "SELECT token FROM chatbi_scheduler_leases "
-                "WHERE task_type = ? AND holder = ?",
-                (task_type, holder)).fetchone()
-        return int(row["token"]) if row and row["token"] is not None else None
-    except Exception:
-        return None
+def release_lease(db, task_type: str, holder: str, token: int) -> bool:
+    """按 holder + token 释放本执行对象持有的租约。
 
-
-def release_lease(db, task_type: str, holder: str,
-                  token: int | None = None) -> bool:
-    """释放本人持有的租约(任务终态 finally 调用)。仅删自己的行。
-
-    二十七审 P1(holder ABA): token 非空时 DELETE 条件必须含 token——
-    自动重试复用同一 task id(holder 相同)时, 旧对象若只按 holder 删,
-    会误删同 holder 新 token 的租约(真实复现: 旧 147 → other →
-    同 holder 151, 旧 release 删掉 151)。token=None 仅限无 token 的
-    兼容路径(scheduler 级短租约, 无执行期 fencing 语义)。
+    holder 会在任务重试时复用，单独按 holder 删除存在 ABA 风险；token
+    必须参与条件，旧执行对象不得删除同 holder 的新代租约。
     """
     try:
         with db.connect() as conn:
             cur = conn.execute(
                 "DELETE FROM chatbi_scheduler_leases "
-                "WHERE task_type = ? AND holder = ? "
-                + ("AND token = ?" if token is not None else ""),
-                (task_type, holder) + ((token,) if token is not None else ()))
+                "WHERE task_type = ? AND holder = ? AND token = ?",
+                (task_type, holder, token))
             return bool(getattr(cur, "rowcount", 0))
     except Exception as e:
         logger.warning("租约 %s 释放失败(等 TTL 过期): %s", task_type, e)
@@ -630,8 +529,8 @@ class RunLease:
 
         - claim_lease_token: 任何未过期行(含同 holder)都拒绝——两个
           执行对象用相同 key/holder 时只有一个 claim 成功(此前
-          acquire_lease_token 的"同 holder 无条件续期"语义会让两个
-          对象共享同一 token, 两个写屏障都通过);
+          旧的同 holder 续租式 claim 会让两个对象共享同一 token,
+          两个写屏障都通过);
         - 过期接管(含同 holder 过期重获)始终铸造新 token——旧对象的
           旧 token 立即作废;
         - 返回 None(未获得/token 不可知)→ 拒绝执行, 不做任何二次

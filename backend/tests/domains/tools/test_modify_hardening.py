@@ -20,7 +20,8 @@ class TestKeywordHintsMissingKey:
     """真实模板渲染：guide 缺 keywordIndex 不再崩（StrictUndefined 下点访问曾直接抛错）。"""
 
     @pytest.fixture(scope="class")
-    def loader(self):
+    @classmethod
+    def loader(cls):
         from engine.prompt_loader import PromptLoader
         # 真实 pack 模板（backend/src/domains）
         src_root = Path(__file__).resolve().parents[3] / "src"

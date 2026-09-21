@@ -1,6 +1,6 @@
 """ToolRegistry 测试。"""
 import pytest
-from sdk.registry import ToolRegistry
+from sdk.registry import ToolRegistry, ToolRegistrationError
 from sdk.tool import Tool, ToolResult, ToolContext
 
 
@@ -31,6 +31,12 @@ class TestToolRegistry:
     def test_get_missing_returns_none(self):
         r = ToolRegistry()
         assert r.get("nope") is None
+
+    def test_duplicate_name_fails_closed(self):
+        r = ToolRegistry()
+        r.register(FakeTool("same"))
+        with pytest.raises(ToolRegistrationError, match="重复注册"):
+            r.register(FakeTool("same"))
 
     def test_describe_for_llm_lists_tools(self):
         r = ToolRegistry()

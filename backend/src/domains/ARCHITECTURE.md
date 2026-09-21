@@ -3,7 +3,8 @@
 > 本文档覆盖 pack 的运行机制（工具/链路/路由/追问）与 SDK 存储设施。
 > 新插件上手速览见同目录 `README.md`;完整开发指南（manifest/依赖门控/
 > 插件 HTTP API/后台任务/管理页）见 `doc/插件开发与嵌入指南.md`。
-> pack.py 可选钩子（`create_api_router` / `register_tasks` / `unload`）、
+> pack.py 可选钩子（`create_api_router` / `register_tasks` / `start` /
+> `health_status` / `unload`）、
 > manifest 依赖声明、任务框架的说明在文末「进阶」节。
 
 ## 核心概念
@@ -370,7 +371,15 @@ def create_registry() -> ToolRegistry:
 | `create_registry()` | 必须:工具注册 | `knowledge_graph/pack.py` |
 | `create_api_router()` | 插件自有 HTTP API,挂 `/api/packs/{name}` 前缀,启停热挂卸 | `knowledge_graph/api.py` |
 | `register_tasks(mgr, app_state)` | 注册后台任务 handler | `knowledge_graph/tasks.py` |
+| `start(app_state, task_manager)` | commit 成功后启动插件资源或启动收敛 | `chatbi/pack.py`、`knowledge_graph/pack.py` |
+| `health_status()` | 向平台 readiness 返回本插件健康状态 | `chatbi/pack.py` |
 | `unload()` | 释放连接/注销 SDK 前缀等清理 | `knowledge_graph/pack.py` |
+
+插件默认全部可选，ChatBI 不具有平台级必选地位。加载失败只隔离当前 pack，
+健康异常以 warning 暴露而不摘除整个平台实例。只有部署显式设置
+`PACKS_CRITICAL` 时，名单内且当前启用的 pack 才把自身失败提升为整次装配
+fail-fast。每个 pack 的原子完整性要求由自身 manifest 的 `runtime_contract`
+声明；默认模式缺件会隔离整包，不会留下半装配插件，平台也不维护具体 pack 清单。
 
 配套机制：
 

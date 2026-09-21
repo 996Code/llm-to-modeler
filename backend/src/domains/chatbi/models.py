@@ -223,10 +223,8 @@ CHATBI_DDL = [
         report TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )""",
-    # 十八审 6.4: 定时任务跨进程租约——refresh/health/purge 在多 worker
-    # 部署下只有一个持有者执行(过期可被抢占)
-    # 二十四审 6: token 单调递增(每次 acquire 发放新值)——旧 holder 即使
-    # 恢复, 其旧 token 也无法通过写前校验(真 fencing)
+    # 后台语义写任务的执行期租约。单实例内仍有多个 TaskManager worker；
+    # token 单调递增，旧任务恢复后也无法通过写前校验(fencing)。
     """CREATE TABLE IF NOT EXISTS chatbi_scheduler_leases (
         task_type TEXT PRIMARY KEY,
         holder TEXT NOT NULL,

@@ -18,6 +18,7 @@ pack 的 api.py 需要两类鉴权语义:管理端(X-Admin-Token)与用户级
     async def search(...): ...
 """
 import logging
+import os
 from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import HTTPException, Request
@@ -112,15 +113,19 @@ class DuplicateTaskError(RuntimeError):
     操作,异常属插件可见契约);平台 TaskManager 抛出本类型。"""
 
 
+class TaskRegistrationError(ValueError):
+    """任务类型注册契约冲突(名称非法或与已有 pack 重名)。"""
+
+
 # ── pack 装配契约异常(三十三审 P1)─────────────────────────
 
 class PackConfigurationError(RuntimeError):
-    """pack 的致命配置/兼容性错误——loader 不得吞掉, 必须传播到
-    lifespan 让服务启动失败。
+    """pack 自身无法安全运行的配置/兼容性错误。
 
     与"可选依赖缺失"(dependency gate 跳过, 服务可降级运行)的
-    区别: 本异常表示 pack 声明了自己无法安全运行的状态(非法配置
-    值、不兼容的数据库版本等)。平台 loader 对本类型不 catch-continue。
+    区别: 本异常表示 pack 必须整体拒绝加载(非法配置值、不兼容的
+    数据库版本等)。默认只跳过该可选 pack；仅 PACKS_CRITICAL 显式
+    声明时才传播并阻断整次启动/装配。
     """
 
 
@@ -128,22 +133,21 @@ class PackIncompatibleError(PackConfigurationError):
     """pack 与运行环境不兼容(如数据库版本低于硬性要求)。"""
 
 
-# ── critical pack 契约(三十五审 P1-A: 单一真相源)──────────
-# 此前 critical 名单散落在 domains/__init__、pack_manager、
-# pack_api_mount 三处各自复制——新增 critical pack 或修改语义时
-# 必须同步三处, 漏一处就是"部分 ChatBI 假 ready"的窗口。
-# 所有模块(包括 domains 和 services)一律从本函数读取。
+# ── 部署级 fail-fast pack 契约 ─────────────────────────────
+# 所有 pack 默认可选、可独立启停。只有部署方显式配置 PACKS_CRITICAL
+# 时，名单内且本次启用的 pack 才以“失败阻断整次装配”的方式运行。
+# 这不是必选名单：禁用名单内 pack 仍然合法。
 
 def critical_packs() -> frozenset:
-    """critical pack 名单(启用即必须完整可用, 任一必需组件失败
-    终止启动/装配)。
+    """返回部署方显式要求 fail-fast 的 pack 名单，默认空。
 
-    语义: critical pack 的依赖失败、import 失败、registry/router/
-    handler 构造失败、schema 迁移失败、**任何加载阶段**的普通
-    异常都必须终止——不允许"部分 critical pack"的假 ready。
-    其它可选 pack 保持尽力而为策略。
+    ``PACKS_CRITICAL=foo,bar`` 表示 foo/bar 被启用时若加载失败，整次
+    启动或热装配失败；它们被停用仍然合法。未配置时，一个插件失败
+    只影响自身，不得拖垮其它插件。
     """
-    return frozenset({"chatbi"})
+    raw = os.getenv("PACKS_CRITICAL", "")
+    return frozenset(
+        name.strip() for name in raw.split(",") if name.strip())
 
 
 

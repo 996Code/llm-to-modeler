@@ -1204,38 +1204,6 @@ class TestReportLifecycle:
         assert get_merge_report(pg_engine, ds) is None
 
 
-class TestSchedulerLease:
-    """P1 6.4: 跨进程租约——同时只有一个持有者, 过期可抢占."""
-
-    def test_lease_exclusive_and_reclaim(self, pg_engine):
-        from domains.chatbi.tasks import acquire_lease
-        assert acquire_lease(pg_engine, "refresh_semantics",
-                             holder="worker-a", ttl_seconds=300)
-        # 他人未过期 → 拒绝
-        assert not acquire_lease(pg_engine, "refresh_semantics",
-                                 holder="worker-b", ttl_seconds=300)
-        # 本人续期 → 成功
-        assert acquire_lease(pg_engine, "refresh_semantics",
-                             holder="worker-a", ttl_seconds=300)
-        # 过期后他人抢占
-        from datetime import datetime, timedelta, timezone
-        expired = (datetime.now(timezone.utc)
-                   - timedelta(seconds=1)).isoformat()
-        with pg_engine.connect() as conn:
-            conn.execute(
-                "UPDATE chatbi_scheduler_leases SET expires_at = ? "
-                "WHERE task_type = ?", (expired, "refresh_semantics"))
-        assert acquire_lease(pg_engine, "refresh_semantics",
-                             holder="worker-b", ttl_seconds=300)
-
-    def test_lease_independent_per_task_type(self, pg_engine):
-        from domains.chatbi.tasks import acquire_lease
-        assert acquire_lease(pg_engine, "health_check",
-                             holder="worker-a", ttl_seconds=120)
-        assert acquire_lease(pg_engine, "purge_stats",
-                             holder="worker-b", ttl_seconds=900)
-
-
 # ════════════════════════════════════════════════════════════════
 # 十九审反例回归: 乱序报告/长键身份/GC 成功代际/执行期租约
 # ════════════════════════════════════════════════════════════════
@@ -1466,9 +1434,10 @@ class TestExecutionLease:
 
     def test_expired_lease_taken_over(self, pg_engine):
         """持有者崩溃(无释放)→ TTL 过期(DB 时钟判定)→ 他人接管."""
-        from domains.chatbi.tasks import acquire_lease, RunLease
-        assert acquire_lease(pg_engine, "run:scan:ds-y", holder="task:dead",
-                             ttl_seconds=300)
+        from domains.chatbi.tasks import claim_lease_token, RunLease
+        assert claim_lease_token(
+            pg_engine, "run:scan:ds-y", holder="task:dead",
+            ttl_seconds=300) is not None
         # 模拟 TTL 流逝: 直接把 expires_at 拨回过去(epoch ms 格式)
         with pg_engine.connect() as conn:
             conn.execute(
@@ -1481,14 +1450,15 @@ class TestExecutionLease:
     def test_concurrent_claims_single_winner(self, pg_engine):
         """多线程同时 claim 同一租约 → 恰好一个成功(真实并发)."""
         import threading
-        from domains.chatbi.tasks import acquire_lease
+        from domains.chatbi.tasks import claim_lease_token
         winners = []
         barrier = threading.Barrier(8)
 
         def worker(i):
             barrier.wait()
-            ok = acquire_lease(pg_engine, "run:refresh_semantics",
-                               holder=f"task:w{i}", ttl_seconds=300)
+            ok = claim_lease_token(
+                pg_engine, "run:refresh_semantics",
+                holder=f"task:w{i}", ttl_seconds=300) is not None
             if ok:
                 winners.append(i)
 
@@ -2265,7 +2235,7 @@ class TestLeaseTokenFencing:
 
     def test_token_rotates_only_on_takeover(self, pg_engine):
         """续租保持 token, 接管轮换 token(轮换式设计缺陷的反例锚)."""
-        from domains.chatbi.tasks import RunLease, lease_token
+        from domains.chatbi.tasks import RunLease
         key = "run:semantic_write:tok-1"
         with pg_engine.connect() as c:
             c.execute("DELETE FROM chatbi_scheduler_leases WHERE task_type=?", (key,))
@@ -2368,9 +2338,8 @@ class TestHolderABA:
         retry.release()
         other.release()
 
-    def test_acquire_cleanup_does_not_delete_existing_lease(self, pg_engine):
-        """acquire 后 token 读失败 → 清理只删自己的行, 不误删同 holder
-        既有新租约(ABA 清理面)."""
+    def test_release_requires_matching_token(self, pg_engine):
+        """释放必须同时匹配 holder 与 token，不能误删同 holder 新租约。"""
         from domains.chatbi.tasks import RunLease, release_lease
         key = "run:semantic_write:aba-2"
         with pg_engine.connect() as c:
@@ -2381,27 +2350,7 @@ class TestHolderABA:
                        ttl_seconds=300)
         assert cur.acquire() and cur.token is not None
         t_new = cur.token
-        # 旧对象按 holder 弱删(不传 token)——删得掉行, 但这是兼容路径
-        # 的已知语义; 真正的防线在 RunLease.release/heartbeat/assert
-        # 全部带 token(见上), 生产代码不再有不带 token 的调用点
-        weak_deleted = release_lease(pg_engine, key, "task:same")
-        if weak_deleted:
-            # 弱删确实能删掉(历史行为)——恢复行, 继续验证带 token 路径
-            with pg_engine.connect() as c:
-                c.execute(
-                    "INSERT INTO chatbi_scheduler_leases "
-                    "(task_type, holder, expires_at, token) VALUES "
-                    "(?, 'task:same', '9999999999999', ?)",
-                    (key, t_new))
-        # 带 token 的删除对正确 token 生效
-        assert release_lease(pg_engine, key, "task:same", token=t_new) is True
-        # 带**错误** token 删不掉(ABA 防线本体)
-        with pg_engine.connect() as c:
-            c.execute(
-                "INSERT INTO chatbi_scheduler_leases "
-                "(task_type, holder, expires_at, token) VALUES "
-                "(?, 'task:same', '9999999999999', ?)",
-                (key, t_new))
+        # 错误 token 删不掉(ABA 防线本体)
         assert release_lease(pg_engine, key, "task:same",
                              token=t_new + 1) is False, (
             "错误 token 的删除删掉了租约(ABA)")
@@ -2410,6 +2359,7 @@ class TestHolderABA:
                 "SELECT token FROM chatbi_scheduler_leases "
                 "WHERE task_type=?", (key,)).fetchone()
         assert row is not None and int(row["token"]) == t_new
+        # 正确 token 才能释放
         assert release_lease(pg_engine, key, "task:same", token=t_new) is True
         cur.release()
 
@@ -3275,6 +3225,7 @@ class TestRetryConfigFailFast:
         """
         import domains
         from sdk.pack_api import PackConfigurationError
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
         # 只加载 chatbi, 且让 create_registry 抛致命错误
         monkeypatch.setenv("PACK_DDL_RETRY_ATTEMPTS", "1.9")
         try:
@@ -3354,6 +3305,10 @@ class TestCriticalPackContract:
     ready(真实注入: loaded 只有 knowledge_graph)。
     """
 
+    @pytest.fixture(autouse=True)
+    def _critical_chatbi(self, monkeypatch):
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
+
     def test_tool_constructor_failure_blocks_multipack(self):
         """多 pack 下 chatbi 工具构造失败 → 终止(不静默跳过)."""
         import domains
@@ -3427,7 +3382,10 @@ class TestCriticalPackContract:
 
         ok_state = types.SimpleNamespace(
             task_manager=types.SimpleNamespace(
-                _handlers={"chatbi.refresh_semantics": lambda h: None}))
+                _handlers={"chatbi.refresh_semantics": lambda h: None},
+                _handler_meta={
+                    "chatbi.refresh_semantics": {"packName": "chatbi"},
+                }))
         result = {
             "loaded": ["chatbi"],
             "pack_tools": {"chatbi": ["ask_data", "switch_chart"]},
@@ -3564,6 +3522,10 @@ class TestCriticalFullExceptionDomain:
     knowledge_graph——普通异常分支 catch-continue 了 critical。
     """
 
+    @pytest.fixture(autouse=True)
+    def _critical_chatbi(self, monkeypatch):
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
+
     def test_ordinary_load_exception_blocks_multipack(self):
         import domains
         from sdk.pack_api import PackConfigurationError
@@ -3586,6 +3548,25 @@ class TestCriticalFullExceptionDomain:
                 pass
         finally:
             domains.load_pack = real
+
+    def test_chatbi_failure_is_isolated_by_default(self, monkeypatch):
+        """未配置 PACKS_CRITICAL 时 ChatBI 失败只跳过自身。"""
+        import domains
+
+        monkeypatch.delenv("PACKS_CRITICAL", raising=False)
+        real = domains.load_pack
+
+        def _broken(pack_name, app_state=None):
+            if pack_name == "chatbi":
+                raise RuntimeError("simulated optional chatbi failure")
+            return real(pack_name, app_state=app_state)
+
+        monkeypatch.setattr(domains, "load_pack", _broken)
+        _, _, routers, tools, _ = domains.load_all_packs(
+            pack_names=["chatbi", "leave_application"])
+        assert "chatbi" not in routers
+        assert "chatbi" not in tools
+        assert "leave_application" in routers
 
     def test_assert_receives_requested(self):
         """断言接收 requested: requested 含 critical 而 loaded 不含
@@ -3624,6 +3605,15 @@ class TestCriticalFullExceptionDomain:
         assert not hasattr(pm, "_CRITICAL_PACKS"), (
             "pack_manager 仍有旧名单(应只有 requirements 明细)")
 
+    def test_default_is_empty_and_deployment_configurable(self, monkeypatch):
+        """ChatBI 默认不是必要插件；fail-fast 只能由部署显式声明。"""
+        from sdk.pack_api import critical_packs
+
+        monkeypatch.delenv("PACKS_CRITICAL", raising=False)
+        assert critical_packs() == frozenset()
+        monkeypatch.setenv("PACKS_CRITICAL", " knowledge_graph, chatbi ")
+        assert critical_packs() == frozenset({"knowledge_graph", "chatbi"})
+
 
 class TestTwoPhaseAssembly:
     """P1-B: 两阶段装配——新 router 构造失败时旧 route 完好.
@@ -3631,6 +3621,10 @@ class TestTwoPhaseAssembly:
     真实注入(审计): mount 先 _unmount_all 再构造, 新 ChatBI
     router 失败时旧 route 已消失(old_route_survives=False)。
     """
+
+    @pytest.fixture(autouse=True)
+    def _critical_chatbi(self, monkeypatch):
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
 
     def test_old_routes_survive_new_router_failure(self, monkeypatch):
         from fastapi import FastAPI
@@ -3701,35 +3695,8 @@ class TestRecheckSharesLock:
             "recheck 未使用 hot_reload_lock(无锁热装配入口)")
 
 
-class TestPackStateMultiWorkerCAS:
-    """P2: 两个独立 PackState 实例(多 worker)不丢更新.
-
-    真实复现(审计): worker A 禁用 X, worker B 基于旧快照禁用 Y,
-    磁盘上 X 又回来了(后写者覆盖)。
-    """
-
-    def test_two_writers_no_lost_update(self):
-        import json
-        import os
-        import tempfile
-        from services.pack_state import PackState
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "state.json")
-        packs = ["chatbi", "knowledge_graph", "njmind_form"]
-        try:
-            a = PackState(path, packs)
-            b = PackState(path, packs)   # worker B: 同一起点
-            a.set_enabled("knowledge_graph", False)
-            b.set_enabled("njmind_form", False)   # B 基于旧快照
-            disk = json.load(open(path))
-            assert "knowledge_graph" not in disk["enabled"], (
-                "A 的禁用被 B 覆盖丢失(stale writer)")
-            assert "njmind_form" not in disk["enabled"], (
-                "B 的变更丢失")
-            assert disk.get("revision", 0) >= 2, "revision 未递增"
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
+class TestChatBIRuntimeRequirements:
+    """ChatBI 在装配阶段必须满足的运行时要求。"""
 
     def test_pg16_required_at_assembly(self, monkeypatch):
         """三十三审 P2: PG<16 / 探测失败都在装配期被拒(fail-closed).
@@ -4011,10 +3978,10 @@ class TestDateLikePoisonIsolation:
 # ════════════════════════════════════════════════════════════════
 
 class TestLeaseMigrationFailClosed:
-    """P1 5.1: token 列迁移失败时 acquire 必须拒绝放行(fail-closed).
+    """P1 5.1: token 列迁移失败时 RunLease 必须拒绝放行(fail-closed).
 
     此前 ensure_lease_token_column 只 logger.error 不返回状态,
-    acquire_lease 继续执行——NULL token 兼容分支让 fencing 降级
+    claim 若继续执行，NULL token 会让 fencing 降级
     运行(fail-open), 违反项目安全约束。
     """
 
@@ -4028,9 +3995,6 @@ class TestLeaseMigrationFailClosed:
         # 模拟迁移失败(sequence/回填故障): ensure 返回 False
         monkeypatch.setattr(tasks_mod, "ensure_lease_token_column",
                             lambda db: False)
-        assert tasks_mod.acquire_lease(pg_engine, key, holder="task:x") is (
-            False), "迁移失败仍放行(fail-open)"
-        # RunLease 同样拒绝
         lease = tasks_mod.RunLease(pg_engine, key, holder="task:x",
                                    ttl_seconds=300)
         assert lease.acquire() is False, "RunLease 在迁移失败后仍 acquired"
@@ -4286,7 +4250,7 @@ class TestEventFailureAcknowledgement:
 
 
 # ════════════════════════════════════════════════════════════════
-# 三十六审回归: 真事务化装配 / route 提交原子性 / 磁盘权威 CAS / 多 worker
+# 三十六审回归: 真事务化装配 / route 提交原子性 / 运行时要求
 # ════════════════════════════════════════════════════════════════
 
 class TestAssembleTransaction:
@@ -4297,6 +4261,10 @@ class TestAssembleTransaction:
     routers/_loaded_packs/handlers 已被替换(runtime 污染)。
     事务化后: 断言在 Prepare 段(staging)失败, 运行态零触碰。
     """
+
+    @pytest.fixture(autouse=True)
+    def _critical_chatbi(self, monkeypatch):
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
 
     def _build_app_state(self):
         from types import SimpleNamespace
@@ -4442,17 +4410,8 @@ class TestRouteCommitAtomicity:
             pack_mod.create_api_router = _real_create
 
 
-class TestPackStateDiskAuthoritativeCAS:
-    """P2-A: 磁盘权威 CAS 的四类反例(三十六审 4.3).
-
-    A. stale no-op: B 持旧内存, 磁盘已被 A 改; B 显式反向操作
-       必须按磁盘判定 changed 并落盘(不再 changed=False)。
-    B. 历史触碰: B 曾动过 KG(旧算法终身 _touched), fresh A 后来
-       启用 KG; B 写无关 pack 不得把 KG 覆盖回 disabled。
-    C. 同 pack 冲突: A 禁→B(旧内存)再禁 → changed=False 磁盘不变;
-       A 启→B(旧内存)再禁 → changed=True 落盘禁用。
-    D. 多轮交替: A/B 交替写不同 pack, 全部保留。
-    """
+class TestPackStateTransactionPersistence:
+    """单实例 toggle 事务在 runtime commit 后才持久化。"""
 
     PACKS = ["chatbi", "knowledge_graph", "njmind_form"]
 
@@ -4461,81 +4420,6 @@ class TestPackStateDiskAuthoritativeCAS:
         tmpdir = tempfile.mkdtemp()
         path = os.path.join(tmpdir, "state.json")
         return path, tmpdir
-
-    def test_stale_noop_reverse_applies(self):
-        import json
-        from services.pack_state import PackState
-        path, tmpdir = self._tmp_state()
-        try:
-            b = PackState(path, self.PACKS)            # B 先起(内存 KG enabled)
-            a = PackState(path, self.PACKS)
-            a.set_enabled("knowledge_graph", False)   # A 禁用 → 磁盘 disabled
-            assert b.is_enabled("knowledge_graph")     # B 旧内存仍 enabled
-            changed = b.set_enabled("knowledge_graph", True)
-            disk = json.load(open(path))
-            assert changed is True, (
-                "stale 实例的反向操作被误判 no-op(changed=False)")
-            assert "knowledge_graph" in disk["enabled"], (
-                "磁盘未应用 stale 实例的显式启用")
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_historical_touch_not_sticky(self):
-        import json
-        from services.pack_state import PackState
-        path, tmpdir = self._tmp_state()
-        try:
-            b = PackState(path, self.PACKS)
-            b.set_enabled("knowledge_graph", False)   # B 曾禁 KG
-            a = PackState(path, self.PACKS)            # fresh A
-            a.set_enabled("knowledge_graph", True)     # A 启用 KG
-            b.set_enabled("njmind_form", False)        # B 写无关 pack
-            disk = json.load(open(path))
-            assert "knowledge_graph" in disk["enabled"], (
-                "B 的历史触碰把 KG 覆盖回 disabled(丢 A 的更新)")
-            assert "njmind_form" not in disk["enabled"], (
-                "B 本次操作丢失")
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_same_pack_conflict_disk_wins(self):
-        import json
-        from services.pack_state import PackState
-        path, tmpdir = self._tmp_state()
-        try:
-            a = PackState(path, self.PACKS)
-            a.set_enabled("knowledge_graph", False)
-            b = PackState(path, self.PACKS)            # B 见到 disabled
-            a.set_enabled("knowledge_graph", True)     # A 又启用
-            changed = b.set_enabled("knowledge_graph", False)
-            disk = json.load(open(path))
-            # B 旧内存=disabled, 磁盘=enabled → 按磁盘判 changed=True
-            assert changed is True, "同 pack 冲突按旧内存误判 no-op"
-            assert "knowledge_graph" not in disk["enabled"], (
-                "磁盘未应用 B 的禁用")
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_alternating_writes_all_preserved(self):
-        import json
-        from services.pack_state import PackState
-        path, tmpdir = self._tmp_state()
-        try:
-            a = PackState(path, self.PACKS)
-            b = PackState(path, self.PACKS)
-            a.set_enabled("njmind_form", False)
-            b.set_enabled("knowledge_graph", False)
-            a.set_enabled("knowledge_graph", True)
-            disk = json.load(open(path))
-            assert "njmind_form" not in disk["enabled"], "A 的禁用丢失"
-            assert "knowledge_graph" in disk["enabled"], (
-                "A 的重新启用被 B 的旧快照覆盖")
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_persist_after_mem_toggle(self):
         """toggle 内存暂存 → runtime commit 后 persist() 落盘(失败零落盘)."""
@@ -4551,7 +4435,8 @@ class TestPackStateDiskAuthoritativeCAS:
             assert not os.path.exists(path), (
                 "persist=False 仍落盘(失败路径会留下错位文件)")
             a.persist()
-            disk = json.load(open(path))
+            with open(path, encoding="utf-8") as state_file:
+                disk = json.load(state_file)
             assert "knowledge_graph" not in disk["enabled"], (
                 "persist() 未落盘内存变更")
         finally:
@@ -4559,110 +4444,12 @@ class TestPackStateDiskAuthoritativeCAS:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class TestMultiWorkerGuard:
-    """P2-B: 共享状态文件的进程数 > 1 时动态管理被拒(503)."""
-
-    def test_count_holders_detects_second_process(self):
-        import json
-        import os
-        import subprocess
-        import sys
-        import tempfile
-        import time
-        from services.pack_state import count_state_file_holders
-
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "state.json")
-        try:
-            # 本进程注册
-            from services.pack_state import register_state_holder
-            register_state_holder(path)
-            # 起一个真实子进程也注册同一状态文件
-            # 三十七审 P3: src 路径用本测试文件的绝对位置推导——
-            # 此前硬编码相对 'src' 只在 backend/ cwd 下可跑
-            import pathlib
-            src_dir = pathlib.Path(__file__).resolve().parents[2] / "src"
-            code = (
-                "import sys, time; sys.path.insert(0, "
-                f"{str(src_dir)!r});"
-                "from services.pack_state import register_state_holder;"
-                f"register_state_holder({path!r});"
-                "print('ready', flush=True);"
-                "time.sleep(30)"
-            )
-            proc = subprocess.Popen(
-                [sys.executable, "-c", code],
-                stdout=subprocess.PIPE, text=True)
-            try:
-                proc.stdout.readline()   # 等 ready
-                time.sleep(0.3)
-                holders = count_state_file_holders(path)
-                assert holders >= 2, (
-                    f"双进程未检出(holders={holders})——多 worker "
-                    f"检测失效")
-            finally:
-                proc.kill()
-                proc.wait()
-        finally:
-            import shutil
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_toggle_rejected_when_multi_worker(self, monkeypatch):
-        """holders>1 时 toggle/recheck 返回 503(不进装配)."""
-        from fastapi.testclient import TestClient
-        from api import admin as admin_mod
-
-        called = {"assemble": 0}
-
-        def _fake_assemble(*a, **kw):
-            called["assemble"] += 1
-            return {"loaded": [], "tools": 0}
-
-        monkeypatch.setattr(
-            "services.pack_manager.assemble_packs", _fake_assemble)
-        import services.pack_state as ps_mod
-        monkeypatch.setattr(
-            ps_mod, "count_state_file_holders", lambda p: 2)
-
-        # 构造最小 request
-        from types import SimpleNamespace
-        from fastapi import FastAPI
-
-        app = FastAPI()
-        app.state.pack_state = SimpleNamespace(
-            state_path="/tmp/x.json",
-            is_discovered=lambda n: True,
-            enabled_names=lambda: {"chatbi"},
-        )
-
-        from fastapi.testclient import TestClient
-        c = TestClient(app)
-
-        class _Req:
-            pass
-
-        # 直接调 _reject_multi_worker 验证 503
-        from fastapi import HTTPException
-        req = SimpleNamespace(app=app)
-        try:
-            admin_mod._reject_multi_worker(req)
-            raise AssertionError("多 worker 未被拒绝")
-        except HTTPException as e:
-            assert e.status_code == 503, f"期望 503, 得到 {e.status_code}"
-        assert called["assemble"] == 0, "被拒后仍触发了装配"
-
-
 # ════════════════════════════════════════════════════════════════
 # 三十七审回归: toggle 事务 / prepare 无副作用 / enhancer 事务 / unload
 # ════════════════════════════════════════════════════════════════
 
 class TestToggleTransaction:
-    """P1-A: 已有状态文件 + 重启 + 首次 toggle 的四方一致性.
-
-    审计反例: POST 200 但 persist 把磁盘/内存恢复成旧值(立即 GET 反弹)。
-    根因: _read_file 不初始化 _last_seen_disk + persist 从整份内存
-    集合推断删除意图。修复: persist 落盘"本次精确操作"。
-    """
+    """已有状态文件 + 重启 + 首次 toggle 的四方一致性。"""
 
     PACKS = ["chatbi", "knowledge_graph", "leave_application", "njmind_form"]
 
@@ -4686,9 +4473,8 @@ class TestToggleTransaction:
                 "leave_application", False, persist=False)
             assert changed is True
             b.persist()
-            disk = json.load(open(path))["enabled"]
-            assert "leave_application" not in disk["enabled"] if isinstance(
-                disk, dict) else True
+            with open(path, encoding="utf-8") as state_file:
+                disk = json.load(state_file)["enabled"]
             assert "leave_application" not in disk, (
                 f"磁盘反弹: {disk}")
             assert "leave_application" not in b.enabled_names(), (
@@ -4708,11 +4494,15 @@ class TestToggleTransaction:
         try:
             a = PackState(path, self.PACKS)
             a.set_enabled("knowledge_graph", False)
-            before = open(path).read()
-            rev_before = json.load(open(path))["revision"]
+            with open(path, encoding="utf-8") as state_file:
+                before = state_file.read()
+            with open(path, encoding="utf-8") as state_file:
+                rev_before = json.load(state_file)["revision"]
             a.persist()   # 无 pending
-            after = open(path).read()
-            rev_after = json.load(open(path))["revision"]
+            with open(path, encoding="utf-8") as state_file:
+                after = state_file.read()
+            with open(path, encoding="utf-8") as state_file:
+                rev_after = json.load(state_file)["revision"]
             assert before == after and rev_before == rev_after, (
                 "无 pending 的 persist 不应写盘")
         finally:
@@ -4861,6 +4651,118 @@ class TestUnloadAfterDisable:
             f"禁用 KG 后 unload 未执行: {unload_calls}")
         assert state._loaded_packs == ["njmind_form"]
 
+    def test_unload_failure_is_not_reported_as_success(self, monkeypatch):
+        """卸载失败可能留下后台资源，finalize 必须失败并留下诊断。"""
+        from services import pack_manager as pm
+        from types import SimpleNamespace
+        import domains.knowledge_graph.pack as kg_pack
+
+        def _boom():
+            raise RuntimeError("simulated unload failure")
+
+        monkeypatch.setattr(kg_pack, "unload", _boom)
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def replace_handlers(self, handlers, metadata):
+                self._handlers = dict(handlers)
+                self._handler_meta = dict(metadata)
+
+        state = SimpleNamespace(task_manager=_TM())
+        state._loaded_packs = ["knowledge_graph", "njmind_form"]
+        state.llm_client = object()
+        state.asset_client = object()
+        state.conversation_manager = object()
+
+        summary = pm.assemble_packs(state, ["njmind_form"], app=None)
+        with pytest.raises(RuntimeError, match="unload 未完整完成"):
+            pm.finalize_assembly(state, summary["_tx"])
+        assert "卸载失败" in state._pack_lifecycle_errors["knowledge_graph"]
+
+    def test_chatbi_scheduler_stop_failure_propagates(self, monkeypatch):
+        """ChatBI 不得吞掉 scheduler 停止失败并继续释放运行时缓存。"""
+        import domains.chatbi.pack as chatbi_pack
+        import domains.chatbi.tasks as chatbi_tasks
+        import domains.chatbi.stores as chatbi_stores
+
+        reset_calls = []
+
+        def _stop_failed(*args, **kwargs):
+            raise RuntimeError("scheduler still alive")
+
+        monkeypatch.setattr(
+            chatbi_tasks, "stop_refresh_scheduler", _stop_failed)
+        monkeypatch.setattr(
+            chatbi_stores, "reset_caches", lambda: reset_calls.append(True))
+
+        with pytest.raises(RuntimeError, match="scheduler still alive"):
+            chatbi_pack.unload()
+        assert reset_calls == [], "scheduler 未停时不应释放其仍可能访问的缓存"
+
+
+class TestLifecycleStartScope:
+    """插件 start 只用于新增 pack 或重试上次启动失败的 pack。"""
+
+    @staticmethod
+    def _tx(old_loaded):
+        return {
+            "snapshot": {"state": {"_loaded_packs": old_loaded}},
+            "pack_routers": {"chatbi": object()},
+            "task_manager": object(),
+            "app": None,
+        }
+
+    def test_unchanged_pack_is_not_started_again(self, monkeypatch):
+        from services.pack_manager import finalize_assembly
+        from types import SimpleNamespace
+        import domains.chatbi.pack as chatbi_pack
+
+        starts = []
+        monkeypatch.setattr(
+            chatbi_pack, "start", lambda *args: starts.append("chatbi"))
+        state = SimpleNamespace(
+            _loaded_packs=["chatbi"], _pack_lifecycle_errors={})
+
+        finalize_assembly(state, self._tx(["chatbi"]))
+        assert starts == [], "切换无关插件时重复调用了既有 pack.start"
+
+    def test_failed_lifecycle_is_retried(self, monkeypatch):
+        from services.pack_manager import finalize_assembly
+        from types import SimpleNamespace
+        import domains.chatbi.pack as chatbi_pack
+
+        starts = []
+        monkeypatch.setattr(
+            chatbi_pack, "start", lambda *args: starts.append("chatbi"))
+        state = SimpleNamespace(
+            _loaded_packs=["chatbi"],
+            _pack_lifecycle_errors={"chatbi": "previous failure"})
+
+        finalize_assembly(state, self._tx(["chatbi"]))
+        assert starts == ["chatbi"]
+        assert state._pack_lifecycle_errors == {}
+
+
+class TestKnowledgeGraphAtomicContract:
+    """KG 核心工具失败时不得以 loaded + 空 registry 继续运行。"""
+
+    def test_core_tool_failure_rejects_pack(self, monkeypatch):
+        import domains.knowledge_graph.pack as kg_pack
+        import domains.knowledge_graph.tools.kb_search as kb_module
+        from sdk.pack_api import PackConfigurationError
+
+        class _BrokenTool:
+            def __init__(self, app_state):
+                raise RuntimeError("broken kb tool")
+
+        monkeypatch.setattr(kb_module, "KbSearchTool", _BrokenTool)
+        with pytest.raises(PackConfigurationError, match="kb_search"):
+            kg_pack.create_registry(object())
+
 
 class TestNoFileNoopKeepsMemory:
     """P2: 无状态文件时 no-op 不清空内存 enabled."""
@@ -4880,35 +4782,6 @@ class TestNoFileNoopKeepsMemory:
             assert sorted(c.enabled_names()) == before, (
                 f"no-op 清空了内存: {c.enabled_names()}")
             assert not os.path.exists(path), "no-op 不应创建文件"
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-
-class TestHolderFailClosed:
-    """P2: 持有者检测失效时管理操作被拒(fail-closed)."""
-
-    def test_count_returns_negative_on_read_error(self, monkeypatch):
-        import builtins
-        from services.pack_state import count_state_file_holders
-        import os
-        import tempfile
-        import shutil
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "state.json")
-        try:
-            # 造 holders 文件, 再让 open 全部失败
-            holders = os.path.join(tmpdir, "state.holders")
-            open(holders, "w").write('{"pid": 1, "ts": 9999999999}\n')
-            real_open = builtins.open
-
-            def _broken_open(f, *a, **kw):
-                if str(f) == holders:
-                    raise OSError("simulated read failure")
-                return real_open(f, *a, **kw)
-
-            monkeypatch.setattr(builtins, "open", _broken_open)
-            n = count_state_file_holders(path)
-            assert n == -1, f"检测失效应返回 -1(fail-closed), 得到 {n}"
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -5040,6 +4913,7 @@ class TestLifecycleFailureVisible:
         from services import pack_manager as pm
         from sdk.pack_api import PackConfigurationError
         from domains.chatbi import tasks as chatbi_tasks
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
 
         def _boom(manager, app_state):
             raise RuntimeError("scheduler boom")
@@ -5068,11 +4942,12 @@ class TestLifecycleFailureVisible:
             raise AssertionError("scheduler 失败仍 finalize 成功")
         except PackConfigurationError:
             pass
+        assert state._pack_lifecycle_errors["chatbi"] == "scheduler boom"
 
     def test_kg_recovery_runs_once(self, monkeypatch):
         """P2-B: KG stale recovery 每进程只执行一次(startup-only)."""
-        from services import pack_manager as pm
         from domains.knowledge_graph import tasks as kg_tasks
+        from domains.knowledge_graph import pack as kg_pack
         from types import SimpleNamespace
 
         calls = []
@@ -5099,11 +4974,10 @@ class TestLifecycleFailureVisible:
             kg_tasks, "_recover_stale_importing",
             lambda m: calls.append("run"))
 
-        # 直接测 once guard: 连续两次调用只执行一次
-        # (不走 assemble——KG 依赖在测试环境未配置, loader 会跳过)
-        pm._KG_RECOVERY_DONE = False
-        pm._run_kg_startup_recovery_once(kg_tasks, None)
-        pm._run_kg_startup_recovery_once(kg_tasks, None)
+        # 直接测 pack 自有 once guard: 连续两次调用只执行一次。
+        kg_pack._RECOVERY_DONE = False
+        kg_pack.start(state, state.task_manager)
+        kg_pack.start(state, state.task_manager)
         assert calls == ["run"], (
             f"KG recovery 应只执行一次(实际 {calls})")
 
@@ -5147,33 +5021,8 @@ class TestEnhancerDetach:
             f"禁用后 config_api 残留: {asset._config_api}")
 
 
-class TestHolderClose:
-    """P3: holder close 后线程退出, 目录不重建."""
-
-    def test_close_stops_thread_and_no_rebuild(self):
-        import os
-        import shutil
-        import tempfile
-        import time
-        from services.pack_state import register_state_holder
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "s.json")
-        try:
-            h = register_state_holder(path)
-            time.sleep(0.1)
-            h.close()
-            assert not h._thread.is_alive(), "close 后线程仍存活"
-            shutil.rmtree(tmpdir)
-            time.sleep(1)   # 短周期验证(close 后 wait 立即返回, 不会重建)
-            assert not os.path.exists(tmpdir), (
-                "close 后目录被心跳重建")
-        finally:
-            if os.path.exists(tmpdir):
-                shutil.rmtree(tmpdir, ignore_errors=True)
-
-
 # ════════════════════════════════════════════════════════════════
-# 三十九审回归: 事务阶段状态机/rollback 传播/scheduler 屏障/holder 契约
+# 三十九审回归: 事务阶段状态机 / rollback 传播 / scheduler 屏障
 # ════════════════════════════════════════════════════════════════
 
 class TestTransactionStages:
@@ -5189,6 +5038,7 @@ class TestTransactionStages:
         from services.pack_state import PackState
         from domains.chatbi import tasks as chatbi_tasks
         from sdk.pack_api import PackConfigurationError
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
 
         def _boom(manager, app_state):
             raise RuntimeError("scheduler boom")
@@ -5218,7 +5068,8 @@ class TestTransactionStages:
             summary = pm.assemble_packs(
                 state, sorted(ps.enabled_names()), app=None)
             ps.persist()
-            disk = json.load(open(ps.state_path))["enabled"]
+            with open(ps.state_path, encoding="utf-8") as state_file:
+                disk = json.load(state_file)["enabled"]
             try:
                 pm.finalize_assembly(state, summary["_tx"])
                 raise AssertionError("finalize 应抛")
@@ -5290,125 +5141,20 @@ class TestSchedulerBarrier:
         assert "scheduler_status" in src, (
             "health detail 未暴露 scheduler 组件")
 
-    def test_tick_survives_lease_error(self):
-        """tick 内 acquire_lease 抛 → 异常传播(屏障捕获), 不静默."""
-        from types import SimpleNamespace
+    def test_tick_has_no_distributed_short_lease(self):
+        """单实例 scheduler 不应为周期任务增加数据库租约往返。"""
+        import inspect
         from domains.chatbi import tasks as ct
-
-        def _boom_lease(*a, **kw):
-            raise RuntimeError("transient lease DB error")
-        orig = ct.acquire_lease
-        ct.acquire_lease = _boom_lease
-        try:
-            loop_state = SimpleNamespace(
-                _last_purge=0.0, _last_gc=0.0,
-                _last_health=0.0, _last_refresh=0.0)
-            try:
-                ct._scheduler_tick(loop_state, None, None)
-                raise AssertionError("lease 异常应传播到屏障")
-            except RuntimeError:
-                pass
-        finally:
-            ct.acquire_lease = orig
-
-
-class TestHolderUUIDIdentity:
-    """P1-C/P2-B: UUID 身份 + close 完整契约."""
-
-    def test_two_handles_refcount(self):
-        import os
-        import tempfile
-        import time
-        import shutil
-        from services.pack_state import (
-            register_state_holder, count_state_file_holders)
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "s.json")
-        try:
-            h1 = register_state_holder(path)
-            h2 = register_state_holder(path)
-            assert count_state_file_holders(path) == 1
-            h1.close()   # 关一个: 另一个仍活
-            time.sleep(0.2)
-            assert count_state_file_holders(path) == 1, (
-                "关闭一个共享 handle 不应注销槽位")
-            assert h2._thread.is_alive()
-            h2.close()
-            h2.close()   # 幂等
-            time.sleep(0.2)
-            assert count_state_file_holders(path) == 0, "全关后槽位未注销"
-            assert not h2._thread.is_alive()
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_close_no_atexit_rebuild(self):
-        """close + 删目录 + 子进程退出 → 目录不重建."""
-        import os
-        import shutil
-        import subprocess
-        import sys
-        import tempfile
-        import time
-        import pathlib
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "s.json")
-        src_dir = pathlib.Path(__file__).resolve().parents[2] / "src"
-        code = (
-            "import sys, time; sys.path.insert(0, "
-            f"{str(src_dir)!r});"
-            "from services.pack_state import register_state_holder;"
-            f"h = register_state_holder({path!r});"
-            "h.close(); print('closed', flush=True); time.sleep(0.5)"
-        )
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True)
-        assert "closed" in r.stdout, r.stderr
-        shutil.rmtree(tmpdir)
-        time.sleep(1)
-        assert not os.path.exists(tmpdir), (
-            "close 后 atexit 仍重建目录")
-
-    def test_two_processes_distinct_uuid(self):
-        """两个独立进程(模拟容器)各自 UUID, count=2."""
-        import os
-        import shutil
-        import subprocess
-        import sys
-        import tempfile
-        import time
-        import pathlib
-        from services.pack_state import count_state_file_holders
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "s.json")
-        src_dir = pathlib.Path(__file__).resolve().parents[2] / "src"
-        code = (
-            "import sys, time; sys.path.insert(0, "
-            f"{str(src_dir)!r});"
-            "from services.pack_state import register_state_holder;"
-            f"register_state_holder({path!r});"
-            "print('ready', flush=True); time.sleep(20)"
-        )
-        procs = [subprocess.Popen(
-            [sys.executable, "-c", code],
-            stdout=subprocess.PIPE, text=True) for _ in range(2)]
-        try:
-            for p in procs:
-                p.stdout.readline()
-            time.sleep(0.5)
-            assert count_state_file_holders(path) == 2, (
-                "双进程未按 UUID 计数(身份碰撞)")
-        finally:
-            for p in procs:
-                p.kill(); p.wait()
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        src = inspect.getsource(ct._scheduler_tick)
+        assert "acquire_lease(" not in src
 
 
 class TestKGRecoveryRetry:
     """P2-C: recovery 失败不置 done, 重试到成功."""
 
     def test_first_failure_retries(self, monkeypatch):
-        from services import pack_manager as pm
         from domains.knowledge_graph import tasks as kg_tasks
+        from domains.knowledge_graph import pack as kg_pack
 
         calls = []
 
@@ -5418,23 +5164,44 @@ class TestKGRecoveryRetry:
                 raise RuntimeError("transient recovery error")
 
         monkeypatch.setattr(kg_tasks, "_recover_stale_importing", _flaky)
-        pm._KG_RECOVERY_DONE = False
+        kg_pack._RECOVERY_DONE = False
+        state = type("State", (), {})()
+        manager = type("Manager", (), {})()
         try:
             try:
-                pm._run_kg_startup_recovery_once(kg_tasks, None)
+                kg_pack.start(state, manager)
             except RuntimeError:
                 pass
-            assert pm._KG_RECOVERY_DONE is False, (
+            assert kg_pack._RECOVERY_DONE is False, (
                 "首次失败就置 done(永不重试)")
-            pm._run_kg_startup_recovery_once(kg_tasks, None)
+            kg_pack.start(state, manager)
             assert calls == ["run", "run"], "第二次未重试"
-            assert pm._KG_RECOVERY_DONE is True, "成功后未置 done"
+            assert kg_pack._RECOVERY_DONE is True, "成功后未置 done"
         finally:
-            pm._KG_RECOVERY_DONE = False
+            kg_pack._RECOVERY_DONE = False
+
+    def test_false_result_retries(self, monkeypatch):
+        """真实 recovery 吞异常并返回 False 时也不能永久置 done。"""
+        from domains.knowledge_graph import tasks as kg_tasks
+        from domains.knowledge_graph import pack as kg_pack
+
+        results = iter([False, True])
+        monkeypatch.setattr(
+            kg_tasks, "_recover_stale_importing", lambda manager: next(results))
+        kg_pack._RECOVERY_DONE = False
+        state = type("State", (), {})()
+        manager = type("Manager", (), {})()
+        try:
+            kg_pack.start(state, manager)
+            assert kg_pack._RECOVERY_DONE is False
+            kg_pack.start(state, manager)
+            assert kg_pack._RECOVERY_DONE is True
+        finally:
+            kg_pack._RECOVERY_DONE = False
 
 
 # ════════════════════════════════════════════════════════════════
-# 四十审回归: 编排入口级组合故障 / holder callback 所有权 / scheduler 语义
+# 四十审回归: 编排入口级组合故障 / scheduler 语义
 # ════════════════════════════════════════════════════════════════
 
 class TestToggleMemoryRollbackFailure:
@@ -5469,7 +5236,6 @@ class TestToggleMemoryRollbackFailure:
 
         app = FastAPI()
         app.state.pack_state = ps
-        app.state.pack_state_holder = None
         app.state.task_manager = _TM()
         app.state.llm_client = object()
         app.state.asset_client = None
@@ -5532,7 +5298,6 @@ class TestToggleMemoryRollbackFailure:
 
         app = FastAPI()
         app.state.pack_state = ps
-        app.state.pack_state_holder = None
         app.state.task_manager = _TM()
         app.state.llm_client = object()
         app.state.asset_client = None
@@ -5556,78 +5321,54 @@ class TestToggleMemoryRollbackFailure:
             assert "knowledge_graph" in ps.enabled_names()
             assert "knowledge_graph" in app.state._loaded_packs
 
+    def test_prepare_failure_and_memory_rollback_failure_degrades(
+            self, monkeypatch, tmp_path):
+        """assemble 尚未返回时，内存补偿失败也不能谎报已回滚。"""
+        from types import SimpleNamespace
+        from fastapi import FastAPI, HTTPException
+        import api.admin as admin_mod
+        import services.pack_manager as pack_manager
+        from services.pack_state import PackState
 
-class TestHolderCallbackOwnership:
-    """P2: 多 handle 的 atexit callback 所有权(绑共享线程)."""
+        pack_state = PackState(
+            str(tmp_path / "state.json"),
+            ["knowledge_graph", "leave_application"])
+        original_set = pack_state.set_enabled
+        toggled = False
 
-    def test_multi_handle_no_atexit_rebuild(self):
-        """双 handle 依次 close + 删目录 + atexit → 不重建."""
-        import atexit
-        import os
-        import pathlib
-        import shutil
-        import subprocess
-        import sys
-        import tempfile
-        import time
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "s.json")
-        src_dir = pathlib.Path(__file__).resolve().parents[2] / "src"
-        code = (
-            "import sys, atexit; sys.path.insert(0, "
-            f"{str(src_dir)!r});"
-            "from services.pack_state import register_state_holder;"
-            f"h1 = register_state_holder({path!r});"
-            f"h2 = register_state_holder({path!r});"
-            "h1.close(); h2.close();"
-            "print('closed', flush=True);"
-            "atexit._run_exitfuncs();"
-            "print('exitfuncs done', flush=True);"
-            "import time as _t; _t.sleep(0.3)"
-        )
-        r = subprocess.run([sys.executable, "-c", code],
-                           capture_output=True, text=True, timeout=30)
-        assert "closed" in r.stdout and "exitfuncs done" in r.stdout, r.stderr
-        shutil.rmtree(tmpdir)
-        time.sleep(0.5)
-        assert not os.path.exists(tmpdir), (
-            "多 handle 全关后 atexit 仍重建目录")
+        def fail_on_rollback(name, enabled, persist=True):
+            nonlocal toggled
+            if name == "knowledge_graph" and not enabled and not persist:
+                toggled = True
+                return original_set(name, enabled, persist=False)
+            if toggled and name == "knowledge_graph" and enabled and not persist:
+                raise RuntimeError("pending memory rollback boom")
+            return original_set(name, enabled, persist=persist)
 
-    def test_concurrent_register_close(self):
-        """并发 register/close 无死锁无泄漏(锁保护)."""
-        import os
-        import shutil
-        import tempfile
-        import threading
-        from services.pack_state import (
-            register_state_holder, count_state_file_holders)
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "s.json")
-        handles = []
-        try:
-            def _worker():
-                for _ in range(20):
-                    h = register_state_holder(path)
-                    handles.append(h)
-            threads = [threading.Thread(target=_worker)
-                       for _ in range(4)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            # 全部关闭
-            for h in handles:
-                h.close()
-            import time
-            time.sleep(0.3)
-            assert count_state_file_holders(path) == 0, (
-                "并发关闭后槽位未清零")
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        pack_state.set_enabled = fail_on_rollback
+        monkeypatch.setattr(
+            pack_manager, "assemble_packs",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError("prepare failed")))
+
+        app = FastAPI()
+        app.state.pack_state = pack_state
+        request = SimpleNamespace(app=app)
+
+        with pytest.raises(HTTPException) as exc_info:
+            admin_mod._toggle_pack(request, "knowledge_graph", False)
+
+        assert "Rollback FAILED" in str(exc_info.value.detail)
+        assert "State rolled back" not in str(exc_info.value.detail)
+        assert app.state.pack_runtime_degraded is True
 
 
 class TestSchedulerReadiness:
     """P2: DB 失败算失败 + readiness 聚合(ever_started 语义)."""
+
+    @pytest.fixture(autouse=True)
+    def _critical_chatbi(self, monkeypatch):
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
 
     def test_db_failure_counts_as_failure(self):
         """tick 的 DB 获取失败上抛(屏障计数), 不再算成功."""
@@ -5652,6 +5393,37 @@ class TestSchedulerReadiness:
         finally:
             rt.get_pack_db = _orig
 
+    def test_child_operation_failure_reaches_barrier(self, monkeypatch):
+        """子任务失败必须上抛到 tick 屏障，且失败项下个 tick 可重试。"""
+        from types import SimpleNamespace
+        import domains.chatbi.tasks as ct
+        import domains.chatbi.runtime as rt
+        import domains.chatbi.query_stats as stats
+
+        now = ct._now_ts()
+        loop_state = SimpleNamespace(
+            _last_purge=0.0,
+            _last_gc=now,
+            _last_health=now,
+            _last_refresh=now,
+        )
+        monkeypatch.setattr(rt, "get_pack_db", lambda: object())
+        monkeypatch.setattr(
+            ct, "_load_settings", lambda state: {
+                "query_stats_retention_days": 90,
+                "health_check_interval_seconds": 300,
+                "metadata_refresh_hours": 6,
+            })
+
+        def _purge_failed(*args, **kwargs):
+            raise RuntimeError("purge db error")
+
+        monkeypatch.setattr(stats, "purge_stats", _purge_failed)
+        with pytest.raises(RuntimeError, match="query stats purge"):
+            ct._scheduler_tick(loop_state, object(), object())
+        assert loop_state._last_purge == 0.0, (
+            "失败后提前推进了 purge 时间戳，下一 tick 不会重试")
+
     def test_readiness_lifecycle(self):
         """ever_started 语义: 未启动不阻塞; 启动后死亡/持续失败变红."""
         import domains.chatbi.tasks as ct
@@ -5672,6 +5444,7 @@ class TestSchedulerReadiness:
         c = TestClient(main.app)
         state = SimpleNamespace(task_manager=_TM())
         try:
+            main.app.state._loaded_packs = ["chatbi"]
             # 未启动: health 200
             ct._scheduler_state.clear()
             ct.stop_refresh_scheduler()
@@ -5697,6 +5470,7 @@ class TestSchedulerReadiness:
         finally:
             ct.stop_refresh_scheduler()
             ct._scheduler_state.clear()
+            main.app.state._loaded_packs = []
 
 
 # ════════════════════════════════════════════════════════════════
@@ -5709,6 +5483,10 @@ class TestSchedulerUnloadReadiness:
     审计反例: 禁用 chatbi(合法 unload 停 scheduler)→ health 503
     "scheduler thread dead"——按设计关闭可选 pack 被误判为平台故障。
     """
+
+    @pytest.fixture(autouse=True)
+    def _critical_chatbi(self, monkeypatch):
+        monkeypatch.setenv("PACKS_CRITICAL", "chatbi")
 
     def test_unload_stop_keeps_health_green(self):
         """unload 路径的 stop → health 200; 手动/异常 stop → 503."""
@@ -5730,6 +5508,7 @@ class TestSchedulerUnloadReadiness:
         c = TestClient(main.app)
         state = SimpleNamespace(task_manager=_TM())
         try:
+            main.app.state._loaded_packs = ["chatbi"]
             ct._scheduler_state.clear()
             ct.stop_refresh_scheduler()
             # 启动 → 200
@@ -5747,88 +5526,289 @@ class TestSchedulerUnloadReadiness:
         finally:
             ct.stop_refresh_scheduler()
             ct._scheduler_state.clear()
+            main.app.state._loaded_packs = []
 
     def test_threshold_invalid_falls_back(self, monkeypatch):
         """P3: 非法阈值回退缺省 5, 不在请求路径抛 ValueError."""
-        from api import health as h
+        from domains.chatbi import tasks as h
         monkeypatch.setenv("SCHEDULER_FAIL_THRESHOLD", "not-a-number")
-        h._SCHEDULER_FAIL_THRESHOLD_CACHE = -1
-        assert h._scheduler_fail_threshold() == 5
+        h._FAIL_THRESHOLD_CACHE = -1
+        assert h.scheduler_failure_threshold() == 5
         monkeypatch.setenv("SCHEDULER_FAIL_THRESHOLD", "-3")
-        h._SCHEDULER_FAIL_THRESHOLD_CACHE = -1
-        assert h._scheduler_fail_threshold() == 5
+        h._FAIL_THRESHOLD_CACHE = -1
+        assert h.scheduler_failure_threshold() == 5
         monkeypatch.setenv("SCHEDULER_FAIL_THRESHOLD", "10")
-        h._SCHEDULER_FAIL_THRESHOLD_CACHE = -1
-        assert h._scheduler_fail_threshold() == 10
+        h._FAIL_THRESHOLD_CACHE = -1
+        assert h.scheduler_failure_threshold() == 10
 
 
-class TestHolderRegisterCloseRace:
-    """P2: register 与最后 close 交错不产生孤儿句柄."""
+class TestPluginHealthBoundary:
+    """平台 readiness 通过 pack hook 聚合，不硬编码领域模块。"""
 
-    def test_interleaved_close_register(self):
-        """barrier 暂停 close 的 unregister, 交错 register.
+    def test_optional_pack_health_is_warning_not_platform_failure(self, monkeypatch):
+        from types import SimpleNamespace
+        from api import health
 
-        修复前: register 复用正在关闭的线程 → close 完成后
-        refcount>0 + 线程死 + 表缺失的孤儿句柄。
-        修复后: register 在锁内看到 stopping/表已移除 → 新建完整线程。
-        """
-        import os
-        import shutil
-        import tempfile
-        import threading
-        import time
-        from services import pack_state as ps
+        app = SimpleNamespace(state=SimpleNamespace(_loaded_packs=["demo"]))
+        request = SimpleNamespace(app=app)
+        demo = SimpleNamespace(
+            health_status=lambda: {"status": "degraded", "detail": "demo down"})
+        monkeypatch.setattr(health.importlib, "import_module", lambda _: demo)
+        monkeypatch.delenv("PACKS_CRITICAL", raising=False)
+        assert health._loaded_pack_health(request) == (True, "demo down")
 
-        tmpdir = tempfile.mkdtemp()
-        path = os.path.join(tmpdir, "s.json")
+    def test_explicit_critical_pack_health_is_fail_closed(self, monkeypatch):
+        from types import SimpleNamespace
+        from api import health
+
+        app = SimpleNamespace(state=SimpleNamespace(_loaded_packs=["demo"]))
+        request = SimpleNamespace(app=app)
+        demo = SimpleNamespace(
+            health_status=lambda: {"status": "degraded", "detail": "demo down"})
+        monkeypatch.setattr(health.importlib, "import_module", lambda _: demo)
+        monkeypatch.setenv("PACKS_CRITICAL", "demo")
+        assert health._loaded_pack_health(request) == (False, "demo down")
+
+    def test_optional_assembly_failure_is_visible_warning(self, monkeypatch):
+        from types import SimpleNamespace
+        from api import health
+
+        state = SimpleNamespace(
+            _loaded_packs=["leave_application"],
+            _pack_assembly_errors={"chatbi": "API 路由构造失败: boom"})
+        request = SimpleNamespace(app=SimpleNamespace(state=state))
+        monkeypatch.delenv("PACKS_CRITICAL", raising=False)
+        ready, detail = health._loaded_pack_health(request)
+        assert ready is True
+        assert "pack chatbi assembly failed" in detail
+
+
+class TestOptionalPackAtomicIsolation:
+    """可选不等于半装配：ChatBI 失败只隔离自身且原因可观测。"""
+
+    @staticmethod
+    def _state(app_state=None):
+        from types import SimpleNamespace
+
+        class _TM:
+            def __init__(self):
+                self._handlers = {}
+                self._handler_meta = {}
+                self.store = None
+
+            def replace_handlers(self, handlers, metadata):
+                self._handlers = dict(handlers)
+                self._handler_meta = dict(metadata)
+
+        state = app_state or SimpleNamespace()
+        state.task_manager = _TM()
+        state.llm_client = object()
+        state.asset_client = SimpleNamespace(_config_api=None)
+        state.conversation_manager = object()
+        state.settings_store = None
+        state._loaded_packs = []
+        return state
+
+    def test_task_registration_failure_excludes_whole_chatbi(self, monkeypatch):
+        from services import pack_manager as pm
+        import domains.chatbi.pack as chatbi_pack
+
+        monkeypatch.delenv("PACKS_CRITICAL", raising=False)
+
+        def _broken_tasks(manager, app_state=None):
+            manager.register(
+                "chatbi.partial", lambda handle: None, pack_name="chatbi")
+            raise RuntimeError("simulated task registration failure")
+
+        monkeypatch.setattr(chatbi_pack, "register_tasks", _broken_tasks)
+        state = self._state()
+        summary = pm.assemble_packs(
+            state, ["chatbi", "leave_application"], app=None)
         try:
-            h0 = ps.register_state_holder(path)
-            old_thread = h0._thread
-
-            in_unregister = threading.Event()
-            release = threading.Event()
-
-            def _gated_unregister(unregister=False):
-                in_unregister.set()
-                release.wait(5)
-            h0._unregister_slot = _gated_unregister
-
-            tA = threading.Thread(target=h0.close)
-            tA.start()
-            assert in_unregister.wait(2)
-            # 交错: close 暂停在 unregister(锁外), 此时 register
-            hB = ps.register_state_holder(path)
-            release.set()
-            tA.join(5)
-            time.sleep(0.3)
-
-            # B 拿到新建线程(非正在关闭的旧线程), 状态完整
-            assert hB._thread is not old_thread, "复用了正在关闭的线程"
-            assert hB._thread.is_alive(), "新句柄线程已死(孤儿)"
-            assert ps.count_state_file_holders(path) == 1, "槽位缺失"
-            assert hB._thread_key in ps._HOLDER_THREADS, "线程表缺失"
-            assert not old_thread.is_alive()
-            # B 的 close 正常
-            hB.close()
-            time.sleep(0.2)
-            assert ps.count_state_file_holders(path) == 0
+            assert summary["loaded"] == ["leave_application"]
+            assert "chatbi" not in state.pack_tools
+            assert "chatbi.partial" not in state.task_manager._handlers
+            assert "任务注册失败" in summary["assembly_errors"]["chatbi"]
         finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+            assert pm.rollback_assembly(state, summary["_tx"])
 
+    def test_runtime_contract_rejects_foreign_task_handler(self):
+        """同名任务存在不等于当前 pack 已完整注册。"""
+        from services import pack_manager as pm
 
-class TestDynamicMgmtDeploymentSwitch:
-    """P2: PACK_DYNAMIC_PACK_MGMT=off 时管理入口 fail-closed."""
+        failures = pm._runtime_contract_failures(
+            pack_configs={
+                "demo": {
+                    "runtime_contract": {
+                        "required_task_types": ["shared.task"],
+                    },
+                },
+            },
+            pack_tools={"demo": []},
+            api_mounted=set(),
+            task_handlers={"shared.task": lambda handle: None},
+            task_handler_meta={
+                "shared.task": {"packName": "another_pack"},
+            },
+            check_api=False,
+            check_tasks=True,
+        )
 
-    def test_off_mode_rejects(self, monkeypatch):
-        from fastapi import HTTPException
-        from api import admin as admin_mod
+        assert "demo" in failures
+        assert "shared.task" in failures["demo"]
 
-        monkeypatch.setenv("PACK_DYNAMIC_PACK_MGMT", "off")
-        reason = admin_mod._dynamic_pack_mgmt_disabled_reason()
-        assert reason, "off 模式应返回拒绝原因"
+    def test_factory_load_failure_reason_reaches_runtime_status(self, monkeypatch):
+        """最早加载阶段失败也必须进入 assembly_errors，不能只打日志。"""
+        from services import pack_manager as pm
+        import domains
 
-    def test_default_on_allows(self, monkeypatch):
-        from api import admin as admin_mod
+        monkeypatch.delenv("PACKS_CRITICAL", raising=False)
+        real_load_pack = domains.load_pack
 
-        monkeypatch.delenv("PACK_DYNAMIC_PACK_MGMT", raising=False)
-        assert admin_mod._dynamic_pack_mgmt_disabled_reason() == ""
+        def _broken(pack_name, app_state=None):
+            if pack_name == "chatbi":
+                raise RuntimeError("simulated registry factory failure")
+            return real_load_pack(pack_name, app_state=app_state)
+
+        monkeypatch.setattr(domains, "load_pack", _broken)
+        state = self._state()
+        summary = pm.assemble_packs(
+            state, ["chatbi", "leave_application"], app=None)
+        try:
+            assert summary["loaded"] == ["leave_application"]
+            assert "registry factory failure" in (
+                summary["assembly_errors"]["chatbi"])
+            assert state._pack_assembly_errors == summary["assembly_errors"]
+        finally:
+            assert pm.rollback_assembly(state, summary["_tx"])
+
+    def test_api_failure_excludes_whole_chatbi(self, monkeypatch):
+        from fastapi import FastAPI
+        from services import pack_manager as pm
+        import domains.chatbi.pack as chatbi_pack
+
+        monkeypatch.delenv("PACKS_CRITICAL", raising=False)
+
+        def _broken_api():
+            raise RuntimeError("simulated API construction failure")
+
+        monkeypatch.setattr(chatbi_pack, "create_api_router", _broken_api)
+        app = FastAPI()
+        state = self._state(app.state)
+        summary = pm.assemble_packs(
+            state, ["chatbi", "leave_application"], app=app)
+        try:
+            assert summary["loaded"] == ["leave_application"]
+            assert "chatbi" not in state.pack_tools
+            assert "chatbi" not in summary["api_mounted"]
+            assert "API 路由构造失败" in summary["assembly_errors"]["chatbi"]
+        finally:
+            assert pm.rollback_assembly(state, summary["_tx"])
+
+    def test_explicit_enable_of_isolated_pack_rolls_back(self, monkeypatch, tmp_path):
+        """显式 enable 未完整装载时不能持久化 enabled=true 假成功。"""
+        from types import SimpleNamespace
+        from fastapi import FastAPI, HTTPException
+        import api.admin as admin_mod
+        from services import pack_manager as pm
+        from services.pack_state import PackState
+
+        state_path = tmp_path / "pack-state.json"
+        pack_state = PackState(
+            str(state_path), ["chatbi", "leave_application"])
+        pack_state.set_enabled("chatbi", False, persist=False)
+
+        app = FastAPI()
+        app.state.pack_state = pack_state
+        app.state._loaded_packs = ["leave_application"]
+        request = SimpleNamespace(app=app)
+        rolled_back = []
+        persisted = []
+
+        monkeypatch.setattr(
+            pm, "assemble_packs",
+            lambda *args, **kwargs: {
+                "loaded": ["leave_application"],
+                "tools": 2,
+                "assembly_errors": {"chatbi": "API 路由构造失败: boom"},
+                "_tx": {"fake": True},
+            })
+        monkeypatch.setattr(
+            pm, "rollback_assembly",
+            lambda state, tx: rolled_back.append(tx) or True)
+        monkeypatch.setattr(
+            pack_state, "persist", lambda: persisted.append(True))
+
+        with pytest.raises(HTTPException, match="State rolled back"):
+            admin_mod._toggle_pack(request, "chatbi", True)
+
+        assert "chatbi" not in pack_state.enabled_names()
+        assert persisted == [], "enable 失败仍写入状态文件"
+        assert rolled_back == [{"fake": True}]
+
+    def test_retry_enabled_but_unloaded_pack_does_not_degrade(
+            self, monkeypatch, tmp_path):
+        """changed=False 的重复 enable 失败也应回滚 runtime，而非误报 degraded。"""
+        from types import SimpleNamespace
+        from fastapi import FastAPI, HTTPException
+        import api.admin as admin_mod
+        from services import pack_manager as pm
+        from services.pack_state import PackState
+
+        pack_state = PackState(
+            str(tmp_path / "pack-state.json"),
+            ["chatbi", "leave_application"])
+        # 冷启动隔离态：期望状态为 enabled，但实际只加载了其它 pack。
+        app = FastAPI()
+        app.state.pack_state = pack_state
+        app.state._loaded_packs = ["leave_application"]
+        request = SimpleNamespace(app=app)
+        rolled_back = []
+
+        monkeypatch.setattr(
+            pm, "assemble_packs",
+            lambda *args, **kwargs: {
+                "loaded": ["leave_application"],
+                "tools": 2,
+                "assembly_errors": {"chatbi": "API 路由构造失败: boom"},
+                "_tx": {"retry": True},
+            })
+        monkeypatch.setattr(
+            pm, "rollback_assembly",
+            lambda state, tx: rolled_back.append(tx) or True)
+
+        with pytest.raises(HTTPException, match="State rolled back"):
+            admin_mod._toggle_pack(request, "chatbi", True)
+
+        assert rolled_back == [{"retry": True}]
+        assert "chatbi" in pack_state.enabled_names()
+        assert not getattr(app.state, "pack_runtime_degraded", False)
+
+    def test_admin_payload_distinguishes_enabled_from_loaded(self, tmp_path):
+        """冷启动隔离后，管理页不能把 enabled=true 显示成运行中。"""
+        from types import SimpleNamespace
+        from fastapi import FastAPI
+        import api.admin as admin_mod
+        from services.pack_state import PackState
+
+        pack_state = PackState(
+            str(tmp_path / "pack-state.json"),
+            ["chatbi", "leave_application"])
+        app = FastAPI()
+        app.state.pack_state = pack_state
+        app.state.pack_tools = {"leave_application": ["submit_leave"]}
+        app.state._loaded_packs = ["leave_application"]
+        app.state._pack_assembly_errors = {"chatbi": "API 构造失败"}
+        app.state._pack_lifecycle_errors = {}
+        app.state.pack_dependency_status = {
+            "chatbi": {"status": "ok", "missing": [], "detail": ""},
+            "leave_application": {
+                "status": "ok", "missing": [], "detail": ""},
+        }
+
+        payload = admin_mod._packs_payload(SimpleNamespace(app=app))
+        chatbi = next(item for item in payload["items"]
+                      if item["name"] == "chatbi")
+        assert chatbi["enabled"] is True
+        assert chatbi["loaded"] is False
+        assert chatbi["runtimeError"] == "API 构造失败"

@@ -4,15 +4,15 @@
   - 元数据: git commit / 进程启动时间 / 配置摘要(二十审要求写入验收元数据)
   - 每数据源: semantic 当前版本 / active 索引指针 / merge 报告版本与告警
   - build ledger 状态分布(孤儿增长观察) + chunk 身份行数(含含截断键计数)
-  - scheduler 租约持有者(多进程唯一性观察)
+  - scheduler/业务写租约持有者(同进程任务重叠与失败恢复观察)
   - 最近 1h 任务统计(refresh/scan 成功/失败) + 任务总数
-  - 双实例 RSS/线程数/fd(二十审 9.8: 采样失败显式记 null, 不再伪装 0)
-  - 两个实例日志的 ERROR 计数(累计)
+  - 单实例 RSS/线程数/fd(采样失败显式记 null, 不伪装 0)
+  - 实例日志的 ERROR 计数(累计)
 
 配置(全部必填, fail-closed):
   SOAK_DATABASE_URL   PG 连接串(不再硬编码回退)
-  SOAK_PORTS          逗号分隔端口, 缺省 "18080,18081"
-  SOAK_INSTANCE_LOGS  逗号分隔日志路径, 缺省 /tmp/llm-modeler-{port}.log
+  SOAK_PORT           后端监听端口, 缺省 "18080"
+  SOAK_INSTANCE_LOG   实例日志路径, 缺省 /tmp/llm-modeler-{port}.log
 
 用法: venv/bin/python scripts/soak_monitor.py [--interval 300]
 停止: kill <pid>(SIGTERM 后当前快照写完即退)
@@ -27,12 +27,9 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 DSN = os.getenv("SOAK_DATABASE_URL", "").strip()
-PORTS = [p.strip() for p in
-         os.getenv("SOAK_PORTS", "18080,18081").split(",") if p.strip()]
-INSTANCE_LOGS = [l.strip() for l in
-                 os.getenv("SOAK_INSTANCE_LOGS", "").split(",") if l.strip()]
-if not INSTANCE_LOGS:
-    INSTANCE_LOGS = [f"/tmp/llm-modeler-{p}.log" for p in PORTS]
+PORT = os.getenv("SOAK_PORT", "18080").strip()
+INSTANCE_LOG = os.getenv(
+    "SOAK_INSTANCE_LOG", f"/tmp/llm-modeler-{PORT}.log").strip()
 if not DSN:
     print("SOAK_DATABASE_URL 未设置(fail-closed, 不再硬编码回退)", flush=True)
     sys.exit(2)
@@ -52,8 +49,8 @@ except Exception:
     GIT_DIRTY = None
 import hashlib
 try:
-    SCRIPT_HASH = hashlib.sha256(open(os.path.abspath(__file__), "rb")
-                                 .read()).hexdigest()[:12]
+    with open(os.path.abspath(__file__), "rb") as script_file:
+        SCRIPT_HASH = hashlib.sha256(script_file.read()).hexdigest()[:12]
 except Exception:
     SCRIPT_HASH = "unknown"
 
@@ -84,17 +81,13 @@ def proc_metrics():
     """
     out = []
     pids, seen = [], set()
-    for port in PORTS:
-        try:
-            # 二十审 5.7: 只取 LISTEN 进程——":port" 无过滤会把连到该端口
-            # 的客户端(如 monitor 自己的出站连接)也算成服务进程
-            # 注意: "-ti" 与地址分开传时 lsof 解析异常(实测返回空),
-            # 必须合并为单个参数或用 "-t -i..." 分列
-            pids += subprocess.run(
-                ["/usr/sbin/lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
-                capture_output=True, text=True, timeout=10).stdout.split()
-        except Exception:
-            pass
+    try:
+        # 只取 LISTEN 进程；否则会把连接到端口的客户端也算成服务进程。
+        pids = subprocess.run(
+            ["/usr/sbin/lsof", "-t", f"-iTCP:{PORT}", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=10).stdout.split()
+    except Exception:
+        pass
     for pid in pids:
         if pid in seen or not pid.isdigit() or int(pid) == os.getpid():
             continue
@@ -156,8 +149,8 @@ def _verdict(snap_body, history) -> str:
             problems.append(f"{d['ds']} requires_review")
     if snap_body.get("build_ledger", {}).get("building", 0) > V_BUILDING_PILE:
         problems.append("building 堆积")
-    # 硬失败(非租约冲突)立即 FAIL; 租约冲突超阈值才 FAIL(双实例调度
-    # 竞争的输家, 偶发预期)
+    # 硬失败(非租约冲突)立即 FAIL；同实例任务短暂重叠导致的租约冲突
+    # 可偶发，持续超阈值则说明调度异常。
     hard_failures = snap_body.get("refresh_hard_failures_1h", 0)
     if hard_failures:
         problems.append(f"1h内 {hard_failures} 个 refresh 硬失败"
@@ -306,13 +299,12 @@ def snapshot(db, _hist=None):
             for r in recent]
     snap["processes"] = proc_metrics()
     log_errors = {}
-    for p in INSTANCE_LOGS:
-        try:
-            with open(p, "rb") as f:
-                data = f.read()
-            log_errors[os.path.basename(p)] = data.count(b"ERROR")
-        except OSError:
-            log_errors[os.path.basename(p)] = None
+    try:
+        with open(INSTANCE_LOG, "rb") as f:
+            data = f.read()
+        log_errors[os.path.basename(INSTANCE_LOG)] = data.count(b"ERROR")
+    except OSError:
+        log_errors[os.path.basename(INSTANCE_LOG)] = None
     snap["log_errors"] = log_errors
     snap["verdict"] = _verdict(snap, _hist)
     return snap
