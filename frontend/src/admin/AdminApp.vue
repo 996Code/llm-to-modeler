@@ -43,7 +43,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, provide, ref } from 'vue'
+import { computed, onMounted, provide, ref, shallowRef } from 'vue'
 import { message } from 'ant-design-vue'
 import type { Component } from 'vue'
 import {
@@ -72,7 +72,8 @@ const navItems = computed(() => [
 ])
 
 // pack 动态管理页
-const packPages = ref<{ pageKey: string; title: string; component: Component }[]>([])
+// 组件定义不应被 Vue 深度代理；列表始终整批替换，shallowRef 正合适。
+const packPages = shallowRef<{ pageKey: string; title: string; component: Component }[]>([])
 // key → component 映射(v-if 分支用)
 const packPageMap = computed<Record<string, Component>>(() =>
   Object.fromEntries(packPages.value.map((p) => [`pack-page:${p.pageKey}`, p.component])))

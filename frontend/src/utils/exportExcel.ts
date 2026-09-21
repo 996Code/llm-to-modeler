@@ -11,8 +11,6 @@
  *
  * 安全: CSV/Excel 注入防护(= + - @ 开头加单引号前缀, OWASP 推荐)。
  */
-import ExcelJS from 'exceljs'
-
 export interface ExportData {
   /** 查询问题 (用作文件名) */
   question: string
@@ -25,6 +23,8 @@ export interface ExportData {
 }
 
 export async function exportQueryToExcel(data: ExportData): Promise<void> {
+  // ExcelJS 体积较大，只在用户实际导出时加载，避免拖慢聊天和管理页首屏。
+  const { default: ExcelJS } = await import('exceljs')
   const { question, columns, rows, chart } = data
   const workbook = new ExcelJS.Workbook()
   workbook.creator = 'LLM Form Modeler'

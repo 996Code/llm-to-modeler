@@ -262,8 +262,6 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   rollback: '回滚', consolidate: '整理', chat: '对话', login: '登录',
 }
 
-const JSON_ = JSON  // 模板内访问
-
 function auditDetailSummary(r: AuditEventItem): string {
   const d = r.detail as Record<string, unknown> | null
   if (!d) return ''
@@ -301,7 +299,7 @@ const columns = computed(() => {
 const detail = ref<CallLogItem | null>(null)
 const detailOpen = ref(false)
 
-import { CALL_TYPE_META as TYPE_META, STAGE_LABELS, stageLabel } from '../labels'
+import { CALL_TYPE_META as TYPE_META, STAGE_LABELS } from '../labels'
 
 function endpointLabel(r: CallLogItem): string {
   const req = r.request_data as { stage?: string } | null

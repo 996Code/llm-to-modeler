@@ -635,9 +635,11 @@ async function doRollback(toVersion: number) {
     versionDrawer.value = false
     await loadContent()
   } catch (e: any) {
-    e?.response?.status === 409
-        ? message.warning('回滚期间版本被并发修改——请刷新后重试')
-        : message.error(e?.response?.data?.detail || '回滚失败')
+    if (e?.response?.status === 409) {
+      message.warning('回滚期间版本被并发修改——请刷新后重试')
+    } else {
+      message.error(e?.response?.data?.detail || '回滚失败')
+    }
   } finally {
     rollingBack.value = null
   }

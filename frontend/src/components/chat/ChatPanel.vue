@@ -313,7 +313,7 @@ import {
   UserOutlined, FormOutlined, TableOutlined, CheckOutlined,
   CheckCircleOutlined, EyeOutlined, QuestionCircleOutlined,
   CopyOutlined, RollbackOutlined,
-  SolutionOutlined, TeamOutlined, ContactsOutlined,
+  ContactsOutlined,
   SearchOutlined, ShareAltOutlined, FileTextOutlined, ApartmentOutlined, RobotOutlined,
   AppstoreAddOutlined, DownloadOutlined, NodeIndexOutlined,
 } from '@ant-design/icons-vue'
@@ -336,8 +336,6 @@ import JsonDiffView from '../json/JsonDiffView.vue'
 import TurnTraceModal from './TurnTraceModal.vue'
 // HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage
 import { getHostPort } from '../../composables/hostPort'
-// 通用 diff（快照摘要的变更数统计）
-import { diffJson } from '../../utils/diff'
 import { getPackManifests } from '../../services/api'
 // Markdown 渲染(marked 解析 + DOMPurify 消毒防 XSS)
 import { marked } from 'marked'
@@ -469,21 +467,6 @@ function m4Headers(): Record<string, string> {
     'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}`,
     'X-User-Id': localStorage.getItem('chatbi_user_id') || 'admin',
   }
-}
-
-function exportQueryCsv(fd: any) {
-  fetch(`${M4_API}/saved-queries/${fd.savedQueryId}/export`, { headers: m4Headers() })
-    .then(async (r) => {
-      if (!r.ok) throw new Error((await r.json()).detail || `HTTP ${r.status}`)
-      const blob = await r.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `query-${String(fd.savedQueryId).slice(0, 8)}.csv`
-      a.click()
-      URL.revokeObjectURL(url)
-    })
-    .catch((e: Error) => antdMessage.error(`导出失败: ${e.message}`))
 }
 
 // 导出 Excel 用:每条消息的 BiChartCard 实例引用(v-for 内 :ref 回调登记)

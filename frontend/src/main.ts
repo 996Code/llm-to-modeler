@@ -14,12 +14,11 @@
 import { createApp } from 'vue'
 // 从 pinia 导入状态管理插件工厂（Pinia ≈ 全局单例 Bean 容器 / Redux Store）
 import { createPinia } from 'pinia'
-// 导入 Ant Design Vue 组件库（类似 Java 的 UI 组件包，提供 Button/Table/Form 等）
-import Antd from 'ant-design-vue'
 // 导入 Ant Design 的全局样式重置表
 import 'ant-design-vue/dist/reset.css'
 // 导入根组件 App.vue（单文件组件 SFC，相当于 Java 的主控制器/根 Bean）
 import App from './App.vue'
+import { installMainAntd } from './plugins/antdMain'
 
 // 创建 Vue 应用实例，传入根组件。
 // 类比：SpringApplication.run(App.class, args) —— 创建应用上下文
@@ -29,9 +28,8 @@ const app = createApp(App)
 // 类比：启用 @EnableXxx 注解，让 @Service/@Repository 注解的 Bean 生效。
 app.use(createPinia())
 
-// 全量注册 Ant Design 组件（app.use(Antd) 会注册所有组件）。
-// 生产环境通常按需引入以减小体积，这里为了开发便利全量引入。
-app.use(Antd)
+// 只注册模板实际使用的 Ant Design 组件，避免把整套组件库放进首屏包。
+installMainAntd(app)
 
 // 将应用挂载到 index.html 中 id="app" 的 DOM 元素。
 // 这是前端应用真正"启动"的瞬间，类似 Spring 上下文 refresh 完成、Tomcat 开始监听端口。

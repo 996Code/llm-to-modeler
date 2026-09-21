@@ -317,7 +317,8 @@ export class LLMFormModeler {
 
   /** 切换展开/收起 */
   toggle() {
-    this.isOpen ? this.close() : this.open()
+    if (this.isOpen) this.close()
+    else this.open()
   }
 
   /** 彻底销毁：关闭 + 移除 DOM + 解绑监听（宿主登出时调用） */

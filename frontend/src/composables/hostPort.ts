@@ -334,7 +334,9 @@ class NullHostPort implements HostPort {
   onAuthUpdated(): void {}
   notifyClose(): void {}
 
-  notifyResize(_mode: 'expanded' | 'normal'): void {}
+  notifyResize(mode: 'expanded' | 'normal'): void {
+    void mode
+  }
   close(): void {}
 }
 

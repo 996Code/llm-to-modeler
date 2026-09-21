@@ -77,6 +77,10 @@ export interface CallLogItem {
 export interface AdminPack {
   name: string
   enabled: boolean
+  /** 当前进程是否完整装配成功；enabled 仅代表期望/持久化状态 */
+  loaded: boolean
+  /** 装配或生命周期失败原因（空串表示无运行期错误） */
+  runtimeError: string
   description: string
   fallback: string
   artifactType: string

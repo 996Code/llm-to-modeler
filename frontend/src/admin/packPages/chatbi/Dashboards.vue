@@ -69,7 +69,8 @@ import {
 } from '@ant-design/icons-vue'
 import { GridStack } from 'gridstack'
 import 'gridstack/dist/gridstack.min.css'
-import * as echarts from 'echarts'
+import { init as initChart } from '../../../utils/echarts'
+import type { ECharts } from 'echarts/core'
 import { chatbiApi } from '../../api'
 
 function uid(): string {
@@ -86,7 +87,7 @@ const refreshingAll = ref(false)
 const gridEl = ref<HTMLElement>()
 let grid: GridStack | null = null
 const editMode = ref(false)
-const chartInstances: Record<string, echarts.ECharts> = {}
+const chartInstances: Record<string, ECharts> = {}
 // 每个 widget 的容器观察器(容器尺寸变化 → echarts resize)
 const resizeObservers: Record<string, ResizeObserver> = {}
 
@@ -293,7 +294,7 @@ function renderLive(wid: string, data: any, error?: string) {
     nextTick(() => {
       const el = body.querySelector('.widget-chart') as HTMLElement | null
       if (el) {
-        const inst = echarts.init(el)
+        const inst = initChart(el)
         inst.setOption(chartOption)
         chartInstances[wid] = inst
         // ResizeObserver 持续跟随容器:gridstack 布局/窗口缩放/编辑模式重建

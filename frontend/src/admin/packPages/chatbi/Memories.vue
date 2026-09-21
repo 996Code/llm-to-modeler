@@ -139,7 +139,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  BulbOutlined, ForkOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined,
+  ForkOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 import { tasksApi } from '../../api'

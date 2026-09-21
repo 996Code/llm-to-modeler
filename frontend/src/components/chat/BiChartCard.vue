@@ -46,8 +46,8 @@
 // BI 图表卡片 —— chatbi pack 的 formatted.chart 渲染器(ECharts)。
 // 机制先例: KgGraphCard(KG 专用图卡)。chart option 由后端 chart_engine 产出,
 // 前端只负责渲染 + kpi/table 两种特判视图(与后端约定 1:1)。
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import * as echarts from 'echarts'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { ECharts } from 'echarts/core'
 
 const props = defineProps<{
   chart: Record<string, any> | null | undefined
@@ -83,10 +83,12 @@ const persistWarningLine = computed(() =>
   (props.detail?.persistWarnings || []).slice(0, 3).join('；'))
 
 const chartEl = ref<HTMLElement | null>(null)
-let instance: echarts.ECharts | null = null
+let instance: ECharts | null = null
 
-const chartType = computed(() => props.chart?.series?.[0]?.type
-  || props.chart?.chart_type || '')
+// chart_type 是业务类型；KPI 的底层 series.type 是 gauge，不能让后者
+// 抢先，否则会绕过轻量 KPI 视图并误走 ECharts 通用分支。
+const chartType = computed(() => props.chart?.chart_type
+  || props.chart?.series?.[0]?.type || '')
 const isKpi = computed(() => chartType.value === 'kpi')
 const isTable = computed(() => chartType.value === 'table')
 const chartHeight = computed(() => (chartType.value === 'pie' ? '260px' : '300px'))
@@ -108,10 +110,13 @@ const truncated = computed(() => Boolean(props.detail?.truncated))
 
 const metricHits = computed(() => props.metricHits || [])
 
-function render() {
-  if (!chartEl.value || !props.chart) return
+async function render() {
+  const target = chartEl.value
+  if (!target || !props.chart) return
+  const { init } = await import('../../utils/echarts')
+  if (chartEl.value !== target || !props.chart) return
   if (!instance) {
-    instance = echarts.init(chartEl.value)
+    instance = init(target)
   }
   instance.setOption(props.chart, true)
 }
@@ -121,8 +126,12 @@ defineExpose({ getChartInstance: () => instance })
 
 onMounted(render)
 watch(() => props.chart, () => {
-  if (isKpi.value || isTable.value) return
-  render()
+  if (isKpi.value || isTable.value) {
+    instance?.dispose()
+    instance = null
+    return
+  }
+  nextTick(render)
 })
 onBeforeUnmount(() => {
   instance?.dispose()

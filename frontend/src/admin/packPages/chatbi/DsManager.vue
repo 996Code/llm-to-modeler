@@ -174,7 +174,7 @@
 import { computed, defineEmits, defineExpose, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  DatabaseOutlined, HeartOutlined, PlusOutlined, QuestionCircleOutlined, SyncOutlined,
+  HeartOutlined, PlusOutlined, QuestionCircleOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 

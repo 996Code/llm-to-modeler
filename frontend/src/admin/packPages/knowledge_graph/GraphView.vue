@@ -90,7 +90,7 @@ import {
   ExpandOutlined, LoadingOutlined, SyncOutlined, UndoOutlined, ZoomInOutlined, ZoomOutOutlined,
 } from '@ant-design/icons-vue'
 import {
-  KgGraphData, KgGraphNode, KgGraphEdge, KgSchema,
+  KgGraphNode, KgGraphEdge, KgSchema,
   expandKgNode, fetchKgGraph,
 } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
@@ -214,7 +214,6 @@ async function render(fit: boolean) {
   const G6 = await import('@antv/g6')
   if (!chartBox.value) return
 
-  const types = typeOptions.value
   const degree: Record<string, number> = {}
   edges.value.forEach((e) => {
     degree[e.source] = (degree[e.source] || 0) + 1
@@ -285,7 +284,7 @@ async function render(fit: boolean) {
       layout: {
         type: 'd3-force', preLayout: true, preventOverlap: true,
         // 链距/斥力偏紧凑:小图(几十节点)不至于散成"看不清的点"
-        linkDistance: (d: unknown) => 60 + Math.random() * 60,
+        linkDistance: () => 60 + Math.random() * 60,
         nodeStrength: -180, edgeStrength: 0.1,
         collideStrength: 0.9, alphaDecay: 0.05, alphaMin: 0.001,
       },

@@ -82,7 +82,7 @@
 import { defineEmits, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  AppstoreAddOutlined, DownloadOutlined, HistoryOutlined, InfoCircleOutlined, ReloadOutlined,
+  AppstoreAddOutlined, DownloadOutlined, InfoCircleOutlined, ReloadOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 import { exportQueryToExcel } from '../../../utils/exportExcel'

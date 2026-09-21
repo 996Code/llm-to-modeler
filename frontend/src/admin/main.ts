@@ -4,8 +4,10 @@
 // 访问路径 /ai-modeler/admin.html;数据走 /ai-modeler/api/admin/*(同源)。
 // =============================================================================
 import { createApp } from 'vue'
-import Antd from 'ant-design-vue'
 import 'ant-design-vue/dist/reset.css'
+import { installAdminAntd } from '../plugins/antdAdmin'
 import AdminApp from './AdminApp.vue'
 
-createApp(AdminApp).use(Antd).mount('#admin-app')
+const app = createApp(AdminApp)
+installAdminAntd(app)
+app.mount('#admin-app')

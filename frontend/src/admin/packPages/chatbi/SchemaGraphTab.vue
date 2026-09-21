@@ -336,7 +336,7 @@ async function loadGraph() {
     // 布局未稳定时 offsetWidth 可能为 0)——双 rAF 确保布局完成再量尺寸
     await nextFrame()
     await render()
-  } catch (e: any) {
+  } catch {
     graphData.value = null
   } finally {
     loading.value = false

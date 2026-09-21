@@ -178,7 +178,7 @@ import {
   EyeOutlined, FileTextOutlined, InboxOutlined, RedoOutlined, UnorderedListOutlined,
 } from '@ant-design/icons-vue'
 import {
-  KgDocument, TaskItem, TaskStatus, deleteKgDocument, fetchKgChunkExtraction, fetchKgChunks,
+  KgDocument, TaskItem, deleteKgDocument, fetchKgChunkExtraction, fetchKgChunks,
   fetchKgDocuments, fetchTask, importKgAll, importKgDocument, retryKgChunks, uploadKgDocuments,
 } from '../../api'
 import type { KgChunkExtraction, KgChunkItem, KgChunksPayload } from '../../api'

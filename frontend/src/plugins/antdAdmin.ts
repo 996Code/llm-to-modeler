@@ -1,0 +1,68 @@
+import type { App, Plugin } from 'vue'
+import {
+  Alert,
+  Badge,
+  Button,
+  Checkbox,
+  Collapse,
+  Descriptions,
+  Divider,
+  Drawer,
+  Dropdown,
+  Empty,
+  Form,
+  Input,
+  InputNumber,
+  Menu,
+  Modal,
+  Popconfirm,
+  Popover,
+  Progress,
+  Radio,
+  Select,
+  Space,
+  Spin,
+  Switch,
+  Table,
+  Tabs,
+  Tag,
+  Tooltip,
+  Upload,
+} from 'ant-design-vue'
+
+const components = [
+  Alert,
+  Badge,
+  Button,
+  Checkbox,
+  Collapse,
+  Descriptions,
+  Divider,
+  Drawer,
+  Dropdown,
+  Empty,
+  Form,
+  Input,
+  InputNumber,
+  Menu,
+  Modal,
+  Popconfirm,
+  Popover,
+  Progress,
+  Radio,
+  Select,
+  Space,
+  Spin,
+  Switch,
+  Table,
+  Tabs,
+  Tag,
+  Tooltip,
+  Upload,
+] as Plugin[]
+
+export function installAdminAntd(app: App): void {
+  for (const component of components) {
+    app.use(component)
+  }
+}

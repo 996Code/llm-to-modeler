@@ -31,7 +31,11 @@
           <div class="pk-name-block">
             <div class="pk-name">{{ pack.name }}</div>
             <div class="pk-tags">
-              <a-tag v-if="pack.enabled && depOk(pack)" color="success" class="pk-state">运行中</a-tag>
+              <a-tag v-if="pack.enabled && depOk(pack) && pack.loaded && !pack.runtimeError" color="success" class="pk-state">运行中</a-tag>
+              <a-tooltip v-else-if="pack.enabled && depOk(pack) && (!pack.loaded || !!pack.runtimeError)"
+                         :title="pack.runtimeError || '插件未完整装配'">
+                <a-tag color="error" class="pk-state">{{ pack.loaded ? '运行异常' : '装配失败' }}</a-tag>
+              </a-tooltip>
               <a-tag v-else-if="!pack.enabled && depOk(pack)" class="pk-state">已禁用</a-tag>
               <a-tooltip v-else :title="depTooltip(pack)">
                 <a-tag :color="pack.dependency?.status === 'probe_failed' ? 'orange' : 'error'" class="pk-state">
@@ -63,13 +67,14 @@
             <a-tooltip v-if="pack.hasSettings" title="配置连接信息 / 参数(声明式表单)">
               <a @click="openSettings(pack)"><SettingOutlined /> 设置</a>
             </a-tooltip>
-            <a-tooltip v-if="!depOk(pack)" title="补配后重新检测依赖,通过则热加载">
+            <a-tooltip v-if="!depOk(pack) || (pack.enabled && (!pack.loaded || !!pack.runtimeError))"
+                       :title="!depOk(pack) ? '补配后重新检测依赖,通过则热加载' : '重新尝试完整装配/生命周期启动'">
               <a :style="{ marginLeft: pack.hasSettings ? '12px' : '0' }" @click="recheck(pack)">
                 <SyncOutlined :spin="rechecking === pack.name" /> 重新检测
               </a>
             </a-tooltip>
-            <a-tooltip v-if="pack.adminPage && depOk(pack)" :title="`打开「${pack.adminTitle}」管理页`">
-              <a :style="{ marginLeft: (pack.hasSettings || !depOk(pack)) ? '12px' : '0' }"
+            <a-tooltip v-if="pack.adminPage && depOk(pack) && pack.loaded" :title="`打开「${pack.adminTitle}」管理页`">
+              <a :style="{ marginLeft: (pack.hasSettings || !depOk(pack) || !pack.loaded) ? '12px' : '0' }"
                  @click="$emit('open-page', pack.adminPage)">
                 <RightOutlined /> 管理页
               </a>
@@ -158,11 +163,13 @@ async function recheck(pack: AdminPack) {
   await loadSafely(async () => {
     const result = await recheckPack(pack.name)
     if (result.dependency.status === 'ok') {
-      message.success(
-        result.reloaded
-          ? `依赖检测通过,「${pack.name}」已热加载`
-          : '依赖检测通过' + (pack.enabled ? '' : '(插件处于禁用态,打开开关即可启用)'),
-      )
+      if (result.reloaded) {
+        message.success(`依赖检测通过,「${pack.name}」已热加载`)
+      } else if (pack.enabled) {
+        message.warning(`依赖检测通过,但「${pack.name}」未完整装配,请查看运行错误`)
+      } else {
+        message.success('依赖检测通过(插件处于禁用态,打开开关即可启用)')
+      }
     } else {
       message.warning(`依赖仍不满足:${result.dependency.detail}`)
     }
