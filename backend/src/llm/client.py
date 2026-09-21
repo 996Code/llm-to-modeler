@@ -146,11 +146,36 @@ class LLMClient:
         # max_retries 可配(env LLM_MAX_RETRIES, 默认 2 = SDK 默认):
         # 5xx/连接失败时 SDK 自动指数退避重试。LLM 网关整体不可达的部署
         # (重试注定失败, 只拖慢路由兜底)可调 0 让失败快速冒泡到上层降级。
+        #
+        # HTTP keep-alive 复用防护(env LLM_NO_KEEPALIVE, 默认开):
+        # 部分 LLM 网关(new-api 系中转)对同一持久连接的后续请求会返回
+        # 500 "upstream error: do request failed"——首请求成功、连接内
+        # 第二个请求起必挂(已实测复现:池内连接 1/12 成功,禁用后 8/8)。
+        # 默认给 httpx transport 注入 Connection: close 强制每次新建连接;
+        # 自建网关无此问题且在意握手开销时可设 LLM_NO_KEEPALIVE=0 关闭。
+        if os.getenv("LLM_NO_KEEPALIVE", "1").strip().lower() not in ("0", "false", "no", "off"):
+            import httpx
+
+            class _NoKeepAliveTransport(httpx.HTTPTransport):
+                """请求头注入 Connection: close——服务端响应后即关连接,
+                SDK 池不会再复用坏通道;握手开销 ~ms 级,LLM 调用秒级,可忽略。"""
+
+                def handle_request(self, request):
+                    request.headers["Connection"] = "close"
+                    return super().handle_request(request)
+
+            http_client = httpx.Client(
+                transport=_NoKeepAliveTransport(),
+                timeout=config.timeout,
+            )
+        else:
+            http_client = None
         self.client = OpenAI(
             base_url=config.base_url,
             api_key=config.api_key or "placeholder-key",  # 占位 key，本地模型忽略
             timeout=config.timeout,
             max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
+            **({"http_client": http_client} if http_client else {}),
         )
 
         logger.info(
