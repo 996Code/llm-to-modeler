@@ -5401,8 +5401,11 @@ class TestSchedulerReadiness:
         import domains.chatbi.query_stats as stats
 
         now = ct._now_ts()
+        # 2h 前到期, 强制本 tick 进入 purge 分支: _now_ts 是 monotonic
+        # (=开机秒数), 新开机 <3600s 时用 0.0 会因 now-0 < 3600 跳过分支
+        purge_due = now - 7200
         loop_state = SimpleNamespace(
-            _last_purge=0.0,
+            _last_purge=purge_due,
             _last_gc=now,
             _last_health=now,
             _last_refresh=now,
@@ -5421,7 +5424,7 @@ class TestSchedulerReadiness:
         monkeypatch.setattr(stats, "purge_stats", _purge_failed)
         with pytest.raises(RuntimeError, match="query stats purge"):
             ct._scheduler_tick(loop_state, object(), object())
-        assert loop_state._last_purge == 0.0, (
+        assert loop_state._last_purge == purge_due, (
             "失败后提前推进了 purge 时间戳，下一 tick 不会重试")
 
     def test_readiness_lifecycle(self):
