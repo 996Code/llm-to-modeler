@@ -18,15 +18,30 @@ from typing import Optional
 
 from sdk.pack_router import DefaultPackRouter
 from domains.njmind_form.keys import FIELDS
+from domains.njmind_form.tools._script_common import script_mark_of, JS_MARK, SQL_MARK
 
 
 class NjmindFormRouter(DefaultPackRouter):
-    """表单领域路由：LLM 语义主判 + 数据规则复核（不抢判断，只兜矛盾）。"""
+    """表单领域路由：LLM 语义主判 + 数据规则复核（不抢判断，只兜矛盾）。
+
+    脚本弹框场景的确定性分流：designer 发送时在消息头拼 [script:js] /
+    [script:sql] 标记（弹框语境必须 100% 命中工具，概率路由不可接受）。
+    命中标记 → 代码直选对应工具（不调 LLM）；无标记 → 原语义路由不变
+    （悬浮窗场景两脚本工具靠 when 描述兜底）。标记剥除归工具内
+    _script_common.strip_script_mark。
+    """
 
     def route(self, user_input: str, artifact: Optional[dict],
               history: str = "", llm_client=None) -> tuple:
-        """LLM 主判 + 数据铁律复核。
-        """
+        """脚本标记确定性分流 + LLM 主判 + 数据铁律复核。"""
+        # 脚本标记分流：代码判断优先于一切（弹框场景的强契约，零 LLM 调用）。
+        # 返回 (tool, 1.0)：代码直选是确定性判断，同父类降级路径的确信度语义
+        mark = script_mark_of(user_input)
+        if mark == JS_MARK and self._registry.get("generate_js_script"):
+            return ("generate_js_script", 1.0)
+        if mark == SQL_MARK and self._registry.get("generate_filter_sql"):
+            return ("generate_filter_sql", 1.0)
+
         has_fields = bool(
             artifact and artifact.get(FIELDS))
         return super().route(user_input, artifact if has_fields else None,

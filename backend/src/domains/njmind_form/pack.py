@@ -33,6 +33,8 @@ from domains.njmind_form.tools.get_form import GetFormTool
 from domains.njmind_form.tools.clone_form import CloneFormTool
 from domains.njmind_form.tools.image_form import ImageFormTool
 from domains.njmind_form.tools.chat import ChatTool
+from domains.njmind_form.tools.generate_js_script import GenerateJsScriptTool
+from domains.njmind_form.tools.generate_filter_sql import GenerateFilterSqlTool
 
 
 def create_registry() -> ToolRegistry:
@@ -60,6 +62,8 @@ def create_registry() -> ToolRegistry:
     registry.register(CloneFormTool())    # 克隆表单
     registry.register(ImageFormTool())    # 从图片识别生成表单
     registry.register(ChatTool())         # 通用问答/闲聊兜底
+    registry.register(GenerateJsScriptTool())  # 字段权限 JS 脚本(弹框内嵌 AI/悬浮窗)
+    registry.register(GenerateFilterSqlTool())  # 过滤条件 SQL(4 配置位)
     return registry
 
 
