@@ -19,31 +19,36 @@ from typing import Optional
 from sdk.pack_router import DefaultPackRouter
 from sdk.registry import ToolRegistry
 from domains.njmind_form.keys import FIELDS
+from domains.njmind_form.tools._script_common import script_mark_of, JS_MARK, SQL_MARK
 
 
 class NjmindFormRouter(DefaultPackRouter):
-    """表单领域路由：LLM 语义主判 + 数据规则复核（不抢判断，只兜矛盾）。"""
+    """表单领域路由：LLM 语义主判 + 数据规则复核（不抢判断，只兜矛盾）。
+
+    脚本弹框场景的确定性分流：designer 发送时在消息头拼 [script:js] /
+    [script:sql] 标记（弹框语境必须 100% 命中工具，概率路由不可接受）。
+    命中标记 → 代码直选对应工具（不调 LLM）；无标记 → 原语义路由不变
+    （悬浮窗场景两脚本工具靠 when 描述兜底）。标记剥除归工具内
+    _script_common.strip_script_mark。
+    """
 
     def route(self, user_input: str, artifact: Optional[dict],
               history: str = "", llm_client=None) -> Optional[str]:
-        """LLM 主判 + 数据铁律复核。
+        """脚本标记确定性分流 + LLM 主判 + 数据铁律复核。"""
+        # 脚本标记分流：代码判断优先于一切（弹框场景的强契约，零 LLM 调用）
+        mark = script_mark_of(user_input)
+        if mark == JS_MARK and self._registry.get("generate_js_script"):
+            return "generate_js_script"
+        if mark == SQL_MARK and self._registry.get("generate_filter_sql"):
+            return "generate_filter_sql"
 
-        铁律（数据事实，先于 LLM）：
-          画布为空时，modify_form 必为幻觉（没有基线可改）——把 modify 从候选中
-          排除。但**不直通 create_form**：空画布下图片识别（image_form）、查询
-          已有表单（get_form）、闲聊（chat）都是合法请求，直通会把它们一并吞掉
-          （曾把"识别这张图片生成表单"判成 create_form）。空画布只改走"无画布
-          候选集"的语义判断，modify 类被铁律挡在集合外。
+        # 铁律（数据事实，先于 LLM）：
+        #   画布为空时，modify_form 必为幻觉（没有基线可改）——把 modify 从候选中
+        #   排除。但**不直通 create_form**：空画布下图片识别（image_form）、查询
+        #   已有表单（get_form）、闲聊（chat）都是合法请求，直通会把它们一并吞掉
+        #   （曾把"识别这张图片生成表单"判成 create_form）。空画布只改走"无画布
+        #   候选集"的语义判断，modify 类被铁律挡在集合外。
 
-        Args:
-            user_input: 用户消息原文
-            artifact: 宿主下发的当前画布制品（空/None = 画布无内容）
-            history: 压缩后的对话历史
-            llm_client: LLM 客户端（None 时父类降级取第一个工具）
-
-        Returns:
-            工具名（不在注册表时由引擎兜底）。
-        """
         has_fields = bool(
             artifact and artifact.get(FIELDS))
 
