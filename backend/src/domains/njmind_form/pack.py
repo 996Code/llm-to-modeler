@@ -44,7 +44,7 @@ def create_registry() -> ToolRegistry:
     (LLM 选择工具时看到的就是这些名字),pack 之间工具名需全局唯一。
 
     Returns:
-        装好 6 个工具的 ToolRegistry。
+        装好 8 个工具的 ToolRegistry。
 
     【Java 类比】
     等价于:
