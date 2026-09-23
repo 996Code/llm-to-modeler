@@ -29,6 +29,93 @@ logger = logging.getLogger(__name__)
 JS_MARK = "[script:js]"
 SQL_MARK = "[script:sql]"
 
+# ── JS 脚本 Profile（与设计器固定配置位对应，不接受任意路径） ──
+
+JS_SCRIPT_PROFILES = {
+    "field_change": {
+        "context": "form",
+        "prompt": "js_field_change_generate",
+        "return_required": False,
+        "field_namespace": "form",
+        "label": "字段值变化事件",
+    },
+    "field_url": {
+        "context": "form",
+        "prompt": "js_url_generate",
+        "return_required": True,
+        "field_namespace": "row",
+        "label": "字段外链",
+    },
+    "button_before": {
+        "context": "button",
+        "prompt": "js_button_generate",
+        "return_required": True,
+        "field_namespace": "row",
+        "label": "按钮前置脚本",
+    },
+    "button_after": {
+        "context": "button",
+        "prompt": "js_button_generate",
+        "return_required": False,
+        "field_namespace": "row",
+        "label": "按钮后置脚本",
+    },
+    "button_hidden": {
+        "context": "button",
+        "prompt": "js_button_generate",
+        "return_required": True,
+        "field_namespace": "row",
+        "label": "按钮隐藏条件",
+    },
+    "button_disabled": {
+        "context": "button",
+        "prompt": "js_button_generate",
+        "return_required": True,
+        "field_namespace": "row",
+        "label": "按钮禁用条件",
+    },
+    "button_url": {
+        "context": "button",
+        "prompt": "js_url_generate",
+        "return_required": True,
+        "field_namespace": "row",
+        "label": "按钮跳转链接",
+    },
+    "button_custom": {
+        "context": "button",
+        "prompt": "js_button_generate",
+        "return_required": False,
+        "field_namespace": "row",
+        "label": "按钮自定义事件",
+    },
+    "table_url": {
+        "context": "list",
+        "prompt": "js_url_generate",
+        "return_required": True,
+        "field_namespace": "row",
+        "label": "列表链接",
+    },
+    "table_formatter": {
+        "context": "list",
+        "prompt": "js_table_formatter_generate",
+        "return_required": True,
+        "field_namespace": "row",
+        "label": "列表格式化",
+    },
+    "table_visibility": {
+        "context": "list_visibility",
+        "prompt": "js_table_visibility_generate",
+        "return_required": True,
+        "field_namespace": "none",
+        "label": "列表字段隐藏条件",
+    },
+}
+
+
+def get_js_script_profile(profile_id: str) -> dict | None:
+    """按固定 Profile 标识读取 JS 脚本配置。"""
+    return JS_SCRIPT_PROFILES.get(profile_id)
+
 
 def strip_script_mark(user_input: str) -> str:
     """剥掉路由标记前缀，返回用户原文（多个标记/前后空白都容忍）。"""
@@ -169,6 +256,22 @@ def build_field_catalog(fields: List[dict], max_lines: int = 120) -> Dict[str, o
     if seq > max_lines:
         lines.append(f"... 共 {seq} 个字段（目录截断）")
     return {"text": "\n".join(lines), "keys": keys, "top_keys": top_keys}
+
+
+def build_external_field_catalog(fields: List[dict]) -> Dict[str, object]:
+    """构建前端规范化字段列表的扁平目录。"""
+    lines: List[str] = []
+    keys: Set[str] = set()
+
+    for seq, field in enumerate(fields, 1):
+        key = str(field.get("fieldTitleKey", ""))
+        title = str(field.get("fieldTitleText", ""))
+        type_name_ = str(field.get("typeName", ""))
+        lines.append(f"#{seq} {key} | {title} | {type_name_}")
+        if key:
+            keys.add(key)
+
+    return {"text": "\n".join(lines), "keys": keys, "top_keys": set(keys)}
 
 
 # ── pack_params 解析（弹框场景的显式定位；悬浮窗场景为空走 LLM 推断） ──
