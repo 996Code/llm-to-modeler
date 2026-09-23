@@ -41,16 +41,52 @@ logger = logging.getLogger(__name__)
 from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
 from domains.njmind_form.tools._script_common import (
     JS_SLOTS, ROW_SLOTS, PACK_NAME, script_params, strip_script_mark,
-    build_field_catalog, normalize_slot, read_existing_script, find_field,
-    slot_host_key, render_prompt,
+    build_field_catalog, build_external_field_catalog, get_js_script_profile,
+    normalize_slot, read_existing_script, find_field, slot_host_key, render_prompt,
 )
 
 MAX_RETRIES = 2
 
-# formData 引用提取（含下标取值形态；_label 后缀是显示值豁免）
+_URL_PROFILES = {"field_url", "button_url", "table_url"}
+_RE_FIXED_URL = re.compile(r"(?i)\bhttps?://[^\s<>'\"`]+")
+# 仅接受 ASCII 路径段，避免把中文业务话术中的“输入/输出”当成路径。
+_RE_INTERNAL_PATH = re.compile(
+    r"(?<![\w/])/[A-Za-z][A-Za-z0-9._~/-]*(?:[?#][^\s<>'\"`]*)?"
+)
+_RE_DYNAMIC_CONTEXT = re.compile(
+    r"(?i)(?:当前\s*(?:行|表单|表单字段|记录|数据)|\b(?:row|formData)\b)"
+)
+_RE_DYNAMIC_TOKEN = re.compile(
+    r"(?i)(?:\bid\b|\bkey\b|编号|字段)"
+)
+_RE_ROW_REF = re.compile(
+    r"\brow\s*(?:(?:\?\.\s*|\.\s*)([A-Za-z_$][\w$]*)|"
+    r"(?:\?\.\s*)?\[\s*['\"]([^'\"]+)['\"]\s*\])"
+)
+
+
+def _has_field_keys(fields: object) -> bool:
+    return isinstance(fields, list) and any(
+        isinstance(field, dict) and str(field.get(FIELD_KEY) or "").strip()
+        for field in fields
+    )
+
+
+def _url_requirement_error(text: str, known_keys: set[str] | None = None) -> str | None:
+    """校验 URL profile 是否包含可执行的 URL 或动态拼接规则。"""
+    text = text or ""
+    if _RE_FIXED_URL.search(text) or _RE_INTERNAL_PATH.search(text):
+        return None
+    has_known_key = any(key and key in text for key in (known_keys or set()))
+    if (_RE_DYNAMIC_CONTEXT.search(text)
+            and (_RE_DYNAMIC_TOKEN.search(text) or has_known_key)):
+        return None
+    return ("URL 需求信息不足：请提供固定 URL、内部路径，或明确的当前行/"
+            "当前表单字段动态拼接规则")
+
+
 _RE_FORMDATA_REF = re.compile(
     r"formData(?:\.(\w+)|\[\s*['\"](\w+)(?:_label)?['\"]\s*\])")
-_RE_ROW_REF = re.compile(r"\brow\.(\w+)")
 
 # 结构化校验的括号对（字符串/模板字面量内部豁免）
 _BRACKET_PAIRS = {"(": ")", "[": "]", "{": "}"}
@@ -128,8 +164,23 @@ class GenerateJsScriptTool(CompositeTool):
         }
 
     def validate_input(self, state: dict):
+        params = script_params(state)
+        profile = get_js_script_profile(str(params.get("script_profile") or ""))
+        if profile is not None:
+            has_list_fields = _has_field_keys(params.get("fields"))
+            if profile["context"] == "button" and has_list_fields:
+                return None
+            if profile["context"] in ("form", "button"):
+                if not _has_field_keys((state.get("source_artifact") or {}).get(FIELDS)):
+                    return ("生成脚本需要表单配置(画布上下文)，"
+                            "请在表单编辑页打开 AI 助手后使用")
+            elif profile["context"] in ("list", "list_visibility"):
+                if not has_list_fields:
+                    return "生成列表脚本需要列表字段配置，请从列表设计页打开 AI 助手后使用"
+            return None
+
         # 画布事实源 fail-closed：脚本生成强依赖字段目录（key 反查校验）
-        if not (state.get("source_artifact") or {}).get(FIELDS):
+        if not _has_field_keys((state.get("source_artifact") or {}).get(FIELDS)):
             return ("生成脚本需要表单配置(画布上下文)，"
                     "请在表单编辑页打开 AI 助手后使用")
         return None
@@ -139,15 +190,52 @@ class GenerateJsScriptTool(CompositeTool):
         state.setdefault("check_errors", [])
         self.run_pipeline(state, ctx)
 
+        if state.get("generation_error"):
+            message = str(state["generation_error"])
+            return ToolResult(
+                artifact=None,
+                artifact_type="data",
+                summary=message,
+                error_for_llm=message,
+            )
+
         script = state.get("script")
         if not script:
             summary = "脚本生成未完成"
             if state.get("check_errors"):
                 errs = "; ".join(str(e)[:60] for e in state["check_errors"][:3])
                 summary = f"脚本生成未完成（校验未通过）：{errs}"
-            return ToolResult(artifact=None, artifact_type="data", summary=summary)
+            return ToolResult(
+                artifact=None,
+                artifact_type="data",
+                summary=summary,
+                error_for_llm=summary,
+            )
 
         slot = state.get("script_slot", "")
+        profile = get_js_script_profile(str(state.get("script_profile") or ""))
+        if profile is not None:
+            artifact = {
+                "type": "script_artifact",
+                "scriptType": "js_interaction",
+                "script": script,
+                "target": {
+                    "profile": state["script_profile"],
+                    "slot": slot,
+                    "targetDesc": state.get("field_name", ""),
+                },
+            }
+            note = state.get("script_note") or ""
+            summary = (f"已生成「{state.get('field_name') or profile['label']}」"
+                       f"的{profile['label']}脚本（{len(script.splitlines())} 行）"
+                       + (f"。{note}" if note else ""))
+            return ToolResult(
+                artifact=artifact,
+                artifact_type="data",
+                summary=summary,
+                formatted=self.format_result(artifact),
+            )
+
         host_key = slot_host_key(slot)
         artifact = {
             "type": "script_artifact",
@@ -193,11 +281,36 @@ class GenerateJsScriptTool(CompositeTool):
     # ── Steps ──────────────────────────────────────────────────
 
     def _step_locate(self, state: dict, ctx: ToolContext) -> None:
-        """定位目标字段与 slot：pack_params 显式定位优先，LLM 推断兜底。"""
+        """定位目标字段与 slot：Profile/pack_params 显式定位优先，LLM 推断兜底。"""
         ctx.emit("stage", "locate", "正在解析表单字段与现有脚本...")
 
         artifact = state.get("source_artifact") or {}
         fields = artifact.get(FIELDS) or []
+        params = script_params(state)
+        profile_id = str(params.get("script_profile") or "")
+        profile = get_js_script_profile(profile_id)
+
+        # 已登记的交互 Profile 由设计器提供完整目标与字段目录，禁止回落到 js_locate。
+        if profile is not None:
+            list_fields = params.get("fields")
+            if (profile["context"] == "button" and isinstance(list_fields, list)
+                    and list_fields):
+                catalog = build_external_field_catalog(list_fields)
+            elif profile["context"] in ("form", "button"):
+                catalog = build_field_catalog(fields)
+            else:
+                catalog = build_external_field_catalog(params.get("fields") or [])
+            state["script_profile"] = profile_id
+            state["script_slot"] = str(params.get("script_slot") or "")
+            state["field_name"] = str(params.get("script_target_desc") or "")
+            state["existing_script"] = str(params.get("current_script") or "")
+            state["field_catalog"] = catalog["text"]
+            state["known_keys"] = catalog["keys"]
+            state["top_keys"] = catalog["top_keys"]
+            ctx.emit("stage", "locate",
+                     f"目标：{state['field_name']} · {profile['label']}")
+            return
+
         catalog = build_field_catalog(fields)
         state["field_catalog"] = catalog["text"]
         state["known_keys"] = catalog["keys"]
@@ -207,7 +320,6 @@ class GenerateJsScriptTool(CompositeTool):
         user_text = strip_script_mark(state.get("user_input", ""))
 
         # ① 弹框场景：pack_params 显式定位（零 LLM）
-        params = script_params(state)
         field_key = str(params.get("script_field") or "").strip()
         slot = normalize_slot(str(params.get("script_slot") or ""))
         existing = str(params.get("current_script") or "")
@@ -268,7 +380,19 @@ class GenerateJsScriptTool(CompositeTool):
                  + ("（基于现有脚本修改）" if state["existing_script"] else ""))
 
     def _step_generate(self, state: dict, ctx: ToolContext) -> None:
-        """LLM 按契约产出最新完整脚本。"""
+        """LLM 按 Profile 或一期权限契约产出最新完整脚本。"""
+        profile = get_js_script_profile(str(state.get("script_profile") or ""))
+        if profile is not None and state.get("script_profile") in _URL_PROFILES:
+            error = _url_requirement_error(
+                strip_script_mark(state.get("user_input", "")),
+                set(state.get("known_keys") or set()),
+            )
+            if error:
+                state["generation_error"] = error
+                state.pop("script", None)
+                ctx.emit("stage", "generate", error)
+                return
+
         is_retry = bool(state.get("check_errors"))
         if is_retry:
             ctx.emit("stage", "generate",
@@ -277,23 +401,33 @@ class GenerateJsScriptTool(CompositeTool):
             ctx.emit("stage", "generate", "正在按平台脚本契约生成...")
 
         slot = state.get("script_slot", "")
-        system = render_prompt(ctx, "js_generate", slot=slot)
+        system = (render_prompt(ctx, profile["prompt"], profile=state["script_profile"])
+                  if profile is not None else render_prompt(ctx, "js_generate", slot=slot))
 
         user_text = strip_script_mark(state.get("user_input", ""))
         user_parts = ["## 用户需求", user_text]
         if state.get("compressed_history"):
             user_parts.extend(["", "## 对话历史", state["compressed_history"]])
         if state.get("field_catalog"):
-            user_parts.extend(["", "## 表单字段目录", state["field_catalog"]])
+            catalog_label = "字段目录" if profile is not None else "表单字段目录"
+            user_parts.extend(["", f"## {catalog_label}", state["field_catalog"]])
         if state.get("existing_script"):
             user_parts.extend(["", "## 现有脚本（在此基础上修改，保留仍成立的逻辑）",
                                f"```javascript\n{state['existing_script']}\n```"])
-        user_parts.extend([
-            "",
-            f"目标字段: {state.get('field_name', '')}"
-            f" (key={state.get('field_key', '')})",
-            f"脚本位: {JS_SLOTS.get(slot, slot)} ({slot})",
-        ])
+        if profile is not None:
+            user_parts.extend([
+                "",
+                f"Profile: {profile['label']} ({state['script_profile']})",
+                f"目标描述: {state.get('field_name', '')}",
+                f"脚本位: {slot}",
+            ])
+        else:
+            user_parts.extend([
+                "",
+                f"目标字段: {state.get('field_name', '')}"
+                f" (key={state.get('field_key', '')})",
+                f"脚本位: {JS_SLOTS.get(slot, slot)} ({slot})",
+            ])
         if is_retry:
             errs = "\n".join(f"- {e}" for e in state["check_errors"][:5])
             user_parts.extend(["", "## 上轮校验失败，请修复", errs, ""])
@@ -309,9 +443,14 @@ class GenerateJsScriptTool(CompositeTool):
             script = script.strip("` \n")
             if script.startswith("javascript"):
                 script = script[len("javascript"):].lstrip("\n")
-        state["script"] = script
         state["check_errors"] = []
         state["script_note"] = str(parsed.get("note") or "").strip()
+        if profile is not None and (parsed.get("error") or not script):
+            state["generation_error"] = str(parsed.get("error") or "脚本生成失败，请提供更明确的需求")
+            state.pop("script", None)
+            return
+        state.pop("generation_error", None)
+        state["script"] = script
 
     def _step_check(self, state: dict, ctx: ToolContext) -> None:
         """机械校验：结构完整性、签名形态、引用 key 反查。失败重跑 generate。
@@ -322,6 +461,14 @@ class GenerateJsScriptTool(CompositeTool):
         由用户编辑器的 CodeMirror 高亮兜底（返回前已肉眼可见）。
         """
         ctx.emit("stage", "check", "正在校验脚本结构与字段引用...")
+        if state.get("generation_error"):
+            return
+
+        profile = get_js_script_profile(str(state.get("script_profile") or ""))
+        if profile is not None:
+            self._check_profile_script(state, ctx, profile)
+            return
+
         script = state.get("script") or ""
         errors = []
 
@@ -356,7 +503,10 @@ class GenerateJsScriptTool(CompositeTool):
 
         # row 场景：row.引用必须在键空间内（row=子表行，行字段=子字段 key）
         if is_row_slot:
-            row_refs = {m.group(1) for m in _RE_ROW_REF.finditer(script)}
+            row_refs = {
+                m.group(1) or m.group(2) or ""
+                for m in _RE_ROW_REF.finditer(script)
+            }
             bad_row = {k for k in row_refs if k and k not in known}
             if bad_row:
                 errors.append(f"row 引用了不存在的字段 key: "
@@ -380,6 +530,57 @@ class GenerateJsScriptTool(CompositeTool):
             return self._step_check(state, ctx)
         # 达上限仍失败：丢弃产物（诚实化——未通过校验就不是"已生成"，
         # 避免用户把残缺脚本应用回设计器）
+        state.pop("script", None)
+        ctx.emit("stage", "check",
+                 f"校验失败（已达上限）："
+                 f"{'; '.join(str(e) for e in errors[:2])[:60]}")
+
+    def _check_profile_script(self, state: dict, ctx: ToolContext,
+                              profile: dict) -> None:
+        """Profile 只校验函数形态、字段目录引用和约定的返回值。"""
+        script = state.get("script") or ""
+        errors = _structural_check(script)
+        s = script.lstrip()
+        if not (s.startswith("(") or s.startswith("async") or s.startswith("function")):
+            errors.append("脚本必须是函数表达式")
+        if profile["return_required"] and not re.search(r"\breturn\b", script):
+            errors.append("该脚本位必须返回结果")
+
+        known = set(state.get("known_keys") or set())
+        fd_refs = {m.group(1) or m.group(2) or "" for m in _RE_FORMDATA_REF.finditer(script)}
+        fd_refs.discard("")
+        fd_refs = {re.sub(r"_label$", "", key) for key in fd_refs}
+        row_refs = {
+            m.group(1) or m.group(2) or ""
+            for m in _RE_ROW_REF.finditer(script)
+            if m.group(1) or m.group(2)
+        }
+        namespace = profile["field_namespace"]
+        if namespace == "form":
+            bad = fd_refs - known
+            if bad:
+                errors.append("脚本引用了表单中不存在的字段 key: "
+                              + ", ".join(sorted(bad)))
+        elif namespace == "row":
+            if fd_refs:
+                errors.append("该脚本位只提供 row，不能使用 formData 取值: "
+                              + ", ".join(sorted(fd_refs)))
+            bad = row_refs - known
+            if bad:
+                errors.append("row 引用了不存在的字段 key: "
+                              + ", ".join(sorted(bad)))
+
+        if not errors:
+            ctx.emit("stage", "check", "校验通过 ✓")
+            return
+
+        state["retry_count"] = state.get("retry_count", 0) + 1
+        state["check_errors"] = errors
+        logger.warning("js profile script check failed (retry %s): %s",
+                       state["retry_count"], errors)
+        if state["retry_count"] < MAX_RETRIES:
+            self._step_generate(state, ctx)
+            return self._step_check(state, ctx)
         state.pop("script", None)
         ctx.emit("stage", "check",
                  f"校验失败（已达上限）："
