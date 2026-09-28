@@ -5,6 +5,9 @@ from domains.njmind_form.tools._script_common import (
     build_field_catalog, JS_MARK, SQL_MARK, strip_script_mark, script_mark_of,
 )
 from domains.njmind_form.tools.generate_js_script import GenerateJsScriptTool
+from domains.njmind_form.tools.generate_filter_sql import (
+    GenerateFilterSqlTool, _xml_escape_sql,
+)
 from sdk.tool import ToolContext
 
 
@@ -100,3 +103,97 @@ class TestJsCheck:
             "editFieldCode")
         self._tool()._step_check(state, _make_ctx())
         assert not state.get("check_errors")
+
+
+class TestSqlCheck:
+    def _tool(self):
+        return GenerateFilterSqlTool()
+
+    def _state(self, sql, user_input="过滤", **extra):
+        from domains.njmind_form.tools._script_common import build_external_field_catalog
+        catalog = build_external_field_catalog([
+            {"fieldTitleKey": "create_time", "fieldTitleText": "创建时间",
+             "typeName": "DATE"},
+            {"fieldTitleKey": "amount", "fieldTitleText": "金额",
+             "typeName": "NUMBER"},
+        ])
+        state = {
+            "sql": sql,
+            "user_input": user_input,
+            "target_columns": catalog,
+            "has_target_catalog": True,
+            "own_keys": set(),
+            "retry_count": 99,
+            "check_errors": [],
+        }
+        state.update(extra)
+        return state
+
+    def test_relative_year_literal_rejected(self):
+        """需求说当年，SQL 写死 2026 → 拦截。"""
+        state = self._state(
+            "create_time >= TIMESTAMP '2026-01-01 00:00:00'",
+            user_input="只看当年的记录")
+        self._tool()._step_check(state, _make_ctx())
+        assert any("年份" in e for e in state["check_errors"])
+        assert "sql" not in state
+
+    def test_relative_year_extract_passes(self):
+        """EXTRACT 动态年份写法 → 通过（extract/year 不算列名）。"""
+        state = self._state(
+            "EXTRACT(YEAR FROM create_time) = "
+            "EXTRACT(YEAR FROM CURRENT_TIMESTAMP)",
+            user_input="只看当年的记录")
+        self._tool()._step_check(state, _make_ctx())
+        assert not state.get("check_errors")
+
+    def test_absolute_year_still_allowed(self):
+        """用户明确给了年份 → 字面量允许。"""
+        state = self._state(
+            "create_time >= TIMESTAMP '2024-01-01 00:00:00'",
+            user_input="只看2024年以后的记录")
+        self._tool()._step_check(state, _make_ctx())
+        assert not state.get("check_errors")
+
+    def test_alias_prefix_rejected(self):
+        """t./t1./ew. 表前缀 → 拦截（运行时由外层统一加别名，MP 单表无别名）。"""
+        for sql in ("t.create_time > TIMESTAMP '2024-01-01 00:00:00'",
+                    "t1.amount > 1000",
+                    "ew.create_user_id = 1"):
+            state = self._state(sql)
+            self._tool()._step_check(state, _make_ctx())
+            assert any("别名" in e or "前缀" in e
+                       for e in state["check_errors"]), sql
+            assert "sql" not in state, sql
+
+    def test_bare_column_passes(self):
+        """裸列名（现行契约）→ 通过。"""
+        state = self._state("amount > 1000 AND create_time IS NOT NULL")
+        self._tool()._step_check(state, _make_ctx())
+        assert not state.get("check_errors")
+
+    def test_mybatis_tag_rejected(self):
+        state = self._state(
+            "amount > 1000 <if test=\"x\">AND amount &lt; 2000</if>")
+        self._tool()._step_check(state, _make_ctx())
+        assert any("动态标签" in e for e in state["check_errors"])
+
+
+class TestSqlXMLEscape:
+    def test_operators_escaped(self):
+        assert _xml_escape_sql("amount < 1000") == "amount &lt; 1000"
+        assert _xml_escape_sql("a < 1 AND b <> 2 AND c <= 3") == \
+            "a &lt; 1 AND b &lt;&gt; 2 AND c &lt;= 3"
+        assert _xml_escape_sql("a > 1") == "a &gt; 1"
+
+    def test_literals_and_placeholders_preserved(self):
+        sql = "amount < #{limit} AND name = 'a<b&c'"
+        assert _xml_escape_sql(sql) == \
+            "amount &lt; #{limit} AND name = 'a<b&c'"
+
+    def test_idempotent(self):
+        once = _xml_escape_sql("amount < 1000 AND b <> 2")
+        assert _xml_escape_sql(once) == once
+
+    def test_entities_preserved(self):
+        assert _xml_escape_sql("a &lt; b &amp;& c") == "a &lt; b &amp;&amp; c"
