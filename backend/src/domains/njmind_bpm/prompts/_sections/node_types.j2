@@ -1,0 +1,41 @@
+{# BPM 节点类型与枚举字典 —— 数据源:上游 bpm_guide.json(maven 编译期生成,SSoT)
+   被 parse.j2/generate.j2/update_parse.j2 include。
+   传入:guide(bpm_guide.json dict)。guide 缺 nodeTypes/enumMappings 时用
+   内置最小兜底(仅 5 节点类型、不列枚举——枚举宁可缺失让 LLM 追问,
+   也不能静态复制一套会漂移的码表)。 #}
+## 节点类型(仅允许以下类型)
+{% if guide and guide.get('nodeTypes') %}
+{% for n in guide['nodeTypes'] %}
+- {{ n.code }} | {{ n.description }}{% if n.rule %} | {{ n.rule }}{% endif %}
+{% endfor %}
+{% else %}
+- START_EVENT | 流程开始 | 流程只能有一个开始节点
+- USER_TASK | 人工审批
+- CC_TASK | 抄送
+- EXCLUSIVE_GATEWAY | 条件分支 | 出边≥2 且每条出边挂条件
+- END_EVENT | 流程结束
+{% endif %}
+
+{% set enums = (guide.get('enumMappings') or []) if guide else [] %}
+{% if enums %}
+## 关键枚举(以下为全部合法取值;不在此表的值非法)
+{% for e in enums if e.group in ('branchLogic', 'approveMethod') %}
+- {{ e.group }}.{{ e.name }} = {{ e.code }}({{ e.description }})
+{% endfor %}
+{% if guide and guide.get('fieldOperatorCompatibility') %}
+## 分支操作符 × 字段类型兼容表(只允许按此组合)
+{% for ftype, ops in guide['fieldOperatorCompatibility'].items() %}
+- {{ ftype }}: {{ ops | join('、') }}
+{% endfor %}
+{% endif %}
+{% else %}
+## 枚举字典不可用
+不要猜测任何枚举值;不确定时在输出 JSON 里置 needsClarification=true 并提问。
+{% endif %}
+
+## 铁律
+1. LLM 只输出语义 key(小写蛇形,如 manager/gateway_amount),**禁止输出任何 BPMN id、坐标、UEL 表达式**
+2. processKey/processName 由系统注入,不要输出
+3. 分支条件用"字段值"模式:formFieldKey + logicType + values,禁止手写表达式
+4. 网关出边≥2;每条条件出边对应 branchRules 里一条(按 edgeKey 关联)
+5. 节点 key/边 key 全图唯一

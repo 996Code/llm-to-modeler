@@ -1,0 +1,38 @@
+# 领域声明（引擎一级路由的候选依据——描述里不带工具细节，引擎据此选"领域"）
+domain:
+  description: 流程/审批流/BPM 流程配置的创建与修改（"做个请假审批流/加个审批节点/改分支条件"类需求）
+  fallback: false   # 兜底域是 njmind_form，本 pack 不抢
+  compact_focus: 生成了什么流程拓扑、改了哪些节点/规则、校验结果
+
+# njmind_bpm pack 静态配置：BPM 上游端点与资产路径集中于此。
+# Java 侧（njmind-modeler feature/bpm-ai-config）提供纯计算端点：
+# parse/render 均零持久化，落库只走 designer 原保存流程。
+
+paths:
+  guide: /api/mcp/bpm/guide
+  templates_list: /api/mcp/bpm/templates/list
+  template: /api/mcp/bpm/templates/{name}
+  schema: /api/mcp/bpm/schemas/{name}
+  parse: /api/mcp/bpm/parse
+  render: /api/mcp/bpm/render
+  get_form: /api/mcp/forms/{code}
+
+# 制品 manifest（供通用层消费：前端 diff / 版本历史 / 服务发现）
+artifact:
+  type: bpm-process
+  actions: [view_json, apply, rewind]
+  identity:
+    approveRules: taskId
+    nodes: key
+  display:
+    title: processName
+    item_label: name
+    welcome_icon: flow
+    welcome_examples:
+      - {title: 请假审批流, desc: ≤3天主管审批，>3天经理+总经理，结束抄送HR, prompt: 生成一个请假审批流程：3天以内部门主管审批，超过3天部门经理和总经理审批，结束后抄送HR, icon: flow}
+      - {title: 报销审批流, desc: 按金额分支，大额加签, prompt: 生成一个报销审批流程：金额1000元以下财务直接审批，1000元以上部门经理审批后总经理审批, icon: flow}
+      - {title: 通用多级审批, desc: 线性多级审批链, prompt: 生成一个通用多级审批流程：提交后组长审批、主管审批、经理审批, icon: flow}
+
+# 依赖的上游服务名（地址由宿主 services 表按请求下发，未下发 fail-closed）
+services:
+  njmind-modeler: {}
