@@ -90,7 +90,8 @@ def test_registry_registers_chat_tool():
 def test_router_routes_to_only_tool_without_llm():
     """无 llm_client 时 DefaultPackRouter 退化为返回首个注册工具(SDK 契约)。
     pack 注册顺序把 ChatTool 放最前——降级/兜底场景应落到无害闲聊,
-    不误触发 generate/update 管线(它们会烧上游调用且需要宿主上下文)。"""
+    不误触发 generate/update 管线(它们会烧上游调用且需要宿主上下文)。
+    route() 返回 (tool_name, confidence) 元组,降级路径 confidence=1.0。"""
     from domains.njmind_bpm.pack import create_router
     router = create_router()
-    assert router.route("你好", None, history="", llm_client=None) == "bpm_chat"
+    assert router.route("你好", None, history="", llm_client=None) == ("bpm_chat", 1.0)
