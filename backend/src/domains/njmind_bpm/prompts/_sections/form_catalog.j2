@@ -1,0 +1,12 @@
+{# 绑定表单字段目录(分支条件可引用字段)
+   传入:form_catalog(蒸馏列表: key/title/type/typeName/options?) #}
+{% if form_catalog %}
+## 绑定表单字段(分支条件只能引用这些字段)
+| key | 名称 | 类型码 | 类型 | 选项 |
+|-----|------|--------|------|------|
+{% for f in form_catalog %}
+| {{ f.key }} | {{ f.title }} | {{ f.type }} | {{ f.typeName }} | {{ f.options | default([]) | join('、') }} |
+{% endfor %}
+{% else %}
+(当前流程未绑定表单或表单目录不可用——分支条件需引用表单字段时,先绑定表单)
+{% endif %}

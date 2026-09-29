@@ -453,16 +453,36 @@ def execute_tool_node(state: GraphState) -> dict:
         # 否则会被下面的兜底 except 吞成 error_for_llm，前端看到的是
         # "工具执行失败: ['请问…']" 而不是追问卡片。
         # 转成 v4 的 ToolResult.ask，走下方统一的 interrupt 机制。
-        result = ToolResult(
-            ask=AskSpec(questions=[
-                AskQuestion(
-                    question=q,
+        # question 为 JSON 字符串(含 question/options/header)时按结构化
+        # 透传(pack 自建点选卡);纯文本维持开放问题+自由输入。
+        import json as _json
+        questions = []
+        for q in ce.questions:
+            parsed = None
+            if isinstance(q, str) and q.startswith("{"):
+                try:
+                    cand = _json.loads(q)
+                    if isinstance(cand, dict) and "question" in cand \
+                            and isinstance(cand.get("options"), list):
+                        parsed = cand
+                except ValueError:
+                    pass
+            if parsed:
+                questions.append(AskQuestion(
+                    question=parsed["question"],
+                    header=parsed.get("header") or "补充信息",
+                    options=[AskOption(label=o.get("label", ""),
+                                       description=o.get("description", ""))
+                             for o in parsed["options"] if isinstance(o, dict)],
+                ))
+            else:
+                questions.append(AskQuestion(
+                    question=q if isinstance(q, str) else str(q),
                     header="补充信息",
-                    # 旧协议是开放问题（无选项）；给一个自由输入项，前端渲染文本输入
                     options=[AskOption(label="自行输入", description="")],
-                )
-                for q in ce.questions
-            ]),
+                ))
+        result = ToolResult(
+            ask=AskSpec(questions=questions),
             summary="需要补充信息",
         )
     except Exception as e:
