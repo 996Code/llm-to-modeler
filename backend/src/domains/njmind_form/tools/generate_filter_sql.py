@@ -35,7 +35,6 @@
 target:{fieldTitleKey, confKey, scene}}。
 """
 import logging
-import re
 
 from sdk.tool import CompositeTool, ToolResult, ToolContext, ClarificationRaised
 
@@ -44,10 +43,15 @@ logger = logging.getLogger(__name__)
 from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
 from domains.njmind_form.tools._script_common import (
     PACK_NAME, script_params, strip_script_mark, build_field_catalog,
-    find_field, target_field_columns, sql_whitelist, SYSTEM_PARAMS,
-    NJMD_MACROS, BPM_MACROS, DB_SPECIFIC_BLACKLIST, type_name,
-    render_prompt,
+    find_field, target_field_columns, type_name, render_prompt,
 )
+# SQL 契约单一事实源（校验正则/词表/黑名单/转义均在此，勿在本文件复制）
+from domains.njmind_form.tools._sql_contract import (
+    check_sql_fragment, xml_escape_sql,
+)
+
+# 既有测试引用的旧名（提取前本模块自有实现，现为共享模块再导出）
+_xml_escape_sql = xml_escape_sql
 
 # 引用记录=17 / 关联数据=10
 CITE_RECORD_TYPE = 17
@@ -63,68 +67,7 @@ CONF_SCENES = {
 
 MAX_RETRIES = 2
 
-_RE_MACRO = re.compile(r"\b(njmd_\w+)\s*\(")
-_RE_PLACEHOLDER = re.compile(r"#\{\s*([^}\s]+)\s*\}")
-_RE_IDENT = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
-_FORBIDDEN_KEYWORDS = re.compile(
-    r"\b(select|from|where|order\s+by|group\s+by|having|insert|update|delete"
-    r"|drop|alter|create|truncate|union)\b", re.IGNORECASE)
-# 表别名前缀：片段必须裸列名（外层 WHERE t.is_deleted=0 统一持有别名；
-# MP 单表注入路径 ExcuteListWrapper 甚至无别名，带前缀直接 SQL 报错）
-_RE_ALIAS_PREFIX = re.compile(r"\b(t\d*|ew)\s*\.\s*[A-Za-z_]")
-# MyBatis 动态标签（DOM 解析器会把它当 XML 元素执行，必须拒绝）
-_RE_MYBATIS_TAG = re.compile(
-    r"<\s*(if|where|foreach|choose|when|otherwise|trim|set|bind)\b",
-    re.IGNORECASE)
-# 相对年份词 → 禁止年份字面量（'2026-…），强制 EXTRACT 动态写法
-_RE_RELATIVE_YEAR = re.compile(r"(当年|本年|今年|去年|上年|明年|近\s*\d+\s*年)")
-_RE_YEAR_LITERAL = re.compile(r"'\s*\d{4}\s*[-/]")
-# EXTRACT(YEAR FROM …)：其 FROM 是函数语法不是查询关键字，检查前剥除
-_RE_EXTRACT_FN = re.compile(r"EXTRACT\s*\([^()]*\)", re.IGNORECASE)
-
-# SQL 词法白名单（校验时不算列名的词）
-_SQL_WORDS = {
-    "and", "or", "not", "in", "is", "null", "like", "between", "exists",
-    "case", "when", "then", "else", "end", "true", "false",
-    "current_timestamp", "current_date", "current_time", "timestamp",
-    "coalesce", "cast", "char", "varchar", "int", "decimal", "date",
-    "extract", "year", "month", "day",
-}
-
-# 运行时 SQL 文本会被包进 <select>…</select> 交 DOM 解析器（ExtremeQuery），
-# 平台对 SQL_TEXT 不做转义（兼容动态标签），所以比较符必须以实体形式落库。
-_XML_UNESCAPED = {"&": "&amp;", "<": "&lt;", ">": "&gt;"}
-_RE_ENTITY = re.compile(r"&[A-Za-z]+;")
-
-
-def _xml_escape_sql(sql: str) -> str:
-    """XML 转义比较符：& < > → 实体；单引号字面量与 #{占位符} 原样保留；
-    已是实体（&lt; 等）的 & 不二次转义（幂等，支持迭代生成）。"""
-    out = []
-    i, n = 0, len(sql)
-    while i < n:
-        ch = sql[i]
-        if ch == "'":
-            j = sql.find("'", i + 1)
-            j = n if j == -1 else j + 1
-            out.append(sql[i:j])
-            i = j
-            continue
-        if ch == "#" and sql.startswith("#{", i):
-            j = sql.find("}", i)
-            j = n if j == -1 else j + 1
-            out.append(sql[i:j])
-            i = j
-            continue
-        if ch == "&":
-            m = _RE_ENTITY.match(sql, i)
-            if m:
-                out.append(m.group())
-                i = m.end()
-                continue
-        out.append(_XML_UNESCAPED.get(ch, ch))
-        i += 1
-    return "".join(out)
+# ── SQL 契约（正则/词表/黑名单/校验/转义）已提取至 _sql_contract.py ──
 
 
 
@@ -372,83 +315,22 @@ class GenerateFilterSqlTool(CompositeTool):
         state["script_note"] = str(parsed.get("note") or "").strip()
 
     def _step_check(self, state: dict, ctx: ToolContext) -> None:
-        """机械校验：片段语义/列名白名单/宏/占位符/三库专有写法。"""
+        """机械校验（逻辑在 _sql_contract.check_sql_fragment，本层只管
+        state 装配 + 重试编排 + note 降级回写）。"""
         ctx.emit("stage", "check", "正在校验SQL列名与占位符...")
-        sql = state.get("sql") or ""
-        errors = []
-
-        # 1) 片段语义：禁止完整 SQL 关键字 / MyBatis 动态标签 / 表别名前缀
-        #    （EXTRACT(... FROM ...) 的 FROM 是函数语法，先剥除再查关键字）
-        keyword_scan = _RE_EXTRACT_FN.sub(" ", sql)
-        m = _FORBIDDEN_KEYWORDS.search(keyword_scan)
-        if m:
-            errors.append(f"只允许 WHERE 片段（布尔表达式），"
-                          f"出现禁止关键字: {m.group()}")
-        m = _RE_MYBATIS_TAG.search(sql)
-        if m:
-            errors.append(f"禁止 MyBatis 动态标签 <{m.group(1)}>；"
-                          f"条件请直接写为布尔表达式")
-        m = _RE_ALIAS_PREFIX.search(sql)
-        if m:
-            errors.append(f"列名必须裸写（禁止 {m.group(1)}. 表别名前缀）；"
-                          f"别名由运行时外层查询统一添加")
-
-        # 2) 三库专有写法黑名单（大小写不敏感）
-        lowered = sql.lower()
-        for bad in DB_SPECIFIC_BLACKLIST:
-            if bad in lowered:
-                errors.append(f"三库兼容：禁止专有写法 {bad}"
-                              f"（用 ANSI 标准等价物）")
-
-        # 3) 宏白名单；bpm 宏在子表场景禁用
-        for name in {g.lower() for g in _RE_MACRO.findall(sql)}:
-            if name not in NJMD_MACROS:
-                errors.append(f"未知宏函数: {name}"
-                              f"（仅支持 {'/'.join(NJMD_MACROS)}）")
-            elif name in BPM_MACROS and state.get("is_sub_table"):
-                errors.append(f"子表场景无流程列，宏 {name} 不可用")
-
-        # 4) 占位符键空间：本表字段 key 或系统参数
-        own = set(state.get("own_keys") or set())
-        for ph in _RE_PLACEHOLDER.findall(sql):
-            if ph not in own and ph not in SYSTEM_PARAMS:
-                errors.append(f"占位符 #{{{ph}}} 不是本表单字段或系统参数")
-
-        # 5) 相对年份禁字面量：需求说当年/去年等 → 必须 EXTRACT 动态写法
-        user_text = strip_script_mark(state.get("user_input", ""))
-        if (_RE_RELATIVE_YEAR.search(user_text)
-                and _RE_YEAR_LITERAL.search(sql)):
-            errors.append(
-                "相对年份（当年/去年等）禁止硬编码年份字面量，请改用 "
-                "EXTRACT(YEAR FROM 列) = EXTRACT(YEAR FROM CURRENT_TIMESTAMP)"
-                "（去年 -1 / 明年 +1）")
-
-        # 5) 列名白名单：目标表字段（上下文目录）∪ 系统列（主/子表分流）
-        allowed = set((state.get("target_columns") or {}).get("keys") or set())
-        allowed |= sql_whitelist(bool(state.get("is_sub_table")))
-        has_catalog = bool(state.get("has_target_catalog"))
-
-        scrubbed = _RE_PLACEHOLDER.sub(" ", sql)
-        scrubbed = _RE_ENTITY.sub(" ", scrubbed)  # &lt; 等实体不算标识符
-        scrubbed = _RE_EXTRACT_FN.sub(" ", scrubbed)
-        scrubbed = re.sub(r"'[^']*'", " ", scrubbed)
-        scrubbed = re.sub(
-            r"(?:TIMESTAMP|DATE|TIME)\s+'[^']*'", " ", scrubbed, flags=re.IGNORECASE)
-        scrubbed = _RE_MACRO.sub(" ", scrubbed)
-        scrubbed = re.sub(r"\b\d+(\.\d+)?\b", " ", scrubbed)
-        idents = {w for w in _RE_IDENT.findall(scrubbed)
-                  if w.lower() not in _SQL_WORDS}
-        unknown_cols = {w for w in idents if w not in allowed}
-        if unknown_cols:
-            if has_catalog:
-                errors.append(f"SQL 使用了白名单外的列名: "
-                              f"{', '.join(sorted(unknown_cols))}")
-            else:
-                # 无目标清单（跨表引用/上下文缺失）：不判失败，note 提示核对
-                state["script_note"] = (
-                    (state.get("script_note") or "")
-                    + f" 请人工核对列名是否存在于目标表: "
-                      f"{', '.join(sorted(unknown_cols))}").strip()
+        notes = []
+        errors = check_sql_fragment(
+            state.get("sql") or "",
+            target_columns=state.get("target_columns") or {},
+            own_keys=state.get("own_keys") or set(),
+            is_sub_table=bool(state.get("is_sub_table")),
+            user_text=strip_script_mark(state.get("user_input", "")),
+            notes=notes,
+        )
+        if notes:
+            state["script_note"] = (
+                (state.get("script_note") or "") + " " + " ".join(notes)
+            ).strip()
 
         if not errors:
             ctx.emit("stage", "check", "校验通过 ✓")

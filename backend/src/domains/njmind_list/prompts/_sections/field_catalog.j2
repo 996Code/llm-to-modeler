@@ -1,0 +1,17 @@
+{# 列表数据源字段目录(列/查询/筛选/排序字段引用的唯一合法域)
+   数据源:guide.fieldCatalog(上游 listconfig guide 响应,SSoT)
+   被 parse.j2 / generate.j2 include;guide 缺失或目录为空时渲染缺省提示
+   (枚举宁可缺失让 LLM 追问,不静态复制会漂移的目录)。 #}
+{% set g = guide | default({}) %}
+{% if g.get('fieldCatalog') %}
+## 数据源字段目录(字段引用一律用 fieldKey 列的值,禁止编造目录外字段)
+| fieldKey | 字段名称 | 类型码 | 来源 |
+|----------|----------|--------|------|
+{%- for f in g.get('fieldCatalog') %}
+| {{ f.get('fieldKey') or '' }} | {{ f.get('fieldTitle') or '' }} | {{ f.get('fieldType') if f.get('fieldType') is not none else '' }} | {{ f.get('source') or '' }} |
+{%- endfor %}
+来源说明:base=本表字段 / part=子表字段 / main=主表引用字段;类型码用于匹配列模板(fieldType)
+{% else %}
+(字段目录不可用——需求里出现具体字段时无法映射 fieldKey:置 needsClarification=true 并向用户确认,
+不要编造 fieldKey)
+{% endif %}

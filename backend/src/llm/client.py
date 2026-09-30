@@ -693,7 +693,24 @@ class LLMClient:
             except json.JSONDecodeError:
                 pass
 
-        # 三级全失败：彻底无法解析，抛错让上层决定（可能要重试或降级）
+        # Python repr form
+        # 第四级：部分网关/模型的 json_object 模式失效时，content 会输出
+        # Python repr（单引号 dict、True/False/None 字面量）而非 JSON。
+        # ast.literal_eval 安全解析 Python 字面量（不执行代码），
+        # 再 json 序列化往返一次保证纯 JSON 兼容形态。
+        # 实证：2026-09-30 996code 网关三个模型均输出 repr（call_logs 佐证）。
+        candidate = text[first:last + 1] if (first != -1 and last != -1 and last > first) else text
+        try:
+            import ast
+            parsed = ast.literal_eval(candidate)
+            if isinstance(parsed, (dict, list)):
+                return json.loads(json.dumps(parsed, ensure_ascii=False))
+        except (ValueError, SyntaxError, TypeError):
+            # TypeError: repr 含 b'x'/1j 等 literal_eval 可解析但 json.dumps
+            # 不可序列化的值（实证 3.12）——按解析失败降级，不逃逸外层
+            pass
+
+        # 四级全失败：彻底无法解析，抛错让上层决定（可能要重试或降级）
         raise ValueError(
             f"Could not extract JSON from LLM response: {text[:200]}..."
         )
