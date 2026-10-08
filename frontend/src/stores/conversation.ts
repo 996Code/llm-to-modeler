@@ -43,6 +43,11 @@ async function refreshEmbedContext() {
   if (!hostCtx) return null // 链路异常：让调用方拦截
   const contextKey = localStorage.getItem('embedded_context_key') || undefined
   const services = (port as any).hostServices as Record<string, string> | undefined
+  // 宿主 INIT 声明的插件集（packs）——单插件宿主（表单/列表/流程设计器各自
+  // 只声明一个 pack）时显式声明给后端，一级路由直通（零 LLM）；多插件
+  // 声明时无法替宿主二选一，不声明、维持语义路由
+  const hostPacks = (port as any).packs as string[] | null
+  const declaredPack = hostPacks && hostPacks.length === 1 ? hostPacks[0] : undefined
   return {
     context: {
       [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
@@ -50,6 +55,7 @@ async function refreshEmbedContext() {
       contextKey,
     },
     services: services || undefined,
+    pack: declaredPack,
   }
 }
 

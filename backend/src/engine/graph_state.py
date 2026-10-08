@@ -109,6 +109,10 @@ class GraphState(TypedDict, total=False):
     # 优先级:用户消息显式指定 > pack_params 默认 > 工具内追问。引擎不解析
     # 内部结构(开闭原则),经 tool_state["pack_params"] 透传给工具,工具自取。
     pack_params: Dict[str, Dict[str, Any]]
+    # 宿主/前端显式声明的目标插件名(ChatRequest.pack)——"谁发起请求,谁声明
+    # 插件":非空且已装配时一级路由直通该 pack(零 LLM),弹窗类强契约场景
+    # 100% 命中;引擎不写死 pack 名、不嗅探消息内容。
+    declared_pack: str
 
     # ── 意图识别(classify_intent 节点写) ──
     # 选中的工具名;条件边 route_by_tool 据此决定走 execute_tool 还是 END

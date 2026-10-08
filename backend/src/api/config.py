@@ -48,6 +48,10 @@ class ChatRequest(BaseModel):
         context: 宿主下发的当前制品（覆盖会话旧配置再进图，防止陈旧基线覆盖手动修改）。
         services: 宿主提供的服务地址表（如 {"pack-service-x": "https://host/base"}），
                   按请求切换上游地址（见 upstream_client.resolve_base）。
+        pack: 宿主/前端显式声明的目标插件名——"谁发起请求，谁声明插件"。
+              非空且该插件已装配时，一级路由直通该插件（零 LLM 调用）；
+              弹窗类强契约场景（脚本弹框必须 100% 命中工具）由发起方声明。
+              引擎不写死插件名、不嗅探消息内容；声明未装配时维持语义路由。
         pack_params: 插件默认参数（宿主注入），{pack: {参数: 值}}——如
                   {"knowledge_graph": {"kb": "产品手册"}} 指定默认知识库。
                   经 tool_state 透传给工具；用户消息里显式指定的值优先于它。
@@ -59,6 +63,7 @@ class ChatRequest(BaseModel):
         image_base64: 图片 base64 编码（用于图片识别）
         context: 宿主当前上下文（可选）
         services: 宿主服务地址表（可选）
+        pack: 宿主显式声明的目标插件名（可选）
         pack_params: 插件默认参数（可选）
     """
     message: str = Field(..., description="User message")
@@ -67,6 +72,8 @@ class ChatRequest(BaseModel):
     image_base64: Optional[str] = None
     context: Optional[Dict[str, Any]] = None
     services: Optional[Dict[str, str]] = None
+    pack: Optional[str] = Field(
+        None, description="宿主显式声明的目标插件名（一级路由直通）")
     pack_params: Optional[Dict[str, Dict[str, Any]]] = None
 
 
@@ -237,6 +244,7 @@ async def chat(req: ChatRequest, request: Request):
             context_artifact=context_artifact,
             forward_headers=fwd,
             services=req.services,  # ← 宿主服务地址表（工作线程内绑定）
+            declared_pack=req.pack or "",  # ← 宿主显式声明的目标插件（一级路由直通）
             pack_params=req.pack_params,  # ← 插件默认参数（宿主注入,tool_state 透传给工具）
         ):
             yield event  # 把每个事件推给前端（SSE）

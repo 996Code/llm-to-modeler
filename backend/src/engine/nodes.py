@@ -162,7 +162,7 @@ def classify_intent_node(state: GraphState) -> dict:
     # conv_id/stage：让两级路由的 LLM 调用日志关联到会话并标注环节（管理端链路追踪）
     pack_name = _route_pack(user_input, compressed_history,
                             conv_id=conversation_id or None,
-                            pack_params=state.get("pack_params"))
+                            declared_pack=state.get("declared_pack"))
 
     # 构建 user message
     tool_name = ""  # 选中的工具名，空表示未选中
@@ -634,32 +634,32 @@ def _route_accepts_conv_id(router: Any) -> bool:
 
 
 def _route_pack(user_input: str, history: str = "", conv_id: str = None,
-                pack_params: dict = None) -> str:
+                declared_pack: str = None) -> str:
     """一级路由（领域无关）：请求属于哪个领域（pack）。
 
-    - 单 pack：直通（零 LLM 调用——两级路由在单领域部署下不引入额外延迟）；
-    - 多 pack：LLM 从各 pack 的 manifest domain.description 里选；无匹配时
-      落到声明 fallback 的 pack（无 fallback 声明则取第一个）。
+    - 显式声明优先：宿主/前端在请求里声明 pack（ChatRequest.pack）且该
+      pack 已装配 → 直通（零 LLM）。契约是"谁发起请求，谁声明插件"——
+      弹窗类强契约场景（脚本弹框必须 100% 命中工具）由发起方显式声明，
+      引擎零领域知识：不写死 pack 名、不嗅探消息内容。
+    - 未声明：单 pack 直通（零 LLM）；多 pack 由 LLM 从各 pack 的
+      manifest domain.description 里选，无匹配落声明 fallback 的 pack。
 
     domain 声明来自 pack 的 config.yaml，由 configure(pack_configs=...) 注入
     （main 启动装配时加载，与 pack_routers 同源——引擎不 import domains）。
     """
-    # 脚本标记短路（声明制，先于单 pack 直通与 LLM 判断）：[script:js]/
-    # [script:sql] 是 designer 脚本弹框的确定性路由契约（弹框语境必须 100%
-    # 命中工具，概率路由不可接受）。目标 pack 由请求的 pack_params 声明
-    # （键 = pack 名，designer 脚本弹窗固定传 {njmind_form: {...}}）——引擎
-    # 不写死 pack 名：哪个 pack 的弹窗发起请求、带哪个 pack 的 params，
-    # 就路由到哪个 pack；未来任何 pack 提供脚本弹窗都自动生效。
-    # 背景：多 pack 部署后 LLM 一级路由曾把 '[script:js] 大于100显示红色'
-    # 误判进 njmind_list → generate_list 调上游 → 弹窗请求不带宿主 services
-    # 表 → fail-closed 报"获取列表字段目录失败"。
-    if user_input and user_input.lstrip().startswith(("[script:js]", "[script:sql]")):
-        declared = next(
-            (p for p in (pack_params or {}) if p in _pack_routers), None)
-        if declared:
-            logger.info(f"route: script mark (pack_params declared) -> pack '{declared}'")
-            return declared
-        # 未声明/声明的 pack 未装配：不短路，落常规路由（LLM 或单 pack 直通）
+    # 显式声明短路（先于单 pack 直通与 LLM 判断）。
+    # 背景：多 pack 部署后 LLM 一级路由曾把脚本弹窗消息误判进别的 pack
+    # （'大于100显示红色'像列表渲染需求）→ 列表工具调上游 → 弹窗请求不带
+    # 宿主 services 表 → fail-closed 误报。声明制根治：弹窗链路显式声明，
+    # 引擎照声明路由。
+    if declared_pack:
+        if declared_pack in _pack_routers:
+            logger.info(f"route: host declared -> pack '{declared_pack}'")
+            return declared_pack
+        # 声明的 pack 未装配（拼错/未启用）：不短路，落常规路由并留痕
+        logger.warning(
+            f"route: host declared pack '{declared_pack}' not assembled, "
+            f"falling to normal routing")
 
     if len(_pack_routers) <= 1:
         only = next(iter(_pack_routers), "")
