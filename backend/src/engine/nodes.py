@@ -160,7 +160,9 @@ def classify_intent_node(state: GraphState) -> dict:
     # 二级（pack，领域知识归 pack）：领域内选哪个工具（如"画布有内容+增量话术
     # =修改类"这类判断写在 pack 的 router 里，不再泄漏进引擎）。
     # conv_id/stage：让两级路由的 LLM 调用日志关联到会话并标注环节（管理端链路追踪）
-    pack_name = _route_pack(user_input, compressed_history, conv_id=conversation_id or None)
+    pack_name = _route_pack(user_input, compressed_history,
+                            conv_id=conversation_id or None,
+                            pack_params=state.get("pack_params"))
 
     # 构建 user message
     tool_name = ""  # 选中的工具名，空表示未选中
@@ -631,7 +633,8 @@ def _route_accepts_conv_id(router: Any) -> bool:
         return False
 
 
-def _route_pack(user_input: str, history: str = "", conv_id: str = None) -> str:
+def _route_pack(user_input: str, history: str = "", conv_id: str = None,
+                pack_params: dict = None) -> str:
     """一级路由（领域无关）：请求属于哪个领域（pack）。
 
     - 单 pack：直通（零 LLM 调用——两级路由在单领域部署下不引入额外延迟）；
@@ -641,17 +644,22 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None) -> str:
     domain 声明来自 pack 的 config.yaml，由 configure(pack_configs=...) 注入
     （main 启动装配时加载，与 pack_routers 同源——引擎不 import domains）。
     """
-    # 脚本标记短路（先于单 pack 直通与 LLM 判断）：[script:js]/[script:sql]
-    # 是 designer 脚本弹框的确定性路由契约（njmind_form 二级路由直选工具）。
-    # 多 pack 部署后 LLM 一级路由曾把 '[script:js] 大于100显示红色' 误判进
-    # njmind_list（"显示红色"像列表渲染需求）→ generate_list 调上游拿字段目录
-    # → 脚本弹窗请求不带宿主 services 表 → fail-closed 报"获取列表字段目录
-    # 失败"。标记命中必须代码直通 njmind_form，不交给概率路由。
+    # 脚本标记短路（声明制，先于单 pack 直通与 LLM 判断）：[script:js]/
+    # [script:sql] 是 designer 脚本弹框的确定性路由契约（弹框语境必须 100%
+    # 命中工具，概率路由不可接受）。目标 pack 由请求的 pack_params 声明
+    # （键 = pack 名，designer 脚本弹窗固定传 {njmind_form: {...}}）——引擎
+    # 不写死 pack 名：哪个 pack 的弹窗发起请求、带哪个 pack 的 params，
+    # 就路由到哪个 pack；未来任何 pack 提供脚本弹窗都自动生效。
+    # 背景：多 pack 部署后 LLM 一级路由曾把 '[script:js] 大于100显示红色'
+    # 误判进 njmind_list → generate_list 调上游 → 弹窗请求不带宿主 services
+    # 表 → fail-closed 报"获取列表字段目录失败"。
     if user_input and user_input.lstrip().startswith(("[script:js]", "[script:sql]")):
-        if "njmind_form" in _pack_routers:
-            logger.info(f"route: script mark -> pack 'njmind_form'")
-            return "njmind_form"
-        # njmind_form 未装配（纯列表部署等）：不短路，落常规路由
+        declared = next(
+            (p for p in (pack_params or {}) if p in _pack_routers), None)
+        if declared:
+            logger.info(f"route: script mark (pack_params declared) -> pack '{declared}'")
+            return declared
+        # 未声明/声明的 pack 未装配：不短路，落常规路由（LLM 或单 pack 直通）
 
     if len(_pack_routers) <= 1:
         only = next(iter(_pack_routers), "")
