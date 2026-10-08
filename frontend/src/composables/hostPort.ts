@@ -137,6 +137,10 @@ export class PostMessageHostPort implements HostPort {
   hostServices: Record<string, string> | null = null
   /** 宿主 INIT 下发的 pack 白名单（上层声明默认插件，供 meta/packs 请求过滤） */
   hostPacks: string[] | null = null
+  /** 握手 promise 缓存（init 幂等）：App 挂载与 getPackManifests 等
+   * 多调用方共享同一次握手——防 manifest 先于 INIT 拉取的竞态
+   * （packs 尚 null → 请求无过滤 → 全量 pack 示例混入宿主弹窗） */
+  private _initPromise: Promise<HostInitResult | null> | null = null
 
   private _nextId = 0
   private _seq = (): string => `r${++this._nextId}`
@@ -221,6 +225,14 @@ export class PostMessageHostPort implements HostPort {
   // ── HostPort 实现 ──
 
   init(): Promise<HostInitResult | null> {
+    // 幂等：App 挂载与 getPackManifests 等多调用方共享同一次握手
+    if (!this._initPromise) {
+      this._initPromise = this._doInit()
+    }
+    return this._initPromise
+  }
+
+  private _doInit(): Promise<HostInitResult | null> {
     // READY 是通知原语（子→宿），宿主收到后回 INIT（宿→子，非请求响应，走监听）
     this._post({ v: PROTOCOL_VERSION, src: 'child', type: 'READY', payload: {} })
     // INIT 是宿→子的指令，无 id；这里用「等首个 INIT」而不是请求-响应。

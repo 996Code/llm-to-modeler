@@ -1,0 +1,37 @@
+# 领域声明（引擎一级路由的候选依据——描述里不带工具细节，引擎据此选"领域"）
+domain:
+  description: 列表页配置/列表设计（"做个设备台账列表/加一列/加导出按钮/只看今年数据"类需求）
+  fallback: false   # 兜底域是 njmind_form，本 pack 不抢
+  compact_focus: 生成了哪些列/按钮/筛选,校验结果
+
+# njmind_list pack 静态配置：列表配置上游端点集中于此。
+# Java 侧（njmind-modeler feature/list-ai-config）提供纯计算端点：
+# guide/templates/validate 均零持久化，保存只走 designer 原保存流程。
+
+paths:
+  tables: /api/mcp/listconfig/tables
+  guide: /api/mcp/listconfig/guide
+  templates_list: /api/mcp/listconfig/templates
+  template: /api/mcp/listconfig/templates/{name}
+  validate: /api/mcp/listconfig/validate
+
+# 制品 manifest（供通用层消费：前端 diff / 版本历史 / 服务发现）
+artifact:
+  type: list-config
+  actions: [view_json, apply, rewind]
+  identity:
+    tableShowFields: fieldTitleKey
+    rowButtons: buttonId
+    buttonGroupConfig.buttonConfigList: buttonId
+  display:
+    title: listName
+    item_label: fieldTitleText
+    welcome_icon: list
+    welcome_examples:
+      - {title: 设备台账列表, desc: 全字段列+增删改查, prompt: 生成设备台账列表：显示设备名称、型号、状态、责任人、购置日期，行按钮带编辑和删除，顶部加新增和导出, icon: list}
+      - {title: 待办过滤列表, desc: SQL 过滤本年度数据, prompt: 生成项目列表：只显示今年立项的项目，按立项时间倒序, icon: list}
+      - {title: 审批状态组合筛选, desc: 组合筛选快速切换, prompt: 生成报销单列表：组合筛选含全部/待审批/已通过/已驳回四档，默认每页 20 条, icon: list}
+
+# 依赖的上游服务名（地址由宿主 services 表按请求下发，未下发 fail-closed）
+services:
+  njmind-modeler: {}

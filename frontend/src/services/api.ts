@@ -151,7 +151,15 @@ let _packCache: PackManifest[] | null = null
 export async function getPackManifests(): Promise<PackManifest[]> {
   if (_packCache) return _packCache
   try {
-    const hostPacks = getHostPort().packs
+    const port = getHostPort()
+    // 嵌入态先等宿主握手完成再读 packs——ChatPanel 挂载与 App 的 port.init()
+    // 并发，若 INIT 未回来 packs 为 null 且 URL 无 packs 时，请求会无过滤
+    // 拉到全部启用 pack（BPM/列表示例混进表单弹窗）。init 幂等（共享握手），
+    // 独立态返回 null 不阻塞；握手失败/超时按原回退链走 URL/默认。
+    if (port.connected) {
+      await port.init()
+    }
+    const hostPacks = port.packs
     const urlPacks = new URLSearchParams(window.location.search).get('packs')
     const packs = hostPacks?.join(',') ?? urlPacks ?? undefined
     const { data } = await api.get('/meta/packs', { params: packs ? { packs } : undefined })
