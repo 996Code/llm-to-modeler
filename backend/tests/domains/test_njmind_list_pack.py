@@ -39,7 +39,7 @@ def test_router_路由到generate_list():
     router = create_router()
     name = router.route("生成设备台账列表", None, history="",
                         llm_client=_FakeLlm("generate_list"))
-    assert name == "generate_list"
+    assert name == ("generate_list", None)
 
 
 def test_router_无llm降级到list_chat兜底():
@@ -49,7 +49,7 @@ def test_router_无llm降级到list_chat兜底():
     不误触发生成管线（它会烧上游调用且需要宿主上下文）。"""
     from domains.njmind_list.pack import create_router
     router = create_router()
-    assert router.route("你好", None, history="", llm_client=None) == "list_chat"
+    assert router.route("你好", None, history="", llm_client=None) == ("list_chat", 1.0)
 
 
 def test_manifest_端点表与服务声明():
