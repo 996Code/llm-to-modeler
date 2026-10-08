@@ -641,6 +641,18 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None) -> str:
     domain 声明来自 pack 的 config.yaml，由 configure(pack_configs=...) 注入
     （main 启动装配时加载，与 pack_routers 同源——引擎不 import domains）。
     """
+    # 脚本标记短路（先于单 pack 直通与 LLM 判断）：[script:js]/[script:sql]
+    # 是 designer 脚本弹框的确定性路由契约（njmind_form 二级路由直选工具）。
+    # 多 pack 部署后 LLM 一级路由曾把 '[script:js] 大于100显示红色' 误判进
+    # njmind_list（"显示红色"像列表渲染需求）→ generate_list 调上游拿字段目录
+    # → 脚本弹窗请求不带宿主 services 表 → fail-closed 报"获取列表字段目录
+    # 失败"。标记命中必须代码直通 njmind_form，不交给概率路由。
+    if user_input and user_input.lstrip().startswith(("[script:js]", "[script:sql]")):
+        if "njmind_form" in _pack_routers:
+            logger.info(f"route: script mark -> pack 'njmind_form'")
+            return "njmind_form"
+        # njmind_form 未装配（纯列表部署等）：不短路，落常规路由
+
     if len(_pack_routers) <= 1:
         only = next(iter(_pack_routers), "")
         if not _pack_routers:
