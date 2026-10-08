@@ -227,7 +227,7 @@ export async function chat(
   options?: {
     context?: { [CONTEXT_KEY_ARTIFACT]: unknown; revision?: string | null; contextKey?: string }
     services?: Record<string, string>
-    target_pack?: string
+    packs?: string[]
   },
 ): Promise<void> {
   await streamSSE(
@@ -239,7 +239,7 @@ export async function chat(
       image_base64: imageBase64,  // 图片识别时透传 base64
       context: options?.context ?? undefined,   // 嵌入模式宿主最新上下文
       services: options?.services ?? undefined, // 宿主服务地址表
-      target_pack: options?.target_pack ?? undefined, // 宿主显式声明的目标插件（一级路由直通）
+      packs: options?.packs ?? undefined,             // 宿主插件链路声明（INIT packs 同义，路由子集）
     },
     callbacks,
   )

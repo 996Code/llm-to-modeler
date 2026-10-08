@@ -43,11 +43,10 @@ async function refreshEmbedContext() {
   if (!hostCtx) return null // 链路异常：让调用方拦截
   const contextKey = localStorage.getItem('embedded_context_key') || undefined
   const services = (port as any).hostServices as Record<string, string> | undefined
-  // 宿主 INIT 声明的插件集（packs）——单插件宿主（表单/列表/流程设计器各自
-  // 只声明一个 pack）时显式声明给后端，一级路由直通（零 LLM）；多插件
-  // 声明时无法替宿主二选一，不声明、维持语义路由
-  const hostPacks = (port as any).packs as string[] | null
-  const targetPack = hostPacks && hostPacks.length === 1 ? hostPacks[0] : undefined
+  // 宿主 INIT 声明的插件链路集（packs）原样沿用到 chat 请求——与 INIT
+  // 同名同义：单插件宿主（表单/列表/流程设计器）后端直通（零 LLM）；
+  // 多插件声明后端在子集内路由（候选收窄）
+  const packs = (port as any).packs as string[] | null
   return {
     context: {
       [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
@@ -55,7 +54,7 @@ async function refreshEmbedContext() {
       contextKey,
     },
     services: services || undefined,
-    target_pack: targetPack,
+    packs: packs ?? undefined,
   }
 }
 

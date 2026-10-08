@@ -162,7 +162,7 @@ def classify_intent_node(state: GraphState) -> dict:
     # conv_id/stage：让两级路由的 LLM 调用日志关联到会话并标注环节（管理端链路追踪）
     pack_name = _route_pack(user_input, compressed_history,
                             conv_id=conversation_id or None,
-                            target_pack=state.get("target_pack"))
+                            packs=state.get("packs"))
 
     # 构建 user message
     tool_name = ""  # 选中的工具名，空表示未选中
@@ -634,32 +634,33 @@ def _route_accepts_conv_id(router: Any) -> bool:
 
 
 def _route_pack(user_input: str, history: str = "", conv_id: str = None,
-                target_pack: str = None) -> str:
+                packs: list = None) -> str:
     """一级路由（领域无关）：请求属于哪个领域（pack）。
 
-    - 显式声明优先：宿主/前端在请求里声明 pack（ChatRequest.pack）且该
-      pack 已装配 → 直通（零 LLM）。契约是"谁发起请求，谁声明插件"——
-      弹窗类强契约场景（脚本弹框必须 100% 命中工具）由发起方显式声明，
+    - packs 子集声明（与嵌入 INIT 下发的 packs 同名同义——窗口初始化声明
+      什么插件链路，后续 chat 消息就只在什么链路里走）：
+      * 声明集（过滤掉未装配项后）只剩 1 个 → 直通（零 LLM）。
+        单域窗口（表单/列表/流程设计器各自只装一个 pack）与弹窗强契约
+        场景（脚本弹框必须 100% 命中工具）由此 100% 命中。
+      * 声明集多个 → LLM 仅在子集内路由（候选收窄，误路由面变小）。
+      * 未声明/声明集全未装配 → 维持全量 LLM 语义路由。
       引擎零领域知识：不写死 pack 名、不嗅探消息内容。
-    - 未声明：单 pack 直通（零 LLM）；多 pack 由 LLM 从各 pack 的
-      manifest domain.description 里选，无匹配落声明 fallback 的 pack。
+    - 单 pack 部署：直通（零 LLM）。
 
     domain 声明来自 pack 的 config.yaml，由 configure(pack_configs=...) 注入
     （main 启动装配时加载，与 pack_routers 同源——引擎不 import domains）。
     """
-    # 显式声明短路（先于单 pack 直通与 LLM 判断）。
-    # 背景：多 pack 部署后 LLM 一级路由曾把脚本弹窗消息误判进别的 pack
-    # （'大于100显示红色'像列表渲染需求）→ 列表工具调上游 → 弹窗请求不带
-    # 宿主 services 表 → fail-closed 误报。声明制根治：弹窗链路显式声明，
-    # 引擎照声明路由。
-    if target_pack:
-        if target_pack in _pack_routers:
-            logger.info(f"route: host declared -> pack '{target_pack}'")
-            return target_pack
-        # 声明的 pack 未装配（拼错/未启用）：不短路，落常规路由并留痕
-        logger.warning(
-            f"route: host declared pack '{target_pack}' not assembled, "
-            f"falling to normal routing")
+    # 声明集与已装配 pack 取交集（拼错/未启用的声明过滤掉）
+    subset = [p for p in (packs or []) if p in _pack_routers]
+    if subset:
+        if len(subset) == 1:
+            logger.info(f"route: packs subset (single) -> pack '{subset[0]}'")
+            return subset[0]
+        if len(subset) < len(packs):
+            dropped = [p for p in packs if p not in subset]
+            logger.warning(
+                f"route: declared packs not assembled, filtered: {dropped}")
+    # 未声明有效子集 → 全量候选（subset 为空时 entries 不过滤）
 
     if len(_pack_routers) <= 1:
         only = next(iter(_pack_routers), "")
@@ -684,11 +685,14 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None,
     entries = [
         f"- {name}: {(d.get('description') or '(无描述)')}"
         + (" [fallback]" if d.get("fallback") else "")
-        for name, d in pack_domains.items() if name in _pack_routers
+        for name, d in pack_domains.items()
+        if name in _pack_routers and (not subset or name in subset)
     ]
     fallback = next((n for n, d in pack_domains.items()
-                     if d.get("fallback") and n in _pack_routers),
-                    next(iter(_pack_routers)))
+                     if d.get("fallback") and n in _pack_routers
+                     and (not subset or n in subset)),
+                    next(iter(subset)) if subset
+                    else next(iter(_pack_routers)))
 
     # entries 拼接放表达式外：f-string 表达式内含反斜杠是 PEP 701（3.12+）特性，
     # 3.11 及以下会 SyntaxError 且报错位置隐蔽——保持 3.11 兼容
@@ -709,7 +713,8 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None,
             {"role": "user", "content": "\n".join(parts)},
         ], conv_id=conv_id, stage="route_pack")
         name = parsed.get("pack") if isinstance(parsed, dict) else None
-        if name in _pack_routers:
+        # 子集声明时 LLM 只能选子集内的（候选 prompt 已过滤，此处兜底校验）
+        if name in _pack_routers and (not subset or name in subset):
             logger.info(f"route: '{user_input[:30]}' -> pack '{name}'")
             return name
     except Exception as e:
