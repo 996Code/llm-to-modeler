@@ -32,19 +32,19 @@ def _configure_multi_pack(llm):
 
 
 class TestExplicitPackRouting:
-    def test_declared_pack_short_circuits(self):
+    def test_target_pack_short_circuits(self):
         """请求声明 pack → 直通该 pack，零 LLM 调用（引擎不猜）。"""
         llm = MagicMock()
         _configure_multi_pack(llm)
-        pack = nodes._route_pack("大于100显示红色", declared_pack="njmind_form")
+        pack = nodes._route_pack("大于100显示红色", target_pack="njmind_form")
         assert pack == "njmind_form"
         llm.chat_json.assert_not_called()
 
-    def test_declared_pack_is_whatever_host_says(self):
+    def test_target_pack_is_whatever_host_says(self):
         """声明不绑定任何固定 pack：声明 njmind_list 就路由 njmind_list。"""
         llm = MagicMock()
         _configure_multi_pack(llm)
-        pack = nodes._route_pack("随便什么话术", declared_pack="njmind_list")
+        pack = nodes._route_pack("随便什么话术", target_pack="njmind_list")
         assert pack == "njmind_list"
         llm.chat_json.assert_not_called()
 
@@ -56,22 +56,22 @@ class TestExplicitPackRouting:
         assert nodes._route_pack("加一列显示金额") == "njmind_list"
         llm.chat_json.assert_called_once()
 
-    def test_declared_pack_not_assembled_falls_back_to_llm(self):
+    def test_target_pack_not_assembled_falls_back_to_llm(self):
         """声明的 pack 未装配（拼错/未启用）→ 不短路，走 LLM 路由。"""
         llm = MagicMock()
         llm.chat_json.return_value = {"pack": "njmind_form"}
         _configure_multi_pack(llm)
-        pack = nodes._route_pack("x", declared_pack="njmind_bpm")
+        pack = nodes._route_pack("x", target_pack="njmind_bpm")
         assert pack == "njmind_form"
         llm.chat_json.assert_called_once()
 
-    def test_classify_node_passes_declared_pack_from_state(self):
+    def test_classify_node_passes_target_pack_from_state(self):
         """classify_intent_node 从 state 读宿主声明并传给 _route_pack。"""
         llm = MagicMock()
         _configure_multi_pack(llm)
         state = {
             "user_input": "[script:js] 大于100显示红色",
-            "declared_pack": "njmind_form",
+            "target_pack": "njmind_form",
             "pack_params": {"njmind_form": {"script_profile": "table_formatter"}},
             "compressed_history": "",
             "conversation_id": "",

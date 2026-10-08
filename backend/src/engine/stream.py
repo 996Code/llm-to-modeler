@@ -104,7 +104,7 @@ async def stream_graph(
     forward_headers: dict = None,
     services: dict = None,
     pack_params: dict = None,
-    declared_pack: str = "",
+    target_pack: str = "",
 ) -> AsyncGenerator[str, None]:
     """走 LangGraph StateGraph 的 SSE 流(异步生成器)。
 
@@ -133,7 +133,7 @@ async def stream_graph(
         pack_params:         插件默认参数(宿主注入),{pack: {参数: 值}}——
                               如 {"<pack_name>": {"param": "value"}};经
                               tool_state 透传给工具,用户显式指定优先于它
-        declared_pack:       宿主/前端显式声明的目标插件名(ChatRequest.pack)。
+        target_pack:       宿主/前端显式声明的目标插件名(ChatRequest.pack)。
                               非空且已装配时一级路由直通该 pack(零 LLM);
                               引擎不写死 pack 名,谁发起请求谁声明插件
 
@@ -184,7 +184,7 @@ async def stream_graph(
             # 插件默认参数(宿主注入):{pack: {参数: 值}},经 tool_state 透传给工具
             "pack_params": pack_params or {},
             # 宿主显式声明的目标插件(路由契约:谁发起请求谁声明插件)
-            "declared_pack": declared_pack or "",
+            "target_pack": target_pack or "",
             "tool_name": "",
             "intent_reason": "",
             # 图片等工具私有状态,只在需要时填充

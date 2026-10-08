@@ -162,7 +162,7 @@ def classify_intent_node(state: GraphState) -> dict:
     # conv_id/stage：让两级路由的 LLM 调用日志关联到会话并标注环节（管理端链路追踪）
     pack_name = _route_pack(user_input, compressed_history,
                             conv_id=conversation_id or None,
-                            declared_pack=state.get("declared_pack"))
+                            target_pack=state.get("target_pack"))
 
     # 构建 user message
     tool_name = ""  # 选中的工具名，空表示未选中
@@ -634,7 +634,7 @@ def _route_accepts_conv_id(router: Any) -> bool:
 
 
 def _route_pack(user_input: str, history: str = "", conv_id: str = None,
-                declared_pack: str = None) -> str:
+                target_pack: str = None) -> str:
     """一级路由（领域无关）：请求属于哪个领域（pack）。
 
     - 显式声明优先：宿主/前端在请求里声明 pack（ChatRequest.pack）且该
@@ -652,13 +652,13 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None,
     # （'大于100显示红色'像列表渲染需求）→ 列表工具调上游 → 弹窗请求不带
     # 宿主 services 表 → fail-closed 误报。声明制根治：弹窗链路显式声明，
     # 引擎照声明路由。
-    if declared_pack:
-        if declared_pack in _pack_routers:
-            logger.info(f"route: host declared -> pack '{declared_pack}'")
-            return declared_pack
+    if target_pack:
+        if target_pack in _pack_routers:
+            logger.info(f"route: host declared -> pack '{target_pack}'")
+            return target_pack
         # 声明的 pack 未装配（拼错/未启用）：不短路，落常规路由并留痕
         logger.warning(
-            f"route: host declared pack '{declared_pack}' not assembled, "
+            f"route: host declared pack '{target_pack}' not assembled, "
             f"falling to normal routing")
 
     if len(_pack_routers) <= 1:

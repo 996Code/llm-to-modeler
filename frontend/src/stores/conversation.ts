@@ -47,7 +47,7 @@ async function refreshEmbedContext() {
   // 只声明一个 pack）时显式声明给后端，一级路由直通（零 LLM）；多插件
   // 声明时无法替宿主二选一，不声明、维持语义路由
   const hostPacks = (port as any).packs as string[] | null
-  const declaredPack = hostPacks && hostPacks.length === 1 ? hostPacks[0] : undefined
+  const targetPack = hostPacks && hostPacks.length === 1 ? hostPacks[0] : undefined
   return {
     context: {
       [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
@@ -55,7 +55,7 @@ async function refreshEmbedContext() {
       contextKey,
     },
     services: services || undefined,
-    pack: declaredPack,
+    target_pack: targetPack,
   }
 }
 
