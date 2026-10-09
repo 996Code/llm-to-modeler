@@ -650,14 +650,16 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None,
     domain 声明来自 pack 的 config.yaml，由 configure(pack_configs=...) 注入
     （main 启动装配时加载，与 pack_routers 同源——引擎不 import domains）。
     """
-    # 声明集与已装配 pack 取交集（拼错/未启用的声明过滤掉）
-    subset = [p for p in (packs or []) if p in _pack_routers]
+    # 声明集与已装配 pack 取交集（拼错/未启用的声明过滤掉；重复项去重
+    # —— ['a','a'] 去重后是单成员，应直通而非误走 LLM 多候选路径）
+    subset = [p for p in dict.fromkeys(packs or []) if p in _pack_routers]
     if subset:
         if len(subset) == 1:
             logger.info(f"route: packs subset (single) -> pack '{subset[0]}'")
             return subset[0]
-        if len(subset) < len(packs):
-            dropped = [p for p in packs if p not in subset]
+        if len(subset) < len(set(packs or [])):
+            dropped = [p for p in dict.fromkeys(packs or [])
+                       if p not in _pack_routers]
             logger.warning(
                 f"route: declared packs not assembled, filtered: {dropped}")
     # 未声明有效子集 → 全量候选（subset 为空时 entries 不过滤）

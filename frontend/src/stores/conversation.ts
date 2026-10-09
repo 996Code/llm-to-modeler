@@ -46,7 +46,7 @@ async function refreshEmbedContext() {
   // 宿主 INIT 声明的插件链路集（packs）原样沿用到 chat 请求——与 INIT
   // 同名同义：单插件宿主（表单/列表/流程设计器）后端直通（零 LLM）；
   // 多插件声明后端在子集内路由（候选收窄）
-  const packs = (port as any).packs as string[] | null
+  const packs = port.packs
   return {
     context: {
       [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
