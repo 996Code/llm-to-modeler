@@ -449,3 +449,38 @@ def test_url_requirement_gate_ignores_existing_script(profile):
     assert state['generation_error']
     assert any(event[:2] == ('stage', 'generate') for event in events)
     ctx.llm_client.chat_json.assert_not_called()
+
+
+class TestTableCustomRenderProfile:
+    def test_profile_registered(self):
+        profile = get_js_script_profile('table_custom_render')
+        assert profile is not None
+        assert profile['context'] == 'list'
+        assert profile['prompt'] == 'js_table_custom_render_generate'
+        assert profile['return_required'] is True
+        assert profile['field_namespace'] == 'row'
+        assert profile['label'] == '列表自定义渲染'
+
+    def test_prompt_renders_runtime_contract(self):
+        from domains.njmind_form.pack import create_prompt_loader
+        loader = create_prompt_loader()
+        rendered = loader.render('njmind_form', 'js_table_custom_render_generate',
+                                 profile='table_custom_render')
+        assert '({ row, service, message, userInfo, checkedRowKeys }) => string | VNode' in rendered
+        assert 'HTML' in rendered
+        assert 'VNode' in rendered
+        assert '不可使用 formData' in rendered
+
+    def test_row_field_checks_enforced(self):
+        state = _list_profile_state('table_custom_render', 'customScript', [
+            {'fieldTitleKey': 'amount', 'fieldTitleText': '金额', 'typeName': 'NUMBER'},
+        ])
+        GenerateJsScriptTool()._step_locate(state, _make_ctx())
+        state.update({
+            'script': '({ row }) => { return row.unknown > 1 ? "<b>x</b>" : "-"; }',
+            'retry_count': 99,
+            'check_errors': [],
+        })
+        GenerateJsScriptTool()._step_check(state, _make_ctx())
+        assert any('row 引用了不存在' in error for error in state['check_errors'])
+        assert 'script' not in state

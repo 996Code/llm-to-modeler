@@ -102,6 +102,13 @@ JS_SCRIPT_PROFILES = {
         "field_namespace": "row",
         "label": "列表格式化",
     },
+    "table_custom_render": {
+        "context": "list",
+        "prompt": "js_table_custom_render_generate",
+        "return_required": True,
+        "field_namespace": "row",
+        "label": "列表自定义渲染",
+    },
     "table_visibility": {
         "context": "list_visibility",
         "prompt": "js_table_visibility_generate",

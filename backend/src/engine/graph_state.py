@@ -110,6 +110,11 @@ class GraphState(TypedDict, total=False):
     # 优先级:用户消息显式指定 > pack_params 默认 > 工具内追问。引擎不解析
     # 内部结构(开闭原则),经 tool_state["pack_params"] 透传给工具,工具自取。
     pack_params: Dict[str, Dict[str, Any]]
+    # 宿主/前端声明的插件链路集(ChatRequest.packs,与嵌入 INIT 下发的
+    # packs 同名同义)——窗口初始化声明什么链路,后续消息就只在什么链路里
+    # 走:子集(过滤未装配后)只剩 1 个直通(零 LLM);多个则 LLM 仅在子集
+    # 内路由;未声明走全量语义路由。引擎不写死 pack 名、不嗅探消息内容。
+    packs: List[str]
 
     # ── 意图识别(classify_intent 节点写) ──
     # 选中的工具名;条件边 route_by_tool 据此决定走 execute_tool 还是 END
