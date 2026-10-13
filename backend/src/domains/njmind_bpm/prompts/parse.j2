@@ -13,7 +13,8 @@
     {"name": "抄送HR", "nodeType": "CC_TASK", "approver": "HR(角色)", "note": ""}
   ],
   "branchIntents": [
-    {"description": "请假天数>3走总经理", "formFieldKey": "请假天数", "logicType": 70, "values": ["3"]}
+    {"description": "请假天数>3走总经理", "formFieldKey": "请假天数", "logicType": 70, "values": ["3"]},
+    {"description": "当前用户角色为财务走财务审批", "formFieldKey": "loginUserRole", "logicType": 30, "values": ["财务角色"]}
   ]
 }
 
@@ -22,3 +23,5 @@
 2. 分支意图引用表单字段(字段目录可用时);无法确定字段时置 needsClarification=true 并提问
 3. 信息不足(如流程主体、审批层级含糊)→ needsClarification=true,给 1-3 个具体问题
 4. 不编造字段 key、不编造审批人具体姓名——只输出语义描述,字段映射在下一阶段做
+5. 审批人用中文名词描述:角色名(如"财务角色")、部门名(如"财务部")、姓名(如"张三")或发起人;**禁止编造角色 id、角色 code、部门 id、用户 id**——id 映射在下一阶段做,编造的 id 会被整体拒绝
+6. 角色分支意图用系统字段 loginUserRole(当前用户角色),操作符只允许 30=包含、40=不包含;values 填角色中文名(如"财务角色")
