@@ -1,16 +1,18 @@
-"""ModifyFormTool - 修改已有表单配置的复合工具(3 步管线)。
+"""ModifyFormTool - 修改已有表单配置的复合工具(5 步管线)。
 
 【模块定位】
 属于 njmind_form 域。当用户说"加一个手机号字段"、"删除 xxx"、"把 xxx 改成必填"
 时,引擎选中本工具。与 GetFormTool(单步查询)不同,本工具是**复合工具
-(CompositeTool)**,内部有 3 步串行管线,并支持校验失败后自动重试。
+(CompositeTool)**,内部有 5 步串行管线,并支持校验失败后自动重试。
 
-【3 步管线】
-  fetch_guide → modify → validate
-    1. fetch_guide: 从上游拉"配置指南"(字段类型映射等元数据)
-    2. modify:      两相式 —— 增量主路径(plan_ops→apply_ops,默认) +
-                    全量重生成兜底(大重构/增量失败时升格,见 _step_modify)
-    3. validate:    差分校验,失败则带错误信息重跑 modify(最多 MAX_RETRIES 次)
+【5 步管线】
+  fetch_guide → fetch_role_catalog → modify → resolve_permissions → validate
+    1. fetch_guide:        从上游拉"配置指南"(字段类型映射等元数据)
+    2. fetch_role_catalog: 取组织角色目录(权限名词解析的值域)
+    3. modify:             两相式 —— 增量主路径(plan_ops→apply_ops,默认) +
+                           全量重生成兜底(大重构/增量失败时升格,见 _step_modify)
+    4. resolve_permissions:角色名词 → 真实 code(目录确定性解析 + 追问回填)
+    5. validate:           差分校验,失败则带错误信息重跑 modify(最多 MAX_RETRIES 次)
 
 【增量主路径(Claude Code Edit 同源)】
   LLM 只输出操作指令集(update/add/remove_field 等,几百字节),
@@ -44,6 +46,9 @@ from domains.njmind_form.tools._postprocess import (
 )
 from domains.njmind_form.tools._incremental_ops import (
     build_catalog, apply_ops, format_failures, restore_untouched, _norm_type_code,
+)
+from domains.njmind_form.tools._permission_catalog import (
+    fetch_role_catalog, role_reference_vars, run_permission_resolution,
 )
 # 模板 stem 推导表与 create 管线同源（add_field 骨架 fallback 拉上游模板用）
 from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem, sanitize_guide
@@ -115,15 +120,18 @@ class ModifyFormTool(CompositeTool):
     # steps 是 CompositeTool 的核心声明:定义管线的步骤顺序
     # 基类 run_pipeline 会按此顺序调用 _step_fetch_guide / _step_modify / _step_validate
     # （"modify" 步内部两相：增量主路径 plan_ops→apply_ops，全量重生成兜底）
-    steps = ["fetch_guide", "modify", "validate"]
+    steps = ["fetch_guide", "fetch_role_catalog", "modify",
+             "resolve_permissions", "validate"]
 
     # Pipeline 步骤定义(用于前端动态渲染进度条)
     # key 对应 SSE stage 事件名（_step_modify 内部 emit plan_ops / apply_ops），
     # 前端按 stage 前缀匹配高亮，全量兜底时复用 apply_ops 节点（stage 名不变）
     pipeline_steps = [
         {"key": "fetch_guide", "label": "获取指南"},
+        {"key": "fetch_role_catalog", "label": "获取角色目录"},
         {"key": "plan_ops", "label": "规划指令"},
         {"key": "apply_ops", "label": "应用修改"},
+        {"key": "resolve_permissions", "label": "解析角色权限"},
         {"key": "validate", "label": "校验结果"},
     ]
 
@@ -184,6 +192,11 @@ class ModifyFormTool(CompositeTool):
         state.setdefault("retry_count", 0)
         state.setdefault("validation_errors", [])
 
+        # 权限追问恢复（resume=整工具重跑）：pending 制品存在 → LLM 步骤全部
+        # 跳过（plan_ops/全量重生成都不跑），只走 resolve 回填 + validate
+        if state.get("_permission_pending_artifact") is not None:
+            ctx.emit("stage", "resolve_permissions", "正在应用您的权限选择...")
+
         # 核心:跑管线。基类会按 self.steps 顺序调各 _step_xxx 方法
         self.run_pipeline(state, ctx)
 
@@ -208,6 +221,15 @@ class ModifyFormTool(CompositeTool):
         else:
             # 没产出 artifact:可能是 modify 步骤异常 / validate 全部失败
             summary = "表单修改未完成"
+
+        # 权限解析附注（reply 从不展示，summary 是前端唯一渲染通道）；
+        # dict.fromkeys 去重保序：重试环路里同一条附注只出现一次
+        notes = list(state.get("_permission_notes") or [])
+        if state.get("_role_catalog_unavailable"):
+            notes.append("组织目录不可用，本轮未配置角色权限")
+        notes = list(dict.fromkeys(notes))
+        if notes:
+            summary = f"{summary}（{'；'.join(notes)}）"
 
         return ToolResult(
             artifact=artifact,
@@ -294,8 +316,35 @@ class ModifyFormTool(CompositeTool):
             ])
         state["guide"] = sanitize_guide(raw)
 
+    def _step_fetch_role_catalog(self, state: dict, ctx: ToolContext) -> None:
+        """取组织角色目录（权限名词解析的值域）。失败/空 → []，绝不抛。
+
+        resume 照常执行（模块级 TTL 缓存命中）——目录是 resolve 的前置
+        依赖，不属于「跳过的 LLM 步骤」。
+        """
+        ctx.emit("stage", "fetch_role_catalog", "正在获取组织角色目录...")
+        rows = fetch_role_catalog(ctx)
+        # msgpack 白名单只认 manifest 声明类 → 只存原始 list[dict]
+        state["role_catalog"] = rows
+        if rows:
+            ctx.emit("stage", "fetch_role_catalog_done",
+                     f"已加载 {len(rows)} 个角色")
+        # 目录不可用不在此追问：resolve 步统一降级
+
+    def _step_resolve_permissions(self, state: dict, ctx: ToolContext) -> None:
+        """角色权限名词 → 真实 code（目录确定性解析 + 追问回填）。
+
+        在 modify（restore_untouched 已还原未触碰字段）之后执行：存量
+        code 透传不翻开关、未被触碰字段的权限键逐字节不变。中文名词绝不
+        进入最终 artifact；无法直选的语义串逐条追问（resume 用 label 反查
+        回填，无第二次 LLM 调用）。目录不可用 → 跳过解析不清已有。
+        """
+        ctx.emit("stage", "resolve_permissions", "正在解析角色权限...")
+        run_permission_resolution(state, ctx, mode="modify")
+        ctx.emit("stage", "resolve_permissions_done", "角色权限已解析")
+
     def _step_modify(self, state: dict, ctx: ToolContext) -> None:
-        """Step 2: 修改配置 —— 增量主路径 + 全量兜底（两相式）。
+        """Step: 修改配置 —— 增量主路径 + 全量兜底（两相式）。
 
         【增量主路径】（默认，Claude Code Edit 同源思路）
           build_catalog(纯代码) → plan_ops(LLM 只输出指令集,几百字节)
@@ -318,6 +367,8 @@ class ModifyFormTool(CompositeTool):
                    写 artifact / validation_errors / _mode / _ops_applied
             ctx:   提供 emit / llm_client / prompt_loader / asset_client
         """
+        if state.get("_permission_pending_artifact") is not None:
+            return  # 权限追问恢复：复用 pending 制品，跳过全部 LLM 修改路径
         if state.get("_mode") != "full":
             if self._modify_incremental(state, ctx):
                 return
@@ -393,11 +444,12 @@ class ModifyFormTool(CompositeTool):
     def _plan_ops(self, state: dict, ctx: ToolContext,
                   catalog, failures: list, validation_errors: list):
         """调 LLM 产出指令集。失败/空输出返回 None（触发升全量）。"""
-        system_prompt = self._render_prompt(
-            ctx, "modify_ops",
-            catalog=catalog.text,
-            guide=state.get("guide") or {},
-        )
+        prompt_vars = {
+            "catalog": catalog.text,
+            "guide": state.get("guide") or {},
+        }
+        prompt_vars.update(role_reference_vars(state))
+        system_prompt = self._render_prompt(ctx, "modify_ops", **prompt_vars)
 
         user_parts = []
         if state.get("compressed_history"):
@@ -498,11 +550,12 @@ class ModifyFormTool(CompositeTool):
 
         # 渲染 system prompt:把指南 + 字段类型模板拼进去
         # 通过 ctx.prompt_loader 加载模板(类比 Spring 的 TemplateEngine)
-        system_prompt = self._render_prompt(
-            ctx, "modify",
-            config=base_config,
-            guide=state.get("guide") or {},
-        )
+        prompt_vars = {
+            "config": base_config,
+            "guide": state.get("guide") or {},
+        }
+        prompt_vars.update(role_reference_vars(state))
+        system_prompt = self._render_prompt(ctx, "modify", **prompt_vars)
 
         # 构建 user message:对话历史 + 修改指令 [+ 校验错误]
         user_parts = []
@@ -594,6 +647,11 @@ class ModifyFormTool(CompositeTool):
             state["validation_errors"] = [{"message": "No configuration to validate"}]
             ctx.emit("stage", "validate_fail", "校验失败：无配置可校验")
             return
+
+        # 重试环路不变量：进 validate 前产物必然再过一次幂等 resolve——
+        # 校验失败→重生成/重规划路径上新产出的中文必须再解析，
+        # "最终制品无中文"在所有进入 validate 的路径上成立
+        run_permission_resolution(state, ctx, mode="modify")
 
         import copy as _copy
         allowed = _get_allowed_keys(ctx)

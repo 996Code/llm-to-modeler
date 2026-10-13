@@ -81,6 +81,13 @@ class HttpAssetClient(ConfigAssetClient):
         result = self._c().get_artifact(entry_id)
         return self._clean(result) if result else None
 
+    def get_org_catalog(self, catalog_type: str) -> list:
+        """组织目录（角色等）。目录语义归 pack 领域客户端，此处仅委托+清洗；
+        失败/空统一 []（目录不可用是可降级场景，不是错误）。"""
+        data = self._c().get_org_catalog(catalog_type)
+        cleaned = self._clean(data) if data else []
+        return cleaned if isinstance(cleaned, list) else []
+
     # ── 通用数据操作（非配置类 pack，按 service_name 经通用传输） ──
 
     def submit_data(self, path: str, data: dict, service_name: str,

@@ -19,10 +19,13 @@ def _make_ctx(llm=None, asset_client=None, prompt_loader=None):
 
 class TestModifyFormToolDeclaration:
     def test_steps_count(self):
-        assert len(ModifyFormTool().steps) == 3
+        assert len(ModifyFormTool().steps) == 5
 
     def test_steps_order(self):
-        assert ModifyFormTool().steps == ["fetch_guide", "modify", "validate"]
+        assert ModifyFormTool().steps == [
+            "fetch_guide", "fetch_role_catalog", "modify",
+            "resolve_permissions", "validate",
+        ]
 
 
 class TestValidateInput:

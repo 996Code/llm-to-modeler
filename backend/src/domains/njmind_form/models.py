@@ -40,6 +40,17 @@ class ParsedField(BaseModel):
     # Optional + None 默认值:仅 SELECT(下拉)等枚举类型才填选项。
     # 等价 Java 的 List<String> options = null; —— 显式 Optional 表达"可能没有"。
     options: Optional[List[str]] = None  # for SELECT types
+    # ── 字段权限语义数组（名词态中间产物，绝不直接落库）──
+    # LLM 从用户口语提取的角色/审批节点中文名（如 ["财务角色"]），由
+    # resolve_permissions 步骤经目录确定性解析成真实 code/id 后才进最终制品。
+    # 六键与上游字段权限契约对齐：三个 Roles（角色）+ 三个 TaskKeys（节点）；
+    # None=未提及（省键），空数组是非法表达（空数组禁令，fail-open 防护）。
+    canShowFieldAddRoles: Optional[List[str]] = None       # 新增可见·角色（名词态）
+    canShowFieldDetailRoles: Optional[List[str]] = None    # 查看可见·角色（名词态）
+    canEditFieldRoles: Optional[List[str]] = None          # 可编辑·角色（名词态）
+    canShowFieldAddTaskKeys: Optional[List[str]] = None    # 新增可见·审批节点（名词态）
+    canShowFieldDetailTaskKeys: Optional[List[str]] = None # 查看可见·审批节点（名词态）
+    canEditFieldTaskKeys: Optional[List[str]] = None       # 可编辑·审批节点（名词态）
 
 
 class FormConfig(BaseModel):

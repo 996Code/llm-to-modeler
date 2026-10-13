@@ -26,8 +26,11 @@
 5. 新增字段只需给 key/标题/类型码/必填，其余结构自动补全；选项类才需要加 "optionSettings":{"optionFields":[...] }；新增字段的 key 用小写拼音（如 shoujihaoma），与目录风格一致
 6. 宁可拆成多条简单指令，不要写一条复杂指令
 7. 用户指令模糊（如"改一下第一个字段"但目录能明确对应）时按目录理解执行；完全无法定位才输出 full_rewrite
+8. **字段权限可 patch 六键**：canShowFieldAddRoles / canShowFieldDetailRoles / canEditFieldRoles（值为角色中文名数组，名称从角色目录参考中选取）与 isShowFieldAdd / isShowFieldDetail / isEditField（0/1）。只输出用户本轮指令涉及的权限改动，未提及字段的权限键一律不写。**patch 的权限数组要么不写、要么非空，禁止空数组**；"取消限制"表达为对应开关置 0（不要动角色数组）
 
 ## 字段类型代码
 {% include "njmind_form/prompts/_sections/field_types.j2" %}
 
 ## {{ catalog }}
+
+{% include "njmind_form/prompts/_sections/role_catalog.j2" %}

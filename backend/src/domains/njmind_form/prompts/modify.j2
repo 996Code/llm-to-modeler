@@ -15,7 +15,8 @@
 5. 【硬约束】formCode、formConfigId 与已有字段的 fieldTitleKey 是数据库标识，与已存数据关联，**原样保留、禁止修改或删除**。修改字段名只改 fieldTitleText（中文名），key 不动
 6. 不要改动 topButtons、bottomButtons 等系统字段
 7. fieldConditionDisplays 必须为 []
-8. 只输出修改后的完整 JSON（formCode、formConfigId 与所有原有字段的 fieldTitleKey 必须原样出现在输出中）
+8. **字段权限**（canShowFieldAddRoles / canShowFieldDetailRoles / canEditFieldRoles 及 can*TaskKeys）：指令没提的字段原样保留其权限键与开关值；指令要求配置时，值为角色/节点的中文名数组（名称从角色目录参考中选取，系统后续解析）。**禁止输出空权限数组**——要么整键省略（未提及），要么非空；"取消限制"只能把对应总开关（isShowFieldAdd / isShowFieldDetail / isEditField）置 0，权限数组原值保留
+9. 只输出修改后的完整 JSON（formCode、formConfigId 与所有原有字段的 fieldTitleKey 必须原样出现在输出中）
 
 ## 字段类型代码
 {% include "njmind_form/prompts/_sections/field_types.j2" %}
@@ -26,3 +27,5 @@
 ```
 
 {% include "njmind_form/prompts/_sections/keyword_hints.j2" %}
+
+{% include "njmind_form/prompts/_sections/role_catalog.j2" %}

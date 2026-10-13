@@ -19,12 +19,12 @@ def _make_ctx(llm=None, asset_client=None, prompt_loader=None):
 
 class TestCreateFormToolDeclaration:
     def test_steps_count(self):
-        assert len(CreateFormTool().steps) == 6
+        assert len(CreateFormTool().steps) == 8
 
     def test_steps_order(self):
         assert CreateFormTool().steps == [
-            "fetch_guide", "list_assets", "parse_fields",
-            "fetch_templates", "generate", "validate",
+            "fetch_guide", "fetch_role_catalog", "list_assets", "parse_fields",
+            "fetch_templates", "generate", "resolve_permissions", "validate",
         ]
 
     def test_input_schema(self):
