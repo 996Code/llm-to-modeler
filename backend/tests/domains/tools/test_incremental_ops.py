@@ -118,6 +118,20 @@ class TestAddField:
         assert not ar.ok
         assert any("重复" in f for f in ar.failures)
 
+    def test_add_does_not_inherit_source_field_config_id(self):
+        """克隆骨架不得把源字段的 formFieldConfigId 带给新字段（id 冲突会导致
+        designer 点击选中错位、保存错行——真实事故：密级字段与文本输入框同 id）。"""
+        config = _config()
+        config["formFieldConfigVos"][0]["formFieldConfigId"] = "widget-abc-123"
+        ops = [{"op": "add_field", "after": "xingming",
+                "field": {"fieldTitleKey": "beizhu", "fieldTitleText": "备注",
+                          "formFieldType": 0, "isRequiredField": 0}}]
+        ar = apply_ops(config, ops)
+        assert ar.ok
+        new = [f for f in ar.new_config["formFieldConfigVos"]
+               if f["fieldTitleKey"] == "beizhu"][0]
+        assert "formFieldConfigId" not in new
+
     def test_add_no_same_type_no_loader_fails(self):
         """无同类型字段且无模板加载器 → fail-closed（不静默造结构）。"""
         ops = [{"op": "add_field",

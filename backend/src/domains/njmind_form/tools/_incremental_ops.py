@@ -29,8 +29,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # add_field 骨架补全时要从克隆源剥掉的「身份属性」——新字段不能继承旧字段的
-# key / 标题 / 默认值（默认值继承会带着旧业务语义，是脏数据）
-_IDENTITY_KEYS = {FIELD_KEY, FIELD_TITLE, "fieldDefaultValue"}
+# key / 标题 / 默认值 / 配置 id（默认值继承会带着旧业务语义；formFieldConfigId
+# 继承会产生同 id 字段——designer 点击选中错位、保存错行，真实事故实证）
+_IDENTITY_KEYS = {FIELD_KEY, FIELD_TITLE, "fieldDefaultValue", "formFieldConfigId"}
 
 # 目录里展示的表单级属性（LLM 改表单结构的入口）。只放「用户可能口头提到」的，
 # 不放 formConfigId/dataVersion 这类系统字段（改了也无意义还危险）
