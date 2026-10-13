@@ -368,7 +368,10 @@ def restore_untouched(new_cfg: Dict[str, Any], base_cfg: Dict[str, Any],
         if key in ar.touched_form_keys:
             continue
         out[key] = copy.deepcopy(base_val)
-    return out
+    # 基线还原可能带回脏数据里的重复 formFieldConfigId（画布存量冲突对）；
+    # 剥掉后续重复 id 让 designer 重新生成——id 冲突会坏点击选中/保存定位
+    from domains.njmind_form.tools._postprocess import _dedupe_config_ids
+    return _dedupe_config_ids(out)
 
 
 def format_failures(failures: List[str], catalog_keys: List[str]) -> str:
