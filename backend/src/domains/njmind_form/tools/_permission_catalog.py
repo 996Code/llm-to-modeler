@@ -12,7 +12,10 @@ njmind_form pack 的权限领域层：把 LLM 产物中的角色「中文名词�
   - resolve_form_role_permissions: 制品就地解析；无法直选的语义串产出追问卡
     （header `__role:<fieldKey>:<prop>:<index>`，候选 label「名称（code）」，
     附固定「忽略本条权限」选项）；answers 里按 header 反查回填，无第二次 LLM
-  - run_permission_resolution: 工具步骤统一入口（目录不可用降级 + pending 标记）
+  - resolve_form_task_permissions: 审批节点版（目录来自 pack_params 的
+    task_keys，code=id；Add/Edit 组剔出抄送节点；未绑流程回阻断消息）
+  - run_permission_resolution: 工具步骤统一入口（角色降级 + 节点阻断 +
+    pending 标记，两类追问合并抛出）
 
 【硬规则（Plan1 v2 审查结论）】
   - 开关置位：仅当某字段本轮有 ≥1 值经「名称匹配」解析成 code 时才把对应
@@ -30,6 +33,7 @@ import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from sdk.catalog import resolve_names, lookup_selected, entries_from_rows
@@ -54,6 +58,24 @@ _PROP_LABELS = {
 # 追问固定选项：「条」=单个 pending 名词——仅丢弃该名词；剥除后组内空才回
 # 「本次指令未涉及该权限」状态（modify 保旧值+旧开关，create 剥键即可）
 IGNORE_LABEL = "忽略本条权限"
+
+# ── 审批节点权限键映射（TaskKeys 数组 → (总开关, 是否允许抄送节点)）──
+# 布尔 = 是否允许 taskType==4（抄送节点）：仅 Detail 组允许，Add/Edit 剔除。
+TASK_FIELDS = {
+    "canShowFieldAddTaskKeys": ("isShowFieldAdd", False),
+    "canShowFieldDetailTaskKeys": ("isShowFieldDetail", True),
+    "canEditFieldTaskKeys": ("isEditField", False),
+}
+# 追问卡展示用的中文属性名
+_TASK_PROP_LABELS = {
+    "canShowFieldAddTaskKeys": "新增可见审批节点",
+    "canShowFieldDetailTaskKeys": "查看可见审批节点",
+    "canEditFieldTaskKeys": "可编辑审批节点",
+}
+# 抄送节点的 taskType 值（designer getTaskKeyList 契约）
+CC_TASK_TYPE = 4
+# 未绑流程（process_definition_key 为 null 且产物带节点语义）的终态提示
+TASK_UNBOUND_MSG = "请先绑定流程后再配置审批节点权限"
 
 # ── 目录获取：模块级 TTL 缓存（传输层 params 请求 cache 是 no-op）──
 ROLE_CATALOG_TTL = 300
@@ -149,6 +171,31 @@ def role_reference_vars(state: dict) -> Dict[str, Any]:
     （模板用 `{% if role_catalog is defined %}` 守卫，StrictUndefined 安全）。"""
     ref = build_role_reference(state.get("role_catalog") or [])
     return {"role_catalog": ref} if ref else {}
+
+
+def task_reference_vars(state: dict) -> Dict[str, Any]:
+    """组装审批节点 prompt 渲染变量（Task 3 的 pack_params 通道）。
+
+    未绑流程（process_definition_key 为 null）不注入——节点语义此时非法，
+    不给 LLM 目录参考（resolve 层对产物语义直接回"请先绑定流程"终态）。
+    已绑但目录空同样不传键（模板守卫安全）。抄送节点打 cc 标记，
+    模板侧标注"仅查看可见可用"。
+    """
+    params = (state.get("pack_params") or {}).get("njmind_form") or {}
+    if params.get("process_definition_key") is None:
+        return {}
+    ref: List[Dict[str, Any]] = []
+    for r in params.get("task_keys") or []:
+        if not isinstance(r, dict):
+            continue
+        code = _clean_text(str(r.get("id") or ""))
+        name = _clean_text(str(r.get("name") or ""))
+        if code and name:
+            ref.append({"code": code, "name": name,
+                        "cc": r.get("taskType") == CC_TASK_TYPE})
+        if len(ref) >= MAX_PROMPT_ROWS:
+            break
+    return {"task_catalog": ref} if ref else {}
 
 
 # ── 解析 + 追问 + 回填 ─────────────────────────────────────────────
@@ -322,6 +369,204 @@ def resolve_form_role_permissions(
     return questions
 
 
+# ── 审批节点解析 + 追问 + 回填 ─────────────────────────────────────
+
+@dataclass
+class TaskPermissionOutcome:
+    """节点权限解析结果：追问卡列表 + 未绑流程阻断消息（二选一）。"""
+    questions: List[str] = field(default_factory=list)
+    block_message: Optional[str] = None
+
+
+def _task_question(field_title: str, anchor: str, prop: str, idx: int,
+                   semantic: str, candidates) -> str:
+    """单条节点追问卡（结构同角色卡，header 前缀 `__task:`）。"""
+    options = [
+        {"label": f"{e.name}（{e.code}）", "description": f"节点 id {e.code}"}
+        for e in candidates[:_MAX_OPTIONS]
+    ]
+    options.append({"label": IGNORE_LABEL, "description": "不配置这条权限"})
+    return json.dumps({
+        "question": (f"字段「{field_title}」的{_TASK_PROP_LABELS.get(prop, prop)}"
+                     f"「{semantic}」无法唯一匹配，请选择："),
+        "header": f"__task:{anchor}:{prop}:{idx}",
+        "options": options,
+    }, ensure_ascii=False)
+
+
+def resolve_form_task_permissions(
+    artifact: Dict[str, Any],
+    task_rows: List[Dict[str, Any]],
+    process_key: Optional[str],
+    answers: Dict[str, Any],
+    *,
+    source_artifact: Optional[Dict[str, Any]] = None,
+    mode: str = "create",
+    notes: Optional[List[str]] = None,
+) -> TaskPermissionOutcome:
+    """就地解析制品中的审批节点名词；返回追问卡或未绑流程阻断消息。
+
+    与角色解析同构（守卫全套复用：开关置位 / 空数组禁令 / 忽略=仅丢弃
+    单条名词 / `__task:` header 回填无第二次 LLM），差异只有三点：
+      - 目录来自 pack_params 的 task_keys（code=id），非组织目录；
+      - Add/Edit 组候选剔出抄送节点（taskType==4），Detail 组保留；
+        存量 id（含抄送 id）透传保留不翻开关——不清已有；
+      - process_key 为 null 且产物带节点语义（非 ASCII 值）→ 阻断消息，
+        调用方回 reply-only 终态（不追问、不校验、不重试）。
+
+    目录空但 process_key 非空：语义名词照常进 pending（零候选追问卡，
+    仅"忽略本条权限"可点）——目录缺失≠未绑流程。
+    """
+    fields = artifact.get(FIELDS)
+    if not isinstance(fields, list):
+        return TaskPermissionOutcome()
+
+    # 行级清洗：code=id（数字 id 归一为字符串）、name 必须字符串
+    clean_rows = []
+    for r in task_rows or []:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("id")
+        if isinstance(rid, int):
+            rid = str(rid)
+        if not isinstance(rid, str) or not isinstance(r.get("name"), str):
+            continue
+        clean_rows.append({"code": rid, "name": r["name"],
+                           "taskType": r.get("taskType")})
+    full_entries = entries_from_rows(clean_rows)
+    full_ids = {e.code for e in full_entries}
+    cc_ids = {r["code"] for r in clean_rows if r["taskType"] == CC_TASK_TYPE}
+    # 组级目录：Add/Edit 剔出抄送节点，Detail 保留全量
+    group_entries = {
+        key: tuple(e for e in full_entries
+                   if allow_cc or e.code not in cc_ids)
+        for key, (_switch, allow_cc) in TASK_FIELDS.items()
+    }
+
+    # 未绑流程短路：产物带节点语义（非 ASCII 值；纯 ASCII 视为存量 id
+    # 透传，不阻断）→ 阻断消息，调用方回 reply-only 终态
+    if process_key is None:
+        for f in fields:
+            if not isinstance(f, dict):
+                continue
+            for key in TASK_FIELDS:
+                raw = f.get(key)
+                if isinstance(raw, list) and any(
+                        isinstance(v, str) and not v.isascii() and v.strip()
+                        for v in raw):
+                    return TaskPermissionOutcome(block_message=TASK_UNBOUND_MSG)
+
+    source_fields = {}
+    if isinstance(source_artifact, dict):
+        for f in source_artifact.get(FIELDS) or []:
+            if isinstance(f, dict) and f.get(FIELD_KEY):
+                source_fields[str(f.get(FIELD_KEY))] = f
+
+    questions: List[str] = []
+    for f in fields:
+        if not isinstance(f, dict):
+            continue
+        anchor = str(f.get(FIELD_KEY) or f.get(FIELD_TITLE) or "")
+        title = str(f.get(FIELD_TITLE) or anchor)
+        if not anchor:
+            continue
+        src = source_fields.get(anchor) or {}
+
+        for task_key, (switch_key, _allow_cc) in TASK_FIELDS.items():
+            if task_key not in f:
+                continue
+            raw = f.get(task_key)
+
+            # 空数组禁令（同角色：modify 保旧值+旧开关，create 剥键+notes）
+            if not isinstance(raw, list) or not raw:
+                if mode == "modify" and src.get(task_key) is not None:
+                    f[task_key] = src.get(task_key)
+                    if switch_key in src:
+                        f[switch_key] = src.get(switch_key)
+                    logger.warning(
+                        f"resolve_permissions: {anchor}.{task_key} 为空数组，"
+                        f"已保留源配置旧值 {src.get(task_key)!r}")
+                else:
+                    f.pop(task_key, None)
+                    if notes is not None:
+                        notes.append("检测到空的审批节点权限数组，已按未提及处理")
+                continue
+
+            resolved: List[str] = []
+            pending: List = []
+            name_matched = False
+            for v in raw:
+                s = v.strip() if isinstance(v, str) else ""
+                if not s:
+                    continue
+                if process_key is None:
+                    # 未绑流程：非 ASCII 已在上面短路阻断，这里只剩
+                    # 纯 ASCII 存量 id —— 透传保留，不置开关不追问
+                    if s not in resolved:
+                        resolved.append(s)
+                    continue
+                if s in full_ids:
+                    # 存量 id 透传（含抄送 id，Add/Edit 组同样不清已有）
+                    if s not in resolved:
+                        resolved.append(s)
+                    continue
+                r = resolve_names([s], group_entries[task_key])
+                if r.resolved:
+                    code = r.resolved[0]
+                    if code not in resolved:
+                        resolved.append(code)
+                    name_matched = True   # 名称匹配 → 本轮语义，置开关
+                else:
+                    pending.append(r.pending[0])
+
+            # 追问回填：按 header 反查（无第二次 LLM 调用）
+            still_pending = []
+            ignored = False
+            for idx, pick in enumerate(pending):
+                header = f"__task:{anchor}:{task_key}:{idx}"
+                ans = answers.get(header)
+                if ans is None or not str(ans).strip():
+                    still_pending.append(pick)
+                    continue
+                ans = str(ans).strip()
+                if ans == IGNORE_LABEL:
+                    # 「条」= 单个 pending 名词，同组已解析值绝不连坐丢弃
+                    ignored = True
+                    continue
+                entry = _lookup_by_label(ans, pick.candidates)
+                if entry is not None:
+                    if entry.code not in resolved:
+                        resolved.append(entry.code)
+                    name_matched = True
+                else:
+                    still_pending.append(pick)
+
+            if resolved or still_pending:
+                f[task_key] = resolved + [p.semantic for p in still_pending]
+                if name_matched and resolved:
+                    f[switch_key] = 1
+            elif ignored:
+                # 忽略后组内空 → "本次指令未涉及该权限"（modify 保旧值）
+                if mode == "modify" and src.get(task_key) is not None:
+                    f[task_key] = src.get(task_key)
+                    if switch_key in src:
+                        f[switch_key] = src.get(switch_key)
+                    logger.warning(
+                        f"resolve_permissions: {anchor}.{task_key} 本轮权限名词"
+                        f"被用户忽略，已保留源配置旧值 {src.get(task_key)!r}")
+                else:
+                    f.pop(task_key, None)
+            else:
+                f.pop(task_key, None)
+                if notes is not None:
+                    notes.append("检测到空的审批节点权限数组，已按未提及处理")
+            for idx, pick in enumerate(still_pending):
+                questions.append(_task_question(
+                    title, anchor, task_key, idx,
+                    pick.semantic, pick.candidates))
+    return TaskPermissionOutcome(questions=questions)
+
+
 # ── 工具步骤统一入口 ───────────────────────────────────────────────
 
 def strip_unresolvable_role_keys(artifact: Dict[str, Any]) -> None:
@@ -347,31 +592,48 @@ def strip_unresolvable_role_keys(artifact: Dict[str, Any]) -> None:
 
 
 def run_permission_resolution(state: dict, ctx, *, mode: str) -> None:
-    """resolve_permissions 步 / validate 入口的统一幂等入口。
+    """resolve_permissions 步 / validate 入口的统一幂等入口（角色 + 节点）。
 
-    - 无制品 → 直通（清 pending 标记）
-    - 目录不可用 → 降级：剥中文语义键、不追问不清已有、标记 summary 提示
+    - 无制品 → 直通（清 pending/阻断标记）
+    - 未绑流程且产物带节点语义 → 置 `_task_block_message`（调用方回
+       reply-only 终态：不追问、不校验、无 LLM 重试），清 pending
+    - 角色目录不可用 → 降级：剥中文语义角色键、不追问不清已有、标记提示
+      （节点解析不受组织目录影响，照常执行）
     - 有 pending（含 resume 回填后仍未落定）→ 存 pending 制品并抛追问
     - 全部落定 → 清 pending 标记（resume 语义：解析完成后删除）
     """
     artifact = state.get("artifact")
     if not isinstance(artifact, dict) or not artifact.get(FIELDS):
         state.pop("_permission_pending_artifact", None)
+        state.pop("_task_block_message", None)
         return
 
+    answers = state.get("clarify_answers") or {}
+    source = state.get("source_artifact") if mode == "modify" else None
+    notes = state.setdefault("_permission_notes", [])
+
+    # 节点解析（pack_params 通道；未绑流程阻断优先于一切追问）
+    params = (state.get("pack_params") or {}).get("njmind_form") or {}
+    task_outcome = resolve_form_task_permissions(
+        artifact, params.get("task_keys"), params.get("process_definition_key"),
+        answers, source_artifact=source, mode=mode, notes=notes)
+    if task_outcome.block_message:
+        state["_task_block_message"] = task_outcome.block_message
+        state.pop("_permission_pending_artifact", None)
+        return
+    state.pop("_task_block_message", None)
+
+    # 角色解析（组织目录不可用 → 降级剥键，不产生追问）
+    questions: List[str] = list(task_outcome.questions)
     rows = state.get("role_catalog") or []
     if not rows:
         state["_role_catalog_unavailable"] = True
         strip_unresolvable_role_keys(artifact)
-        state.pop("_permission_pending_artifact", None)
-        return
+    else:
+        questions = resolve_form_role_permissions(
+            artifact, rows, answers,
+            source_artifact=source, mode=mode, notes=notes) + questions
 
-    questions = resolve_form_role_permissions(
-        artifact, rows, state.get("clarify_answers") or {},
-        source_artifact=state.get("source_artifact") if mode == "modify" else None,
-        mode=mode,
-        notes=state.setdefault("_permission_notes", []),
-    )
     if questions:
         state["_permission_pending_artifact"] = artifact
         raise ClarificationRaised(questions)
@@ -379,10 +641,11 @@ def run_permission_resolution(state: dict, ctx, *, mode: str) -> None:
 
 
 def copy_role_semantics_to_config(parsed_fields, config: Dict[str, Any]) -> None:
-    """create 管线的确定性兜底：ParsedField 语义角色数组 → 产物字段。
+    """create 管线的确定性兜底：ParsedField 语义数组 → 产物字段。
 
     prompt 已要求 LLM 拷贝（generate.j2），此处只在产物缺键时补拷
     （按 fieldTitleKey 对齐），语义名词仍由 resolve 步统一解析。
+    覆盖全部六个语义键：三个 Roles + 三个 TaskKeys。
     """
     by_key = {}
     for f in (config.get(FIELDS) or []):
@@ -392,7 +655,8 @@ def copy_role_semantics_to_config(parsed_fields, config: Dict[str, Any]) -> None
         target = by_key.get(str(getattr(pf, FIELD_KEY, "") or ""))
         if target is None:
             continue
-        for roles_key in ROLE_FIELDS:
-            vals = getattr(pf, roles_key, None)
-            if isinstance(vals, list) and vals and roles_key not in target:
-                target[roles_key] = list(vals)
+        for semantic_key in list(ROLE_FIELDS) + list(TASK_FIELDS):
+            vals = getattr(pf, semantic_key, None)
+            if (isinstance(vals, list) and vals
+                    and semantic_key not in target):
+                target[semantic_key] = list(vals)

@@ -48,7 +48,8 @@ from domains.njmind_form.tools._incremental_ops import (
     build_catalog, apply_ops, format_failures, restore_untouched, _norm_type_code,
 )
 from domains.njmind_form.tools._permission_catalog import (
-    fetch_role_catalog, role_reference_vars, run_permission_resolution,
+    fetch_role_catalog, role_reference_vars, task_reference_vars,
+    run_permission_resolution,
 )
 # 模板 stem 推导表与 create 管线同源（add_field 骨架 fallback 拉上游模板用）
 from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem, sanitize_guide
@@ -203,6 +204,13 @@ class ModifyFormTool(CompositeTool):
         # 管线跑完后,artifact 是最终配置(可能经过了多次重试修改)
         artifact = state.get("artifact")
         validation_errors = state.get("validation_errors", [])
+
+        # 未绑流程终态：节点语义无法解析且不该解析——reply/summary 双通道
+        # 回固定提示（前端只渲染 summary），无 artifact、无校验、无重试
+        block_msg = state.pop("_task_block_message", None)
+        if block_msg:
+            return ToolResult(reply=block_msg, summary=block_msg)
+
         if artifact:
             form_name = artifact.get("formName", "")
             field_count = len(artifact.get(FIELDS, []))
@@ -332,16 +340,20 @@ class ModifyFormTool(CompositeTool):
         # 目录不可用不在此追问：resolve 步统一降级
 
     def _step_resolve_permissions(self, state: dict, ctx: ToolContext) -> None:
-        """角色权限名词 → 真实 code（目录确定性解析 + 追问回填）。
+        """权限名词 → 真实 code/id（角色目录 + 审批节点目录确定性解析）。
 
         在 modify（restore_untouched 已还原未触碰字段）之后执行：存量
-        code 透传不翻开关、未被触碰字段的权限键逐字节不变。中文名词绝不
-        进入最终 artifact；无法直选的语义串逐条追问（resume 用 label 反查
-        回填，无第二次 LLM 调用）。目录不可用 → 跳过解析不清已有。
+        code/id 透传不翻开关、未被触碰字段的权限键逐字节不变。中文名词
+        绝不进入最终 artifact；无法直选的语义串逐条追问（resume 用 label
+        反查回填，无第二次 LLM 调用）。角色目录不可用 → 跳过角色解析不清
+        已有。未绑流程（process_definition_key 为 null 且产物带节点语义）
+        → 置 `_task_block_message`，execute 回 reply-only 终态。
         """
-        ctx.emit("stage", "resolve_permissions", "正在解析角色权限...")
+        ctx.emit("stage", "resolve_permissions", "正在解析字段权限...")
         run_permission_resolution(state, ctx, mode="modify")
-        ctx.emit("stage", "resolve_permissions_done", "角色权限已解析")
+        if state.get("_task_block_message"):
+            return  # 未绑流程：reply-only 终态，后续 validate 由守卫跳过
+        ctx.emit("stage", "resolve_permissions_done", "字段权限已解析")
 
     def _step_modify(self, state: dict, ctx: ToolContext) -> None:
         """Step: 修改配置 —— 增量主路径 + 全量兜底（两相式）。
@@ -449,6 +461,7 @@ class ModifyFormTool(CompositeTool):
             "guide": state.get("guide") or {},
         }
         prompt_vars.update(role_reference_vars(state))
+        prompt_vars.update(task_reference_vars(state))
         system_prompt = self._render_prompt(ctx, "modify_ops", **prompt_vars)
 
         user_parts = []
@@ -555,6 +568,7 @@ class ModifyFormTool(CompositeTool):
             "guide": state.get("guide") or {},
         }
         prompt_vars.update(role_reference_vars(state))
+        prompt_vars.update(task_reference_vars(state))
         system_prompt = self._render_prompt(ctx, "modify", **prompt_vars)
 
         # 构建 user message:对话历史 + 修改指令 [+ 校验错误]
@@ -641,6 +655,8 @@ class ModifyFormTool(CompositeTool):
              全部为存量 → 视为通过（AI 没有让配置变得更糟）。
           4. 未知字段错误（Unrecognized field）从不进 LLM——机械剥离后本地重验。
         """
+        if state.get("_task_block_message"):
+            return  # 未绑流程 reply-only 终态：不校验（无 LLM 重试环路）
         ctx.emit("stage", "validate", "正在提交到上游平台进行校验...")
         artifact = state.get("artifact")
         if not artifact:

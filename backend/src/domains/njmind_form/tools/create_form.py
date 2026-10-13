@@ -16,8 +16,9 @@ from domains.njmind_form.models import ParsedField
 from domains.njmind_form.tools._config_loader import load_type_mappings
 from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem, sanitize_guide
 from domains.njmind_form.tools._permission_catalog import (
-    fetch_role_catalog, role_reference_vars, run_permission_resolution,
-    copy_role_semantics_to_config, ROLE_FIELDS,
+    fetch_role_catalog, role_reference_vars, task_reference_vars,
+    run_permission_resolution, copy_role_semantics_to_config,
+    ROLE_FIELDS, TASK_FIELDS,
 )
 from domains.njmind_form.tools._postprocess import (
     parse_fixable_field_errors, fill_missing_required,
@@ -124,6 +125,14 @@ class CreateFormTool(CompositeTool):
 
         artifact = state.get("artifact")
         validation_errors = state.get("validation_errors", [])
+
+        # 未绑流程终态：节点语义无法解析且不该解析——reply/summary 双通道
+        # 回固定提示（前端只渲染 summary，漏 summary 会出现空白气泡），
+        # 无 artifact、无校验、无 LLM 重试
+        block_msg = state.pop("_task_block_message", None)
+        if block_msg:
+            return ToolResult(reply=block_msg, summary=block_msg)
+
         if artifact:
             # 成功:从制品提取表单名和字段数,拼人类可读摘要
             form_name = artifact.get("formName", "")
@@ -255,9 +264,10 @@ class CreateFormTool(CompositeTool):
         guide = state.get("guide") or {}  # 上一步拉的配置指南
 
         # 渲染 prompt:通过 prompt_loader 从模板文件加载,注入 guide 变量;
-        # 角色目录可用时附参考区（卫生清洗后注入，模板 is defined 守卫）
+        # 角色目录/审批节点目录可用时附参考区（卫生清洗后注入，模板守卫）
         prompt_vars = {"guide": guide}
         prompt_vars.update(role_reference_vars(state))
+        prompt_vars.update(task_reference_vars(state))
         system_prompt = self._render_prompt(ctx, "parse", **prompt_vars)
         user_msg = self._build_parse_user_message(user_input, compressed_history)
 
@@ -289,13 +299,8 @@ class CreateFormTool(CompositeTool):
             # 缺键/None 一律保持 None（未提及），空数组由 resolve 层拦截
             role_semantics = {
                 k: (list(f[k]) if isinstance(f.get(k), list) and f[k] else None)
-                for k in ROLE_FIELDS
+                for k in list(ROLE_FIELDS) + list(TASK_FIELDS)
             }
-            role_semantics.update({
-                k: (list(f[k]) if isinstance(f.get(k), list) and f[k] else None)
-                for k in ("canShowFieldAddTaskKeys", "canShowFieldDetailTaskKeys",
-                          "canEditFieldTaskKeys")
-            })
             parsed_fields.append(ParsedField(
                 fieldTitleText=f.get(FIELD_TITLE, ""),  # 字段中文名
                 fieldTitleKey=f.get(FIELD_KEY, ""),  # 字段 key(英文标识)
@@ -380,6 +385,7 @@ class CreateFormTool(CompositeTool):
             "field_templates": state.get("field_templates") or {},
         }
         prompt_vars.update(role_reference_vars(state))
+        prompt_vars.update(task_reference_vars(state))
         system_prompt = self._render_prompt(ctx, "generate", **prompt_vars)
 
         # 构建 user message:把解析出的字段信息序列化给 LLM
@@ -396,10 +402,7 @@ class CreateFormTool(CompositeTool):
                     **({"options": f.options} if f.options else {}),
                     # 权限语义数组（名词态）非空才带——LLM 原样拷入产物
                     **{k: list(getattr(f, k))
-                       for k in list(ROLE_FIELDS) + [
-                           "canShowFieldAddTaskKeys",
-                           "canShowFieldDetailTaskKeys",
-                           "canEditFieldTaskKeys"]
+                       for k in list(ROLE_FIELDS) + list(TASK_FIELDS)
                        if getattr(f, k, None)},
                 }
                 for f in state.get("parsed_fields", [])
@@ -448,21 +451,26 @@ class CreateFormTool(CompositeTool):
         state["validation_errors"] = []  # 重置错误:新生成的配置要先校验才算数
 
     def _step_resolve_permissions(self, state: dict, ctx: ToolContext) -> None:
-        """角色权限名词 → 真实 code（目录确定性解析 + 追问回填）。
+        """权限名词 → 真实 code/id（角色目录 + 审批节点目录确定性解析）。
 
-        中文名词只存在于 LLM 中间产物，最终 artifact 只允许真实 role code。
-        无法直选的语义串逐条产出追问卡（ClarificationRaised → 引擎 interrupt
-        → 用户点选 → resume 整工具重跑：pending 守卫跳过全部 LLM 步骤，
-        本步用 answers 反查回填，无第二次 LLM 调用）。
-        目录不可用（modeler 未升级等）→ 本轮完全跳过权限解析（不追问、
-        不清已有），summary 附降级提示（见 execute）。
+        中文名词只存在于 LLM 中间产物，最终 artifact 只允许真实 role code
+        与节点 id。无法直选的语义串逐条产出追问卡（ClarificationRaised →
+        引擎 interrupt → 用户点选 → resume 整工具重跑：pending 守卫跳过全部
+        LLM 步骤，本步用 answers 反查回填，无第二次 LLM 调用）。
+        角色目录不可用（modeler 未升级等）→ 跳过角色解析不清已有。
+        未绑流程（process_definition_key 为 null 且产物带节点语义）→
+        置 `_task_block_message`，execute 回 reply-only 终态。
         """
-        ctx.emit("stage", "resolve_permissions", "正在解析角色权限...")
+        ctx.emit("stage", "resolve_permissions", "正在解析字段权限...")
         run_permission_resolution(state, ctx, mode="create")
-        ctx.emit("stage", "resolve_permissions_done", "角色权限已解析")
+        if state.get("_task_block_message"):
+            return  # 未绑流程：reply-only 终态，后续 validate 由守卫跳过
+        ctx.emit("stage", "resolve_permissions_done", "字段权限已解析")
 
     def _step_validate(self, state: dict, ctx: ToolContext) -> None:
         """提交上游校验（含未知字段本地剥离循环）。失败时工具内部 retry。"""
+        if state.get("_task_block_message"):
+            return  # 未绑流程 reply-only 终态：不校验（也就无 LLM 重试环路）
         ctx.emit("stage", "validate", "正在提交到上游平台进行校验...")
         artifact = state.get("artifact")
         if not artifact:
