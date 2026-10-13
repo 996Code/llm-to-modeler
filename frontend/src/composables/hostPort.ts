@@ -41,6 +41,9 @@ export const CONTEXT_KEY_ARTIFACT = 'artifact'
 export interface HostContext {
   artifact: unknown | null
   revision: string | null
+  /** 宿主随 GET_CONTEXT 下发的 pack 级参数（如 njmind_form 的流程节点目录），
+   *  原样透传给后端工具层；旧宿主不带该字段 → undefined（协议演进兼容） */
+  packParams?: Record<string, unknown> | null
 }
 
 /** APPLY 请求载荷 */

@@ -21,6 +21,8 @@ beforeAll(() => {
     parent: {
       postMessage: (msg: any, target: string) => posted.push({ msg, target }),
     },
+    // location.search：isEmbedded / getRequestUserId 读取（pack_params 链路用例需要）
+    location: { search: '' },
     addEventListener: (_t: string, h: Handler) => listeners.push(h),
     removeEventListener: (_t: string, h: Handler) => {
       const i = listeners.indexOf(h)
@@ -112,6 +114,59 @@ describe('PostMessageHostPort 协议自测', () => {
     })
     const ctx = await p
     expect(ctx?.revision).toBe('r9')
+  })
+
+  it('packParams 链路：GET_CONTEXT_RESULT 带 packParams → refreshEmbedContext 产出 pack_params；不带 → undefined', async () => {
+    // node 环境无 localStorage（refreshEmbedContext / chat 读取）：补最小 stub
+    vi.stubGlobal('localStorage', { getItem: () => null })
+    const { refreshEmbedContext } = await import('../../stores/conversation')
+    const packParams = {
+      njmind_form: {
+        process_definition_key: 'leave_v1',
+        task_keys: [{ id: 't1', name: '经理审批', taskType: 1 }],
+      },
+    }
+
+    // 新宿主：GET_CONTEXT_RESULT 携带 packParams → 上下文含 pack_params（原样透传）
+    const p1 = refreshEmbedContext()
+    const req1 = posted.filter((x) => x.msg.type === 'GET_CONTEXT').at(-1)!
+    expect(req1).toBeTruthy()
+    dispatchFromHost({
+      v: 1, src: 'host', id: req1.msg.id, type: 'GET_CONTEXT_RESULT',
+      payload: { artifact: { a: 1 }, revision: 'r1', packParams },
+    })
+    const ctx1 = await p1
+    expect((ctx1 as any)?.pack_params).toEqual(packParams)
+
+    // 旧宿主：不带 packParams（未知字段演进）→ undefined，不造默认值
+    const p2 = refreshEmbedContext()
+    const req2 = posted.filter((x) => x.msg.type === 'GET_CONTEXT').at(-1)!
+    dispatchFromHost({
+      v: 1, src: 'host', id: req2.msg.id, type: 'GET_CONTEXT_RESULT',
+      payload: { artifact: { a: 2 }, revision: 'r2' },
+    })
+    const ctx2 = await p2
+    expect((ctx2 as any)?.pack_params).toBeUndefined()
+  })
+
+  it('chat：options.pack_params 写入请求 body（undefined 不发）', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => null })
+    const bodies: any[] = []
+    const origFetch = globalThis.fetch
+    vi.stubGlobal('fetch', async (_url: any, init: any) => {
+      bodies.push(JSON.parse(init.body))
+      // !resp.ok → streamSSE 直接抛错（不开看门狗定时器），用例只关心 body
+      return { ok: false, status: 500, body: null }
+    })
+    const { chat } = await import('../../services/api')
+    const packParams = { njmind_form: { process_definition_key: 'leave_v1', task_keys: [] } }
+
+    await chat('hi', null, {}, undefined, undefined, { pack_params: packParams } as any).catch(() => {})
+    expect(bodies[0].pack_params).toEqual(packParams)
+
+    await chat('hi', null, {}).catch(() => {})
+    expect(bodies[1].pack_params).toBeUndefined()
+    vi.stubGlobal('fetch', origFetch)
   })
 
   it('APPLY：成功回执透传权威配置；失败按错误码返回', async () => {

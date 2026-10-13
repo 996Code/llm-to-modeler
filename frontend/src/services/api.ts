@@ -228,6 +228,9 @@ export async function chat(
     context?: { [CONTEXT_KEY_ARTIFACT]: unknown; revision?: string | null; contextKey?: string }
     services?: Record<string, string>
     packs?: string[]
+    /** 宿主随 GET_CONTEXT 下发的 pack 级参数（如 njmind_form 的流程节点目录）；
+     *  undefined 不发（旧宿主兼容） */
+    pack_params?: Record<string, unknown>
   },
 ): Promise<void> {
   await streamSSE(
@@ -240,6 +243,7 @@ export async function chat(
       context: options?.context ?? undefined,   // 嵌入模式宿主最新上下文
       services: options?.services ?? undefined, // 宿主服务地址表
       packs: options?.packs ?? undefined,             // 宿主插件链路声明（INIT packs 同义，路由子集）
+      pack_params: options?.pack_params ?? undefined, // 宿主 pack 级参数（如流程节点目录），供工具层解析权限
     },
     callbacks,
   )
