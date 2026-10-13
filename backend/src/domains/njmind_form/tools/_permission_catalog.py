@@ -20,6 +20,9 @@ njmind_form pack 的权限领域层：把 LLM 产物中的角色「中文名词�
     （restore_untouched 之后执行的 resolve 不得翻动还原值）。
   - 空数组禁令（fail-open 防护）：modify 语境剥键保旧值 + warning；
     create 语境剥键 + notes 提示。取消限制只能表达为开关置 0。
+  - 忽略语义：「忽略本条权限」的"条"=单个 pending 名词，同组已解析值绝不
+    连坐丢弃；剥除后组内空 → 回"本次指令未涉及该权限"状态（modify 保旧
+    值+旧开关，与空数组分支同构；create 剥键即可，开关不动）。
   - resume 语义：_permission_pending_artifact 存在 → 工具跳过所有 LLM 步骤，
     本模块用 answers 直接回填 pending 制品。
 """
@@ -48,7 +51,8 @@ _PROP_LABELS = {
     "canEditFieldRoles": "可编辑角色",
 }
 
-# 追问固定选项：选中即从产物剥除该权限键（取消限制语义 = 开关置 0）
+# 追问固定选项：「条」=单个 pending 名词——仅丢弃该名词；剥除后组内空才回
+# 「本次指令未涉及该权限」状态（modify 保旧值+旧开关，create 剥键即可）
 IGNORE_LABEL = "忽略本条权限"
 
 # ── 目录获取：模块级 TTL 缓存（传输层 params 请求 cache 是 no-op）──
@@ -267,6 +271,7 @@ def resolve_form_role_permissions(
 
             # 追问回填：按 header 反查（无第二次 LLM 调用）
             still_pending = []
+            ignored = False
             for idx, pick in enumerate(pending):
                 header = f"__role:{anchor}:{roles_key}:{idx}"
                 ans = answers.get(header)
@@ -275,12 +280,10 @@ def resolve_form_role_permissions(
                     continue
                 ans = str(ans).strip()
                 if ans == IGNORE_LABEL:
-                    # 忽略本条权限：剥键 + 开关置 0（取消限制的唯一表达）；
-                    # 语义串全弃（含同组已解析值），不再写回该键
-                    f.pop(roles_key, None)
-                    f[switch_key] = 0
-                    still_pending = []
-                    break
+                    # 「条」= 单个 pending 名词：仅丢弃该名词，
+                    # 同组已解析值与其余待定名词不受影响
+                    ignored = True
+                    continue
                 entry = _lookup_by_label(ans, pick.candidates)
                 if entry is not None:
                     if entry.code not in resolved:
@@ -289,17 +292,29 @@ def resolve_form_role_permissions(
                 else:
                     still_pending.append(pick)   # 回答无法识别 → 再问一次
 
-            if roles_key in f:  # 忽略路径已剥键，跳过写回
-                if resolved or still_pending:
-                    # 已定 code 在前、待定名词殿后（resume 再解析保持稳定）
-                    f[roles_key] = resolved + [p.semantic for p in still_pending]
-                    if name_matched and resolved:
-                        f[switch_key] = 1
+            if resolved or still_pending:
+                # 已定 code 在前、待定名词殿后（resume 再解析保持稳定）
+                f[roles_key] = resolved + [p.semantic for p in still_pending]
+                if name_matched and resolved:
+                    f[switch_key] = 1
+            elif ignored:
+                # 忽略后组内空 → 回「本次指令未涉及该权限」状态（与空数组
+                # 禁令分支同构）：modify 保旧值+旧开关（忽略=本次不写，
+                # 不是清空旧权限）；create（新字段）剥键即可
+                if mode == "modify" and src.get(roles_key) is not None:
+                    f[roles_key] = src.get(roles_key)
+                    if switch_key in src:
+                        f[switch_key] = src.get(switch_key)
+                    logger.warning(
+                        f"resolve_permissions: {anchor}.{roles_key} 本轮权限名词"
+                        f"被用户忽略，已保留源配置旧值 {src.get(roles_key)!r}")
                 else:
-                    # 全部值非法（非字符串/空白）→ 等同空数组禁令处置
                     f.pop(roles_key, None)
-                    if notes is not None:
-                        notes.append("检测到空的角色权限数组，已按未提及处理")
+            else:
+                # 全部值非法（非字符串/空白）→ 等同空数组禁令处置
+                f.pop(roles_key, None)
+                if notes is not None:
+                    notes.append("检测到空的角色权限数组，已按未提及处理")
             for idx, pick in enumerate(still_pending):
                 questions.append(_question(
                     title, anchor, roles_key, idx,

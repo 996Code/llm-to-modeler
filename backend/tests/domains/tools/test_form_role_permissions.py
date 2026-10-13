@@ -3,7 +3,7 @@
 覆盖：
 - 纯 resolve 层：直选置位、code 透传不翻开关、空数组剥除（modify 保旧值/
   create 剥键提示）、歧义追问卡（label+忽略项）、resume label 反查、
-  忽略剥键置开关 0、modify 三来源保真
+  忽略仅丢弃单条名词（修复轮语义锁）、modify 三来源保真
 - 工具层：validate 重试路径再解析、目录不可用降级、resume 不烧 LLM、
   clarify 合并跳过 __ 键
 - prompt 层：目录参考区卫生清洗（换行/竖线/截断/200 上限/数据参考标注）
@@ -147,8 +147,11 @@ class TestAmbiguousAsk:
         assert f["canEditFieldRoles"] == ["SALE_MGR"]
         assert f["isEditField"] == 1
 
-    def test_ignore_answer_strips_key_and_zeroes_switch(self):
-        """选'忽略本条权限'：该键剥除 + 开关置 0（取消限制语义）。"""
+    def test_create_ignore_emptied_group_strips_key_only(self):
+        """create 选'忽略本条权限'后组内空：剥键即可，开关回未涉及态（不动）。
+
+        isEditField=1 是模板默认（可编辑），忽略≠禁用字段——开关不因忽略置 0。
+        """
         artifact = {"formFieldConfigVos": [
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldRoles": ["主管"], "isEditField": 1},
@@ -158,7 +161,82 @@ class TestAmbiguousAsk:
         assert questions == []
         f = artifact["formFieldConfigVos"][0]
         assert "canEditFieldRoles" not in f
-        assert f["isEditField"] == 0
+        assert f["isEditField"] == 1            # 开关不动（默认态即未涉及态）
+
+
+class TestIgnoreAnswerSemantics:
+    """「忽略本条权限」的"条"=单个 pending 名词（评审修复轮锁定语义）。
+
+    - 同组部分忽略：已解析值绝不连坐丢弃，开关按既有规则置 1
+    - 忽略后组内空 → 回"本次指令未涉及该权限"状态：
+      create（新字段）剥键即可；modify 存量开关与旧 roles 一律不动
+      （忽略=本次不写，不是清空旧权限——与空数组剥键保旧值分支同构）
+    """
+
+    def test_partial_ignore_keeps_resolved_sibling(self):
+        """"财务角色"直选命中 + "主管"歧义被忽略 → 财务写入，主管丢弃。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["财务角色", "主管"]},
+        ]}
+        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, answers)
+        assert questions == []
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldRoles"] == ["FIN"]   # 已解析值保留，绝不全丢
+        assert f["isEditField"] == 1               # 组内仍有已解析值 → 置 1
+
+    def test_modify_full_ignore_keeps_old_roles_and_switch(self):
+        """modify 全忽略：忽略=本次不写——旧 roles 与存量开关原样保留。"""
+        source = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["FIN"], "isEditField": 1},
+        ]}
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管"], "isEditField": 1},
+        ]}
+        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        questions = pc.resolve_form_role_permissions(
+            artifact, ROWS, answers, source_artifact=source, mode="modify")
+        assert questions == []
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldRoles"] == ["FIN"]   # 旧 roles 不动
+        assert f["isEditField"] == 1               # 存量开关不动
+
+    def test_modify_full_ignore_restores_old_switch_value(self):
+        """modify 全忽略（存量开关 0）：本轮产物开关被翻成 1 也要还原回 0。"""
+        source = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["FIN"], "isEditField": 0},
+        ]}
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管"], "isEditField": 1},
+        ]}
+        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        questions = pc.resolve_form_role_permissions(
+            artifact, ROWS, answers, source_artifact=source, mode="modify")
+        assert questions == []
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldRoles"] == ["FIN"]
+        assert f["isEditField"] == 0               # 回存量开关值（非清零）
+
+    def test_modify_ignore_new_restriction_writes_nothing(self):
+        """modify 新增限制被忽略且源无旧值：剥键即"本次不写"。"""
+        source = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额"},
+        ]}
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管"], "isEditField": 1},
+        ]}
+        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        questions = pc.resolve_form_role_permissions(
+            artifact, ROWS, answers, source_artifact=source, mode="modify")
+        assert questions == []
+        f = artifact["formFieldConfigVos"][0]
+        assert "canEditFieldRoles" not in f        # 本次不写（源本就无此键）
 
 
 class TestModifyKeepsSources:
