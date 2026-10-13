@@ -10,8 +10,11 @@ njmind_form pack 的权限领域层：把 LLM 产物中的角色「中文名词�
   - fetch_role_catalog: 取角色目录（模块级 TTL 缓存 300s，失败/空 → [] 绝不抛）
   - build_role_reference: 目录 → prompt 参考区（卫生清洗 + 上限 + 数据参考标注）
   - resolve_form_role_permissions: 制品就地解析；无法直选的语义串产出追问卡
-    （header `__role:<fieldKey>:<prop>:<index>`，候选 label「名称（code）」，
-    附固定「忽略本条权限」选项）；answers 里按 header 反查回填，无第二次 LLM
+    （header `__role:<fieldKey>:<prop>:<semantic-token>`，token=名词身份短哈希、
+    跨轮稳定；候选 label「名称（code）」，附固定「忽略本条权限」选项）；
+    answers 里按 header 反查回填，无第二次 LLM。header 用身份而非序号：
+    pending 列表位移（部分作答/目录漂移/制品重生成）时错位答案的 key 必不
+    撞键 → 重新追问，绝不静默写到别的名词（终审 Important-1）
   - resolve_form_task_permissions: 审批节点版（目录来自 pack_params 的
     task_keys，code=id；Add/Edit 组剔出抄送节点；未绑流程回阻断消息）
   - run_permission_resolution: 工具步骤统一入口（角色降级 + 节点阻断 +
@@ -29,6 +32,7 @@ njmind_form pack 的权限领域层：把 LLM 产物中的角色「中文名词�
   - resume 语义：_permission_pending_artifact 存在 → 工具跳过所有 LLM 步骤，
     本模块用 answers 直接回填 pending 制品。
 """
+import hashlib
 import json
 import logging
 import re
@@ -216,9 +220,31 @@ def _lookup_by_label(answer: str, candidates):
     return lookup_selected(answer, candidates)
 
 
-def _question(field_title: str, anchor: str, prop: str, idx: int,
+def _semantic_token(semantic: str) -> str:
+    """语义串 → 8 位十六进制短哈希（追问 header 末段）。
+
+    终审 Important-1 修复：header 从「位置标识」（pending 列表序号）升级为
+    「名词身份标识」——同一名词跨轮 token 恒定，不同名词 token 几乎必异。
+    位置标识的缺陷：部分作答/忽略/答案不识别会让 still_pending 压缩、目录
+    漂移（TTL 300s/上游增删）会让原本 pending 的名词直选、validate 重试会
+    重生成制品——pending 列表一位移，同一序号就指向不同名词，旧答案被
+    静默写到别的名词上（零命中候选=全目录，任何合法 label 都反查得中）。
+    身份标识下，错位/残留答案的 header 与当前名词的 header 必不撞键 →
+    视为未作答重新追问，绝不静默写错 code。
+    sha1 跨进程稳定（不受 PYTHONHASHSEED 影响）；清洗沿用 _clean_text 的
+    截断规则，语义等价的名词（仅空白差异）归一到同一 token。
+    """
+    return hashlib.sha1(
+        _clean_text(semantic).encode("utf-8")).hexdigest()[:8]
+
+
+def _question(field_title: str, anchor: str, prop: str,
               semantic: str, candidates) -> str:
-    """单条追问卡（JSON 字符串，引擎按结构化透传渲染点选卡）。"""
+    """单条追问卡（JSON 字符串，引擎按结构化透传渲染点选卡）。
+
+    header 末段是名词身份 token（见 _semantic_token）而非列表序号：
+    跨轮稳定、与具体名词一一对应，防答案错位回填。
+    """
     options = [
         {"label": f"{e.name}（{e.code}）", "description": f"编码 {e.code}"}
         for e in candidates[:_MAX_OPTIONS]
@@ -227,7 +253,7 @@ def _question(field_title: str, anchor: str, prop: str, idx: int,
     return json.dumps({
         "question": (f"字段「{field_title}」的{_PROP_LABELS.get(prop, prop)}"
                      f"「{semantic}」无法唯一匹配，请选择："),
-        "header": f"__role:{anchor}:{prop}:{idx}",
+        "header": f"__role:{anchor}:{prop}:{_semantic_token(semantic)}",
         "options": options,
     }, ensure_ascii=False)
 
@@ -316,11 +342,14 @@ def resolve_form_role_permissions(
                 else:
                     pending.append(r.pending[0])
 
-            # 追问回填：按 header 反查（无第二次 LLM 调用）
+            # 追问回填：按 header 反查（无第二次 LLM 调用）。header 末段是
+            # 名词身份 token——错位/残留/旧格式（序号版）答案的 key 与当前
+            # 名词必不匹配 → 视为未作答，重新追问（绝不静默写错 code）
             still_pending = []
             ignored = False
-            for idx, pick in enumerate(pending):
-                header = f"__role:{anchor}:{roles_key}:{idx}"
+            for pick in pending:
+                header = (f"__role:{anchor}:{roles_key}:"
+                          f"{_semantic_token(pick.semantic)}")
                 ans = answers.get(header)
                 if ans is None or not str(ans).strip():
                     still_pending.append(pick)
@@ -362,9 +391,16 @@ def resolve_form_role_permissions(
                 f.pop(roles_key, None)
                 if notes is not None:
                     notes.append("检测到空的角色权限数组，已按未提及处理")
-            for idx, pick in enumerate(still_pending):
+            # 同语义重复名词只发一张卡（header 即身份，答案对同语义全部生效）
+            asked: set = set()
+            for pick in still_pending:
+                header = (f"__role:{anchor}:{roles_key}:"
+                          f"{_semantic_token(pick.semantic)}")
+                if header in asked:
+                    continue
+                asked.add(header)
                 questions.append(_question(
-                    title, anchor, roles_key, idx,
+                    title, anchor, roles_key,
                     pick.semantic, pick.candidates))
     return questions
 
@@ -378,9 +414,12 @@ class TaskPermissionOutcome:
     block_message: Optional[str] = None
 
 
-def _task_question(field_title: str, anchor: str, prop: str, idx: int,
+def _task_question(field_title: str, anchor: str, prop: str,
                    semantic: str, candidates) -> str:
-    """单条节点追问卡（结构同角色卡，header 前缀 `__task:`）。"""
+    """单条节点追问卡（结构同角色卡，header 前缀 `__task:`）。
+
+    header 末段同角色卡用名词身份 token（_semantic_token），跨轮稳定。
+    """
     options = [
         {"label": f"{e.name}（{e.code}）", "description": f"节点 id {e.code}"}
         for e in candidates[:_MAX_OPTIONS]
@@ -389,7 +428,7 @@ def _task_question(field_title: str, anchor: str, prop: str, idx: int,
     return json.dumps({
         "question": (f"字段「{field_title}」的{_TASK_PROP_LABELS.get(prop, prop)}"
                      f"「{semantic}」无法唯一匹配，请选择："),
-        "header": f"__task:{anchor}:{prop}:{idx}",
+        "header": f"__task:{anchor}:{prop}:{_semantic_token(semantic)}",
         "options": options,
     }, ensure_ascii=False)
 
@@ -519,11 +558,12 @@ def resolve_form_task_permissions(
                 else:
                     pending.append(r.pending[0])
 
-            # 追问回填：按 header 反查（无第二次 LLM 调用）
+            # 追问回填：按 header 反查（无第二次 LLM 调用；身份 token 同角色卡）
             still_pending = []
             ignored = False
-            for idx, pick in enumerate(pending):
-                header = f"__task:{anchor}:{task_key}:{idx}"
+            for pick in pending:
+                header = (f"__task:{anchor}:{task_key}:"
+                          f"{_semantic_token(pick.semantic)}")
                 ans = answers.get(header)
                 if ans is None or not str(ans).strip():
                     still_pending.append(pick)
@@ -560,9 +600,16 @@ def resolve_form_task_permissions(
                 f.pop(task_key, None)
                 if notes is not None:
                     notes.append("检测到空的审批节点权限数组，已按未提及处理")
-            for idx, pick in enumerate(still_pending):
+            # 同语义重复名词只发一张卡（header 即身份，同角色卡）
+            asked: set = set()
+            for pick in still_pending:
+                header = (f"__task:{anchor}:{task_key}:"
+                          f"{_semantic_token(pick.semantic)}")
+                if header in asked:
+                    continue
+                asked.add(header)
                 questions.append(_task_question(
-                    title, anchor, task_key, idx,
+                    title, anchor, task_key,
                     pick.semantic, pick.candidates))
     return TaskPermissionOutcome(questions=questions)
 

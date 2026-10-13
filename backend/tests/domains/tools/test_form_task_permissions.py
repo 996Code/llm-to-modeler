@@ -32,6 +32,11 @@ PACK_PARAMS = {"njmind_form": {
 }}
 
 
+def _task_header(key: str, prop: str, semantic: str) -> str:
+    """组装节点追问 header（与实现同格式：末段名词身份 token）。"""
+    return f"__task:{key}:{prop}:{pc._semantic_token(semantic)}"
+
+
 def _make_ctx(llm=None, asset_client=None):
     ctx = ToolContext(
         llm_client=llm or MagicMock(),
@@ -112,7 +117,7 @@ class TestCcFilter:
             artifact, TASK_ROWS, "process_bx", {})
         assert len(outcome.questions) == 1
         q = json.loads(outcome.questions[0])
-        assert q["header"] == "__task:jine:canShowFieldAddTaskKeys:0"
+        assert q["header"] == _task_header("jine", "canShowFieldAddTaskKeys", "审批")
         labels = [o["label"] for o in q["options"]]
         assert "部门经理审批（act_1）" in labels
         assert "财务审批（act_2）" in labels
@@ -173,13 +178,66 @@ class TestTaskIgnoreAnswer:
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldTaskKeys": ["财务审批", "审批"]},
         ]}
-        answers = {"__task:jine:canEditFieldTaskKeys:0": "忽略本条权限"}
+        answers = {_task_header("jine", "canEditFieldTaskKeys", "审批"):
+                   "忽略本条权限"}
         outcome = pc.resolve_form_task_permissions(
             artifact, TASK_ROWS, "process_bx", answers)
         assert outcome.questions == []
         f = artifact["formFieldConfigVos"][0]
         assert f["canEditFieldTaskKeys"] == ["act_2"]   # 已解析值绝不连坐丢弃
         assert f["isEditField"] == 1
+
+
+class TestTaskMultiPendingStableHeaders:
+    """终审 Important-1（节点版）：多 pending + header 身份 token 防错配。"""
+
+    def test_two_pending_nodes_answered_via_stable_headers(self):
+        """同字段同属性两个歧义节点名词（审批/归档）→ token 作答 → 两个
+        正确 id 按序写入、开关置 1、无错配无追问。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canShowFieldAddTaskKeys": ["审批", "归档"]},
+        ]}
+        outcome = pc.resolve_form_task_permissions(
+            artifact, TASK_ROWS, "process_bx", {})
+        assert len(outcome.questions) == 2
+        headers = {json.loads(q)["header"] for q in outcome.questions}
+        assert headers == {
+            _task_header("jine", "canShowFieldAddTaskKeys", "审批"),
+            _task_header("jine", "canShowFieldAddTaskKeys", "归档"),
+        }
+        answers = {
+            _task_header("jine", "canShowFieldAddTaskKeys", "审批"):
+                "部门经理审批（act_1）",
+            _task_header("jine", "canShowFieldAddTaskKeys", "归档"):
+                "财务审批（act_2）",
+        }
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canShowFieldAddTaskKeys": ["审批", "归档"]},
+        ]}
+        outcome = pc.resolve_form_task_permissions(
+            artifact, TASK_ROWS, "process_bx", answers)
+        assert outcome.questions == []
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canShowFieldAddTaskKeys"] == ["act_1", "act_2"]  # 各归各位
+        assert f["isShowFieldAdd"] == 1
+
+    def test_legacy_or_stale_key_never_writes_wrong_id(self):
+        """旧序号/过期 key 的作答不被消费：语义保留重新追问，绝不静默
+        写错节点 id（零命中候选=全组，错配必中——身份 token 拦截）。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldTaskKeys": ["审批"]},
+        ]}
+        answers = {"__task:jine:canEditFieldTaskKeys:0": "财务审批（act_2）"}
+        outcome = pc.resolve_form_task_permissions(
+            artifact, TASK_ROWS, "process_bx", answers)
+        assert len(outcome.questions) == 1                       # 重新追问
+        assert json.loads(outcome.questions[0])["header"] == \
+            _task_header("jine", "canEditFieldTaskKeys", "审批")
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldTaskKeys"] == ["审批"]             # 语义原样保留
 
 
 class TestEmptyCatalogAsk:
@@ -276,7 +334,8 @@ class TestResumeSkipsLLM:
         assert llm.chat_json.call_count == 2      # parse + generate 各一次
 
         state["clarify_answers"] = {
-            "__task:jine:canEditFieldTaskKeys:0": "财务审批（act_2）"}
+            _task_header("jine", "canEditFieldTaskKeys", "审批"):
+                "财务审批（act_2）"}
         result = tool.execute(state, ctx)
         assert llm.chat_json.call_count == 2      # resume 未烧 LLM
         f = result.artifact["formFieldConfigVos"][0]

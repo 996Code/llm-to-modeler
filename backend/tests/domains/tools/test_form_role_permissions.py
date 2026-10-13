@@ -26,6 +26,16 @@ ROWS = [
 ]
 
 
+def _tok(semantic: str) -> str:
+    """角色追问 header 的名词身份 token（与实现同源）。"""
+    return pc._semantic_token(semantic)
+
+
+def _role_header(key: str, prop: str, semantic: str) -> str:
+    """组装角色追问 header（与实现同格式）。"""
+    return f"__role:{key}:{prop}:{_tok(semantic)}"
+
+
 @pytest.fixture(autouse=True)
 def _reset_cache():
     """模块级 TTL 目录缓存跨测试隔离。"""
@@ -120,7 +130,8 @@ class TestEmptyArrayBan:
 
 class TestAmbiguousAsk:
     def test_ambiguous_question_has_labels_and_ignore_option(self):
-        """歧义追问：候选 label '名称（code）' + 固定'忽略本条权限'。"""
+        """歧义追问：候选 label '名称（code）' + 固定'忽略本条权限'；
+        header 末段是名词身份 token（跨轮稳定，非列表序号）。"""
         artifact = {"formFieldConfigVos": [
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldRoles": ["主管"]},
@@ -128,7 +139,7 @@ class TestAmbiguousAsk:
         questions = pc.resolve_form_role_permissions(artifact, ROWS, {})
         assert len(questions) == 1
         q = json.loads(questions[0])
-        assert q["header"] == "__role:jine:canEditFieldRoles:0"
+        assert q["header"] == _role_header("jine", "canEditFieldRoles", "主管")
         labels = [o["label"] for o in q["options"]]
         assert "财务主管（FIN_MGR）" in labels
         assert "销售主管（SALE_MGR）" in labels
@@ -140,7 +151,8 @@ class TestAmbiguousAsk:
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldRoles": ["主管"]},
         ]}
-        answers = {"__role:jine:canEditFieldRoles:0": "销售主管（SALE_MGR）"}
+        answers = {_role_header("jine", "canEditFieldRoles", "主管"):
+                   "销售主管（SALE_MGR）"}
         questions = pc.resolve_form_role_permissions(artifact, ROWS, answers)
         assert questions == []
         f = artifact["formFieldConfigVos"][0]
@@ -156,7 +168,8 @@ class TestAmbiguousAsk:
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldRoles": ["主管"], "isEditField": 1},
         ]}
-        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        answers = {_role_header("jine", "canEditFieldRoles", "主管"):
+                   "忽略本条权限"}
         questions = pc.resolve_form_role_permissions(artifact, ROWS, answers)
         assert questions == []
         f = artifact["formFieldConfigVos"][0]
@@ -179,7 +192,8 @@ class TestIgnoreAnswerSemantics:
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldRoles": ["财务角色", "主管"]},
         ]}
-        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        answers = {_role_header("jine", "canEditFieldRoles", "主管"):
+                   "忽略本条权限"}
         questions = pc.resolve_form_role_permissions(artifact, ROWS, answers)
         assert questions == []
         f = artifact["formFieldConfigVos"][0]
@@ -196,7 +210,7 @@ class TestIgnoreAnswerSemantics:
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldRoles": ["主管"], "isEditField": 1},
         ]}
-        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        answers = {_role_header("jine", "canEditFieldRoles", "主管"): "忽略本条权限"}
         questions = pc.resolve_form_role_permissions(
             artifact, ROWS, answers, source_artifact=source, mode="modify")
         assert questions == []
@@ -214,7 +228,7 @@ class TestIgnoreAnswerSemantics:
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldRoles": ["主管"], "isEditField": 1},
         ]}
-        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        answers = {_role_header("jine", "canEditFieldRoles", "主管"): "忽略本条权限"}
         questions = pc.resolve_form_role_permissions(
             artifact, ROWS, answers, source_artifact=source, mode="modify")
         assert questions == []
@@ -231,12 +245,155 @@ class TestIgnoreAnswerSemantics:
             {"fieldTitleKey": "jine", "fieldTitleText": "金额",
              "canEditFieldRoles": ["主管"], "isEditField": 1},
         ]}
-        answers = {"__role:jine:canEditFieldRoles:0": "忽略本条权限"}
+        answers = {_role_header("jine", "canEditFieldRoles", "主管"): "忽略本条权限"}
         questions = pc.resolve_form_role_permissions(
             artifact, ROWS, answers, source_artifact=source, mode="modify")
         assert questions == []
         f = artifact["formFieldConfigVos"][0]
         assert "canEditFieldRoles" not in f        # 本次不写（源本就无此键）
+
+
+class TestMultiPendingStableHeaders:
+    """终审 Important-1：多 pending 同组挂起 + header 身份化防答案错配。
+
+    旧 header 末段是 pending 列表序号：部分作答/目录漂移/制品重生成都会让
+    同一序号指向不同名词，旧答案被静默写到别的名词（零命中候选=全目录，
+    任何合法 label 都反查得中）。新 header 末段是名词身份 token：错位答案
+    的 key 必不撞键 → 重新追问，绝不静默写错 code。
+    """
+
+    def test_two_pending_nouns_both_answered_no_mismatch(self):
+        """同字段同属性两个歧义名词（主管/归档）→ 分别作答 → 两个正确
+        code 按序写入、开关置 1、无追问无错配。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管", "归档"]},
+        ]}
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, {})
+        assert len(questions) == 2
+        headers = {json.loads(q)["header"] for q in questions}
+        assert headers == {
+            _role_header("jine", "canEditFieldRoles", "主管"),
+            _role_header("jine", "canEditFieldRoles", "归档"),
+        }
+        answers = {
+            _role_header("jine", "canEditFieldRoles", "主管"):
+                "销售主管（SALE_MGR）",
+            _role_header("jine", "canEditFieldRoles", "归档"):
+                "财务角色（FIN）",
+        }
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管", "归档"]},
+        ]}
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, answers)
+        assert questions == []
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldRoles"] == ["SALE_MGR", "FIN"]  # 各归各位
+        assert f["isEditField"] == 1
+
+    def test_partial_answer_remaining_header_identity_stable(self):
+        """只答归档一轮后，主管的追问 header 仍是自己的 token（与首轮
+        一致），不因列表压缩换序号；下一轮按 token 作答正确落定。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管", "归档"]},
+        ]}
+        # 第一轮：只答归档
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, {
+            _role_header("jine", "canEditFieldRoles", "归档"):
+                "财务角色（FIN）"})
+        assert len(questions) == 1
+        assert json.loads(questions[0])["header"] == \
+            _role_header("jine", "canEditFieldRoles", "主管")
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldRoles"] == ["FIN", "主管"]  # 已定 code 在前
+        # 第二轮（resume 重放同一制品）：主管按自身 token 作答 → 落定
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, {
+            _role_header("jine", "canEditFieldRoles", "主管"):
+                "销售主管（SALE_MGR）"})
+        assert questions == []
+        assert artifact["formFieldConfigVos"][0]["canEditFieldRoles"] == \
+            ["FIN", "SALE_MGR"]
+
+    def test_duplicate_semantics_single_question(self):
+        """同语义重复名词只发一张卡；一次作答对同语义全部生效（写码去重）。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管", "主管"]},
+        ]}
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, {})
+        assert len(questions) == 1
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, {
+            _role_header("jine", "canEditFieldRoles", "主管"):
+                "销售主管（SALE_MGR）"})
+        assert questions == []
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldRoles"] == ["SALE_MGR"]  # 去重写入
+        assert f["isEditField"] == 1
+
+
+class TestAnswerMismatchProtection:
+    """答案错配防护：伪造/过期 header 的 answers 不得静默写入错误 code。"""
+
+    def test_catalog_drift_compacts_pending_but_token_answers_stay_bound(self):
+        """目录漂移压缩 pending（旧缺陷触发器）：首轮目录下 归档/主管 两问
+        都作答；次轮目录新增"归档"直选 → pending 压缩成只剩主管。旧序号
+        header 下 :0 位的归档答案会打到主管头上（全目录反查必中）静默写
+        FIN、真答案 :1 被丢弃；身份 token 下答案各归各位，零错配。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["归档", "主管"]},
+        ]}
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, {})
+        assert len(questions) == 2                     # 首轮：两问
+        answers = {
+            _role_header("jine", "canEditFieldRoles", "归档"):
+                "财务角色（FIN）",
+            _role_header("jine", "canEditFieldRoles", "主管"):
+                "销售主管（SALE_MGR）",
+        }
+        # 次轮目录漂移：归档 可直选（resolve_names 直选归 DA，不经 answers）
+        drifted = ROWS + [{"id": "4", "code": "DA", "name": "归档"}]
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["归档", "主管"]},
+        ]}
+        questions = pc.resolve_form_role_permissions(artifact, drifted, answers)
+        assert questions == []
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldRoles"] == ["DA", "SALE_MGR"]  # 各归各位
+        assert "FIN" not in f["canEditFieldRoles"]           # 归档答案未串到主管
+
+    def test_legacy_positional_key_safely_ignored_and_reasked(self):
+        """在途旧格式（序号版）header：修复部署前发出的追问卡，用户按旧
+        key 作答 → 新代码不消费（防错位）→ 该名词重新追问一次（安全忽略
+        的取舍：多问一次，绝不静默写错）。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管"]},
+        ]}
+        answers = {"__role:jine:canEditFieldRoles:0": "销售主管（SALE_MGR）"}
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, answers)
+        assert len(questions) == 1                       # 未消费 → 重新追问
+        assert json.loads(questions[0])["header"] == \
+            _role_header("jine", "canEditFieldRoles", "主管")
+        assert artifact["formFieldConfigVos"][0]["canEditFieldRoles"] == ["主管"]
+
+    def test_foreign_token_key_ignored(self):
+        """answers 携带"别的名词的 token"作 key（过期/串答）：当前名词
+        不消费该键 → 重新追问，不落任何 code。"""
+        artifact = {"formFieldConfigVos": [
+            {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+             "canEditFieldRoles": ["主管"]},
+        ]}
+        answers = {_role_header("jine", "canEditFieldRoles", "归档"):
+                   "财务主管（FIN_MGR）"}   # 归档的 key，答的却是主管的 label
+        questions = pc.resolve_form_role_permissions(artifact, ROWS, answers)
+        assert len(questions) == 1
+        f = artifact["formFieldConfigVos"][0]
+        assert f["canEditFieldRoles"] == ["主管"]   # 语义原样保留
+        assert f.get("isEditField") is None          # 无 code 写入即不置开关
 
 
 class TestModifyKeepsSources:
@@ -329,7 +486,7 @@ class TestResumeSkipsLLM:
         assert llm.chat_json.call_count == 2      # parse + generate 各一次
 
         state["clarify_answers"] = {
-            "__role:jine:canEditFieldRoles:0": "财务主管（FIN_MGR）"}
+            _role_header("jine", "canEditFieldRoles", "主管"): "财务主管（FIN_MGR）"}
         result = tool.execute(state, ctx)
         assert llm.chat_json.call_count == 2      # resume 未烧 LLM
         f = result.artifact["formFieldConfigVos"][0]
@@ -351,7 +508,7 @@ class TestClarifyMergeSkipsUnderscoreKeys:
         state = {
             "user_input": "做一个报销单",
             "guide": {},
-            "clarify_answers": {"__role:jine:canEditFieldRoles:0": "财务角色（FIN）"},
+            "clarify_answers": {_role_header("jine", "canEditFieldRoles", "主管"): "财务角色（FIN）"},
         }
         tool._step_parse_fields(state, ctx)
         user_msg = llm.chat_json.call_args[0][0][1]["content"]
