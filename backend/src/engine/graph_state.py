@@ -17,9 +17,10 @@
 
 ::
 
-    START → classify_intent → execute_tool → handle_result → END
-                                  ↑  interrupt(追问)  ↓
-                                  └─── resume ────────┘
+    START → classify_intent → execute_tool ─┬─→ handle_result → END
+                          ↑ (重跑)          │ ask: pending_questions
+                          │                 ▼
+                          └──── resume ← clarify_gate(interrupt 挂起)
 
 每个箭头经过后,LangGraph 都会把当前 GraphState 快照到 checkpointer。
 
@@ -82,9 +83,10 @@ class GraphState(TypedDict, total=False):
     - tool_state:           工具内部 state(透传,Graph 不读内部结构,开闭原则)
     - tool_result:          工具执行结果(ToolResult 序列化后的 dict)
 
-    ── 追问(LangGraph interrupt/restore 的握手字段) ──
-    - pending_questions:    interrupt 的 value(工具向用户提的追问问题列表)
-    - clarify_answers:      resume 的 value(用户回答,框架恢复时注入)
+    ── 追问(LangGraph interrupt/restore 握手;I2 修复:interrupt 独立在 clarify_gate) ──
+    - pending_questions:    interrupt 的 payload({questions, summary},
+                            execute_tool 遇 ask 时提交,clarify_gate 据此挂起)
+    - clarify_answers:      resume 的 value(用户回答,clarify_gate 注入 tool_state)
 
     ── SSE 事件(handle_result 等节点累积) ──
     - sse_events:           节点产出的事件列表,由 stream.py 消费推给前端
@@ -128,9 +130,12 @@ class GraphState(TypedDict, total=False):
     tool_result: Optional[Dict[str, Any]]  # ToolResult.model_dump()
 
     # ── 追问(LangGraph interrupt/restore 握手) ──
-    # interrupt(value=pending_questions) 的 value:工具向用户提的追问问题列表,图在此暂停
-    pending_questions: List[Dict[str, Any]]
-    # Command(resume=clarify_answers) 的 value:用户回答,框架恢复时注入工具
+    # interrupt 的 payload:execute_tool 遇 ask 时写入 {questions, summary},
+    # 图路由到 clarify_gate 节点据此挂起;拿到回答后由 clarify_gate 清空。
+    # 空值({})表示无待问问题。
+    pending_questions: Dict[str, Any]
+    # Command(resume=clarify_answers) 的 value:用户回答。由 clarify_gate
+    # 注入 tool_state["clarify_answers"] 后清空(引擎级键只做握手中转)
     clarify_answers: Dict[str, Any]
 
     # ── SSE 事件(节点累积,stream.py 消费) ──
