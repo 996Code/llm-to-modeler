@@ -68,8 +68,10 @@
           </div>
           <div class="msg-body">
             <!-- 助手消息按 Markdown 渲染(知识图谱回答含列表/加粗/代码等);
-                 用户消息保持纯文本插值(防 v-html 注入) -->
-            <div v-if="msg.role === 'assistant'" class="msg-text md-content" v-html="renderMarkdown(msg.content)"></div>
+                 用户消息保持纯文本插值(防 v-html 注入)。
+                 @click 事件委托:[片段N] 徽标是 v-html 注入的纯 DOM,无法逐个
+                 绑监听——容器统一接 click,onMdRefClick 按 class 识别徽标 -->
+            <div v-if="msg.role === 'assistant'" class="msg-text md-content" v-html="renderMarkdown(msg.content)" @click="onMdRefClick"></div>
             <div v-else class="msg-text">{{ msg.content }}</div>
             
             <!-- ===== 追问卡片：当消息需要用户补充信息时显示 ===== -->
@@ -208,7 +210,7 @@
                 <KgGraphCard
                   v-else-if="msg.dataResult?.type === 'kg_search_result'"
                   :result="msg.dataResult"
-                  :cited-chunks="citedChunkNums(msg.content)"
+                  :cited-chunks="kgCitedChunks(msg)"
                 />
                 <!-- 遍历「提取后的可显示字段」（getDataDisplayFields 已做中文化与过滤） -->
                 <div v-else v-for="(value, key) in getDataDisplayFields(msg.dataResult)" :key="key" class="data-field">
@@ -356,9 +358,10 @@ function renderMarkdown(text: string): string {
   if (!text) return ''
   let html = marked.parse(text) as string
   // 片段编号(兼容 [片段3]/[片段:3]/[片段：3]) → 紫色徽标
+  // data-chunk-idx 供点击委托取编号(滚动到 KgGraphCard 对应片段)
   html = html.replace(
     /\[片段[:：]?\s*(\d+)\]/g,
-    '<span class="md-ref md-ref-chunk">片段 $1</span>')
+    '<span class="md-ref md-ref-chunk" data-chunk-idx="$1">片段 $1</span>')
   // 实体引用 [实体:x] → 蓝色徽标(x 保留)
   html = html.replace(
     /\[实体[:：]?\s*([^\]<]+)\]/g,
@@ -382,7 +385,30 @@ function renderMarkdown(text: string): string {
       if (/^(https?:|\/|#|mailto:)/i.test(href)) return m
       return `<span class="md-fake-link">${label}</span>`
     })
-  return DOMPurify.sanitize(safe, { ADD_ATTR: ['class'] })
+  return DOMPurify.sanitize(safe, { ADD_ATTR: ['class', 'data-chunk-idx'] })
+}
+
+/** md-content 容器事件委托:[片段N] 徽标点击 → 滚动到本条消息的
+ *  KgGraphCard 对应片段手风琴并展开。徽标是 v-html 注入的纯 DOM,
+ *  无法逐个绑监听——容器统一接 click,按 class 识别。
+ *  双界过滤:编号 <1(如 [片段:0])或 > chunks.length(如 [片段:99],
+ *  LLM 编造)时锚点不存在,一律静默忽略不动作。 */
+function onMdRefClick(e: MouseEvent) {
+  const el = (e.target as HTMLElement)?.closest?.('.md-ref-chunk') as HTMLElement | null
+  if (!el) return
+  const idx = Number(el.dataset.chunkIdx)
+  if (!Number.isInteger(idx) || idx < 1) return
+  // 作用域限定本条消息:多轮对话每条 assistant 消息有自己的图谱卡,
+  // 向上找 .msg-body 再查锚点,避免命中别的消息的片段
+  const scope = el.closest('.msg-body')
+  if (!scope) return
+  const anchor = scope.querySelector(`[data-chunk-anchor="${idx}"]`) as HTMLElement | null
+  if (!anchor) return  // 越界编号:锚点只对有效片段渲染(1..chunks.length)
+  anchor.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  // 展开手风琴:自定义事件冒泡到 KgGraphCard 根(卡片根监听 kg-scroll-chunk)
+  anchor.dispatchEvent(new CustomEvent('kg-scroll-chunk', {
+    detail: idx - 1, bubbles: true,
+  }))
 }
 
 /** 从回答文本提取被引用的片段编号([片段N] 徽标;KG 回答专用)。
@@ -396,6 +422,19 @@ function citedChunkNums(content?: string): number[] {
     if (!nums.includes(n)) nums.push(n)
   }
   return nums
+}
+
+/** KgGraphCard 的 citedChunks 权威源:后端 artifact 的 cited_chunks
+ *  (kb_search 透传,正则解析在后端完成);旧制品/字段缺失时回退前端
+ *  文本解析。双界过滤:n <1 或 n> chunks.length 一律剔除([片段:0] 与
+ *  LLM 编造的 [片段:99] 都不进徽标高亮)。 */
+function kgCitedChunks(msg: any): number[] {
+  const total = msg?.dataResult?.sources?.chunks?.length || 0
+  const raw: unknown = msg?.dataResult?.cited_chunks
+  const nums = Array.isArray(raw)
+    ? raw.map(Number).filter(Number.isInteger)
+    : citedChunkNums(msg?.content)
+  return nums.filter((n) => n >= 1 && n <= total)
 }
 
 // ===== 组件入参（props）声明 =====
@@ -1125,8 +1164,13 @@ watch(() => store.currentConversation?.id, (convId) => {
   vertical-align: baseline;
   white-space: nowrap;
 }
-/* 片段(向量召回原文)→ 紫,与图谱卡手风琴 chip 同族 */
-.md-content :deep(.md-ref-chunk) { background: rgba(114, 46, 209, 0.1); color: #722ed1; }
+/* 片段(向量召回原文)→ 紫,与图谱卡手风琴 chip 同族;可点击跳转对应片段 */
+.md-content :deep(.md-ref-chunk) {
+  background: rgba(114, 46, 209, 0.1);
+  color: #722ed1;
+  cursor: pointer;
+}
+.md-content :deep(.md-ref-chunk:hover) { background: rgba(114, 46, 209, 0.2); }
 /* 实体(图谱节点)→ 蓝 */
 .md-content :deep(.md-ref-entity) { background: rgba(47, 84, 235, 0.1); color: #2f54eb; }
 /* 三元组(图谱边)→ 青 */

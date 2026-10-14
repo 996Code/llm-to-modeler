@@ -19,6 +19,7 @@ kb_search 对话工具与 POST /search REST 共用本模块。
 top 分数)、耗时全量留痕——检索质量与召回水位在调用日志里直接可查。
 """
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -37,6 +38,19 @@ def _prompt_loader():
         from sdk.prompt_loader import PromptLoader
         _loader = PromptLoader(packs_root=Path(__file__).resolve().parent.parent)
     return _loader
+
+
+# 与前端 ChatPanel.vue 同款正则:兼容 [片段:N]/[片段N]/[片段：N]
+_CITED_CHUNK_RE = re.compile(r"\[片段[:：]?\s*(\d+)\]")
+
+
+def parse_cited_chunks(answer: str) -> List[int]:
+    """从回答文本解析被引用的片段编号([片段:N] → N 去重升序)。
+
+    编号权威源是 sources.chunks 顺序(片段N ↔ sources.chunks[N-1]),
+    这里只做文本解析回传,前端据此区分"已引用/已召回未引用"。
+    """
+    return sorted({int(m) for m in _CITED_CHUNK_RE.findall(answer or "")})
 
 
 def _cfg(app_state, key, default):
@@ -335,7 +349,7 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
                     top_k: Optional[int] = None,
                     on_stage=None) -> Dict[str, Any]:
     """混合检索 + LLM 综合回答。Returns:
-    {answer, subgraph, chunks, intent, sources}
+    {answer, cited_chunks, subgraph, chunks, intent, sources}
 
     on_stage(stage_key, message): 检索各阶段的进度回调(kb_search 透传给
     ctx.emit → 前端 pipeline 进度条)。None 时无副作用(REST /search 直调)。
@@ -385,6 +399,8 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
     }
     return {
         "answer": answer,
+        # 被引用片段编号(从 answer 解析 [片段:N];编号权威源=sources.chunks 顺序)
+        "cited_chunks": parse_cited_chunks(answer),
         "kb": {"id": kb["id"], "name": kb.get("name") or ""},
         "intent": retrieved.get("intent"),
         "subgraph": sub,
