@@ -14,11 +14,6 @@
       <span class="rt-tip">retrieve-only:只跑检索链,不做 LLM 综合回答</span>
     </div>
 
-    <a-alert
-      v-if="error" type="error" show-icon style="margin-top: 12px"
-      :message="`检索测试失败:${error}`"
-    />
-
     <template v-if="result">
       <section class="rt-card">
         <div class="rt-title">检索意图</div>
@@ -88,7 +83,7 @@
 </template>
 
 <script setup lang="ts">
-import { inject, ref } from 'vue'
+import { inject, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { kgRetrieveTest, KgRetrieveTestResult } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
@@ -99,8 +94,10 @@ const loadSafely = inject<LoadSafely>('loadSafely')!
 const query = ref('')
 const topK = ref(5)
 const loading = ref(false)
-const error = ref('')
 const result = ref<KgRetrieveTestResult | null>(null)
+
+// 切库即弃旧结果:诊断页残留旧库数据 = 误诊(兄弟组件 DocManager/GraphView 同款 watch 惯例)
+watch(() => props.kbId, () => { result.value = null })
 
 const termCols = [
   { title: '意图词', dataIndex: 'term', key: 'term', width: 160 },
@@ -110,8 +107,8 @@ const termCols = [
 async function run() {
   const q = query.value.trim()
   if (!q) { message.warning('请输入测试问题'); return }
+  if (loading.value) return   // 连点守卫:旧响应晚到不得覆盖新一轮
   loading.value = true
-  error.value = ''
   await loadSafely(async () => {
     result.value = await kgRetrieveTest(props.kbId, q, topK.value)
   })
