@@ -519,3 +519,64 @@ class TestUpstreamOrgEndpoints:
                 raise RuntimeError("network down")
 
         assert self._api(Boom()).get_org_catalog("role") == []
+
+
+class TestRenderRetryPreservesResolvedPermissions:
+    def test_render_retry_restores_resolved_snapshot_not_regenerate(self):
+        """render 校验失败重试时：权限已解析成功的 draft 必须冻结恢复，
+        不得重跑 LLM 重生成（重生成的名词漂移会让已答追问失效——
+        真实事故：用户答「部门经理」后 render 重试产「部门经理角色」死循环）。"""
+        import types
+        from domains.njmind_bpm.tools.generate_process import GenerateProcessTool
+        tool = GenerateProcessTool()
+        resolved_draft = {
+            "approveRules": [{"nodeKey": "manager", "approveOptRangeSettings": {
+                "checkedRoleIds": [{"roleId": "101", "depAndSupDep": 0, "condition": None}]}}],
+            "branchRules": [], "topology": {"nodes": [], "edges": []},
+        }
+        llm_calls = []
+        class _LLM:
+            def chat_json(self, *a, **k):
+                llm_calls.append(1)
+                return {"approveRules": [{"nodeKey": "manager", "approveOptRangeSettings": {
+                    "checkedRoleIds": ["部门经理角色"]}}], "branchRules": [],
+                    "topology": {"nodes": [], "edges": []}}
+        render_count = []
+        class _Api:
+            def render(self, d):
+                render_count.append(1)
+                n = len(render_count)
+                if n == 1:
+                    return {"validation": {"pass": False, "errors": [
+                        {"message": "拓扑缺开始节点", "code": "TOPOLOGY_INVALID"}]}}
+                return {"validation": {"pass": True, "errors": [], "warnings": []},
+                        "bpmnXml": "<xml/>", "rules": {}}
+        class _Ctx:
+            emit = staticmethod(lambda *a, **k: None)
+            llm_client = _LLM()
+        state = {
+            "_permission_resolved_draft": resolved_draft,
+            "raw_draft": resolved_draft,
+            "retry_count": 0,
+            "source_artifact": {"modelKey": "test_flow", "name": "测试流程",
+                                "rules": {}},
+        }
+        import domains.njmind_bpm.service_locator as sl
+        old = sl.get_api
+        sl.get_api = lambda: _Api()
+        try:
+            tool._step_render(state, types.SimpleNamespace(emit=lambda *a, **k: None,
+                                                           llm_client=_LLM()))
+        finally:
+            sl.get_api = old
+        assert state["artifact"], "重试后应产出 artifact"
+        rules = state["artifact"]["rules"]
+        assert llm_calls == [], f"render 重试不得烧 LLM（实烧 {len(llm_calls)} 次）"
+        ar = state["artifact"]
+        # resolved 快照里的真实 roleId 保留（未被名词漂移覆盖）
+        raw_after = state.get("raw_draft") or {}
+        kept = any(
+            (r.get("approveOptRangeSettings") or {}).get("checkedRoleIds") == [
+                {"roleId": "101", "depAndSupDep": 0, "condition": None}]
+            for r in (raw_after.get("approveRules") or []))
+        assert kept, "恢复后 draft 应保留已解析的真实 roleId"

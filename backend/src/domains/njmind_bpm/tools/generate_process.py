@@ -325,6 +325,14 @@ class GenerateProcessTool(CompositeTool):
             state["_permission_pending_draft"] = copy.deepcopy(draft)
             raise ClarificationRaised(questions)
         state.pop("_permission_pending_draft", None)
+        # 解析成功快照：render 校验失败重试时冻结恢复——重跑 LLM 只会让
+        # 名词漂移（真实事故：「部门经理」重生成变「部门经理角色」，已答
+        # 追问指纹失效 → 无限重问），重试只需 render+机械修复，draft 冻结
+        state["_permission_resolved_draft"] = copy.deepcopy(draft)
+        bank = state.setdefault("_permission_answer_bank", {})
+        for k, v in (state.get("clarify_answers") or {}).items():
+            if k.startswith("__bpm_"):
+                bank[k] = v
 
     def _step_resolve_permissions(self, state: dict, ctx: ToolContext) -> None:
         ctx.emit("stage", "resolve_permissions", "正在解析审批人与角色分支...")
@@ -431,9 +439,19 @@ class GenerateProcessTool(CompositeTool):
         msgs = [e.get("message", str(e))[:60] if isinstance(e, dict) else str(e)[:60]
                 for e in errors[:3]]
         if state["retry_count"] < MAX_RETRIES:
-            ctx.emit("stage", "render_retry",
-                     f"校验失败:{'; '.join(msgs)},正在重试(第 {state['retry_count']} 次)...")
-            self._step_generate(state, ctx)
+            # 权限已解析过 → draft 冻结恢复，重试只走 render+机械修复：
+            # LLM 重生成会让审批人名词漂移，用户已答的追问指纹失效 →
+            # 无限重问（真实事故实证）。无解析快照（不含权限的普通流程）
+            # 保留原 LLM 重试路径。
+            if isinstance(state.get("_permission_resolved_draft"), dict):
+                state["raw_draft"] = copy.deepcopy(state["_permission_resolved_draft"])
+                ctx.emit("stage", "render_retry",
+                         f"校验失败:{'; '.join(msgs)}，正在以冻结草稿重试"
+                         f"(第 {state['retry_count']} 次)...")
+            else:
+                ctx.emit("stage", "render_retry",
+                         f"校验失败:{'; '.join(msgs)}，正在重试(第 {state['retry_count']} 次)...")
+                self._step_generate(state, ctx)
             return self._step_render(state, ctx)
         ctx.emit("stage", "render_fail",
                  f"校验失败(已达最大重试):{'; '.join(msgs)}")
