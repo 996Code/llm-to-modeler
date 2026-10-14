@@ -552,3 +552,85 @@ def test_mechanical_repair_downgrades_incompatible_operator():
     fixed, remaining = mechanical_repair(draft, errors)
     assert fixed["branchRules"][0]["rules"][0]["logicType"] == 10
     assert remaining == []
+
+
+# ── P2T4：审批人替换/继承 + 分支互斥（merge 包装层语义） ──────────────
+
+class TestMergeApproveRuleDetails:
+    def test_mentioned_node_replaces_settings_keeps_other_flags(self):
+        from domains.njmind_bpm.tools._pipeline_common import merge_approve_rule_details
+        host = [{"nodeKey": "n1", "approveOptRangeSettings": {"checkedUserIds": ["u_old"]},
+                 "isSupportBack": 1}]
+        gen = [{"nodeKey": "n1", "approveOptRangeSettings": {"checkedRoleIds": [
+            {"roleId": "101", "depAndSupDep": 0, "condition": None}]}}]
+        merged = merge_approve_rule_details(gen, host)
+        assert merged[0]["approveOptRangeSettings"] == {"checkedRoleIds": [
+            {"roleId": "101", "depAndSupDep": 0, "condition": None}]}
+        assert merged[0]["isSupportBack"] == 1
+
+    def test_unmentioned_node_inherits_whole_row_verbatim(self):
+        from domains.njmind_bpm.tools._pipeline_common import merge_approve_rule_details
+        host = [{"nodeKey": "n2", "approveOptRangeSettings": {"checkedRoleIds": ["role_1"]},
+                 "isSupportBack": 1}]
+        merged = merge_approve_rule_details([], host)
+        assert merged == host  # 宿主值形态不变（字符串数组原样透传）
+
+    def test_mentioned_without_settings_inherits_host_settings(self):
+        from domains.njmind_bpm.tools._pipeline_common import merge_approve_rule_details
+        host = [{"nodeKey": "n1", "approveOptRangeSettings": {"checkedUserIds": ["u1"]}}]
+        gen = [{"nodeKey": "n1", "multiApproveMethod": 2}]
+        merged = merge_approve_rule_details(gen, host)
+        assert merged[0]["approveOptRangeSettings"] == {"checkedUserIds": ["u1"]}
+        assert merged[0]["multiApproveMethod"] == 2
+
+
+class TestMergeBranchRuleDetails:
+    def test_role_rules_remove_inherited_field_rules(self):
+        from domains.njmind_bpm.tools._pipeline_common import merge_branch_rule_details
+        host = [{"edgeKey": "e1", "rules": [{"formFieldKey": "amount"}]}]
+        gen = [{"edgeKey": "e1", "roleRules": [
+            {"formFieldKey": "loginUserRole", "logicType": 30, "values": ["FIN"]}]}]
+        merged = merge_branch_rule_details(gen, host)
+        assert "rules" not in merged[0]
+        assert merged[0]["roleRules"][0]["values"] == ["FIN"]
+
+    def test_field_rules_remove_inherited_role_rules(self):
+        from domains.njmind_bpm.tools._pipeline_common import merge_branch_rule_details
+        host = [{"edgeKey": "e1", "roleRules": [
+            {"formFieldKey": "loginUserRole", "logicType": 30, "values": ["OLD"]}]}]
+        gen = [{"edgeKey": "e1", "rules": [{"formFieldKey": "amount"}]}]
+        merged = merge_branch_rule_details(gen, host)
+        assert "roleRules" not in merged[0]
+        assert merged[0]["rules"][0]["formFieldKey"] == "amount"
+
+    def test_empty_role_rules_row_stripped_with_warning_no_raise(self):
+        from domains.njmind_bpm.tools._pipeline_common import merge_branch_rule_details
+        host = []
+        gen = [{"edgeKey": "e1", "roleRules": []},
+               {"edgeKey": "e2", "rules": [{"formFieldKey": "amount"}]}]
+        merged = merge_branch_rule_details(gen, host)  # 不得 raise
+        assert [r["edgeKey"] for r in merged] == ["e2"]
+
+    def test_unmentioned_branch_inherits_whole_row(self):
+        from domains.njmind_bpm.tools._pipeline_common import merge_branch_rule_details
+        host = [{"edgeKey": "e9", "rules": [{"formFieldKey": "x"}]}]
+        merged = merge_branch_rule_details([], host)
+        assert merged == host
+
+
+def test_user_answer_with_uniquifier_suffix_resolves_to_nth_candidate():
+    """T3 Minor：同名候选人 label 加"（2）"后缀后，点选带后缀 label 必须回填
+    第二个候选人 id（而非 miss → 重问）。"""
+    from domains.njmind_bpm.tools._permission_catalog import _user_answer_id
+    # 真实唯一化场景：完全同名同部门的两个候选人
+    results = [{"id": "u1", "label": "张三｜研发部"},
+               {"id": "u2", "label": "张三｜研发部"}]
+    class _Api:
+        def search_users(self, kw):
+            raise AssertionError("不应走重搜——带后缀 label 必须直命中")
+    assert _user_answer_id("张三｜研发部（2）", results, _Api()) == "u2"
+    assert _user_answer_id("张三｜研发部（1）", results, None) == "u1"
+    # 不同 label（未触发唯一化）精确直命中
+    diff = [{"id": "u1", "label": "张三｜研发部"},
+            {"id": "u2", "label": "张三｜财务部"}]
+    assert _user_answer_id("张三｜财务部", diff, None) == "u2"

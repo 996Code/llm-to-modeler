@@ -148,10 +148,22 @@ def _user_options(results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
 
 def _user_answer_id(answer: str, results, api) -> Optional[str]:
     """人员答案 → id：先按候选 label 反查（点选），查不中再按答案文本
-    重新搜索（前端"其他"自由输入：更准确姓名/工号），单结果直选。"""
+    重新搜索（前端"其他"自由输入：更准确姓名/工号），单结果直选。
+
+    唯一化后缀：多候选同名时 options 的 label 会加"（n）"后缀
+    （_user_options），反查时先剥后缀按序号定位对应候选。
+    """
     for r in results or []:
         if str(r.get("label") or "") == answer:
             return r.get("id")
+    import re
+    m = re.search(r"（(\d+)）$", answer)
+    if m and results:
+        base = answer[:m.start()]
+        nth = int(m.group(1))
+        same = [r for r in results if str(r.get("label") or "") == base]
+        if 1 <= nth <= len(same):
+            return same[nth - 1].get("id")
     if api is None:
         return None
     retry = None
