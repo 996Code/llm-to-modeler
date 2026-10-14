@@ -52,7 +52,7 @@ class FakeOrgApi:
 
 
 def _tok(semantic: str) -> str:
-    return pc._semantic_token(semantic)
+    return pc.semantic_token(semantic)
 
 
 def _draft_cn():
@@ -602,8 +602,8 @@ class TestFinalReviewFixes:
         qs2 = pc.resolve_bpm_permissions(draft, roles, [], merged, None)
         # bank 的指纹 <fp> 与 draft 名词指纹一致才能消费——真实指纹由
         # pc 内部生成，此处用 pc 的指纹函数对齐
-        from domains.njmind_bpm.tools._permission_catalog import _semantic_token
-        fp = _semantic_token("独角兽骑士")
+        from sdk.catalog import semantic_token
+        fp = semantic_token("独角兽骑士")
         bank = {f"__bpm_role:m:checkedRoleIds:{fp}": "部门总管实际名（BM）"}
         merged = {**bank, "some_field": "文本输入框"}  # 模拟分支门 resume 只带新答案
         qs3 = pc.resolve_bpm_permissions(draft, roles, [], merged, None)

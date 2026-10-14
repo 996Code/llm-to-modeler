@@ -34,7 +34,7 @@ PACK_PARAMS = {"njmind_form": {
 
 def _task_header(key: str, prop: str, semantic: str) -> str:
     """组装节点追问 header（与实现同格式：末段名词身份 token）。"""
-    return f"__task:{key}:{prop}:{pc._semantic_token(semantic)}"
+    return f"__task:{key}:{prop}:{pc.semantic_token(semantic)}"
 
 
 def _make_ctx(llm=None, asset_client=None):

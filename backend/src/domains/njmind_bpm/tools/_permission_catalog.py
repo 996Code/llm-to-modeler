@@ -34,7 +34,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from sdk.catalog import resolve_names, lookup_selected, entries_from_rows
+from sdk.catalog import (resolve_names, lookup_selected, entries_from_rows,
+                         clean_text, semantic_token, IGNORE_LABEL)
 from domains.njmind_bpm import keys as K
 
 logger = logging.getLogger(__name__)
@@ -49,8 +50,6 @@ VALUES = "values"
 
 # 追问固定选项：「条」=单个 pending 名词——仅丢弃该名词，同组已解析值
 # 绝不连坐丢弃
-IGNORE_LABEL = "忽略本条权限"
-
 # 追问卡候选上限（前端自动附"其他"自由输入，超限仍可手输名称）
 _MAX_OPTIONS = 50
 _NAME_MAX = 32
@@ -58,12 +57,8 @@ _NAME_MAX = 32
 _DIRTY_CHARS_RE = re.compile(r"[\r\n|]")
 
 
-def _clean_text(s: str) -> str:
-    """剥换行/竖线（追问卡注入面收窄）+ 截 32 字符。"""
-    return _DIRTY_CHARS_RE.sub("", s)[:_NAME_MAX].strip()
 
-
-def _semantic_token(semantic: str) -> str:
+def semantic_token(semantic: str) -> str:
     """语义串 → 8 位十六进制短哈希（追问 header 末段）。
 
     与 Plan 1 njmind_form 同源：header 用「名词身份」而非位置序号——
@@ -71,7 +66,7 @@ def _semantic_token(semantic: str) -> str:
     必不撞键 → 重新追问，绝不静默写到别的名词。sha1 跨进程稳定。
     """
     return hashlib.sha1(
-        _clean_text(semantic).encode("utf-8")).hexdigest()[:8]
+        clean_text(semantic).encode("utf-8")).hexdigest()[:8]
 
 
 def _question(question: str, header: str, options: List[Dict[str, str]]) -> str:
@@ -135,7 +130,7 @@ def _user_options(results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     options: List[Dict[str, str]] = []
     seen: Dict[str, int] = {}
     for r in results[:_MAX_OPTIONS]:
-        label = _clean_text(str(r.get("label") or ""))
+        label = clean_text(str(r.get("label") or ""))
         if not label:
             continue
         n = seen.get(label, 0) + 1
@@ -296,7 +291,7 @@ def _resolve_roles(raw, anchor: str, prop: str, role_entries,
 
     still: List = []
     for pick in pending:
-        header = f"__bpm_role:{anchor}:{prop}:{_semantic_token(pick.semantic)}"
+        header = f"__bpm_role:{anchor}:{prop}:{semantic_token(pick.semantic)}"
         ans = answers.get(header) if isinstance(answers, dict) else None
         ans = str(ans).strip() if ans is not None and str(ans).strip() else None
         if ans is None:
@@ -313,7 +308,7 @@ def _resolve_roles(raw, anchor: str, prop: str, role_entries,
 
     asked: set = set()
     for pick in still:
-        header = f"__bpm_role:{anchor}:{prop}:{_semantic_token(pick.semantic)}"
+        header = f"__bpm_role:{anchor}:{prop}:{semantic_token(pick.semantic)}"
         if header in asked:
             continue
         asked.add(header)
@@ -361,7 +356,7 @@ def _resolve_deps(raw, anchor: str, dept_entries,
 
     still: List = []
     for pick in pending:
-        header = f"__bpm_dep:{anchor}:{CHECKED_DEP_IDS}:{_semantic_token(pick.semantic)}"
+        header = f"__bpm_dep:{anchor}:{CHECKED_DEP_IDS}:{semantic_token(pick.semantic)}"
         ans = answers.get(header) if isinstance(answers, dict) else None
         ans = str(ans).strip() if ans is not None and str(ans).strip() else None
         if ans is None:
@@ -377,7 +372,7 @@ def _resolve_deps(raw, anchor: str, dept_entries,
 
     asked: set = set()
     for pick in still:
-        header = f"__bpm_dep:{anchor}:{CHECKED_DEP_IDS}:{_semantic_token(pick.semantic)}"
+        header = f"__bpm_dep:{anchor}:{CHECKED_DEP_IDS}:{semantic_token(pick.semantic)}"
         if header in asked:
             continue
         asked.add(header)
@@ -437,7 +432,7 @@ def _resolve_users(raw, anchor: str, answers, search, questions: List[str]) -> L
 
     still: List = []
     for semantic, results in pending:
-        header = f"__bpm_user:{anchor}:{CHECKED_USER_IDS}:{_semantic_token(semantic)}"
+        header = f"__bpm_user:{anchor}:{CHECKED_USER_IDS}:{semantic_token(semantic)}"
         ans = answers.get(header) if isinstance(answers, dict) else None
         ans = str(ans).strip() if ans is not None and str(ans).strip() else None
         if ans is None:
@@ -453,7 +448,7 @@ def _resolve_users(raw, anchor: str, answers, search, questions: List[str]) -> L
 
     asked: set = set()
     for semantic, results in still:
-        header = f"__bpm_user:{anchor}:{CHECKED_USER_IDS}:{_semantic_token(semantic)}"
+        header = f"__bpm_user:{anchor}:{CHECKED_USER_IDS}:{semantic_token(semantic)}"
         if header in asked:
             continue
         asked.add(header)
@@ -510,7 +505,7 @@ def _resolve_role_values(raw, anchor: str, role_entries,
 
     still: List = []
     for pick in pending:
-        header = f"__bpm_role:{anchor}:{ROLE_RULES}:{_semantic_token(pick.semantic)}"
+        header = f"__bpm_role:{anchor}:{ROLE_RULES}:{semantic_token(pick.semantic)}"
         ans = answers.get(header) if isinstance(answers, dict) else None
         ans = str(ans).strip() if ans is not None and str(ans).strip() else None
         if ans is None:
@@ -527,7 +522,7 @@ def _resolve_role_values(raw, anchor: str, role_entries,
 
     asked: set = set()
     for pick in still:
-        header = f"__bpm_role:{anchor}:{ROLE_RULES}:{_semantic_token(pick.semantic)}"
+        header = f"__bpm_role:{anchor}:{ROLE_RULES}:{semantic_token(pick.semantic)}"
         if header in asked:
             continue
         asked.add(header)

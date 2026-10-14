@@ -40,7 +40,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from sdk.catalog import resolve_names, lookup_selected, entries_from_rows
+from sdk.catalog import (resolve_names, lookup_selected, entries_from_rows,
+                         clean_text, semantic_token, IGNORE_LABEL)
 from sdk.tool import ClarificationRaised
 from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
 
@@ -61,8 +62,6 @@ _PROP_LABELS = {
 
 # 追问固定选项：「条」=单个 pending 名词——仅丢弃该名词；剥除后组内空才回
 # 「本次指令未涉及该权限」状态（modify 保旧值+旧开关，create 剥键即可）
-IGNORE_LABEL = "忽略本条权限"
-
 # ── 审批节点权限键映射（TaskKeys 数组 → (总开关, 是否允许抄送节点)）──
 # 布尔 = 是否允许 taskType==4（抄送节点）：仅 Detail 组允许，Add/Edit 剔除。
 TASK_FIELDS = {
@@ -148,10 +147,6 @@ def fetch_role_catalog(ctx) -> List[Dict[str, Any]]:
 _DIRTY_CHARS_RE = re.compile(r"[\r\n|]")
 
 
-def _clean_text(s: str) -> str:
-    """剥换行/竖线（prompt 注入面收窄）+ 截 32 字符。"""
-    return _DIRTY_CHARS_RE.sub("", s)[:_NAME_MAX].strip()
-
 
 def build_role_reference(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """目录行 → prompt 参考区条目（清洗 + 200 条上限）。
@@ -161,8 +156,8 @@ def build_role_reference(rows: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     """
     out: List[Dict[str, str]] = []
     for r in rows or []:
-        code = _clean_text(str(r.get("code") or ""))
-        name = _clean_text(str(r.get("name") or ""))
+        code = clean_text(str(r.get("code") or ""))
+        name = clean_text(str(r.get("name") or ""))
         if code and name:
             out.append({"code": code, "name": name})
         if len(out) >= MAX_PROMPT_ROWS:
@@ -192,8 +187,8 @@ def task_reference_vars(state: dict) -> Dict[str, Any]:
     for r in params.get("task_keys") or []:
         if not isinstance(r, dict):
             continue
-        code = _clean_text(str(r.get("id") or ""))
-        name = _clean_text(str(r.get("name") or ""))
+        code = clean_text(str(r.get("id") or ""))
+        name = clean_text(str(r.get("name") or ""))
         if code and name:
             ref.append({"code": code, "name": name,
                         "cc": r.get("taskType") == CC_TASK_TYPE})
@@ -220,7 +215,7 @@ def _lookup_by_label(answer: str, candidates):
     return lookup_selected(answer, candidates)
 
 
-def _semantic_token(semantic: str) -> str:
+def semantic_token(semantic: str) -> str:
     """语义串 → 8 位十六进制短哈希（追问 header 末段）。
 
     终审 Important-1 修复：header 从「位置标识」（pending 列表序号）升级为
@@ -235,7 +230,7 @@ def _semantic_token(semantic: str) -> str:
     截断规则，语义等价的名词（仅空白差异）归一到同一 token。
     """
     return hashlib.sha1(
-        _clean_text(semantic).encode("utf-8")).hexdigest()[:8]
+        clean_text(semantic).encode("utf-8")).hexdigest()[:8]
 
 
 def _question(field_title: str, anchor: str, prop: str,
@@ -253,7 +248,7 @@ def _question(field_title: str, anchor: str, prop: str,
     return json.dumps({
         "question": (f"字段「{field_title}」的{_PROP_LABELS.get(prop, prop)}"
                      f"「{semantic}」无法唯一匹配，请选择："),
-        "header": f"__role:{anchor}:{prop}:{_semantic_token(semantic)}",
+        "header": f"__role:{anchor}:{prop}:{semantic_token(semantic)}",
         "options": options,
     }, ensure_ascii=False)
 
@@ -349,7 +344,7 @@ def resolve_form_role_permissions(
             ignored = False
             for pick in pending:
                 header = (f"__role:{anchor}:{roles_key}:"
-                          f"{_semantic_token(pick.semantic)}")
+                          f"{semantic_token(pick.semantic)}")
                 ans = answers.get(header)
                 if ans is None or not str(ans).strip():
                     still_pending.append(pick)
@@ -395,7 +390,7 @@ def resolve_form_role_permissions(
             asked: set = set()
             for pick in still_pending:
                 header = (f"__role:{anchor}:{roles_key}:"
-                          f"{_semantic_token(pick.semantic)}")
+                          f"{semantic_token(pick.semantic)}")
                 if header in asked:
                     continue
                 asked.add(header)
@@ -428,7 +423,7 @@ def _task_question(field_title: str, anchor: str, prop: str,
     return json.dumps({
         "question": (f"字段「{field_title}」的{_TASK_PROP_LABELS.get(prop, prop)}"
                      f"「{semantic}」无法唯一匹配，请选择："),
-        "header": f"__task:{anchor}:{prop}:{_semantic_token(semantic)}",
+        "header": f"__task:{anchor}:{prop}:{semantic_token(semantic)}",
         "options": options,
     }, ensure_ascii=False)
 
@@ -563,7 +558,7 @@ def resolve_form_task_permissions(
             ignored = False
             for pick in pending:
                 header = (f"__task:{anchor}:{task_key}:"
-                          f"{_semantic_token(pick.semantic)}")
+                          f"{semantic_token(pick.semantic)}")
                 ans = answers.get(header)
                 if ans is None or not str(ans).strip():
                     still_pending.append(pick)
@@ -604,7 +599,7 @@ def resolve_form_task_permissions(
             asked: set = set()
             for pick in still_pending:
                 header = (f"__task:{anchor}:{task_key}:"
-                          f"{_semantic_token(pick.semantic)}")
+                          f"{semantic_token(pick.semantic)}")
                 if header in asked:
                     continue
                 asked.add(header)

@@ -28,7 +28,7 @@ ROWS = [
 
 def _tok(semantic: str) -> str:
     """角色追问 header 的名词身份 token（与实现同源）。"""
-    return pc._semantic_token(semantic)
+    return pc.semantic_token(semantic)
 
 
 def _role_header(key: str, prop: str, semantic: str) -> str:

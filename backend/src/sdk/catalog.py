@@ -137,3 +137,27 @@ def entries_from_rows(rows: Sequence[dict]) -> list[CatalogEntry]:
         if isinstance(code, str) and isinstance(name, str):
             entries.append(CatalogEntry(code=code, name=name))
     return entries
+
+
+# ── 名词追问通用件（原 form/bpm 双 pack 各持一份，下沉统一——防漂移）──
+
+IGNORE_LABEL = "忽略本条权限"
+
+_NAME_MAX = 32
+_DIRTY_CHARS_RE = __import__("re").compile(r"[\r\n|]")
+
+
+def clean_text(s: str) -> str:
+    """剥换行/竖线（prompt/追问卡注入面收窄）+ 截 32 字符。"""
+    return _DIRTY_CHARS_RE.sub("", s)[:_NAME_MAX].strip()
+
+
+def semantic_token(semantic: str) -> str:
+    """语义串 → 8 位十六进制短哈希（追问 header 末段）。
+
+    header 用「名词身份」而非位置序号：pending 列表位移（部分作答/忽略/
+    目录漂移/制品重生成）时，错位答案的 key 必不撞键 → 重新追问，
+    绝不静默写到别的名词。sha1 跨进程稳定。
+    """
+    import hashlib
+    return hashlib.sha1(clean_text(semantic).encode("utf-8")).hexdigest()[:8]
