@@ -166,7 +166,13 @@ class TestResumeZeroLLM:
         # ── 第一轮:跑到追问挂起 ──
         list(graph.stream(_initial_input(), config))
         assert tool.execute_calls == 1
-        assert llm.chat_json.call_count == 2  # parse + generate(真实烧了)
+        # parse + generate(真实烧了);标题生成(conversation_title,main 侧
+        # 意图轮附带调用)与本测试的追问语义无关,按 stage 排除
+        tool_llm_calls = [
+            c for c in llm.chat_json.call_args_list
+            if c.kwargs.get("stage") != "conversation_title"
+        ]
+        assert len(tool_llm_calls) == 2
 
         task, intr_value = _interrupt_payload(graph, config)
 
