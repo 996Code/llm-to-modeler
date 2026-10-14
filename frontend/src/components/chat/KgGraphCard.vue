@@ -1,5 +1,8 @@
 <template>
-  <div class="kgc">
+  <!-- 根监听 kg-scroll-chunk:回答文本的 [片段N] 徽标点击后由
+       ChatPanel 的事件委托 dispatch 到锚点(会冒泡到这里),展开
+       对应片段手风琴——徽标(纯 DOM)与卡片(组件)间的解耦通道 -->
+  <div class="kgc" @kg-scroll-chunk="onScrollChunk">
     <div class="kgc-head">
       <PartitionOutlined class="kgc-icon" />
       <span class="kgc-title">知识库 · {{ result.kb?.name || '检索结果' }}</span>
@@ -29,7 +32,8 @@
         <FileTextOutlined /> 文档片段 · 回答引用了 {{ (citedChunks || []).length }}/{{ result.sources.chunks.length }} 个
         <span class="kgc-src-hint">(灰色"未引用"= 检索到但回答未采用)</span>
       </span>
-      <div v-for="(c, i) in result.sources.chunks" :key="i" class="kgc-chunk-item">
+      <div v-for="(c, i) in result.sources.chunks" :key="i"
+           class="kgc-chunk-item" :data-chunk-anchor="i + 1">
         <!-- 片段 chip(点击切换展开;手风琴:同一时间只展开一条)。
              编号"片段N"与回答文本里的 [片段N] 引用同源(sources.chunks
              顺序 = prompt loop.index),用户凭编号对照定位原文;
@@ -93,6 +97,14 @@ const chunkHits = computed(() => props.result.sources?.chunks?.length || 0)
 const expandedChunk = ref<number | null>(null)
 function toggleChunk(i: number) {
   expandedChunk.value = expandedChunk.value === i ? null : i
+}
+
+// 回答徽标跳转的展开入口:ChatPanel 滚动到锚点后 dispatch 自定义事件,
+// 这里按编号(0 基)展开对应手风琴。越界防御:编号不在片段范围内忽略。
+function onScrollChunk(e: Event) {
+  const i = Number((e as CustomEvent).detail)
+  if (!Number.isInteger(i) || i < 0 || i >= (props.result.sources?.chunks?.length || 0)) return
+  expandedChunk.value = i
 }
 
 // 该片段是否被回答引用([片段N] 编号从 1 起,数组下标从 0 起)

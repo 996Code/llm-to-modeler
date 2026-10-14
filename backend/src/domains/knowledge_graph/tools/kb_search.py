@@ -210,6 +210,9 @@ class KbSearchTool(Tool):
             "kb": result["kb"],
             "subgraph": sub,
             "sources": result.get("sources") or {},
+            # 被引用片段编号(编号权威源=sources.chunks 顺序)——前端
+            # KgGraphCard 据此区分"已引用/已召回未引用",徽标点击跳转同源
+            "cited_chunks": result.get("cited_chunks") or [],
         }
         return ToolResult(
             artifact=artifact,
