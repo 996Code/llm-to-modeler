@@ -287,7 +287,12 @@ class SqlGeneratingFakeLLM(FakeLLM):
 
 
 def test_evalset_sql_skeleton(capsys):
-    """EVALSET 前 10 条全流程（召回→LLM 精筛替身）SQL 骨架表名集比对。
+    """EVALSET 混合抽样 10 条全流程（召回→LLM 精筛替身）SQL 骨架表名集比对。
+
+    抽样口径（终审 deferred#4）：前 10 条全是 easy 单表，无法激活多表
+    JOIN 精筛过滤分支——改为 [:7]（7 条 easy 单表）+ [10:13]（3 条
+    medium 双表 m001-m003），确保多表 JOIN 链路（召回多表→精筛多选→
+    生成 JOIN 骨架）被评测覆盖。全量 20 条比对留 P1#5 扩容。
 
     基线定位同 recall 基线：管线回归护栏，非检索/生成质量度量——
     精筛与 SQL 生成为确定性替身，骨架表名命中率衡量"召回表名能
@@ -298,7 +303,8 @@ def test_evalset_sql_skeleton(capsys):
     llm.last_generated_sql = ""
     hits = 0
     checked = 0
-    for case in EVALSET[:10]:  # 骨架比对先跑前 10 条（全量留 P1#5 扩容）
+    # 7 条 easy + 3 条 medium（m001-m003 双表 JOIN，激活精筛多表分支）
+    for case in EVALSET[:7] + EVALSET[10:13]:
         register_query_vector(llm, case["query"], case["expected_tables"])
         result = retrieve(case["query"], store, embedder, llm=llm,
                           scope=EVAL_SCOPE)
@@ -313,5 +319,5 @@ def test_evalset_sql_skeleton(capsys):
         print(f"  {case['id']}: 期望{sorted(expected_tables)}"
               f" 生成{sorted(got_tables)} {'HIT' if hit else 'MISS'}")
     print(f"\n=== SQL 骨架表名命中率 {hits}/{checked} ===")
-    assert checked > 0, "前 10 条全部未召回，骨架比对无从进行"
+    assert checked > 0, "抽样 10 条全部未召回，骨架比对无从进行"
     assert hits >= 6, f"骨架命中 {hits}/{checked} <60%"
