@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 # 会话上下文:日志层读线程绑定的 conv_id 兜底(call_context 无任何依赖,无循环)
 from sdk.call_context import current_conversation_id, current_pack_name
 
+import httpx
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -624,6 +625,83 @@ class LLMClient:
                     "chars": sum(len(t) for t in texts),
                 },
                 response_data={"dim": len(vectors[0]) if vectors else None, "count": len(vectors)},
+                status_code=None if not error else 500,
+                duration_ms=int((time.monotonic() - start) * 1000),
+                error_message=error,
+                conv_id=conv_id,
+            )
+
+    # ── rerank(外部 API,Cohere/Jina 协议) ─────────────────────
+
+    _rerank_client: Optional["httpx.Client"] = None
+
+    def rerank(
+        self,
+        query: str,
+        texts: List[str],
+        conv_id: Optional[str] = None,
+        stage: Optional[str] = None,
+    ) -> List[int]:
+        """重排序:query 与 texts 的相关度排序(只接外部 API,不绑本地模型)。
+
+        协议参照 Cohere/Jina(/rerank 非 OpenAI 官方端点,不走 self.client):
+        POST {base_url}/rerank {model, query, documents, top_n}
+        → {"results": [{"index", "relevance_score"}, ...] 按分数降序}
+
+        配置(env,与 embeddings 的 LLM_EMBED_MODEL 同款按调用读取):
+            RERANK_BASE_URL / RERANK_MODEL / RERANK_API_KEY
+            RERANK_TIMEOUT(默认 3——排序增强不值得长等,超时即降级)
+        未配置抛 RuntimeError;失败抛原异常。降级决策归调用方
+        (rerank 是排序质量项不是数据正确性项,蓝图 P0#4)。
+
+        Returns:
+            按相关度降序的原文索引列表(如 [2,0,1] = texts[2] 最相关)。
+        """
+        base = os.getenv("RERANK_BASE_URL", "").strip().rstrip("/")
+        model = os.getenv("RERANK_MODEL", "").strip()
+        if not base or not model:
+            raise RuntimeError("RERANK_BASE_URL/RERANK_MODEL 未配置,重排不可用")
+        timeout = float(os.getenv("RERANK_TIMEOUT", "3"))
+        api_key = os.getenv("RERANK_API_KEY", "").strip()
+        texts = [str(t) for t in texts]
+        start = time.monotonic()
+        error: Optional[str] = None
+        indices: List[int] = []
+        try:
+            if self._rerank_client is None:
+                self._rerank_client = httpx.Client(timeout=timeout)
+            resp = self._rerank_client.post(
+                f"{base}/rerank",
+                json={"model": model, "query": query,
+                      "documents": texts, "top_n": len(texts)},
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+            )
+            # 手动状态码检查(等价 raise_for_status;非 2xx 时 resp.text 入错误消息)
+            if resp.status_code != 200:
+                raise RuntimeError(
+                    f"rerank HTTP {resp.status_code}: {str(resp.text)[:200]}")
+            results = (json.loads(resp.text) or {}).get("results") or []
+            indices = [int(r["index"]) for r in results]
+            if sorted(indices) != list(range(len(texts))):
+                raise ValueError(
+                    f"rerank results 与文档数不符: {len(indices)} 项,"
+                    f"索引集 {sorted(indices)} != 0..{len(texts) - 1}")
+            return indices
+        except Exception as e:
+            error = str(e)
+            raise
+        finally:
+            # 观测与 embeddings 同款:入 call_logs(不记文档全文,只记条数/分数)
+            scores = [float(r.get("relevance_score") or 0.0)
+                      for r in (locals().get("results") or [])]
+            self._log_call(
+                endpoint=f"rerank:{model}",
+                request_data={"stage": stage or "rerank",
+                              "query": query[:200], "count": len(texts)},
+                response_data={
+                    "order": indices[:20],
+                    "topScore": round(max(scores), 4) if scores else None,
+                },
                 status_code=None if not error else 500,
                 duration_ms=int((time.monotonic() - start) * 1000),
                 error_message=error,
