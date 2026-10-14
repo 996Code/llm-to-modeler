@@ -718,6 +718,34 @@ export async function kgSearch(query: string, kb?: string): Promise<KgSearchResu
   return data
 }
 
+/** P0#2 检索测试页:retrieve-test 逐词命中/截断水位/向量降级(管理端诊断数据)。 */
+export interface KgTermDetail { term: string; matched: string | null; type: string | null }
+export interface KgRetrieveDiagnostics {
+  termDetail: KgTermDetail[]
+  nodesTruncated: boolean | null
+  edgesTruncated: boolean | null
+  maxNodes: number | null
+  maxEdges: number | null
+  vectorDegraded: boolean
+}
+export interface KgRetrieveTestResult {
+  kb: { id: string; name: string }
+  intent: { entities: string[]; keywords: string[]; hop: number } | null
+  seeds: { id?: string; name: string; type?: string | null }[]
+  subgraph: { nodes: { id: string; name: string; type?: string | null }[]
+              edges: { source: string; target: string; type: string }[] }
+  chunks: { docId?: string; docName?: string; seq?: number
+            score?: number; text?: string }[]
+  diagnostics: KgRetrieveDiagnostics
+}
+export async function kgRetrieveTest(
+  kbId: string, query: string, topK?: number,
+): Promise<KgRetrieveTestResult> {
+  const { data } = await kgApi.post(`/kbs/${kbId}/retrieve-test`,
+                                    { query, top_k: topK })
+  return data
+}
+
 // ── 小工具 ────────────────────────────────────────────────
 
 /** ISO 时间戳 → 本地可读时间(列表展示用)。 */

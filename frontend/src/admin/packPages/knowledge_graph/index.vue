@@ -65,6 +65,11 @@
         <SchemaEditor v-if="currentKbId" :kb-id="currentKbId" :refresh-tick="refreshTick" @changed="loadKbs" />
         <a-empty v-else description="先在上方选择或新建一个知识库" style="padding: 60px 0" />
       </a-tab-pane>
+      <a-tab-pane key="retrieval-test">
+        <template #tab><ExperimentOutlined /> 检索测试</template>
+        <RetrievalTest v-if="currentKbId" :kb-id="currentKbId" />
+        <a-empty v-else description="先在上方选择或新建一个知识库" style="padding: 60px 0" />
+      </a-tab-pane>
     </a-tabs>
 
     <!-- 建库弹窗:选本体模板起步(自原库管理页并入) -->
@@ -97,11 +102,11 @@
 <script setup lang="ts">
 // 知识图谱管理页(manifest admin.page=knowledge_graph → AdminApp 动态 Tab 挂载)。
 // 结构:顶部"知识库工作条"(选择 + 统计 + 新建/删除,合并自原「知识库管理」子页)
-//       + 三个子页(文档导入/图谱浏览/本体设置)。
+//       + 四个子页(文档导入/图谱浏览/本体设置/检索测试)。
 import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  ApartmentOutlined, DeleteOutlined, FileTextOutlined,
+  ApartmentOutlined, DeleteOutlined, ExperimentOutlined, FileTextOutlined,
   NodeIndexOutlined, PartitionOutlined, PlusOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import {
@@ -111,6 +116,7 @@ import type { LoadSafely } from '../../components/loadSafely'
 import DocManager from './DocManager.vue'
 import SchemaEditor from './SchemaEditor.vue'
 import GraphView from './GraphView.vue'
+import RetrievalTest from './RetrievalTester.vue'
 
 const loadSafely = inject<LoadSafely>('loadSafely')!
 
