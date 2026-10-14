@@ -14,6 +14,7 @@ make_eval_fixture / SIX_TABLE_MODELS（接口见文件底部注释或 task-2-rep
 （跨任务对齐裁决），确保检索文本能命中 + Task 3 骨架断言列名可用。
 """
 import json
+import re
 from pathlib import Path
 
 from domains.chatbi.indexing import build_index, model_to_text
@@ -195,3 +196,122 @@ def test_fixture_all_tables_reachable():
                           scope=EVAL_SCOPE)
         hit = [x["name"] for x in result.models]
         assert m.name in hit, f"{m.name} 未被召回: {hit} ({result.no_match_reason})"
+
+
+# ── Task 3: recall@5 基线 + SQL 骨架比对（管线回归护栏）──────────
+
+def recall_at_k(expected: set, retrieved: list, k: int = 5) -> float:
+    """期望表集合在 retrieved 前 k 名中的命中率（|期望∩top-k|/|期望|）。"""
+    if not expected:
+        return 1.0
+    top = set(retrieved[:k])
+    return len(expected & top) / len(expected)
+
+
+def test_evalset_recall_baseline(capsys):
+    """EVALSET 20 条 recall@5 基线断言（阶段 1 纯向量召回，skip_llm_refine）。
+
+    基线定位=管线回归护栏（错即掉 0，防检索链路回归），非检索质量度量：
+    正交基假向量方案下非期望表 cos=0 被 0.35 阈值滤除，recall 恒优——
+    本数字只用于拦截 embed→索引→召回→阈值过滤链路的回归（任一环节
+    断裂即掉 0），不是检索质量（embed 模型/真实语义匹配）的度量。
+    """
+    store, embedder, llm = make_eval_fixture()
+    scores = []
+    misses = []
+    for case in EVALSET:
+        register_query_vector(llm, case["query"], case["expected_tables"])
+        result = retrieve(case["query"], store, embedder,
+                          skip_llm_refine=True, scope=EVAL_SCOPE)
+        got = [m["name"] for m in result.models]
+        r = recall_at_k(set(case["expected_tables"]), got, 5)
+        scores.append(r)
+        if r < 1.0:
+            misses.append((case["id"], case["expected_tables"], got[:5]))
+    mean = sum(scores) / len(scores)
+    print(f"\n=== ChatBI 检索基线 recall@5={mean:.3f} (n={len(scores)}) ===")
+    print("基线定位=管线回归护栏（错即掉 0，防检索链路回归），非检索质量度量")
+    for mid, exp, got in misses:
+        print(f"  MISS {mid}: 期望{exp} 实得{got}")
+    # 基线门槛：假 embedder 语义映射下 easy 全中，总体 ≥0.70
+    assert mean >= 0.70, f"基线 {mean:.3f} 低于 0.70：{misses}"
+
+
+# —— SQL 骨架比对（阶段 2 LLM 精筛替身 → 按召回表生成 SQL 骨架）——
+
+def table_names_from_skeleton(sql: str) -> set:
+    """FROM/JOIN 后的表名集合（大小写不敏感，忽略别名）。
+
+    注意只取紧跟 FROM/JOIN 的第一个标识符（如 `orders o` 取 orders），
+    遇 subquery 的 FROM 也按同规则提取（本评测集骨架无子查询）。
+    """
+    return set(t.lower() for t in re.findall(
+        r"(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.IGNORECASE))
+
+
+class SqlGeneratingFakeLLM(FakeLLM):
+    """LLM 精筛替身：按召回候选表名生成 plausible SQL（精筛+生成一体）。
+
+    对齐 retrieval._llm_refine 的真实契约（已读 parse_json_response 确认）：
+      - 精筛走 llm.chat()（非 chat_json）→ 返回文本被
+        parse_json_response 解析；
+      - 期望格式 {"models": [...], "reason": ...}（精筛 prompt 末行约定），
+        数组格式 retrieval 亦兼容（已防御）。
+
+    retrieve 管线内只有精筛这一次 LLM 调用；真实链路的 SQL 生成在
+    askData（精筛表名 → schema_context → LLM 生成 SQL），不在本管线。
+    本替身把"按召回表名生成 plausible SQL"折叠进精筛调用（brief 设计：
+    精筛替身+骨架记录），评测的是"召回表名 → 精筛选择 → SQL 骨架"
+    的链路连通性，非 LLM 生成质量。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_generated_sql = ""
+
+    def chat(self, messages, temperature=None, max_tokens=None,
+             conv_id=None, stage=None, model=None):
+        content = messages[0]["content"] if messages else ""
+        # 候选行格式 "N. name=xxx type=... score=... desc=..."（retrieval
+        # _llm_refine 拼装）→ 提取表名全选（正交基方案召回即期望）；
+        # 同表集生成骨架 SQL 记入 last_generated_sql（模拟下游 askData
+        # 的 SQL 生成——retrieve 管线内只有精筛这一次 chat 调用）
+        names = sorted(set(re.findall(r"name=(\S+)", content)))
+        if names:
+            sql = "SELECT * FROM " + names[0]
+            for t in names[1:]:
+                sql += f" JOIN {t} ON 1=1"
+            self.last_generated_sql = sql
+        return json.dumps({"models": names,
+                           "reason": "评测替身：召回候选全选并生成骨架"})
+
+
+def test_evalset_sql_skeleton(capsys):
+    """EVALSET 前 10 条全流程（召回→LLM 精筛替身）SQL 骨架表名集比对。
+
+    基线定位同 recall 基线：管线回归护栏，非检索/生成质量度量——
+    精筛与 SQL 生成为确定性替身，骨架表名命中率衡量"召回表名能
+    正确流经精筛选择→SQL 生成骨架"的链路连通性。
+    """
+    store, embedder, llm = make_eval_fixture()
+    llm.__class__ = SqlGeneratingFakeLLM  # make_eval_fixture 返回的替身升级
+    llm.last_generated_sql = ""
+    hits = 0
+    checked = 0
+    for case in EVALSET[:10]:  # 骨架比对先跑前 10 条（全量留 P1#5 扩容）
+        register_query_vector(llm, case["query"], case["expected_tables"])
+        result = retrieve(case["query"], store, embedder, llm=llm,
+                          scope=EVAL_SCOPE)
+        if not result.models:
+            continue
+        checked += 1
+        gen_sql = llm.last_generated_sql  # 替身记录的生成 SQL
+        expected_tables = table_names_from_skeleton(case["expected_sql_skeleton"])
+        got_tables = table_names_from_skeleton(gen_sql)
+        hit = bool(expected_tables & got_tables)
+        hits += hit
+        print(f"  {case['id']}: 期望{sorted(expected_tables)}"
+              f" 生成{sorted(got_tables)} {'HIT' if hit else 'MISS'}")
+    print(f"\n=== SQL 骨架表名命中率 {hits}/{checked} ===")
+    assert checked > 0, "前 10 条全部未召回，骨架比对无从进行"
+    assert hits >= 6, f"骨架命中 {hits}/{checked} <60%"
