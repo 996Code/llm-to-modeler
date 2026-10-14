@@ -296,6 +296,8 @@ class UpstreamClient:
 
     # 鉴权头脱敏：call_logs 经管理端 JsonViewer 明文可见，鉴权凭据
     # （X-Org-Token/Authorization/Cookie/token 类）不得落库（安全审查发现）
+    # "key" 会连带 X-Request-Key 类非凭据头一并脱敏——有意保守：脱敏面
+    # 宁可过大（调试信息少一个头），不可漏过任何可能的凭据载体
     _SENSITIVE_HEADER_MARKERS = ("token", "auth", "cookie", "secret", "key")
 
     @staticmethod

@@ -91,10 +91,13 @@ def _dedupe_config_ids(obj: Any) -> Any:
                 fid = i.get("formFieldConfigId")
                 if fid is None:
                     continue
-                if fid in seen:
+                # int/str 归一比较：同一 id 的 1 与 "1" 视为冲突（LLM 回吐
+                # 混类型时原逻辑双双保留，designer 仍错位）
+                key = str(fid)
+                if key in seen:
                     i.pop("formFieldConfigId", None)
                 else:
-                    seen.add(fid)
+                    seen.add(key)
         return items
     if isinstance(obj, dict):
         return {k: _dedupe_config_ids(v) for k, v in obj.items()}

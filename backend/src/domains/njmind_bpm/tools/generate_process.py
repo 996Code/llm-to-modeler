@@ -77,9 +77,11 @@ class GenerateProcessTool(CompositeTool):
         warnings = state.get("validation_warnings", [])
         if artifact:
             nodes = len((artifact.get("draft_topology") or {}).get("nodes", []))
+            perm_notes = state.get("_permission_notes") or []
             summary = (f"已生成流程「{artifact.get('processName', '')}」"
                        f"({nodes} 个节点),校验通过"
-                       + (f",附 {len(warnings)} 个提示" if warnings else ""))
+                       + (f",附 {len(warnings)} 个提示" if warnings else "")
+                       + (f";{';'.join(perm_notes[:3])}" if perm_notes else ""))
         else:
             errs = "; ".join(
                 e.get("message", str(e))[:60] for e in errors[:3]) if errors else "未知原因"
@@ -338,7 +340,8 @@ class GenerateProcessTool(CompositeTool):
             state.get("org_role_catalog") or [],
             state.get("org_dept_catalog") or [],
             answers,
-            service_locator.get_api())
+            service_locator.get_api(),
+            notes=state.setdefault("_permission_notes", []))
         if questions:
             # 防御快照：stash 深拷贝，与 raw_draft 解耦（render 重试路径上
             # merge_rule_details 会替换 raw_draft 引用，stash 不被牵连）
