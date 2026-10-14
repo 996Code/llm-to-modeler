@@ -102,7 +102,7 @@
     "id": "m002",
     "query": "每个部门下有多少名员工",
     "expected_tables": ["employee", "department"],
-    "expected_columns": ["department.name", "COUNT(*)"],
+    "expected_columns": ["name", "COUNT(*)"],
     "expected_sql_skeleton": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id GROUP BY d.name",
     "difficulty": "medium",
     "category": "join_aggregate"
@@ -111,7 +111,7 @@
     "id": "m003",
     "query": "2025 年 12 月各产品的销售数量汇总",
     "expected_tables": ["orders", "product"],
-    "expected_columns": ["product.name", "SUM(quantity)"],
+    "expected_columns": ["name", "SUM(quantity)"],
     "expected_sql_skeleton": "SELECT p.name, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id WHERE o.created_at >= '2025-12-01' AND o.created_at < '2026-01-01' GROUP BY p.name",
     "difficulty": "medium",
     "category": "join_aggregate"
@@ -120,7 +120,7 @@
     "id": "m004",
     "query": "销售额最高的前 5 个订单分别属于哪个客户",
     "expected_tables": ["orders", "customer"],
-    "expected_columns": ["customer.name", "orders.amount"],
+    "expected_columns": ["name", "amount"],
     "expected_sql_skeleton": "SELECT c.name, o.amount FROM orders o JOIN customer c ON o.customer_id = c.id ORDER BY o.amount DESC LIMIT 5",
     "difficulty": "medium",
     "category": "join_rank"
@@ -129,7 +129,7 @@
     "id": "m005",
     "query": "每个客户累计消费金额，按金额从高到低排列",
     "expected_tables": ["orders", "customer"],
-    "expected_columns": ["customer.name", "SUM(amount)"],
+    "expected_columns": ["name", "SUM(amount)"],
     "expected_sql_skeleton": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC",
     "difficulty": "medium",
     "category": "join_aggregate"
@@ -138,7 +138,7 @@
     "id": "m006",
     "query": "张伟名下的客户有哪些",
     "expected_tables": ["customer", "employee"],
-    "expected_columns": ["customer.name", "employee.name"],
+    "expected_columns": ["name", "name"],
     "expected_sql_skeleton": "SELECT c.name, e.name FROM customer c JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟'",
     "difficulty": "medium",
     "category": "join_filter"
@@ -156,16 +156,16 @@
     "id": "h001",
     "query": "上季度销售额前十的客户及其负责人姓名",
     "expected_tables": ["orders", "customer", "employee"],
-    "expected_columns": ["customer_name", "SUM(amount)", "owner_name"],
-    "expected_sql_skeleton": "SELECT c.name, SUM(o.amount), e.name FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 10",
+    "expected_columns": ["name", "SUM(amount)", "name"],
+    "expected_sql_skeleton": "SELECT c.name, SUM(o.amount), e.name FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE o.created_at >= '2026-07-01' AND o.created_at < '2026-10-01' GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 10",
     "difficulty": "hard",
     "category": "multi_join_metric"
   },
   {
     "id": "h002",
     "query": "销售部每个员工的成交订单总额和主要负责的客户数",
-    "expected_tables": ["orders", "employee", "department"],
-    "expected_columns": ["employee.name", "SUM(amount)", "COUNT(DISTINCT customer_id)"],
+    "expected_tables": ["orders", "customer", "employee", "department"],
+    "expected_columns": ["name", "SUM(amount)", "COUNT(DISTINCT customer_id)"],
     "expected_sql_skeleton": "SELECT e.name, SUM(o.amount), COUNT(DISTINCT c.id) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' GROUP BY e.name",
     "difficulty": "hard",
     "category": "multi_join_metric"
@@ -174,7 +174,7 @@
     "id": "h003",
     "query": "对比各产品类别在华东区的销售额贡献占比",
     "expected_tables": ["orders", "product", "customer"],
-    "expected_columns": ["product.category", "SUM(amount)"],
+    "expected_columns": ["category", "SUM(amount)"],
     "expected_sql_skeleton": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华东' GROUP BY p.category ORDER BY SUM(o.amount) DESC",
     "difficulty": "hard",
     "category": "multi_join_metric"
