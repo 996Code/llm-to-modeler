@@ -142,6 +142,11 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     # 图谱路:实体/关键词找种子 → BFS 子图(两步各记一条 call_log:
     # 种子匹配的命中数/精确率,子图的召回量与截断水位)
     terms = intent["entities"] or intent["keywords"]
+    # P0#2 检索测试页:召回明细/水位出返回体(此前只进 call_logs,管理端
+    # 测试页与日志共用同一数据源;用户级 /search 不透传该键,防枚举口径不变)
+    diagnostics: Dict[str, Any] = {"termDetail": [], "nodesTruncated": None,
+                                   "edgesTruncated": None, "maxNodes": None,
+                                   "maxEdges": None, "vectorDegraded": False}
     seeds: List[Dict[str, Any]] = []
     subgraph = {"nodes": [], "edges": []}
     if terms:
@@ -172,6 +177,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     "matched": _hit.get("name") if _hit else None,
                     "type": _hit.get("type") if _hit else None,
                 })
+            diagnostics["termDetail"] = list(_term_detail)
             _log_retrieval_call(
                 app_state, "graph", "neo4j:find_entities",
                 request_data={"stage": "kg.find_entities", "kbId": kb["id"],
@@ -200,6 +206,10 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             _nodes = subgraph.get("nodes") or []
             _edges = subgraph.get("edges") or []
             _name_of = {n.get("id"): n.get("name") for n in _nodes}
+            diagnostics.update(
+                nodesTruncated=len(_nodes) >= _max_nodes,
+                edgesTruncated=len(_edges) >= _max_edges,
+                maxNodes=_max_nodes, maxEdges=_max_edges)
             _log_retrieval_call(
                 app_state, "graph", "neo4j:subgraph_around",
                 request_data={"stage": "kg.subgraph", "kbId": kb["id"],
@@ -285,7 +295,9 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             # search 本身的失败内层 finally 已记,这里跳过防同一次失败落两条
             if _search_failed:
                 logger.warning(f"向量检索失败,降级纯图谱: {e}")
-                return {"intent": intent, "seeds": seeds, "subgraph": subgraph, "chunks": []}
+                diagnostics["vectorDegraded"] = True
+                return {"intent": intent, "seeds": seeds, "subgraph": subgraph,
+                        "chunks": [], "diagnostics": diagnostics}
             _log_retrieval_call(
                 app_state, "vector", "milvus:search",
                 request_data={"stage": "kg.vector_search", "kbId": kb["id"],
@@ -294,8 +306,10 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 duration_ms=int((time.monotonic() - _t0) * 1000),
                 error=str(e), conv_id=conv_id)
             logger.warning(f"向量检索失败,降级纯图谱: {e}")
+            diagnostics["vectorDegraded"] = True
 
-    return {"intent": intent, "seeds": seeds, "subgraph": subgraph, "chunks": chunks}
+    return {"intent": intent, "seeds": seeds, "subgraph": subgraph,
+            "chunks": chunks, "diagnostics": diagnostics}
 
 
 def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
