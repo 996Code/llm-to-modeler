@@ -64,10 +64,11 @@ class GenerateProcessTool(CompositeTool):
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         state.setdefault("retry_count", 0)
         state.setdefault("validation_errors", [])
-        # 权限追问恢复（resume=整工具重跑）：pending draft 存在 → 所有 LLM
-        # 步骤跳过（parse_intents/fetch_templates/generate 守卫），
-        # resolve_permissions 用 answers 直接回填，无第二次 LLM
-        if state.get("_permission_pending_draft") is not None:
+        # 权限追问恢复（resume=整工具重跑）：pending（有未答追问）或
+        # resolved（权限已解析过的冻结快照——嵌套追问如分支字段门 resume）
+        # 存在 → 所有 LLM 步骤跳过（parse_intents/fetch_templates/generate
+        # 守卫），防止名词漂移让已答指纹失效（真实事故：交替无限重问）
+        if self._permission_frozen(state):
             ctx.emit("stage", "resolve_permissions", "正在应用您的审批人选择...")
         self.run_pipeline(state, ctx)
 
@@ -177,9 +178,15 @@ class GenerateProcessTool(CompositeTool):
             ctx.emit("stage", "fetch_org_catalogs_done",
                      f"已加载 {len(roles)} 个角色、{len(depts)} 个部门")
 
+    @staticmethod
+    def _permission_frozen(state: dict) -> bool:
+        """权限态冻结（pending 或 resolved 任一存在）：LLM 步骤全跳过。"""
+        return (state.get("_permission_pending_draft") is not None
+                or state.get("_permission_resolved_draft") is not None)
+
     def _step_parse_intents(self, state: dict, ctx: ToolContext) -> None:
-        if state.get("_permission_pending_draft") is not None:
-            return  # 权限追问恢复：跳过 LLM，pending draft 已含解析结果
+        if self._permission_frozen(state):
+            return  # 权限追问恢复：跳过 LLM，pending/resolved draft 已含解析结果
         ctx.emit("stage", "parse_intents", "AI 正在解析流程需求...")
         user_input = state.get("user_input", "")
         clarify = state.get("clarify_answers") or {}
@@ -209,7 +216,7 @@ class GenerateProcessTool(CompositeTool):
                  f"已解析流程意图:{parsed.get('processSummary', '')}({n_nodes} 个节点)")
 
     def _step_fetch_templates(self, state: dict, ctx: ToolContext) -> None:
-        if state.get("_permission_pending_draft") is not None:
+        if self._permission_frozen(state):
             return  # 权限追问恢复：generate 已跳过，模板不再需要
         ctx.emit("stage", "fetch_templates", "正在匹配流程模板...")
         api = service_locator.get_api()
@@ -235,8 +242,14 @@ class GenerateProcessTool(CompositeTool):
                  f"已加载 {len(templates)} 个流程模板")
 
     def _step_generate(self, state: dict, ctx: ToolContext) -> None:
-        if state.get("_permission_pending_draft") is not None:
-            return  # 权限追问恢复：复用 pending draft，不重跑 LLM
+        if self._permission_frozen(state):
+            # pending：raw_draft 已是待解析半成品；resolved（嵌套追问恢复）：
+            # 恢复冻结快照——名词与已答指纹稳定对齐
+            resolved = state.get("_permission_resolved_draft")
+            if (state.get("_permission_pending_draft") is None
+                    and isinstance(resolved, dict)):
+                state["raw_draft"] = copy.deepcopy(resolved)
+            return  # 权限态冻结：不重跑 LLM
         is_retry = bool(state.get("validation_errors"))
         if is_retry:
             ctx.emit("stage", "generate_retry",
@@ -306,6 +319,10 @@ class GenerateProcessTool(CompositeTool):
         （引擎 interrupt → 用户点选 → resume 整工具重跑：LLM 步骤守卫跳过，
         本步用 answers 反查回填，无第二次 LLM 调用）。
         全部落定 → 清 pending 标记（resume 语义：解析完成后删除）。
+        答案来源 = bank（历轮已消费的 __bpm_* 累积）+ 本轮 clarify_answers
+        ——嵌套追问（分支字段门）resume 只带新答案，bank 防旧答案丢失。
+        resolved 快照仅在解析**实际改写**过 draft 时刷新（终审发现：无权限
+        名词的流程也落快照会让 render 重试的 LLM 修复路径不可达）。
         幂等：已解析值（对象/ASCII id/code）原样透传——render 入口重跑
         无副作用（重试环路不变量：generate 重生成的中文必须再解析一次）。
         """
@@ -313,11 +330,14 @@ class GenerateProcessTool(CompositeTool):
         if not isinstance(draft, dict):
             state.pop("_permission_pending_draft", None)
             return
+        bank = state.get("_permission_answer_bank") or {}
+        answers = {**bank, **(state.get("clarify_answers") or {})}
+        before = copy.deepcopy(draft)
         questions = pc.resolve_bpm_permissions(
             draft,
             state.get("org_role_catalog") or [],
             state.get("org_dept_catalog") or [],
-            state.get("clarify_answers") or {},
+            answers,
             service_locator.get_api())
         if questions:
             # 防御快照：stash 深拷贝，与 raw_draft 解耦（render 重试路径上
@@ -325,10 +345,11 @@ class GenerateProcessTool(CompositeTool):
             state["_permission_pending_draft"] = copy.deepcopy(draft)
             raise ClarificationRaised(questions)
         state.pop("_permission_pending_draft", None)
-        # 解析成功快照：render 校验失败重试时冻结恢复——重跑 LLM 只会让
-        # 名词漂移（真实事故：「部门经理」重生成变「部门经理角色」，已答
-        # 追问指纹失效 → 无限重问），重试只需 render+机械修复，draft 冻结
-        state["_permission_resolved_draft"] = copy.deepcopy(draft)
+        if draft != before:
+            # 解析成功快照：render 校验失败重试时冻结恢复——重跑 LLM 只会让
+            # 名词漂移（真实事故：「部门经理」重生成变「部门经理角色」，已答
+            # 追问指纹失效 → 无限重问），重试只需 render+机械修复，draft 冻结
+            state["_permission_resolved_draft"] = copy.deepcopy(draft)
         bank = state.setdefault("_permission_answer_bank", {})
         for k, v in (state.get("clarify_answers") or {}).items():
             if k.startswith("__bpm_"):

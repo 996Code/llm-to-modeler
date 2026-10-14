@@ -3,6 +3,7 @@
 被 generate_process 使用;所有函数纯操作 dict,
 不触网络(网络在工具步骤里经 service_locator.get_api())。
 """
+import copy
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -296,6 +297,23 @@ def merge_approve_rule_details(generated: List[Dict[str, Any]],
         base = host_by.get(k) or {}
         item = dict(base)
         item.update({kk: vv for kk, vv in r.items() if vv is not None})
+        # settings 整体替换时，宿主角色元素已配的角色筛选条件（spec 裁定
+        # "照旧继承"）回填到新数组同 roleId 且本轮未显式配置的元素上
+        new_settings = r.get("approveOptRangeSettings")
+        if isinstance(new_settings, dict) and "approveOptRangeSettings" in r:
+            host_settings = (base.get("approveOptRangeSettings") or {})
+            host_roles = host_settings.get("checkedRoleIds")
+            new_roles = (item["approveOptRangeSettings"] or {}).get("checkedRoleIds")
+            if isinstance(host_roles, list) and isinstance(new_roles, list):
+                host_cond = {str(x.get("roleId")): x.get("condition")
+                             for x in host_roles
+                             if isinstance(x, dict) and x.get("roleId")}
+                for x in new_roles:
+                    if (isinstance(x, dict) and x.get("roleId")
+                            and str(x["roleId"]) in host_cond
+                            and not x.get("condition")):
+                        x["condition"] = copy.deepcopy(
+                            host_cond[str(x["roleId"])])
         merged.append(item)
     for k, r in host_by.items():
         if k not in seen:

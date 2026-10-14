@@ -634,3 +634,21 @@ def test_user_answer_with_uniquifier_suffix_resolves_to_nth_candidate():
     diff = [{"id": "u1", "label": "张三｜研发部"},
             {"id": "u2", "label": "张三｜财务部"}]
     assert _user_answer_id("张三｜财务部", diff, None) == "u2"
+
+
+
+class TestConditionInheritanceOnSettingsReplace:
+    def test_host_role_condition_backfilled_into_replaced_settings(self):
+        """契约-Important：settings 整体替换时，宿主角色元素已配的
+        condition（角色筛选条件，spec 裁定"照旧继承"）必须回填到新数组
+        同 roleId 且本轮未显式配置的元素上。"""
+        from domains.njmind_bpm.tools._pipeline_common import merge_approve_rule_details
+        host_cond = [{"leftExpression": "dept", "boolCond": "eq"}]
+        host = [{"nodeKey": "n1", "approveOptRangeSettings": {"checkedRoleIds": [
+            {"roleId": "101", "depAndSupDep": 0, "condition": host_cond}]}}]
+        gen = [{"nodeKey": "n1", "approveOptRangeSettings": {"checkedRoleIds": [
+            {"roleId": "101", "depAndSupDep": 0, "condition": None}]}}]
+        merged = merge_approve_rule_details(gen, host)
+        new_roles = merged[0]["approveOptRangeSettings"]["checkedRoleIds"]
+        assert new_roles[0]["condition"] == host_cond, \
+            "宿主已配的角色筛选条件被整体替换丢失"

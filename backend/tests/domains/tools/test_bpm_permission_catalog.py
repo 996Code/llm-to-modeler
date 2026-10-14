@@ -580,3 +580,33 @@ class TestRenderRetryPreservesResolvedPermissions:
                 {"roleId": "101", "depAndSupDep": 0, "condition": None}]
             for r in (raw_after.get("approveRules") or []))
         assert kept, "恢复后 draft 应保留已解析的真实 roleId"
+
+
+class TestFinalReviewFixes:
+    def test_bank_replay_survives_nested_clarify_round(self):
+        """状态机-高：权限问完→分支字段门中断→resume 只带字段答案时，
+        bank 里已消费的 __bpm_* 答案必须参与解析（不丢、不重问）。"""
+        from domains.njmind_bpm.tools.generate_process import GenerateProcessTool
+        tool = GenerateProcessTool()
+        draft = {"approveRules": [{"nodeKey": "m", "approveOptRangeSettings": {
+            "checkedRoleIds": ["独角兽骑士"]}}],
+            "branchRules": [], "topology": {"nodes": [], "edges": []}}
+        roles = [{"id": "101", "code": "BM", "name": "部门总管实际名"}, {"id": "102", "code": "XG", "name": "相关方"}]
+        # 第一轮：零命中 → 必问
+        qs = pc.resolve_bpm_permissions(draft, roles, [], {}, None)
+        assert len(qs) == 1
+        # 模拟引擎侧 bank 已累积该答案（resolve 成功路径写入）
+        bank = {"__bpm_role:m:checkedRoleIds:<fp>": "部门总管实际名（BM）"}
+        # 第二轮：分支门 resume（answers 只有字段答案，无 __bpm_*）
+        merged = {**bank, "some_field": "文本输入框"}
+        qs2 = pc.resolve_bpm_permissions(draft, roles, [], merged, None)
+        # bank 的指纹 <fp> 与 draft 名词指纹一致才能消费——真实指纹由
+        # pc 内部生成，此处用 pc 的指纹函数对齐
+        from domains.njmind_bpm.tools._permission_catalog import _semantic_token
+        fp = _semantic_token("独角兽骑士")
+        bank = {f"__bpm_role:m:checkedRoleIds:{fp}": "部门总管实际名（BM）"}
+        merged = {**bank, "some_field": "文本输入框"}  # 模拟分支门 resume 只带新答案
+        qs3 = pc.resolve_bpm_permissions(draft, roles, [], merged, None)
+        assert qs3 == [], f"bank 答案应被消费，仍重问: {qs3[:1]}"
+        assert draft["approveRules"][0]["approveOptRangeSettings"][
+            "checkedRoleIds"] == [{"roleId": "101", "depAndSupDep": 0, "condition": None}]

@@ -107,3 +107,39 @@ class TestDataOpsViaTransport:
             "leave-system", "/api/leave/status", auth=True,
             params={"q": 1}, extra_headers=None)
         assert result["status"] == "approved"
+
+
+class TestAuthHeaderRedaction:
+    def test_sensitive_headers_not_persisted_to_call_logs(self):
+        """安全-中：X-Org-Token/Authorization 等鉴权头不得明文进 call_logs
+        （管理端 JsonViewer 可见——终审发现）。"""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from services.upstream_client import UpstreamClient
+
+        store = MagicMock()
+        client = UpstreamClient(conversation_store=store)
+
+        class _Resp:
+            status_code = 200
+            def json(self):
+                return {}
+            headers = {}
+            text = ""
+
+        captured = {}
+        def fake_save(*a, **kw):
+            captured.update(a[3] if len(a) > 3 else kw.get("request_data") or {})
+        store.save_call_log.side_effect = fake_save
+
+        with patch.object(client, "resolve_base", return_value="http://x"), \
+             patch.object(client._client, "get", return_value=_Resp()):
+            client.get("svc", "/api/mcp/org/users",
+                       auth=False,
+                       extra_headers={"X-Org-Token": "sec-token",
+                                      "Authorization": "Bearer jwt",
+                                      "X-Trace": "keep-me"})
+        hdrs = captured.get("headers") or {}
+        assert hdrs.get("X-Org-Token") == "[REDACTED]", hdrs
+        assert hdrs.get("Authorization") == "[REDACTED]"
+        assert hdrs.get("X-Trace") == "keep-me"
