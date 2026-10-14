@@ -25,11 +25,17 @@ def _make_client():
 class TestRerank:
 
     def test_unconfigured_raises(self, monkeypatch):
-        """未配置 RERANK_BASE_URL/MODEL → RuntimeError(调用方降级的触发条件)。"""
+        """未配置 RERANK_BASE_URL/MODEL → RuntimeError(调用方降级的触发条件);
+        降级也落 call_logs(终审:开关开但平台未配置时,管理端须能看到
+        '为何每次都降级'而不是只有服务端 warning)。"""
         for k in ("RERANK_BASE_URL", "RERANK_MODEL"):
             monkeypatch.delenv(k, raising=False)
+        client = _make_client()
         with pytest.raises(RuntimeError, match="RERANK"):
-            _make_client().rerank("q", ["a", "b"])
+            client.rerank("q", ["a", "b"])
+        log = client._conversation_store.calls[-1]
+        assert "未配置" in log["error_message"]
+        assert log["status_code"] == 500
 
     def test_returns_desc_indices(self, monkeypatch):
         """Cohere/Jina 协议:POST {model,query,documents,top_n}

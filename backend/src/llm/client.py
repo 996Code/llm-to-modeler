@@ -664,8 +664,6 @@ class LLMClient:
         """
         base = os.getenv("RERANK_BASE_URL", "").strip().rstrip("/")
         model = os.getenv("RERANK_MODEL", "").strip()
-        if not base or not model:
-            raise RuntimeError("RERANK_BASE_URL/RERANK_MODEL 未配置,重排不可用")
         timeout = float(os.getenv("RERANK_TIMEOUT", "3"))
         api_key = os.getenv("RERANK_API_KEY", "").strip()
         texts = [str(t) for t in texts]
@@ -673,7 +671,12 @@ class LLMClient:
         error: Optional[str] = None
         indices: List[int] = []
         results: List[Dict[str, Any]] = []   # try 前初始化:finally 观测读它
+        # env 检查在 try 内抛:降级路径(开关开但平台未配置)也落 call_logs
+        # 留痕,管理端能看到"为何每次都降级"而不是只有服务端 warning
         try:
+            if not base or not model:
+                raise RuntimeError(
+                    "RERANK_BASE_URL/RERANK_MODEL 未配置,重排不可用")
             if self._rerank_client is None:
                 self._rerank_client = httpx.Client(timeout=timeout)
             resp = self._rerank_client.post(
