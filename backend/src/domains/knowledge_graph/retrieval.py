@@ -378,6 +378,19 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
     if retrieved is None:
         retrieved = hybrid_retrieve(app_state, kb, query, conv_id=conv_id,
                                     top_k=top_k, on_stage=_stage)
+    # P0#4 rerank:linearize 前对 chunks 重排(排序对象=资料段非子图)。
+    # 开关在 KG settings(默认关);失败降级原序不阻断(排序质量项,
+    # 与向量路降级同语义)。重排发生在 sources.chunks 构造前——
+    # 排序后顺序即编号权威源,[片段:N] 自动对齐。
+    if retrieved.get("chunks") and _cfg(app_state, "rerank_enabled", False):
+        _stage("kb_search.rerank", f"重排 {len(retrieved['chunks'])} 个片段…")
+        try:
+            order = app_state.llm_client.rerank(
+                query, [(c.get("text") or "")[:600] for c in retrieved["chunks"]],
+                conv_id=conv_id, stage="kg.rerank")
+            retrieved["chunks"] = [retrieved["chunks"][i] for i in order]
+        except Exception as e:
+            logger.warning(f"rerank 失败,降级原召回序: {e}")
     _stage("kb_search.assemble", "整理三元组与文档片段…")
     ctx = linearize_context(retrieved)
 
