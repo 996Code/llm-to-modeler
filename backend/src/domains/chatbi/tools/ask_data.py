@@ -232,7 +232,8 @@ class AskDataTool(CompositeTool):
                 data_source_id=ds.id, llm=llm, db=db,
                 top_k=int(settings.get("retrieve_top_k", 20)),
                 score_threshold=float(settings.get("rag_score_threshold", 0.35)),
-                conv_id=ctx.conv_id)
+                conv_id=ctx.conv_id,
+                rerank_enabled=bool(settings.get("rerank_enabled", False)))
             # 源 agent.py:250-254: 只取 type=model 的记录作表名;
             # 纯指标召回(如问"GMV"只命中 metric 记录)时指标名不得混入表名
             all_hits = [m for m in getattr(rc["retrieval"], "models", [])

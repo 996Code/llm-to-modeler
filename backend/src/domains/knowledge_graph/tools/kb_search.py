@@ -87,6 +87,9 @@ class KbSearchTool(Tool):
                 {"key": "kb_search.graph", "label": "图谱实体匹配"},
                 {"key": "kb_search.subgraph", "label": "扩展关联子图"},
                 {"key": "kb_search.vector", "label": "向量检索文档"},
+                # rerank 开关开启时才有该阶段事件;不开时进度条按前缀
+                # 匹配直接跳到 assemble,无副作用
+                {"key": "kb_search.rerank", "label": "重排检索片段"},
                 {"key": "kb_search.assemble", "label": "整理检索依据"},
                 {"key": "kb_search.answer", "label": "综合回答"},
             ],

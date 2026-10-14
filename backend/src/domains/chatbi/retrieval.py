@@ -140,6 +140,7 @@ def retrieve(
     top_k: int = DEFAULT_TOP_K,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     conv_id: Optional[str] = None,
+    rerank_enabled: bool = False,
 ) -> RetrievalResult:
     """两阶段检索: 向量召回 → LLM 精筛。
 
@@ -156,6 +157,7 @@ def retrieve(
         top_k: 向量召回数量 (默认 20)
         score_threshold: 召回分数阈值 (默认 0.35)
         conv_id: 会话 id (LLM 调用日志关联)
+        rerank_enabled: rerank 精排开关(调用方传,移植契约:配置读取在 ask_data)
 
     Returns:
         RetrievalResult — 无召回/无真匹配 → models=[] + no_match_reason
@@ -245,7 +247,21 @@ def retrieve(
             logger.warning("retrieve: %d 条截断键命中因身份真源缺失被丢弃"
                            "(宁缺毋滥)", dropped_by_identity)
         candidates = [h for hits in candidates_by_scope.values() for h in hits]
-    candidates.sort(key=lambda r: r.score, reverse=True)
+    # P0#4 rerank 精排:候选表按 query 相关度重排(排序对象=候选非图结构)。
+    # 失败/超时降级向量分序(排序质量项,不阻断检索);默认关。
+    # rerank 成功时跳过下方 sort——sort 会覆盖 rerank 序。
+    reranked = False
+    if rerank_enabled and llm is not None and candidates:
+        try:
+            order = llm.rerank(
+                question, [h.record.text for h in candidates],
+                conv_id=conv_id, stage="chatbi.rerank")
+            candidates = [candidates[i] for i in order]
+            reranked = True
+        except Exception as e:
+            logger.warning("retrieve rerank 失败,降级向量分序: %s", e)
+    if not reranked:
+        candidates.sort(key=lambda r: r.score, reverse=True)
     candidates = candidates[:top_k]
 
     if not candidates:
@@ -537,6 +553,7 @@ def retrieve_context(
     top_k: int = DEFAULT_TOP_K,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     conv_id: Optional[str] = None,
+    rerank_enabled: bool = False,
 ) -> Dict[str, Any]:
     """两阶段召回 + schema_context 构建的一站式入口。
 
@@ -552,6 +569,7 @@ def retrieve_context(
         question, store, embedder,
         data_source_id=data_source_id, llm=llm, db=db, scope=scope,
         top_k=top_k, score_threshold=score_threshold, conv_id=conv_id,
+        rerank_enabled=rerank_enabled,
     )
     names = [m["name"] for m in result.models]
     return {
