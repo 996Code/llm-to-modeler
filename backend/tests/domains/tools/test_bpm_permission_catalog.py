@@ -497,21 +497,13 @@ class TestUpstreamOrgEndpoints:
         assert t.calls[0]["path"] == "/api/mcp/org/catalog"
         assert t.calls[0]["params"] == {"type": "role"}
 
-    def test_search_users_sends_org_token_header(self, monkeypatch):
-        monkeypatch.setenv("ORG_MCP_TOKEN", "secret-token")
+    def test_search_users_calls_declared_path_anonymously(self):
         t = FakeTransport([{"id": "u1", "label": "张三｜财务部"}])
         rows = self._api(t).search_users("张三")
         assert rows[0]["id"] == "u1"
         assert t.calls[0]["path"] == "/api/mcp/org/users"
         assert t.calls[0]["params"] == {"keyword": "张三"}
-        assert t.calls[0]["headers"]["X-Org-Token"] == "secret-token"
-
-    def test_search_users_without_token_sends_nothing(self, monkeypatch):
-        monkeypatch.delenv("ORG_MCP_TOKEN", raising=False)
-        t = FakeTransport([{"id": "u1", "label": "张三｜财务部"}])
-        rows = self._api(t).search_users("张三")
-        assert rows is None                       # 降级：不发请求
-        assert t.calls == []
+        assert not t.calls[0].get("headers")  # 匿名调用，无额外鉴权头
 
     def test_get_org_catalog_failure_returns_empty(self):
         class Boom:

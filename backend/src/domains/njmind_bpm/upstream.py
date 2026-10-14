@@ -97,22 +97,15 @@ class BpmModelerAPI:
         return data
 
     def search_users(self, keyword: str) -> Optional[List[Dict[str, Any]]]:
-        """受控人员搜索：keyword → [{"id","label":"姓名｜部门"}]。
+        """人员搜索：keyword → [{"id","label":"姓名｜部门"}]。
 
-        端点带 X-Org-Token 校验（modeler 侧 fail-closed 403）；token 从
-        env ORG_MCP_TOKEN 读，未配置 → 不发请求直接返回 None（降级：
-        调用方按零结果追问或跳过，绝不匿名硬撞 403）。请求失败同样返回
-        None（None=搜索不可用；[] = 搜索可用但零命中，语义不同）。
+        与 org 端点族其余成员一致的匿名服务间调用。请求失败返回 None
+        （None=搜索不可用；[] = 搜索可用但零命中，语义不同）。
         """
-        import os
-        token = os.getenv("ORG_MCP_TOKEN", "")
-        if not token:
-            return None
         try:
             data = self._t.get(
                 SERVICE_NAME, self._path("org_users"),
-                auth=False, params={"keyword": keyword},
-                extra_headers={"X-Org-Token": token})
+                auth=False, params={"keyword": keyword})
         except Exception as e:
             logger.warning(f"search_users({keyword}) failed: {e}")
             return None

@@ -16,14 +16,14 @@ njmind_bpm pack 的身份解析层：把 LLM draft 中的审批人/角色「中�
       approveRules[].approveOptRangeSettings.checkedRoleIds 中文名词
         → [{roleId: 真实id, depAndSupDep: 0, condition: None}]
       checkedDepIds → 真实部门 id 数组
-      checkedUserIds → api.search_users(名词)（X-Org-Token 端点）
+      checkedUserIds → api.search_users(名词)（匿名 MCP 端点）
       branchRules[].roleRules[].values 中文名词 → 角色 code 数组
 
 【降级语义（目录卫生）】
   - 角色目录空 → checkedRoleIds/roleRules.values 的非 ASCII 名词剥除
     （ASCII/对象视为存量透传保留），不追问、不清已有
   - 部门目录空 → checkedDepIds 同构剥除
-  - 人员搜索不可用（未配 ORG_MCP_TOKEN / 网络失败）→ checkedUserIds
+  - 人员搜索不可用（网络失败）→ checkedUserIds
     非 ASCII 名词剥除；搜索可用但零命中 ≠ 降级，照常追问
   - 幂等：已解析值（对象/ASCII id/code）原样透传，render 入口重跑
     无副作用（重试环路不变量）
