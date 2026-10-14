@@ -30,6 +30,11 @@ groups:
         default: 30
         min: 5
         max: 300
+      - key: rerank_enabled
+        type: bool
+        label: 启用 rerank 精排
+        default: false
+        help: 需平台配置 RERANK_BASE_URL/RERANK_MODEL;失败自动降级向量分序不阻断
       - key: sql_max_rows
         type: int
         label: 结果最大行数
