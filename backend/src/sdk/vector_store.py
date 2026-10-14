@@ -226,8 +226,7 @@ class MilvusVectorStore:
 
 # ── 进程级单例(设置热改时重建) ────────────────────────────────
 
-_cached_store: Optional[MilvusVectorStore] = None
-_cached_fp: tuple = ()
+_cached_stores: Dict[tuple, MilvusVectorStore] = {}
 _cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络 IO)
 _build_lock = threading.Lock()     # 串行化连接构建
 
@@ -236,48 +235,44 @@ def get_vector_store(settings: Dict[str, Any],
                      collection_prefix: str = "") -> MilvusVectorStore:
     """按解析后的配置取/建向量存储单例(指纹 = 连接三元组 + 前缀)。
 
+    多 pack 各自的前缀并存(chatbi 与 knowledge_graph 同时活跃):单槽
+    缓存会让两 pack 互踢——后到者 close 掉前者的连接,前者下一次调用
+    报 ConnectionNotExist(曾经只在检索日志里看到"should create
+    connection first"的根因)。按指纹各存一份,连接数 = 活跃前缀数(≤2)。
+
     锁纪律/失败纪律同 graph_store.get_graph_store:命中路径轻锁,构建
     在锁外,构建失败清缓存不留坏连接。
     """
-    global _cached_store, _cached_fp
     fp = (settings.get("milvus_uri"), settings.get("milvus_user"),
           settings.get("milvus_password"), collection_prefix)
     with _cache_lock:
-        if _cached_store is not None and _cached_fp == fp:
-            return _cached_store
+        hit = _cached_stores.get(fp)
+        if hit is not None:
+            return hit
 
     with _build_lock:
         with _cache_lock:
-            if _cached_store is not None and _cached_fp == fp:
-                return _cached_store
+            hit = _cached_stores.get(fp)
+            if hit is not None:
+                return hit
         try:
             store = MilvusVectorStore(uri=fp[0], user=fp[1] or "", password=fp[2] or "",
                                       collection_prefix=collection_prefix)
         except Exception:
             with _cache_lock:
-                if _cached_store is not None:
-                    try:
-                        _cached_store.close()
-                    except Exception:
-                        pass
-                _cached_store, _cached_fp = None, ()
+                _cached_stores.pop(fp, None)
             raise
-        old = None
         with _cache_lock:
-            old = _cached_store
-            _cached_store, _cached_fp = store, fp
-        if old is not None and old is not store:
-            try:
-                old.close()
-            except Exception:
-                pass
+            _cached_stores[fp] = store
         return store
 
 
 def reset_vector_store_cache() -> None:
     """测试辅助:清单例。"""
-    global _cached_store, _cached_fp
     with _cache_lock:
-        if _cached_store is not None:
-            _cached_store.close()
-        _cached_store, _cached_fp = None, ()
+        for s in _cached_stores.values():
+            try:
+                s.close()
+            except Exception:
+                pass
+        _cached_stores.clear()
