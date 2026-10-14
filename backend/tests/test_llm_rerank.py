@@ -1,6 +1,5 @@
 """P0#4 平台 rerank 接口测试 —— Cohere/Jina 协议、env 配置、观测、降级语义。"""
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -147,3 +146,41 @@ class TestRerank:
                             lambda self, url, **kw: BadResp())
         with pytest.raises(ValueError):
             client.rerank("q", ["a", "b"])
+
+    def test_non_200_raises_with_error_logged(self, monkeypatch):
+        """非 200 → RuntimeError(带状态码与响应片段)且 error 入 call_logs
+        ——蓝图验收"断掉端点后日志有 degraded 记录"的观测前提。"""
+        monkeypatch.setenv("RERANK_BASE_URL", "http://x/v1")
+        monkeypatch.setenv("RERANK_MODEL", "m")
+        client = _make_client()
+
+        class ErrResp:
+            status_code = 503
+            text = "service unavailable"
+
+        monkeypatch.setattr("httpx.Client.post",
+                            lambda self, url, **kw: ErrResp())
+        with pytest.raises(RuntimeError, match="503"):
+            client.rerank("q", ["a"], stage="kg.rerank")
+        log = client._conversation_store.calls[-1]
+        assert log["status_code"] == 500
+        assert "503" in log["error_message"]
+
+    def test_close_closes_rerank_client(self, monkeypatch):
+        """close() 收口 rerank httpx client——与 OpenAI client 同款生命周期
+        (审查 major:不关则 socket 等 GC)。"""
+        monkeypatch.setenv("RERANK_BASE_URL", "http://x/v1")
+        monkeypatch.setenv("RERANK_MODEL", "m")
+        client = _make_client()
+
+        class OkResp:
+            status_code = 200
+            text = json.dumps({"results": [{"index": 0, "relevance_score": 0.5}]})
+
+        closed = []
+        monkeypatch.setattr("httpx.Client.post", lambda self, url, **kw: OkResp())
+        monkeypatch.setattr("httpx.Client.close",
+                            lambda self: closed.append(1))
+        client.rerank("q", ["a"])
+        client.close()
+        assert closed, "close() 必须关闭 _rerank_client"

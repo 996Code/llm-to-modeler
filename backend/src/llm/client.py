@@ -160,7 +160,7 @@ class LLMClient:
         )
 
     def close(self):
-        """关闭底层 OpenAI SDK 客户端（释放其内嵌的 httpx 连接池与 socket）。
+        """关闭底层客户端（OpenAI SDK + rerank httpx，释放连接池与 socket）。
 
         由应用生命周期调用（main.lifespan 关闭段），与 upstream.close() /
         checkpointer 连接关闭同一收口思路——SDK 客户端不显式关闭时，
@@ -168,12 +168,17 @@ class LLMClient:
         不阻断其余组件的清理（@PreDestroy 链式调用不应互相影响）。
         """
         client = getattr(self, "client", None)
-        if client is None:
-            return
-        try:
-            client.close()
-        except Exception as e:
-            logger.warning(f"Failed to close LLM client: {e}")
+        if client is not None:
+            try:
+                client.close()
+            except Exception as e:
+                logger.warning(f"Failed to close LLM client: {e}")
+        rerank_client = getattr(self, "_rerank_client", None)
+        if rerank_client is not None:
+            try:
+                rerank_client.close()
+            except Exception as e:
+                logger.warning(f"Failed to close rerank client: {e}")
 
     def _log_call(
         self,
@@ -667,6 +672,7 @@ class LLMClient:
         start = time.monotonic()
         error: Optional[str] = None
         indices: List[int] = []
+        results: List[Dict[str, Any]] = []   # try 前初始化:finally 观测读它
         try:
             if self._rerank_client is None:
                 self._rerank_client = httpx.Client(timeout=timeout)
@@ -693,7 +699,7 @@ class LLMClient:
         finally:
             # 观测与 embeddings 同款:入 call_logs(不记文档全文,只记条数/分数)
             scores = [float(r.get("relevance_score") or 0.0)
-                      for r in (locals().get("results") or [])]
+                      for r in results if isinstance(r, dict)]
             self._log_call(
                 endpoint=f"rerank:{model}",
                 request_data={"stage": stage or "rerank",
