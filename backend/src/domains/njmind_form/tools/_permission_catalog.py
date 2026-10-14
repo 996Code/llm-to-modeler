@@ -41,7 +41,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from sdk.catalog import (resolve_names, lookup_selected, entries_from_rows,
-                         clean_text, semantic_token, IGNORE_LABEL)
+                         clean_text, semantic_token, IGNORE_LABEL,
+                         PendingPick)
 from sdk.tool import ClarificationRaised
 from domains.njmind_form.keys import FIELDS, FIELD_KEY, FIELD_TITLE
 
@@ -84,7 +85,6 @@ TASK_UNBOUND_MSG = "请先绑定流程后再配置审批节点权限"
 ROLE_CATALOG_TTL = 300
 # prompt 参考区注入上限（注入卫生约束）
 MAX_PROMPT_ROWS = 200
-_NAME_MAX = 32
 # 追问卡候选上限（前端自动附"其他"自由输入，超限仍可手输名称/code）
 _MAX_OPTIONS = 50
 
@@ -143,8 +143,6 @@ def fetch_role_catalog(ctx) -> List[Dict[str, Any]]:
 
 
 # ── prompt 参考区（注入卫生）──────────────────────────────────────
-
-_DIRTY_CHARS_RE = re.compile(r"[\r\n|]")
 
 
 
@@ -215,22 +213,16 @@ def _lookup_by_label(answer: str, candidates):
     return lookup_selected(answer, candidates)
 
 
-def semantic_token(semantic: str) -> str:
-    """语义串 → 8 位十六进制短哈希（追问 header 末段）。
+def _repick_with_user_input(pick, user_input: str):
+    """自由输入未命中候选 → 用输入换入 pending 语义（防追问死循环）。
 
-    终审 Important-1 修复：header 从「位置标识」（pending 列表序号）升级为
-    「名词身份标识」——同一名词跨轮 token 恒定，不同名词 token 几乎必异。
-    位置标识的缺陷：部分作答/忽略/答案不识别会让 still_pending 压缩、目录
-    漂移（TTL 300s/上游增删）会让原本 pending 的名词直选、validate 重试会
-    重生成制品——pending 列表一位移，同一序号就指向不同名词，旧答案被
-    静默写到别的名词上（零命中候选=全目录，任何合法 label 都反查得中）。
-    身份标识下，错位/残留答案的 header 与当前名词的 header 必不撞键 →
-    视为未作答重新追问，绝不静默写错 code。
-    sha1 跨进程稳定（不受 PYTHONHASHSEED 影响）；清洗沿用 _clean_text 的
-    截断规则，语义等价的名词（仅空白差异）归一到同一 token。
+    原样回锅原语义会让每轮重发同 header 追问卡，用户除"忽略"外无法
+    脱身（候选为空时反查必 None）。换入用户输入后下一轮 resolve_names
+    按全规则匹配（①-④）——手输的真实名词可经包含匹配直选；编造词
+    仍 pending，但 header 已变、卡面带最新语义，用户看得见要忽略什么。
+    绝不把输入直接当 code 落库（无中文落库不变量不破）。
     """
-    return hashlib.sha1(
-        clean_text(semantic).encode("utf-8")).hexdigest()[:8]
+    return PendingPick(semantic=user_input, candidates=pick.candidates)
 
 
 def _question(field_title: str, anchor: str, prop: str,
@@ -361,7 +353,9 @@ def resolve_form_role_permissions(
                         resolved.append(entry.code)
                     name_matched = True
                 else:
-                    still_pending.append(pick)   # 回答无法识别 → 再问一次
+                    # 自由输入未命中 → 换入用户输入下轮全规则重解析
+                    # （原样回锅原语义 = 同 header 卡死循环）
+                    still_pending.append(_repick_with_user_input(pick, ans))
 
             if resolved or still_pending:
                 # 已定 code 在前、待定名词殿后（resume 再解析保持稳定）
@@ -574,7 +568,8 @@ def resolve_form_task_permissions(
                         resolved.append(entry.code)
                     name_matched = True
                 else:
-                    still_pending.append(pick)
+                    # 自由输入未命中 → 换入用户输入下轮全规则重解析
+                    still_pending.append(_repick_with_user_input(pick, ans))
 
             if resolved or still_pending:
                 f[task_key] = resolved + [p.semantic for p in still_pending]
@@ -672,6 +667,9 @@ def run_permission_resolution(state: dict, ctx, *, mode: str) -> None:
         state["_role_catalog_unavailable"] = True
         strip_unresolvable_role_keys(artifact)
     else:
+        # 目录恢复可用：清上一轮的降级标志（只置不清会让 summary
+        # 在 resume 轮谎报"组织目录不可用"）
+        state.pop("_role_catalog_unavailable", None)
         questions = resolve_form_role_permissions(
             artifact, rows, answers,
             source_artifact=source, mode=mode, notes=notes) + questions

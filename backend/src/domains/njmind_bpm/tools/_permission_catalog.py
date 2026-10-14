@@ -28,7 +28,6 @@ njmind_bpm pack 的身份解析层：把 LLM draft 中的审批人/角色「中�
   - 幂等：已解析值（对象/ASCII id/code）原样透传，render 入口重跑
     无副作用（重试环路不变量）
 """
-import hashlib
 import json
 import logging
 import re
@@ -52,21 +51,6 @@ VALUES = "values"
 # 绝不连坐丢弃
 # 追问卡候选上限（前端自动附"其他"自由输入，超限仍可手输名称）
 _MAX_OPTIONS = 50
-_NAME_MAX = 32
-
-_DIRTY_CHARS_RE = re.compile(r"[\r\n|]")
-
-
-
-def semantic_token(semantic: str) -> str:
-    """语义串 → 8 位十六进制短哈希（追问 header 末段）。
-
-    与 Plan 1 njmind_form 同源：header 用「名词身份」而非位置序号——
-    pending 列表位移（部分作答/目录漂移/制品重生成）时错位答案的 key
-    必不撞键 → 重新追问，绝不静默写到别的名词。sha1 跨进程稳定。
-    """
-    return hashlib.sha1(
-        clean_text(semantic).encode("utf-8")).hexdigest()[:8]
 
 
 def _question(question: str, header: str, options: List[Dict[str, str]]) -> str:
@@ -151,7 +135,6 @@ def _user_answer_id(answer: str, results, api) -> Optional[str]:
     for r in results or []:
         if str(r.get("label") or "") == answer:
             return r.get("id")
-    import re
     m = re.search(r"（(\d+)）$", answer)
     if m and results:
         base = answer[:m.start()]
@@ -180,7 +163,10 @@ def resolve_bpm_permissions(
     departments: List[Dict[str, Any]],
     answers: Dict[str, Any],
     api,
+    notes: Optional[List[str]] = None,
 ) -> List[str]:
+    # notes: 可写列表（调用方传 state 持久通道），降级剥除时写入用户
+    # 可见提示——权限被剥只留服务端日志对用户不诚实（form 侧同款模式）
     """就地解析 draft 中的审批人/角色分支名词；返回追问卡列表（空=全部落定）。
 
     Args:
@@ -216,12 +202,12 @@ def resolve_bpm_permissions(
 
         settings[CHECKED_ROLE_IDS] = _resolve_roles(
             settings.get(CHECKED_ROLE_IDS), anchor, CHECKED_ROLE_IDS,
-            role_entries, role_id_by_code, answers, questions)
+            role_entries, role_id_by_code, answers, questions, notes)
         settings[CHECKED_DEP_IDS] = _resolve_deps(
             settings.get(CHECKED_DEP_IDS), anchor,
-            dept_entries, answers, questions)
+            dept_entries, answers, questions, notes)
         settings[CHECKED_USER_IDS] = _resolve_users(
-            settings.get(CHECKED_USER_IDS), anchor, answers, search, questions)
+            settings.get(CHECKED_USER_IDS), anchor, answers, search, questions, notes)
         for key in (CHECKED_ROLE_IDS, CHECKED_DEP_IDS, CHECKED_USER_IDS):
             if settings.get(key) == []:
                 settings.pop(key, None)
@@ -239,7 +225,7 @@ def resolve_bpm_permissions(
             if not isinstance(rr, dict):
                 continue
             rr[VALUES] = _resolve_role_values(
-                rr.get(VALUES), anchor, role_entries, answers, questions)
+                rr.get(VALUES), anchor, role_entries, answers, questions, notes)
             if not rr.get(VALUES):
                 rr.pop(VALUES, None)
         # values 剥空的 roleRule 条目整体剔除（无 values 的角色条件无意义）
@@ -254,7 +240,8 @@ def resolve_bpm_permissions(
 
 def _resolve_roles(raw, anchor: str, prop: str, role_entries,
                    role_id_by_code: Dict[str, str],
-                   answers, questions: List[str]) -> List:
+                   answers, questions: List[str],
+                   notes: Optional[List[str]] = None) -> List:
     """角色名词 → 对象数组（roleId=目录真实 id）。幂等：对象透传。
 
     目录空（降级）：非 ASCII 名词剥除，不追问。
@@ -279,6 +266,8 @@ def _resolve_roles(raw, anchor: str, prop: str, role_entries,
                 logger.warning(
                     f"resolve_permissions: 角色目录不可用，"
                     f"{anchor}.{prop} 中文名词「{v}」已剥除")
+                if notes is not None:
+                    notes.append(f"{anchor}.{prop} 的「{v}」：角色目录不可用，已按未配置处理")
             else:
                 out.append(v)
             continue
@@ -323,7 +312,8 @@ def _resolve_roles(raw, anchor: str, prop: str, role_entries,
 # ── checkedDepIds：中文名词 → 真实部门 id 数组 ──────────────────
 
 def _resolve_deps(raw, anchor: str, dept_entries,
-                  answers, questions: List[str]) -> List:
+                  answers, questions: List[str],
+                  notes: Optional[List[str]] = None) -> List:
     """部门名词 → id 数组（code=str(id) 命中后原样回写）。幂等：ASCII id
     透传。目录空（降级）剥中文。"""
     if raw is None:
@@ -345,6 +335,8 @@ def _resolve_deps(raw, anchor: str, dept_entries,
                 logger.warning(
                     f"resolve_permissions: 部门目录不可用，"
                     f"{anchor}.{CHECKED_DEP_IDS} 中文名词「{v}」已剥除")
+                if notes is not None:
+                    notes.append(f"{anchor} 的部门「{v}」：部门目录不可用，已按未配置处理")
             else:
                 out.append(v)
             continue
@@ -386,7 +378,8 @@ def _resolve_deps(raw, anchor: str, dept_entries,
 
 # ── checkedUserIds：姓名 → api.search_users 直选/追问 ───────────
 
-def _resolve_users(raw, anchor: str, answers, search, questions: List[str]) -> List:
+def _resolve_users(raw, anchor: str, answers, search, questions: List[str],
+                  notes: Optional[List[str]] = None) -> List:
     """人员名词 → id 数组（经受控搜索）。
 
     - 单结果直选；零结果 → 追问"更准确的姓名或工号"；
@@ -412,6 +405,8 @@ def _resolve_users(raw, anchor: str, answers, search, questions: List[str]) -> L
             logger.warning(
                 f"resolve_permissions: 人员搜索不可用，"
                 f"{anchor}.{CHECKED_USER_IDS} 中文名词「{v}」已剥除")
+            if notes is not None:
+                notes.append(f"{anchor} 的审批人「{v}」：人员搜索不可用，已按未配置处理")
             continue
         try:
             results = search(v.strip())
@@ -422,6 +417,8 @@ def _resolve_users(raw, anchor: str, answers, search, questions: List[str]) -> L
             logger.warning(
                 f"resolve_permissions: 人员搜索不可用，"
                 f"{anchor}.{CHECKED_USER_IDS} 中文名词「{v}」已剥除")
+            if notes is not None:
+                notes.append(f"{anchor} 的审批人「{v}」：人员搜索不可用，已按未配置处理")
             continue
         if not isinstance(results, list):
             results = []
@@ -471,7 +468,8 @@ def _api_of(search):
 # ── roleRules.values：中文名词 → 角色 code 数组 ─────────────────
 
 def _resolve_role_values(raw, anchor: str, role_entries,
-                         answers, questions: List[str]) -> List:
+                         answers, questions: List[str],
+                         notes: Optional[List[str]] = None) -> List:
     """角色分支 values 名词 → 角色 code 数组。幂等：ASCII code 透传。
 
     目录空（降级）：非 ASCII 名词剥除，不追问。
@@ -493,6 +491,8 @@ def _resolve_role_values(raw, anchor: str, role_entries,
                 logger.warning(
                     f"resolve_permissions: 角色目录不可用，"
                     f"{anchor}.roleRules 中文名词「{v}」已剥除")
+                if notes is not None:
+                    notes.append(f"{anchor}.roleRules 的「{v}」：角色目录不可用，已按未配置处理")
             else:
                 out.append(v)
             continue

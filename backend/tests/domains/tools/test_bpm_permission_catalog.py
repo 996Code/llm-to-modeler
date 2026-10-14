@@ -602,3 +602,41 @@ class TestFinalReviewFixes:
         assert qs3 == [], f"bank 答案应被消费，仍重问: {qs3[:1]}"
         assert draft["approveRules"][0]["approveOptRangeSettings"][
             "checkedRoleIds"] == [{"roleId": "101", "depAndSupDep": 0, "condition": None}]
+
+
+# ── 审查修复回归（2026-10-14 内容级审查第 4 项）─────────────────
+
+class TestAuditNotesVisibility:
+    def test_目录降级剥除_写入用户可见notes(self):
+        """修复4：权限名词被剥只留服务端日志对用户不诚实——notes 通道
+        必须收到可写进 summary 的提示。"""
+        draft = {
+            "approveRules": [
+                {"nodeKey": "n1", "approveOptRangeSettings": {
+                    "checkedRoleIds": ["审批人甲", "r1"]}},
+            ],
+            "branchRules": [],
+        }
+        notes: list = []
+        questions = pc.resolve_bpm_permissions(
+            draft, roles=[], departments=[], answers={},
+            api=None, notes=notes)
+        assert questions == []            # 目录空=降级不追问
+        assert notes, "剥除必须写 notes"
+        assert any("审批人甲" in n for n in notes)
+        # ASCII 存量 code 不剥（幂等透传），也不该进 notes
+        assert draft["approveRules"][0]["approveOptRangeSettings"]["checkedRoleIds"] == ["r1"]
+
+    def test_目录可用时不误报notes(self):
+        draft = {
+            "approveRules": [
+                {"nodeKey": "n1", "approveOptRangeSettings": {
+                    "checkedRoleIds": ["r1"]}},
+            ],
+            "branchRules": [],
+        }
+        notes: list = []
+        pc.resolve_bpm_permissions(
+            draft, roles=[{"id": 1, "code": "r1", "name": "财务"}],
+            departments=[], answers={}, api=None, notes=notes)
+        assert notes == []

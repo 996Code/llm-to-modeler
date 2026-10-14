@@ -571,3 +571,56 @@ class TestModifyPipelineResolve:
         assert f["isRequiredField"] == 0
         assert f["canEditFieldRoles"] == ["FIN"]   # 三来源之角色保留
         assert f["isEditField"] == 0               # 开关未被翻动
+
+
+# ── 审查修复回归（2026-10-14 内容级审查 1-5 项）─────────────────
+
+class TestAuditFixes:
+    def test_semantic_token_统一到_sdk_无遮蔽(self):
+        """修复1：两 pack 的 semantic_token 必须是 sdk.catalog 同一对象。"""
+        from sdk.catalog import semantic_token as sdk_st
+        import domains.njmind_bpm.tools._permission_catalog as bpm_pc
+        assert pc.semantic_token is sdk_st
+        assert bpm_pc.semantic_token is sdk_st
+
+    def test_自由输入未命中_换入用户输入防死循环(self):
+        """修复2：候选为空时自由输入原样回锅会每轮重发同 header 卡——
+        换入用户输入后 semantic 变化，下轮 resolve_names 可全规则重解析。"""
+        from sdk.catalog import PendingPick
+        pick = PendingPick(semantic="审批人甲", candidates=())
+        ans = "张三丰"
+        new_pick = pc._repick_with_user_input(pick, ans)
+        assert new_pick.semantic == "张三丰"
+        assert new_pick.semantic != pick.semantic   # header 必变，不再撞键
+
+    def test_role_catalog_stale_标志_恢复时清除(self):
+        """修复3：目录恢复可用后 _role_catalog_unavailable 必须被清——
+        只置不清会让 resume 轮 summary 谎报"组织目录不可用"。"""
+        state = {
+            "artifact": {"formFieldConfigVos": [
+                {"fieldTitleKey": "jine", "fieldTitleText": "金额",
+                 "formFieldType": 0,
+                 "canEditFieldRoles": ["财务"]}]},
+            "clarify_answers": {},
+            "role_catalog": [],          # 第一轮：目录不可用
+            "_role_catalog_unavailable": True,   # 假设上轮已置
+        }
+        pc.run_permission_resolution(state, None, mode="create")
+        assert state.get("_role_catalog_unavailable") is True  # 仍不可用
+
+        state["role_catalog"] = [{"code": "role_fin", "name": "财务"}]
+        pc.run_permission_resolution(state, None, mode="create")
+        assert "_role_catalog_unavailable" not in state   # 恢复即清除
+
+    def test_id去重_int_str混类型判等(self):
+        """修复5：同一 id 的 int 与 str 形态视为冲突，后者剥除。"""
+        from domains.njmind_form.tools._postprocess import _dedupe_config_ids
+        fields = [
+            {"fieldTitleKey": "a", "formFieldConfigId": 1},
+            {"fieldTitleKey": "b", "formFieldConfigId": "1"},
+            {"fieldTitleKey": "c", "formFieldConfigId": 2},
+        ]
+        out = _dedupe_config_ids(fields)
+        assert out[0].get("formFieldConfigId") == 1     # 首个保留
+        assert "formFieldConfigId" not in out[1]        # "1" 判为冲突剥除
+        assert out[2].get("formFieldConfigId") == 2
