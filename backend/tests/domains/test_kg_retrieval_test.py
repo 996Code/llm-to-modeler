@@ -82,6 +82,9 @@ def rt_client(env, monkeypatch):
     app.include_router(router, prefix="/api/packs/knowledge_graph")
     app.state.llm_client = env.llm
     app.state.settings_store = None
+    # 观测 sink 一并挂上:检索调用日志(_log_retrieval_call)读
+    # app_state.conversation_store,缺了会静默早退(top_k 锚定用例依赖它)
+    app.state.conversation_store = env.app_state.conversation_store
     # 端点按 kb_id 查 store;fake 图谱的库固定 "kb1"——store 也走 fake 对齐
     fake_store = SimpleNamespace(
         get_kb=lambda kid: dict(KB1) if kid == "kb1" else None,
@@ -133,3 +136,13 @@ class TestRetrieveTestEndpoint:
                          json={"query": "甲在哪?"},
                          headers={"X-Admin-Token": "t"})
         assert ok.status_code == 200
+
+    def test_endpoint_passes_top_k(self, rt_client):
+        """top_k 端到端透传:前端 top 5/10/20 选择器断裂会静默失效——
+        以向量检索日志的 topK 锚定(默认 5,传 1 须命中 1)。"""
+        client, env = rt_client
+        r = client.post("/api/packs/knowledge_graph/kbs/kb1/retrieve-test",
+                        json={"query": "甲在哪?", "top_k": 1})
+        assert r.status_code == 200
+        vec_logs = [c for c in env.obs_calls if c["call_type"] == "vector"]
+        assert vec_logs and vec_logs[0]["request_data"]["topK"] == 1
