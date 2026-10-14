@@ -76,3 +76,46 @@ class BpmModelerAPI:
     def get_form(self, form_code: str) -> Optional[Dict[str, Any]]:
         return self._t.get(SERVICE_NAME, self._path("get_form", code=form_code),
                            auth=False)
+
+    # ── 组织目录与人员搜索（审批人名词解析，Plan2 T3）────────
+
+    def get_org_catalog(self, catalog_type: str) -> List[Dict[str, Any]]:
+        """组织目录（type=role/dept → [{"id","code","name"}] / [{"id","name",...}]）。
+
+        匿名端点（/api/mcp/** 服务间匿名语义）。失败（网络/假200/服务未下发）
+        Fail-Closed 返回 []，绝不抛——目录不可用属于可降级场景（本轮跳过
+        权限解析继续管线），不是错误。
+        """
+        try:
+            data = self._t.get(SERVICE_NAME, self._path("org_catalog"),
+                               auth=False, params={"type": catalog_type})
+        except Exception as e:  # 含 resolve_base 的 ServiceUnresolvableError
+            logger.warning(f"get_org_catalog({catalog_type}) failed: {e}")
+            return []
+        if not isinstance(data, list):
+            return []
+        return data
+
+    def search_users(self, keyword: str) -> Optional[List[Dict[str, Any]]]:
+        """受控人员搜索：keyword → [{"id","label":"姓名｜部门"}]。
+
+        端点带 X-Org-Token 校验（modeler 侧 fail-closed 403）；token 从
+        env ORG_MCP_TOKEN 读，未配置 → 不发请求直接返回 None（降级：
+        调用方按零结果追问或跳过，绝不匿名硬撞 403）。请求失败同样返回
+        None（None=搜索不可用；[] = 搜索可用但零命中，语义不同）。
+        """
+        import os
+        token = os.getenv("ORG_MCP_TOKEN", "")
+        if not token:
+            return None
+        try:
+            data = self._t.get(
+                SERVICE_NAME, self._path("org_users"),
+                auth=False, params={"keyword": keyword},
+                extra_headers={"X-Org-Token": token})
+        except Exception as e:
+            logger.warning(f"search_users({keyword}) failed: {e}")
+            return None
+        if not isinstance(data, list):
+            return []
+        return data

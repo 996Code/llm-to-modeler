@@ -1,11 +1,15 @@
-"""GenerateProcessTool - 从零生成流程草稿(6 步管线)。
+"""GenerateProcessTool - 从零生成流程草稿(9 步管线)。
 
-fetch_guide → fetch_form_catalog → parse_intents → fetch_templates
-→ generate → render(含机械修复循环)
+fetch_guide → fetch_existing → fetch_form_catalog → fetch_org_catalogs
+→ parse_intents → fetch_templates → generate → resolve_permissions
+→ render(含机械修复循环)
 
 承接义务:F1(processKey/processName 宿主注入,LLM 自造值剥离)、
-机械修复 ≤4 轮、重生成 ≤MAX_RETRIES、仅校验通过才产 artifact。
+机械修复 ≤4 轮、重生成 ≤MAX_RETRIES、仅校验通过才产 artifact、
+审批人/角色分支中文名词在 render 前解析成真实 id/code(追问挂起
+resume 零 LLM)。
 """
+import copy
 import json
 import logging
 from typing import Any, Dict, Optional
@@ -19,6 +23,7 @@ from domains.njmind_bpm.tools._pipeline_common import (
     collect_unknown_branch_fields, apply_branch_field_answers,
     merge_rule_details,
 )
+from domains.njmind_bpm.tools import _permission_catalog as pc
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +37,18 @@ class GenerateProcessTool(CompositeTool):
     description = "根据自然语言需求生成完整审批流程(拓扑+规则);画布已有流程时按新描述整体重造并回显覆盖"
     when = "任何流程生成/修改/重做需求:'做个请假审批流'、'改成...'、'重新生成...'"
 
-    steps = ["fetch_guide", "fetch_existing", "fetch_form_catalog", "parse_intents",
-             "fetch_templates", "generate", "render"]
+    steps = ["fetch_guide", "fetch_existing", "fetch_form_catalog",
+             "fetch_org_catalogs", "parse_intents", "fetch_templates",
+             "generate", "resolve_permissions", "render"]
     pipeline_steps = [
         {"key": "fetch_guide", "label": "获取流程指南"},
         {"key": "fetch_existing", "label": "读取当前流程"},
         {"key": "fetch_form_catalog", "label": "加载表单字段"},
+        {"key": "fetch_org_catalogs", "label": "加载组织目录"},
         {"key": "parse_intents", "label": "解析流程意图"},
         {"key": "fetch_templates", "label": "匹配流程模板"},
         {"key": "generate", "label": "生成流程草稿"},
+        {"key": "resolve_permissions", "label": "解析审批人"},
         {"key": "render", "label": "渲染与校验"},
     ]
 
@@ -56,6 +64,11 @@ class GenerateProcessTool(CompositeTool):
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         state.setdefault("retry_count", 0)
         state.setdefault("validation_errors", [])
+        # 权限追问恢复（resume=整工具重跑）：pending draft 存在 → 所有 LLM
+        # 步骤跳过（parse_intents/fetch_templates/generate 守卫），
+        # resolve_permissions 用 answers 直接回填，无第二次 LLM
+        if state.get("_permission_pending_draft") is not None:
+            ctx.emit("stage", "resolve_permissions", "正在应用您的审批人选择...")
         self.run_pipeline(state, ctx)
 
         artifact = state.get("artifact")
@@ -147,13 +160,35 @@ class GenerateProcessTool(CompositeTool):
                          f"绑定表单 {form_key} 不存在,分支条件功能受限")
         state["form_catalog"] = catalog
 
+    def _step_fetch_org_catalogs(self, state: dict, ctx: ToolContext) -> None:
+        """取组织角色/部门目录（审批人名词解析的值域）。失败/空 → []，绝不抛。
+
+        resume 也照常执行（非 LLM 步骤）——目录是 resolve_permissions 的
+        前置依赖。目录不可用（modeler 未升级/网络失败）不在此追问：
+        resolve 步统一降级（剥中文名词、不追问、继续管线）。
+        """
+        ctx.emit("stage", "fetch_org_catalogs", "正在获取组织角色与部门目录...")
+        api = service_locator.get_api()
+        roles = pc._clean_role_rows(api.get_org_catalog("role"))
+        depts = pc._clean_dept_rows(api.get_org_catalog("dept"))
+        state["org_role_catalog"] = roles
+        state["org_dept_catalog"] = depts
+        if roles or depts:
+            ctx.emit("stage", "fetch_org_catalogs_done",
+                     f"已加载 {len(roles)} 个角色、{len(depts)} 个部门")
+
     def _step_parse_intents(self, state: dict, ctx: ToolContext) -> None:
+        if state.get("_permission_pending_draft") is not None:
+            return  # 权限追问恢复：跳过 LLM，pending draft 已含解析结果
         ctx.emit("stage", "parse_intents", "AI 正在解析流程需求...")
         user_input = state.get("user_input", "")
         clarify = state.get("clarify_answers") or {}
         if clarify:
+            # `__` 前缀键是结构化追问回答（权限点选），拼进自然语言只会
+            # 污染 prompt——跳过（对齐 njmind_form 先例）
             extra = clarify.get("text") or "；".join(
-                f"{k}: {v}" for k, v in clarify.items() if k != "text")
+                f"{k}: {v}" for k, v in clarify.items()
+                if k != "text" and not k.startswith("__"))
             if extra:
                 user_input = f"{user_input}\n（用户补充回答：{extra}）"
 
@@ -174,6 +209,8 @@ class GenerateProcessTool(CompositeTool):
                  f"已解析流程意图:{parsed.get('processSummary', '')}({n_nodes} 个节点)")
 
     def _step_fetch_templates(self, state: dict, ctx: ToolContext) -> None:
+        if state.get("_permission_pending_draft") is not None:
+            return  # 权限追问恢复：generate 已跳过，模板不再需要
         ctx.emit("stage", "fetch_templates", "正在匹配流程模板...")
         api = service_locator.get_api()
         state["process_template"] = api.get_template("bpm_process_generic")
@@ -198,6 +235,8 @@ class GenerateProcessTool(CompositeTool):
                  f"已加载 {len(templates)} 个流程模板")
 
     def _step_generate(self, state: dict, ctx: ToolContext) -> None:
+        if state.get("_permission_pending_draft") is not None:
+            return  # 权限追问恢复：复用 pending draft，不重跑 LLM
         is_retry = bool(state.get("validation_errors"))
         if is_retry:
             ctx.emit("stage", "generate_retry",
@@ -260,10 +299,46 @@ class GenerateProcessTool(CompositeTool):
         state["raw_draft"] = draft
         state["validation_errors"] = []
 
+    def _resolve_permissions(self, state: dict, ctx: ToolContext) -> None:
+        """审批人/角色分支名词 → 真实 id/code（就地改写 raw_draft）。
+
+        有 pending → 存 `_permission_pending_draft` + 抛 ClarificationRaised
+        （引擎 interrupt → 用户点选 → resume 整工具重跑：LLM 步骤守卫跳过，
+        本步用 answers 反查回填，无第二次 LLM 调用）。
+        全部落定 → 清 pending 标记（resume 语义：解析完成后删除）。
+        幂等：已解析值（对象/ASCII id/code）原样透传——render 入口重跑
+        无副作用（重试环路不变量：generate 重生成的中文必须再解析一次）。
+        """
+        draft = state.get("raw_draft")
+        if not isinstance(draft, dict):
+            state.pop("_permission_pending_draft", None)
+            return
+        questions = pc.resolve_bpm_permissions(
+            draft,
+            state.get("org_role_catalog") or [],
+            state.get("org_dept_catalog") or [],
+            state.get("clarify_answers") or {},
+            service_locator.get_api())
+        if questions:
+            # 防御快照：stash 深拷贝，与 raw_draft 解耦（render 重试路径上
+            # merge_rule_details 会替换 raw_draft 引用，stash 不被牵连）
+            state["_permission_pending_draft"] = copy.deepcopy(draft)
+            raise ClarificationRaised(questions)
+        state.pop("_permission_pending_draft", None)
+
+    def _step_resolve_permissions(self, state: dict, ctx: ToolContext) -> None:
+        ctx.emit("stage", "resolve_permissions", "正在解析审批人与角色分支...")
+        self._resolve_permissions(state, ctx)
+        ctx.emit("stage", "resolve_permissions_done", "审批人与角色分支已解析")
+
     def _step_render(self, state: dict, ctx: ToolContext) -> None:
         ctx.emit("stage", "render", "正在渲染 BPMN 并校验...")
         api = service_locator.get_api()
         host = host_context_from(state)
+        # 重试环路不变量：render 入口幂等 resolve——机械修复/重生成路径上
+        # 新产出的中文必须再解析一次，"render 输入无中文身份语义"在所有
+        # 进入 render 的路径上成立（已解析值透传，幂等无副作用）
+        self._resolve_permissions(state, ctx)
         # I2 规则明细合并:整体重造时,新 draft 未覆盖的用户已配明细
         # (审批人勾选/按钮设置等)从宿主规则继承,不因重造丢失
         raw = state.get("raw_draft")
