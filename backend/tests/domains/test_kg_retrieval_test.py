@@ -1,6 +1,8 @@
 """P0#2 检索测试页 —— hybrid_retrieve diagnostics 增量 + 管理端 retrieve-test 端点。"""
 from types import SimpleNamespace
 
+import pytest
+
 from domains.knowledge_graph import retrieval, runtime
 
 # 复用 m4 的检索 fake 环境(MockLLM/RetrievalFakeGraph/RetrievalFakeVector/obs_calls)
@@ -42,3 +44,92 @@ class TestHybridRetrieveDiagnostics:
         out = retrieval.hybrid_retrieve(env.app_state, KB1, "甲在哪个部门?")
         assert out["chunks"] == []
         assert out["diagnostics"]["vectorDegraded"] is True
+
+    def test_diagnostics_vector_degraded_on_embeddings_failure(
+            self, env, monkeypatch):
+        """embeddings 失败发生在 vector.search 之前 → 走外层降级路径
+        (degraded 日志那条,非内层 _search_failed 早退):图谱路照常,
+        继续到函数末尾 return,chunks 空 + vectorDegraded=True。"""
+        def boom(texts, conv_id=None, stage=None):
+            raise RuntimeError("embedding down")
+        monkeypatch.setattr(env.llm, "embeddings", boom)
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "甲在哪个部门?")
+        assert out["chunks"] == []
+        assert out["diagnostics"]["vectorDegraded"] is True
+        # 外层降级不拖垮图谱路:种子/子图照常返回
+        assert out["seeds"] and out["seeds"][0]["name"] == "甲"
+        assert out["subgraph"]["nodes"]
+        # 外层路径落且仅落 1 条 degraded 向量日志(与内层 search 失败的
+        # 早退路径区分:那条的日志无 degraded 标记)
+        vec_logs = [c for c in env.obs_calls if c["call_type"] == "vector"]
+        assert len(vec_logs) == 1
+        assert vec_logs[0]["request_data"].get("degraded") is True
+
+
+# ── 管理端 retrieve-test 端点 ─────────────────────────────────
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture()
+def rt_client(env, monkeypatch):
+    # 开放模式确定性:本 fixture 下走鉴权真实链(conftest 已注册
+    # require_admin),ADMIN_TOKEN 未配置=放行;门控行为留给专属用例设 env
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+    from domains.knowledge_graph.api import router
+    app = FastAPI()
+    app.include_router(router, prefix="/api/packs/knowledge_graph")
+    app.state.llm_client = env.llm
+    app.state.settings_store = None
+    # 端点按 kb_id 查 store;fake 图谱的库固定 "kb1"——store 也走 fake 对齐
+    fake_store = SimpleNamespace(
+        get_kb=lambda kid: dict(KB1) if kid == "kb1" else None,
+        list_kbs=lambda: [dict(KB1)],
+        list_documents=lambda kb_id: [],
+    )
+    monkeypatch.setattr(runtime, "get_kg_store", lambda state: fake_store)
+    return TestClient(app), env
+
+
+class TestRetrieveTestEndpoint:
+
+    def test_endpoint_returns_both_paths(self, rt_client):
+        client, env = rt_client
+        r = client.post("/api/packs/knowledge_graph/kbs/kb1/retrieve-test",
+                        json={"query": "甲在哪个部门?"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["kb"]["name"] == "一号库"
+        assert body["intent"]["entities"] == ["甲"]
+        assert body["diagnostics"]["termDetail"][0]["matched"] == "甲"
+        assert body["chunks"] and body["chunks"][0]["score"] == 0.88
+
+    def test_endpoint_retrieve_only_skips_answer_llm(self, rt_client):
+        """retrieve-only 硬约束:不触发 kg.answer——省钱省时不烧回答 token。"""
+        client, env = rt_client
+        client.post("/api/packs/knowledge_graph/kbs/kb1/retrieve-test",
+                    json={"query": "甲在哪?"})
+        assert env.llm.chat_calls == []  # chat() 仅 kg.answer 用到;意图走 chat_json
+
+    def test_endpoint_requires_query(self, rt_client):
+        client, _ = rt_client
+        assert client.post("/api/packs/knowledge_graph/kbs/kb1/retrieve-test",
+                           json={"query": " "}).status_code == 422
+
+    def test_endpoint_404_unknown_kb(self, rt_client):
+        client, _ = rt_client
+        assert client.post("/api/packs/knowledge_graph/kbs/nope/retrieve-test",
+                           json={"query": "x"}).status_code == 404
+
+    def test_endpoint_admin_gated(self, rt_client, monkeypatch):
+        """ADMIN_TOKEN 配置时无口令 401——诊断面(seeds/水位)不裸奔到用户级。"""
+        client, _ = rt_client
+        monkeypatch.setenv("ADMIN_TOKEN", "t")
+        r = client.post("/api/packs/knowledge_graph/kbs/kb1/retrieve-test",
+                        json={"query": "x"})
+        assert r.status_code == 401
+        ok = client.post("/api/packs/knowledge_graph/kbs/kb1/retrieve-test",
+                         json={"query": "甲在哪?"},
+                         headers={"X-Admin-Token": "t"})
+        assert ok.status_code == 200

@@ -533,6 +533,36 @@ async def search(request: Request, payload: Dict[str, Any]):
         raise HTTPException(502, "检索失败,请稍后重试或联系管理员")
 
 
+# ── 检索测试(管理端:两路召回明细可视化,retrieve-only) ─────────
+
+@router.post("/kbs/{kb_id}/retrieve-test", dependencies=[Depends(admin_required)])
+async def kb_retrieve_test(request: Request, kb_id: str, payload: Dict[str, Any]):
+    """检索测试(管理端,DocManager 检索测试页):两路召回明细可视化。
+
+    retrieve-only:直接跑 hybrid_retrieve,不做 LLM 综合回答(意图解析
+    kg.query 仍走——它是检索的一部分)。种子命中/截断水位/向量分数是
+    内部排查数据,挂管理门内,不进用户级 /search(防枚举口径同源)。
+
+    Body: {query: 问题, top_k?: 向量条数}
+    """
+    query = str((payload or {}).get("query") or "").strip()
+    if not query:
+        raise HTTPException(422, "query 不能为空")
+    top_k = payload.get("top_k")
+
+    store = runtime.get_kg_store(request.app.state)
+    kb = store.get_kb(kb_id)
+    if not kb:
+        raise HTTPException(404, f"知识库不存在: {kb_id}")
+
+    from domains.knowledge_graph import retrieval
+    import asyncio
+    result = await asyncio.to_thread(
+        retrieval.hybrid_retrieve, request.app.state, kb, query,
+        None, top_k)
+    return result | {"kb": {"id": kb["id"], "name": kb.get("name") or ""}}
+
+
 # ── 依赖状态(设置页"重新检测"用) ─────────────────────────────
 
 @router.get("/dependency-status", dependencies=[Depends(admin_required)])
