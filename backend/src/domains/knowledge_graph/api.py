@@ -557,9 +557,14 @@ async def kb_retrieve_test(request: Request, kb_id: str, payload: Dict[str, Any]
 
     from domains.knowledge_graph import retrieval
     import asyncio
-    result = await asyncio.to_thread(
-        retrieval.hybrid_retrieve, request.app.state, kb, query,
-        None, top_k)
+    try:
+        result = await asyncio.to_thread(
+            retrieval.hybrid_retrieve, request.app.state, kb, query,
+            None, top_k)
+    except Exception:
+        # 500 回体是通用文案不泄内部串;堆栈进服务端日志(与 /search 同款纪律)
+        logger.exception(f"retrieve-test failed: kb={kb_id}")
+        raise
     return result | {"kb": {"id": kb["id"], "name": kb.get("name") or ""}}
 
 
