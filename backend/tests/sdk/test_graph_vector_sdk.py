@@ -222,7 +222,7 @@ class TestFactoryPrefix:
 
     def test_vector_factory_passes_prefix(self, monkeypatch):
         import sdk.vector_store as vs_mod
-        vs_mod._cached_store, vs_mod._cached_fp = None, ()
+        vs_mod._cached_stores.clear()
         calls = []
 
         real_cls = vs_mod.MilvusVectorStore
@@ -243,7 +243,7 @@ class TestFactoryPrefix:
             assert s1 is not s2
             assert calls == ["kg", "bi"]   # 两个前缀各构造一次(指纹区分)
         finally:
-            vs_mod._cached_store, vs_mod._cached_fp = None, ()
+            vs_mod._cached_stores.clear()
 
     def test_graph_factory_passes_prefix(self, monkeypatch):
         import sdk.graph_store as gs_mod
