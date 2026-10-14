@@ -1,6 +1,4 @@
 """KG 引用编号测试 —— answer.j2 句尾引用规则 + cited_chunks 解析回传。"""
-import os
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,6 +40,12 @@ class TestParseCitedChunks:
     def test_parse_ignores_non_citation_brackets(self):
         """非片段引用的方括号(如 [实体:X]/[链接文字])不产生编号。"""
         assert retrieval.parse_cited_chunks("结论[实体:甲],参见[备注]与[片段:x]") == []
+
+    def test_parse_out_of_range_passthrough(self):
+        """越界编号原样透传(不 clamp/不滤除)——T2 裁决:过滤责任在前端
+        消费端(双界 n>=1 && n<=len),后端解析到什么算什么,契约锚定。
+        返回去重升序:99 与 0 均在,顺序按升序。"""
+        assert retrieval.parse_cited_chunks("幻觉[片段:99]与[片段:0]") == [0, 99]
 
 
 class TestAnswerQuestionCitedChunks:
