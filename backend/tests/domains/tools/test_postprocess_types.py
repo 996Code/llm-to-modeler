@@ -82,3 +82,34 @@ class TestNormalizeValidationErrors:
         assert out[0].startswith("【类型错误】")
         assert out[1].startswith("1. ")
         assert "formTitle" in out[1]
+
+
+class TestDedupeConfigIds:
+    def test_duplicate_form_field_config_id_keeps_first_strips_rest(self):
+        """同 formFieldConfigId 重复：保留首个，后续剥掉 id（designer 归一化会
+        重新生成 UUID）——LLM 抄 id / 骨架克隆残留的最后防线。"""
+        cfg = postprocess_config({
+            "formFieldConfigVos": [
+                {"fieldTitleKey": "a", "fieldTitleText": "旧字段",
+                 "formFieldConfigId": "widget-same-id"},
+                {"fieldTitleKey": "b", "fieldTitleText": "新字段",
+                 "formFieldConfigId": "widget-same-id"},
+                {"fieldTitleKey": "c", "fieldTitleText": "正常",
+                 "formFieldConfigId": "widget-other-id"},
+            ],
+        })
+        fields = cfg["formFieldConfigVos"]
+        assert fields[0]["formFieldConfigId"] == "widget-same-id"
+        assert "formFieldConfigId" not in fields[1]
+        assert fields[2]["formFieldConfigId"] == "widget-other-id"
+
+    def test_unique_ids_untouched(self):
+        cfg = postprocess_config({
+            "formFieldConfigVos": [
+                {"fieldTitleKey": "a", "formFieldConfigId": "widget-1"},
+                {"fieldTitleKey": "b", "formFieldConfigId": "widget-2"},
+            ],
+        })
+        fields = cfg["formFieldConfigVos"]
+        assert fields[0]["formFieldConfigId"] == "widget-1"
+        assert fields[1]["formFieldConfigId"] == "widget-2"

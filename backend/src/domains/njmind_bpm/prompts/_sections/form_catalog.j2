@@ -1,6 +1,8 @@
 {# 绑定表单字段目录(分支条件可引用字段)
-   传入:form_catalog(蒸馏列表: key/title/type/typeName/options?) #}
-{% if form_catalog %}
+   传入:form_catalog(蒸馏列表: key/title/type/typeName/options?)
+   StrictUndefined:调用点可能未传 form_catalog(parse.j2 不 include 本段),
+   用 is defined 守卫避免渲染炸裂 #}
+{% if form_catalog is defined and form_catalog %}
 ## 绑定表单字段(分支条件只能引用这些字段)
 | key | 名称 | 类型码 | 类型 | 选项 |
 |-----|------|--------|------|------|

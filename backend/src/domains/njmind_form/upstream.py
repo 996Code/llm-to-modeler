@@ -117,3 +117,22 @@ class ModelerAPI:
         """按制品标识（formCode）查询已有配置。"""
         return self._t.get(SERVICE_NAME, self._path("get_form", code=entry_id),
                            auth=False)
+
+    def get_org_catalog(self, catalog_type: str) -> List[Dict[str, Any]]:
+        """组织目录（type=role → [{"id","code","name"}] 直接 JSON 数组）。
+
+        匿名端点（/api/mcp/** 服务间匿名语义）。params 携带查询串时传输层
+        cache 本就是 no-op（缓存键不含查询串），这里显式不传 cache；
+        pack 层（_permission_catalog）做模块级 TTL 缓存。
+        失败（网络/假200/服务未下发）Fail-Closed 返回 []，绝不抛——
+        目录不可用属于可降级场景（本轮跳过权限解析），不是错误。
+        """
+        try:
+            data = self._t.get(SERVICE_NAME, self._path("org_catalog"),
+                               auth=False, params={"type": catalog_type})
+        except Exception as e:  # 含 resolve_base 的 ServiceUnresolvableError
+            logger.warning(f"get_org_catalog({catalog_type}) failed: {e}")
+            return []
+        if not isinstance(data, list):
+            return []
+        return data

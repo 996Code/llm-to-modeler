@@ -16,6 +16,8 @@ paths:
   parse: /api/mcp/bpm/parse
   render: /api/mcp/bpm/render
   get_form: /api/mcp/forms/{code}
+  org_catalog: /api/mcp/org/catalog
+  org_users: /api/mcp/org/users
 
 # 制品 manifest（供通用层消费：前端 diff / 版本历史 / 服务发现）
 artifact:

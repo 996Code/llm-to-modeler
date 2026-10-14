@@ -1,7 +1,8 @@
-"""CreateFormTool - 创建表单的复合工具(6 步管线)。
+"""CreateFormTool - 创建表单的复合工具(8 步管线)。
 
-把现有 nodes.py 的 6 步 CREATE 管线搬进 CompositeTool:
-  fetch_guide -> list_assets -> parse_fields -> fetch_templates -> generate -> validate
+把现有 nodes.py 的 CREATE 管线搬进 CompositeTool:
+  fetch_guide -> fetch_role_catalog -> list_assets -> parse_fields
+  -> fetch_templates -> generate -> resolve_permissions -> validate
 
 所有 njmind 业务字段名只出现在本文件内,Engine 从不访问。
 """
@@ -14,6 +15,11 @@ from domains.njmind_form.tools._preflight import require_modeler_service
 from domains.njmind_form.models import ParsedField
 from domains.njmind_form.tools._config_loader import load_type_mappings
 from domains.njmind_form.tools._config_loader import load_prop_defaults, field_template_stem, sanitize_guide
+from domains.njmind_form.tools._permission_catalog import (
+    fetch_role_catalog, role_reference_vars, task_reference_vars,
+    run_permission_resolution, copy_role_semantics_to_config,
+    ROLE_FIELDS, TASK_FIELDS,
+)
 from domains.njmind_form.tools._postprocess import (
     parse_fixable_field_errors, fill_missing_required,
     postprocess_config, _collect_schema_keys, schema_projection,
@@ -67,16 +73,18 @@ class CreateFormTool(CompositeTool):
     
     # ── 插件化元数据 ──
 
-    steps = ["fetch_guide", "list_assets", "parse_fields",
-             "fetch_templates", "generate", "validate"]
-    
+    steps = ["fetch_guide", "fetch_role_catalog", "list_assets", "parse_fields",
+             "fetch_templates", "generate", "resolve_permissions", "validate"]
+
     # Pipeline 步骤定义(用于前端动态渲染)
     pipeline_steps = [
         {"key": "fetch_guide", "label": "获取指南"},
+        {"key": "fetch_role_catalog", "label": "获取角色目录"},
         {"key": "list_assets", "label": "加载模板"},
         {"key": "parse_fields", "label": "解析字段"},
         {"key": "fetch_templates", "label": "匹配模板"},
         {"key": "generate", "label": "生成配置"},
+        {"key": "resolve_permissions", "label": "解析角色权限"},
         {"key": "validate", "label": "校验结果"},
     ]
 
@@ -95,7 +103,7 @@ class CreateFormTool(CompositeTool):
         return require_modeler_service(ctx) or super().preflight(state, ctx)
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
-        """执行 6 步管线。retry 在 _step_validate 内部处理。"""
+        """执行 8 步管线。retry 在 _step_validate 内部处理。"""
         # 插件自检（意图识别的最后防线）：画布非空（含未保存草稿——只要画布上
         # 有内容，用户说"加/删/改"就应该是修改而非从零创建）。此处不强行改道
         # （工具间跳转不在框架内），而是在首步前给用户一句明确提示，让用户
@@ -105,12 +113,26 @@ class CreateFormTool(CompositeTool):
         state.setdefault("retry_count", 0)
         state.setdefault("validation_errors", [])
 
-        # 跑 6 步管线:fetch_guide → list_assets → parse_fields
-        #          → fetch_templates → generate → validate
+        # 权限追问恢复（resume=整工具重跑）：pending 制品存在 → 所有 LLM 步骤
+        # 跳过、只跑 fetch_guide/fetch_role_catalog/resolve_permissions/validate
+        if state.get("_permission_pending_artifact") is not None:
+            ctx.emit("stage", "resolve_permissions", "正在应用您的权限选择...")
+
+        # 跑 8 步管线:fetch_guide → fetch_role_catalog → list_assets
+        #          → parse_fields → fetch_templates → generate
+        #          → resolve_permissions → validate
         self.run_pipeline(state, ctx)
 
         artifact = state.get("artifact")
         validation_errors = state.get("validation_errors", [])
+
+        # 未绑流程终态：节点语义无法解析且不该解析——reply/summary 双通道
+        # 回固定提示（前端只渲染 summary，漏 summary 会出现空白气泡），
+        # 无 artifact、无校验、无 LLM 重试
+        block_msg = state.pop("_task_block_message", None)
+        if block_msg:
+            return ToolResult(reply=block_msg, summary=block_msg)
+
         if artifact:
             # 成功:从制品提取表单名和字段数,拼人类可读摘要
             form_name = artifact.get("formName", "")
@@ -126,6 +148,16 @@ class CreateFormTool(CompositeTool):
         else:
             # 失败:未生成制品(可能重试耗尽)
             summary = "表单生成未完成"
+
+        # 权限解析附注（空数组提示 / 目录不可用降级提示——reply 从不展示，
+        # summary 是前端唯一渲染通道，漏附注用户就看不到降级事实）；
+        # dict.fromkeys 去重保序：重试环路里同一条附注只出现一次
+        notes = list(state.get("_permission_notes") or [])
+        if state.get("_role_catalog_unavailable"):
+            notes.append("组织目录不可用，本轮未配置角色权限")
+        notes = list(dict.fromkeys(notes))
+        if notes:
+            summary = f"{summary}（{'；'.join(notes)}）"
 
         return ToolResult(
             artifact=artifact,
@@ -184,8 +216,25 @@ class CreateFormTool(CompositeTool):
             ])
         state["guide"] = sanitize_guide(raw)
 
+    def _step_fetch_role_catalog(self, state: dict, ctx: ToolContext) -> None:
+        """取组织角色目录（权限名词解析的值域）。失败/空 → []，绝不抛。
+
+        resume 也照常执行（模块级 TTL 缓存命中，无网络开销）——目录是
+        resolve 的前置依赖，不属于「跳过的 LLM 步骤」。
+        """
+        ctx.emit("stage", "fetch_role_catalog", "正在获取组织角色目录...")
+        rows = fetch_role_catalog(ctx)
+        # msgpack 白名单只认 manifest 声明类 → 只存原始 list[dict]
+        state["role_catalog"] = rows
+        if rows:
+            ctx.emit("stage", "fetch_role_catalog_done",
+                     f"已加载 {len(rows)} 个角色")
+        # 目录不可用（modeler 未升级/网络失败）不在此追问：resolve 步统一降级
+
     def _step_list_assets(self, state: dict, ctx: ToolContext) -> None:
         """列出可用模板和 Schema 文件名。"""
+        if state.get("_permission_pending_artifact") is not None:
+            return  # 权限追问恢复：复用 pending 制品，不重跑资产步骤
         ctx.emit("stage", "list_assets", "正在获取可用模板和 Schema 列表...")
         # 拉可用模板名列表(本阶段只取文件名,内容在 fetch_templates 步骤按需拉)
         templates = ctx.asset_client.list_templates()
@@ -195,22 +244,31 @@ class CreateFormTool(CompositeTool):
 
     def _step_parse_fields(self, state: dict, ctx: ToolContext) -> None:
         """LLM 解析自然语言 -> 结构化字段列表。"""
+        if state.get("_permission_pending_artifact") is not None:
+            return  # 权限追问恢复：跳过 LLM，pending 制品已含解析结果
         ctx.emit("stage", "parse_fields", "AI 正在解析您的自然语言需求...")
         user_input = state.get("user_input", "")
         compressed_history = state.get("compressed_history", "")
         # 追问恢复：interrupt 后引擎把用户回答注入 tool_state["clarify_answers"] 并重跑本工具。
         # 不合并进输入的话，重跑仍是原始模糊描述 → 再次追问 → 死循环。
+        # `__` 前缀键是结构化追问回答（如 __role: 权限点选），拼进自然语言
+        # 只会污染 prompt（对齐 njmind_list generate_list 先例）——跳过。
         clarify = state.get("clarify_answers") or {}
         if clarify:
             extra = clarify.get("text") or "；".join(
-                f"{k}: {v}" for k, v in clarify.items() if k != "text"
+                f"{k}: {v}" for k, v in clarify.items()
+                if k != "text" and not k.startswith("__")
             )
             if extra:
                 user_input = f"{user_input}\n（用户补充回答：{extra}）"
         guide = state.get("guide") or {}  # 上一步拉的配置指南
 
-        # 渲染 prompt:通过 prompt_loader 从模板文件加载,注入 guide 变量
-        system_prompt = self._render_prompt(ctx, "parse", guide=guide)
+        # 渲染 prompt:通过 prompt_loader 从模板文件加载,注入 guide 变量;
+        # 角色目录/审批节点目录可用时附参考区（卫生清洗后注入，模板守卫）
+        prompt_vars = {"guide": guide}
+        prompt_vars.update(role_reference_vars(state))
+        prompt_vars.update(task_reference_vars(state))
+        system_prompt = self._render_prompt(ctx, "parse", **prompt_vars)
         user_msg = self._build_parse_user_message(user_input, compressed_history)
 
         # 组装 LLM 消息(对标 ChatGPT 的 messages 数组)
@@ -237,6 +295,12 @@ class CreateFormTool(CompositeTool):
         parsed_fields = []
         for f in raw_fields:
             type_code = f.get("fieldType", 0)  # 字段类型编码(数字)
+            # 六个权限语义数组（名词态）：LLM 只在用户明确提权限时才填，
+            # 缺键/None 一律保持 None（未提及），空数组由 resolve 层拦截
+            role_semantics = {
+                k: (list(f[k]) if isinstance(f.get(k), list) and f[k] else None)
+                for k in list(ROLE_FIELDS) + list(TASK_FIELDS)
+            }
             parsed_fields.append(ParsedField(
                 fieldTitleText=f.get(FIELD_TITLE, ""),  # 字段中文名
                 fieldTitleKey=f.get(FIELD_KEY, ""),  # 字段 key(英文标识)
@@ -245,12 +309,15 @@ class CreateFormTool(CompositeTool):
                 fieldTypeName=f.get("fieldTypeName", _TYPE_NAMES.get(type_code, "TEXT")),
                 description=f.get("description", ""),
                 options=f.get("options"),  # 选项(单选/多选用)
+                **role_semantics,
             ))
         state["parsed_fields"] = parsed_fields
         ctx.emit("stage", "parse_fields_done", f"已解析出 {len(parsed_fields)} 个字段：{state['form_name']}")
 
     def _step_fetch_templates(self, state: dict, ctx: ToolContext) -> None:
         """获取表单模板 + 按字段类型获取字段模板（类型→模板映射以 guide.json 为事实源）。"""
+        if state.get("_permission_pending_artifact") is not None:
+            return  # 权限追问恢复：generate 已跳过，模板不再需要
         ctx.emit("stage", "fetch_templates", "正在匹配字段模板...")
         # 表单模板:整体表单的骨架(所有表单共用一个 simple_form 模板)
         state["form_template"] = ctx.asset_client.get_template("simple_form")
@@ -300,6 +367,8 @@ class CreateFormTool(CompositeTool):
 
     def _step_generate(self, state: dict, ctx: ToolContext) -> None:
         """LLM 基于模板组装完整 FormConfig。"""
+        if state.get("_permission_pending_artifact") is not None:
+            return  # 权限追问恢复：复用 pending 制品，不重跑 LLM
         # 是否重试:validation_errors 非空说明上一轮校验失败,本轮要修复
         is_retry = bool(state.get("validation_errors"))
 
@@ -311,11 +380,13 @@ class CreateFormTool(CompositeTool):
 
         # 渲染 prompt:注入表单骨架模板 + 各字段类型模板
         # LLM 按模板填充,而非自由发挥,保证产出结构稳定
-        system_prompt = self._render_prompt(
-            ctx, "generate",
-            form_template=state.get("form_template") or {},
-            field_templates=state.get("field_templates") or {},
-        )
+        prompt_vars = {
+            "form_template": state.get("form_template") or {},
+            "field_templates": state.get("field_templates") or {},
+        }
+        prompt_vars.update(role_reference_vars(state))
+        prompt_vars.update(task_reference_vars(state))
+        system_prompt = self._render_prompt(ctx, "generate", **prompt_vars)
 
         # 构建 user message:把解析出的字段信息序列化给 LLM
         fields_data = {
@@ -329,6 +400,10 @@ class CreateFormTool(CompositeTool):
                     "fieldTypeName": f.fieldTypeName,
                     # 有 options 才加(单选/多选),避免空字段干扰
                     **({"options": f.options} if f.options else {}),
+                    # 权限语义数组（名词态）非空才带——LLM 原样拷入产物
+                    **{k: list(getattr(f, k))
+                       for k in list(ROLE_FIELDS) + list(TASK_FIELDS)
+                       if getattr(f, k, None)},
                 }
                 for f in state.get("parsed_fields", [])
             ],
@@ -369,17 +444,45 @@ class CreateFormTool(CompositeTool):
         config = ctx.llm_client.chat_json(messages, conv_id=ctx.conv_id, stage="create_form.generate")
         # 机械后处理（布尔→0/1、字段去重、formTitle 兜底）：确定性偏差不烧 LLM 重试
         config = postprocess_config(config)
+        # 权限语义数组确定性兜底拷贝（LLM 漏拷时按 fieldTitleKey 补齐；
+        # 名词态，解析归 resolve_permissions 步）
+        copy_role_semantics_to_config(state.get("parsed_fields") or [], config)
         state["artifact"] = config
         state["validation_errors"] = []  # 重置错误:新生成的配置要先校验才算数
 
+    def _step_resolve_permissions(self, state: dict, ctx: ToolContext) -> None:
+        """权限名词 → 真实 code/id（角色目录 + 审批节点目录确定性解析）。
+
+        中文名词只存在于 LLM 中间产物，最终 artifact 只允许真实 role code
+        与节点 id。无法直选的语义串逐条产出追问卡（ClarificationRaised →
+        引擎 interrupt → 用户点选 → resume 整工具重跑：pending 守卫跳过全部
+        LLM 步骤，本步用 answers 反查回填，无第二次 LLM 调用）。
+        角色目录不可用（modeler 未升级等）→ 跳过角色解析不清已有。
+        未绑流程（process_definition_key 为 null 且产物带节点语义）→
+        置 `_task_block_message`，execute 回 reply-only 终态。
+        """
+        ctx.emit("stage", "resolve_permissions", "正在解析字段权限...")
+        run_permission_resolution(state, ctx, mode="create")
+        if state.get("_task_block_message"):
+            return  # 未绑流程：reply-only 终态，后续 validate 由守卫跳过
+        ctx.emit("stage", "resolve_permissions_done", "字段权限已解析")
+
     def _step_validate(self, state: dict, ctx: ToolContext) -> None:
         """提交上游校验（含未知字段本地剥离循环）。失败时工具内部 retry。"""
+        if state.get("_task_block_message"):
+            return  # 未绑流程 reply-only 终态：不校验（也就无 LLM 重试环路）
         ctx.emit("stage", "validate", "正在提交到上游平台进行校验...")
         artifact = state.get("artifact")
         if not artifact:
             state["validation_errors"] = [{"message": "No configuration to validate"}]
             ctx.emit("stage", "validate_fail", "校验失败：无配置可校验")
             return
+
+        # 重试环路不变量：进 validate 前产物必然再过一次幂等 resolve——
+        # 校验失败→LLM 重生成路径上新产出的中文必须再解析一次，
+        # "最终制品无中文"在所有进入 validate 的路径上成立（已解析 code
+        # 原样透传，幂等无副作用；新 pending 同样走追问闭环）
+        run_permission_resolution(state, ctx, mode="create")
 
         import copy as _copy
         allowed = _get_allowed_keys(ctx)

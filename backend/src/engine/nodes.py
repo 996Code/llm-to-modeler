@@ -16,8 +16,16 @@
   route_by_tool（条件边：tool_name 空 → END）
     ▼
 ★execute_tool_node ────── 调 tool.execute(state, ctx)
-    │    工具可能 raise ClarificationRaised → 转 LangGraph interrupt()
+    │    工具可能 raise ClarificationRaised → 转 ToolResult.ask
     │    工具经 ctx.emit 实时推 SSE 进度（thread-local → stream → 前端）
+    │    ask 非空 → 正常 return（挂起键随 tool_state 提交进图状态）
+    ▼
+  route_after_execute（条件边：pending_questions 非空 → clarify_gate）
+    ▼
+★clarify_gate_node ────── 唯一 interrupt 点（轻节点，零副作用）：
+    │    interrupt(已提交的 pending_questions) 挂起等用户答复；
+    │    resume 只重放本节点 → 拿到 answer 注入 tool_state.clarify_answers、
+    │    清 pending_questions，返回触发工具重跑（守卫路径，零 LLM）
     ▼
 ★handle_result_node ───── ToolResult 三态（reply/artifact/ask）分流为 SSE 事件
     ▼
@@ -27,6 +35,8 @@
   - 节点函数签名: (state: GraphState) -> dict(部分更新)
   - 工具内部 state 通过 tool_state 透传,Graph 不读内部结构（开闭原则）
   - 追问通过 LangGraph interrupt() 暂停 + Command(resume) 恢复（checkpointer 存档）
+  - interrupt 只挂在 clarify_gate 轻节点:挂谁 resume 就从节点头重放谁——
+    挂在 execute_tool 内会导致工具全管线重跑（多烧 LLM、产物漂移）
 """
 import logging
 import time
@@ -355,10 +365,11 @@ def execute_tool_node(state: GraphState) -> dict:
     核心逻辑:
     1. 从 registry 取工具,构建 ToolContext
     2. 执行 tool.execute()
-    3. 如果 ToolResult.ask 非空 → 调用 interrupt() 挂起
-       - interrupt value = {questions, summary}
-       - resume 后 answers 会作为 interrupt() 的返回值
-    4. 如果是恢复(resume),把 answers 注入 tool_state 后重跑工具
+    3. 如果 ToolResult.ask 非空 → **正常 return**(不在本节点挂起):
+       - tool_state(含工具写入的挂起态键,如 _permission_pending_artifact)
+         随返回提交进图状态——resume 后重跑的工具能走守卫路径(零 LLM)
+       - interrupt payload 存入 pending_questions,由 clarify_gate 节点挂起
+       - tool_result=None 语义:告诉下游路由"未产出终态结果"
     """
     tool_name = state.get("tool_name", "")  # 上游 classify_intent 选中的工具
     tool_state = state.get("tool_state", {})  # 工具内部状态
@@ -524,10 +535,11 @@ def execute_tool_node(state: GraphState) -> dict:
         "detail": _trace_detail,
     })
 
-    # ── 处理追问:interrupt! ──
+    # ── 处理追问:正常 return,交给 clarify_gate 节点挂起 ──
     if result.ask is not None:
         # ask 非空：工具需要向用户追问更多信息
-        # 构建 interrupt value(发给前端的数据)
+        # 构建 interrupt payload(发给前端的数据;存入 pending_questions,
+        # 由 clarify_gate 节点据此 interrupt——本节点绝不挂起)
         # model_dump()：Pydantic 对象转 dict，类比 Jackson 序列化
         questions_data = [q.model_dump() for q in result.ask.questions]
         # 拼人类可读的追问文案，供前端展示
@@ -535,34 +547,22 @@ def execute_tool_node(state: GraphState) -> dict:
             f"{i+1}. {q.question}" for i, q in enumerate(result.ask.questions)
         )
 
-        interrupt_value = {
-            "questions": questions_data,  # 结构化问题（前端渲染追问界面用）
-            "summary": questions_text,  # 文本摘要（前端直接展示用）
-        }
-
-        # ★ LangGraph interrupt:挂起执行,等待 Command(resume=answers)
-        # 这是整个追问机制的核心：interrupt() 会抛 PauseSignal 挂起当前执行
-        # 框架把 interrupt_value 序列化保存，前端展示问题
-        # 用户回答后，调用 Command(resume=answer)，框架恢复执行
-        # resume 后,answer 就是用户在前端输入的回答
-        answer = interrupt(interrupt_value)
-
-        # ── resume 后到这里 ──
-        # 把用户的回答注入 tool_state,准备重跑工具
-        logger.info(f"Resumed with answer: {answer}")
-        # answer 可能是 dict（结构化回答）或字符串，统一成 dict 结构
-        tool_state["clarify_answers"] = answer if isinstance(answer, dict) else {"text": str(answer)}
-        # 上轮中断标记的清理归工具侧:CompositeTool.run_pipeline 开头自清
-        # _need_clarify(SDK 契约),私有键由插件自行消费——引擎只透传
-        # tool_state,不认识插件的内部键
-
-        # 清空 tool_result 和 pending_questions,触发重跑
-        # 返回 None 的 tool_result 会被 route_after_result 识别为"需要重跑"
+        # ★ 关键修复(I2):此处必须 return 而非 interrupt()
+        # 旧拓扑在节点内 interrupt 挂起,本节点的返回永不提交——tool_state
+        # 里工具写入的挂起态键(如 _permission_pending_artifact)不进
+        # checkpoint;用户答复后 LangGraph 从节点头重放 execute_tool,
+        # 工具全管线重跑(多烧 parse+generate 两次 LLM,产物可能漂移),
+        # 重放到 interrupt 拿到答案后还要在节点内二次执行工具。
+        # 正常 return 后:挂起键随图状态提交,resume 只重放轻节点
+        # clarify_gate(零副作用零成本),重跑的工具直接走守卫路径。
         return {
-            "tool_state": tool_state,
-            "tool_result": None,  # 关键：None 触发 rerun 路由
-            "pending_questions": [],  # 清空待问问题（已问过）
-            "clarify_answers": {},  # 清空（已注入 tool_state，避免重复）
+            "tool_state": tool_state,  # 含挂起态键——resume 守卫的依据
+            "tool_result": None,  # None 语义:无终态结果,触发后续重跑路由
+            "pending_questions": {  # interrupt payload,clarify_gate 据此挂起
+                "questions": questions_data,  # 结构化问题（前端渲染追问界面用）
+                "summary": questions_text,  # 文本摘要（前端直接展示用）
+            },
+            "clarify_answers": {},  # 清空（防上轮残留被误注入）
             "sse_events": sse_events,
         }
 
@@ -573,13 +573,58 @@ def execute_tool_node(state: GraphState) -> dict:
     }
 
 
+def clarify_gate_node(state: GraphState) -> dict:
+    """追问门:整条图**唯一**的 interrupt 挂起点(轻节点,零副作用)。
+
+    为什么必须是独立节点(而非挂在 execute_tool 内):
+    LangGraph 的 resume 语义是"从被挂起的节点头重放"——挂谁就重放谁。
+    挂在 execute_tool 内 = resume 时工具全管线重跑(多烧 LLM、产物漂移);
+    独立成轻节点后,resume 只重放本节点(interrupt 前无任何副作用,
+    重放零成本),拿到答案注入 tool_state,由路由触发 execute_tool 重跑
+    ——重跑的工具能看到已提交的挂起态键,守卫生效零 LLM。
+
+    输入: pending_questions(execute_tool 提交的 interrupt payload)
+    动作: interrupt(payload) 挂起 → resume 后 answer 注入 tool_state
+    输出: tool_result=None + 清 pending_questions(route_after_result 重跑)
+    """
+    pending = state.get("pending_questions") or {}
+    tool_state = state.get("tool_state", {})
+
+    # ★ LangGraph interrupt:挂起执行,等待 Command(resume=answers)
+    # 这是整个追问机制的核心：interrupt() 会抛 PauseSignal 挂起当前执行
+    # 框架把 payload 序列化保存，stream.py 查 get_state 把 questions 推给前端
+    # 用户回答后，调用 Command(resume=answer)，框架恢复执行
+    # resume 后,answer 就是用户在前端输入的回答(重放本节点时返回)
+    answer = interrupt(pending)
+
+    # ── resume 后到这里 ──
+    # 把用户的回答注入 tool_state,准备重跑工具
+    logger.info(f"Resumed with answer: {answer}")
+    # answer 可能是 dict（结构化回答）或字符串，统一成 dict 结构
+    tool_state["clarify_answers"] = answer if isinstance(answer, dict) else {"text": str(answer)}
+    # 上轮中断标记的清理归工具侧:CompositeTool.run_pipeline 开头自清
+    # _need_clarify(SDK 契约),私有键由插件自行消费——引擎只透传
+    # tool_state,不认识插件的内部键
+
+    # 清空 pending_questions 与 tool_result,触发重跑
+    # 返回 None 的 tool_result 会被 route_after_result 识别为"需要重跑"
+    return {
+        "tool_state": tool_state,
+        "tool_result": None,  # 关键：None 触发 rerun 路由
+        "pending_questions": {},  # 清空待问问题（已问过）
+        "clarify_answers": {},  # 清空（已注入 tool_state，避免重复）
+        "sse_events": [],
+    }
+
+
 def handle_result_node(state: GraphState) -> dict:
     """处理工具结果:根据 ToolResult 三态分流。
 
     三态:
     - error_for_llm: 错误回流
     - reply: 闲聊回复
-    - ask: 追问(已在 execute_tool 中处理 interrupt)
+    - ask: 追问(已在 execute_tool 转成 pending_questions,由 clarify_gate 挂起;
+      走到本节点时 tool_result 为 None,直接空事件放行)
     - artifact: 制品结果(config/data)
     - 都没有: 未知结果
 
@@ -587,7 +632,8 @@ def handle_result_node(state: GraphState) -> dict:
     """
     tool_result_data = state.get("tool_result")
     if tool_result_data is None:
-        # tool_result 为 None：说明追问恢复后需要重跑，本节点不该被调到
+        # tool_result 为 None：说明是追问挂起(pending_questions 交给
+        # clarify_gate)或追问恢复后待重跑,本节点不产出终态事件
         # 返回空事件，让路由把流程带回 execute_tool 重跑
         return {"sse_events": []}
 
@@ -688,11 +734,24 @@ def route_by_tool(state: GraphState) -> str:
     return "end"
 
 
+def route_after_execute(state: GraphState) -> str:
+    """execute_tool 之后:有待问问题 → clarify_gate 挂起;否则收尾。
+
+    pending_questions 非空说明工具请求了追问——interrupt 必须发生在
+    独立的 clarify_gate 节点(挂谁 resume 就重放谁),不能留在 execute_tool。
+    """
+    if state.get("pending_questions"):
+        return "clarify"
+    return "result"
+
+
 def route_after_result(state: GraphState) -> str:
     """handle_result 之后:如果 tool_result 为空说明需要重跑(追问恢复)。"""
     tool_result = state.get("tool_result")
     if tool_result is None and state.get("tool_name"):
-        # tool_result 为 None + 有 tool_name：说明是追问恢复，需要重跑工具
+        # tool_result 为 None + 有 tool_name：说明是 clarify_gate 注入答案后
+        # 的重跑请求（首次挂起走 route_after_execute → clarify_gate,
+        # 不经本路由）——回到 execute_tool 消费答案
         # 类比 Java：状态机检测到 retry 信号，回到执行节点
         return "rerun"
     return "done"

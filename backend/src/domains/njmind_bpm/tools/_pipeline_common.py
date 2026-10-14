@@ -3,6 +3,7 @@
 被 generate_process 使用;所有函数纯操作 dict,
 不触网络(网络在工具步骤里经 service_locator.get_api())。
 """
+import copy
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -271,13 +272,86 @@ def merge_rule_details(new_rules: Dict[str, Any],
                 merged.append(dict(r))
         return merged
 
-    out[K.APPROVE_RULES] = _merge_list(
-        (new_rules or {}).get(K.APPROVE_RULES), host_approve, K.NODE_KEY_REF)
+    out[K.APPROVE_RULES] = merge_approve_rule_details(
+        (new_rules or {}).get(K.APPROVE_RULES), host_approve)
     out[K.CC_RULES] = _merge_list(
         (new_rules or {}).get(K.CC_RULES), host_cc, K.NODE_KEY_REF)
-    out[K.BRANCH_RULES] = _merge_list(
-        (new_rules or {}).get(K.BRANCH_RULES), host_branch, K.EDGE_KEY_REF)
+    out[K.BRANCH_RULES] = merge_branch_rule_details(
+        (new_rules or {}).get(K.BRANCH_RULES), host_branch)
     return out
+
+
+def merge_approve_rule_details(generated: List[Dict[str, Any]],
+                               host: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """P2T4：审批规则替换/继承语义（_merge_list 之上的包装层）。
+
+    提及节点（generated 含该 nodeKey）→ approveOptRangeSettings 整块替换
+    （LLM 未给 settings 时继承宿主的）；其余非 None 键正常覆盖。
+    未提及节点 → 整条继承宿主（值形态逐字不变）。
+    """
+    host_by = {r.get(K.NODE_KEY_REF): r for r in (host or []) if r.get(K.NODE_KEY_REF)}
+    merged, seen = [], set()
+    for r in (generated or []):
+        k = r.get(K.NODE_KEY_REF)
+        seen.add(k)
+        base = host_by.get(k) or {}
+        item = dict(base)
+        item.update({kk: vv for kk, vv in r.items() if vv is not None})
+        # settings 整体替换时，宿主角色元素已配的角色筛选条件（spec 裁定
+        # "照旧继承"）回填到新数组同 roleId 且本轮未显式配置的元素上
+        new_settings = r.get("approveOptRangeSettings")
+        if isinstance(new_settings, dict) and "approveOptRangeSettings" in r:
+            host_settings = (base.get("approveOptRangeSettings") or {})
+            host_roles = host_settings.get("checkedRoleIds")
+            new_roles = (item["approveOptRangeSettings"] or {}).get("checkedRoleIds")
+            if isinstance(host_roles, list) and isinstance(new_roles, list):
+                host_cond = {str(x.get("roleId")): x.get("condition")
+                             for x in host_roles
+                             if isinstance(x, dict) and x.get("roleId")}
+                for x in new_roles:
+                    if (isinstance(x, dict) and x.get("roleId")
+                            and str(x["roleId"]) in host_cond
+                            and not x.get("condition")):
+                        x["condition"] = copy.deepcopy(
+                            host_cond[str(x["roleId"])])
+        merged.append(item)
+    for k, r in host_by.items():
+        if k not in seen:
+            merged.append(dict(r))
+    return merged
+
+
+def merge_branch_rule_details(generated: List[Dict[str, Any]],
+                              host: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """P2T4：分支规则替换/继承 + rules/roleRules 互斥。
+
+    非空 roleRules → 写入并移除继承的 rules；非空 rules → 对称移除 roleRules；
+    roleRules==[] → 非法（禁空数组契约）→ 剥该行 + warning（不 raise——
+    render 步内 raise 会被引擎兜底吞成 error_for_llm）。未提及 → 整条继承。
+    """
+    host_by = {r.get(K.EDGE_KEY_REF): r for r in (host or []) if r.get(K.EDGE_KEY_REF)}
+    merged, seen = [], set()
+    for r in (generated or []):
+        k = r.get(K.EDGE_KEY_REF)
+        if r.get("roleRules") == []:
+            logger.warning(
+                f"merge_branch_rule_details: {k!r} 携带空 roleRules（契约禁空数组），"
+                f"该分支行已剥除")
+            seen.add(k)
+            continue
+        seen.add(k)
+        base = host_by.get(k) or {}
+        item = dict(base)
+        item.update({kk: vv for kk, vv in r.items() if vv is not None})
+        if r.get("roleRules"):
+            item.pop("rules", None)
+        elif r.get("rules"):
+            item.pop("roleRules", None)
+        merged.append(item)
+    for k, r in host_by.items():
+        if k not in seen:
+            merged.append(dict(r))
+    return merged
 
 
 def build_form_catalog(form_config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:

@@ -24,6 +24,7 @@ paths:
   create: /api/mcp/forms/create
   update: /api/mcp/forms/{code}/update
   get_form: /api/mcp/forms/{code}
+  org_catalog: /api/mcp/org/catalog   # 组织目录（type=role 角色目录，权限名词解析用）
 
 # 字段类型码 → 模板 stem 的例外覆盖（默认推导：类型名 name.lower()，见 create_form._step_fetch_templates）
 # 全量类型表以上游 guide.json 的 fieldTypes 为唯一事实源，此处只保留「推导规则不适用」的例外：

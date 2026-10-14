@@ -29,7 +29,13 @@
       "fieldTitleKey": "拼音蛇形（如 xingming）",
       "fieldType": 0,
       "fieldTypeName": "TEXT",
-      "options": ["选项1", "选项2"]
+      "options": ["选项1", "选项2"],
+      "canShowFieldAddRoles": ["角色中文名"],
+      "canShowFieldDetailRoles": ["角色中文名"],
+      "canEditFieldRoles": ["角色中文名"],
+      "canShowFieldAddTaskKeys": ["审批节点中文名"],
+      "canShowFieldDetailTaskKeys": ["审批节点中文名"],
+      "canEditFieldTaskKeys": ["审批节点中文名"]
     }
   ]
 }
@@ -47,6 +53,10 @@
 - 「部门」→DEPARTMENT(6)，「人员」「审批人」→USER(7)
 - 无法判断字段类型时，设置 needsClarification=true 并提问，不要猜测
 - 如果用户回复模糊（如'你定'、'随便'、'都行'），结合对话历史推断表单类型，生成常见字段，不要追问
+- 字段权限（角色/审批节点）：用户提到"只有XX角色可见/可编辑"类限制时，把角色中文名填进对应数组（canShowFieldAddRoles=新增可见、canShowFieldDetailRoles=查看可见、canEditFieldRoles=可编辑；can*TaskKeys 同理填审批节点中文名）。名称尽量从下方角色目录/审批节点参考中选取；审批节点权限只有在表单已绑定流程（有审批节点参考）时才可配置，抄送节点只能填进 canShowFieldDetailTaskKeys（查看可见）；用户没提权限的字段一律省略这些键；**权限数组要么整键省略、要么非空，禁止输出空数组**
 - 只输出 JSON，不输出其他内容
+{% include "njmind_form/prompts/_sections/role_catalog.j2" %}
+
+{% include "njmind_form/prompts/_sections/task_catalog.j2" %}
 
 {% include "njmind_form/prompts/_sections/keyword_hints.j2" %}

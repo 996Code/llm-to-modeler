@@ -31,7 +31,8 @@ import { getHostPort, CONTEXT_KEY_ARTIFACT } from '../composables/hostPort'
  *     不能静默降级（否则 AI 基于空配置回答，用户只会看到"我没拿到表单"的误导）；
  *   - 对象：成功，context.artifact 为宿主最新画布。
  */
-async function refreshEmbedContext() {
+// 导出供协议链路测试（hostPort.test.ts）直接驱动；运行时仅本 store 使用
+export async function refreshEmbedContext() {
   const port = getHostPort()
   if (!port.connected) return undefined
   // 拉宿主最新画布；失败先重试一次（瞬时抖动），仍失败则判链路异常
@@ -55,6 +56,9 @@ async function refreshEmbedContext() {
     },
     services: services || undefined,
     packs: packs ?? undefined,
+    // 宿主随 GET_CONTEXT 下发的 pack 级参数（如 njmind_form 的流程节点目录），
+    // 原样透传给后端工具层；旧宿主不带 → undefined（请求体不发该字段）
+    pack_params: hostCtx.packParams ?? undefined,
   }
 }
 

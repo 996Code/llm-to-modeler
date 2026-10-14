@@ -193,7 +193,7 @@ async def stream_graph(
             # 图片等工具私有状态,只在需要时填充
             "tool_state": {"image_base64": image_base64} if image_base64 else {},
             "tool_result": None,
-            "pending_questions": [],
+            "pending_questions": {},
             "clarify_answers": {},
             # sse_events 是节点产出的"待发送事件列表",由本桥接层消费
             "sse_events": [],

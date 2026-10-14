@@ -77,6 +77,30 @@ def _coerce_int_strings(obj: Any) -> Any:
     return obj
 
 
+# 字段配置 id 唯一性兜底：同 formFieldConfigId 保留首个、后续剥掉 id 键
+# （designer 归一化会给无 id 字段生成新 UUID，与手工加字段路径一致）。
+# 防线背景：骨架克隆曾把源字段 id 带给新字段（已修 _IDENTITY_KEYS），此处
+# 兜 LLM 全量回吐/patch 抄 id 的残余路径——id 冲突在 designer 表现为点击
+# 选中错位、保存错行（真实事故：密级字段与文本输入框同 id）。
+def _dedupe_config_ids(obj: Any) -> Any:
+    if isinstance(obj, list):
+        items = [_dedupe_config_ids(v) for v in obj]
+        if items and all(isinstance(i, dict) and FIELD_KEY in i for i in items):
+            seen: set = set()
+            for i in items:
+                fid = i.get("formFieldConfigId")
+                if fid is None:
+                    continue
+                if fid in seen:
+                    i.pop("formFieldConfigId", None)
+                else:
+                    seen.add(fid)
+        return items
+    if isinstance(obj, dict):
+        return {k: _dedupe_config_ids(v) for k, v in obj.items()}
+    return obj
+
+
 # 数组按 fieldTitleKey 去重（保留首个）。递归处理子表单/标签页内的字段数组。
 def _dedupe_fields(obj: Any) -> Any:
     if isinstance(obj, list):
@@ -126,6 +150,7 @@ def postprocess_config(config: Dict[str, Any]) -> Dict[str, Any]:
     cfg = _bool_to_int(cfg)
     cfg = _coerce_int_strings(cfg)
     cfg = _dedupe_fields(cfg)
+    cfg = _dedupe_config_ids(cfg)
     # formTitle 兜底：宿主画布配置无此字段，上游 F4 要求非空；
     # 格式约定为 $fieldKey$（取标题字段或第一个字段）
     if not cfg.get("formTitle"):

@@ -29,8 +29,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # add_field 骨架补全时要从克隆源剥掉的「身份属性」——新字段不能继承旧字段的
-# key / 标题 / 默认值（默认值继承会带着旧业务语义，是脏数据）
-_IDENTITY_KEYS = {FIELD_KEY, FIELD_TITLE, "fieldDefaultValue"}
+# key / 标题 / 默认值 / 配置 id（默认值继承会带着旧业务语义；formFieldConfigId
+# 继承会产生同 id 字段——designer 点击选中错位、保存错行，真实事故实证）
+_IDENTITY_KEYS = {FIELD_KEY, FIELD_TITLE, "fieldDefaultValue", "formFieldConfigId"}
 
 # 目录里展示的表单级属性（LLM 改表单结构的入口）。只放「用户可能口头提到」的，
 # 不放 formConfigId/dataVersion 这类系统字段（改了也无意义还危险）
@@ -367,7 +368,10 @@ def restore_untouched(new_cfg: Dict[str, Any], base_cfg: Dict[str, Any],
         if key in ar.touched_form_keys:
             continue
         out[key] = copy.deepcopy(base_val)
-    return out
+    # 基线还原可能带回脏数据里的重复 formFieldConfigId（画布存量冲突对）；
+    # 剥掉后续重复 id 让 designer 重新生成——id 冲突会坏点击选中/保存定位
+    from domains.njmind_form.tools._postprocess import _dedupe_config_ids
+    return _dedupe_config_ids(out)
 
 
 def format_failures(failures: List[str], catalog_keys: List[str]) -> str:

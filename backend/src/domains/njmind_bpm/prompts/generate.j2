@@ -14,12 +14,45 @@
 7. **禁止输出 processKey/processName(系统注入)、BPMN id、坐标、UEL**
 8. 只输出完整 JSON:紧凑格式,不要 markdown 围栏,不要解释
 
-## 整流程模板(参考结构)
+## 审批人与角色分支中间态契约(核心)
+审批人/角色引用一律用**中文名词**,id/code 映射由系统在渲染前完成。骨架:
+
 ```json
-{{ process_template | tojson }}
+{
+  "approveRules": [{
+    "nodeKey": "finance",
+    "approveOptRange": 80,
+    "approveOptRangeSettings": {
+      "checkedRoleIds": ["财务角色"],
+      "checkedDepIds": ["财务部"],
+      "checkedUserIds": ["张三"],
+      "initiator": 0,
+      "allUser": 0,
+      "formFieldKey": [{"formFieldType": 7, "formFieldKey": "approver"}]
+    }
+  }],
+  "branchRules": [{
+    "edgeKey": "finance_only",
+    "logic": 10,
+    "roleRules": [{"formFieldKey": "loginUserRole", "logicType": 30, "values": ["财务角色"]}]
+  }]
+}
 ```
 
-{% if rule_templates %}
+硬约束:
+1. checkedRoleIds/checkedDepIds/checkedUserIds 数组元素是中文名词(角色名/部门名/姓名);**禁止编造任何 id、code、uuid**——系统按名词查目录映射,查不到会被拒绝并追问
+2. 用户需求**未提及的身份维度直接省键**,不要输出空数组占位(如未提角色则整个 checkedRoleIds 键不出现,不是 "checkedRoleIds": [])
+3. formFieldKey(表单字段关联审批人)最终形态是对象数组 [{formFieldType,formFieldKey}],formFieldKey 只能取字段目录中的 key,formFieldType 照抄目录类型码;空则省键
+4. 角色分支用 roleRules 组,formFieldKey 固定 "loginUserRole"(当前用户角色),logicType 只允许 30=包含、40=不包含,values 填角色中文名
+5. 同一条 branchRule 上 rules(表单字段值条件)与 roleRules(角色条件)**互斥,不可同时出现**——需求同时涉及"字段值+角色"时拆成两条边
+6. initiator/allUser 等 0/1 开关仅在用户明确提及时输出
+
+## 整流程模板(参考结构)
+```json
+{{ (process_template | default({})) | tojson }}
+```
+
+{% if rule_templates is defined and rule_templates %}
 ## 原子规则模板(按需复制修改)
 {% for name, tmpl in rule_templates.items() %}
 ### {{ name }}

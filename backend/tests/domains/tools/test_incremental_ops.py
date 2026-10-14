@@ -1,4 +1,6 @@
 """增量指令集测试：目录构建 + 确定性合并器（纯逻辑，零 LLM/零网络）。"""
+import copy
+
 import pytest
 
 from domains.njmind_form.tools._incremental_ops import (
@@ -117,6 +119,20 @@ class TestAddField:
         ar = apply_ops(_config(), ops)
         assert not ar.ok
         assert any("重复" in f for f in ar.failures)
+
+    def test_add_does_not_inherit_source_field_config_id(self):
+        """克隆骨架不得把源字段的 formFieldConfigId 带给新字段（id 冲突会导致
+        designer 点击选中错位、保存错行——真实事故：密级字段与文本输入框同 id）。"""
+        config = _config()
+        config["formFieldConfigVos"][0]["formFieldConfigId"] = "widget-abc-123"
+        ops = [{"op": "add_field", "after": "xingming",
+                "field": {"fieldTitleKey": "beizhu", "fieldTitleText": "备注",
+                          "formFieldType": 0, "isRequiredField": 0}}]
+        ar = apply_ops(config, ops)
+        assert ar.ok
+        new = [f for f in ar.new_config["formFieldConfigVos"]
+               if f["fieldTitleKey"] == "beizhu"][0]
+        assert "formFieldConfigId" not in new
 
     def test_add_no_same_type_no_loader_fails(self):
         """无同类型字段且无模板加载器 → fail-closed（不静默造结构）。"""
@@ -337,3 +353,23 @@ class TestAtomicityAndFullRewrite:
     def test_format_failures_includes_keys(self):
         msg = format_failures(["#1 锚点未命中"], ["a", "b"])
         assert "锚点未命中" in msg and "a,b" in msg
+
+
+class TestRestoreUntouchedIdHygiene:
+    def test_restore_then_dedupe_ids(self):
+        """基线自带冲突 id（画布脏数据）时，restore 后最终产物必须去重——
+        postprocess 剥掉的 id 不能被基线还原带回来。"""
+        from domains.njmind_form.tools._incremental_ops import ApplyResult
+        config = _config()
+        config["formFieldConfigVos"][0]["formFieldConfigId"] = "widget-dup"
+        config["formFieldConfigVos"][2]["formFieldConfigId"] = "widget-dup"
+        ar = ApplyResult()
+        ar.ok = True
+        ar.touched_keys = {"xingming"}
+        new_cfg = copy.deepcopy(config)
+        new_cfg["formFieldConfigVos"][0]["fieldTitleText"] = "改名"
+        from domains.njmind_form.tools._incremental_ops import restore_untouched
+        out = restore_untouched(new_cfg, config, ar)
+        ids = [f.get("formFieldConfigId") for f in out["formFieldConfigVos"]]
+        present = [i for i in ids if i]
+        assert len(present) == len(set(present)), f"仍有重复: {ids}"

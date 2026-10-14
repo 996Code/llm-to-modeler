@@ -11,7 +11,8 @@
 替代旧 ``engine/dispatcher.py`` 用手写 if/else 调度,改用 LangGraph 的 StateGraph
 声明式描述工具调度流程:
 
-- classify_intent(意图识别) → route(路由判断) → execute_tool(执行工具) → handle_result(结果处理)
+- classify_intent(意图识别) → route(路由判断) → execute_tool(执行工具)
+  → clarify_gate(追问门,interrupt 挂起/恢复) → handle_result(结果处理)
 - interrupt/restore 追问机制:工具执行中途可暂停向用户提问,拿到回答后恢复
 - checkpoint 自动持久化状态:每过一个节点自动落盘,断点续跑/双击恢复靠它
 
@@ -41,19 +42,30 @@
     classify_intent ──[route_by_tool]──┐ "tool" → execute_tool
       │                                └ "end"  → END (无可执行工具,纯闲聊)
       ▼
-    execute_tool ──→ handle_result ──[route_after_result]──┐ "rerun" → execute_tool
-                            ▲                              └ "done"  → END
+    execute_tool ──[route_after_execute]──┐ "clarify" → clarify_gate (工具追问)
+      │                                   └ "result" → handle_result
+      ▼
+    clarify_gate ──→ handle_result
+      ▲   │
+      │   └ interrupt(已提交的 pending_questions) 挂起;
+      │     Command(resume=answers) 后只重放本节点(零副作用零成本),
+      │     答案注入 tool_state → 触发 execute_tool 重跑(守卫路径,零 LLM)
+      │
+    handle_result ──[route_after_result]──┐ "rerun" → execute_tool
+                            ▲              └ "done"  → END
                             │
-                       (interrupt/Command(resume): 工具追问时图被挂起,
-                        用户回答后从这里恢复,可能再跑一次 execute_tool)
+                       (追问恢复后注入了答案的工具重跑回环)
 
-三个节点:
+四个节点:
   - ``classify_intent``: 调 LLM 判断用户要干什么、该用哪个工具
-  - ``execute_tool``:    执行工具(含 interrupt 向用户追问)
+  - ``execute_tool``:    执行工具(遇追问正常 return,提交挂起态键)
+  - ``clarify_gate``:    追问门——全图唯一 interrupt 点(轻节点)
   - ``handle_result``:   收尾:产出 SSE 事件 / 决定是否重跑
 
-两条条件边(就是 Java 里的 if 路由):
+三条条件边(就是 Java 里的 if 路由):
   - ``route_by_tool``:      classify_intent 之后,有工具就走 execute_tool,没工具直接 END
+  - ``route_after_execute``: execute_tool 之后,有 pending_questions → clarify_gate 挂起,
+                            否则 handle_result 收尾
   - ``route_after_result``: handle_result 之后,要重跑(如用户追问后参数变了)回 execute_tool,否则 END
 """
 import logging
@@ -124,12 +136,16 @@ def build_graph(
     # LangGraph 用它做 channel 类型推断 + reducer 合并。类比 Spring Integration 的 channel 类型声明。
     workflow = StateGraph(GraphState)
 
-    # ── 注册三个节点 ──
+    # ── 注册四个节点 ──
     # add_node(name, fn):fn 签名 (state: GraphState) -> dict,返回增量字段,框架自动 merge。
     # 注意节点是按 name 标识,边的 source/target 也用 name 引用。
     workflow.add_node("classify_intent", nodes.classify_intent_node)
     workflow.add_node("check_confidence", nodes.check_confidence_node)
     workflow.add_node("execute_tool", nodes.execute_tool_node)
+    # clarify_gate:追问门——全图唯一 interrupt 点。必须独立成节点:
+    # LangGraph resume 从被挂起节点头重放,挂在 execute_tool 内会导致
+    # 工具全管线重跑(多烧 LLM、产物漂移);独立轻节点 resume 零成本。
+    workflow.add_node("clarify_gate", nodes.clarify_gate_node)
     workflow.add_node("handle_result", nodes.handle_result_node)
 
     # ── 注册边(确定流程骨架) ──
@@ -156,10 +172,19 @@ def build_graph(
         {"tool": "execute_tool", "end": END},
     )
 
-    # execute_tool 执行完必然走到 handle_result 收尾(无条件)
-    workflow.add_edge("execute_tool", "handle_result")
+    # ── 条件边 2:execute_tool 之后路由(工具是否请求追问) ──
+    # route_after_execute:pending_questions 非空(工具 ask)→ "clarify" 进
+    # 追问门挂起;否则 → "result" 直接收尾。
+    workflow.add_conditional_edges(
+        "execute_tool",
+        nodes.route_after_execute,
+        {"clarify": "clarify_gate", "result": "handle_result"},
+    )
 
-    # ── 条件边 2:handle_result 之后路由(决定是否重跑) ──
+    # clarify_gate 拿到答案(resume)后必然走到 handle_result 收尾(无条件)
+    workflow.add_edge("clarify_gate", "handle_result")
+
+    # ── 条件边 3:handle_result 之后路由(决定是否重跑) ──
     # route_after_result:返回 "rerun" → 回到 execute_tool 再跑一遍(如追问后参数变化);
     # 返回 "done" → END。这是图的回环点,让单次 stream 能跑多轮工具。
     # 对标 Claude Code query.ts 的 while(true):条件边就是循环条件。

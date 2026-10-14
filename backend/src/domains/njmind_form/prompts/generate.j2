@@ -15,7 +15,8 @@
 7. fieldConditionDisplays 必须为 []
 8. **每个字段必须显式设置 isRequiredField**：按语义判断必填（"申请人"、"姓名"等通常必填，设为 1；"备注"、"描述"等可选，设为 0）
 9. **类型硬约束**（违反会导致上游无法解析）：布尔/枚举属性一律输出整数 0 或 1，禁止 true/false 或加引号；数字类属性（fieldWidth、formColumnsNumber、selectMode、displayStyle、optionValue 等）必须输出整数，禁止写成字符串
-10. 只输出完整 JSON：紧凑格式（无缩进无换行），不要 markdown 代码围栏（禁止 ```json），不要任何解释文字
+10. **字段权限数组**：字段信息里带 canShowFieldAddRoles / canShowFieldDetailRoles / canEditFieldRoles（及 can*TaskKeys）时，非空数组原样拷入该字段配置（保持中文名，系统后续解析），并把对应总开关（isShowFieldAdd / isShowFieldDetail / isEditField）置 1；未提及或无该键的字段省略权限键、保持模板开关默认值。**禁止输出空权限数组，取消限制不用数组表达**；审批节点名称（can*TaskKeys）只能来自审批节点参考，抄送节点只能出现在 canShowFieldDetailTaskKeys
+11. 只输出完整 JSON：紧凑格式（无缩进无换行），不要 markdown 代码围栏（禁止 ```json），不要任何解释文字
 
 ## 表单模板
 ```json
@@ -34,3 +35,7 @@
 
 ## 字段类型代码
 {% include "njmind_form/prompts/_sections/field_types.j2" %}
+
+{% include "njmind_form/prompts/_sections/role_catalog.j2" %}
+
+{% include "njmind_form/prompts/_sections/task_catalog.j2" %}

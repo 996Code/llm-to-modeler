@@ -294,6 +294,21 @@ class UpstreamClient:
     def _ms(start: float) -> int:
         return int((time.time() - start) * 1000)
 
+    # 鉴权头脱敏：call_logs 经管理端 JsonViewer 明文可见，鉴权凭据
+    # （X-Org-Token/Authorization/Cookie/token 类）不得落库（安全审查发现）
+    _SENSITIVE_HEADER_MARKERS = ("token", "auth", "cookie", "secret", "key")
+
+    @staticmethod
+    def _redact_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+        out = {}
+        for k, v in dict(headers or {}).items():
+            lk = str(k).lower()
+            if any(m in lk for m in UpstreamClient._SENSITIVE_HEADER_MARKERS):
+                out[k] = "[REDACTED]"
+            else:
+                out[k] = v
+        return out
+
     def _log(self, endpoint: str, *, status_code: Optional[int] = None,
              error_message: Optional[str] = None, duration: int = 0,
              headers: Optional[Dict[str, str]] = None,
@@ -306,6 +321,7 @@ class UpstreamClient:
         前端 JsonViewer 自动格式化渲染（此前存截断字符串导致前端显示
         一坨未格式化文本）。response_data 同理存原始响应对象，不截断
         （产品决策：完整观测优先于 DB 体积）。
+        headers 落库前脱敏（鉴权头 → [REDACTED]）。
         """
         if not self._conversation_store:
             return
@@ -313,7 +329,7 @@ class UpstreamClient:
         request_data = {
             "method": method,
             "params": params,
-            "headers": dict(headers or {}),
+            "headers": self._redact_headers(headers),
         }
         if body is not None:
             request_data["body"] = body
