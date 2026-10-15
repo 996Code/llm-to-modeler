@@ -1,81 +1,94 @@
 <template>
   <div class="kg-page">
-    <!-- 顶部知识库工作条:选择 + 统计 + 管理(新建/删除)合一 -->
-    <div class="kg-bar">
-      <div class="kg-bar-title">
-        <PartitionOutlined class="kg-bar-icon" />
-        <span>知识库</span>
-      </div>
-      <a-select
-        v-model:value="currentKbId" style="min-width: 240px" placeholder="选择知识库"
-        :loading="loadingKbs" @change="onKbChange"
-      >
-        <a-select-option v-for="k in kbs" :key="k.id" :value="k.id">
-          {{ k.name }}
-          <span class="kg-bar-meta">{{ k.docCount ?? 0 }} 文档 / {{ k.entityTotal ?? 0 }} 实体</span>
-        </a-select-option>
-      </a-select>
-      <a-button type="primary" @click="openCreate"><PlusOutlined /> 新建</a-button>
-      <a-popconfirm
-        v-if="currentKb"
-        title="删除当前知识库将同时清除图谱、向量与上传文件,确认?"
-        ok-text="删除" ok-type="danger" @confirm="doDeleteCurrent"
-      >
-        <a-button danger><DeleteOutlined /> 删除</a-button>
-      </a-popconfirm>
-      <a-button @click="refreshAll"><SyncOutlined :spin="loadingKbs" /> 刷新</a-button>
-    </div>
+    <!-- 左右分栏:左侧知识库列表(替代原顶部下拉工作条),右侧选中库详情 -->
+    <div class="kg-split">
+      <!-- 左侧:知识库树(库名 + 文档/实体统计) -->
+      <aside class="kg-side">
+        <div class="kg-side-head">
+          <div class="kg-side-title"><PartitionOutlined class="kg-side-icon" /> 知识库</div>
+          <a-button size="small" type="primary" @click="openCreate"><PlusOutlined /> 新建</a-button>
+        </div>
+        <div class="kg-side-list">
+          <div v-if="loadingKbs && !kbs.length" class="kg-side-tip">加载中…</div>
+          <template v-else>
+            <div
+              v-for="k in kbs" :key="k.id" class="kb-item"
+              :class="{ on: k.id === currentKbId }" @click="currentKbId = k.id"
+            >
+              <div class="kb-item-name" :title="k.name">{{ k.name }}</div>
+              <div class="kb-item-meta">{{ k.docCount ?? 0 }} 文档 / {{ k.entityTotal ?? 0 }} 实体</div>
+            </div>
+            <!-- 列表空态:引导新建 -->
+            <div v-if="!kbs.length" class="kb-item-empty" @click="openCreate">
+              <PlusOutlined class="kb-item-empty-icon" />
+              <div>还没有知识库<br>点此创建第一个</div>
+            </div>
+          </template>
+        </div>
+      </aside>
 
-    <!-- 当前库信息条:描述/标签/统计(替代原管理页卡片的职责) -->
-    <div v-if="currentKb" class="kg-info">
-      <div class="kg-info-main">
-        <span class="kg-info-name">{{ currentKb.name }}</span>
-        <a-tag v-if="currentKb.vectorEnabled" color="cyan">向量 dim={{ currentKb.vectorDim || '待导入探测' }}</a-tag>
-        <!-- 默认启用后仅剩"模型变更保护"会走到这——不再是无配置的未决态 -->
-        <a-tooltip v-else title="embedding 模型与建库时不一致,向量已保护性停用——切回原模型或清库重建">
-          <a-tag color="orange">向量停用(模型变更)</a-tag>
-        </a-tooltip>
-        <a-tooltip v-if="currentKb.schemaTemplate" :title="`建库所选本体模板:${currentKb.schemaTemplate}(可在「本体设置」页自定义实体/关系类型)`">
-          <a-tag color="geekblue">本体:{{ currentKb.schemaTemplate }}</a-tag>
-        </a-tooltip>
-        <span v-if="currentKb.description" class="kg-info-desc">{{ currentKb.description }}</span>
-      </div>
-      <div class="kg-info-stats">
-        <span><FileTextOutlined /> 文档 <b>{{ currentKb.docCount ?? 0 }}</b></span>
-        <span><NodeIndexOutlined /> 实体 <b>{{ currentKb.entityTotal ?? 0 }}</b></span>
-        <span><ApartmentOutlined /> 关系 <b>{{ currentKb.relationTotal ?? 0 }}</b></span>
-      </div>
-    </div>
+      <!-- 右侧:选中库详情——信息条(含删除/刷新,原工作条拆解并入) + 四个子页 tab -->
+      <section class="kg-main">
+        <template v-if="currentKb">
+          <div class="kg-info">
+            <div class="kg-info-main">
+              <span class="kg-info-name">{{ currentKb.name }}</span>
+              <a-tag v-if="currentKb.vectorEnabled" color="cyan">向量 dim={{ currentKb.vectorDim || '待导入探测' }}</a-tag>
+              <!-- 默认启用后仅剩"模型变更保护"会走到这——不再是无配置的未决态 -->
+              <a-tooltip v-else title="embedding 模型与建库时不一致,向量已保护性停用——切回原模型或清库重建">
+                <a-tag color="orange">向量停用(模型变更)</a-tag>
+              </a-tooltip>
+              <a-tooltip v-if="currentKb.schemaTemplate" :title="`建库所选本体模板:${currentKb.schemaTemplate}(可在「本体设置」页自定义实体/关系类型)`">
+                <a-tag color="geekblue">本体:{{ currentKb.schemaTemplate }}</a-tag>
+              </a-tooltip>
+              <span v-if="currentKb.description" class="kg-info-desc">{{ currentKb.description }}</span>
+            </div>
+            <div class="kg-info-stats">
+              <span><FileTextOutlined /> 文档 <b>{{ currentKb.docCount ?? 0 }}</b></span>
+              <span><NodeIndexOutlined /> 实体 <b>{{ currentKb.entityTotal ?? 0 }}</b></span>
+              <span><ApartmentOutlined /> 关系 <b>{{ currentKb.relationTotal ?? 0 }}</b></span>
+            </div>
+            <div class="kg-info-actions">
+              <a-popconfirm
+                title="删除当前知识库将同时清除图谱、向量与上传文件,确认?"
+                ok-text="删除" ok-type="danger" @confirm="doDeleteCurrent"
+              >
+                <a-button size="small" danger><DeleteOutlined /> 删除</a-button>
+              </a-popconfirm>
+              <a-button size="small" @click="refreshAll"><SyncOutlined :spin="loadingKbs" /> 刷新</a-button>
+            </div>
+          </div>
 
-    <!-- 无库空态:引导新建 -->
-    <div v-if="!loadingKbs && !kbs.length" class="kg-empty" @click="openCreate">
-      <PartitionOutlined class="kg-empty-icon" />
-      <div class="kg-empty-title">还没有知识库</div>
-      <div class="kg-empty-sub">每个库独立本体 / 图谱 / 向量 collection(物理隔离,删库即清)——点这里创建第一个</div>
-    </div>
+          <a-tabs v-model:activeKey="tab" size="small">
+            <a-tab-pane key="docs">
+              <template #tab><FileTextOutlined /> 文档导入</template>
+              <DocManager :kb-id="currentKbId" :refresh-tick="refreshTick" @changed="loadKbs" />
+            </a-tab-pane>
+            <a-tab-pane key="graph">
+              <template #tab><NodeIndexOutlined /> 图谱浏览</template>
+              <GraphView :kb-id="currentKbId" :schema="currentKb?.schema || null" :refresh-tick="refreshTick" />
+            </a-tab-pane>
+            <a-tab-pane key="schema">
+              <template #tab><ApartmentOutlined /> 本体设置</template>
+              <SchemaEditor :kb-id="currentKbId" :refresh-tick="refreshTick" @changed="loadKbs" />
+            </a-tab-pane>
+            <a-tab-pane key="retrieval-test">
+              <template #tab><ExperimentOutlined /> 检索测试</template>
+              <RetrievalTest :kb-id="currentKbId" />
+            </a-tab-pane>
+          </a-tabs>
+        </template>
 
-    <a-tabs v-else v-model:activeKey="tab" size="small">
-      <a-tab-pane key="docs">
-        <template #tab><FileTextOutlined /> 文档导入</template>
-        <DocManager v-if="currentKbId" :kb-id="currentKbId" :refresh-tick="refreshTick" @changed="loadKbs" />
-        <a-empty v-else description="先在上方选择或新建一个知识库" style="padding: 60px 0" />
-      </a-tab-pane>
-      <a-tab-pane key="graph">
-        <template #tab><NodeIndexOutlined /> 图谱浏览</template>
-        <GraphView v-if="currentKbId" :kb-id="currentKbId" :schema="currentKb?.schema || null" :refresh-tick="refreshTick" />
-        <a-empty v-else description="先在上方选择或新建一个知识库" style="padding: 60px 0" />
-      </a-tab-pane>
-      <a-tab-pane key="schema">
-        <template #tab><ApartmentOutlined /> 本体设置</template>
-        <SchemaEditor v-if="currentKbId" :kb-id="currentKbId" :refresh-tick="refreshTick" @changed="loadKbs" />
-        <a-empty v-else description="先在上方选择或新建一个知识库" style="padding: 60px 0" />
-      </a-tab-pane>
-      <a-tab-pane key="retrieval-test">
-        <template #tab><ExperimentOutlined /> 检索测试</template>
-        <RetrievalTest v-if="currentKbId" :kb-id="currentKbId" />
-        <a-empty v-else description="先在上方选择或新建一个知识库" style="padding: 60px 0" />
-      </a-tab-pane>
-    </a-tabs>
+        <!-- 右侧空态:无库或未选中 -->
+        <div v-else class="kg-empty">
+          <PartitionOutlined class="kg-empty-icon" />
+          <div class="kg-empty-title">{{ kbs.length ? '未选择知识库' : '还没有知识库' }}</div>
+          <div class="kg-empty-sub">
+            {{ kbs.length ? '从左侧列表选择一个知识库查看详情' : '每个库独立本体 / 图谱 / 向量 collection(物理隔离,删库即清)——点左侧「新建」创建第一个' }}
+          </div>
+        </div>
+      </section>
+    </div>
 
     <!-- 建库弹窗:选本体模板起步(自原库管理页并入) -->
     <a-modal v-model:open="createOpen" title="新建知识库" :confirm-loading="creating"
@@ -106,8 +119,8 @@
 
 <script setup lang="ts">
 // 知识图谱管理页(manifest admin.page=knowledge_graph → AdminApp 动态 Tab 挂载)。
-// 结构:顶部"知识库工作条"(选择 + 统计 + 新建/删除,合并自原「知识库管理」子页)
-//       + 四个子页(文档导入/图谱浏览/本体设置/检索测试)。
+// 结构:左右分栏——左侧知识库列表(选择 + 新建,替代原顶部下拉工作条),
+//       右侧选中库详情(信息条 + 删除/刷新 + 四个子页:文档导入/图谱浏览/本体设置/检索测试)。
 import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
@@ -156,10 +169,6 @@ async function loadKbs() {
     }
   })
   if (seq === loadKbsSeq) loadingKbs.value = false
-}
-
-function onKbChange() {
-  // 切库时子页按 kbId prop 自行重载(响应式),这里无需额外动作
 }
 
 // ── 建库/删库(自 KbManager 并入) ──────────────────────
@@ -219,15 +228,47 @@ async function doDeleteCurrent() {
 
 <style scoped>
 .kg-page { padding: 6px 2px 0; }
-.kg-bar {
-  display: flex; align-items: center; gap: 12px; margin-bottom: 10px;
-  background: linear-gradient(90deg, #f5f7ff, #fafbff);
-  border: 1px solid #e6ebf5; border-radius: 10px; padding: 10px 16px;
-}
-.kg-bar-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #1f2937; }
-.kg-bar-icon { color: #2f54eb; font-size: 16px; }
-.kg-bar-meta { color: #94a3b8; font-size: 12px; margin-left: 8px; }
 
+/* ── 左右分栏骨架 ─────────────────────────────── */
+.kg-split { display: flex; gap: 14px; align-items: stretch; }
+.kg-side {
+  width: 260px; flex-shrink: 0; align-self: flex-start;
+  border: 1px solid #e5e6eb; border-radius: 10px; background: #fff;
+  padding: 10px; position: sticky; top: 76px;
+}
+.kg-main { flex: 1; min-width: 0; }
+
+/* 左侧:标题行 + 库列表 */
+.kg-side-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 2px 4px 8px; border-bottom: 1px solid #eef1f5; margin-bottom: 6px;
+}
+.kg-side-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #1f2329; }
+.kg-side-icon { color: #2f54eb; font-size: 15px; }
+.kg-side-list { max-height: calc(100vh - 220px); overflow-y: auto; }
+.kg-side-tip { padding: 16px 4px; text-align: center; color: #94a3b8; font-size: 12.5px; }
+
+.kb-item {
+  border-radius: 8px; padding: 8px 10px; cursor: pointer;
+  transition: background 0.15s;
+}
+.kb-item:hover { background: #f2f6ff; }
+.kb-item.on { background: #eaf0ff; }
+.kb-item.on .kb-item-name { color: #3370ff; }
+.kb-item-name {
+  font-size: 13px; font-weight: 600; color: #1f2329;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kb-item-meta { font-size: 11.5px; color: #94a3b8; margin-top: 2px; }
+.kb-item-empty {
+  border: 1.5px dashed #c7d2fe; border-radius: 10px; padding: 18px 10px;
+  text-align: center; cursor: pointer; color: #9ca3af; font-size: 12.5px; line-height: 1.7;
+  background: #fafbff; transition: border-color 0.15s, background 0.15s;
+}
+.kb-item-empty:hover { border-color: #2f54eb; background: #f5f7ff; color: #2f54eb; }
+.kb-item-empty-icon { font-size: 16px; color: #2f54eb; margin-bottom: 4px; }
+
+/* 右侧:信息条(含原工作条拆解出的删除/刷新) */
 .kg-info {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
   border: 1px solid #eef1f7; border-radius: 10px; padding: 8px 16px;
@@ -239,14 +280,15 @@ async function doDeleteCurrent() {
 .kg-info-stats { margin-left: auto; display: flex; gap: 16px; }
 .kg-info-stats span { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 4px; }
 .kg-info-stats b { color: #1f2937; font-size: 14px; }
+.kg-info-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
+/* 右侧空态:无库/未选中提示(创建引导在左侧列表) */
 .kg-empty {
-  border: 1.5px dashed #c7d2fe; border-radius: 12px; padding: 46px 20px; text-align: center;
-  cursor: pointer; background: #fafbff; transition: border-color 0.15s, background 0.15s;
+  border: 1.5px dashed #dcdfe6; border-radius: 12px; padding: 60px 20px; text-align: center;
+  background: #fafbfc;
 }
-.kg-empty:hover { border-color: #2f54eb; background: #f5f7ff; }
-.kg-empty-icon { font-size: 30px; color: #2f54eb; }
-.kg-empty-title { font-weight: 700; font-size: 15px; color: #1f2937; margin-top: 8px; }
+.kg-empty-icon { font-size: 30px; color: #c9cdd4; }
+.kg-empty-title { font-weight: 700; font-size: 15px; color: #4e5969; margin-top: 8px; }
 .kg-empty-sub { font-size: 12.5px; color: #9ca3af; margin-top: 4px; }
 
 .kg-templates { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
