@@ -420,6 +420,57 @@ export async function saveDisplaySettings(
   return data
 }
 
+// ── 模型单价与费用观测(P2#13) ────────────────────────────
+
+/** 单价条目(元/千 token);键名与后端 platform_settings 契约对齐 */
+export interface ModelPricingEntry {
+  input_per_1k: number
+  output_per_1k: number
+}
+
+/** 单价表:{models: {模型名: 单价}}(与 GET/PUT /api/admin/settings/model-pricing 契约一致) */
+export interface ModelPricingPayload {
+  models: Record<string, ModelPricingEntry>
+}
+
+/** 读模型单价表(未配置时 models 为空对象,费用聚合端点据此 cost=null)。 */
+export async function fetchModelPricing(): Promise<ModelPricingPayload> {
+  const { data } = await adminApi.get<ModelPricingPayload>('/settings/model-pricing')
+  return data
+}
+
+/** 保存模型单价表(PUT 语义:提交即全量替换;校验失败后端 422 整体拒绝)。 */
+export async function saveModelPricing(models: Record<string, ModelPricingEntry>): Promise<ModelPricingPayload> {
+  const { data } = await adminApi.put<ModelPricingPayload>('/settings/model-pricing', { models })
+  return data
+}
+
+/** 费用聚合行:按 pack/stage/天分组(后端 get_cost_summary 契约,snake_case) */
+export interface CostSummaryItem {
+  pack: string
+  stage: string
+  /** UTC 日期(YYYY-MM-DD) */
+  day: string
+  calls: number
+  tokens_in: number
+  tokens_out: number
+  /** 该组费用(元);组内模型均无单价时为 null(不计入 total_cost) */
+  cost: number | null
+}
+
+export interface CostSummary {
+  items: CostSummaryItem[]
+  /** 窗口内有价模型费用合计(元) */
+  total_cost: number
+  days: number
+}
+
+/** 近 N 天 LLM 费用聚合(默认 7 天;单价未配的模型 cost=null)。 */
+export async function fetchCostSummary(days = 7): Promise<CostSummary> {
+  const { data } = await adminApi.get<CostSummary>('/costs/summary', { params: { days } })
+  return data
+}
+
 // ── 任务中心 ─────────────────────────────────────────────
 
 export type TaskStatus =

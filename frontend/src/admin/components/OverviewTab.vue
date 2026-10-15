@@ -71,28 +71,65 @@
           <div class="ov-extra">引擎自动 + 插件上报</div>
         </div>
       </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background: #fefce8; color: #ca8a04"><DollarOutlined /></div>
+        <div class="ov-body">
+          <div class="ov-value">¥{{ totalCostText }}</div>
+          <div class="ov-label">近 7 天 LLM 费用</div>
+          <div class="ov-extra ov-ellipsis" :title="costExtra">{{ costExtra }}</div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-// 概览:图标化统计卡片,数据结构与 backend get_admin_stats 对齐。
-import { inject, onMounted, ref } from 'vue'
+// 概览:图标化统计卡片,数据结构与 backend get_admin_stats / get_cost_summary 对齐。
+import { computed, inject, onMounted, ref } from 'vue'
 import {
   MessageOutlined, CommentOutlined, RobotOutlined, CloudServerOutlined,
-  AppstoreOutlined, NodeIndexOutlined, DatabaseOutlined,
+  AppstoreOutlined, NodeIndexOutlined, DatabaseOutlined, DollarOutlined,
 } from '@ant-design/icons-vue'
-import { AdminStats, fetchStats, fmtTime } from '../api'
+import { AdminStats, CostSummary, fetchCostSummary, fetchStats, fmtTime } from '../api'
 import type { LoadSafely } from './loadSafely'
 
 const stats = ref<AdminStats | null>(null)
+const costSummary = ref<CostSummary | null>(null)
 const loading = ref(false)
 const loadSafely = inject<LoadSafely>('loadSafely')!
+
+// 近 7 天总费用(有价模型合计;未配单价时为 0,extra 提示补配)
+const totalCostText = computed(() =>
+  (costSummary.value?.total_cost ?? 0).toFixed(2))
+
+// 按 pack 汇总的费用小列表(取前 3,超长省略;title 悬停看全量)
+const byPack = computed(() => {
+  const m = new Map<string, number>()
+  for (const it of costSummary.value?.items ?? []) {
+    if (it.cost == null) continue
+    const key = it.pack || '(无归属)'
+    m.set(key, (m.get(key) ?? 0) + it.cost)
+  }
+  return [...m.entries()].sort((a, b) => b[1] - a[1])
+})
+
+const costExtra = computed(() => {
+  if (!costSummary.value) return ''
+  if (!costSummary.value.items.length) return '近 7 天无 LLM 调用'
+  if (!byPack.value.length) return '未配置模型单价(费用显示为 0)'
+  return byPack.value.slice(0, 3)
+    .map(([pack, cost]) => `${pack} ¥${cost.toFixed(2)}`)
+    .join(' · ')
+})
 
 async function load() {
   loading.value = true
   await loadSafely(async () => {
     stats.value = await fetchStats()
+    // 费用卡片独立拉取:单价未配/聚合失败不拖垮概览主统计
+    try {
+      costSummary.value = await fetchCostSummary(7)
+    } catch { /* 费用卡片缺数据不影响其他卡片 */ }
   })
   loading.value = false
 }
@@ -123,4 +160,5 @@ onMounted(load)
 .ov-dim { font-size: 14px; color: #9ca3af; font-weight: 500; }
 .ov-label { font-size: 13px; color: #4b5563; margin-top: 3px; }
 .ov-extra { font-size: 11px; color: #9ca3af; margin-top: 2px; }
+.ov-ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
 </style>
