@@ -67,11 +67,24 @@
             <RobotOutlined />
           </div>
           <div class="msg-body">
+            <!-- P2#15 失败诊断卡:错误消息渲染为可定位/可查链路/可重试的卡片
+                 (替代裸文本;失败环节分类+本轮链路入口+重发上一问) -->
+            <div v-if="msg.kind === 'error-diag'" class="diag-card">
+              <div class="diag-head">
+                <CloseCircleOutlined class="diag-icon" />
+                <span class="diag-title">{{ errorCategoryLabel(msg.errorCategory) }}</span>
+              </div>
+              <div class="diag-detail">{{ msg.content }}</div>
+              <div class="diag-actions">
+                <a @click="openTraceForMessage(i)"><NodeIndexOutlined /> 查看本轮链路</a>
+                <a class="diag-retry" @click="retryLastQuestion(i)"><RollbackOutlined /> 重试</a>
+              </div>
+            </div>
             <!-- 助手消息按 Markdown 渲染(知识图谱回答含列表/加粗/代码等);
                  用户消息保持纯文本插值(防 v-html 注入)。
                  @click 事件委托:[片段N] 徽标是 v-html 注入的纯 DOM,无法逐个
                  绑监听——容器统一接 click,onMdRefClick 按 class 识别徽标 -->
-            <div v-if="msg.role === 'assistant'" class="msg-text md-content" v-html="renderMarkdown(msg.content)" @click="onMdRefClick"></div>
+            <div v-else-if="msg.role === 'assistant'" class="msg-text md-content" v-html="renderMarkdown(msg.content)" @click="onMdRefClick"></div>
             <div v-else class="msg-text">{{ msg.content }}</div>
             
             <!-- ===== 追问卡片：当消息需要用户补充信息时显示 ===== -->
@@ -312,7 +325,7 @@
 import { ref, computed, watch, nextTick, onMounted } from 'vue'
 // 图标组件（ant-design-vue 图标库，按需引入以减小打包体积）
 import {
-  UserOutlined, FormOutlined, TableOutlined, CheckOutlined,
+  UserOutlined, FormOutlined, TableOutlined, CheckOutlined, CloseCircleOutlined,
   CheckCircleOutlined, EyeOutlined, QuestionCircleOutlined,
   CopyOutlined, RollbackOutlined,
   ContactsOutlined,
@@ -604,6 +617,34 @@ function openTurnTrace(msgIndex: number) {
   traceTurnIndex.value = Math.max(0, userCount - 1)
   traceTitle.value = (store.messages[msgIndex]?.content || '').slice(0, 24)
   traceVisible.value = true
+}
+
+// ── P2#15 失败诊断卡 ──
+/** 失败环节分类 → 用户可读标签(哪坏了的第一答案) */
+function errorCategoryLabel(cat?: string): string {
+  switch (cat) {
+    case 'llm-upstream': return 'LLM 上游服务故障'
+    case 'retrieval': return '检索链路故障'
+    case 'execution': return '查询执行失败'
+    default: return '请求处理失败'
+  }
+}
+
+/** 诊断卡「查看本轮链路」:复用 openTurnTrace(轮次口径一致) */
+function openTraceForMessage(msgIndex: number) {
+  openTurnTrace(msgIndex)
+}
+
+/** 诊断卡「重试」:重发该失败轮的上一条 user 消息(失败卡自身不入历史重发) */
+function retryLastQuestion(msgIndex: number) {
+  for (let k = msgIndex - 1; k >= 0; k--) {
+    const m = store.messages[k]
+    if (m?.role === 'user' && m.kind !== 'error-diag') {
+      store.sendMessage(m.content)
+      return
+    }
+  }
+  antdMessage.warning('未找到可重试的问题')
 }
 
 function showJsonViewer(data: FormConfig | Record<string, any>) {  // 存对象：变更视图在 JsonDiffView 内做序列化 + 行级 diff
@@ -1443,4 +1484,21 @@ watch(() => store.currentConversation?.id, (convId) => {
   min-height: 0;
   border-top: 1px solid var(--border-color-light);
 }
+
+/* P2#15 失败诊断卡 */
+.diag-card {
+  border: 1px solid #fecaca; background: #fef2f2;
+  border-radius: 10px; padding: 10px 14px; max-width: 560px;
+}
+.diag-head { display: flex; align-items: center; gap: 6px; }
+.diag-icon { color: #dc2626; font-size: 16px; }
+.diag-title { font-weight: 600; color: #991b1b; font-size: 13.5px; }
+.diag-detail {
+  color: #7f1d1d; font-size: 12.5px; margin-top: 6px;
+  white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto;
+}
+.diag-actions { margin-top: 8px; display: flex; gap: 14px; }
+.diag-actions a { color: #2f54eb; font-size: 12.5px; cursor: pointer; }
+.diag-actions a:hover { text-decoration: underline; }
+.diag-retry { color: #16a34a !important; }
 </style>

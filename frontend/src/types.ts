@@ -57,6 +57,9 @@ export interface Message {
   dataResult?: Record<string, any>     // artifactType='data' 时的结构化数据（非配置类结果）
   needsClarification?: boolean         // 是否需要用户追问澄清（后端无法直接生成时置 true）
   clarificationQuestions?: ClarificationQuestion[]  // 后端 AskQuestion 对象(非纯字符串)
+  // P2#15 失败诊断卡:错误消息的失败环节分类(llm-upstream/retrieval/execution/unknown)
+  kind?: 'error-diag'
+  errorCategory?: string
   createdAt?: string                   // 创建时间（字符串形式的 ISO 时间）
 }
 

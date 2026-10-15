@@ -401,9 +401,15 @@ export const useConversationStore = defineStore('conversation', () => {
           // 异步刷新侧边会话列表（标题可能更新）
           loadConversations()
         },
-        // 出错回调：插入一条错误提示消息
+        // 出错回调：插入诊断卡消息(P2#15——失败可定位环节+可查链路+可重试,
+        // 不再是一行裸文本;分类从错误文本关键词推断,兜底"未知环节")
         onError: (err) => {
-          messages.value.push({ role: 'assistant', content: `错误: ${err}` })
+          messages.value.push({
+            role: 'assistant',
+            content: `错误: ${err}`,
+            kind: 'error-diag',
+            errorCategory: classifyError(err),
+          })
           stageMessage.value = ''
           currentStage.value = ''
         },
@@ -414,7 +420,12 @@ export const useConversationStore = defineStore('conversation', () => {
         },
       }, clarifyAnswers, imageBase64, embedCtx ?? localCtx)
     } catch (e: any) {  // e: any —— 捕获任意异常并当作 any 处理（才能访问 .message）
-      messages.value.push({ role: 'assistant', content: `请求失败: ${e.message}` })
+      messages.value.push({
+        role: 'assistant',
+        content: `请求失败: ${e.message}`,
+        kind: 'error-diag',
+        errorCategory: classifyError(e.message || ''),
+      })
     } finally {
       // 无论成功失败，都结束流式状态
       streaming.value = false
@@ -422,6 +433,24 @@ export const useConversationStore = defineStore('conversation', () => {
       currentStage.value = ''
     }
   }
+
+// P2#15 失败诊断:错误文本 → 失败环节分类(给用户"哪坏了"的第一答案)
+function classifyError(err: string): string {
+  const t = (err || '').toLowerCase()
+  if (t.includes('llm') || t.includes('chat') || t.includes('completion')
+      || t.includes('500') || t.includes('502') || t.includes('timeout')
+      || t.includes('connection') || t.includes('embed')) {
+    return 'llm-upstream'
+  }
+  if (t.includes('milvus') || t.includes('neo4j') || t.includes('vector')
+      || t.includes('graph') || t.includes('检索')) {
+    return 'retrieval'
+  }
+  if (t.includes('sql') || t.includes('数据库') || t.includes('执行')) {
+    return 'execution'
+  }
+  return 'unknown'
+}
 
   // 返回对外暴露的状态/派生值/动作。
   // 注意：return 后这些 ref/computed 就成为 store 的公共 API，
