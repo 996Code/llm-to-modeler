@@ -56,6 +56,8 @@ class KGStore:
             embedding_model TEXT DEFAULT '',
             vector_dim INTEGER,
             vector_enabled INTEGER DEFAULT 1,  -- 本地 bge-m3 定死能力,默认启用(10-15 裁决)
+            kind TEXT DEFAULT 'kb',         -- kb(默认,存量兼容) | folder(目录,分组用)
+            parent_id TEXT,                -- 层级树:NULL=顶层;指向 folder id(10-15 用户需求)
             status TEXT DEFAULT 'active',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -93,6 +95,15 @@ class KGStore:
 
     def _init_db(self):
         self.db.init_schema(self._DDL)
+        # 层级树列迁移(10-15 用户需求:左侧树):存量表无 kind/parent_id
+        try:
+            with self._get_conn() as conn:
+                conn.execute("ALTER TABLE kg_knowledge_bases "
+                             "ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'kb'")
+                conn.execute("ALTER TABLE kg_knowledge_bases "
+                             "ADD COLUMN IF NOT EXISTS parent_id TEXT")
+        except Exception as e:
+            logger.warning(f"层级树列迁移失败(不影响启动,下次重试): {e}")
         # 一次性迁移:存量"未决"库(vector_enabled=0 且无 embedding_model
         # 记录——曾因探测失败落 0)翻转为启用——本地 bge-m3 定死能力。
         # 模型变更显式关闭的库(0 且有模型记录)不动:那是向量兼容性保护态。
@@ -114,20 +125,75 @@ class KGStore:
         description: str = "",
         schema_json: Optional[Dict] = None,
         schema_template: str = "",
+        kind: str = "kb",
+        parent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
+        if kind not in ("kb", "folder"):
+            raise ValueError(f"kind 须为 kb|folder,实际: {kind}")
+        if parent_id:
+            parent = self.get_kb(parent_id)
+            if not parent:
+                raise ValueError(f"父节点不存在: {parent_id}")
+            if parent.get("kind") != "folder":
+                raise ValueError("parent 必须是 folder(目录),不能挂在知识库下")
         kb_id = str(uuid.uuid4())
         now = _now()
         with self._get_conn() as conn:
             conn.execute(
                 """INSERT INTO kg_knowledge_bases
                    (id, name, description, schema_json, schema_template,
-                    vector_enabled, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
+                    vector_enabled, kind, parent_id, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (kb_id, name, description,
                  json.dumps(schema_json, ensure_ascii=False) if schema_json else None,
-                 schema_template, now, now),
+                 schema_template, 1 if kind == "kb" else 0,
+                 kind, parent_id, now, now),
             )
         return self.get_kb(kb_id)
+
+    def list_kb_tree(self) -> List[Dict[str, Any]]:
+        """层级树(10-15 用户需求):顶层(含目录与散库)在前,目录下挂 children。
+
+        folder 不带文档统计(它不存文档);kb 带 docCount/entityTotal。
+        排序:folder 先于 kb,同级按名称。
+        """
+        flat = self.list_kbs()
+        by_parent: Dict[Optional[str], List[Dict[str, Any]]] = {}
+        for item in flat:
+            by_parent.setdefault(item.get("parentId"), []).append(item)
+        def build(parent_id: Optional[str]) -> List[Dict[str, Any]]:
+            kids = by_parent.get(parent_id, [])
+            kids.sort(key=lambda x: (0 if x.get("kind") == "folder" else 1, x["name"]))
+            for k in kids:
+                k["children"] = build(k["id"]) if k.get("kind") == "folder" else []
+            return kids
+        return build(None)
+
+    def move_kb(self, kb_id: str, parent_id: Optional[str]) -> bool:
+        """移动节点(换父/提顶层)。环防护:新父链上不得包含自身。"""
+        node = self.get_kb(kb_id)
+        if not node:
+            return False
+        if parent_id:
+            parent = self.get_kb(parent_id)
+            if not parent:
+                raise ValueError(f"父节点不存在: {parent_id}")
+            if parent.get("kind") != "folder":
+                raise ValueError("parent 必须是 folder(目录)")
+            # 环检测:沿 parent 链上溯,链上任一节点是自身即环
+            # (f2 的祖先是 f1;把 f1 移到 f2 下 = f1 成了自己的祖先)
+            hop, guard = parent, 0
+            while hop is not None and guard < 100:
+                if hop["id"] == kb_id:
+                    raise ValueError("形成环(cycle):不能把目录移到自己的子树下")
+                pid = hop.get("parentId")
+                hop = self.get_kb(pid) if pid else None
+                guard += 1
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE kg_knowledge_bases SET parent_id = ?, updated_at = ? "
+                "WHERE id = ?", (parent_id, _now(), kb_id))
+            return cur.rowcount > 0
 
     def get_kb(self, kb_id: str) -> Optional[Dict[str, Any]]:
         with self._get_conn() as conn:
@@ -217,6 +283,9 @@ class KGStore:
             "embeddingModel": d.get("embedding_model") or "",
             "vectorDim": d.get("vector_dim"),
             "vectorEnabled": bool(d.get("vector_enabled")),
+            # 层级树(10-15):kind=kb|folder;parentId 指向 folder(顶层为 None)
+            "kind": d.get("kind") or "kb",
+            "parentId": d.get("parent_id"),
             "status": d.get("status") or "active",
             "createdAt": d["created_at"], "updatedAt": d["updated_at"],
         }
