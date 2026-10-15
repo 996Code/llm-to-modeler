@@ -146,11 +146,13 @@ def _init_schema():
     """会话级建表(四 Store DDL + checkpoint 三表,幂等执行一次,早于首个测试)。"""
     from services.conversation_store import ConversationStore
     from services.pack_settings import PackSettingsStore
+    from services.platform_settings import PlatformSettingsStore
     from services.task_store import TaskStore
     from domains.knowledge_graph.store import KGStore
 
     ConversationStore()
     PackSettingsStore()
+    PlatformSettingsStore()
     TaskStore()
     KGStore()
     # LangGraph checkpoint 三表(PostgresSaver.setup 幂等;清表依赖其存在)

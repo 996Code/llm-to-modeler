@@ -20,7 +20,34 @@
         </button>
       </nav>
       <div class="shell-actions">
-        <a-badge status="processing" text="服务运行中" />
+        <!-- 服务运行中徽标 hover 弹「系统配置」面板:平台级显示设置
+             (独立/嵌入对话页共读;配置入口只在管理界面,对话界面不支持配置) -->
+        <a-popover trigger="hover" placement="bottomRight" overlay-class-name="sys-config-popover">
+          <template #title>系统配置</template>
+          <template #content>
+            <div class="sys-config-panel">
+              <!-- 开关 1:对话时的链路/路径/思考信息 -->
+              <div class="config-row">
+                <div class="config-text">
+                  <div class="config-label">显示链路与思考信息</div>
+                  <div class="config-desc">关闭后对话仅显示「正在处理…」与最终结果(独立/嵌入对话页生效)</div>
+                </div>
+                <a-switch size="small" :checked="displaySettings.showPipeline"
+                          @change="(v: boolean | string | number) => saveDisplay('showPipeline', !!v)" />
+              </div>
+              <!-- 开关 2:对话界面的检索结果 -->
+              <div class="config-row">
+                <div class="config-text">
+                  <div class="config-label">显示检索结果</div>
+                  <div class="config-desc">关闭后对话中不显示知识图谱检索结果卡</div>
+                </div>
+                <a-switch size="small" :checked="displaySettings.showRetrieval"
+                          @change="(v: boolean | string | number) => saveDisplay('showRetrieval', !!v)" />
+              </div>
+            </div>
+          </template>
+          <a-badge status="processing" text="服务运行中" />
+        </a-popover>
         <a-button size="small" ghost @click="doLogout">退出</a-button>
       </div>
     </header>
@@ -56,7 +83,10 @@ import CallLogsTab from './components/CallLogsTab.vue'
 import TasksTab from './components/TasksTab.vue'
 import PacksTab from './components/PacksTab.vue'
 import { hasPackPage, packPageRegistry } from './packPages/registry'
-import { apiErrorMessage, fetchPacks, UnauthorizedError } from './api'
+import {
+  apiErrorMessage, fetchDisplaySettings, fetchPacks, saveDisplaySettings,
+  UnauthorizedError,
+} from './api'
 
 const tab = ref('overview')
 
@@ -116,8 +146,32 @@ function doLogout() {
   window.location.href = '/ai-modeler/auth.html?page=admin'
 }
 
+// ── 平台级显示设置(右上角徽标 hover 面板) ──────────────────────
+// 独立/嵌入对话页经用户级端点 GET /api/settings/display 共读这一份配置;
+// 默认两开关全开(与后端默认值同口径),挂载后拉服务端真实值。
+const displaySettings = ref<{ showPipeline: boolean; showRetrieval: boolean }>({
+  showPipeline: true,
+  showRetrieval: true,
+})
+
+/** 切开关 → PUT 落库(乐观更新,失败回滚并提示)。 */
+async function saveDisplay(key: 'showPipeline' | 'showRetrieval', value: boolean) {
+  const prev = { ...displaySettings.value }
+  displaySettings.value = { ...displaySettings.value, [key]: value }
+  try {
+    displaySettings.value = await saveDisplaySettings({ [key]: value })
+  } catch (e) {
+    displaySettings.value = prev
+    if (e instanceof UnauthorizedError) { onAuthFail(); return }
+    message.error(apiErrorMessage(e))
+  }
+}
+
 onMounted(async () => {
   loadPackPages()
+  try {
+    displaySettings.value = await fetchDisplaySettings()
+  } catch { /* 拉取失败保持默认值;面板开关仍可切(切时再落库) */ }
 })
 </script>
 
@@ -209,6 +263,50 @@ onMounted(async () => {
   align-items: center;
   gap: 16px;
   flex-shrink: 0;
+}
+/* 徽标 hover 目标:扩大热区,让 popover 稳定触发 */
+.shell-actions :deep(.ant-badge) {
+  cursor: default;
+  padding: 2px 4px;
+  border-radius: 6px;
+  transition: background 0.2s;
+}
+.shell-actions :deep(.ant-badge:hover) {
+  background: #f2f6ff;
+}
+
+/* ===== 系统配置面板(popover content) ===== */
+.sys-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 260px;
+}
+.config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 4px;
+}
+.config-row + .config-row {
+  border-top: 1px solid #f0f0f0;
+}
+.config-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.config-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1f2329;
+}
+.config-desc {
+  font-size: 12px;
+  color: #86909c;
+  line-height: 1.4;
 }
 .shell-main {
   max-width: 1400px;

@@ -361,8 +361,9 @@ import JsonDiffView from '../json/JsonDiffView.vue'
 import TurnTraceModal from './TurnTraceModal.vue'
 // HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage
 import { getHostPort } from '../../composables/hostPort'
-// 系统配置单例：showPipeline(链路思考显示)/showRetrieval(检索结果显示)两开关
-import { useSysConfig } from '../../composables/sysConfig'
+// 系统配置只读单例：showPipeline(链路思考显示)/showRetrieval(检索结果显示)
+// 两开关——数据源是后端平台级设置(管理界面配置,独立/嵌入对话共读)
+import { useSysConfig, refresh as refreshSysConfig } from '../../composables/sysConfig'
 import { getPackManifests } from '../../services/api'
 // Markdown 渲染(marked 解析 + DOMPurify 消毒防 XSS)
 import { marked } from 'marked'
@@ -475,7 +476,7 @@ defineProps<{ embedded?: boolean }>()
 const store = useConversationStore()
 // HostPort 单例：能力决定按钮是否可用（宿主无 apply → 自动退化复制 JSON）
 const port = getHostPort()
-// 系统配置（响应式单例）：右上角服务状态 hover 面板里的两个显示开关
+// 系统配置（响应式只读单例）：管理界面配置的两个显示开关，独立/嵌入对话共读
 const sysConfig = useSysConfig()
 
 // pack 的展示声明（data_labels/data_hidden/welcome_examples）——领域词住 manifest，
@@ -486,6 +487,9 @@ const packArtifactType = ref<string | undefined>(undefined)
 // 交互不同，按钮由声明驱动而非组件硬编码
 const packActions = ref<string[]>(['view_json'])
 onMounted(async () => {
+  // 挂载时从服务端刷新系统配置（管理端改了显示开关，新会话/刷新即生效；
+  // 失败回退 localStorage 缓存再回退默认，见 sysConfig composable）
+  refreshSysConfig()
   try {
     const manifests = await getPackManifests()
     // 主交互 pack：优先声明了 artifact.display 的（制品卡标签/动作取自它）

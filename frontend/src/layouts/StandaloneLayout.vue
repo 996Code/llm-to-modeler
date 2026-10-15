@@ -61,12 +61,6 @@
 
     <!-- 中间聊天主区域 -->
     <div class="main-area">
-      <!-- 顶部状态栏：右上角服务状态徽标，hover 弹系统配置（两开关） -->
-      <div class="main-header">
-        <div class="shell-actions">
-          <ServiceStatusBadge />
-        </div>
-      </div>
       <ChatPanel />
     </div>
 
@@ -85,8 +79,6 @@ import { useConversationStore } from '../stores/conversation'
 // 导入两个子组件（.vue 后缀可省略）
 import ChatPanel from '../components/chat/ChatPanel.vue'
 import ResultPanel from '../components/json/ResultPanel.vue'
-// 服务状态徽标：右上角 hover 弹系统配置（链路思考显示/检索结果显示两开关）
-import ServiceStatusBadge from '../components/ServiceStatusBadge.vue'
 
 // 实例化 store，模板里即可通过 store.xxx 访问状态/动作
 const store = useConversationStore()
@@ -181,21 +173,6 @@ const store = useConversationStore()
   flex-direction: column;
   min-width: 0;
   background: var(--bg-page);
-}
-/* 顶部状态栏：右对齐放服务状态徽标（样式参照管理端 shell-actions） */
-.main-header {
-  flex-shrink: 0;
-  display: flex;
-  justify-content: flex-end;
-  padding: 8px 16px;
-  background: var(--bg-container);
-  border-bottom: 1px solid var(--border-color-lighter);
-}
-.shell-actions {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-shrink: 0;
 }
 .json-area {
   width: 40%;

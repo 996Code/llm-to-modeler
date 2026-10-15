@@ -79,21 +79,24 @@ api.interceptors.response.use(
   }
 )
 
-// ── 健康检查 ────────────────────────────────────────────────────
+// ── 系统显示设置（用户级只读） ─────────────────────────────────
+
+/** 显示设置形状（与后端 GET /api/settings/display 响应对齐） */
+export interface DisplaySettings {
+  /** 对话时显示链路/路径/思考信息 */
+  showPipeline: boolean
+  /** 对话界面显示检索结果 */
+  showRetrieval: boolean
+}
 
 /**
- * 服务健康检查（GET /api/health，后端在鉴权白名单内，无需 token）。
- * 供聊天页右上角服务状态徽标探测：true=服务正常（绿点），false=服务异常（红点）。
- * 用原生 fetch 而非 axios 实例：健康探测要的是「连没连上」，503/网络错误
- * 都归为异常即可，不需要走 401 跳转等业务拦截逻辑。
+ * 读平台级显示设置（GET /api/settings/display，用户级端点，无 admin 门）。
+ * 独立对话页与嵌入对话页共读；配置入口在管理界面（对话界面不支持配置）。
+ * 失败由调用方兜底（sysConfig composable 回退 localStorage 缓存再回退默认）。
  */
-export async function checkHealth(): Promise<boolean> {
-  try {
-    const r = await fetch(`${API_BASE}/health`)
-    return r.ok
-  } catch {
-    return false
-  }
+export async function fetchDisplaySettings(): Promise<DisplaySettings> {
+  const { data } = await api.get('/settings/display')
+  return data
 }
 
 // ── 会话（Conversation）相关 REST 接口 ──────────────────────────

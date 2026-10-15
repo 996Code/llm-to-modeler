@@ -26,9 +26,6 @@
         </div>
       </div>
       <div class="header-actions">
-        <!-- 服务状态徽标：hover 弹系统配置（链路思考显示/检索结果显示两开关）。
-             与管理端 shell-actions 同款 a-badge，两布局共享同一份配置状态 -->
-        <ServiceStatusBadge />
         <!-- 历史对话（右上角图标入口）：嵌入布局无侧栏，这是用户翻自己
              历史会话的唯一入口。列表按当前用户隔离（X-User-Id=宿主下发
              userId），点选后覆盖当前对话继续沟通（有确认提示防误触） -->
@@ -105,8 +102,6 @@ import { listConversations } from '../services/api'
 import type { Conversation } from '../types'
 // 子组件：聊天主面板（带 :embedded="true" 会让它显示「应用」按钮）
 import ChatPanel from '../components/chat/ChatPanel.vue'
-// 服务状态徽标：右上角 hover 弹系统配置（链路思考显示/检索结果显示两开关）
-import ServiceStatusBadge from '../components/ServiceStatusBadge.vue'
 
 // HostPort 单例（嵌入态 = PostMessageHostPort）
 const port = getHostPort()
@@ -234,7 +229,7 @@ function relativeTime(iso?: string): string {
 .header-text { display: flex; flex-direction: column; line-height: 1.3; }
 .title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
 .subtitle { font-size: 11px; color: var(--text-secondary); }
-.header-actions { display: flex; align-items: center; gap: 8px; }
+.header-actions { display: flex; gap: 4px; }
 
 /* 历史对话入口（右上角图标，与 新对话/关闭 同组） */
 .history-btn { color: var(--text-secondary); }

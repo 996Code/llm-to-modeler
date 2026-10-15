@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from src.api.admin import router as admin_router
 from src.api.conversations import router as conversations_router
+from src.api.settings import router as settings_router
 from src.services.conversation_store import ConversationStore
 from src.services.pack_state import PackState
 
@@ -29,6 +30,7 @@ def client(tmp_path, monkeypatch):
     app = FastAPI()
     app.include_router(admin_router)
     app.include_router(conversations_router)
+    app.include_router(settings_router)
 
     store = ConversationStore(str(tmp_path / "conversations.db"))
     app.state.conversation_store = store
@@ -437,3 +439,60 @@ def test_admin_username_with_token_reads_any_conversation(client):
     # 带 token → 200
     resp = client.get(f"/api/conversations/{conv_a['id']}", headers={"X-User-Id": "admin", **_auth_headers()})
     assert resp.status_code == 200
+
+
+# ── 平台级显示设置(管理端配置 + 用户级读取) ─────────────────
+
+def test_admin_display_settings_requires_token(client):
+    """admin 门:无口令/错口令读显示设置 → 401(与 stats 等管理端点同门)。"""
+    assert client.get("/api/admin/settings/display").status_code == 401
+    assert client.get("/api/admin/settings/display",
+                      headers={"X-Admin-Token": "wrong"}).status_code == 401
+    assert client.put("/api/admin/settings/display", json={}).status_code == 401
+
+
+def test_display_settings_defaults(client):
+    """默认值:两开关全开;用户级端点(无 admin 门)与管理端读到的口径一致。"""
+    resp = client.get("/api/admin/settings/display", headers=_auth_headers())
+    assert resp.status_code == 200
+    assert resp.json() == {"show_pipeline": True, "show_retrieval": True}
+    # 用户级读取(聊天页/嵌入页用,不带管理口令)
+    resp = client.get("/api/settings/display")
+    assert resp.status_code == 200
+    assert resp.json() == {"show_pipeline": True, "show_retrieval": True}
+
+
+def test_display_settings_roundtrip(client):
+    """读写往返:管理端 PUT 落库 → 管理端 GET 与用户级 GET 都看到新值。"""
+    resp = client.put("/api/admin/settings/display", headers=_auth_headers(),
+                      json={"show_pipeline": False, "show_retrieval": False})
+    assert resp.status_code == 200
+    assert resp.json() == {"show_pipeline": False, "show_retrieval": False}
+    # 管理端读回
+    assert client.get("/api/admin/settings/display",
+                      headers=_auth_headers()).json() == {
+        "show_pipeline": False, "show_retrieval": False}
+    # 用户级读回(独立/嵌入对话页共读这一个端点)
+    assert client.get("/api/settings/display").json() == {
+        "show_pipeline": False, "show_retrieval": False}
+
+
+def test_display_settings_partial_update(client):
+    """部分更新:只提交要改的键,未提交键保持原值(与 pack settings 同语义)。"""
+    resp = client.put("/api/admin/settings/display", headers=_auth_headers(),
+                      json={"show_retrieval": False})
+    assert resp.status_code == 200
+    assert resp.json() == {"show_pipeline": True, "show_retrieval": False}
+
+
+def test_display_settings_validation(client):
+    """校验:非布尔值/未知键 → 422 整体拒绝(不落半截配置)。"""
+    resp = client.put("/api/admin/settings/display", headers=_auth_headers(),
+                      json={"show_pipeline": "yes"})
+    assert resp.status_code == 422
+    resp = client.put("/api/admin/settings/display", headers=_auth_headers(),
+                      json={"unknown_key": True})
+    assert resp.status_code == 422
+    # 拒绝后值未被污染
+    assert client.get("/api/settings/display").json() == {
+        "show_pipeline": True, "show_retrieval": True}
