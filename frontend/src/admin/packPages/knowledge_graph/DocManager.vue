@@ -11,7 +11,7 @@
       <p class="dm-upload-text">点击或拖拽文件到此处上传</p>
       <p class="dm-upload-hint">
         支持 md / txt / pdf / docx,单文件 ≤ {{ maxMb }}MB;同库同内容自动去重
-        <a-popover placement="bottom" trigger="click">
+        <a-popover placement="bottom" trigger="hover">
           <template #content>
             <div class="dm-chunk-pop">
               <div class="dm-chunk-pop-title">导入如何切块(结构感知)</div>
@@ -23,7 +23,7 @@
               </ul>
             </div>
           </template>
-          <a class="dm-chunk-link"><QuestionCircleOutlined /> 切块规则</a>
+          <a class="dm-chunk-link" @click.stop @mousemove.stop><QuestionCircleOutlined /> 切块规则</a>
         </a-popover>
       </p>
     </a-upload-dragger>
