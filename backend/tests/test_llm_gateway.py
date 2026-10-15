@@ -162,3 +162,55 @@ class TestEmbedCache:
         c.put("b", [[2]])
         c.put("c", [[3]])
         assert c.get("a") is None and c.get("c") == [[3]]
+
+
+class TestChatCache:
+
+    def test_disabled_by_default(self, monkeypatch):
+        """默认关:两次同参 chat 都出站。"""
+        monkeypatch.delenv("LLM_CACHE_ENABLED", raising=False)
+        client = LLMClient(config=None, conversation_store=_FakeStore())
+        n = []
+
+        class FakeChat:
+            def create(self, **kw):
+                n.append(1)
+                # 注:计划原 fixture 缺 choice.finish_reason(chat 成功路径
+                # 观测会读),补上让红落在"缓存未实现"而非替身报错
+                m = SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content="答", reasoning_content=None))],
+                    usage=None)
+                return m
+        monkeypatch.setattr(type(client.client.chat.completions),
+                            "create", lambda self, **kw: FakeChat().create(**kw))
+        r1 = client.chat([{"role": "user", "content": "q"}])
+        r2 = client.chat([{"role": "user", "content": "q"}])
+        assert r1 == r2 == "答" and len(n) == 2
+
+    def test_enabled_hits_cache(self, monkeypatch):
+        """开启:全同 messages+temperature 二次零出站;temperature 不同不命中。"""
+        monkeypatch.setenv("LLM_CACHE_ENABLED", "1")
+        client = LLMClient(config=None, conversation_store=_FakeStore())
+        n = []
+
+        class FakeChat:
+            def create(self, **kw):
+                n.append(1)
+                m = SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content="答", reasoning_content=None))],
+                    usage=None)
+                return m
+        fake = FakeChat()
+        monkeypatch.setattr(type(client.client.chat.completions),
+                            "create", lambda self, **kw: fake.create(**kw))
+        client.chat([{"role": "user", "content": "q"}], temperature=0.1)
+        client.chat([{"role": "user", "content": "q"}], temperature=0.1)
+        assert len(n) == 1, "全同参数二次应命中"
+        client.chat([{"role": "user", "content": "q"}], temperature=0.9)
+        assert len(n) == 2, "temperature 不同不得命中"

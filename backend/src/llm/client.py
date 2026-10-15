@@ -143,6 +143,12 @@ class LLMClient:
         self._embed_cache = EmbedCache(
             max_entries=int(os.getenv("EMBED_CACHE_MAX", "4096")))
 
+        # chat 结果缓存(P1#8 T3):独立实例,与嵌入缓存互不挤占,
+        # 参数同款(LRU 上限同源 EMBED_CACHE_MAX,TTL 24h)。
+        # 默认关(chat 混用途缓存错层风险,LLM_CACHE_ENABLED 显式开启)
+        self._chat_cache = EmbedCache(
+            max_entries=int(os.getenv("EMBED_CACHE_MAX", "4096")))
+
         if not config.api_key:
             # 没配 api_key 时只 warning 不抛异常：本地模型（LM Studio）常无需 key
             # 真正调用失败时由 SDK 抛错，这里给开发者一个提前提示
@@ -267,6 +273,40 @@ class LLMClient:
         """
         start_time = time.time()  # 计时起点，用于算 duration_ms
         endpoint = f"{self.config.base_url}/chat/completions"
+        # chat 结果缓存(P1#8 T3):LLM_CACHE_ENABLED 默认关——chat 是混用途
+        # 出口(路由/抽取/生成共用),缓存错层风险高,只对全同参数命中
+        # (messages 逐项 role/content + model 显式覆盖优先 + temperature)。
+        # 查在限速 acquire 之前:命中零出站,不应占 RPM/TPM 配额。
+        # 多模态 content(list)的 sig 构造可能失败——失败跳过缓存,
+        # 不阻断主链路(裁决:缓存是增强项,主链路永远直通)。
+        cache_key = None
+        if os.getenv("LLM_CACHE_ENABLED", "0").strip().lower() in (
+                "1", "true", "yes", "on") and messages:
+            try:
+                sig = json.dumps([[m.get("role"), m.get("content")]
+                                  for m in messages], ensure_ascii=False)
+                cache_key = embed_cache_key(
+                    model or self.config.model,
+                    "chat|t{}".format(
+                        self.config.temperature if temperature is None
+                        else temperature),
+                    [sig])
+            except (TypeError, ValueError):
+                # content 含不可序列化对象:放弃本次缓存,走原链路
+                cache_key = None
+            if cache_key is not None:
+                hit = self._chat_cache.get(cache_key)
+                if hit is not None:
+                    # 命中:零出站零等待——duration=0,单独记 cache 日志
+                    # (未命中路径仍走下方原观测,duration 真实)
+                    self._log_call(
+                        endpoint="chat:cache",
+                        request_data={
+                            "stage": stage, "cache_hit": True,
+                            "count": len(messages)},
+                        response_data={}, status_code=None, duration_ms=0,
+                        conv_id=conv_id)
+                    return hit
         # 全局限速:RPM/TPM 配额等待(未配置限额时零开销直通)。
         # 多模态 content(list)不计入估算——只按文本部分粗估已够防撞限额
         _est = estimate_tokens("".join(
@@ -353,6 +393,11 @@ class LLMClient:
                 conv_id=conv_id,
                 stage=stage,
             )
+
+            # 成功才回填 chat 缓存(异常/失败路径不缓存坏值);
+            # 未开启或 sig 构造失败时 cache_key=None,这里天然跳过
+            if cache_key is not None:
+                self._chat_cache.put(cache_key, result)
 
             return result
 
