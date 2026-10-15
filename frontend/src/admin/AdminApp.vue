@@ -211,10 +211,10 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 .shell-main {
-  max-width: 1400px;
+  max-width: 1760px;   /* 宽屏自适应:1400 在 2K+ 显示器两侧各留 ~580px 空白(用户 10-15 报"间距太大") */
   width: 100%;
   margin: 0 auto;
-  padding: 20px 24px;
+  padding: 16px 20px;
 }
 .page-card {
   background: #fff;

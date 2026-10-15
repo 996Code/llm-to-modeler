@@ -227,14 +227,14 @@ async function doDeleteCurrent() {
 </script>
 
 <style scoped>
-.kg-page { padding: 6px 2px 0; }
+.kg-page { padding: 0; }
 
 /* ── 左右分栏骨架 ─────────────────────────────── */
-.kg-split { display: flex; gap: 14px; align-items: stretch; }
+.kg-split { display: flex; gap: 12px; align-items: stretch; }
 .kg-side {
-  width: 260px; flex-shrink: 0; align-self: flex-start;
+  width: 232px; flex-shrink: 0; align-self: flex-start;
   border: 1px solid #e5e6eb; border-radius: 10px; background: #fff;
-  padding: 10px; position: sticky; top: 76px;
+  padding: 8px; position: sticky; top: 76px;
 }
 .kg-main { flex: 1; min-width: 0; }
 
