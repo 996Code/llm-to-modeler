@@ -254,6 +254,25 @@
                 <a-button size="small" type="link" @click.stop="showJsonViewer(msg.dataResult)">
                   <EyeOutlined /> 查看详情
                 </a-button>
+                <!-- P2#14 结果反馈: chatbi 数据卡底部点赞/点踩(datasource_id
+                     是 chatbi 制品特征, KG 检索卡不渲染);点击微调对应表/关系
+                     置信度, 开关 feedback_enabled 默认关(关时后端 422, 静默) -->
+                <span v-if="msg.dataResult?.datasource_id" class="fb-buttons">
+                  <button
+                    class="fb-btn" :class="{ active: msg.feedbackVote === 'up' }"
+                    title="结果有帮助, 提升相关表置信度"
+                    :disabled="msg.feedbackSending"
+                    @click.stop="sendResultFeedback(msg, 'up')">
+                    <LikeOutlined />
+                  </button>
+                  <button
+                    class="fb-btn" :class="{ active: msg.feedbackVote === 'down' }"
+                    title="结果不对, 下调相关表置信度"
+                    :disabled="msg.feedbackSending"
+                    @click.stop="sendResultFeedback(msg, 'down')">
+                    <DislikeOutlined />
+                  </button>
+                </span>
               </div>
             </div>
           </div>
@@ -340,11 +359,13 @@ import {
   ContactsOutlined,
   SearchOutlined, ShareAltOutlined, FileTextOutlined, ApartmentOutlined, RobotOutlined,
   AppstoreAddOutlined, DownloadOutlined, NodeIndexOutlined,
+  LikeOutlined, DislikeOutlined,
 } from '@ant-design/icons-vue'
 // Modal：ant-design-vue 的弹窗组件（模板里的 JSON 查看器）
 import { Modal, message as antdMessage } from 'ant-design-vue'
 // 单轮 trace 拉取(轮末给消息卡补 LLM 次数/token, 输入框累计对话 token)
-import { getConversationTrace } from '../../services/api'
+// + chatbi 结果反馈(P2#14 点赞/点踩)
+import { getConversationTrace, sendChatbiFeedback } from '../../services/api'
 // 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
 import { useConversationStore } from '../../stores/conversation'
 import { copyText } from '../../utils/clipboard'
@@ -570,6 +591,50 @@ async function exportQueryExcel(msg: any, index: number) {
     antdMessage.success('已导出 Excel')
   } catch (e: any) {
     antdMessage.error(`导出失败: ${e.message || '未知错误'}`)
+  }
+}
+
+// ── P2#14 结果反馈: chatbi 数据卡点赞/点踩 ──
+// 表集优先取本条消息制品的 current_tables(历史消息恢复后同样可用);
+// message_id 历史消息有 id, 流式新消息没有(后端按最近数据制品兜底)。
+// 成功轻提示; 失败静默(422=功能未启用是默认态, 不打扰; 其余错误轻提示)。
+async function sendResultFeedback(msg: any, vote: 'up' | 'down') {
+  if (msg.feedbackVote === vote || msg.feedbackSending) return
+  const convId = store.currentConversation?.id
+  if (!convId) {
+    antdMessage.warning('会话尚未保存, 暂无法反馈')
+    return
+  }
+  const art = msg.dataResult || {}
+  const tables: string[] = art.current_tables
+    || (art.table_provenance || []).map((t: any) => t.name)
+  msg.feedbackSending = true
+  try {
+    const r = await sendChatbiFeedback({
+      conversation_id: convId,
+      message_id: msg.id || undefined,
+      feedback: vote,
+      tables: tables.length ? tables : undefined,
+    })
+    msg.feedbackVote = vote
+    if (r.success && r.applied_tables?.length) {
+      antdMessage.success(vote === 'up'
+        ? `已反馈: ${r.applied_tables.join('、')} 置信度已提升`
+        : `已反馈: ${r.applied_tables.join('、')} 置信度已下调`)
+    } else {
+      antdMessage.success('已记录反馈')
+    }
+  } catch (e: any) {
+    const status = e?.response?.status
+    if (status === 422) {
+      // 反馈功能默认关(设置页 feedback_enabled)——静默, 不向终端用户
+      // 暴露服务端开关概念
+      console.debug('chatbi feedback disabled (feedback_enabled off)')
+    } else {
+      antdMessage.info('反馈未记录, 请稍后重试')
+    }
+  } finally {
+    msg.feedbackSending = false
   }
 }
 
@@ -1287,6 +1352,36 @@ watch(() => store.currentConversation?.id, (convId) => {
   display: flex;
   gap: 8px;
   padding: 0 16px 12px;
+}
+
+/* P2#14 结果反馈: 消息卡底部小图标按钮(常驻小图标, hover/选中高亮) */
+.fb-buttons {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+  align-items: center;
+}
+.fb-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  color: #b0b3b8;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 4px;
+  transition: color 0.2s, background 0.2s;
+}
+.fb-btn:hover:not(:disabled) {
+  color: #2f54eb;
+  background: #f0f5ff;
+}
+.fb-btn.active {
+  color: #2f54eb;
+}
+.fb-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* ===== 配置卡片样式（表单配置结果） ===== */

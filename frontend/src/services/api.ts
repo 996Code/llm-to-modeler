@@ -228,6 +228,29 @@ export async function getPackManifests(): Promise<PackManifest[]> {
   return _packCache
 }
 
+// ── chatbi 结果反馈(P2#14: 对话卡点赞/点踩 → 表/关系置信度微调) ──
+
+/** 反馈请求体(后端 POST /api/packs/chatbi/feedback 契约) */
+export interface ChatbiFeedbackBody {
+  conversation_id: string
+  /** 定位具体消息;缺省后端取最近一条数据制品消息 */
+  message_id?: string
+  /** 'up' 点赞 | 'down' 点踩 */
+  feedback: 'up' | 'down'
+  /** 反馈涉及表;缺省后端从消息制品 current_tables 解析 */
+  tables?: string[]
+  /** 可选文字反馈(点踩原因等, 落事件留痕) */
+  comment?: string
+}
+
+/** 反馈响应: applied_tables = 实际发生置信度变化的表名 */
+export async function sendChatbiFeedback(
+  body: ChatbiFeedbackBody,
+): Promise<{ success: boolean, applied_tables: string[] }> {
+  const { data } = await api.post('/packs/chatbi/feedback', body)
+  return data
+}
+
 // ── 配置生成（SSE 流式）────────────────────────────────────────
 
 /**

@@ -158,6 +158,14 @@ groups:
         default: 5
         min: 1
         max: 20
+  - key: feedback
+    title: 结果反馈
+    fields:
+      - key: feedback_enabled
+        type: bool
+        label: 启用点赞/点踩反馈
+        default: false
+        help: 对话卡点赞/点踩微调对应表/关系置信度(默认关=零行为变化);关闭时反馈接口返回 422
   - key: observability
     title: 可观测
     fields:
