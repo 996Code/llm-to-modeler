@@ -146,3 +146,58 @@ class TestExecutionAccuracy:
         assert proj_stats["hits"] >= proj_stats["checked"] - 3, (
             f"EX-proj {proj_stats['hits']}/{proj_stats['checked']} "
             f"显著低于链路连通预期")
+
+
+def mrr_at_k(expected: set, retrieved: list, k: int = 5) -> float:
+    """MRR@k:期望表中最早出现在前 k 名的倒数排名均值(无命中=0)。"""
+    for rank, name in enumerate(retrieved[:k], start=1):
+        if name in expected:
+            return 1.0 / rank
+    return 0.0
+
+
+class TestLayeredReport:
+
+    def test_evalset_layered_report(self, capsys):
+        """难度×类别分层 recall/MRR 矩阵 + 坏例按 (1-recall) 降序报告——
+        P1#6 混合化的对比基线(改动前后跑同一报告看数字变化)。"""
+        from domains.chatbi.retrieval import retrieve
+        from tests.domains.test_chatbi_evalset import (
+            make_eval_fixture, register_query_vector, recall_at_k)
+        store, embedder, llm = make_eval_fixture()
+        rows = []
+        for case in EVALSET:
+            register_query_vector(llm, case["query"], case["expected_tables"])
+            result = retrieve(case["query"], store, embedder,
+                              skip_llm_refine=True, scope="44444444-4444-4444-4444-444444444444")
+            got = [m["name"] for m in result.models]
+            rows.append({
+                "id": case["id"], "difficulty": case["difficulty"],
+                "category": case.get("category", ""),
+                "recall": recall_at_k(set(case["expected_tables"]), got),
+                "mrr": mrr_at_k(set(case["expected_tables"]), got),
+            })
+        # 分层矩阵
+        from collections import defaultdict
+        agg = defaultdict(lambda: [0, 0.0, 0.0])
+        for r in rows:
+            a = agg[(r["difficulty"], r["category"])]
+            a[0] += 1; a[1] += r["recall"]; a[2] += r["mrr"]
+        print("\n=== 难度×类别矩阵 (n, recall, mrr) ===")
+        for (d, c), (n, rc, mr) in sorted(agg.items()):
+            print(f"  {d:7s} {c:20s} n={n:2d} recall={rc/n:.3f} mrr={mr/n:.3f}")
+        # 坏例报告(按损失降序)
+        misses = sorted((r for r in rows if r["recall"] < 1.0),
+                        key=lambda r: 1 - r["recall"], reverse=True)
+        print("=== 坏例(降序) ===")
+        for m in misses[:10]:
+            print(f"  {m['id']} {m['difficulty']}/{m['category']} "
+                  f"recall={m['recall']:.2f} mrr={m['mrr']:.2f}")
+        mean_recall = sum(r["recall"] for r in rows) / len(rows)
+        mean_mrr = sum(r["mrr"] for r in rows) / len(rows)
+        print(f"=== 总体 recall@5={mean_recall:.3f} mrr@5={mean_mrr:.3f} "
+              f"(n={len(rows)}) ===")
+        # 报告用例的断言:打印成功+总体达标(假向量口径=1.0)
+        captured = capsys.readouterr().out
+        assert "难度×类别矩阵" in captured and "总体 recall" in captured
+        assert mean_recall >= 0.70 and mean_mrr >= 0.70
