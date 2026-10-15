@@ -46,10 +46,13 @@ def start(app_state, task_manager=None) -> None:
 
     启动收敛属于 KG pack 的数据生命周期，不应由平台核心按 pack 名称
     分支调用。失败不置位，下一次显式装配仍可重试。
+    另:零库首次启动自动建「默认知识库」(用户 10-15 建议:开箱即用,
+    上传/问答不再面对空态);用户删掉后不重建(尊重删除)。
     """
     global _RECOVERY_DONE
     from domains.knowledge_graph import tasks
     tasks._app_state = app_state
+    _ensure_default_kb(app_state)
     if task_manager is None or _RECOVERY_DONE:
         return
     completed = tasks._recover_stale_importing(task_manager)
@@ -57,6 +60,19 @@ def start(app_state, task_manager=None) -> None:
     # 明确 False 才代表失败，真实实现会在异常路径返回 False。
     if completed is not False:
         _RECOVERY_DONE = True
+
+
+def _ensure_default_kb(app_state) -> None:
+    """零库时建默认知识库;已有库(含 folder)不动;失败只记日志不阻断启动。"""
+    try:
+        from domains.knowledge_graph import runtime
+        store = runtime.get_kg_store(app_state)
+        if store.list_kbs():
+            return
+        store.create_kb("默认知识库", description="系统默认知识库——可直接上传文档开始使用")
+        logger.info("零库启动:已创建默认知识库")
+    except Exception as e:
+        logger.warning(f"默认知识库创建失败(不影响启动): {e}")
 
 
 def unload() -> None:

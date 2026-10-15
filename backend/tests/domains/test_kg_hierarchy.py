@@ -5,6 +5,7 @@
 - 循环引用防护:parent 必须是 folder 且不得形成环
 """
 import pytest
+from types import SimpleNamespace
 
 from domains.knowledge_graph.store import KGStore
 
@@ -216,3 +217,46 @@ class TestKbTreeApi:
         assert r.status_code == 200, r.text
         assert r.json()["success"] is True
         assert c.get(f"{BASE}/kbs/{folder['id']}").status_code == 404
+
+
+class TestDefaultKb:
+    def test_start_creates_default_kb_when_empty(self, monkeypatch):
+        """零库启动 → 自动建「默认知识库」(用户 10-15 建议:开箱即用)。"""
+        from domains.knowledge_graph import pack as kg_pack, runtime
+        kg_pack._RECOVERY_DONE = False
+        store = KGStore()
+        assert not store.list_kbs()   # 前置:空
+        app_state = SimpleNamespace()
+        monkeypatch.setattr(runtime, "get_kg_store", lambda s: store)
+        kg_pack.start(app_state, task_manager=object())
+        names = [k["name"] for k in store.list_kbs()]
+        assert "默认知识库" in names
+
+    def test_start_skips_when_kbs_exist(self, monkeypatch):
+        """已有库(含 folder) → 不建默认库(不干扰用户结构)。"""
+        from domains.knowledge_graph import pack as kg_pack, runtime
+        kg_pack._RECOVERY_DONE = False
+        store = KGStore()
+        store.create_kb("用户已有库")
+        app_state = SimpleNamespace()
+        monkeypatch.setattr(runtime, "get_kg_store", lambda s: store)
+        kg_pack.start(app_state, task_manager=object())
+        names = [k["name"] for k in store.list_kbs()]
+        assert "默认知识库" not in names and names == ["用户已有库"]
+
+    def test_start_recreates_default_when_all_deleted(self, monkeypatch):
+        """删光所有库后重启 → 默认库再现(零库即建,不区分"从未建过"与
+        "删光了"——语义简化:想保留空态就至少留一个库)。"""
+        from domains.knowledge_graph import pack as kg_pack, runtime
+        kg_pack._RECOVERY_DONE = False
+        store = KGStore()
+        app_state = SimpleNamespace()
+        monkeypatch.setattr(runtime, "get_kg_store", lambda s: store)
+        kg_pack.start(app_state, task_manager=object())
+        default = next(k for k in store.list_kbs() if k["name"] == "默认知识库")
+        store.delete_kb(default["id"])
+        assert store.list_kbs() == []          # 删光
+        kg_pack._RECOVERY_DONE = False
+        kg_pack.start(app_state, task_manager=object())
+        names = [k["name"] for k in store.list_kbs()]
+        assert names == ["默认知识库"]          # 零库即建
