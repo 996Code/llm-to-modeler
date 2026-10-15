@@ -4,19 +4,20 @@
   引擎一级路由按 manifest domain.description 选中 knowledge_graph 域,
   二级路由(DefaultPackRouter 中性框架)按 name/when 选中本工具。
 
-【多库语义】
-  state 带 kb 参数(如"在产品手册库里查")→ 按名解析;
-  未指定且只有一库 → 自动选中;未指定且多库 → AskSpec 追问(引擎
-  interrupt/resume 原生支持,用户带 answers 重发)。
+【多库语义】(N3 跨库)
+  state 带 kb 参数(如"在产品手册库里查")→ 单库检索(按名解析);
+  未指定且只有一库 → 自动选中;未指定且多库 → **跨全部库检索**
+  (answer_question_multi,不再追问让 LLM 选单库——用户要跨库)。
+  会话记忆仍只绑定单库(用户显式指定过才绑定),绑定在则单库沿用。
 
 【产物】
   artifact_type="data":{subgraph, sources} —— 前端通用数据卡展示,
-  子图结构完整返回(图谱可视化页同构)。
+  子图结构完整返回(图谱可视化页同构);跨库时附 kbs 列表。
 """
 import logging
 from typing import Any, Optional
 
-from sdk.tool import AskOption, AskQuestion, AskSpec, Tool, ToolContext, ToolResult
+from sdk.tool import Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,8 @@ class KbSearchTool(Tool):
             "type": "object",
             "properties": {
                 "user_input": {"type": "string", "description": "用户消息(检索问题)"},
-                "kb": {"type": "string", "description": "知识库名(可选;多库时指定)"},
+                "kb": {"type": "string",
+                       "description": "知识库名(可选;指定则单库检索,不指定跨全部库)"},
             },
             "required": ["user_input"],
         }
@@ -99,13 +101,13 @@ class KbSearchTool(Tool):
         ctx.emit("stage", "kb_search.resolve", "正在解析问题与选定知识库…")
 
         # ── 知识库解析 ──
-        # 优先级:本轮显式指定 > 追问答案 > 会话记忆 > 宿主默认 > 唯一库自动 > 多库追问。
-        # 会话记忆(ctx.session_state,scope=knowledge_graph):一个对话绑定
-        # 一个库——首次选定后跨轮沿用,用户显式说"换到XX库"才更新绑定;
-        # 绑定的库被删除则清掉记忆回到追问。记忆排在宿主默认(pack_params)
-        # 之前:用户在会话里的显式选择比宿主注入的默认更新、更强。
+        # 优先级:本轮显式指定 > 会话记忆 > 宿主默认 > 唯一库自动 > 跨全部库。
+        # 会话记忆(ctx.session_state,scope=knowledge_graph):只绑定单库——
+        # 用户显式指定过才写入,跨轮沿用;绑定的库被删除则清掉记忆回到跨库。
         # 宿主默认与显式指定分开处理:显式指定错库 = 用户当下错误,报错;
         # 宿主默认失效(配置过期/库被删) = 静默降级继续解析流,不打断用户。
+        # N3 跨库:未绑定单库且多库时不再追问选库——直接把全部库(排除
+        # folder 目录节点,目录不存文档不可检索)交给 answer_question_multi。
         kb = None
         kb_source = ""             # 选库来源(链路观测)
         mem_event = ""             # 记忆变更事件(链路观测):bind/switch/invalidate
@@ -113,7 +115,7 @@ class KbSearchTool(Tool):
         host_hint = str(
             (state.get("pack_params") or {}).get("knowledge_graph", {}).get("kb") or ""
         ).strip()
-        # 会话记忆候选(显式/追问都没解析到才启用)
+        # 会话记忆候选(显式没解析到才启用)
         mem_kb_name = str(mem.get("kb") or "").strip() if mem else ""
 
         if explicit_hint:
@@ -121,36 +123,17 @@ class KbSearchTool(Tool):
             kb_source = "explicit"
             if not kb:
                 return ToolResult(error_for_llm=f"知识库「{explicit_hint}」不存在")
+            kbs = [kb]
         else:
-            kbs = store.list_kbs()
-            # 追问答案:interrupt 后引擎把用户回答注入 tool_state["clarify_answers"]
-            # (见 engine/nodes.py 的追问恢复注入,与 njmind_form 同一约定)。
-            # 两种形态:①前端追问卡片点选项 → {header: label} 结构化;
-            # ②用户直接打字 → {text: 原话}。都按"精确名 > 唯一包含匹配"解析。
-            answers = state.get("clarify_answers") or {}
-            chosen = str(answers.get("kb") or answers.get("知识库") or "").strip()
-            if not chosen:
-                raw = str(answers.get("text") or "").strip()
-                if raw:
-                    exact = next((k for k in kbs if k["name"] == raw), None)
-                    if exact is not None:
-                        chosen = exact["name"]
-                    else:
-                        contains = [k for k in kbs if k["name"] in raw]
-                        # 唯一包含才敢认定;多个包含(如都含"库"字)仍走追问
-                        if len(contains) == 1:
-                            chosen = contains[0]["name"]
-            if chosen:
-                kb = next((k for k in kbs if k["name"] == chosen), None)
-                if kb is not None:
-                    kb_source = "clarify"
-            if kb is None and mem_kb_name:
-                # 会话记忆:绑定的库还在就直接沿用(多轮免追问的核心)
+            # folder 是纯分组节点:不存文档/无向量,跨库检索目标里排除
+            kbs = [k for k in store.list_kbs() if k.get("kind") != "folder"]
+            if mem_kb_name:
+                # 会话记忆:绑定的库还在就直接沿用(多轮免重复解析的核心)
                 kb = next((k for k in kbs if k["name"] == mem_kb_name), None)
                 if kb is not None:
                     kb_source = "memory"
                 elif mem:
-                    mem.pop("kb")  # 绑定的库已删除,清记忆回到正常解析流
+                    mem.pop("kb")  # 绑定的库已删除,清记忆回到跨库检索
                     mem_event = "invalidate"
             if kb is None and host_hint:
                 # 宿主默认兜底(记忆优先于它;指向的库失效则继续往下走)
@@ -160,34 +143,32 @@ class KbSearchTool(Tool):
             if kb is None and len(kbs) == 1:
                 kb = kbs[0]
                 kb_source = "single-auto"
-            if kb is None and kbs:
-                if mem_event:
-                    _trace_invalidate(ctx)
-                return ToolResult(ask=AskSpec(questions=[AskQuestion(
-                    question="要在哪个知识库里检索?",
-                    header="知识库",
-                    options=[AskOption(label=k["name"],
-                                       description=(k.get("description") or "")[:60])
-                             for k in kbs],
-                )]))
-            if kb is None:
+            if not kbs:
                 if mem_event:
                     _trace_invalidate(ctx)
                 return ToolResult(
                     reply="当前还没有任何知识库。请先在「知识图谱」管理页创建知识库并导入文档。",
                     summary="无可用知识库")
 
-        # 选定即写回会话记忆(本轮的最终绑定,含显式切换;fail-open)
-        if mem is not None and mem.get("kb") != kb["name"]:
+        # 选定即写回会话记忆(仅单库绑定:显式指定/记忆沿用/宿主默认/
+        # 唯一库自动;跨库路径不绑定——记忆只承载"用户明确指定的那个库";
+        # fail-open)
+        if kb is not None and mem is not None and mem.get("kb") != kb["name"]:
             mem.set("kb", kb["name"])
             mem_event = mem_event or ("switch" if mem_kb_name else "bind")
 
-        # 选库决策入链(链路观测):来源 + 记忆变更——"为什么没问/为什么用这个库"
+        # 选库决策入链(链路观测):来源 + 记忆变更——"为什么单库/为什么跨库"
         # 在管理端链路视图一眼可答
-        ctx.trace("kb_search.resolve_kb", f"选定知识库「{kb['name']}」", "ok", detail={
-            "kb": kb["name"], "source": kb_source,
-            **({"memoryEvent": mem_event} if mem_event else {}),
-        })
+        if kb is not None:
+            ctx.trace("kb_search.resolve_kb", f"选定知识库「{kb['name']}」", "ok", detail={
+                "kb": kb["name"], "source": kb_source,
+                **({"memoryEvent": mem_event} if mem_event else {}),
+            })
+        else:
+            if mem_event:
+                _trace_invalidate(ctx)
+            ctx.trace("kb_search.resolve_kb", f"跨库检索 {len(kbs)} 个知识库", "ok", detail={
+                "kbs": [k["name"] for k in kbs], "source": "all-cross"})
 
         # ── 混合检索 + 回答 ──
         # on_stage 把 retrieval 内部各阶段(意图/图谱/子图/向量/组装/回答)
@@ -195,11 +176,17 @@ class KbSearchTool(Tool):
         def _on_stage(key: str, message: str) -> None:
             ctx.emit("stage", key, message)
 
-        ctx.trace("kb_search.retrieve", f"检索 {kb['name']}", "info")
         try:
-            result = retrieval.answer_question(
-                self._app_state, kb, query, conv_id=ctx.conv_id,
-                on_stage=_on_stage)
+            if kb is not None:
+                ctx.trace("kb_search.retrieve", f"检索 {kb['name']}", "info")
+                result = retrieval.answer_question(
+                    self._app_state, kb, query, conv_id=ctx.conv_id,
+                    on_stage=_on_stage)
+            else:
+                ctx.trace("kb_search.retrieve", f"跨库检索 {len(kbs)} 个知识库", "info")
+                result = retrieval.answer_question_multi(
+                    self._app_state, kbs, query, conv_id=ctx.conv_id,
+                    on_stage=_on_stage)
         except Exception as e:
             logger.exception("kb_search 检索失败")
             return ToolResult(error_for_llm=f"知识库检索失败: {e}")
@@ -217,6 +204,9 @@ class KbSearchTool(Tool):
             # KgGraphCard 据此区分"已引用/已召回未引用",徽标点击跳转同源
             "cited_chunks": result.get("cited_chunks") or [],
         }
+        # 跨库检索附库清单(前端可标注来源库;kb.name 为拼接展示名)
+        if result.get("kbs"):
+            artifact["kbs"] = result["kbs"]
         return ToolResult(
             artifact=artifact,
             artifact_type="data",
