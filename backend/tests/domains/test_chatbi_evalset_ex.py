@@ -201,3 +201,6 @@ class TestLayeredReport:
         captured = capsys.readouterr().out
         assert "难度×类别矩阵" in captured and "总体 recall" in captured
         assert mean_recall >= 0.70 and mean_mrr >= 0.70
+        # readouterr 会消费输出——重打印让基线数字默认可见(P1#6 改动
+        # 前后跑本测试,无需 -s 即可对比矩阵)
+        print(captured, end="")
