@@ -1624,3 +1624,56 @@ class TestSymmetricContestedPruning:
         n = tasks._drop_contested_aliases(batch, graph_aliases, graph=g, kb_id="kb1")
         assert n == 0
         assert g.nodes[("kb1", "张小凡")]["aliases"] == ["鬼厉"]
+
+
+class TestDeleteDocumentGraphSlim:
+    """P2#10 删文档图谱瘦身验收锚定:核心语义(无孤儿+去引用)当前
+    delete_document 已内建(边删+source_docs 去引用+孤立 DETACH DELETE,
+    耗时与该文档贡献量成正比)——RAGFlow 软标记重建模式不适用于真图库。
+    本组测试锚定验收,防回归。"""
+
+    def test_delete_removes_doc_edges_keeps_shared(self, env):
+        """删文档:该文档的边全删;多文档共享的实体保留(去引用不删)。"""
+        from domains.knowledge_graph import tasks as kg_tasks
+        env.store.create_kb("瘦身库")
+        doc1 = env.store.create_document("瘦身库", "a.md", "text/markdown", 10, "", "h1")
+        doc2 = env.store.create_document("瘦身库", "b.md", "text/markdown", 10, "", "h2")
+        # 两文档都贡献实体 甲/乙(upsert_batch 幂等 MERGE,source_docs 累积)
+        for doc in (doc1, doc2):
+            env.graph.upsert_batch("瘦身库", doc["id"],
+                entities=[
+                    {"name": "甲", "normalized_name": "甲", "type": "person",
+                     "description": "", "aliases": [], "chunk_id": "c1"},
+                    {"name": "乙", "normalized_name": "乙", "type": "person",
+                     "description": "", "aliases": [], "chunk_id": "c1"},
+                ],
+                relations=[
+                    {"source": "甲", "target": "乙", "type": "相关",
+                     "description": "", "evidence": "x", "chunk_id": "c1"},
+                ])
+        edges_before = len([e for e in env.graph.edges
+                            if e["kb"] == "瘦身库"])
+        env.graph.delete_document("瘦身库", doc1["id"])
+        # 该文档的边已删(m3 fake 的 delete_document 返回值 edges 恒 0,
+        # 以 edges 列表实际变化为准)
+        edges_after = len([e for e in env.graph.edges
+                           if e["kb"] == "瘦身库"])
+        assert edges_after < edges_before
+        # 甲/乙 仍被 doc2 引用 → 不删
+        names = {n["name"] for n in env.graph.list_entities("瘦身库")}
+        assert {"甲", "乙"} <= names
+
+    def test_delete_orphans_removed(self, env):
+        """删文档后孤立实体(无任何 source_docs 引用)被清理——无孤儿验收。"""
+        env.store.create_kb("孤儿库")
+        doc = env.store.create_document("孤儿库", "c.md", "text/markdown", 10, "", "h3")
+        env.graph.upsert_batch("孤儿库", doc["id"],
+            entities=[
+                {"name": "独苗", "normalized_name": "独苗", "type": "concept",
+                 "description": "", "aliases": [], "chunk_id": "c1"},
+            ],
+            relations=[])
+        r = env.graph.delete_document("孤儿库", doc["id"])
+        assert r["orphanEntities"] == 1
+        names = {n["name"] for n in env.graph.list_entities("孤儿库")}
+        assert "独苗" not in names
