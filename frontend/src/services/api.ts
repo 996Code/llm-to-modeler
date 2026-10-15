@@ -79,6 +79,23 @@ api.interceptors.response.use(
   }
 )
 
+// ── 健康检查 ────────────────────────────────────────────────────
+
+/**
+ * 服务健康检查（GET /api/health，后端在鉴权白名单内，无需 token）。
+ * 供聊天页右上角服务状态徽标探测：true=服务正常（绿点），false=服务异常（红点）。
+ * 用原生 fetch 而非 axios 实例：健康探测要的是「连没连上」，503/网络错误
+ * 都归为异常即可，不需要走 401 跳转等业务拦截逻辑。
+ */
+export async function checkHealth(): Promise<boolean> {
+  try {
+    const r = await fetch(`${API_BASE}/health`)
+    return r.ok
+  } catch {
+    return false
+  }
+}
+
 // ── 会话（Conversation）相关 REST 接口 ──────────────────────────
 
 /**
