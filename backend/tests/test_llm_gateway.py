@@ -17,18 +17,17 @@ class _FakeStore:
 
 
 class _StubEmbedder:
-    """替身 local embedder:记录收到的文本。"""
+    """替身 local embedder:记录收到的文本(镜像真实默认行为=不加前缀)。"""
     last_texts = None
 
     def encode(self, texts):
         _StubEmbedder.last_texts = list(texts)
         return [[0.1, 0.2] for _ in texts]
 
-    _PREFIX = "为这个句子生成表示以用于检索相关文章："
-
     def encode_queries(self, texts):
-        # 镜像真实 LocalEmbedder.encode_queries:前缀注入在其内部
-        _StubEmbedder.last_texts = [self._PREFIX + t for t in texts]
+        # 镜像真实 LocalEmbedder.encode_queries 默认口径:直传(bge-m3
+        # 官方明确查询侧无需 instruction;EMBED_QUERY_PREFIX 开关另测)
+        _StubEmbedder.last_texts = list(texts)
         return [[0.9, 0.9] for _ in texts]
 
 
@@ -49,12 +48,26 @@ class TestEmbedModes:
         assert _StubEmbedder.last_texts == ["员工表"]
 
     def test_query_mode_prefixes_locally(self, monkeypatch):
-        """mode=query 走 encode_queries:本地后端加 bge-m3 检索前缀。"""
+        """mode=query 走 encode_queries:默认(bge-m3)不加前缀直传;
+        EMBED_QUERY_PREFIX=1 时注入检索前缀(审查修正:m3 官方明确
+        查询侧无需 instruction,前缀属 v1.5 系列)。"""
         client = _local_client(monkeypatch)
         out = client.embeddings(["员工表"], stage="x", mode="query")
         assert out == [[0.9, 0.9]]
-        assert _StubEmbedder.last_texts == [
-            "为这个句子生成表示以用于检索相关文章：员工表"]
+        assert _StubEmbedder.last_texts == ["员工表"]   # 默认无前缀
+        # 开关开:真实 encode_queries 注入前缀(裸实例绕 __init__)
+        from llm.local_embeddings import _LocalEmbedder
+        emb = object.__new__(_LocalEmbedder)
+        seen = {}
+        monkeypatch.setattr(_LocalEmbedder, "encode",
+                            lambda self, ts: seen.update(texts=ts))
+        monkeypatch.setenv("EMBED_QUERY_PREFIX", "1")
+        emb.encode_queries(["员工表"])
+        assert seen["texts"] == ["为这个句子生成表示以用于检索相关文章：员工表"]
+        # 开关关(默认):直传
+        monkeypatch.delenv("EMBED_QUERY_PREFIX")
+        emb.encode_queries(["员工表"])
+        assert seen["texts"] == ["员工表"]
 
     def test_api_backend_ignores_mode(self, monkeypatch):
         """API 后端无官方查询/文档区分:mode 忽略不报错。"""

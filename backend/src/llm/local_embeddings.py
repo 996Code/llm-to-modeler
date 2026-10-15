@@ -155,10 +155,17 @@ class _LocalEmbedder:
         return (cls_vec / norm).tolist()
 
     def encode_queries(self, texts: List[str]) -> List[List[float]]:
-        """查询侧编码:bge-m3 官方检索用法——加 instruction 前缀,
-        与文档侧(无前缀)形成非对称检索对(对称侧量检索质量更高,
-        RAGFlow encode/encode_queries 同款拆分)。"""
-        return self.encode([self._QUERY_PREFIX + t for t in texts])
+        """查询侧编码。**默认不加前缀**——bge-m3 官方模型卡明确
+        "不再需要为查询添加 instruction"(前缀属 bge-*-zh-v1.5 系列)。
+
+        EMBED_QUERY_PREFIX=1 时启用前缀(换 v1.5 系列本地模型或其他
+        需要 instruction 的模型用;存量 m3 库两侧口径一致,勿开)。
+        """
+        import os as _os
+        if _os.getenv("EMBED_QUERY_PREFIX", "0").strip().lower() in (
+                "1", "true", "yes", "on"):
+            return self.encode([self._QUERY_PREFIX + t for t in texts])
+        return self.encode(texts)
 
 
 # ── 进程级单例(懒加载 + 双重检查锁) ──────────────────────
