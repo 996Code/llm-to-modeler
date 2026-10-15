@@ -82,6 +82,86 @@ def save_display_settings(
     return merged, []
 
 
+# ── 模型单价(model_pricing 键,P2#13 费用观测) ─────────────────
+
+# platform_settings 表里的键名
+MODEL_PRICING_KEY = "model_pricing"
+
+# 单价条目只认这两个键(元/千 token);多余键整体拒绝,防拼写错误静默沉库
+_PRICING_FIELDS = ("input_per_1k", "output_per_1k")
+
+
+def get_model_pricing(store: Optional["PlatformSettingsStore"]) -> Dict[str, Any]:
+    """读模型单价表:{models: {模型名: {input_per_1k, output_per_1k}}}。
+
+    库里没有/结构损坏时逐层回空——单价缺失只影响费用数字(cost=null),
+    不应连累聚合端点报错。返回形状与 PUT 请求体一致(前端免转换)。
+    """
+    saved = store.get(MODEL_PRICING_KEY) if store is not None else None
+    saved = saved if isinstance(saved, dict) else {}
+    models = saved.get("models") if isinstance(saved.get("models"), dict) else {}
+    clean: Dict[str, Dict[str, float]] = {}
+    for name, entry in models.items():
+        if not isinstance(name, str) or not name or not isinstance(entry, dict):
+            continue
+        values = {}
+        for field in _PRICING_FIELDS:
+            raw = entry.get(field)
+            values[field] = float(raw) if isinstance(raw, (int, float)) \
+                and not isinstance(raw, bool) else 0.0
+        clean[name] = values
+    return {"models": clean}
+
+
+def save_model_pricing(
+    store: "PlatformSettingsStore", payload: Dict[str, Any]
+) -> Tuple[Dict[str, Any], List[Dict[str, str]]]:
+    """校验并整体替换保存模型单价表(PUT 语义:提交即全量)。
+
+    Returns:
+        (merged, errors)。errors 非空时调用方应整体拒绝(不落半截配置)。
+        校验规则:models 必须是对象;模型名非空字符串;条目只认
+        input_per_1k/output_per_1k 两个非负有限数字键。
+    """
+    import math
+
+    errors: List[Dict[str, str]] = []
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, dict):
+        return get_model_pricing(store), [
+            {"field": "models", "message": '请求体必须是 {"models": {模型名: {input_per_1k, output_per_1k}}}'}]
+
+    clean: Dict[str, Dict[str, float]] = {}
+    for name, entry in models.items():
+        if not isinstance(name, str) or not name.strip():
+            errors.append({"field": f"models.{name}", "message": "模型名必须是非空字符串"})
+            continue
+        if not isinstance(entry, dict):
+            errors.append({"field": f"models.{name}", "message": "单价条目必须是对象"})
+            continue
+        if set(entry) != set(_PRICING_FIELDS):
+            errors.append({"field": f"models.{name}",
+                           "message": "条目只支持 input_per_1k/output_per_1k 两个键(均必填)"})
+            continue
+        values: Dict[str, float] = {}
+        bad = False
+        for field in _PRICING_FIELDS:
+            raw = entry.get(field)
+            if (isinstance(raw, bool) or not isinstance(raw, (int, float))
+                    or not math.isfinite(float(raw)) or float(raw) < 0):
+                errors.append({"field": f"models.{name}.{field}",
+                               "message": "必须是 >= 0 的数字(元/千 token)"})
+                bad = True
+        if bad:
+            continue
+        clean[name.strip()] = {f: float(entry[f]) for f in _PRICING_FIELDS}
+
+    if errors:
+        return get_model_pricing(store), errors
+    store.set(MODEL_PRICING_KEY, {"models": clean})
+    return get_model_pricing(store), []
+
+
 # ── 存储层 ──────────────────────────────────────────────────────
 
 class PlatformSettingsStore:

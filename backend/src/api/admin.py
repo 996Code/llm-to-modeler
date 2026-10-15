@@ -22,6 +22,9 @@
   POST   /api/admin/packs/{name}/disable      → 禁用 pack(热生效;最后一个不可禁)
   GET    /api/admin/settings/display          → 平台级显示设置(链路/检索结果显示开关)
   PUT    /api/admin/settings/display          → 保存显示设置(部分更新;用户级只读端点共读)
+  GET    /api/admin/settings/model-pricing    → 模型单价表(P2#13 费用观测)
+  PUT    /api/admin/settings/model-pricing    → 保存模型单价表(整体替换,元/千 token)
+  GET    /api/admin/costs/summary             → 按 pack/stage/天的 LLM 费用聚合(?days=7)
 
 【热切换链路】
 enable/disable → PackState.set_enabled(落盘 data/pack_state.json)
@@ -106,6 +109,58 @@ async def admin_put_display_settings(request: Request, payload: Dict[str, Any]):
         raise HTTPException(422, detail={"message": "显示设置校验失败", "errors": errors})
     logger.info(f"display settings saved: {merged.keys()}")
     return merged
+
+
+# ── 模型单价配置(P2#13 平台费用观测) ────────────────────────
+
+@router.get("/settings/model-pricing")
+async def admin_get_model_pricing(request: Request):
+    """读模型单价表:{models: {模型名: {input_per_1k, output_per_1k}}}(元/千 token)。
+
+    未配置时返回空表(费用聚合端点据此把 cost 记 null,不报错)。
+    """
+    from services.platform_settings import get_model_pricing, get_platform_settings_store
+
+    return get_model_pricing(get_platform_settings_store(request))
+
+
+@router.put("/settings/model-pricing")
+async def admin_put_model_pricing(request: Request, payload: Dict[str, Any]):
+    """保存模型单价表(PUT 语义:提交即全量替换)。
+
+    body: {"models": {模型名: {"input_per_1k": 元, "output_per_1k": 元}}}。
+    校验失败 422 整体拒绝(不落半截配置);模型名须与 call_logs
+    request_data.model 的落库口径一致(即 LLM_MODEL / 调用级覆盖名)。
+    """
+    from services.platform_settings import (
+        get_platform_settings_store, save_model_pricing,
+    )
+
+    merged, errors = save_model_pricing(get_platform_settings_store(request), payload)
+    if errors:
+        raise HTTPException(422, detail={"message": "单价配置校验失败", "errors": errors})
+    # 审计留痕:只记模型名不记值(单价非 secret,但变更应可在日志追溯)
+    logger.info(f"model pricing saved: models={sorted(merged['models'].keys())}")
+    return merged
+
+
+@router.get("/costs/summary")
+async def admin_cost_summary(request: Request):
+    """LLM 费用聚合:按 pack/stage/天分组,join 单价表算费用。
+
+    Query 参数:
+      days: 时间窗口天数(默认 7,夹在 1~90 防全表倾倒)
+
+    返回 {items: [{pack, stage, day, calls, tokens_in, tokens_out, cost}],
+    total_cost}。cost 单位为元;无单价配置的模型 cost=null 且不计入
+    total_cost(聚合行仍返回,便于先看 token 量再补单价)。
+    """
+    days = max(1, min(_int_param(request, "days", 7), 90))
+    from services.platform_settings import get_model_pricing, get_platform_settings_store
+
+    pricing = get_model_pricing(get_platform_settings_store(request))["models"]
+    return request.app.state.conversation_store.get_cost_summary(
+        days=days, pricing=pricing)
 
 
 # ── 概览统计 ──────────────────────────────────────────────────
