@@ -152,8 +152,21 @@ export const useConversationStore = defineStore('conversation', () => {
    */
   async function selectConversation(id: string) {
     loading.value = true
+    // 切会话即清流式 UI 态(进度条/阶段提示):原会话若仍在流式中,其
+    // SSE 回调已被会话切换守卫拦住不串扰这里;streaming 标志留给原流
+    // finally 收尾,但 UI 上不再显示原会话的进度
+    stageMessage.value = ''
+    currentStage.value = ''
+    pipelineSteps.value = []
     try {
       const conv = await api.getConversation(id)
+      // 双重校验:加载期间用户可能又切了别的会话——晚到的响应不得覆盖
+      if (currentConversation.value?.id && currentConversation.value.id !== id
+          && currentConversation.value.id !== '') {
+        // 已切走,丢弃本次加载(以当前选择为准)
+        loading.value = false
+        return
+      }
       currentConversation.value = conv
       // 历史消息里的 dataArtifact(数据型制品快照,如 KG 检索子图)映射到
       // dataResult——前端渲染分支复用 SSE 实时路径的同一条(图谱卡/数据卡)
@@ -282,6 +295,16 @@ export const useConversationStore = defineStore('conversation', () => {
     currentStage.value = ''
     pipelineSteps.value = []  // 重置，等待后端 pipeline_definition 事件
 
+    // 会话切换守卫(用户 10-15 报障:SSE 回调闭包不绑会话,切到会话 B 后
+    // A 的流式结果仍往 messages push——B 的界面显示 A 的回答)。
+    // 发起时快照会话 id,回调里校验:已切走则丢弃(结果已落库,切回
+    // A 时历史加载可见,不丢数据只丢串扰)
+    const originConvId = currentConversation.value?.id
+    const isStale = () => {
+      const now = currentConversation.value?.id
+      return !!originConvId && !!now && originConvId !== now
+    }
+
     try {
 
       // 调用 chat，注册各类 SSE 事件回调（回调内根据事件更新状态/UI）
@@ -289,11 +312,13 @@ export const useConversationStore = defineStore('conversation', () => {
       await api.chat(text, convId || null, {
         // 阶段更新回调
         onStage: (stage, msg) => {
+          if (isStale()) return
           stageMessage.value = msg
           currentStage.value = stage
         },
         // 后端下发 pipeline 定义回调
         onPipelineDefinition: (tool, steps) => {
+          if (isStale()) return
           // 接收后端发送的 pipeline 定义
           pipelineSteps.value = steps
         },
@@ -305,6 +330,7 @@ export const useConversationStore = defineStore('conversation', () => {
             currentConversation.value = { id: result.conversationId } as Conversation
             loadConversations()  // 刷侧边栏,让新会话出现(不 await,不阻塞渲染)
           }
+          if (isStale()) return   // 已切走:结果已落库,不串扰新会话界面
           // onResult 分流顺序(由后端 ToolResult 三态决定):
           // 0. error — 执行失败/前置校验拦截(error_for_llm 通道),显示错误提示
           // 1. general  — 闲聊(reply 通道),显示纯文本
@@ -408,6 +434,7 @@ export const useConversationStore = defineStore('conversation', () => {
         // 出错回调：插入诊断卡消息(P2#15——失败可定位环节+可查链路+可重试,
         // 不再是一行裸文本;分类从错误文本关键词推断,兜底"未知环节")
         onError: (err) => {
+          if (isStale()) return
           messages.value.push({
             role: 'assistant',
             content: `错误: ${err}`,
@@ -419,11 +446,13 @@ export const useConversationStore = defineStore('conversation', () => {
         },
         // 流结束回调
         onDone: () => {
+          if (isStale()) return
           stageMessage.value = ''
           currentStage.value = ''
         },
       }, clarifyAnswers, imageBase64, embedCtx ?? localCtx)
     } catch (e: any) {  // e: any —— 捕获任意异常并当作 any 处理（才能访问 .message）
+      if (isStale()) return
       messages.value.push({
         role: 'assistant',
         content: `请求失败: ${e.message}`,
