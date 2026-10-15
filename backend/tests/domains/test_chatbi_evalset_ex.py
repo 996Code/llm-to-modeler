@@ -146,6 +146,12 @@ class TestExecutionAccuracy:
         assert proj_stats["hits"] >= proj_stats["checked"] - 3, (
             f"EX-proj {proj_stats['hits']}/{proj_stats['checked']} "
             f"显著低于链路连通预期")
+        # 口径拆分固化:expected_columns 双口径(29 投影/31 整行)被误翻转时
+        # checked-3 容差可吞掉单条漂移——锚定分布防数据口径漂移(终审 minor)
+        assert proj_stats["checked"] == 29, (
+            f"投影类应为 29 条,实际 {proj_stats['checked']}"
+            "——expected_columns 口径被改动?")
+        assert full_stats["checked"] == 31
 
 
 def mrr_at_k(expected: set, retrieved: list, k: int = 5) -> float:
