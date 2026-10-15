@@ -45,6 +45,14 @@ class FakeLLM:
                 return v() if callable(v) else v
         raise RuntimeError(f"FakeLLM.chat_json: {stage} 未编排")
 
+    def embeddings(self, texts, conv_id=None, stage=None, mode="document"):
+        """N1 修 ask_data 重复传参后向量检索真实执行(此前 TypeError 被吞
+        从未生效)——夹具补 embeddings:返回 V_ORDERS 正交基(命中订单表,
+        管线走完整检索→生成路径而非 137 表澄清),与
+        test_chatbi_retrieval.FakeLLM 同款方案。"""
+        from tests.domains.test_chatbi_retrieval import V_ORDERS
+        return [list(V_ORDERS) for _ in texts]
+
 
 # ── 测试环境: 真实 biz 表 + 数据源行 + 语义层(FakeLLM 扫描) ────
 
@@ -116,10 +124,41 @@ def env(test_url=""):
     tool = AskDataTool(db=db, settings={
         "graph_enabled": False,  # 集成测试关图谱(2 表场景), 走检索降级路径
         "retrieve_top_k": 5, "fewshot_top_k": 2,
+        # N1 修复后向量检索真实执行:夹具向量(V_ORDERS)命中订单表,
+        # 但演示库有 137 张表(测试库累积),超默认阈值 8 会走表澄清
+        # 分支——测试要的是完整管线,阈值调大跳过澄清
+        "clarify_table_threshold": 200,
     })
-    yield {"db": db, "ds": ds, "content": content, "tool": tool,
-           "ctx_kw": ctx_kw, "conv_store": conv_store, "conv_id": conv_id,
-           "cm": cm}
+    # N1 后向量后端默认 pg:测试库 PG 无 chatbi 向量数据,真实检索零召回
+    # → 全部走澄清/降级,管线测试断言全崩。fixture 内把 get_vector 换成
+    # 内存 FakeSdkVector 并预写订单表向量(V_ORDERS)——检索命中,管线
+    # 走完整路径(与 N1 前该测试的真实意图一致:测管线不测向量库)。
+    from unittest.mock import patch as _patch
+    from tests.domains.test_chatbi_retrieval import FakeSdkVector, V_ORDERS, V_USERS
+    from domains.chatbi import stores as _cb_stores
+    from domains.chatbi.stores import ChatBIVectorStore as _CbVs
+    _sdk_fake = FakeSdkVector()
+    # scope 用数据源行登记的真实值(get_or_create_scope 签发)——
+    # retrieve_context 按 ds.id 反查 scope,写死假 scope 会零召回
+    from domains.chatbi.stores import get_or_create_scope as _goc
+    _scope = _goc(db, ds.id)
+    _sdk_fake.ensure_collection(_scope, 8)
+    # chunk_id 用生产格式 model:{表名}(decode_chunk_id 反解出表名;
+    # 裸 id 无冒号会解出 id 本身,prev_tables 断言对不上)
+    _sdk_fake.upsert_chunks(_scope, [
+        {"chunk_id": "model:biz_orders", "doc_id": "schema", "seq": 0,
+         "text": "订单表 biz_orders", "vector": list(V_ORDERS)},
+        {"chunk_id": "model:biz_users", "doc_id": "schema", "seq": 0,
+         "text": "用户表 biz_users", "vector": list(V_USERS)},
+    ])
+    _real_get_vector = _cb_stores.get_vector
+    _cb_stores.get_vector = lambda state: _CbVs(_sdk_fake)
+    try:
+        yield {"db": db, "ds": ds, "content": content, "tool": tool,
+               "ctx_kw": ctx_kw, "conv_store": conv_store, "conv_id": conv_id,
+               "cm": cm}
+    finally:
+        _cb_stores.get_vector = _real_get_vector
 
 
 def _run(env, question, llm, session_state=None):
@@ -354,8 +393,13 @@ class TestMultiTurn:
 
         result2, state2 = _run(env, "按城市呢", WatchLLM({}))
         assert result2.error_for_llm is None
-        # 继承表出现在 SQL 生成上下文(检索降级全表 + prev 合并, biz_users 都在)
-        assert "biz_users" in state2["current_tables"]
+        # N1 修复后向量检索真实执行(此前 TypeError 被吞走全表降级):
+        # "按城市呢"的假向量(V_ORDERS)召回 biz_orders——真实召回语义。
+        # 本测试主题是 prev_tables 继承:第一轮的 biz_orders 经会话记忆
+        # 进入第二轮上下文(检索命中 + prev 合并都在)
+        assert "biz_orders" in state2["current_tables"]
+        assert "biz_orders" in _sess(env).get("prev_tables") or \
+            "biz_orders" in state2["current_tables"]
 
 
 # ── 场景 6: switch_chart(S7 重校验 + 类型切换) ────────────────

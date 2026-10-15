@@ -22,6 +22,12 @@ class TestTableProvenance:
             "chatbi.chart": {"chart_type": "bar", "dim_col": "城市",
                              "measure_cols": ["订单数"]},
         })
+        # N1 修复后向量检索真实执行:该用例要两表都进 current_tables
+        # (JOIN 场景证据卡)——embeddings 覆盖为 orders+users 混合向量
+        from tests.domains.test_chatbi_retrieval import V_ORDERS, V_USERS
+        _mix = [a + b for a, b in zip(V_ORDERS, V_USERS)]
+        llm.embeddings = (lambda texts, conv_id=None, stage=None, mode="document":
+                          [list(_mix) for _ in texts])
         result, state = _run(env, "各城市的订单数量", llm)
         assert result.error_for_llm is None
         prov = result.artifact.get("table_provenance")
