@@ -313,11 +313,15 @@ export const useConversationStore = defineStore('conversation', () => {
           //    必须在 config 检查之前:artifactType 是后端设置的显式判别式
           // 4. result.config — 配置结果(默认),显示 config-card + 应用按钮
           if (result.error) {
-            // 工具执行失败/被前置校验拦截:显示明确错误(缺地址/校验失败等),
-            // 不静默——用户必须知道这轮为什么没有产出
+            // 工具执行失败/被前置校验拦截:显示诊断卡(P2#15——失败可定位
+            // 环节+可查链路+可重试,不再是一行裸文本),不静默——用户必须
+            // 知道这轮为什么没有产出
             messages.value.push({
               role: 'assistant',
               content: `⚠️ ${result.summary || result.message || '执行失败'}`,
+              kind: 'error-diag',
+              errorCategory: classifyError(
+                `${result.error || ''} ${result.summary || ''} ${result.message || ''}`),
             })
           }
           // 闲聊
