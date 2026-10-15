@@ -390,6 +390,36 @@ export async function recheckPack(name: string): Promise<{
   return data
 }
 
+// ── 平台级显示设置 ─────────────────────────────────────────
+
+/** 显示设置形状(与 GET/PUT /api/admin/settings/display 契约对齐) */
+export interface DisplaySettings {
+  /** 对话时显示链路/路径/思考信息(独立/嵌入对话页生效) */
+  showPipeline: boolean
+  /** 对话界面显示检索结果 */
+  showRetrieval: boolean
+}
+
+/** 读平台级显示设置(右上角徽标 hover 面板的初始值)。 */
+export async function fetchDisplaySettings(): Promise<DisplaySettings> {
+  const { data } = await adminApi.get<{ show_pipeline: boolean, show_retrieval: boolean }>(
+    '/settings/display')
+  return { showPipeline: data.show_pipeline, showRetrieval: data.show_retrieval }
+}
+
+/** 保存显示设置(部分更新:只提交要改的键;返回合并后的最新值)。 */
+export async function saveDisplaySettings(
+  values: Partial<DisplaySettings>,
+): Promise<DisplaySettings> {
+  // 后端契约是 snake_case(show_pipeline/show_retrieval)——前端 camelCase
+  // 转换漏了会 422"未知配置项"(实测抓出)
+  const body: Record<string, boolean> = {}
+  if (values.showPipeline !== undefined) body.show_pipeline = values.showPipeline
+  if (values.showRetrieval !== undefined) body.show_retrieval = values.showRetrieval
+  const { data } = await adminApi.put<DisplaySettings>('/settings/display', body)
+  return data
+}
+
 // ── 任务中心 ─────────────────────────────────────────────
 
 export type TaskStatus =

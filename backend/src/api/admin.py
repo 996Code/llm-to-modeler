@@ -20,6 +20,8 @@
   GET    /api/admin/packs                     → 全部已发现 pack 的启停状态 + manifest 摘要
   POST   /api/admin/packs/{name}/enable       → 启用 pack(热生效,立即持久化)
   POST   /api/admin/packs/{name}/disable      → 禁用 pack(热生效;最后一个不可禁)
+  GET    /api/admin/settings/display          → 平台级显示设置(链路/检索结果显示开关)
+  PUT    /api/admin/settings/display          → 保存显示设置(部分更新;用户级只读端点共读)
 
 【热切换链路】
 enable/disable → PackState.set_enabled(落盘 data/pack_state.json)
@@ -70,6 +72,40 @@ async def require_admin(request: Request):
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+
+
+# ── 平台级显示设置 ────────────────────────────────────────────
+
+@router.get("/settings/display")
+async def admin_get_display_settings(request: Request):
+    """读平台级显示设置(链路/思考信息、检索结果显示两开关)。
+
+    配置入口只在管理界面;独立/嵌入对话页经用户级端点
+    GET /api/settings/display 共读同一份存储。
+    """
+    from services.platform_settings import get_display_settings, get_platform_settings_store
+
+    return get_display_settings(get_platform_settings_store(request))
+
+
+@router.put("/settings/display")
+async def admin_put_display_settings(request: Request, payload: Dict[str, Any]):
+    """保存平台级显示设置(部分更新:只提交要改的键)。
+
+    只认 show_pipeline / show_retrieval 两个布尔键,未知键/非布尔值
+    422 整体拒绝(不落半截配置)。
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "请求体必须是 {\"show_pipeline\": bool, \"show_retrieval\": bool}")
+    from services.platform_settings import (
+        get_platform_settings_store, save_display_settings,
+    )
+
+    merged, errors = save_display_settings(get_platform_settings_store(request), payload)
+    if errors:
+        raise HTTPException(422, detail={"message": "显示设置校验失败", "errors": errors})
+    logger.info(f"display settings saved: {merged.keys()}")
+    return merged
 
 
 # ── 概览统计 ──────────────────────────────────────────────────

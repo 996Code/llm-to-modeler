@@ -197,9 +197,11 @@
             </div>
 
             <!-- ===== 数据卡片 (artifact_type=data: 非配置类结果) ===== -->
-            <!-- v-else-if 确保与 config-card 互斥:一条消息不会同时渲染两种卡片 -->
+            <!-- v-else-if 确保与 config-card 互斥:一条消息不会同时渲染两种卡片。
+                 检索结果隐藏开关:KG 检索结果卡在 showRetrieval 关闭时整卡不渲染
+                 (答案文本照常,引用徽标点击变 no-op,见 onMdRefClick) -->
             <div
-              v-else-if="msg.dataResult"
+              v-else-if="msg.dataResult && !(msg.dataResult.type === 'kg_search_result' && !sysConfig.showRetrieval)"
               class="data-card"
             >
               <div class="data-card-header">
@@ -242,8 +244,9 @@
                     <DownloadOutlined /> 导出 Excel
                   </a-button>
                 </template>
-                <!-- 本轮链路(通用能力:引擎级打点,任何 pack 的工具轮可看) -->
-                <a-button size="small" type="link"
+                <!-- 本轮链路(通用能力:引擎级打点,任何 pack 的工具轮可看)。
+                     showPipeline 关闭时隐藏(用户只要"正在处理…"+结果) -->
+                <a-button v-if="sysConfig.showPipeline" size="small" type="link"
                           :disabled="!store.currentConversation?.id"
                           @click.stop="openTurnTrace(i)">
                   <NodeIndexOutlined /> 本轮链路
@@ -258,8 +261,9 @@
       </template>
 
       <!-- ===== Pipeline 进度卡片（流式生成中显示） ===== -->
-      <!-- 仅在 store.streaming=true（后端正在处理）时渲染 -->
-      <div v-if="store.streaming" class="pipeline-card">
+      <!-- 仅在 store.streaming=true（后端正在处理）时渲染；
+           showPipeline 关闭时不渲染进度卡与步骤链路，只显示简单处理文案 -->
+      <div v-if="store.streaming && sysConfig.showPipeline" class="pipeline-card">
         <div class="pipeline-header">
           <!-- 思考动画：三个圆点依次闪烁，纯视觉反馈 -->
           <div class="thinking-dots">
@@ -285,6 +289,11 @@
             <span class="step-label">{{ step.label }}</span>
           </div>
         </div>
+      </div>
+      <!-- showPipeline 关闭时的极简反馈：一行「正在处理…」（有阶段文案则
+           显示阶段文案），结果出来照常渲染——用户要的就是"别给我看过程" -->
+      <div v-else-if="store.streaming" class="processing-simple">
+        {{ store.stageMessage || '正在处理…' }}
       </div>
     </div>
 
@@ -352,6 +361,9 @@ import JsonDiffView from '../json/JsonDiffView.vue'
 import TurnTraceModal from './TurnTraceModal.vue'
 // HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage
 import { getHostPort } from '../../composables/hostPort'
+// 系统配置只读单例：showPipeline(链路思考显示)/showRetrieval(检索结果显示)
+// 两开关——数据源是后端平台级设置(管理界面配置,独立/嵌入对话共读)
+import { useSysConfig, refresh as refreshSysConfig } from '../../composables/sysConfig'
 import { getPackManifests } from '../../services/api'
 // Markdown 渲染(marked 解析 + DOMPurify 消毒防 XSS)
 import { marked } from 'marked'
@@ -408,6 +420,9 @@ function renderMarkdown(text: string): string {
  *  双界过滤:编号 <1(如 [片段:0])或 > chunks.length(如 [片段:99],
  *  LLM 编造)时锚点不存在,一律静默忽略不动作。 */
 function onMdRefClick(e: MouseEvent) {
+  // 检索结果显示关闭时点击变 no-op：图谱卡未渲染，锚点本就找不到；
+  // 显式短路避免空查询，也让意图自文档化
+  if (!sysConfig.showRetrieval) return
   const el = (e.target as HTMLElement)?.closest?.('.md-ref-chunk') as HTMLElement | null
   if (!el) return
   const idx = Number(el.dataset.chunkIdx)
@@ -461,6 +476,8 @@ defineProps<{ embedded?: boolean }>()
 const store = useConversationStore()
 // HostPort 单例：能力决定按钮是否可用（宿主无 apply → 自动退化复制 JSON）
 const port = getHostPort()
+// 系统配置（响应式只读单例）：管理界面配置的两个显示开关，独立/嵌入对话共读
+const sysConfig = useSysConfig()
 
 // pack 的展示声明（data_labels/data_hidden/welcome_examples）——领域词住 manifest，
 // 本组件只按通用字段渲染。拉取失败回退空（不显示示例卡、key 不翻译）
@@ -470,6 +487,9 @@ const packArtifactType = ref<string | undefined>(undefined)
 // 交互不同，按钮由声明驱动而非组件硬编码
 const packActions = ref<string[]>(['view_json'])
 onMounted(async () => {
+  // 挂载时从服务端刷新系统配置（管理端改了显示开关，新会话/刷新即生效；
+  // 失败回退 localStorage 缓存再回退默认，见 sysConfig composable）
+  refreshSysConfig()
   try {
     const manifests = await getPackManifests()
     // 主交互 pack：优先声明了 artifact.display 的（制品卡标签/动作取自它）
@@ -1376,6 +1396,14 @@ watch(() => store.currentConversation?.id, (convId) => {
 }
 
 /* ===== Pipeline 进度条样式（流式生成中显示） ===== */
+/* showPipeline 关闭时的极简处理文案：与消息行同宽的一行灰字 */
+.processing-simple {
+  max-width: 880px;
+  margin: 0 auto 24px;
+  padding: 0 24px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
 .pipeline-card {
   max-width: 880px;
   margin: 0 auto 24px;
@@ -1468,6 +1496,7 @@ watch(() => store.currentConversation?.id, (convId) => {
   .examples { grid-template-columns: 1fr; }
   .message-row { padding: 0 12px; }
   .pipeline-card { padding: 0 12px; }
+  .processing-simple { padding: 0 12px; }
 }
 
 /* JSON 查看器内容区：撑满全屏 Modal 的 body（内部 diff 自行滚动） */

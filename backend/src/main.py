@@ -51,6 +51,7 @@ from api.config import router as config_router
 from api.conversations import router as conversations_router
 from api.health import router as health_router
 from api.meta import router as meta_router
+from api.settings import router as settings_router
 from api.tasks import router as tasks_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
 from llm.client import LLMClient
@@ -108,6 +109,10 @@ async def lifespan(app: FastAPI):
     from services.pack_settings import PackSettingsStore
     settings_store = PackSettingsStore(database_url=database_url)
     app.state.settings_store = settings_store
+
+    # 平台级设置存储(平台自身 KV;当前消费者=显示设置,管理端写/用户级读)
+    from services.platform_settings import PlatformSettingsStore
+    app.state.platform_settings_store = PlatformSettingsStore(database_url=database_url)
 
     # 通用后台任务框架(任务表/日志表 + 线程池调度;handler 由 pack 注册)
     from services.task_store import TaskStore
@@ -327,6 +332,8 @@ app.include_router(auth_router)       # /api/auth/token（白名单，中间件�
 app.include_router(config_router)
 app.include_router(conversations_router)
 app.include_router(meta_router)
+# 用户级设置路由(平台级显示设置只读;独立/嵌入对话页共读)
+app.include_router(settings_router)
 # 管理端路由（X-Admin-Token 守门,ADMIN_TOKEN 未配置时整组 503）
 app.include_router(admin_router)
 # 任务中心路由（同 admin 口令守门;SSE 实时进度/日志）
