@@ -453,6 +453,17 @@ async function doDeleteCurrent() {
 .kg-side-tree :deep(.ant-tree .ant-tree-node-content-wrapper) {
   padding: 0 2px; border-radius: 6px;
 }
+/* 顶层节点贴左(用户 10-15 报"顶层缩紧不合适"):只清顶层的 indent
+   单元与 treenode 左内边距;子层保持层级缩进(层级感不丢) */
+.kg-side-tree :deep(.ant-tree > .ant-tree-list-holder-inner > div > .ant-tree-treenode) {
+  padding-left: 0 !important;
+}
+.kg-side-tree :deep(
+  .ant-tree > .ant-tree-list-holder-inner > div > .ant-tree-treenode
+  > .ant-tree-switcher) {
+  margin-left: 0;
+}
+.kg-side-tree :deep(.ant-tree .ant-tree-switcher) { width: 18px; }
 .kg-side-tip { padding: 16px 4px; text-align: center; color: #94a3b8; font-size: 12.5px; }
 
 /* 树节点:图标 + 名称/统计 + hover 操作 */
