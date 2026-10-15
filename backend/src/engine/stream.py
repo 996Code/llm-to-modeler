@@ -474,10 +474,15 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
         store.add_message(conv_id=conv_id, role="user", content=user_input)
 
         # 数据型制品(KG 检索子图/查询结果):随 assistant 消息一起落库,
-        # 历史恢复时前端用 dataArtifact 重渲染图谱卡/数据卡
+        # 历史恢复时前端用 dataArtifact 重渲染图谱卡/数据卡。
+        # P2#15:错误轮(error_for_llm 通道)带诊断卡字段——历史回放
+        # 重渲染诊断卡(失败环节分类+链路入口+重试),而非裸文本
         data_artifact = result_data.get("data") if result_data.get("artifactType") == "data" else None
+        is_error = bool(result_data.get("error"))
         store.add_message(conv_id=conv_id, role="assistant", content=summary,
-                          data_artifact=data_artifact)
+                          data_artifact=data_artifact,
+                          extra={"kind": "error-diag", "error_category": "unknown"}
+                          if is_error else None)
 
         # 配置结果:存 config_snapshot + 更新对话配置
         config = result_data.get("config")

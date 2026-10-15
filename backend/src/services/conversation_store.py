@@ -737,6 +737,7 @@ class ConversationStore:
         content: str,
         config_snapshot: Optional[Dict[str, Any]] = None,
         data_artifact: Optional[Dict[str, Any]] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """向会话追加一条消息。只 INSERT,不 UPDATE(严格遵守 append-only)。
 
@@ -752,6 +753,9 @@ class ConversationStore:
             config_snapshot:当时的配置快照(可选,用于审计"用户当时配的什么")
             data_artifact:  数据型制品快照(可选,KG 检索子图等——历史恢复时
                             前端据此重渲染数据卡/图谱卡)
+            extra:          消息级附加字段(可选,如 P2#15 诊断卡的
+                            kind='error-diag' + error_category——历史回放时
+                            前端据此重渲染诊断卡而非裸文本)
 
         Returns:
             包含 id / role / content / configSnapshot / dataArtifact / createdAt 的字典。
@@ -767,6 +771,7 @@ class ConversationStore:
             "content": content,
             "config_snapshot": config_snapshot,
             "data_artifact": data_artifact,
+            **(extra or {}),
         }
 
         with self._get_conn() as conn:
@@ -802,6 +807,10 @@ class ConversationStore:
             "content": payload.get("content", ""),
             "configSnapshot": payload.get("config_snapshot"),
             "dataArtifact": payload.get("data_artifact"),
+            # P2#15 诊断卡回放:错误消息的 kind/error_category 落 payload
+            # (历史会话恢复时前端据此重渲染诊断卡,而非裸文本)
+            "kind": payload.get("kind"),
+            "errorCategory": payload.get("error_category"),
             "createdAt": row["created_at"],
         }
 
