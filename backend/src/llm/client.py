@@ -287,9 +287,13 @@ class LLMClient:
                                   for m in messages], ensure_ascii=False)
                 cache_key = embed_cache_key(
                     model or self.config.model,
-                    "chat|t{}".format(
+                    "chat|t{}|m{}".format(
                         self.config.temperature if temperature is None
-                        else temperature),
+                        else temperature,
+                        # max_tokens 入键:截断口径不同的回复不得互相复用
+                        # (显式传参优先,缺省取配置——与 chat() 出站一致)
+                        self.config.max_tokens if max_tokens is None
+                        else max_tokens),
                     [sig])
             except (TypeError, ValueError):
                 # content 含不可序列化对象:放弃本次缓存,走原链路
