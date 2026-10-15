@@ -95,8 +95,10 @@ export interface DisplaySettings {
  * 失败由调用方兜底（sysConfig composable 回退 localStorage 缓存再回退默认）。
  */
 export async function fetchDisplaySettings(): Promise<DisplaySettings> {
-  const { data } = await api.get('/settings/display')
-  return data
+  // 后端响应是 snake_case——映射为前端 camelCase(与 admin 侧同款修正)
+  const { data } = await api.get<{ show_pipeline: boolean, show_retrieval: boolean }>(
+    '/settings/display')
+  return { showPipeline: data.show_pipeline, showRetrieval: data.show_retrieval }
 }
 
 // ── 会话（Conversation）相关 REST 接口 ──────────────────────────

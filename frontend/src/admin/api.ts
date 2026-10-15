@@ -402,15 +402,21 @@ export interface DisplaySettings {
 
 /** 读平台级显示设置(右上角徽标 hover 面板的初始值)。 */
 export async function fetchDisplaySettings(): Promise<DisplaySettings> {
-  const { data } = await adminApi.get<DisplaySettings>('/settings/display')
-  return data
+  const { data } = await adminApi.get<{ show_pipeline: boolean, show_retrieval: boolean }>(
+    '/settings/display')
+  return { showPipeline: data.show_pipeline, showRetrieval: data.show_retrieval }
 }
 
 /** 保存显示设置(部分更新:只提交要改的键;返回合并后的最新值)。 */
 export async function saveDisplaySettings(
   values: Partial<DisplaySettings>,
 ): Promise<DisplaySettings> {
-  const { data } = await adminApi.put<DisplaySettings>('/settings/display', values)
+  // 后端契约是 snake_case(show_pipeline/show_retrieval)——前端 camelCase
+  // 转换漏了会 422"未知配置项"(实测抓出)
+  const body: Record<string, boolean> = {}
+  if (values.showPipeline !== undefined) body.show_pipeline = values.showPipeline
+  if (values.showRetrieval !== undefined) body.show_retrieval = values.showRetrieval
+  const { data } = await adminApi.put<DisplaySettings>('/settings/display', body)
   return data
 }
 
