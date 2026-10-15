@@ -111,7 +111,8 @@ class FakeLLM:
         self.chat_json_result = {}
         self.chat_json_calls = []
 
-    def embeddings(self, texts, conv_id=None, stage=None):
+    def embeddings(self, texts, conv_id=None, stage=None, mode=None):
+        # mode 参数跟随生产接口演进(query/document 分侧),替身本身不区分
         self.embed_calls.append((list(texts), stage))
         if self.embed_error is not None:
             raise self.embed_error

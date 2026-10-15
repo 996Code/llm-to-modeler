@@ -66,7 +66,8 @@ class MockLLM:
             return {"merges": self.consolidate_result or []}
         return {}
 
-    def embeddings(self, texts, conv_id=None, stage=None):
+    def embeddings(self, texts, conv_id=None, stage=None, mode=None):
+        # mode 参数跟随生产接口演进(query/document 分侧),替身本身不区分
         self.embed_calls += 1
         return [[0.1, 0.2, 0.3] for _ in texts]
 

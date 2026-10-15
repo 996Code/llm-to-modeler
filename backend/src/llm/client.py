@@ -69,6 +69,8 @@ logger = logging.getLogger(__name__)
 from llm.rate_limit import (  # noqa: E402
     estimate_tokens, get_rate_limiter, is_rate_limit_error,
 )
+# 平台嵌入缓存键(P1#8 T2:embeddings 出站前查,命中零出站)
+from llm.embed_cache import EmbedCache, embed_cache_key  # noqa: E402
 
 
 class LLMConfig(BaseModel):
@@ -133,6 +135,19 @@ class LLMClient:
         self._log_full = os.getenv("LLM_LOG_FULL", "1").strip().lower() not in (
             "0", "false", "no", "off",
         )
+
+        # 平台嵌入缓存(LRU+TTL 24h,P1#8):embeddings 出站前查——
+        # 重复文本零出站(检索链路同 query 反复编码是主收益场景)。
+        # 容量 EMBED_CACHE_MAX 可调(默认 4096 条;单条约数 KB 向量,
+        # 上限内存占用 ~几十 MB 量级,TTL 到期惰性淘汰)
+        self._embed_cache = EmbedCache(
+            max_entries=int(os.getenv("EMBED_CACHE_MAX", "4096")))
+
+        # chat 结果缓存(P1#8 T3):独立实例,与嵌入缓存互不挤占,
+        # 参数同款(LRU 上限同源 EMBED_CACHE_MAX,TTL 24h)。
+        # 默认关(chat 混用途缓存错层风险,LLM_CACHE_ENABLED 显式开启)
+        self._chat_cache = EmbedCache(
+            max_entries=int(os.getenv("EMBED_CACHE_MAX", "4096")))
 
         if not config.api_key:
             # 没配 api_key 时只 warning 不抛异常：本地模型（LM Studio）常无需 key
@@ -258,6 +273,44 @@ class LLMClient:
         """
         start_time = time.time()  # 计时起点，用于算 duration_ms
         endpoint = f"{self.config.base_url}/chat/completions"
+        # chat 结果缓存(P1#8 T3):LLM_CACHE_ENABLED 默认关——chat 是混用途
+        # 出口(路由/抽取/生成共用),缓存错层风险高,只对全同参数命中
+        # (messages 逐项 role/content + model 显式覆盖优先 + temperature)。
+        # 查在限速 acquire 之前:命中零出站,不应占 RPM/TPM 配额。
+        # 多模态 content(list)的 sig 构造可能失败——失败跳过缓存,
+        # 不阻断主链路(裁决:缓存是增强项,主链路永远直通)。
+        cache_key = None
+        if os.getenv("LLM_CACHE_ENABLED", "0").strip().lower() in (
+                "1", "true", "yes", "on") and messages:
+            try:
+                sig = json.dumps([[m.get("role"), m.get("content")]
+                                  for m in messages], ensure_ascii=False)
+                cache_key = embed_cache_key(
+                    model or self.config.model,
+                    "chat|t{}|m{}".format(
+                        self.config.temperature if temperature is None
+                        else temperature,
+                        # max_tokens 入键:截断口径不同的回复不得互相复用
+                        # (显式传参优先,缺省取配置——与 chat() 出站一致)
+                        self.config.max_tokens if max_tokens is None
+                        else max_tokens),
+                    [sig])
+            except (TypeError, ValueError):
+                # content 含不可序列化对象:放弃本次缓存,走原链路
+                cache_key = None
+            if cache_key is not None:
+                hit = self._chat_cache.get(cache_key)
+                if hit is not None:
+                    # 命中:零出站零等待——duration=0,单独记 cache 日志
+                    # (未命中路径仍走下方原观测,duration 真实)
+                    self._log_call(
+                        endpoint="chat:cache",
+                        request_data={
+                            "stage": stage, "cache_hit": True,
+                            "count": len(messages)},
+                        response_data={}, status_code=None, duration_ms=0,
+                        conv_id=conv_id)
+                    return hit
         # 全局限速:RPM/TPM 配额等待(未配置限额时零开销直通)。
         # 多模态 content(list)不计入估算——只按文本部分粗估已够防撞限额
         _est = estimate_tokens("".join(
@@ -344,6 +397,11 @@ class LLMClient:
                 conv_id=conv_id,
                 stage=stage,
             )
+
+            # 成功才回填 chat 缓存(异常/失败路径不缓存坏值);
+            # 未开启或 sig 构造失败时 cache_key=None,这里天然跳过
+            if cache_key is not None:
+                self._chat_cache.put(cache_key, result)
 
             return result
 
@@ -519,6 +577,7 @@ class LLMClient:
         texts: List[str],
         conv_id: Optional[str] = None,
         stage: Optional[str] = None,
+        mode: str = "document",
     ) -> List[List[float]]:
         """批量向量化;后端由 EMBEDDING_BACKEND 决定(同步)。
 
@@ -526,6 +585,11 @@ class LLMClient:
           零外部依赖零费用;``LLM_EMBED_MODEL`` 默认 bge-m3
         - api: OpenAI 兼容 /v1/embeddings,模型由 ``LLM_EMBED_MODEL``
           指定;未配置直接抛 RuntimeError,由调用方降级(纯图谱模式)
+
+        mode 只影响 local 后端(bge-m3 检索前缀,非对称检索对):
+        - ``document``(默认): 直传编码——入库/文档侧,现行为不变
+        - ``query``: 查询侧加官方 instruction 前缀(encode_queries)
+        - api 后端无官方查询/文档区分,mode 忽略(直传,debug 留痕)
 
         注意:两种后端维度一致(云端 1024 / 本地 1024),切换后端
         无需重建知识库向量;但 bge-m3 与 text-embedding-v3
@@ -535,33 +599,73 @@ class LLMClient:
             与输入等长等序的向量列表。
 
         Failure:
+            ValueError: mode 非 document/query。
             RuntimeError: 模型未配置/本地初始化失败。
             SDK 原生异常: 网络/鉴权/模型不存在(调用方决定重试或降级)。
         """
+        if mode not in ("document", "query"):
+            raise ValueError(f"未知 embeddings mode: {mode}")
         backend = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
+        texts = [str(t) for t in texts]
+        # 缓存键 model 口径 = 该后端实际出站模型:api 用 LLM_EMBED_MODEL
+        # (切模型键即变,旧向量不串味);local 恒 bge-m3,用常量标签
+        # (与观测端点 embeddings:local/bge-m3 同源)——不用 config.model,
+        # 那是 chat 模型名,切 chat 模型不应冲掉嵌入缓存
+        key_model = (os.getenv("LLM_EMBED_MODEL", "").strip()
+                     if backend == "api" else "local/bge-m3")
+        cache_key = embed_cache_key(key_model, mode, texts)
+        hit = self._embed_cache.get(cache_key)
+        if hit is not None:
+            # 命中:零出站零推理——duration=0,单独记一条 cache 日志
+            # (未命中路径仍走各后端原观测,duration 真实)
+            self._log_call(
+                endpoint="embeddings:cache",
+                request_data={
+                    "stage": stage or "embeddings", "count": len(texts),
+                    "mode": mode, "cache_hit": True},
+                response_data={"count": len(hit)},
+                status_code=None, duration_ms=0, conv_id=conv_id)
+            return hit
         if backend == "local":
-            return self._embeddings_local(texts, conv_id=conv_id, stage=stage)
-        return self._embeddings_api(texts, conv_id=conv_id, stage=stage)
+            result = self._embeddings_local(
+                texts, conv_id=conv_id, stage=stage, query=(mode == "query"))
+        else:
+            if mode == "query":
+                logger.debug(
+                    "embeddings mode=query ignored on api backend "
+                    f"(stage={stage}): OpenAI 兼容端点无查询/文档区分,直传")
+            result = self._embeddings_api(texts, conv_id=conv_id, stage=stage)
+        # 只有成功返回才回填(异常路径不缓存坏值)
+        self._embed_cache.put(cache_key, result)
+        return result
 
     def _embeddings_local(
         self,
         texts: List[str],
         conv_id: Optional[str] = None,
         stage: Optional[str] = None,
+        query: bool = False,
     ) -> List[List[float]]:
-        """本地 onnx 推理后端(观测与 api 后端同规格:耗时/条数入调用日志)。"""
+        """本地 onnx 推理后端(观测与 api 后端同规格:耗时/条数入调用日志)。
+
+        query=True 走 encode_queries(查询侧加 bge-m3 检索前缀),
+        观测 request_data 记 mode 字段区分两侧。
+        """
         from llm.local_embeddings import get_local_embedder
         texts = [str(t) for t in texts]
+        mode = "query" if query else "document"
+        embedder = get_local_embedder()
         start = time.monotonic()
         try:
-            vectors = get_local_embedder().encode(texts)
+            vectors = (embedder.encode_queries(texts) if query
+                       else embedder.encode(texts))
             duration_ms = int((time.monotonic() - start) * 1000)
             self._log_call(
                 endpoint="embeddings:local/bge-m3",
                 request_data={
                     "stage": stage or "embeddings", "count": len(texts),
                     "chars": sum(len(t) for t in texts),
-                    "backend": "local",
+                    "backend": "local", "mode": mode,
                 },
                 response_data={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0},
                 status_code=None,
@@ -573,7 +677,8 @@ class LLMClient:
             self._log_call(
                 endpoint="embeddings:local/bge-m3",
                 request_data={"stage": stage or "embeddings", "count": len(texts),
-                              "chars": sum(len(t) for t in texts), "backend": "local"},
+                              "chars": sum(len(t) for t in texts),
+                              "backend": "local", "mode": mode},
                 response_data={},
                 status_code=500,
                 duration_ms=int((time.monotonic() - start) * 1000),
