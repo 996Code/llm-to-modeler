@@ -35,7 +35,8 @@ artifact:
 
 dependencies:
   milvus:
-    required: false         # 可选: 语义层向量检索(两阶段召回第一阶段);不可用时降级全表清单(对标原系统 SEC-005)
+    required: false         # 可选: 语义层向量检索(两阶段召回第一阶段);不可用时降级全表清单(对标原系统 SEC-005)。
+                             # 向量默认存 PG(pgvector,走平台 DATABASE_URL);仅 VECTOR_BACKEND=milvus 时需要本依赖
     fields:
       - milvus_uri
     probe:

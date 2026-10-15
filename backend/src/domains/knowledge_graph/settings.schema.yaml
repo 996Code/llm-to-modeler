@@ -32,9 +32,8 @@ groups:
         type: string
         label: Milvus 地址
         env: MILVUS_URI
-        required: true
         placeholder: http://localhost:19530
-        help: 向量存储;每个知识库一个独立 collection
+        help: 可选——向量默认存 PG(pgvector,走 DATABASE_URL);仅 VECTOR_BACKEND=milvus 时需要
       - key: milvus_user
         type: string
         label: Milvus 用户

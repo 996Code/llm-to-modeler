@@ -14,7 +14,7 @@
 | 前端 | Vue 3 + TypeScript + Vite + Ant Design Vue + Pinia + AntV G6（图谱可视化） |
 | 后端 | Python 3.12 + FastAPI + LangGraph StateGraph |
 | LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型；embedding 同协议） |
-| 存储 | PostgreSQL（对话/审计/任务/checkpoint，必填）+ Neo4j（图谱，可选）+ Milvus（向量，可选） |
+| 存储 | PostgreSQL（对话/审计/任务/checkpoint + 向量 pgvector，必填）+ Neo4j（图谱，可选）+ Milvus（向量可选后端，仅 `VECTOR_BACKEND=milvus`） |
 | 上游 | AssetClient 抽象（HTTP 适配；地址请求级解析：宿主 services 表按请求下发） |
 
 ---
@@ -533,6 +533,11 @@ APP_MEM_LIMIT=8g               # 应用容器内存护栏
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your-password
+# ── 向量后端（默认 pg；Milvus 已降为可选后端）──
+# VECTOR_BACKEND=pg        # 默认。向量存 PostgreSQL(pgvector 扩展 + HNSW 余弦索引),
+#                          # 走 DATABASE_URL 同库,建表时自动 CREATE EXTENSION vector
+#                          # (目标 PG 需装 pgvector;无权限时报错并提示找 DBA 授权)。
+# VECTOR_BACKEND=milvus    # 切回 Milvus:需配下方 MILVUS_* 并运行 Milvus 服务。
 MILVUS_URI=http://localhost:19530
 LLM_EMBED_MODEL=bge-m3              # 默认本地 ONNX(EMBEDDING_BACKEND=local,零 API 费用)
 EMBEDDING_BACKEND=local              # local(默认)/api(云端 OpenAI 兼容 /v1/embeddings)
@@ -852,7 +857,9 @@ SDK 存储设施（前缀登记 + scope 签发隔离契约）。
 ## 十二、Docker 部署
 
 前后端合并为一个一体容器（nginx 伺服静态/反代 + uvicorn 跑 API），
-外加 Neo4j（图谱）与 Milvus（向量）两个依赖服务，共三个容器。
+外加 Neo4j（图谱）一个依赖服务；向量存 PostgreSQL（pgvector，与平台
+存储同库同容器）。Milvus 为可选后端，默认不启动——仅
+`VECTOR_BACKEND=milvus` 时用 `docker compose --profile milvus up -d` 启用。
 
 ```bash
 # 1. 准备配置
@@ -871,7 +878,7 @@ vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD、POSTGRES_PASSWORD 等
 ```
 
 - 应用入口：`http://<主机>:19090/ai-modeler/`（`HOST_PORT` 可改）
-- 数据落盘：`./data/postgres`（PG 数据）、`./data/app`（上传文件）、`./data/neo4j`、`./data/milvus`
+- 数据落盘：`./data/postgres`（PG 数据，含向量表）、`./data/app`（上传文件）、`./data/neo4j`、`./data/milvus`（仅启用 milvus profile 时）
 - embedding 模型：首次部署自动下载到 `./data/models/embedding/`（bge-m3，~543MB），
   跨版本复用；`EMBEDDING_BACKEND=local` 启用本地向量化
 - 镜像构建：`deploy.sh` 在 docker run 容器内预构建（前端 dist / 后端 .deps / nginx deb），
@@ -881,3 +888,8 @@ vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD、POSTGRES_PASSWORD 等
 升级需先手动迁移存量数据——源库落点、宿主执行命令与影响说明见
 `backend/scripts/migrate_sqlite_to_pg.py` 脚本头部的 runbook(幂等可重跑,
 不随镜像/部署分发)。
+
+**存量升级（Milvus → PG 向量迁移，一次性,手动执行）**：向量默认后端已切
+pg(pgvector),曾用 Milvus 的部署升级后按需迁移——停 app 后在宿主跑
+`backend/scripts/migrate_milvus_to_pg.py`(幂等,按 doc 补缺口不覆盖新数据;
+Milvus 不可达/无数据时自动跳过),runbook 见脚本头部。

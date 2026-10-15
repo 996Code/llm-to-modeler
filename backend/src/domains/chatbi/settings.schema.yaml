@@ -8,9 +8,8 @@ groups:
         type: string
         label: Milvus 地址
         env: MILVUS_URI
-        required: true
         placeholder: http://milvus:19530
-        help: 语义层向量检索(两阶段召回);未配置时插件中心显示依赖未配置且不可启用
+        help: 可选——向量默认存 PG(pgvector,走 DATABASE_URL);仅 VECTOR_BACKEND=milvus 时需要
   - key: security
     title: 凭据加密
     fields:
