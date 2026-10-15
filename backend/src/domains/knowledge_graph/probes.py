@@ -47,3 +47,25 @@ def milvus(settings: dict) -> None:
         client.list_collections(timeout=_PROBE_CONNECT_TIMEOUT)
     finally:
         client.close()
+
+
+def pg_vector(settings: dict) -> None:
+    """PG 向量后端连通性(VECTOR_BACKEND=pg 默认):SELECT 1 + pgvector 扩展在。
+
+    走 DATABASE_URL(与业务库同实例——向量表建在 public schema);
+    扩展缺失给明确错误(需 DBA: CREATE EXTENSION vector)。
+    """
+    import os
+    import psycopg
+
+    dsn = os.getenv("DATABASE_URL", "").strip()
+    if not dsn:
+        raise RuntimeError("DATABASE_URL 未配置——PG 向量后端必填")
+    with psycopg.connect(dsn, connect_timeout=_PROBE_CONNECT_TIMEOUT) as conn:
+        row = conn.execute(
+            "SELECT extname FROM pg_extension WHERE extname = 'vector'"
+        ).fetchone()
+        if not row:
+            raise RuntimeError(
+                "pgvector 扩展未安装——请执行 CREATE EXTENSION vector;"
+                "镜像需含 pgvector(如 pgvector/pgvector:pg16)")

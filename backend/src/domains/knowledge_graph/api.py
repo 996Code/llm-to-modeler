@@ -648,7 +648,13 @@ async def kb_retrieve_test(request: Request, kb_id: str, payload: Dict[str, Any]
 
 @router.get("/dependency-status", dependencies=[Depends(admin_required)])
 async def dependency_status(request: Request):
-    """对 Neo4j/Milvus 各跑一次探针(结果即时,不走缓存)。"""
+    """对 Neo4j/向量存储各跑一次探针(结果即时,不走缓存)。
+
+    向量探针按 VECTOR_BACKEND 分流:pg(默认)探 PG(pgvector 扩展
+    可用性),milvus 才探 Milvus——删 Milvus 后设置页不再误报红
+    (功能对齐审查:换向量库,平台/插件状态口径同步更新)。
+    """
+    import os
     from domains.knowledge_graph import probes
     settings = runtime.settings_reader(request.app.state).all()
 
@@ -660,7 +666,9 @@ async def dependency_status(request: Request):
         except Exception as e:
             return {"ok": False, "detail": str(e) or type(e).__name__}
 
+    backend = os.getenv("VECTOR_BACKEND", "pg").strip().lower()
+    vector_probe = "milvus" if backend == "milvus" else "pg_vector"
     return {
         "neo4j": _probe("neo4j"),
-        "milvus": _probe("milvus"),
+        backend: _probe(vector_probe),
     }

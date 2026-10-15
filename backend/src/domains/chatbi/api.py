@@ -520,6 +520,9 @@ async def health_detail_ep(request: Request):
     组件各自独立探测, 一个挂了不影响其他组件上报: 向量库(Milvus)/
     LLM 网关/数据源加密凭据 + 各业务库最近健康状态。
     """
+    import os
+    _backend = os.getenv("VECTOR_BACKEND", "pg").strip().lower()
+    vector_key = "milvus" if _backend == "milvus" else "pg"
     components: dict = {}
     # 调度器(三十九审 P1-D): 线程存活/连续 tick 失败/最近 tick——
     # 线程死亡或持续失败必须可见, 不能 health 绿而定时不跑
@@ -553,10 +556,11 @@ async def health_detail_ep(request: Request):
         if not callable(ping):
             raise RuntimeError("向量适配器无 ping 探针")
         ping()
-        components["milvus"] = {"status": "ok", "detail": "ping 通过"}
+        components[vector_key] = {"status": "ok", "detail": "ping 通过"}
     except Exception as e:
-        components["milvus"] = {"status": "fail",
-                                "detail": f"Milvus 不可达: {str(e)[:160]}"}
+        components[vector_key] = {
+            "status": "fail",
+            "detail": f"向量库({vector_key})不可达: {str(e)[:160]}"}
     # LLM 网关: GET /models 真实探针(异步 httpx 不阻塞事件循环;
     # 模型名从 config 读——llm.model 属性不存在, 此前恒显示空)
     try:

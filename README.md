@@ -403,7 +403,7 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 
 ### 4.3 knowledge_graph — 知识图谱 + 向量检索（全能力插件）
 
-自然语言驱动的知识库：上传文档 → LLM 抽取实体/关系入 Neo4j、切块向量化入 Milvus →
+自然语言驱动的知识库：上传文档 → LLM 抽取实体/关系入 Neo4j、切块向量化入 PG(pgvector,默认;Milvus 可选) →
 对话里"查一下知识库里""张伟向谁汇报"直接命中（`kb_search` 工具），答案带三元组证据
 与原文引用。
 
@@ -416,7 +416,7 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 | 检索可观测 | 两路库调用入 `call_logs`（graph/vector 类型）:逐词种子命中、子图召回量+三元组明细+截断水位、向量逐条相似度分数——会话链路与调用日志页均可查 |
 | 插件 HTTP API | `/api/packs/knowledge_graph/*`:知识库 CRUD/文档上传/导入/图谱查询/增量展开/检索问答（管理页与宿主直调） |
 | 管理页 | 管理端动态 Tab:知识库工作条（选库/建库/删库）+ 文档导入 + G6 图谱浏览（单击详情/双击展开邻居/悬停高亮一阶邻域）+ 本体设置（模板起步/LLM 归纳/类型审核） |
-| 依赖门控 | manifest 声明 neo4j/milvus 依赖与探针;未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
+| 依赖门控 | manifest 声明 neo4j 依赖与向量后端探针(pg 默认/milvus 可选);未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
 
 **SDK 存储下沉**：图/向量/文档解析能力已下沉 `sdk/`（`graph_store` / `vector_store` /
 `doc_parser` / `scope_registry`）,带命名空间隔离契约（前缀登记 fail-fast + scope_id

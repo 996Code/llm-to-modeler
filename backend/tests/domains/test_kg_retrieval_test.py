@@ -146,3 +146,53 @@ class TestRetrieveTestEndpoint:
         assert r.status_code == 200
         vec_logs = [c for c in env.obs_calls if c["call_type"] == "vector"]
         assert vec_logs and vec_logs[0]["request_data"]["topK"] == 1
+
+
+class TestDependencyStatusBackendAware:
+    """删 Milvus 后状态口径同步(功能对齐审查):VECTOR_BACKEND=pg 时
+    依赖状态探 PG(pgvector),不再无条件探 Milvus 误报红。"""
+
+    def test_pg_backend_probes_pg_vector(self, monkeypatch):
+        import os
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from domains.knowledge_graph.api import router
+        from domains.knowledge_graph import probes as kg_probes
+
+        monkeypatch.setenv("VECTOR_BACKEND", "pg")
+        called = []
+        monkeypatch.setattr(kg_probes, "pg_vector",
+                            lambda s: called.append("pg") or None)
+        monkeypatch.setattr(kg_probes, "milvus",
+                            lambda s: called.append("milvus") or None)
+        app = FastAPI()
+        app.include_router(router, prefix="/api/packs/knowledge_graph")
+        app.state.llm_client = None
+        app.state.settings_store = None
+        r = TestClient(app).get("/api/packs/knowledge_graph/dependency-status")
+        assert r.status_code == 200
+        body = r.json()
+        assert "pg" in body and "milvus" not in body   # 键=backend 名
+        assert called == ["pg"]
+
+    def test_milvus_backend_still_probes_milvus(self, monkeypatch):
+        import os
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from domains.knowledge_graph.api import router
+        from domains.knowledge_graph import probes as kg_probes
+
+        monkeypatch.setenv("VECTOR_BACKEND", "milvus")
+        called = []
+        monkeypatch.setattr(kg_probes, "pg_vector",
+                            lambda s: called.append("pg") or None)
+        monkeypatch.setattr(kg_probes, "milvus",
+                            lambda s: called.append("milvus") or None)
+        app = FastAPI()
+        app.include_router(router, prefix="/api/packs/knowledge_graph")
+        app.state.llm_client = None
+        app.state.settings_store = None
+        r = TestClient(app).get("/api/packs/knowledge_graph/dependency-status")
+        body = r.json()
+        assert "milvus" in body and "pg" not in body
+        assert called == ["milvus"]
