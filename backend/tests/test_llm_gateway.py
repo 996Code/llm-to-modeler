@@ -93,3 +93,72 @@ class TestEmbedModes:
         client = _local_client(monkeypatch)
         with pytest.raises(ValueError):
             client.embeddings(["q"], mode="other")
+
+
+class TestEmbedCache:
+
+    def test_second_call_zero_outbound(self, monkeypatch):
+        """同参二次 embeddings:零出站(替身不再被调)——蓝图验收
+        '重复 query 检索链路 LLM 调用数下降可观测'的直接锚点。"""
+        client = _local_client(monkeypatch)
+        calls = []
+
+        def counting_encode(texts):
+            calls.append(list(texts))
+            return [[0.1, 0.2] for _ in texts]
+        monkeypatch.setattr("llm.local_embeddings.get_local_embedder",
+                            lambda: SimpleNamespace(
+                                encode=counting_encode,
+                                encode_queries=lambda ts: counting_encode(ts)))
+        v1 = client.embeddings(["员工表"], stage="s1")
+        v2 = client.embeddings(["员工表"], stage="s2")
+        assert v1 == v2 == [[0.1, 0.2]]
+        assert len(calls) == 1, f"第二次应命中缓存零出站,实际出站 {len(calls)}"
+        # 命中可观测:第二次日志带 cache_hit
+        log2 = [c for c in client._conversation_store.calls
+                if c["request_data"].get("stage") == "s2"][-1]
+        assert log2["request_data"].get("cache_hit") is True
+
+    def test_different_mode_no_cross_hit(self, monkeypatch):
+        """mode 不同不串味:query 与 document 各自出站。"""
+        client = _local_client(monkeypatch)
+        seen = []
+
+        def rec(texts):
+            seen.append(list(texts))
+            return [[0.3] for _ in texts]
+        monkeypatch.setattr("llm.local_embeddings.get_local_embedder",
+                            lambda: SimpleNamespace(
+                                encode=rec, encode_queries=lambda ts: rec(ts)))
+        client.embeddings(["q"], mode="document", stage="a")
+        client.embeddings(["q"], mode="query", stage="b")
+        assert len(seen) == 2
+
+    def test_ttl_expiry(self, monkeypatch):
+        """TTL 过期后重新出站(monkeypatch time)。"""
+        import llm.embed_cache as ec
+        client = _local_client(monkeypatch)
+        monkeypatch.setattr("llm.local_embeddings.get_local_embedder",
+                            lambda: SimpleNamespace(
+                                encode=lambda ts: [[0.4] for _ in ts],
+                                encode_queries=lambda ts: [[0.4] for _ in ts]))
+        client.embeddings(["x"], stage="a")
+        # 注:计划原文 lambda: ec.time.monotonic() + 90000 自引用递归
+        # (ec.time 即全局 time 模块,setattr 后 lambda 调到自己)——改为
+        # patch 前绑定原函数,语义不变(原值+90000 > TTL 86400)
+        _orig = ec.time.monotonic
+        monkeypatch.setattr(ec.time, "monotonic", lambda: _orig() + 90000)
+        client.embeddings(["x"], stage="b")
+        # 过期后出站——第二次日志 cache_hit 非 True
+        log2 = [c for c in client._conversation_store.calls
+                if c["request_data"].get("stage") == "b"][-1]
+        assert log2["request_data"].get("cache_hit") is not True
+
+    def test_lru_eviction(self):
+        """超上限淘汰最旧(容量 2,放 3 条,第 1 条被逐)。"""
+        from llm.embed_cache import EmbedCache
+        c = EmbedCache(max_entries=2, ttl_seconds=60)
+        c.put("a", [[1]])
+        c.put("b", [[2]])
+        c.put("c", [[3]])
+        assert c.get("a") is None and c.get("c") == [[3]]

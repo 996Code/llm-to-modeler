@@ -69,6 +69,8 @@ logger = logging.getLogger(__name__)
 from llm.rate_limit import (  # noqa: E402
     estimate_tokens, get_rate_limiter, is_rate_limit_error,
 )
+# 平台嵌入缓存键(P1#8 T2:embeddings 出站前查,命中零出站)
+from llm.embed_cache import EmbedCache, embed_cache_key  # noqa: E402
 
 
 class LLMConfig(BaseModel):
@@ -133,6 +135,13 @@ class LLMClient:
         self._log_full = os.getenv("LLM_LOG_FULL", "1").strip().lower() not in (
             "0", "false", "no", "off",
         )
+
+        # 平台嵌入缓存(LRU+TTL 24h,P1#8):embeddings 出站前查——
+        # 重复文本零出站(检索链路同 query 反复编码是主收益场景)。
+        # 容量 EMBED_CACHE_MAX 可调(默认 4096 条;单条约数 KB 向量,
+        # 上限内存占用 ~几十 MB 量级,TTL 到期惰性淘汰)
+        self._embed_cache = EmbedCache(
+            max_entries=int(os.getenv("EMBED_CACHE_MAX", "4096")))
 
         if not config.api_key:
             # 没配 api_key 时只 warning 不抛异常：本地模型（LM Studio）常无需 key
@@ -548,14 +557,38 @@ class LLMClient:
         if mode not in ("document", "query"):
             raise ValueError(f"未知 embeddings mode: {mode}")
         backend = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
+        texts = [str(t) for t in texts]
+        # 缓存键 model 口径 = 该后端实际出站模型:api 用 LLM_EMBED_MODEL
+        # (切模型键即变,旧向量不串味);local 恒 bge-m3,用常量标签
+        # (与观测端点 embeddings:local/bge-m3 同源)——不用 config.model,
+        # 那是 chat 模型名,切 chat 模型不应冲掉嵌入缓存
+        key_model = (os.getenv("LLM_EMBED_MODEL", "").strip()
+                     if backend == "api" else "local/bge-m3")
+        cache_key = embed_cache_key(key_model, mode, texts)
+        hit = self._embed_cache.get(cache_key)
+        if hit is not None:
+            # 命中:零出站零推理——duration=0,单独记一条 cache 日志
+            # (未命中路径仍走各后端原观测,duration 真实)
+            self._log_call(
+                endpoint="embeddings:cache",
+                request_data={
+                    "stage": stage or "embeddings", "count": len(texts),
+                    "mode": mode, "cache_hit": True},
+                response_data={"count": len(hit)},
+                status_code=None, duration_ms=0, conv_id=conv_id)
+            return hit
         if backend == "local":
-            return self._embeddings_local(
+            result = self._embeddings_local(
                 texts, conv_id=conv_id, stage=stage, query=(mode == "query"))
-        if mode == "query":
-            logger.debug(
-                "embeddings mode=query ignored on api backend "
-                f"(stage={stage}): OpenAI 兼容端点无查询/文档区分,直传")
-        return self._embeddings_api(texts, conv_id=conv_id, stage=stage)
+        else:
+            if mode == "query":
+                logger.debug(
+                    "embeddings mode=query ignored on api backend "
+                    f"(stage={stage}): OpenAI 兼容端点无查询/文档区分,直传")
+            result = self._embeddings_api(texts, conv_id=conv_id, stage=stage)
+        # 只有成功返回才回填(异常路径不缓存坏值)
+        self._embed_cache.put(cache_key, result)
+        return result
 
     def _embeddings_local(
         self,
