@@ -39,6 +39,39 @@
 
     <!-- 对话内明细(卡片右下角小字: 耗时/自愈/降级/LLM 用量) -->
     <div v-if="detailLine" class="detail-line">{{ detailLine }}</div>
+
+    <!-- P2#11 数据来源折叠区: 表 schema 卡 + JOIN 路径 + SQL(可信度双件套) -->
+    <div v-if="tableProvenance.length" class="prov-section">
+      <button class="prov-toggle" @click="provOpen = !provOpen">
+        {{ provOpen ? '▼' : '▶' }} 数据来源 · {{ tableProvenance.length }} 张表 ·
+        本查询返回 {{ artifact?.rowcount ?? 0 }} 行
+      </button>
+      <div v-if="provOpen" class="prov-body">
+        <div v-for="t in tableProvenance" :key="t.name" class="prov-table">
+          <div class="prov-table-head">
+            <b>{{ t.display_name || t.name }}</b>
+            <code class="prov-table-name">{{ t.name }}</code>
+            <span v-if="t.metrics?.length" class="prov-metrics">
+              指标: {{ t.metrics.join('、') }}
+            </span>
+          </div>
+          <div v-if="t.description" class="prov-desc">{{ t.description }}</div>
+          <div v-if="t.columns.length" class="prov-cols">
+            <span v-for="c in t.columns" :key="c.name" class="prov-col">
+              {{ c.display_name }}<i class="prov-col-type">{{ c.data_type }}</i>
+            </span>
+          </div>
+          <div v-else class="prov-missing">{{ t.note || '无列信息' }}</div>
+        </div>
+        <div v-if="artifact?.join_path_section" class="prov-join">
+          {{ artifact.join_path_section }}
+        </div>
+        <details v-if="artifact?.sql" class="prov-sql">
+          <summary>执行 SQL</summary>
+          <pre>{{ artifact.sql }}</pre>
+        </details>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -70,6 +103,11 @@ const detailLine = computed(() => {
   if (tokens > 0) parts.push(`${fmtTokens(tokens)} tokens`)
   return parts.join(' · ')
 })
+
+// P2#11 数据来源: 制品 table_provenance(空则整个区块不渲染)
+const provOpen = ref(false)
+const tableProvenance = computed(
+  () => (props.artifact?.table_provenance as any[] | undefined) || [])
 
 function fmtTokens(n: number): string {
   if (n >= 10000) return `${(n / 10000).toFixed(1)}万`
@@ -145,6 +183,33 @@ onBeforeUnmount(() => {
 .detail-line {
   color: #999; font-size: 12px;
   margin-top: 6px; text-align: right;   /* 卡片右下角小字 */
+}
+/* P2#11 数据来源折叠区 */
+.prov-section { margin-top: 8px; border-top: 1px dashed #e5e7eb; padding-top: 6px; }
+.prov-toggle {
+  background: none; border: none; cursor: pointer; padding: 0;
+  color: #6b7280; font-size: 12px;
+}
+.prov-toggle:hover { color: #2f54eb; }
+.prov-body { margin-top: 6px; }
+.prov-table { background: #f9fafb; border-radius: 6px; padding: 6px 10px; margin-bottom: 6px; }
+.prov-table-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
+.prov-table-name { color: #9ca3af; font-size: 11px; }
+.prov-metrics { color: #d48806; font-size: 11px; }
+.prov-desc { color: #6b7280; font-size: 11.5px; margin-top: 2px; }
+.prov-cols { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+.prov-col {
+  background: #eef2ff; color: #3730a3; border-radius: 4px;
+  padding: 1px 6px; font-size: 11px;
+}
+.prov-col-type { color: #9ca3af; font-style: normal; margin-left: 3px; font-size: 10px; }
+.prov-missing { color: #9ca3af; font-size: 11.5px; }
+.prov-join { color: #6b7280; font-size: 11.5px; margin-top: 4px; }
+.prov-sql { margin-top: 6px; }
+.prov-sql summary { cursor: pointer; color: #6b7280; font-size: 11.5px; }
+.prov-sql pre {
+  background: #f3f4f6; border-radius: 6px; padding: 8px;
+  font-size: 11px; overflow-x: auto; white-space: pre-wrap; margin: 4px 0 0;
 }
 .persist-warn { color: #d46b08; font-size: 12px; margin-bottom: 8px; }
 .kpi-view { text-align: center; padding: 18px 0; }

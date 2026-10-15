@@ -97,6 +97,43 @@ def _format_history(messages: list, max_turns: int = 4) -> str:
     return "\n".join(lines)
 
 
+def _semantic_content(db, datasource_id):
+    """语义层薄封装(finalize 处局部 import 防循环依赖)。"""
+    from domains.chatbi import semantic
+    return semantic.load_current_content(db, datasource_id)
+
+
+def _build_table_provenance(content, table_names: list) -> list:
+    """P2#11 证据卡数据源:current_tables 每表的 schema 卡(列名/中文名/类型)。
+
+    纯语义层组装零查询成本;表级行数不实时 COUNT(大表慢且估算误导)——
+    溯源数字面用制品顶层 rowcount(本查询实际行数,已有键)。
+    """
+    if not content or not table_names:
+        return []
+    wanted = list(dict.fromkeys(table_names))   # 去重保序
+    by_name = {m.name: m for m in content.models}
+    out = []
+    for name in wanted:
+        m = by_name.get(name)
+        if m is None:
+            out.append({"name": name, "display_name": name,
+                        "columns": [], "note": "语义层未收录(可能已下线)"})
+            continue
+        out.append({
+            "name": m.name,
+            "display_name": m.display_name or m.name,
+            "description": m.description or "",
+            "columns": [
+                {"name": c.name, "display_name": c.display_name or c.name,
+                 "data_type": c.data_type}
+                for c in m.columns
+            ],
+            "metrics": [mt.display_name or mt.name for mt in m.metrics],
+        })
+    return out
+
+
 class AskDataTool(CompositeTool):
     name = "ask_data"
     description = "用自然语言查询业务数据库:自动检索表结构、生成 SQL、执行并生成图表"
@@ -787,6 +824,13 @@ class AskDataTool(CompositeTool):
             # 持久化降级对用户可见(源 persist_warning 等价物): 引用同一列表,
             # 下方四段持久化失败 append 后随 artifact 落库(三审 P0 修复)
             "persist_warnings": persist_warnings,
+            # P2#11 证据卡:表 schema 卡(列/中文/类型/指标)——前端"数据来源"
+            # 折叠区的数据源;与 current_tables/seed_tables/join_path_section
+            # 同层互补(那些是检索过程,这是最终用表的完整 schema)。
+            # content 在 retrieve 步骤的局部域,这里从语义层重取(纯读零成本)
+            "table_provenance": _build_table_provenance(
+                _semantic_content(self._db, state["ds"].id),
+                state.get("current_tables") or []),
         }
 
         # 记忆抽取 (源 chat_stream 在成功查询后调 extract_memory_from_turn
