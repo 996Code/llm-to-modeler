@@ -476,13 +476,25 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
         # 数据型制品(KG 检索子图/查询结果):随 assistant 消息一起落库,
         # 历史恢复时前端用 dataArtifact 重渲染图谱卡/数据卡。
         # P2#15:错误轮(error_for_llm 通道)带诊断卡字段——历史回放
-        # 重渲染诊断卡(失败环节分类+链路入口+重试),而非裸文本
+        # 重渲染诊断卡(失败环节分类+链路入口+重试),而非裸文本。
+        # 分类与前端 classifyError 同口径(错误文本关键词推断)
         data_artifact = result_data.get("data") if result_data.get("artifactType") == "data" else None
-        is_error = bool(result_data.get("error"))
+        extra = None
+        if result_data.get("error"):
+            err_text = f"{result_data.get('error', '')} {summary}".lower()
+            if any(k in err_text for k in ("llm", "chat", "completion", "500",
+                                           "502", "timeout", "connection", "embed")):
+                cat = "llm-upstream"
+            elif any(k in err_text for k in ("milvus", "neo4j", "vector",
+                                             "graph", "检索")):
+                cat = "retrieval"
+            elif any(k in err_text for k in ("sql", "数据库", "执行")):
+                cat = "execution"
+            else:
+                cat = "unknown"
+            extra = {"kind": "error-diag", "error_category": cat}
         store.add_message(conv_id=conv_id, role="assistant", content=summary,
-                          data_artifact=data_artifact,
-                          extra={"kind": "error-diag", "error_category": "unknown"}
-                          if is_error else None)
+                          data_artifact=data_artifact, extra=extra)
 
         # 配置结果:存 config_snapshot + 更新对话配置
         config = result_data.get("config")
