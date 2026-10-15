@@ -539,6 +539,15 @@ export interface KgKnowledgeBase {
   status: string; createdAt: string; updatedAt: string
   docCount?: number; entityTotal?: number; relationTotal?: number
   graph?: { entities: number; relations: number }
+  /** 层级树(10-15):kb=知识库 | folder=纯分组目录;parentId 指向目录(顶层 null) */
+  kind?: 'kb' | 'folder'
+  parentId?: string | null
+}
+/** 层级树节点:folder 带 children 递归;kb 叶子带文档/实体/关系计数 */
+export interface KgTreeNode extends KgKnowledgeBase {
+  kind: 'kb' | 'folder'
+  parentId: string | null
+  children?: KgTreeNode[]
 }
 export interface KgDocument {
   id: string; kbId: string; filename: string; mimeType: string
@@ -622,12 +631,34 @@ export async function fetchKgKbs(): Promise<KgKnowledgeBase[]> {
   const { data } = await kgApi.get('/kbs')
   return data.items
 }
+/** 层级树(10-15):顶层列表,folder 节点带 children 递归;排序 folder 先于 kb */
+export async function fetchKgKbTree(): Promise<KgTreeNode[]> {
+  const { data } = await kgApi.get('/kbs/tree')
+  return data.items
+}
 export async function fetchKgTemplates(): Promise<KgTemplate[]> {
   const { data } = await kgApi.get('/kbs/templates')
   return data.items
 }
-export async function createKgKb(payload: { name: string; description?: string; template?: string }): Promise<KgKnowledgeBase> {
+export async function createKgKb(payload: {
+  name: string; description?: string; template?: string; parent_id?: string | null
+}): Promise<KgKnowledgeBase> {
   const { data } = await kgApi.post('/kbs', payload)
+  return data
+}
+/** 新建文件夹(纯分组目录,不存文档);parentId 缺省顶层 */
+export async function createKgFolder(
+  name: string, parentId?: string | null,
+): Promise<KgTreeNode> {
+  const { data } = await kgApi.post('/kbs',
+    { name, kind: 'folder', parent_id: parentId ?? null })
+  return data
+}
+/** 移动节点:换父目录/提顶层;环/非目录父 → 后端 422 */
+export async function moveKbNode(
+  id: string, parentId: string | null,
+): Promise<KgTreeNode> {
+  const { data } = await kgApi.put(`/kbs/${id}/move`, { parent_id: parentId })
   return data
 }
 export async function updateKgKb(id: string, payload: { name?: string; description?: string; schema?: KgSchema }): Promise<KgKnowledgeBase> {

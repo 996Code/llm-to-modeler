@@ -6,10 +6,13 @@
 【端点清单】(M2 范围:库 CRUD / 模板 / 文档上传管理 / 图谱浏览 / 依赖状态)
   GET    /kbs                          知识库列表(含文档/实体/关系计数)
   GET    /kbs/templates                本体模板清单(建库下拉)
-  POST   /kbs                          建库 {name, description, template}
+  GET    /kbs/tree                     层级树(目录+子库递归,左侧树渲染)
+  POST   /kbs                          建库 {name, description, template, kind?, parent_id?}
   GET    /kbs/{id}                     库详情 + 图谱实时计数
   PUT    /kbs/{id}                     改库 {name?, description?, schema?}
-  DELETE /kbs/{id}                     删库(联动 Neo4j/Milvus/文件/元数据)
+  PUT    /kbs/{id}/move                移动节点 {parent_id: string|null}
+  DELETE /kbs/{id}                     删库(联动 Neo4j/Milvus/文件/元数据;
+                                       folder 需空,有子节点 422)
   GET    /kbs/{id}/documents           文档列表
   POST   /kbs/{id}/documents           上传(multipart files,多文件;查重跳过)
   DELETE /kbs/{id}/documents/{doc_id}  删文档(联动清理;导入任务 M3)
@@ -80,6 +83,16 @@ async def kb_templates(request: Request):
     return {"items": list_templates()}
 
 
+@router.get("/kbs/tree", dependencies=[Depends(admin_required)])
+async def kb_tree(request: Request):
+    """层级树(10-15 用户需求:左侧需要是有层级的树)。
+
+    list_kb_tree 直出:顶层列表,folder 节点带 children(递归);
+    排序 folder 先于 kb、同级按名称;kb 节点带 doc/entity/relation 计数。
+    """
+    return {"items": runtime.get_kg_store(request.app.state).list_kb_tree()}
+
+
 @router.post("/kbs", dependencies=[Depends(admin_required)])
 async def create_kb(request: Request, payload: Dict[str, Any]):
     name = str(payload.get("name") or "").strip()
@@ -87,15 +100,25 @@ async def create_kb(request: Request, payload: Dict[str, Any]):
         raise HTTPException(422, "知识库名称不能为空")
     description = str(payload.get("description") or "").strip()
     template = str(payload.get("template") or "general").strip()
+    # 层级树(10-15):kind=kb|folder(默认 kb);parent_id 挂目录下(默认顶层)。
+    # folder 是纯分组节点——不套本体模板;合法性(父存在/父是 folder/
+    # kind 取值)由 store.create_kb 校验,ValueError → 422。
+    kind = str(payload.get("kind") or "kb").strip()
+    parent_id = payload.get("parent_id") or None
 
     store = runtime.get_kg_store(request.app.state)
     if store.get_kb_by_name(name):
         raise HTTPException(409, f"知识库「{name}」已存在")
-    kb = store.create_kb(
-        name=name, description=description,
-        schema_json=get_template_schema(template), schema_template=template,
-    )
-    logger.info(f"kb created: {kb['id']} ({name}, template={template})")
+    try:
+        kb = store.create_kb(
+            name=name, description=description,
+            schema_json=get_template_schema(template) if kind == "kb" else None,
+            schema_template=template if kind == "kb" else "",
+            kind=kind, parent_id=str(parent_id) if parent_id else None,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    logger.info(f"kb created: {kb['id']} ({name}, template={template}, kind={kind})")
     return kb
 
 
@@ -130,10 +153,40 @@ async def update_kb(kb_id: str, request: Request, payload: Dict[str, Any]):
     return store.get_kb(kb_id)
 
 
-@router.delete("/kbs/{kb_id}", dependencies=[Depends(admin_required)])
-async def delete_kb(kb_id: str, request: Request):
+@router.put("/kbs/{kb_id}/move", dependencies=[Depends(admin_required)])
+async def move_kb(kb_id: str, request: Request, payload: Dict[str, Any]):
+    """移动节点(换父目录/提顶层)。body: {parent_id: string|null}。
+
+    合法性(父存在/父是 folder/不成环)由 store.move_kb 校验,
+    ValueError → 422;返回移动后的节点(前端据此刷新树)。
+    """
     _kb_or_404(request, kb_id)
     store = runtime.get_kg_store(request.app.state)
+    parent_id = payload.get("parent_id") or None
+    try:
+        moved = store.move_kb(kb_id, str(parent_id) if parent_id else None)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if not moved:
+        raise HTTPException(404, "知识库不存在")
+    return store.get_kb(kb_id)
+
+
+@router.delete("/kbs/{kb_id}", dependencies=[Depends(admin_required)])
+async def delete_kb(kb_id: str, request: Request):
+    kb = _kb_or_404(request, kb_id)
+    store = runtime.get_kg_store(request.app.state)
+
+    # 目录删除守卫:非空目录拒绝——直接删会让子节点 parentId 悬空成
+    # 孤儿(树里再也挂不上)。先移出/删光子节点再删目录。
+    if kb.get("kind") == "folder":
+        children = [k for k in store.list_kbs() if k.get("parentId") == kb_id]
+        if children:
+            raise HTTPException(
+                422, f"目录下还有 {len(children)} 个子节点,请先移出或删除后再删除目录")
+        store.delete_kb(kb_id)
+        logger.info(f"folder deleted: {kb_id}")
+        return {"success": True, "cleanupErrors": []}
 
     # 删除守卫:有进行中的导入/归纳任务时拒绝——任务与删除并发会让
     # upsert 在清理之后回写,产出再也触达不了的孤儿子图。等任务结束再删。
@@ -150,9 +203,8 @@ async def delete_kb(kb_id: str, request: Request):
         _graph(request).delete_scope(kb_id)
     except Exception as e:
         errors.append(f"neo4j: {e}")
-    kb = store.get_kb(kb_id)
     try:
-        if kb and kb.get("vectorEnabled"):
+        if kb.get("vectorEnabled"):
             runtime.get_vector(request.app.state).drop_collection(kb_id)
     except Exception as e:
         errors.append(f"milvus: {e}")

@@ -27,6 +27,7 @@ import {
   Tabs,
   Tag,
   Tooltip,
+  Tree,
   Upload,
 } from 'ant-design-vue'
 
@@ -58,6 +59,7 @@ const components = [
   Tabs,
   Tag,
   Tooltip,
+  Tree,
   Upload,
 ] as Plugin[]
 
