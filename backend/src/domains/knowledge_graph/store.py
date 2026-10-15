@@ -55,7 +55,7 @@ class KGStore:
             schema_template TEXT DEFAULT '',-- 建库所选模板 key(溯源)
             embedding_model TEXT DEFAULT '',
             vector_dim INTEGER,
-            vector_enabled INTEGER DEFAULT 0,
+            vector_enabled INTEGER DEFAULT 1,  -- 本地 bge-m3 定死能力,默认启用(10-15 裁决)
             status TEXT DEFAULT 'active',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -93,6 +93,18 @@ class KGStore:
 
     def _init_db(self):
         self.db.init_schema(self._DDL)
+        # 一次性迁移:存量"未决"库(vector_enabled=0 且无 embedding_model
+        # 记录——曾因探测失败落 0)翻转为启用——本地 bge-m3 定死能力。
+        # 模型变更显式关闭的库(0 且有模型记录)不动:那是向量兼容性保护态。
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE kg_knowledge_bases SET vector_enabled = 1, "
+                    "updated_at = ? WHERE vector_enabled = 0 AND "
+                    "(embedding_model IS NULL OR embedding_model = '')",
+                    (_now(),))
+        except Exception as e:
+            logger.warning(f"存量库向量启用迁移失败(不影响启动,下次重试): {e}")
 
     # ── 知识库 ─────────────────────────────────────────────
 
@@ -110,7 +122,7 @@ class KGStore:
                 """INSERT INTO kg_knowledge_bases
                    (id, name, description, schema_json, schema_template,
                     vector_enabled, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 0, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
                 (kb_id, name, description,
                  json.dumps(schema_json, ensure_ascii=False) if schema_json else None,
                  schema_template, now, now),

@@ -938,13 +938,26 @@ class TestImportPipeline:
         assert len(env.graph.delete_calls) == deletes_before    # 未清理图谱
         assert all(c["status"] == "done" for c in env.store.list_chunks(doc["id"]))
 
-    def test_vector_degraded_without_model(self, env, monkeypatch):
+    def test_vector_probes_and_enables_by_default(self, env, monkeypatch):
+        """默认启用语义:api 后端无 LLM_EMBED_MODEL 也不再"静默纯图谱"——
+        探测走 llm_client 能力(MockLLM 可用即开启);真正不可用
+        (embeddings 抛错)则任务失败进重试,不假可用。"""
         monkeypatch.setenv("EMBEDDING_BACKEND", "api")
-        kb, doc = _make_doc(env, "降级", ["[E:甲]"])
+        monkeypatch.delenv("LLM_EMBED_MODEL", raising=False)
+        kb, doc = _make_doc(env, "默认探测", ["[E:甲]"])
         t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
-        assert t["status"] == "succeeded"
-        assert t["result"]["vectorEnabled"] is False
-        assert not env.store.get_kb(kb["id"])["vectorEnabled"]
+        assert t["status"] == "succeeded", t.get("error")
+        assert t["result"]["vectorEnabled"] is True
+        assert env.store.get_kb(kb["id"])["vectorEnabled"] is True
+
+        # embeddings 彻底不可用 → 失败(不静默纯图谱)
+        kb2, doc2 = _make_doc(env, "探测失败", ["[E:乙]"])
+        def boom(*a, **k):
+            raise RuntimeError("embed down")
+        env.llm.embeddings = boom
+        t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb2["id"], doc2["id"])["id"])
+        assert t2["status"] == "failed"
+        assert "向量准备失败" in (t2.get("error") or "")
 
 
 class TestInduceSchema:

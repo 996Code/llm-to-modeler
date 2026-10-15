@@ -769,22 +769,31 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
                     stored_model=stored_model, current_model=current_model)
                 store.set_kb_vector_info(kb["id"], stored_model, kb.get("vectorDim"), False)
                 return False
-            handle.log(f"向量模式: 沿用库配置 dim={kb.get('vectorDim')}(模型 {stored_model or '未记录'})",
-                       dim=kb.get("vectorDim"), model=stored_model or "")
-            runtime.get_vector(app_state).ensure_collection(kb["id"], kb["vectorDim"] or 1024)
+            dim = kb.get("vectorDim")
+            if not dim:
+                # 默认启用后新库无历史探测记录——首次导入补一次维度探测
+                probe = app_state.llm_client.embeddings(
+                    ["维度探测"], conv_id=conv_id, stage="kg.embed_probe",
+                    mode="query")
+                dim = len(probe[0])
+                store.set_kb_vector_info(kb["id"], current_model or "bge-m3",
+                                         dim, True)
+            handle.log(f"向量模式: 沿用库配置 dim={dim}(模型 {stored_model or '未记录'})",
+                       dim=dim, model=stored_model or "")
+            runtime.get_vector(app_state).ensure_collection(kb["id"], dim)
             return True
-        # 未决:探测 embedding 模型
+        # vectorEnabled=False 只有两种合法态:模型变更保护(上面已处理)或
+        # 极旧库未迁移——本地 bge-m3 是定死能力(10-15 裁决:默认启用),
+        # 这里兜底补开并走一次维度探测,不再留"未决探测"分支。
         import os
         embed_model = os.getenv("LLM_EMBED_MODEL", "").strip()
         backend = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
         if backend == "local":
-            # local 后端不需要 LLM_EMBED_MODEL(进程内 onnx 推理),模型名固定
             embed_model = embed_model or "bge-m3"
         if not embed_model:
-            handle.log("LLM_EMBED_MODEL 未配置,本库以纯图谱模式运行(检索无向量路)",
-                       level="warn")
-            store.set_kb_vector_info(kb["id"], "", None, False)
-            return False
+            raise RuntimeError(
+                "EMBEDDING_BACKEND=api 且 LLM_EMBED_MODEL 未配置,向量能力不可用"
+                "——请配置后重试(本地后端无需该配置)")
         probe = app_state.llm_client.embeddings(
             ["维度探测"], conv_id=conv_id, stage="kg.embed_probe", mode="query")
         dim = len(probe[0])
@@ -794,12 +803,9 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
                    model=embed_model, dim=dim)
         return True
     except Exception as e:
-        handle.log(f"向量准备失败,降级纯图谱模式: {e}", level="warn")
-        try:
-            store.set_kb_vector_info(kb["id"], "", None, False)
-        except Exception:
-            pass
-        return False
+        # 失败不再静默降级关闭(10-15 裁决:假可用比报错更有害)——上抛让
+        # 任务失败进入重试,向量连接类故障自愈后自动续跑
+        raise RuntimeError(f"向量准备失败: {e}") from e
 
 
 def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], conv_id: str) -> int:

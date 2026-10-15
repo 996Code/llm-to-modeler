@@ -73,14 +73,37 @@ class MilvusVectorStore:
                  collection_prefix: str = ""):
         if not collection_prefix:
             raise ValueError("collection_prefix 必传,由使用方声明命名空间")
+        self._uri = uri
+        self._user = user
+        self._password = password
+        self._connect()
+        self._prefix = collection_prefix
+
+    def _connect(self) -> None:
+        """建/重建 Milvus 客户端(自愈路径复用同一份连接参数)。"""
         from pymilvus import MilvusClient
         # timeout=5: 连接/请求级超时——健康探针 ping 在 Milvus 停机时
         # 快速失败变红, 而不是挂起等默认长超时(四审验收场景 8)
         self._client = MilvusClient(
-            uri=uri, user=user or None, password=password or None,
+            uri=self._uri, user=self._user or None,
+            password=self._password or None,
             timeout=5,
         )
-        self._prefix = collection_prefix
+
+    def _with_reconnect(self, fn, *args, **kwargs):
+        """连接失效自愈:ConnectionNotExist(连接被关闭/空闲断链)时重建
+        客户端重试一次。真实事故:uvicorn --reload 的 unload 钩子 close 了
+        缓存连接,在途任务报 should create connection first——不自愈则
+        只能重启进程。仅对连接类异常重试,其余原样上抛。"""
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if "ConnectionNotExist" not in type(e).__name__ and \
+               "should create connection" not in str(e):
+                raise
+            logger.warning(f"milvus 连接失效,重建后重试一次: {e}")
+            self._connect()
+            return fn(*args, **kwargs)
 
     def _check_scope(self, scope_id: str) -> None:
         """scope_id 契约入口防御(公共实现见 scope_registry.check_scope_id)。"""
@@ -92,7 +115,7 @@ class MilvusVectorStore:
     # ── 生命周期 ───────────────────────────────────────────
 
     def ping(self) -> None:
-        self._client.list_collections()
+        self._with_reconnect(self._client.list_collections)
 
     def close(self) -> None:
         try:
@@ -106,7 +129,7 @@ class MilvusVectorStore:
         """建库 collection(幂等)。dim 来自建库时的一次 embedding 探测。"""
         self._check_scope(scope)
         name = self._name(scope)
-        if self._client.has_collection(name):
+        if self._with_reconnect(self._client.has_collection, name):
             return
         from pymilvus import DataType
         schema = self._client.create_schema(auto_id=False, enable_dynamic_field=False)
@@ -128,7 +151,7 @@ class MilvusVectorStore:
     def drop_collection(self, scope: str) -> None:
         self._check_scope(scope)
         name = self._name(scope)
-        if self._client.has_collection(name):
+        if self._with_reconnect(self._client.has_collection, name):
             self._client.drop_collection(name)
             logger.info(f"milvus collection dropped: {name}")
 
@@ -148,7 +171,8 @@ class MilvusVectorStore:
             "text": str(it["text"])[:_MAX_TEXT_LEN],
             _VECTOR_FIELD: it["vector"],
         } for it in items]
-        self._client.upsert(collection_name=name, data=rows)
+        self._with_reconnect(
+            self._client.upsert, collection_name=name, data=rows)
         # flush 让写入立刻可见(search/stats 一致性;单文档块数量小,代价可忽略)
         try:
             self._client.flush(collection_name=name)
@@ -178,7 +202,8 @@ class MilvusVectorStore:
         ids: set = set()
         offset = 0
         while True:
-            rows = self._client.query(
+            rows = self._with_reconnect(
+                self._client.query,
                 collection_name=name, filter=expr,
                 output_fields=[_ID_FIELD], limit=1000, offset=offset,
             ) or []
@@ -194,7 +219,8 @@ class MilvusVectorStore:
         """相似度检索(COSINE,分数越高越相似)。"""
         self._check_scope(scope)
         expr = f'doc_id == "{doc_id}"' if doc_id else None
-        results = self._client.search(
+        results = self._with_reconnect(
+            self._client.search,
             collection_name=self._name(scope),
             data=[query_vector],
             limit=top_k,

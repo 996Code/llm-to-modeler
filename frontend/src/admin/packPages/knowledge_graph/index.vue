@@ -30,9 +30,14 @@
     <div v-if="currentKb" class="kg-info">
       <div class="kg-info-main">
         <span class="kg-info-name">{{ currentKb.name }}</span>
-        <a-tag v-if="currentKb.vectorEnabled" color="cyan">向量 dim={{ currentKb.vectorDim }}</a-tag>
-        <a-tag v-else>纯图谱</a-tag>
-        <a-tag v-if="currentKb.schemaTemplate" color="geekblue">{{ currentKb.schemaTemplate }}</a-tag>
+        <a-tag v-if="currentKb.vectorEnabled" color="cyan">向量 dim={{ currentKb.vectorDim || '待导入探测' }}</a-tag>
+        <!-- 默认启用后仅剩"模型变更保护"会走到这——不再是无配置的未决态 -->
+        <a-tooltip v-else title="embedding 模型与建库时不一致,向量已保护性停用——切回原模型或清库重建">
+          <a-tag color="orange">向量停用(模型变更)</a-tag>
+        </a-tooltip>
+        <a-tooltip v-if="currentKb.schemaTemplate" :title="`建库所选本体模板:${currentKb.schemaTemplate}(可在「本体设置」页自定义实体/关系类型)`">
+          <a-tag color="geekblue">本体:{{ currentKb.schemaTemplate }}</a-tag>
+        </a-tooltip>
         <span v-if="currentKb.description" class="kg-info-desc">{{ currentKb.description }}</span>
       </div>
       <div class="kg-info-stats">

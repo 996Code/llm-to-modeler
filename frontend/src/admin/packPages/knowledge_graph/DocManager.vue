@@ -12,6 +12,18 @@
       <p class="dm-upload-hint">支持 md / txt / pdf / docx,单文件 ≤ {{ maxMb }}MB;同库同内容自动去重</p>
     </a-upload-dragger>
 
+    <!-- 切块规则说明(导入前可见,10-15 用户诉求) -->
+    <a-collapse :bordered="false" class="dm-chunk-doc">
+      <a-collapse-panel key="chunking" header="导入如何切块?(结构感知说明)">
+        <ul class="dm-chunk-list">
+          <li><b>结构块</b>:识别到章节标题(如"第X章/第X节")时整章一块,保持上下文完整(超长章在句读处兜底再切)</li>
+          <li><b>无结构文本</b>:按句读边界软目标 {{ chunkTargetChars }} 字/块切,保持语义连贯</li>
+          <li><b>向量子切</b>:整章大块向量化前再按 {{ vectorSubChars }} 字切段——抽取看整章(上下文全),检索召回按段(向量不稀释)</li>
+          <li>每块的抽取状态可点行内「块明细」查看;块大小可在<b>插件设置</b>调整(chunk_target_chars / chunk_max_chars / vector_subchunk_chars)</li>
+        </ul>
+      </a-collapse-panel>
+    </a-collapse>
+
     <!-- 上传结果反馈 -->
     <a-alert
       v-if="uploadResults.length" type="info" closable show-icon style="margin-top: 10px"
@@ -195,6 +207,9 @@ const importingAll = ref(false)
 const uploadResults = ref<{ filename: string; ok: boolean; reason?: string }[]>([])
 const taskByDoc = ref<Record<string, TaskItem>>({})
 const maxMb = 20
+// 切块参数展示值(与后端默认一致;实际以插件设置为准)
+const chunkTargetChars = 1200
+const vectorSubChars = 1200
 let loadSeq = 0   // 请求序号守卫(切库错序防护)
 
 const columns = [
@@ -446,6 +461,11 @@ onBeforeUnmount(() => window.clearInterval(timer))
 .dm-upload-icon { font-size: 36px; color: #2f54eb; margin: 14px 0 6px; }
 .dm-upload-text { font-size: 14px; color: #1f2937; margin: 0 0 6px; }
 .dm-upload-hint { font-size: 12px; color: #9ca3af; margin-bottom: 14px; }
+.dm-chunk-doc { margin-bottom: 10px; background: transparent; }
+.dm-chunk-doc :deep(.ant-collapse-item) { border: none; }
+.dm-chunk-doc :deep(.ant-collapse-header) { padding: 4px 0; color: #6b7280; font-size: 12.5px; }
+.dm-chunk-doc :deep(.ant-collapse-content-box) { padding: 4px 0 8px 16px; }
+.dm-chunk-list { margin: 0; padding-left: 16px; color: #6b7280; font-size: 12.5px; line-height: 1.9; }
 .dm-upload-line { font-size: 12.5px; color: #4b5563; display: flex; align-items: center; gap: 6px; }
 .dm-ok { color: #16a34a; }
 .dm-bad { color: #dc2626; }
