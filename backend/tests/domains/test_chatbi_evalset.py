@@ -209,7 +209,7 @@ def recall_at_k(expected: set, retrieved: list, k: int = 5) -> float:
 
 
 def test_evalset_recall_baseline(capsys):
-    """EVALSET 20 条 recall@5 基线断言（阶段 1 纯向量召回，skip_llm_refine）。
+    """EVALSET 60 条 recall@5 基线断言（阶段 1 纯向量召回，skip_llm_refine）。
 
     基线定位=管线回归护栏（错即掉 0，防检索链路回归），非检索质量度量：
     正交基假向量方案下非期望表 cos=0 被 0.35 阈值滤除，recall 恒优——
@@ -257,6 +257,7 @@ _SIX_TABLE_FK = {
     frozenset(("salary", "employee")): "salary.emp_id = employee.id",
     frozenset(("orders", "customer")): "orders.customer_id = customer.id",
     frozenset(("orders", "product")): "orders.product_id = product.id",
+    frozenset(("customer", "employee")): "customer.owner_id = employee.id",
 }
 
 
