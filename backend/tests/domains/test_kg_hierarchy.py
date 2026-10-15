@@ -230,7 +230,11 @@ class TestDefaultKb:
         monkeypatch.setattr(runtime, "get_kg_store", lambda s: store)
         kg_pack.start(app_state, task_manager=object())
         names = [k["name"] for k in store.list_kbs()]
-        assert "默认知识库" in names
+        assert set(names) == {"默认分组", "默认知识库"}
+        tree = store.list_kb_tree()
+        folder = next(t for t in tree if t["name"] == "默认分组")
+        assert folder["kind"] == "folder"
+        assert [c["name"] for c in folder["children"]] == ["默认知识库"]
 
     def test_start_skips_when_kbs_exist(self, monkeypatch):
         """已有库(含 folder) → 不建默认库(不干扰用户结构)。"""
@@ -242,7 +246,7 @@ class TestDefaultKb:
         monkeypatch.setattr(runtime, "get_kg_store", lambda s: store)
         kg_pack.start(app_state, task_manager=object())
         names = [k["name"] for k in store.list_kbs()]
-        assert "默认知识库" not in names and names == ["用户已有库"]
+        assert names == ["用户已有库"]
 
     def test_start_recreates_default_when_all_deleted(self, monkeypatch):
         """删光所有库后重启 → 默认库再现(零库即建,不区分"从未建过"与
@@ -253,10 +257,10 @@ class TestDefaultKb:
         app_state = SimpleNamespace()
         monkeypatch.setattr(runtime, "get_kg_store", lambda s: store)
         kg_pack.start(app_state, task_manager=object())
-        default = next(k for k in store.list_kbs() if k["name"] == "默认知识库")
-        store.delete_kb(default["id"])
+        for k in store.list_kbs():
+            store.delete_kb(k["id"])
         assert store.list_kbs() == []          # 删光
         kg_pack._RECOVERY_DONE = False
         kg_pack.start(app_state, task_manager=object())
-        names = [k["name"] for k in store.list_kbs()]
-        assert names == ["默认知识库"]          # 零库即建
+        names = {k["name"] for k in store.list_kbs()}
+        assert names == {"默认分组", "默认知识库"}   # 零库即建

@@ -63,14 +63,18 @@ def start(app_state, task_manager=None) -> None:
 
 
 def _ensure_default_kb(app_state) -> None:
-    """零库时建默认知识库;已有库(含 folder)不动;失败只记日志不阻断启动。"""
+    """零库时建默认结构:「默认分组」文件夹 + 里面「默认知识库」(用户裁决);
+    已有库(含 folder)不动;失败只记日志不阻断启动。"""
     try:
         from domains.knowledge_graph import runtime
         store = runtime.get_kg_store(app_state)
         if store.list_kbs():
             return
-        store.create_kb("默认知识库", description="系统默认知识库——可直接上传文档开始使用")
-        logger.info("零库启动:已创建默认知识库")
+        folder = store.create_kb("默认分组", kind="folder")
+        store.create_kb("默认知识库",
+                       description="系统默认知识库——可直接上传文档开始使用",
+                       parent_id=folder["id"])
+        logger.info("零库启动:已创建默认分组/默认知识库")
     except Exception as e:
         logger.warning(f"默认知识库创建失败(不影响启动): {e}")
 
