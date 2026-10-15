@@ -271,9 +271,11 @@ class AskDataTool(CompositeTool):
                 score_threshold=float(settings.get("rag_score_threshold", 0.35)),
                 conv_id=ctx.conv_id,
                 rerank_enabled=bool(settings.get("rerank_enabled", False)),
-                content=content,
                 hybrid_enabled=bool(
                     settings.get("hybrid_search_enabled", False)))
+            # 注: content 已按位传参(第 2 位),不得再以关键字重复传
+            # ——c3285d4 引入的重复实参让本调用必抛 TypeError 被降级
+            # 吞掉(向量检索从未真正生效),N1 切 pg 后暴露,此处修复。
             # 源 agent.py:250-254: 只取 type=model 的记录作表名;
             # 纯指标召回(如问"GMV"只命中 metric 记录)时指标名不得混入表名
             all_hits = [m for m in getattr(rc["retrieval"], "models", [])

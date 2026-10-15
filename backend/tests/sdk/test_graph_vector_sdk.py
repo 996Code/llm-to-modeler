@@ -222,6 +222,9 @@ class TestFactoryPrefix:
 
     def test_vector_factory_passes_prefix(self, monkeypatch):
         import sdk.vector_store as vs_mod
+        # 后端钉在 milvus:工厂默认 VECTOR_BACKEND=pg(N1 迁移后),
+        # 本测试的对象是 milvus 构造参数透传,与 pg 路径无关
+        monkeypatch.setenv("VECTOR_BACKEND", "milvus")
         vs_mod._cached_stores.clear()
         calls = []
 

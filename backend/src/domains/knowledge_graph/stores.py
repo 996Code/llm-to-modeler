@@ -18,7 +18,7 @@ from sdk.scope_registry import register_prefix, unregister_prefix
 
 PACK_NAME = "knowledge_graph"
 GRAPH_PREFIX = "kg_"     # Neo4j 约束/索引名前缀(与存量数据一致)
-VECTOR_PREFIX = "kg"     # Milvus collection 名前缀(与存量数据一致)
+VECTOR_PREFIX = "kg"     # 向量存储表/collection 名前缀(与存量数据一致)
 # KG 图模型(SDK 已无领域默认值,这里显式声明)
 NODE_LABEL = "Entity"
 REL_TYPE = "RELATES"
@@ -43,8 +43,8 @@ def get_graph(app_state) -> sdk_graph.Neo4jGraphStore:
     )
 
 
-def get_vector(app_state) -> sdk_vector.MilvusVectorStore:
-    """Milvus 向量存储单例(同上)。"""
+def get_vector(app_state) -> sdk_vector.VectorStore:
+    """向量存储单例(默认 pg/pgvector;VECTOR_BACKEND=milvus 时切 Milvus)。"""
     from domains.knowledge_graph import runtime
     _ensure_prefix_registered()
     settings = runtime.settings_reader(app_state).all()

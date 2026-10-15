@@ -1,10 +1,19 @@
-"""MilvusVectorStore —— SDK 通用向量存储(Milvus 2.4/2.5,pymilvus)。
+"""SDK 通用向量存储 —— 双后端:pg(默认,pgvector)/ Milvus(可选)。
 
 【模块定位】
 从 knowledge_graph 插件下沉的通用向量设施:按 scope 物理隔离的
-collection 管理 + 向量写入/删除/相似度检索。零领域知识——只收
+collection/表管理 + 向量写入/删除/相似度检索。零领域知识——只收
 "文本 + 向量"对,不认识 embedding 模型/知识库/文档(embedding 由
 调用方生成后传入;SDK 不依赖任何 LLM 配置,测试可用 Fake 向量)。
+
+【后端选择】(env VECTOR_BACKEND,默认 pg)
+  - pg:     PgVectorStore(sdk/pg_vector_store.py,PostgreSQL + pgvector
+            HNSW 余弦索引,psycopg 直连 DATABASE_URL)——平台 PG-only
+            收敛后的默认;
+  - milvus: MilvusVectorStore(本文件,2.4/2.5,pymilvus)——保留为
+            可选后端,存量部署经 VECTOR_BACKEND=milvus 切回。
+  两实现同方法集(VectorStore Protocol)、同命名规则(collection_name)、
+  同检索语义(score 越高越相似,阈值后置过滤在适配层),上层零改动。
 
 【数据模型】(每 scope 一个 collection,物理隔离)
   collection 名 = {collection_prefix}_{scope 转下划线}_v1
@@ -26,6 +35,7 @@ collection 管理 + 向量写入/删除/相似度检索。零领域知识——�
 单测用内存 Fake,不要求真实 Milvus。
 """
 import logging
+import os
 import threading
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -252,25 +262,64 @@ class MilvusVectorStore:
 
 # ── 进程级单例(设置热改时重建) ────────────────────────────────
 
-_cached_stores: Dict[tuple, MilvusVectorStore] = {}
+_cached_stores: Dict[tuple, Any] = {}   # 指纹 → store(pg/milvus 混存,键含 backend)
 _cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络 IO)
 _build_lock = threading.Lock()     # 串行化连接构建
 
+# 支持的向量后端:pg(默认,pgvector)/ milvus(可选)
+_BACKENDS = ("pg", "milvus")
+
+
+def resolve_vector_backend() -> str:
+    """解析向量后端(env VECTOR_BACKEND;默认 pg,未知值 fail-fast)。"""
+    backend = (os.getenv("VECTOR_BACKEND", "") or "pg").strip().lower()
+    if backend not in _BACKENDS:
+        raise ValueError(
+            f"未知 VECTOR_BACKEND: {backend!r}(可选: {'/'.join(_BACKENDS)})")
+    return backend
+
 
 def get_vector_store(settings: Dict[str, Any],
-                     collection_prefix: str = "") -> MilvusVectorStore:
-    """按解析后的配置取/建向量存储单例(指纹 = 连接三元组 + 前缀)。
+                     collection_prefix: str = "") -> Any:
+    """按解析后的配置取/建向量存储单例(指纹 = backend + 连接参数 + 前缀)。
+
+    后端由 env VECTOR_BACKEND 决定(默认 pg):
+      - pg:     PgVectorStore,连接串取 settings["pg_vector_url"](逃生口,
+                无 pack schema 字段时用)或 env DATABASE_URL;
+      - milvus: MilvusVectorStore,连接三元组取 milvus_* 设置。
 
     多 pack 各自的前缀并存(chatbi 与 knowledge_graph 同时活跃):单槽
     缓存会让两 pack 互踢——后到者 close 掉前者的连接,前者下一次调用
     报 ConnectionNotExist(曾经只在检索日志里看到"should create
-    connection first"的根因)。按指纹各存一份,连接数 = 活跃前缀数(≤2)。
+    connection first"的根因)。按指纹各存一份,连接数 = 活跃前缀数(≤2);
+    指纹含 backend 维度,热切换 VECTOR_BACKEND 时新旧后端不互踩
+    (旧连接留给在途任务,随下次 reset 回收)。
 
     锁纪律/失败纪律同 graph_store.get_graph_store:命中路径轻锁,构建
     在锁外,构建失败清缓存不留坏连接。
     """
-    fp = (settings.get("milvus_uri"), settings.get("milvus_user"),
-          settings.get("milvus_password"), collection_prefix)
+    backend = resolve_vector_backend()
+    if backend == "milvus":
+        fp = ("milvus", settings.get("milvus_uri"), settings.get("milvus_user"),
+              settings.get("milvus_password"), collection_prefix)
+
+        def build() -> Any:
+            return MilvusVectorStore(
+                uri=fp[1], user=fp[2] or "", password=fp[3] or "",
+                collection_prefix=collection_prefix)
+    else:
+        from sdk.pg_vector_store import PgVectorStore
+        dsn = (settings.get("pg_vector_url")
+               or os.getenv("DATABASE_URL", "") or "").strip()
+        if not dsn:
+            raise RuntimeError(
+                "VECTOR_BACKEND=pg 需要 PostgreSQL 连接串:请在 env 配置 "
+                "DATABASE_URL(与平台存储同库,pgvector 扩展由建表时自动启用)。")
+        fp = ("pg", dsn, collection_prefix)
+
+        def build() -> Any:
+            return PgVectorStore(dsn=dsn, collection_prefix=collection_prefix)
+
     with _cache_lock:
         hit = _cached_stores.get(fp)
         if hit is not None:
@@ -282,8 +331,7 @@ def get_vector_store(settings: Dict[str, Any],
             if hit is not None:
                 return hit
         try:
-            store = MilvusVectorStore(uri=fp[0], user=fp[1] or "", password=fp[2] or "",
-                                      collection_prefix=collection_prefix)
+            store = build()
         except Exception:
             with _cache_lock:
                 _cached_stores.pop(fp, None)

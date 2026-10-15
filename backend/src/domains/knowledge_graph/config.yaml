@@ -35,8 +35,11 @@ dependencies:
     probe:
       module: domains.knowledge_graph.probes
       fn: neo4j
+  # 向量后端默认 pg(pgvector,走平台 DATABASE_URL,无独立依赖);
+  # milvus 仅 VECTOR_BACKEND=milvus 时需要——降为可选,未配置/不可达
+  # 只记录状态,不阻断加载(存量部署切 pg 后停掉 Milvus 不影响本插件)。
   milvus:
-    required: true
+    required: false
     fields:
       - milvus_uri
     probe:
