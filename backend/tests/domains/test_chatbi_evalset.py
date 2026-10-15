@@ -209,7 +209,7 @@ def recall_at_k(expected: set, retrieved: list, k: int = 5) -> float:
 
 
 def test_evalset_recall_baseline(capsys):
-    """EVALSET 20 条 recall@5 基线断言（阶段 1 纯向量召回，skip_llm_refine）。
+    """EVALSET 60 条 recall@5 基线断言（阶段 1 纯向量召回，skip_llm_refine）。
 
     基线定位=管线回归护栏（错即掉 0，防检索链路回归），非检索质量度量：
     正交基假向量方案下非期望表 cos=0 被 0.35 阈值滤除，recall 恒优——
@@ -249,6 +249,26 @@ def table_names_from_skeleton(sql: str) -> set:
         r"(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.IGNORECASE))
 
 
+# —— 六表域外键常识（替身可硬编码的 schema 常识，不算偷答案）——
+# 精筛候选给了表名；JOIN 键属于 schema 常识（真实链路由 schema_context
+# 提供给 LLM）。表对查不到时 ON 1=1 兜底（保持可执行，骨架口径不炸）。
+_SIX_TABLE_FK = {
+    frozenset(("employee", "department")): "employee.dept_id = department.id",
+    frozenset(("salary", "employee")): "salary.emp_id = employee.id",
+    frozenset(("orders", "customer")): "orders.customer_id = customer.id",
+    frozenset(("orders", "product")): "orders.product_id = product.id",
+    frozenset(("customer", "employee")): "customer.owner_id = employee.id",
+}
+
+
+def _fk_on_clause(joined: set, new_table: str) -> str:
+    """新表与已 JOIN 表集合的外键条件；无已知外键则 1=1 兜底。"""
+    for pair, cond in _SIX_TABLE_FK.items():
+        if new_table in pair and pair & joined:
+            return cond
+    return "1=1"
+
+
 class SqlGeneratingFakeLLM(FakeLLM):
     """LLM 精筛替身：按召回候选表名生成 plausible SQL（精筛+生成一体）。
 
@@ -263,6 +283,12 @@ class SqlGeneratingFakeLLM(FakeLLM):
     本替身把"按召回表名生成 plausible SQL"折叠进精筛调用（brief 设计：
     精筛替身+骨架记录），评测的是"召回表名 → 精筛选择 → SQL 骨架"
     的链路连通性，非 LLM 生成质量。
+
+    T2 升级（EX 执行口径）：JOIN ON 用六表域外键常识（schema 常识级，
+    替身不读 expected_sql/expected_columns，只看精筛候选表名）；
+    SELECT * 全列（EX 比对按期望列名投影）；FROM=排序首表，其余 JOIN。
+    替身不生成 WHERE/聚合/排序——期望 SQL 的过滤子句与聚合列在
+    比对器侧按子集投影口径消化（见 test_chatbi_evalset_ex）。
     """
 
     def __init__(self, *args, **kwargs):
@@ -278,21 +304,22 @@ class SqlGeneratingFakeLLM(FakeLLM):
         # 的 SQL 生成——retrieve 管线内只有精筛这一次 chat 调用）
         names = sorted(set(re.findall(r"name=(\S+)", content)))
         if names:
+            joined = {names[0]}
             sql = "SELECT * FROM " + names[0]
             for t in names[1:]:
-                sql += f" JOIN {t} ON 1=1"
+                sql += f" JOIN {t} ON {_fk_on_clause(joined, t)}"
+                joined.add(t)
             self.last_generated_sql = sql
         return json.dumps({"models": names,
                            "reason": "评测替身：召回候选全选并生成骨架"})
 
 
 def test_evalset_sql_skeleton(capsys):
-    """EVALSET 混合抽样 10 条全流程（召回→LLM 精筛替身）SQL 骨架表名集比对。
+    """EVALSET 全量 60 条全流程（召回→LLM 精筛替身）SQL 骨架表名集比对。
 
-    抽样口径（终审 deferred#4）：前 10 条全是 easy 单表，无法激活多表
-    JOIN 精筛过滤分支——改为 [:7]（7 条 easy 单表）+ [10:13]（3 条
-    medium 双表 m001-m003），确保多表 JOIN 链路（召回多表→精筛多选→
-    生成 JOIN 骨架）被评测覆盖。全量 20 条比对留 P1#5 扩容。
+    抽样口径沿革：P0 时 20 条抽样 [:7]+[10:13]（终审 deferred#4，
+    确保多表 JOIN 精筛分支覆盖）→ P1#5 T2 扩容后全量 60 条比对
+    （抽样与全量语义一致，多表分支天然覆盖）。
 
     基线定位同 recall 基线：管线回归护栏，非检索/生成质量度量——
     精筛与 SQL 生成为确定性替身，骨架表名命中率衡量"召回表名能
@@ -303,8 +330,7 @@ def test_evalset_sql_skeleton(capsys):
     llm.last_generated_sql = ""
     hits = 0
     checked = 0
-    # 7 条 easy + 3 条 medium（m001-m003 双表 JOIN，激活精筛多表分支）
-    for case in EVALSET[:7] + EVALSET[10:13]:
+    for case in EVALSET:
         register_query_vector(llm, case["query"], case["expected_tables"])
         result = retrieve(case["query"], store, embedder, llm=llm,
                           scope=EVAL_SCOPE)
@@ -316,8 +342,9 @@ def test_evalset_sql_skeleton(capsys):
         got_tables = table_names_from_skeleton(gen_sql)
         hit = bool(expected_tables & got_tables)
         hits += hit
-        print(f"  {case['id']}: 期望{sorted(expected_tables)}"
-              f" 生成{sorted(got_tables)} {'HIT' if hit else 'MISS'}")
+        if not hit:
+            print(f"  MISS {case['id']}: 期望{sorted(expected_tables)}"
+                  f" 生成{sorted(got_tables)}")
     print(f"\n=== SQL 骨架表名命中率 {hits}/{checked} ===")
-    assert checked > 0, "抽样 10 条全部未召回，骨架比对无从进行"
-    assert hits >= 6, f"骨架命中 {hits}/{checked} <60%"
+    assert checked >= 55, f"全量 60 条中 {checked} 条未召回，骨架比对基数不足"
+    assert hits >= 54, f"骨架命中 {hits}/{checked} 低于全量阈值"

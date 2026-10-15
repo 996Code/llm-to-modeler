@@ -2,181 +2,856 @@
   {
     "id": "e001",
     "query": "查询所有员工的名字和入职日期",
-    "expected_tables": ["employee"],
-    "expected_columns": ["name", "hire_date"],
+    "expected_tables": [
+      "employee"
+    ],
+    "expected_columns": [
+      "name",
+      "hire_date"
+    ],
     "expected_sql_skeleton": "SELECT name, hire_date FROM employee",
+    "expected_sql": "SELECT name, hire_date FROM employee",
     "difficulty": "easy",
     "category": "single_table"
   },
   {
     "id": "e002",
     "query": "列出所有部门名称及部门编号",
-    "expected_tables": ["department"],
-    "expected_columns": ["id", "name"],
+    "expected_tables": [
+      "department"
+    ],
+    "expected_columns": [
+      "id",
+      "name"
+    ],
     "expected_sql_skeleton": "SELECT id, name FROM department",
+    "expected_sql": "SELECT id, name FROM department",
     "difficulty": "easy",
     "category": "single_table"
   },
   {
     "id": "e003",
     "query": "查询今年入职的员工有哪些",
-    "expected_tables": ["employee"],
-    "expected_columns": ["name", "hire_date"],
+    "expected_tables": [
+      "employee"
+    ],
+    "expected_columns": [
+      "name",
+      "hire_date"
+    ],
     "expected_sql_skeleton": "SELECT name, hire_date FROM employee WHERE hire_date >= '2026-01-01'",
+    "expected_sql": "SELECT name, hire_date FROM employee WHERE hire_date >= '2026-01-01'",
     "difficulty": "easy",
     "category": "single_table_filter"
   },
   {
     "id": "e004",
     "query": "查一下编号为 1001 的客户的基本信息",
-    "expected_tables": ["customer"],
-    "expected_columns": ["id", "name", "phone"],
+    "expected_tables": [
+      "customer"
+    ],
+    "expected_columns": [
+      "id",
+      "name",
+      "phone"
+    ],
     "expected_sql_skeleton": "SELECT id, name, phone FROM customer WHERE id = 1001",
+    "expected_sql": "SELECT id, name, phone FROM customer WHERE id = 1001",
     "difficulty": "easy",
     "category": "single_table_filter"
   },
   {
     "id": "e005",
     "query": "展示所有产品的名称和单价",
-    "expected_tables": ["product"],
-    "expected_columns": ["name", "price"],
+    "expected_tables": [
+      "product"
+    ],
+    "expected_columns": [
+      "name",
+      "price"
+    ],
     "expected_sql_skeleton": "SELECT name, price FROM product",
+    "expected_sql": "SELECT name, price FROM product",
     "difficulty": "easy",
     "category": "single_table"
   },
   {
     "id": "e006",
     "query": "员工总数是多少",
-    "expected_tables": ["employee"],
-    "expected_columns": ["COUNT(*)"],
+    "expected_tables": [
+      "employee"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT COUNT(*) FROM employee",
+    "expected_sql": "SELECT COUNT(*) FROM employee",
     "difficulty": "easy",
     "category": "single_table_aggregate"
   },
   {
     "id": "e007",
     "query": "查一下最近 10 条订单记录",
-    "expected_tables": ["orders"],
-    "expected_columns": ["id", "order_no", "amount", "created_at"],
+    "expected_tables": [
+      "orders"
+    ],
+    "expected_columns": [
+      "id",
+      "order_no",
+      "amount",
+      "created_at"
+    ],
     "expected_sql_skeleton": "SELECT id, order_no, amount, created_at FROM orders ORDER BY created_at DESC LIMIT 10",
+    "expected_sql": "SELECT id, order_no, amount, created_at FROM orders ORDER BY created_at DESC LIMIT 10",
     "difficulty": "easy",
     "category": "single_table"
   },
   {
     "id": "e008",
     "query": "哪些员工的邮箱还没有填写",
-    "expected_tables": ["employee"],
-    "expected_columns": ["name", "email"],
+    "expected_tables": [
+      "employee"
+    ],
+    "expected_columns": [
+      "name",
+      "email"
+    ],
     "expected_sql_skeleton": "SELECT name, email FROM employee WHERE email IS NULL OR email = ''",
+    "expected_sql": "SELECT name, email FROM employee WHERE email IS NULL OR email = ''",
     "difficulty": "easy",
     "category": "single_table_filter"
   },
   {
     "id": "e009",
     "query": "产品表里有哪些产品类别",
-    "expected_tables": ["product"],
-    "expected_columns": ["category"],
+    "expected_tables": [
+      "product"
+    ],
+    "expected_columns": [
+      "category"
+    ],
     "expected_sql_skeleton": "SELECT DISTINCT category FROM product",
+    "expected_sql": "SELECT DISTINCT category FROM product",
     "difficulty": "easy",
     "category": "single_table"
   },
   {
     "id": "e010",
     "query": "按入职时间倒序看员工名单",
-    "expected_tables": ["employee"],
-    "expected_columns": ["name", "hire_date"],
+    "expected_tables": [
+      "employee"
+    ],
+    "expected_columns": [
+      "name",
+      "hire_date"
+    ],
     "expected_sql_skeleton": "SELECT name, hire_date FROM employee ORDER BY hire_date DESC",
+    "expected_sql": "SELECT name, hire_date FROM employee ORDER BY hire_date DESC",
     "difficulty": "easy",
     "category": "single_table"
   },
   {
+    "id": "e011",
+    "query": "薪资表里 2025 年 12 月发放的工资记录有哪些",
+    "expected_tables": [
+      "salary"
+    ],
+    "expected_columns": [
+      "emp_id",
+      "amount",
+      "pay_month"
+    ],
+    "expected_sql_skeleton": "SELECT emp_id, amount, pay_month FROM salary WHERE pay_month >= '2025-12-01' AND pay_month < '2026-01-01'",
+    "expected_sql": "SELECT emp_id, amount, pay_month FROM salary WHERE pay_month >= '2025-12-01' AND pay_month < '2026-01-01'",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e012",
+    "query": "列出西南区域的客户名称和联系电话",
+    "expected_tables": [
+      "customer"
+    ],
+    "expected_columns": [
+      "name",
+      "phone"
+    ],
+    "expected_sql_skeleton": "SELECT name, phone FROM customer WHERE region = '西南'",
+    "expected_sql": "SELECT name, phone FROM customer WHERE region = '西南'",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e013",
+    "query": "单价低于 500 的产品有哪些",
+    "expected_tables": [
+      "product"
+    ],
+    "expected_columns": [
+      "name",
+      "price"
+    ],
+    "expected_sql_skeleton": "SELECT name, price FROM product WHERE price < 500",
+    "expected_sql": "SELECT name, price FROM product WHERE price < 500",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e014",
+    "query": "订单金额超过 5000 的订单号和金额",
+    "expected_tables": [
+      "orders"
+    ],
+    "expected_columns": [
+      "order_no",
+      "amount"
+    ],
+    "expected_sql_skeleton": "SELECT order_no, amount FROM orders WHERE amount > 5000",
+    "expected_sql": "SELECT order_no, amount FROM orders WHERE amount > 5000",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e015",
+    "query": "部门编号为 2 的部门叫什么名字",
+    "expected_tables": [
+      "department"
+    ],
+    "expected_columns": [
+      "id",
+      "name"
+    ],
+    "expected_sql_skeleton": "SELECT id, name FROM department WHERE id = 2",
+    "expected_sql": "SELECT id, name FROM department WHERE id = 2",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e016",
+    "query": "统计订单表的总金额",
+    "expected_tables": [
+      "orders"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT SUM(amount) FROM orders",
+    "expected_sql": "SELECT SUM(amount) FROM orders",
+    "difficulty": "easy",
+    "category": "single_table_aggregate"
+  },
+  {
+    "id": "e017",
+    "query": "查询 2026 年 3 月的订单记录",
+    "expected_tables": [
+      "orders"
+    ],
+    "expected_columns": [
+      "id",
+      "order_no",
+      "amount"
+    ],
+    "expected_sql_skeleton": "SELECT id, order_no, amount FROM orders WHERE created_at >= '2026-03-01' AND created_at < '2026-04-01'",
+    "expected_sql": "SELECT id, order_no, amount FROM orders WHERE created_at >= '2026-03-01' AND created_at < '2026-04-01'",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e018",
+    "query": "薪资表里工资金额最高的那条记录",
+    "expected_tables": [
+      "salary"
+    ],
+    "expected_columns": [
+      "emp_id",
+      "amount",
+      "pay_month"
+    ],
+    "expected_sql_skeleton": "SELECT emp_id, amount, pay_month FROM salary ORDER BY amount DESC LIMIT 1",
+    "expected_sql": "SELECT emp_id, amount, pay_month FROM salary ORDER BY amount DESC LIMIT 1",
+    "difficulty": "easy",
+    "category": "single_table"
+  },
+  {
+    "id": "e019",
+    "query": "员工邮箱以 example.com 结尾的名单",
+    "expected_tables": [
+      "employee"
+    ],
+    "expected_columns": [
+      "name",
+      "email"
+    ],
+    "expected_sql_skeleton": "SELECT name, email FROM employee WHERE email LIKE '%@example.com'",
+    "expected_sql": "SELECT name, email FROM employee WHERE email LIKE '%@example.com'",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e020",
+    "query": "购买数量不少于 10 的订单有哪些",
+    "expected_tables": [
+      "orders"
+    ],
+    "expected_columns": [
+      "order_no",
+      "quantity"
+    ],
+    "expected_sql_skeleton": "SELECT order_no, quantity FROM orders WHERE quantity >= 10",
+    "expected_sql": "SELECT order_no, quantity FROM orders WHERE quantity >= 10",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e021",
+    "query": "各产品类别下有多少种产品",
+    "expected_tables": [
+      "product"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT category, COUNT(*) FROM product GROUP BY category",
+    "expected_sql": "SELECT category, COUNT(*) FROM product GROUP BY category",
+    "difficulty": "easy",
+    "category": "single_table_aggregate"
+  },
+  {
+    "id": "e022",
+    "query": "按单价从低到高列出产品",
+    "expected_tables": [
+      "product"
+    ],
+    "expected_columns": [
+      "name",
+      "price"
+    ],
+    "expected_sql_skeleton": "SELECT name, price FROM product ORDER BY price ASC",
+    "expected_sql": "SELECT name, price FROM product ORDER BY price ASC",
+    "difficulty": "easy",
+    "category": "single_table"
+  },
+  {
+    "id": "e023",
+    "query": "各部门编号下的员工人数",
+    "expected_tables": [
+      "employee"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT dept_id, COUNT(*) FROM employee GROUP BY dept_id",
+    "expected_sql": "SELECT dept_id, COUNT(*) FROM employee GROUP BY dept_id",
+    "difficulty": "easy",
+    "category": "single_table_aggregate"
+  },
+  {
+    "id": "e024",
+    "query": "查询 2025 年入职的员工姓名",
+    "expected_tables": [
+      "employee"
+    ],
+    "expected_columns": [
+      "name",
+      "hire_date"
+    ],
+    "expected_sql_skeleton": "SELECT name, hire_date FROM employee WHERE hire_date >= '2025-01-01' AND hire_date < '2026-01-01'",
+    "expected_sql": "SELECT name, hire_date FROM employee WHERE hire_date >= '2025-01-01' AND hire_date < '2026-01-01'",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
+    "id": "e025",
+    "query": "订单号里包含 202512 的订单",
+    "expected_tables": [
+      "orders"
+    ],
+    "expected_columns": [
+      "order_no",
+      "amount"
+    ],
+    "expected_sql_skeleton": "SELECT order_no, amount FROM orders WHERE order_no LIKE '%202512%'",
+    "expected_sql": "SELECT order_no, amount FROM orders WHERE order_no LIKE '%202512%'",
+    "difficulty": "easy",
+    "category": "single_table_filter"
+  },
+  {
     "id": "m001",
     "query": "统计每个部门的平均薪资",
-    "expected_tables": ["employee", "salary"],
-    "expected_columns": ["dept_id", "AVG(amount)"],
+    "expected_tables": [
+      "employee",
+      "salary"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id",
+    "expected_sql": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id",
     "difficulty": "medium",
     "category": "join_aggregate"
   },
   {
     "id": "m002",
     "query": "每个部门下有多少名员工",
-    "expected_tables": ["employee", "department"],
-    "expected_columns": ["name", "COUNT(*)"],
+    "expected_tables": [
+      "employee",
+      "department"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id GROUP BY d.name",
+    "expected_sql": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id GROUP BY d.name",
     "difficulty": "medium",
     "category": "join_aggregate"
   },
   {
     "id": "m003",
     "query": "2025 年 12 月各产品的销售数量汇总",
-    "expected_tables": ["orders", "product"],
-    "expected_columns": ["name", "SUM(quantity)"],
+    "expected_tables": [
+      "orders",
+      "product"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.name, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id WHERE o.created_at >= '2025-12-01' AND o.created_at < '2026-01-01' GROUP BY p.name",
+    "expected_sql": "SELECT p.name, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id WHERE o.created_at >= '2025-12-01' AND o.created_at < '2026-01-01' GROUP BY p.name",
     "difficulty": "medium",
     "category": "join_aggregate"
   },
   {
     "id": "m004",
     "query": "销售额最高的前 5 个订单分别属于哪个客户",
-    "expected_tables": ["orders", "customer"],
-    "expected_columns": ["name", "amount"],
+    "expected_tables": [
+      "orders",
+      "customer"
+    ],
+    "expected_columns": [
+      "name",
+      "amount"
+    ],
     "expected_sql_skeleton": "SELECT c.name, o.amount FROM orders o JOIN customer c ON o.customer_id = c.id ORDER BY o.amount DESC LIMIT 5",
+    "expected_sql": "SELECT c.name, o.amount FROM orders o JOIN customer c ON o.customer_id = c.id ORDER BY o.amount DESC LIMIT 5",
     "difficulty": "medium",
     "category": "join_rank"
   },
   {
     "id": "m005",
     "query": "每个客户累计消费金额，按金额从高到低排列",
-    "expected_tables": ["orders", "customer"],
-    "expected_columns": ["name", "SUM(amount)"],
+    "expected_tables": [
+      "orders",
+      "customer"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC",
+    "expected_sql": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC",
     "difficulty": "medium",
     "category": "join_aggregate"
   },
   {
     "id": "m006",
     "query": "张伟名下的客户有哪些",
-    "expected_tables": ["customer", "employee"],
-    "expected_columns": ["name", "name"],
+    "expected_tables": [
+      "customer",
+      "employee"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, e.name FROM customer c JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟'",
+    "expected_sql": "SELECT c.name, e.name FROM customer c JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟'",
     "difficulty": "medium",
     "category": "join_filter"
   },
   {
     "id": "m007",
     "query": "各月订单量和订单金额趋势",
-    "expected_tables": ["orders"],
-    "expected_columns": ["DATE_TRUNC('month', created_at)", "COUNT(*)", "SUM(amount)"],
-    "expected_sql_skeleton": "SELECT DATE_TRUNC('month', created_at), COUNT(*), SUM(amount) FROM orders GROUP BY DATE_TRUNC('month', created_at) ORDER BY 1",
+    "expected_tables": [
+      "orders"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT substr(created_at,1,7), COUNT(*), SUM(amount) FROM orders GROUP BY substr(created_at,1,7) ORDER BY 1",
+    "expected_sql": "SELECT substr(created_at,1,7), COUNT(*), SUM(amount) FROM orders GROUP BY substr(created_at,1,7) ORDER BY 1",
     "difficulty": "medium",
     "category": "aggregate_time"
   },
   {
+    "id": "m008",
+    "query": "哪些部门的平均薪资超过 16500，列出部门和平均薪资",
+    "expected_tables": [
+      "employee",
+      "salary"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > 16500",
+    "expected_sql": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > 16500",
+    "difficulty": "medium",
+    "category": "join_having"
+  },
+  {
+    "id": "m009",
+    "query": "消费总额前 3 的客户名称及消费总额",
+    "expected_tables": [
+      "orders",
+      "customer"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 3",
+    "expected_sql": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 3",
+    "difficulty": "medium",
+    "category": "join_rank"
+  },
+  {
+    "id": "m010",
+    "query": "每个区域下有多少个客户",
+    "expected_tables": [
+      "customer"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT region, COUNT(*) FROM customer GROUP BY region",
+    "expected_sql": "SELECT region, COUNT(*) FROM customer GROUP BY region",
+    "difficulty": "medium",
+    "category": "aggregate_group"
+  },
+  {
+    "id": "m011",
+    "query": "每个产品类别卖出的总件数",
+    "expected_tables": [
+      "orders",
+      "product"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT p.category, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.category",
+    "expected_sql": "SELECT p.category, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.category",
+    "difficulty": "medium",
+    "category": "join_aggregate"
+  },
+  {
+    "id": "m012",
+    "query": "2026 年 6 月各客户的消费金额",
+    "expected_tables": [
+      "orders",
+      "customer"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id WHERE o.created_at >= '2026-06-01' AND o.created_at < '2026-07-01' GROUP BY c.name",
+    "expected_sql": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id WHERE o.created_at >= '2026-06-01' AND o.created_at < '2026-07-01' GROUP BY c.name",
+    "difficulty": "medium",
+    "category": "join_aggregate"
+  },
+  {
+    "id": "m013",
+    "query": "每个员工 2025 年 12 月的工资金额",
+    "expected_tables": [
+      "employee",
+      "salary"
+    ],
+    "expected_columns": [
+      "name",
+      "amount"
+    ],
+    "expected_sql_skeleton": "SELECT e.name, s.amount FROM employee e JOIN salary s ON s.emp_id = e.id WHERE s.pay_month >= '2025-12-01' AND s.pay_month < '2026-01-01'",
+    "expected_sql": "SELECT e.name, s.amount FROM employee e JOIN salary s ON s.emp_id = e.id WHERE s.pay_month >= '2025-12-01' AND s.pay_month < '2026-01-01'",
+    "difficulty": "medium",
+    "category": "join_filter"
+  },
+  {
+    "id": "m014",
+    "query": "华南区域客户购买的产品名称和数量",
+    "expected_tables": [
+      "orders",
+      "customer",
+      "product"
+    ],
+    "expected_columns": [
+      "name",
+      "quantity"
+    ],
+    "expected_sql_skeleton": "SELECT p.name, o.quantity FROM orders o JOIN customer c ON o.customer_id = c.id JOIN product p ON o.product_id = p.id WHERE c.region = '华南'",
+    "expected_sql": "SELECT p.name, o.quantity FROM orders o JOIN customer c ON o.customer_id = c.id JOIN product p ON o.product_id = p.id WHERE c.region = '华南'",
+    "difficulty": "medium",
+    "category": "join_filter"
+  },
+  {
+    "id": "m015",
+    "query": "单价在 500 到 1000 之间的产品名称与类别",
+    "expected_tables": [
+      "product"
+    ],
+    "expected_columns": [
+      "name",
+      "category",
+      "price"
+    ],
+    "expected_sql_skeleton": "SELECT name, category, price FROM product WHERE price >= 500 AND price <= 1000",
+    "expected_sql": "SELECT name, category, price FROM product WHERE price >= 500 AND price <= 1000",
+    "difficulty": "medium",
+    "category": "filter_range"
+  },
+  {
+    "id": "m016",
+    "query": "各负责人名下客户的累计订单金额",
+    "expected_tables": [
+      "orders",
+      "customer",
+      "employee"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT e.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id GROUP BY e.name",
+    "expected_sql": "SELECT e.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id GROUP BY e.name",
+    "difficulty": "medium",
+    "category": "join_aggregate"
+  },
+  {
+    "id": "m017",
+    "query": "2026 年上半年各月订单总金额对比",
+    "expected_tables": [
+      "orders"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT substr(created_at,1,7), SUM(amount) FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-07-01' GROUP BY substr(created_at,1,7) ORDER BY 1",
+    "expected_sql": "SELECT substr(created_at,1,7), SUM(amount) FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-07-01' GROUP BY substr(created_at,1,7) ORDER BY 1",
+    "difficulty": "medium",
+    "category": "aggregate_time"
+  },
+  {
+    "id": "m018",
+    "query": "每个产品被多少个不同客户购买过",
+    "expected_tables": [
+      "orders",
+      "product"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT p.name, COUNT(DISTINCT o.customer_id) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name",
+    "expected_sql": "SELECT p.name, COUNT(DISTINCT o.customer_id) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name",
+    "difficulty": "medium",
+    "category": "join_distinct"
+  },
+  {
+    "id": "m019",
+    "query": "哪些员工的 2025 年 12 月工资低于 10000",
+    "expected_tables": [
+      "employee",
+      "salary"
+    ],
+    "expected_columns": [
+      "name",
+      "amount"
+    ],
+    "expected_sql_skeleton": "SELECT e.name, s.amount FROM employee e JOIN salary s ON s.emp_id = e.id WHERE s.amount < 10000 AND s.pay_month >= '2025-12-01' AND s.pay_month < '2026-01-01'",
+    "expected_sql": "SELECT e.name, s.amount FROM employee e JOIN salary s ON s.emp_id = e.id WHERE s.amount < 10000 AND s.pay_month >= '2025-12-01' AND s.pay_month < '2026-01-01'",
+    "difficulty": "medium",
+    "category": "join_filter"
+  },
+  {
+    "id": "m020",
+    "query": "各部门 2025 年入职的员工人数",
+    "expected_tables": [
+      "employee",
+      "department"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id WHERE e.hire_date >= '2025-01-01' AND e.hire_date < '2026-01-01' GROUP BY d.name",
+    "expected_sql": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id WHERE e.hire_date >= '2025-01-01' AND e.hire_date < '2026-01-01' GROUP BY d.name",
+    "difficulty": "medium",
+    "category": "join_filter"
+  },
+  {
+    "id": "m021",
+    "query": "订单量最多的前 3 种产品及其订单次数",
+    "expected_tables": [
+      "orders",
+      "product"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT p.name, COUNT(*) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name ORDER BY COUNT(*) DESC LIMIT 3",
+    "expected_sql": "SELECT p.name, COUNT(*) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name ORDER BY COUNT(*) DESC LIMIT 3",
+    "difficulty": "medium",
+    "category": "join_rank"
+  },
+  {
+    "id": "m022",
+    "query": "每个客户的平均订单金额",
+    "expected_tables": [
+      "orders",
+      "customer"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT c.name, AVG(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name",
+    "expected_sql": "SELECT c.name, AVG(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name",
+    "difficulty": "medium",
+    "category": "join_aggregate"
+  },
+  {
+    "id": "m023",
+    "query": "华东区域客户 2025 年 12 月的订单明细",
+    "expected_tables": [
+      "orders",
+      "customer"
+    ],
+    "expected_columns": [
+      "order_no",
+      "amount"
+    ],
+    "expected_sql_skeleton": "SELECT o.order_no, o.amount FROM orders o JOIN customer c ON o.customer_id = c.id WHERE c.region = '华东' AND o.created_at >= '2025-12-01' AND o.created_at < '2026-01-01'",
+    "expected_sql": "SELECT o.order_no, o.amount FROM orders o JOIN customer c ON o.customer_id = c.id WHERE c.region = '华东' AND o.created_at >= '2025-12-01' AND o.created_at < '2026-01-01'",
+    "difficulty": "medium",
+    "category": "join_filter"
+  },
+  {
+    "id": "m024",
+    "query": "各产品的销售总额，只要总额超过 3000 的",
+    "expected_tables": [
+      "orders",
+      "product"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT p.name, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name HAVING SUM(o.amount) > 3000",
+    "expected_sql": "SELECT p.name, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name HAVING SUM(o.amount) > 3000",
+    "difficulty": "medium",
+    "category": "join_having"
+  },
+  {
+    "id": "m025",
+    "query": "每个部门的薪资总额，按部门编号排序",
+    "expected_tables": [
+      "employee",
+      "salary"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT dept_id, SUM(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id ORDER BY dept_id",
+    "expected_sql": "SELECT dept_id, SUM(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id ORDER BY dept_id",
+    "difficulty": "medium",
+    "category": "join_aggregate"
+  },
+  {
     "id": "h001",
     "query": "上季度销售额前十的客户及其负责人姓名",
-    "expected_tables": ["orders", "customer", "employee"],
-    "expected_columns": ["name", "SUM(amount)", "name"],
+    "expected_tables": [
+      "orders",
+      "customer",
+      "employee"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, SUM(o.amount), e.name FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE o.created_at >= '2026-07-01' AND o.created_at < '2026-10-01' GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 10",
+    "expected_sql": "SELECT c.name, SUM(o.amount), e.name FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE o.created_at >= '2026-07-01' AND o.created_at < '2026-10-01' GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 10",
     "difficulty": "hard",
     "category": "multi_join_metric"
   },
   {
     "id": "h002",
     "query": "销售部每个员工的成交订单总额和主要负责的客户数",
-    "expected_tables": ["orders", "customer", "employee", "department"],
-    "expected_columns": ["name", "SUM(amount)", "COUNT(DISTINCT customer_id)"],
+    "expected_tables": [
+      "orders",
+      "customer",
+      "employee",
+      "department"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT e.name, SUM(o.amount), COUNT(DISTINCT c.id) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' GROUP BY e.name",
+    "expected_sql": "SELECT e.name, SUM(o.amount), COUNT(DISTINCT c.id) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' GROUP BY e.name",
     "difficulty": "hard",
     "category": "multi_join_metric"
   },
   {
     "id": "h003",
     "query": "对比各产品类别在华东区的销售额贡献占比",
-    "expected_tables": ["orders", "product", "customer"],
-    "expected_columns": ["category", "SUM(amount)"],
+    "expected_tables": [
+      "orders",
+      "product",
+      "customer"
+    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华东' GROUP BY p.category ORDER BY SUM(o.amount) DESC",
+    "expected_sql": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华东' GROUP BY p.category ORDER BY SUM(o.amount) DESC",
     "difficulty": "hard",
     "category": "multi_join_metric"
+  },
+  {
+    "id": "h004",
+    "query": "销售部员工 2026 年的订单总金额",
+    "expected_tables": [
+      "orders",
+      "customer",
+      "employee",
+      "department"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT e.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' AND o.created_at >= '2026-01-01' GROUP BY e.name",
+    "expected_sql": "SELECT e.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' AND o.created_at >= '2026-01-01' GROUP BY e.name",
+    "difficulty": "hard",
+    "category": "four_join"
+  },
+  {
+    "id": "h005",
+    "query": "华南区客户购买的各产品类别总金额",
+    "expected_tables": [
+      "orders",
+      "product",
+      "customer"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华南' GROUP BY p.category",
+    "expected_sql": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华南' GROUP BY p.category",
+    "difficulty": "hard",
+    "category": "multi_join_metric"
+  },
+  {
+    "id": "h006",
+    "query": "平均工资高于全公司平均工资的部门和其平均工资",
+    "expected_tables": [
+      "employee",
+      "salary"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > (SELECT AVG(amount) FROM salary)",
+    "expected_sql": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > (SELECT AVG(amount) FROM salary)",
+    "difficulty": "hard",
+    "category": "subquery"
+  },
+  {
+    "id": "h007",
+    "query": "购买过电脑配件类产品的客户数量",
+    "expected_tables": [
+      "orders",
+      "product",
+      "customer"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT COUNT(DISTINCT o.customer_id) FROM orders o JOIN product p ON o.product_id = p.id WHERE p.category = '电脑配件'",
+    "expected_sql": "SELECT COUNT(DISTINCT o.customer_id) FROM orders o JOIN product p ON o.product_id = p.id WHERE p.category = '电脑配件'",
+    "difficulty": "medium",
+    "category": "distinct_count"
+  },
+  {
+    "id": "h008",
+    "query": "订单金额高于全部订单平均金额的订单号、客户名与金额",
+    "expected_tables": [
+      "orders",
+      "customer"
+    ],
+    "expected_columns": [
+      "order_no",
+      "name",
+      "amount"
+    ],
+    "expected_sql_skeleton": "SELECT o.order_no, c.name, o.amount FROM orders o JOIN customer c ON o.customer_id = c.id WHERE o.amount > (SELECT AVG(amount) FROM orders)",
+    "expected_sql": "SELECT o.order_no, c.name, o.amount FROM orders o JOIN customer c ON o.customer_id = c.id WHERE o.amount > (SELECT AVG(amount) FROM orders)",
+    "difficulty": "hard",
+    "category": "subquery"
+  },
+  {
+    "id": "h009",
+    "query": "各区域负责人为张伟的客户带来的订单总额",
+    "expected_tables": [
+      "orders",
+      "customer",
+      "employee"
+    ],
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT c.region, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟' GROUP BY c.region",
+    "expected_sql": "SELECT c.region, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟' GROUP BY c.region",
+    "difficulty": "hard",
+    "category": "multi_join_metric"
+  },
+  {
+    "id": "h010",
+    "query": "没下过单的客户名单",
+    "expected_tables": [
+      "customer",
+      "orders"
+    ],
+    "expected_columns": [
+      "name"
+    ],
+    "expected_sql_skeleton": "SELECT c.name FROM customer c WHERE c.id NOT IN (SELECT customer_id FROM orders)",
+    "expected_sql": "SELECT c.name FROM customer c WHERE c.id NOT IN (SELECT customer_id FROM orders)",
+    "difficulty": "hard",
+    "category": "anti_join"
   }
 ]
