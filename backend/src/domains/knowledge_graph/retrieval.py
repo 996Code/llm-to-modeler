@@ -12,7 +12,8 @@
   - 向量未启用/失败 → 只走图谱路
   - 图谱无命中且无向量命中 → 让 LLM 明确回答"未找到"(prompt 已约束)
 
-kb_search 对话工具与 POST /search REST 共用本模块。
+kb_search 对话工具与 POST /search REST 共用本模块;跨库(多库)检索走
+answer_question_multi(意图解析一次/逐库检索/合并策略见其 docstring)。
 
 【检索可观测】图谱/向量两路的每次调用入 call_logs(call_type='graph'/'vector'),
 与 llm/upstream 同表同视图:请求(参数/种子词/top_k)、响应(召回量/匹配度
@@ -120,11 +121,15 @@ def parse_query_intent(app_state, query: str, relation_types: List[Dict],
 def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     conv_id: Optional[str] = None,
                     top_k: Optional[int] = None,
-                    on_stage=None) -> Dict[str, Any]:
+                    on_stage=None,
+                    intent: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """混合检索:返回 {intent, seeds, subgraph, chunks}。
 
     图谱路始终执行;向量路仅 kb.vector_enabled 时执行(失败降级为空)。
     on_stage(stage_key, message): 各阶段进度回调(可选)。
+    intent: 预解析的检索意图(可选;跨库检索 answer_question_multi 传入
+    ——所有库共享同一 query 意图,不逐库重复烧 LLM)。传入时跳过意图
+    解析与对应 stage 事件(由调用方统一发)。
     """
     def _stage(key: str, message: str) -> None:
         if on_stage is not None:
@@ -136,9 +141,10 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     store = runtime.get_kg_store(app_state)
     graph = runtime.get_graph(app_state)
     schema = kb.get("schema") or {}
-    _stage("kb_search.intent", "解析检索意图(实体/关键词/跳数)…")
-    intent = parse_query_intent(
-        app_state, query, schema.get("relation_types") or [], conv_id=conv_id)
+    if intent is None:
+        _stage("kb_search.intent", "解析检索意图(实体/关键词/跳数)…")
+        intent = parse_query_intent(
+            app_state, query, schema.get("relation_types") or [], conv_id=conv_id)
 
     # 图谱路:实体/关键词找种子 → BFS 子图(两步各记一条 call_log:
     # 种子匹配的命中数/精确率,子图的召回量与截断水位)
@@ -350,6 +356,10 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
     chunk_texts: List[str] = []
     for i, c in enumerate(retrieved.get("chunks") or []):
         src = c.get("docName") or "文档"
+        # 跨库检索的 chunk 带 kbName:资料前缀追加库名(〔库名/文档名〕),
+        # LLM 回答能标注来源库;单库 chunk 无该键,前缀保持〔文档名〕不变
+        if c.get("kbName"):
+            src = f"{c['kbName']}/{src}"
         # 文档原文是不可信输入:反引号 defang,防片段内容干扰 answer 模板
         text = (c.get("text") or "").strip().replace("\n", " ").replace("```", "~~~")
         chunk_texts.append(f"〔{src}〕{text[:600]}")
@@ -434,5 +444,160 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
         "intent": retrieved.get("intent"),
         "subgraph": sub,
         "chunks": retrieved.get("chunks") or [],
+        "sources": sources,
+    }
+
+
+# ── 跨库(多库)综合回答 ─────────────────────────────────────
+
+def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
+                          conv_id: Optional[str] = None,
+                          top_k: Optional[int] = None,
+                          on_stage=None) -> Dict[str, Any]:
+    """跨库检索 + LLM 综合回答(N3:知识库检索支持跨库)。
+
+    合并策略:
+      - 意图解析**一次**:所有库共享同一 query 意图(硬约束——多库不重复
+        烧 LLM;各库 schema 的 relation_types 合并去重后一起给意图解析)
+      - 逐库 hybrid_retrieve(图谱+向量各库独立,共享意图)
+      - chunks 跨库按相似度排序取全局 top_k(每库先各取 top_k,合并后再
+        截全局 top_k),逐条带 kbName 库来源标注
+      - subgraph 各库 concat(节点 id 天然带 kb 前缀,跨库不冲突)
+      - LLM 综合回答**一次**:资料前缀〔库名/文档名〕(linearize_context
+        对带 kbName 的 chunk 追加库名)
+      - cited_chunks 编号权威源=合并后 chunks 顺序(P0#3 契约不变)
+
+    单库列表委托 answer_question(与单库路径行为完全一致),仅补 kbs 键。
+    Returns: {answer, cited_chunks, kb, kbs, intent, subgraph, chunks, sources}
+      kb 为展示兼容字段(前端卡片标题用):{id: "", name: 库名拼接}。
+    """
+    def _stage(key: str, message: str) -> None:
+        if on_stage is not None:
+            try:
+                on_stage(key, message)
+            except Exception:
+                pass  # 进度回调失败不拖垮检索
+
+    if not kbs:
+        raise ValueError("跨库检索至少需要一个知识库")
+    # 去重(同名/同 ID 混传防御),保持传入顺序
+    _seen = set()
+    kbs = [kb for kb in kbs if not (kb["id"] in _seen or _seen.add(kb["id"]))]
+    if len(kbs) == 1:
+        result = answer_question(app_state, kbs[0], query, conv_id=conv_id,
+                                top_k=top_k, on_stage=on_stage)
+        result["kbs"] = [{"id": kbs[0]["id"], "name": kbs[0].get("name") or ""}]
+        return result
+
+    # ── 意图解析一次(所有库共享) ──
+    _stage("kb_search.intent", "解析检索意图(实体/关键词/跳数)…")
+    _rel_types, _seen_rt = [], set()
+    for kb in kbs:
+        for rt in (kb.get("schema") or {}).get("relation_types") or []:
+            _name = rt.get("name") if isinstance(rt, dict) else str(rt)
+            if _name and _name not in _seen_rt:
+                _seen_rt.add(_name)
+                _rel_types.append(rt)
+    intent = parse_query_intent(app_state, query, _rel_types, conv_id=conv_id)
+
+    # ── 逐库检索(共享意图,图谱/向量各库独立) ──
+    per_kb: List[Dict[str, Any]] = []
+    for i, kb in enumerate(kbs):
+        _stage("kb_search.graph",
+               f"({i + 1}/{len(kbs)}) 库「{kb.get('name')}」图谱实体匹配…")
+        per_kb.append(hybrid_retrieve(
+            app_state, kb, query, conv_id=conv_id, top_k=top_k,
+            on_stage=_stage, intent=intent))
+
+    # ── 合并 ──
+    # chunks:跨库按相似度排序取全局 top_k;逐条标注库来源(kbName 进
+    # linearize 的资料前缀与 sources,回答/前端都能看到出处库)
+    merged_chunks: List[Dict[str, Any]] = []
+    for kb, r in zip(kbs, per_kb):
+        for c in r.get("chunks") or []:
+            c["kbName"] = kb.get("name") or ""
+            merged_chunks.append(c)
+    k = top_k or int(_cfg(app_state, "vector_top_k", 5))
+    merged_chunks.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+    merged_chunks = merged_chunks[:k]
+
+    # subgraph:各库 concat(节点 id 带 kb 前缀不冲突;线性化的 id→name
+    # 映射按 id 查,跨库同名实体各归各的库,不会串)
+    subgraph = {
+        "nodes": [n for r in per_kb for n in (r.get("subgraph") or {}).get("nodes") or []],
+        "edges": [e for r in per_kb for e in (r.get("subgraph") or {}).get("edges") or []],
+    }
+    # diagnostics:逐库合并(按库名分组;answer 路径不外透,与单库口径一致)
+    diagnostics = {"perKb": {kb.get("name"): r.get("diagnostics")
+                             for kb, r in zip(kbs, per_kb)}}
+    retrieved = {
+        "intent": intent,
+        "seeds": [s for r in per_kb for s in r.get("seeds") or []],
+        "subgraph": subgraph,
+        "chunks": merged_chunks,
+        "diagnostics": diagnostics,
+    }
+
+    # P0#4 rerank:与单库同款——合并后、linearize 前重排;排序后顺序即
+    # 编号权威源。开关默认关;失败降级原序不阻断
+    if merged_chunks and _cfg(app_state, "rerank_enabled", False):
+        _stage("kb_search.rerank", f"重排 {len(merged_chunks)} 个片段…")
+        try:
+            order = app_state.llm_client.rerank(
+                query, [(c.get("text") or "")[:600] for c in merged_chunks],
+                conv_id=conv_id, stage="kg.rerank")
+            merged_chunks = [merged_chunks[i] for i in order]
+            retrieved["chunks"] = merged_chunks
+        except Exception as e:
+            logger.warning(f"rerank 失败,降级原召回序: {e}")
+
+    _stage("kb_search.assemble", "整理三元组与文档片段…")
+    ctx = linearize_context(retrieved)
+
+    _stage("kb_search.answer", f"综合回答(依据 {len(ctx['triples'])} 条三元组 / "
+                               f"{len(ctx['chunk_texts'])} 个文档片段)…")
+    prompt = _prompt_loader().render(
+        "knowledge_graph", "answer",
+        kb_name="、".join(kb.get("name") or "" for kb in kbs), query=query,
+        triples=ctx["triples"], node_details=ctx["node_details"],
+        chunk_texts=ctx["chunk_texts"],
+    )
+    temperature = int(_cfg(app_state, "answer_temperature", 30)) / 100.0
+    answer = app_state.llm_client.chat(
+        [{"role": "user", "content": prompt}],
+        temperature=temperature, conv_id=conv_id, stage="kg.answer",
+    ).strip()
+
+    # 来源汇总:实体跨库合并去重(展示名);chunks 带库来源标注
+    entities: List[str] = []
+    _seen_names = set()
+    for r in per_kb:
+        for n in (r.get("subgraph") or {}).get("nodes") or []:
+            if n["name"] not in _seen_names:
+                _seen_names.add(n["name"])
+                entities.append(n["name"])
+    sources = {
+        "entities": entities[:20],
+        "chunks": [
+            {
+                "docId": c.get("docId"),
+                "docName": c.get("docName"),
+                "kbName": c.get("kbName"),
+                "score": c.get("score"),
+                "seq": c.get("seq"),
+                "text": (c.get("text") or "").strip()[:600],
+            }
+            for c in merged_chunks
+        ],
+    }
+    return {
+        "answer": answer,
+        "cited_chunks": parse_cited_chunks(answer),
+        # 展示兼容(前端卡片标题):跨库时 id 置空、name 拼接
+        "kb": {"id": "", "name": "、".join(kb.get("name") or "" for kb in kbs)},
+        "kbs": [{"id": kb["id"], "name": kb.get("name") or ""} for kb in kbs],
+        "intent": intent,
+        "subgraph": subgraph,
+        "chunks": merged_chunks,
         "sources": sources,
     }

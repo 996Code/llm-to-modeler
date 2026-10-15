@@ -537,30 +537,44 @@ async def induce_schema(kb_id: str, request: Request, payload: Dict[str, Any] = 
 async def search(request: Request, payload: Dict[str, Any]):
     """混合检索问答(非流式;宿主/前端直接调用)。
 
-    Body: {kb: 知识库名或ID(可选,缺省唯一库), query: 问题, top_k?: 向量条数}
+    Body: {kb: 知识库名/ID/数组(可选), query: 问题, top_k?: 向量条数}
+      - kb 字符串:单库检索(名或 ID;不存在 404——回显的是用户自己的输入)
+      - kb 数组:跨指定库检索;不存在的名字**静默跳过**(不 404 泄露探测
+        结果,防枚举口径:只回显存在的库名);全部不存在才 404
+      - kb 缺省:全部库跨库检索(N3 跨库默认;排除 folder 目录节点)
     """
     query = str((payload or {}).get("query") or "").strip()
     if not query:
         raise HTTPException(422, "query 不能为空")
-    kb_ref = str((payload or {}).get("kb") or "").strip()
+    kb_ref = (payload or {}).get("kb")
     top_k = payload.get("top_k")
 
     store = runtime.get_kg_store(request.app.state)
-    kb = None
-    if kb_ref:
-        kb = store.get_kb_by_name(kb_ref) or store.get_kb(kb_ref)
+    target: List[Dict[str, Any]] = []
+    if isinstance(kb_ref, list):
+        refs = [str(r).strip() for r in kb_ref if str(r or "").strip()]
+        if not refs:
+            raise HTTPException(422, "kb 数组不能为空")
+        seen_ids = set()
+        for ref in refs:
+            kb = store.get_kb_by_name(ref) or store.get_kb(ref)
+            # folder 目录不存文档不可检索,与不存在的名字同款静默跳过
+            if kb and kb.get("kind") != "folder" and kb["id"] not in seen_ids:
+                seen_ids.add(kb["id"])
+                target.append(kb)
+        if not target:
+            # 全部不存在:只说不存在,不回显任何库名(防枚举)
+            raise HTTPException(404, "知识库不存在")
+    elif kb_ref is not None and str(kb_ref).strip():
+        ref = str(kb_ref).strip()
+        kb = store.get_kb_by_name(ref) or store.get_kb(ref)
+        if not kb:
+            raise HTTPException(404, f"知识库不存在: {ref}")
+        target = [kb]
     else:
-        kbs = store.list_kbs()
-        if len(kbs) == 1:
-            kb = kbs[0]
-        elif not kbs:
+        target = [k for k in store.list_kbs() if k.get("kind") != "folder"]
+        if not target:
             raise HTTPException(404, "当前没有任何知识库")
-        else:
-            # 不回显全部库名——这是无管理口令的用户级端点,库名清单本身
-            # 是信息泄露面(可被枚举探测)。给数量与指引即可。
-            raise HTTPException(422, f"存在 {len(kbs)} 个知识库,请用 kb 参数指定目标库")
-    if not kb:
-        raise HTTPException(404, f"知识库不存在: {kb_ref}")
 
     from domains.knowledge_graph import retrieval
     from sdk.pack_api import user_id
@@ -571,12 +585,22 @@ async def search(request: Request, payload: Dict[str, Any]):
     try:
         # 检索链含多次 LLM/图/向量同步调用(LLM_TIMEOUT 默认 300s),
         # 直接在 async 端点里跑会阻塞整个事件循环(其他会话的 SSE 心跳
-        # 一起冻结)——丢线程池执行
+        # 一起冻结)——丢线程池执行。单库走 answer_question(既有路径
+        # 零改动),多库走 answer_question_multi(意图一次/合并策略)
         import asyncio
-        result = await asyncio.to_thread(
-            retrieval.answer_question,
-            request.app.state, kb, query, conv_id=conv_id, top_k=top_k,
-        )
+        if len(target) == 1:
+            result = await asyncio.to_thread(
+                retrieval.answer_question,
+                request.app.state, target[0], query, conv_id=conv_id, top_k=top_k)
+            # 单库也补 kbs 键:响应形状与多库一致(前端/测试统一消费,
+            # 不必按库数分支)
+            result.setdefault(
+                "kbs", [{"id": target[0]["id"],
+                         "name": target[0].get("name") or ""}])
+        else:
+            result = await asyncio.to_thread(
+                retrieval.answer_question_multi,
+                request.app.state, target, query, conv_id=conv_id, top_k=top_k)
         return result | {"user": user}
     except Exception as e:
         # 异常详情只进服务端日志;用户级端点不回显内部错误串(可能带
