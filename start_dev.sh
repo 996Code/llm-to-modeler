@@ -33,6 +33,14 @@ BACKEND_DIR="${SCRIPT_DIR}/backend"
 MOCK_LOG="/tmp/mock-api.log"
 BACKEND_LOG="/tmp/backend.log"
 
+# 统一解释器:优先 venv(backend/.venv——代码用 3.10+ 语法,系统 python3
+# 可能是 3.9 会直接 TypeError 崩),无 venv 再退回 PATH 上的 python3
+PYTHON="${BACKEND_DIR}/.venv/bin/python"
+if [ ! -x "$PYTHON" ]; then
+  PYTHON="$(command -v python3)"
+  log_warn "backend/.venv 不存在,退回系统 python3(若 <3.10 会启动失败,先建 venv)"
+fi
+
 # 解析参数
 START_MOCK=true
 START_BACKEND=true
@@ -69,7 +77,7 @@ if [ "$START_MOCK" = true ]; then
   log_info "启动 Mock API Server (端口 ${MOCK_PORT})..."
   log_info "  日志: ${MOCK_LOG}"
   cd "$BACKEND_DIR"
-  python3 mock_api_server.py --port "$MOCK_PORT" > "$MOCK_LOG" 2>&1 &
+  "$PYTHON" mock_api_server.py --port "$MOCK_PORT" > "$MOCK_LOG" 2>&1 &
   MOCK_PID=$!
   log_info "Mock API PID: ${MOCK_PID}"
 
@@ -94,7 +102,7 @@ if [ "$START_BACKEND" = true ]; then
   log_info "  日志: ${BACKEND_LOG}"
   cd "$BACKEND_DIR"
   # main:app + PYTHONPATH=src：src.X 与 X 双模块加载会让 thread-local 互不可见
-  (cd "$BACKEND_DIR" && PYTHONPATH=src python3 -m uvicorn main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload > "$BACKEND_LOG" 2>&1 &)
+  (cd "$BACKEND_DIR" && PYTHONPATH=src "$PYTHON" -m uvicorn main:app --host 0.0.0.0 --port "$BACKEND_PORT" --reload > "$BACKEND_LOG" 2>&1 &)
   BACKEND_PID=$!
   log_info "Backend PID: ${BACKEND_PID}"
 
