@@ -40,13 +40,16 @@ def keyword_scores(query: str, models: List) -> Dict[str, float]:
     toks = tokenize_query(query)
     if not toks:
         return {}
-    q_lower = query.lower()
+    # query 的英文/数字 token 集(词级相等判定用——裸子串会让 order
+    # 命中 order_status、user 命中 user_id,各吃最高权重)
+    q_words = set(t.lower() for t in _WORD_RE.findall(query))
     out: Dict[str, float] = {}
     for m in models:
         text = model_to_text(m).lower()
         score = sum(1.0 for t in toks if t.lower() in text)
-        # 反向点名:表名或中文名整体出现在 query
-        if m.name and m.name.lower() in q_lower:
+        # 反向点名:英文表名须是 query 的完整词(词边界,防子串误命中);
+        # 中文 display_name 整串出现在 query(中文无词边界,整串已够严)
+        if m.name and m.name.lower() in q_words:
             score += 3.0
         if m.display_name and m.display_name in query:
             score += 3.0

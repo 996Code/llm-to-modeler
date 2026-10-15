@@ -47,6 +47,17 @@ class TestKeywordScores:
         s2 = keyword_scores("订单数据", [m])
         assert s1.get("orders", 0) > s2.get("orders", 0)
 
+    def test_reverse_match_requires_word_boundary(self):
+        """反向点名须词边界:'按user_id查'不得给 user 表 +3(裸子串误命中,
+        T1 审查 major);'user 表'才点名 user。"""
+        from domains.chatbi.models import Model
+        user = Model(name="user", display_name="用户表", description="",
+                     columns=[])
+        s_sub = keyword_scores("按user_id查数据", [user])
+        s_full = keyword_scores("看 user 表的数据", [user])
+        assert s_sub.get("user", 0.0) == 0.0, f"子串误命中: {s_sub}"
+        assert s_full.get("user", 0.0) >= 3.0
+
 
 class TestRRFFuse:
 
