@@ -635,11 +635,13 @@ function openTraceForMessage(msgIndex: number) {
   openTurnTrace(msgIndex)
 }
 
-/** 诊断卡「重试」:重发该失败轮的上一条 user 消息(失败卡自身不入历史重发) */
+/** 诊断卡「重试」:重发该失败轮的上一条 user 消息,并移除本张诊断卡
+ *  (审查:反复失败重试会堆积诊断卡——重试即表示用户已处置该失败) */
 function retryLastQuestion(msgIndex: number) {
   for (let k = msgIndex - 1; k >= 0; k--) {
     const m = store.messages[k]
     if (m?.role === 'user' && m.kind !== 'error-diag') {
+      store.messages.splice(msgIndex, 1)   // 移除被重试的诊断卡
       store.sendMessage(m.content)
       return
     }

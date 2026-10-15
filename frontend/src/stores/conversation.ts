@@ -160,9 +160,11 @@ export const useConversationStore = defineStore('conversation', () => {
     pipelineSteps.value = []
     try {
       const conv = await api.getConversation(id)
-      // 双重校验:加载期间用户可能又切了别的会话——晚到的响应不得覆盖
-      if (currentConversation.value?.id && currentConversation.value.id !== id
-          && currentConversation.value.id !== '') {
+      // 双重校验:加载期间用户可能又切了别的会话(含切到新会话=null)——
+      // 晚到的响应不得覆盖当前选择。只认"当前仍是本次要加载的会话或
+      // 尚无选择"两种状态
+      if (currentConversation.value?.id !== undefined
+          && currentConversation.value?.id !== id) {
         // 已切走,丢弃本次加载(以当前选择为准)
         loading.value = false
         return
@@ -298,12 +300,11 @@ export const useConversationStore = defineStore('conversation', () => {
     // 会话切换守卫(用户 10-15 报障:SSE 回调闭包不绑会话,切到会话 B 后
     // A 的流式结果仍往 messages push——B 的界面显示 A 的回答)。
     // 发起时快照会话 id,回调里校验:已切走则丢弃(结果已落库,切回
-    // A 时历史加载可见,不丢数据只丢串扰)
+    // A 时历史加载可见,不丢数据只丢串扰)。
+    // null 边界(审查抓出):切到"新会话"(currentConversation=null)同样算
+    // 切走——只允许"当前会话仍是发起会话"这一种状态通过,其余全拦
     const originConvId = currentConversation.value?.id
-    const isStale = () => {
-      const now = currentConversation.value?.id
-      return !!originConvId && !!now && originConvId !== now
-    }
+    const isStale = () => currentConversation.value?.id !== originConvId
 
     try {
 
@@ -325,12 +326,14 @@ export const useConversationStore = defineStore('conversation', () => {
         // 收到最终结果回调：这里按优先级分流（决定 UI 渲染哪种卡片）
         onResult: (result) => {
           // 懒创建采纳:首条消息不带 id 发出的会话在此拿到后端回传的新 id,
-          // 采纳后后续轮次/刷新/恢复都基于它(见 startNewConversation 注释)
+          // 采纳后后续轮次/刷新/恢复都基于它(见 startNewConversation 注释)。
+          // 守卫前置(审查 null 边界):从会话 A 切到新会话后,A 的结果不得
+          // 把 A 的 id 采纳成新会话的 id
+          if (isStale()) return   // 已切走:结果已落库,不串扰新会话界面
           if (result.conversationId && !currentConversation.value) {
             currentConversation.value = { id: result.conversationId } as Conversation
             loadConversations()  // 刷侧边栏,让新会话出现(不 await,不阻塞渲染)
           }
-          if (isStale()) return   // 已切走:结果已落库,不串扰新会话界面
           // onResult 分流顺序(由后端 ToolResult 三态决定):
           // 0. error — 执行失败/前置校验拦截(error_for_llm 通道),显示错误提示
           // 1. general  — 闲聊(reply 通道),显示纯文本

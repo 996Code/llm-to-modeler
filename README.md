@@ -539,6 +539,15 @@ EMBEDDING_BACKEND=local              # local(默认)/api(云端 OpenAI 兼容 /v
 
 # ── 管理端口令（可选加固；不配=开放访问，公网部署必须配置）──
 # ADMIN_TOKEN=
+
+# ── 检索增强（可选；默认全关，管理端插件设置里也有开关）──
+# RERANK_BASE_URL=              # 外置 rerank API(Cohere/Jina 协议 POST {base}/rerank)
+# RERANK_MODEL=                 # rerank 模型名(两变量都配才生效)
+# RERANK_API_KEY=
+# RERANK_TIMEOUT=3              # 秒;超时降级原召回序不阻断
+# EMBED_QUERY_PREFIX=0          # 1=查询向量加检索前缀(仅 bge-*-zh-v1.5 系模型需要;bge-m3 官方明确无需,勿开)
+# EMBED_CACHE_MAX=4096          # 嵌入缓存 LRU 上限(默认开,TTL 24h,重复文本零出站)
+# LLM_CACHE_ENABLED=0           # 1=chat 结果进程内缓存 24h(全同参数命中;对话场景慎开)
 ```
 
 健康检查：根路径 `GET /health`（运维/K8s 探针）与 `GET /api/health`

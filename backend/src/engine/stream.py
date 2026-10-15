@@ -481,7 +481,8 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
         data_artifact = result_data.get("data") if result_data.get("artifactType") == "data" else None
         extra = None
         if result_data.get("error"):
-            err_text = f"{result_data.get('error', '')} {summary}".lower()
+            err_text = f"{result_data.get('error', '')} {summary} " \
+                       f"{result_data.get('message', '')}".lower()
             if any(k in err_text for k in ("llm", "chat", "completion", "500",
                                            "502", "timeout", "connection", "embed")):
                 cat = "llm-upstream"
