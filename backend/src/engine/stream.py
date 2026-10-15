@@ -483,12 +483,14 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
         if result_data.get("error"):
             err_text = f"{result_data.get('error', '')} {summary} " \
                        f"{result_data.get('message', '')}".lower()
-            if any(k in err_text for k in ("llm", "chat", "completion", "500",
-                                           "502", "timeout", "connection", "embed")):
-                cat = "llm-upstream"
-            elif any(k in err_text for k in ("milvus", "neo4j", "vector",
+            # 存储设施关键词优先于通用连接词(与前端 errorDiag.ts 同口径:
+            # milvus/neo4j 的 connection 错误归检索设施,不是 LLM 上游)
+            if any(k in err_text for k in ("milvus", "neo4j", "vector",
                                              "graph", "检索")):
                 cat = "retrieval"
+            elif any(k in err_text for k in ("llm", "chat", "completion", "500",
+                                              "502", "timeout", "connection", "embed")):
+                cat = "llm-upstream"
             elif any(k in err_text for k in ("sql", "数据库", "执行")):
                 cat = "execution"
             else:

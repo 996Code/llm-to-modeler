@@ -22,6 +22,7 @@ import type { Conversation, FormConfig, Message } from '../types'
 import * as api from '../services/api'
 // HostPort：嵌入模式读取宿主上下文（最新配置 + 服务地址表），注入每次 chat 请求
 import { getHostPort, CONTEXT_KEY_ARTIFACT } from '../composables/hostPort'
+import { classifyError } from '../utils/errorDiag'
 
 /**
  * 嵌入模式下组装发给后端的附加上下文（每次发消息前调用）。
@@ -471,23 +472,6 @@ export const useConversationStore = defineStore('conversation', () => {
   }
 
 // P2#15 失败诊断:错误文本 → 失败环节分类(给用户"哪坏了"的第一答案)
-function classifyError(err: string): string {
-  const t = (err || '').toLowerCase()
-  if (t.includes('llm') || t.includes('chat') || t.includes('completion')
-      || t.includes('500') || t.includes('502') || t.includes('timeout')
-      || t.includes('connection') || t.includes('embed')) {
-    return 'llm-upstream'
-  }
-  if (t.includes('milvus') || t.includes('neo4j') || t.includes('vector')
-      || t.includes('graph') || t.includes('检索')) {
-    return 'retrieval'
-  }
-  if (t.includes('sql') || t.includes('数据库') || t.includes('执行')) {
-    return 'execution'
-  }
-  return 'unknown'
-}
-
   // 返回对外暴露的状态/派生值/动作。
   // 注意：return 后这些 ref/computed 就成为 store 的公共 API，
   // 组件里用 store.xxx 即可访问（Pinia 会自动解包 ref，无需写 .value）。

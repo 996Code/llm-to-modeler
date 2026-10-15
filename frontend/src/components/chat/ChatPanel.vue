@@ -339,6 +339,7 @@ import { getConversationTrace } from '../../services/api'
 // 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
 import { useConversationStore } from '../../stores/conversation'
 import { copyText } from '../../utils/clipboard'
+import { errorCategoryLabel } from '../../utils/errorDiag'
 // 仅引入类型（编译期检查，运行时不打包）
 import type { FormConfig, ClarificationQuestion, ClarificationOption } from '../../types'
 // 子组件：输入框
@@ -620,16 +621,6 @@ function openTurnTrace(msgIndex: number) {
 }
 
 // ── P2#15 失败诊断卡 ──
-/** 失败环节分类 → 用户可读标签(哪坏了的第一答案) */
-function errorCategoryLabel(cat?: string): string {
-  switch (cat) {
-    case 'llm-upstream': return 'LLM 上游服务故障'
-    case 'retrieval': return '检索链路故障'
-    case 'execution': return '查询执行失败'
-    default: return '请求处理失败'
-  }
-}
-
 /** 诊断卡「查看本轮链路」:复用 openTurnTrace(轮次口径一致) */
 function openTraceForMessage(msgIndex: number) {
   openTurnTrace(msgIndex)
@@ -1489,18 +1480,19 @@ watch(() => store.currentConversation?.id, (convId) => {
 
 /* P2#15 失败诊断卡 */
 .diag-card {
-  border: 1px solid #fecaca; background: #fef2f2;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+  background: color-mix(in srgb, var(--color-danger) 6%, #fff);
   border-radius: 10px; padding: 10px 14px; max-width: 560px;
 }
 .diag-head { display: flex; align-items: center; gap: 6px; }
-.diag-icon { color: #dc2626; font-size: 16px; }
-.diag-title { font-weight: 600; color: #991b1b; font-size: 13.5px; }
+.diag-icon { color: var(--color-danger); font-size: 16px; }
+.diag-title { font-weight: 600; color: var(--color-danger); font-size: 13.5px; }
 .diag-detail {
-  color: #7f1d1d; font-size: 12.5px; margin-top: 6px;
+  color: var(--text-secondary, #7f1d1d); font-size: 12.5px; margin-top: 6px;
   white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto;
 }
 .diag-actions { margin-top: 8px; display: flex; gap: 14px; }
-.diag-actions a { color: #2f54eb; font-size: 12.5px; cursor: pointer; }
+.diag-actions a { color: var(--color-primary); font-size: 12.5px; cursor: pointer; }
 .diag-actions a:hover { text-decoration: underline; }
-.diag-retry { color: #16a34a !important; }
+.diag-retry { color: var(--color-success) !important; }
 </style>
