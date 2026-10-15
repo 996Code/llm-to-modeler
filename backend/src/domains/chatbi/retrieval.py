@@ -141,6 +141,8 @@ def retrieve(
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     conv_id: Optional[str] = None,
     rerank_enabled: bool = False,
+    content: "SemanticModelContent | None" = None,
+    hybrid_enabled: bool = False,
 ) -> RetrievalResult:
     """两阶段检索: 向量召回 → LLM 精筛。
 
@@ -158,6 +160,9 @@ def retrieve(
         score_threshold: 召回分数阈值 (默认 0.35)
         conv_id: 会话 id (LLM 调用日志关联)
         rerank_enabled: rerank 精排开关(调用方传,移植契约:配置读取在 ask_data)
+        content: 语义层内容(关键词路数据源;None=关键词路跳过,
+            移植契约:retrieve 不读 db/settings,由调用方注入)
+        hybrid_enabled: 关键词路融合开关(RRF;默认关=行为与现状逐字节一致)
 
     Returns:
         RetrievalResult — 无召回/无真匹配 → models=[] + no_match_reason
@@ -247,6 +252,47 @@ def retrieve(
             logger.warning("retrieve: %d 条截断键命中因身份真源缺失被丢弃"
                            "(宁缺毋滥)", dropped_by_identity)
         candidates = [h for hits in candidates_by_scope.values() for h in hits]
+
+    # ── P1#6 关键词路融合(RRF):向量漏召回的表靠表名/列中文名点名补进 ──
+    # content 由调用方注入(移植契约:retrieve 不读 db/settings);
+    # 失败降级纯向量(与向量路失败降级对称——融合是召回增强项)。
+    # 位置裁决(探针验证): 融合段在身份过滤段【之后】——身份段末尾从
+    # candidates_by_scope 重建 candidates, 融合在前会被重建覆盖(关键词
+    # 新命中不在 per-scope dict 里); 关键词 record 从 content 构造、
+    # metadata 已设、id 无 # 截断键, 本就无需身份反查。
+    hybrid_fused = False
+    if hybrid_enabled and content is not None and content.models:
+        try:
+            from domains.chatbi.hybrid import keyword_scores, rrf_fuse
+            kw_scores = keyword_scores(question, content.models)
+            if kw_scores:
+                vec_ranked = [h.record.metadata.get("name", h.record.id)
+                              for h in candidates]
+                kw_ranked = [n for n, _ in sorted(kw_scores.items(),
+                                                  key=lambda x: -x[1])]
+                fused = rrf_fuse(vec_ranked, kw_ranked)
+                by_name = {h.record.metadata.get("name", h.record.id): h
+                           for h in candidates}
+                # 关键词新命中(向量库没有的)→ 从 content 构造 SearchResult
+                from domains.chatbi.stores import SearchResult, VectorRecord
+                from domains.chatbi.indexing import model_to_text
+                for name in fused:
+                    if name not in by_name:
+                        m = next((x for x in content.models
+                                  if x.name == name), None)
+                        if m is None:
+                            continue
+                        by_name[name] = SearchResult(
+                            record=VectorRecord(
+                                id=f"model:{m.name}", vector=[],
+                                metadata={"name": m.name, "type": "model"},
+                                text=model_to_text(m)),
+                            score=float(kw_scores.get(name, 0.0)))
+                candidates = [by_name[n] for n in fused if n in by_name]
+                hybrid_fused = True
+        except Exception as e:
+            logger.warning("retrieve 关键词路失败,降级纯向量: %s", e)
+
     # P0#4 rerank 精排:候选表按 query 相关度重排(排序对象=候选非图结构)。
     # 失败/超时降级向量分序(排序质量项,不阻断检索);默认关。
     # rerank 成功时跳过下方 sort——sort 会覆盖 rerank 序。
@@ -260,7 +306,10 @@ def retrieve(
             reranked = True
         except Exception as e:
             logger.warning("retrieve rerank 失败,降级向量分序: %s", e)
-    if not reranked:
+    # P1#6 裁决: hybrid 融合生效时视为已定序(RRF 序为准)——
+    # 跳过 score sort: 关键词匹配分与 cosine 量纲不同, 混排会覆盖
+    # 融合序(rerank 同款 reranked 标志思路)。
+    if not reranked and not hybrid_fused:
         candidates.sort(key=lambda r: r.score, reverse=True)
     candidates = candidates[:top_k]
 
@@ -554,12 +603,16 @@ def retrieve_context(
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     conv_id: Optional[str] = None,
     rerank_enabled: bool = False,
+    hybrid_enabled: bool = False,
 ) -> Dict[str, Any]:
     """两阶段召回 + schema_context 构建的一站式入口。
 
     流程: retrieve(召回→精筛) → 命中表名 → build_schema_context。
     源 agent 流程中的图谱表扩展(expand_with_relationships)属图谱扩展栈,
     在其落地前以精筛命中表直接构建 context(种子表语义不变)。
+
+    content 参数双义: 语义层内容既作 schema_context 构建源, 也作
+    retrieve 关键词路的数据源(hybrid_enabled 开时透传给 retrieve)。
 
     Returns:
         {retrieval: RetrievalResult, model_names: [...], schema_context: str,
@@ -570,6 +623,7 @@ def retrieve_context(
         data_source_id=data_source_id, llm=llm, db=db, scope=scope,
         top_k=top_k, score_threshold=score_threshold, conv_id=conv_id,
         rerank_enabled=rerank_enabled,
+        content=content, hybrid_enabled=hybrid_enabled,
     )
     names = [m["name"] for m in result.models]
     return {

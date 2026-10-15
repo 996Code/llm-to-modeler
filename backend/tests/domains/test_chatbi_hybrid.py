@@ -1,5 +1,11 @@
-"""P1#6 检索混合化 —— 分词/关键词计分/RRF 融合纯函数。"""
+"""P1#6 检索混合化 —— 分词/关键词计分/RRF 融合纯函数 + T2 retrieve 接线。"""
 from domains.chatbi.hybrid import keyword_scores, rrf_fuse, tokenize_query
+from domains.chatbi.models import SemanticModelContent
+from domains.chatbi.retrieval import retrieve
+
+from tests.domains.test_chatbi_evalset import (
+    EVALSET, EVAL_SCOPE, SIX_TABLE_MODELS, make_eval_fixture,
+    recall_at_k, register_query_vector)
 
 
 class TestTokenize:
@@ -76,3 +82,68 @@ class TestRRFFuse:
         """两路并集全保留(未入任一路者不出现;单路者排后按原序)。"""
         fused = rrf_fuse(["a", "b"], ["c", "a"])
         assert set(fused) == {"a", "b", "c"} and len(fused) == 3
+
+
+# ── T2 集成:融合进 retrieve 管线 ─────────────────────────────
+
+
+class TestRetrieveHybrid:
+    """retrieve() 混合检索接线:签名(content/hybrid_enabled)+融合段行为。"""
+
+    def _content(self):
+        return SemanticModelContent(models=list(SIX_TABLE_MODELS))
+
+    def test_hybrid_off_by_default(self):
+        """默认关(不传参):行为与现状一致——纯向量。"""
+        store, embedder, llm = make_eval_fixture()
+        register_query_vector(llm, "查询所有员工的名字", ["employee"])
+        r1 = retrieve("查询所有员工的名字", store, embedder,
+                      skip_llm_refine=True, scope=EVAL_SCOPE)
+        r2 = retrieve("查询所有员工的名字", store, embedder,
+                      skip_llm_refine=True, scope=EVAL_SCOPE,
+                      content=self._content(), hybrid_enabled=False)
+        assert [m["name"] for m in r1.models] == [m["name"] for m in r2.models]
+
+    def test_keyword_path_rescues_vector_miss(self):
+        """关键词路独立价值:向量对不上的表靠关键词补召回(RRF 融合进候选)。
+        场景:假向量只注册了 department(员工表向量缺失=向量路漏),
+        开关开+content 注入 → employee 靠'员工'关键词命中并进候选。"""
+        store, embedder, llm = make_eval_fixture()
+        register_query_vector(llm, "查询所有员工的名字", ["department"])
+        r = retrieve("查询所有员工的名字", store, embedder,
+                     skip_llm_refine=True, scope=EVAL_SCOPE,
+                     content=self._content(), hybrid_enabled=True)
+        names = [m["name"] for m in r.models]
+        assert "employee" in names, f"关键词路未补召回: {names}"
+
+    def test_hybrid_no_content_degrades(self):
+        """content=None(未扫描/未注入):关键词路跳过,纯向量不报错。"""
+        store, embedder, llm = make_eval_fixture()
+        register_query_vector(llm, "查询所有员工的名字", ["employee"])
+        r = retrieve("查询所有员工的名字", store, embedder,
+                     skip_llm_refine=True, scope=EVAL_SCOPE,
+                     content=None, hybrid_enabled=True)
+        assert r.models and r.models[0]["name"] == "employee"
+
+
+def test_hybrid_on_baseline_unchanged():
+    """开关开+content 注入跑 60 条评测集:recall@5 仍 =1.000。
+
+    关键词路只补不删(RRF 并集融合,向量命中不丢)——开关开不得
+    引入基线回退(P1#6 收益数字的护栏面)。"""
+    store, embedder, llm = make_eval_fixture()
+    content = SemanticModelContent(models=list(SIX_TABLE_MODELS))
+    scores = []
+    misses = []
+    for case in EVALSET:
+        register_query_vector(llm, case["query"], case["expected_tables"])
+        r = retrieve(case["query"], store, embedder,
+                     skip_llm_refine=True, scope=EVAL_SCOPE,
+                     content=content, hybrid_enabled=True)
+        got = [m["name"] for m in r.models]
+        s = recall_at_k(set(case["expected_tables"]), got, 5)
+        scores.append(s)
+        if s < 1.0:
+            misses.append((case["id"], case["expected_tables"], got[:5]))
+    mean = sum(scores) / len(scores)
+    assert mean == 1.000, f"开关开基线回退 {mean:.3f}: {misses}"
