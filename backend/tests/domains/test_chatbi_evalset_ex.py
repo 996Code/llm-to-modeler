@@ -31,7 +31,17 @@ class TestFixtureSanity:
         from collections import Counter
         assert len(EVALSET) == 60
         c = Counter(x["difficulty"] for x in EVALSET)
-        assert c == {"easy": 25, "medium": 25, "hard": 10}
+        # h007 难度校正 hard->medium（id 稳定不改）：easy25/medium26/hard9
+        assert c == {"easy": 25, "medium": 26, "hard": 9}
+
+    def test_skeleton_equals_expected_sql(self):
+        """60 条 expected_sql_skeleton 与 expected_sql 全等（T1 审查补）。
+
+        两者口径本应一致（skeleton 供表名集断言、sql 供 EX 执行），
+        任何一处单独漂移都会使骨架断言与结果集比对失配。
+        """
+        for case in EVALSET:
+            assert case["expected_sql_skeleton"] == case["expected_sql"], case["id"]
 
     def test_expected_tables_subset_of_six(self):
         six = {"employee", "department", "salary", "orders", "customer", "product"}

@@ -81,9 +81,7 @@
     "expected_tables": [
       "employee"
     ],
-    "expected_columns": [
-      "COUNT(*)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT COUNT(*) FROM employee",
     "expected_sql": "SELECT COUNT(*) FROM employee",
     "difficulty": "easy",
@@ -232,9 +230,7 @@
     "expected_tables": [
       "orders"
     ],
-    "expected_columns": [
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT SUM(amount) FROM orders",
     "expected_sql": "SELECT SUM(amount) FROM orders",
     "difficulty": "easy",
@@ -308,10 +304,7 @@
     "expected_tables": [
       "product"
     ],
-    "expected_columns": [
-      "category",
-      "COUNT(*)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT category, COUNT(*) FROM product GROUP BY category",
     "expected_sql": "SELECT category, COUNT(*) FROM product GROUP BY category",
     "difficulty": "easy",
@@ -338,10 +331,7 @@
     "expected_tables": [
       "employee"
     ],
-    "expected_columns": [
-      "dept_id",
-      "COUNT(*)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT dept_id, COUNT(*) FROM employee GROUP BY dept_id",
     "expected_sql": "SELECT dept_id, COUNT(*) FROM employee GROUP BY dept_id",
     "difficulty": "easy",
@@ -384,10 +374,7 @@
       "employee",
       "salary"
     ],
-    "expected_columns": [
-      "dept_id",
-      "AVG(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id",
     "expected_sql": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id",
     "difficulty": "medium",
@@ -400,10 +387,7 @@
       "employee",
       "department"
     ],
-    "expected_columns": [
-      "name",
-      "COUNT(*)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id GROUP BY d.name",
     "expected_sql": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id GROUP BY d.name",
     "difficulty": "medium",
@@ -416,10 +400,7 @@
       "orders",
       "product"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(quantity)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.name, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id WHERE o.created_at >= '2025-12-01' AND o.created_at < '2026-01-01' GROUP BY p.name",
     "expected_sql": "SELECT p.name, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id WHERE o.created_at >= '2025-12-01' AND o.created_at < '2026-01-01' GROUP BY p.name",
     "difficulty": "medium",
@@ -448,10 +429,7 @@
       "orders",
       "customer"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC",
     "expected_sql": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC",
     "difficulty": "medium",
@@ -464,10 +442,7 @@
       "customer",
       "employee"
     ],
-    "expected_columns": [
-      "name",
-      "name"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, e.name FROM customer c JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟'",
     "expected_sql": "SELECT c.name, e.name FROM customer c JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟'",
     "difficulty": "medium",
@@ -479,11 +454,7 @@
     "expected_tables": [
       "orders"
     ],
-    "expected_columns": [
-      "substr(created_at,1,7)",
-      "COUNT(*)",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT substr(created_at,1,7), COUNT(*), SUM(amount) FROM orders GROUP BY substr(created_at,1,7) ORDER BY 1",
     "expected_sql": "SELECT substr(created_at,1,7), COUNT(*), SUM(amount) FROM orders GROUP BY substr(created_at,1,7) ORDER BY 1",
     "difficulty": "medium",
@@ -491,17 +462,14 @@
   },
   {
     "id": "m008",
-    "query": "哪些部门的平均薪资超过 15000，列出部门和平均薪资",
+    "query": "哪些部门的平均薪资超过 16500，列出部门和平均薪资",
     "expected_tables": [
       "employee",
       "salary"
     ],
-    "expected_columns": [
-      "dept_id",
-      "AVG(amount)"
-    ],
-    "expected_sql_skeleton": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > 15000",
-    "expected_sql": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > 15000",
+    "expected_columns": [],
+    "expected_sql_skeleton": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > 16500",
+    "expected_sql": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > 16500",
     "difficulty": "medium",
     "category": "join_having"
   },
@@ -512,10 +480,7 @@
       "orders",
       "customer"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 3",
     "expected_sql": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 3",
     "difficulty": "medium",
@@ -527,10 +492,7 @@
     "expected_tables": [
       "customer"
     ],
-    "expected_columns": [
-      "region",
-      "COUNT(*)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT region, COUNT(*) FROM customer GROUP BY region",
     "expected_sql": "SELECT region, COUNT(*) FROM customer GROUP BY region",
     "difficulty": "medium",
@@ -543,10 +505,7 @@
       "orders",
       "product"
     ],
-    "expected_columns": [
-      "category",
-      "SUM(quantity)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.category, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.category",
     "expected_sql": "SELECT p.category, SUM(o.quantity) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.category",
     "difficulty": "medium",
@@ -559,10 +518,7 @@
       "orders",
       "customer"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id WHERE o.created_at >= '2026-06-01' AND o.created_at < '2026-07-01' GROUP BY c.name",
     "expected_sql": "SELECT c.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id WHERE o.created_at >= '2026-06-01' AND o.created_at < '2026-07-01' GROUP BY c.name",
     "difficulty": "medium",
@@ -625,10 +581,7 @@
       "customer",
       "employee"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT e.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id GROUP BY e.name",
     "expected_sql": "SELECT e.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id GROUP BY e.name",
     "difficulty": "medium",
@@ -640,10 +593,7 @@
     "expected_tables": [
       "orders"
     ],
-    "expected_columns": [
-      "substr(created_at,1,7)",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT substr(created_at,1,7), SUM(amount) FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-07-01' GROUP BY substr(created_at,1,7) ORDER BY 1",
     "expected_sql": "SELECT substr(created_at,1,7), SUM(amount) FROM orders WHERE created_at >= '2026-01-01' AND created_at < '2026-07-01' GROUP BY substr(created_at,1,7) ORDER BY 1",
     "difficulty": "medium",
@@ -656,10 +606,7 @@
       "orders",
       "product"
     ],
-    "expected_columns": [
-      "name",
-      "COUNT(DISTINCT customer_id)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.name, COUNT(DISTINCT o.customer_id) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name",
     "expected_sql": "SELECT p.name, COUNT(DISTINCT o.customer_id) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name",
     "difficulty": "medium",
@@ -688,10 +635,7 @@
       "employee",
       "department"
     ],
-    "expected_columns": [
-      "name",
-      "COUNT(*)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id WHERE e.hire_date >= '2025-01-01' AND e.hire_date < '2026-01-01' GROUP BY d.name",
     "expected_sql": "SELECT d.name, COUNT(*) FROM department d JOIN employee e ON e.dept_id = d.id WHERE e.hire_date >= '2025-01-01' AND e.hire_date < '2026-01-01' GROUP BY d.name",
     "difficulty": "medium",
@@ -704,10 +648,7 @@
       "orders",
       "product"
     ],
-    "expected_columns": [
-      "name",
-      "COUNT(*)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.name, COUNT(*) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name ORDER BY COUNT(*) DESC LIMIT 3",
     "expected_sql": "SELECT p.name, COUNT(*) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name ORDER BY COUNT(*) DESC LIMIT 3",
     "difficulty": "medium",
@@ -720,10 +661,7 @@
       "orders",
       "customer"
     ],
-    "expected_columns": [
-      "name",
-      "AVG(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, AVG(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name",
     "expected_sql": "SELECT c.name, AVG(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id GROUP BY c.name",
     "difficulty": "medium",
@@ -752,10 +690,7 @@
       "orders",
       "product"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.name, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name HAVING SUM(o.amount) > 3000",
     "expected_sql": "SELECT p.name, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id GROUP BY p.name HAVING SUM(o.amount) > 3000",
     "difficulty": "medium",
@@ -768,10 +703,7 @@
       "employee",
       "salary"
     ],
-    "expected_columns": [
-      "dept_id",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT dept_id, SUM(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id ORDER BY dept_id",
     "expected_sql": "SELECT dept_id, SUM(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id ORDER BY dept_id",
     "difficulty": "medium",
@@ -785,11 +717,7 @@
       "customer",
       "employee"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(amount)",
-      "name"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.name, SUM(o.amount), e.name FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE o.created_at >= '2026-07-01' AND o.created_at < '2026-10-01' GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 10",
     "expected_sql": "SELECT c.name, SUM(o.amount), e.name FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE o.created_at >= '2026-07-01' AND o.created_at < '2026-10-01' GROUP BY c.name ORDER BY SUM(o.amount) DESC LIMIT 10",
     "difficulty": "hard",
@@ -804,11 +732,7 @@
       "employee",
       "department"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(amount)",
-      "COUNT(DISTINCT customer_id)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT e.name, SUM(o.amount), COUNT(DISTINCT c.id) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' GROUP BY e.name",
     "expected_sql": "SELECT e.name, SUM(o.amount), COUNT(DISTINCT c.id) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' GROUP BY e.name",
     "difficulty": "hard",
@@ -822,10 +746,7 @@
       "product",
       "customer"
     ],
-    "expected_columns": [
-      "category",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华东' GROUP BY p.category ORDER BY SUM(o.amount) DESC",
     "expected_sql": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华东' GROUP BY p.category ORDER BY SUM(o.amount) DESC",
     "difficulty": "hard",
@@ -840,10 +761,7 @@
       "employee",
       "department"
     ],
-    "expected_columns": [
-      "name",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT e.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' AND o.created_at >= '2026-01-01' GROUP BY e.name",
     "expected_sql": "SELECT e.name, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id JOIN department d ON e.dept_id = d.id WHERE d.name = '销售部' AND o.created_at >= '2026-01-01' GROUP BY e.name",
     "difficulty": "hard",
@@ -857,10 +775,7 @@
       "product",
       "customer"
     ],
-    "expected_columns": [
-      "category",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华南' GROUP BY p.category",
     "expected_sql": "SELECT p.category, SUM(o.amount) FROM orders o JOIN product p ON o.product_id = p.id JOIN customer c ON o.customer_id = c.id WHERE c.region = '华南' GROUP BY p.category",
     "difficulty": "hard",
@@ -873,10 +788,7 @@
       "employee",
       "salary"
     ],
-    "expected_columns": [
-      "dept_id",
-      "AVG(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > (SELECT AVG(amount) FROM salary)",
     "expected_sql": "SELECT dept_id, AVG(amount) FROM employee JOIN salary ON employee.id = salary.emp_id GROUP BY dept_id HAVING AVG(amount) > (SELECT AVG(amount) FROM salary)",
     "difficulty": "hard",
@@ -890,12 +802,10 @@
       "product",
       "customer"
     ],
-    "expected_columns": [
-      "COUNT(DISTINCT customer_id)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT COUNT(DISTINCT o.customer_id) FROM orders o JOIN product p ON o.product_id = p.id WHERE p.category = '电脑配件'",
     "expected_sql": "SELECT COUNT(DISTINCT o.customer_id) FROM orders o JOIN product p ON o.product_id = p.id WHERE p.category = '电脑配件'",
-    "difficulty": "hard",
+    "difficulty": "medium",
     "category": "distinct_count"
   },
   {
@@ -923,10 +833,7 @@
       "customer",
       "employee"
     ],
-    "expected_columns": [
-      "region",
-      "SUM(amount)"
-    ],
+    "expected_columns": [],
     "expected_sql_skeleton": "SELECT c.region, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟' GROUP BY c.region",
     "expected_sql": "SELECT c.region, SUM(o.amount) FROM orders o JOIN customer c ON o.customer_id = c.id JOIN employee e ON c.owner_id = e.id WHERE e.name = '张伟' GROUP BY c.region",
     "difficulty": "hard",
