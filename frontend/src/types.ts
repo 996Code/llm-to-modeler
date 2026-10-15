@@ -61,6 +61,9 @@ export interface Message {
   kind?: 'error-diag'
   errorCategory?: string
   createdAt?: string                   // 创建时间（字符串形式的 ISO 时间）
+  // P2#14 结果反馈:该消息已提交的点赞/点踩(前端本地态, 重复点击防抖)
+  feedbackVote?: 'up' | 'down'
+  feedbackSending?: boolean
 }
 
 /** 追问问题 —— 对应后端 AskQuestion model（一个问题包含标题 + 多个选项） */

@@ -25,7 +25,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from sdk.pack_api import admin_required
+from sdk.pack_api import admin_required, user_required
 from sdk.relational_store import PackRelationalDB
 
 from domains.chatbi import datasources
@@ -126,6 +126,15 @@ class GraphRelationshipIn(BaseModel):
     on: str                       # JOIN ON 条件(表.列 = 表.列 [AND ...])
     cardinality: Literal["N:1", "1:N", "1:1", "N:N"] = "N:1"
     expected_version: int | None = None  # 十三审 7.2: 必填(API层强制428)
+
+
+class ChatFeedbackIn(BaseModel):
+    """P2#14 对话卡点赞/点踩请求(用户级, 同 m4 的 user_required 口径)。"""
+    conversation_id: str
+    message_id: str | None = None   # 定位具体消息;缺省取最近一条数据制品消息
+    feedback: Literal["up", "down"]  # 非法枚举 Pydantic 直接 422
+    tables: list[str] | None = None  # 反馈涉及表;缺省从消息制品 current_tables 解析
+    comment: str | None = None       # 可选文字反馈(点踩原因等, 落事件留痕)
 
 
 # ── 数据源管理(移植 data_sources.py 全集,密码永不回显) ────────
@@ -948,6 +957,85 @@ async def sample_questions(ds_id: str):
     if content is None:
         return {"items": []}
     return {"items": content.sample_questions}
+
+
+# ── 对话反馈闭环(P2#14: 点赞/点踩 → 置信度微调, 用户级) ────────
+
+@router.post("/feedback", dependencies=[Depends(user_required)])
+async def chat_feedback(body: ChatFeedbackIn, request: Request):
+    """对话卡点赞/点踩 → apply_feedback_signals 接线微调表/关系置信度。
+
+    用户级端点(身份 X-User-Id 透传, 同 /search 信任模型; 会话归属
+    校验防借反馈套他人会话表集)。开关 chatbi 设置 feedback_enabled
+    **默认关**——关时 422 且零行为变化(不调置信度、不落事件), 开启
+    才进闭环:
+      1. 解析反馈表集: body.tables > 消息制品 current_tables;
+      2. domains.chatbi.feedback.apply_chat_feedback(既有
+         apply_feedback_signals 语义零改动, 只接线)原地微调语义层
+         content JSON 的表/关系 confidence;
+      3. 反馈事件 append 到会话 events 表(kind=feedback, 不进
+         user/assistant 消息重放)——RAGFlow chunk_feedback 同款
+         "反馈先留痕, 权重调整 best-effort"。
+    """
+    from sdk.pack_api import settings_reader
+    # 开关门(默认 false: schema 未声明/未保存时同样落到 False)
+    try:
+        enabled = bool(settings_reader(request.app.state, "chatbi")
+                       .get("feedback_enabled", False))
+    except Exception:
+        enabled = False
+    if not enabled:
+        raise HTTPException(422, "反馈功能未启用(设置页 feedback_enabled)")
+
+    store = getattr(request.app.state, "conversation_store", None)
+    if store is None:
+        raise HTTPException(503, "会话存储未装配")
+    uid = _user_id(request)
+    # 归属校验: 非本人/不存在一律 404(不回显会话是否存在, 防枚举)
+    conv = store.get_conversation(body.conversation_id, uid)
+    if conv is None:
+        raise HTTPException(404, "会话不存在")
+
+    # 定位数据制品消息: message_id 精确匹配 > 最近一条带数据制品的消息
+    artifact = None
+    messages = conv.get("messages") or []
+    if body.message_id:
+        artifact = next((m.get("dataArtifact") for m in messages
+                         if m.get("id") == body.message_id
+                         and m.get("dataArtifact")), None)
+    if artifact is None:
+        artifact = next((m.get("dataArtifact") for m in reversed(messages)
+                         if m.get("dataArtifact")), None)
+    if artifact is None:
+        raise HTTPException(422, "该会话没有可反馈的数据结果消息")
+
+    tables = ([t for t in (body.tables or []) if t]
+              or [t for t in (artifact.get("current_tables") or []) if t]
+              or [t.get("name") for t in (artifact.get("table_provenance")
+                                          or []) if t.get("name")])
+    if not tables:
+        raise HTTPException(422, "无法定位反馈涉及的表(消息制品无表集)")
+    ds_id = artifact.get("datasource_id")
+    if not ds_id:
+        raise HTTPException(422, "消息制品缺少 datasource_id, 无法定位语义层")
+
+    from domains.chatbi import feedback as feedback_mod
+    result = feedback_mod.apply_chat_feedback(_db(), ds_id, tables, body.feedback)
+
+    # 反馈事件留痕(append-only events; 失败不阻断反馈结果返回)
+    try:
+        store.append_event(body.conversation_id, "feedback", {
+            "feedback": body.feedback,
+            "tables": tables,
+            "message_id": body.message_id,
+            "comment": body.comment,
+            "applied_tables": result["applied_tables"],
+            "user_id": uid,
+        })
+    except Exception as e:
+        logger.warning("feedback 事件落库失败(不阻断): %s", e)
+
+    return {"success": True, "applied_tables": result["applied_tables"]}
 
 
 # ── Skills 业务规则(只读管理端点;文件随 pack 分发, 编辑走部署流程) ──
