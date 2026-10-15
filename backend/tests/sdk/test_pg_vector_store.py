@@ -254,3 +254,41 @@ class TestFactoryBackend:
             assert vs.get_vector_store({}, collection_prefix="kg") is pg_store
         finally:
             vs.reset_vector_store_cache()
+
+
+class TestPgConnectionSelfHeal:
+    """连接自愈(功能对齐审查:Milvus 有 _with_reconnect,PG 补齐同款)。"""
+
+    def test_reconnects_on_operational_error(self, monkeypatch):
+        from sdk.pg_vector_store import PgVectorStore
+        store = object.__new__(PgVectorStore)
+        store._dsn = "postgresql://x"
+        store._prefix = "kg"
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                import psycopg.errors as pe
+                raise pe.OperationalError("connection reset")
+            return "ok"
+
+        store._new_pool = lambda: None
+        store._pool = type("P", (), {"close": lambda self: None})()
+        assert store._with_reconnect(flaky) == "ok"
+        assert calls["n"] == 2
+
+    def test_other_errors_not_retried(self, monkeypatch):
+        from sdk.pg_vector_store import PgVectorStore
+        store = object.__new__(PgVectorStore)
+        store._dsn, store._prefix = "x", "kg"
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            raise ValueError("业务错误")
+
+        import pytest
+        with pytest.raises(ValueError):
+            store._with_reconnect(boom)
+        assert calls["n"] == 1

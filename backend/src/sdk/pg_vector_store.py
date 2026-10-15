@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 
 from psycopg import sql
 from psycopg_pool import ConnectionPool
+import psycopg.errors as psycopg_errors
 
 from sdk.scope_registry import check_scope_id
 from sdk.vector_store import collection_name
@@ -76,10 +77,13 @@ class PgVectorStore:
             raise ValueError("dsn 必传(PG 向量存储直连连接串)")
         self._dsn = dsn
         self._prefix = collection_prefix
-        self._pool = ConnectionPool(
-            conninfo=dsn, min_size=_POOL_MIN, max_size=_POOL_MAX,
+        self._pool = self._new_pool()
+
+    def _new_pool(self) -> ConnectionPool:
+        return ConnectionPool(
+            conninfo=self._dsn, min_size=_POOL_MIN, max_size=_POOL_MAX,
             open=True, timeout=10,
-            name=f"pg_vector_store[{collection_prefix}]",
+            name=f"pg_vector_store[{self._prefix}]",
         )
 
     def _check_scope(self, scope_id: str) -> None:
@@ -101,6 +105,9 @@ class PgVectorStore:
     # ── 生命周期 ───────────────────────────────────────────
 
     def ping(self) -> None:
+        self._with_reconnect(self._ping_raw)
+
+    def _ping_raw(self) -> None:
         with self._pool.connection() as conn:
             conn.execute("SELECT 1")
 
@@ -109,6 +116,21 @@ class PgVectorStore:
             self._pool.close()
         except Exception:
             logger.warning("pg vector pool close failed", exc_info=True)
+
+    def _with_reconnect(self, fn, *args, **kwargs):
+        """连接失效自愈(与 MilvusVectorStore._with_reconnect 同款语义):
+        PG 重启/网络断后池内连接失效,OperationalError 时重建池重试一次。
+        仅对连接类异常重试,其余原样上抛。"""
+        try:
+            return fn(*args, **kwargs)
+        except psycopg_errors.OperationalError as e:
+            logger.warning(f"pg vector 连接失效,重建池后重试一次: {e}")
+            try:
+                self._pool.close()
+            except Exception:
+                pass
+            self._pool = self._new_pool()
+            return fn(*args, **kwargs)
 
     # ── 表管理 ─────────────────────────────────────────────
 
@@ -175,9 +197,11 @@ class PgVectorStore:
     # ── 数据操作 ───────────────────────────────────────────
 
     def upsert_chunks(self, scope: str, items: List[Dict[str, Any]]) -> int:
-        """写入/覆盖 chunk 向量(INSERT .. ON CONFLICT 主键 upsert)。
+        """写入/覆盖 chunk 向量(INSERT .. ON CONFLICT 主键 upsert)。"""
+        return self._with_reconnect(self._upsert_raw, scope, items)
 
-        items: [{chunk_id, doc_id, seq, text, vector}]
+    def _upsert_raw(self, scope: str, items: List[Dict[str, Any]]) -> int:
+        """items: [{chunk_id, doc_id, seq, text, vector}]
         """
         self._check_scope(scope)
         if not items:
@@ -233,7 +257,15 @@ class PgVectorStore:
         self, scope: str, query_vector: List[float], top_k: int = 5,
         doc_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """相似度检索(余弦;score = 1 - 余弦距离,越高越相似)。
+        """相似度检索(余弦;score = 1 - 余弦距离,越高越相似)。"""
+        return self._with_reconnect(
+            self._search_raw, scope, query_vector, top_k, doc_id)
+
+    def _search_raw(
+        self, scope: str, query_vector: List[float], top_k: int = 5,
+        doc_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
 
         ORDER BY embedding <=> %s::vector LIMIT k 可走 HNSW 索引;
         doc_id 过滤在索引扫描后施加(与 Milvus 标量过滤同语义)。
@@ -244,6 +276,11 @@ class PgVectorStore:
         qvec = _vec_literal(query_vector)
         with self._pool.connection() as conn:
             if not self._table_exists(conn, name):
+                # 行为与 Milvus"缺 collection 抛异常→调用方降级"殊途同归
+                # (chatbi 单 scope 跳过/kg 向量路降级),但补 warning 留痕:
+                # 静默零痕迹会让"为什么没召回"在排查时无线索(功能对齐审查)
+                logger.warning("pg vector search: 表不存在(库还没建?) scope=%s",
+                                scope[:8])
                 return []
             query = sql.SQL(
                 "SELECT chunk_id, doc_id, seq, text, "
