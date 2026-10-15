@@ -519,6 +519,7 @@ class LLMClient:
         texts: List[str],
         conv_id: Optional[str] = None,
         stage: Optional[str] = None,
+        mode: str = "document",
     ) -> List[List[float]]:
         """批量向量化;后端由 EMBEDDING_BACKEND 决定(同步)。
 
@@ -526,6 +527,11 @@ class LLMClient:
           零外部依赖零费用;``LLM_EMBED_MODEL`` 默认 bge-m3
         - api: OpenAI 兼容 /v1/embeddings,模型由 ``LLM_EMBED_MODEL``
           指定;未配置直接抛 RuntimeError,由调用方降级(纯图谱模式)
+
+        mode 只影响 local 后端(bge-m3 检索前缀,非对称检索对):
+        - ``document``(默认): 直传编码——入库/文档侧,现行为不变
+        - ``query``: 查询侧加官方 instruction 前缀(encode_queries)
+        - api 后端无官方查询/文档区分,mode 忽略(直传,debug 留痕)
 
         注意:两种后端维度一致(云端 1024 / 本地 1024),切换后端
         无需重建知识库向量;但 bge-m3 与 text-embedding-v3
@@ -535,12 +541,20 @@ class LLMClient:
             与输入等长等序的向量列表。
 
         Failure:
+            ValueError: mode 非 document/query。
             RuntimeError: 模型未配置/本地初始化失败。
             SDK 原生异常: 网络/鉴权/模型不存在(调用方决定重试或降级)。
         """
+        if mode not in ("document", "query"):
+            raise ValueError(f"未知 embeddings mode: {mode}")
         backend = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
         if backend == "local":
-            return self._embeddings_local(texts, conv_id=conv_id, stage=stage)
+            return self._embeddings_local(
+                texts, conv_id=conv_id, stage=stage, query=(mode == "query"))
+        if mode == "query":
+            logger.debug(
+                "embeddings mode=query ignored on api backend "
+                f"(stage={stage}): OpenAI 兼容端点无查询/文档区分,直传")
         return self._embeddings_api(texts, conv_id=conv_id, stage=stage)
 
     def _embeddings_local(
@@ -548,20 +562,28 @@ class LLMClient:
         texts: List[str],
         conv_id: Optional[str] = None,
         stage: Optional[str] = None,
+        query: bool = False,
     ) -> List[List[float]]:
-        """本地 onnx 推理后端(观测与 api 后端同规格:耗时/条数入调用日志)。"""
+        """本地 onnx 推理后端(观测与 api 后端同规格:耗时/条数入调用日志)。
+
+        query=True 走 encode_queries(查询侧加 bge-m3 检索前缀),
+        观测 request_data 记 mode 字段区分两侧。
+        """
         from llm.local_embeddings import get_local_embedder
         texts = [str(t) for t in texts]
+        mode = "query" if query else "document"
+        embedder = get_local_embedder()
         start = time.monotonic()
         try:
-            vectors = get_local_embedder().encode(texts)
+            vectors = (embedder.encode_queries(texts) if query
+                       else embedder.encode(texts))
             duration_ms = int((time.monotonic() - start) * 1000)
             self._log_call(
                 endpoint="embeddings:local/bge-m3",
                 request_data={
                     "stage": stage or "embeddings", "count": len(texts),
                     "chars": sum(len(t) for t in texts),
-                    "backend": "local",
+                    "backend": "local", "mode": mode,
                 },
                 response_data={"count": len(vectors), "dim": len(vectors[0]) if vectors else 0},
                 status_code=None,
@@ -573,7 +595,8 @@ class LLMClient:
             self._log_call(
                 endpoint="embeddings:local/bge-m3",
                 request_data={"stage": stage or "embeddings", "count": len(texts),
-                              "chars": sum(len(t) for t in texts), "backend": "local"},
+                              "chars": sum(len(t) for t in texts),
+                              "backend": "local", "mode": mode},
                 response_data={},
                 status_code=500,
                 duration_ms=int((time.monotonic() - start) * 1000),

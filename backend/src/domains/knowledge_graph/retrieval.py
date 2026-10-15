@@ -245,7 +245,8 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             k = top_k or int(_cfg(app_state, "vector_top_k", 5))
             vector = runtime.get_vector(app_state)
             qvec = app_state.llm_client.embeddings(
-                [query], conv_id=conv_id, stage="kg.query_embed")[0]
+                [query], conv_id=conv_id, stage="kg.query_embed",
+                mode="query")[0]
             # doc 名映射提前(日志里直接给文档名而不是裸 ID)
             _doc_names = {d["id"]: d["filename"] for d in store.list_documents(kb["id"])}
             try:

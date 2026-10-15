@@ -786,7 +786,7 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
             store.set_kb_vector_info(kb["id"], "", None, False)
             return False
         probe = app_state.llm_client.embeddings(
-            ["维度探测"], conv_id=conv_id, stage="kg.embed_probe")
+            ["维度探测"], conv_id=conv_id, stage="kg.embed_probe", mode="query")
         dim = len(probe[0])
         store.set_kb_vector_info(kb["id"], embed_model, dim, True)
         runtime.get_vector(app_state).ensure_collection(kb["id"], dim)
