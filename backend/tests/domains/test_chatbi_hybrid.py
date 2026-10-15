@@ -147,3 +147,19 @@ def test_hybrid_on_baseline_unchanged():
             misses.append((case["id"], case["expected_tables"], got[:5]))
     mean = sum(scores) / len(scores)
     assert mean == 1.000, f"开关开基线回退 {mean:.3f}: {misses}"
+
+
+def test_hybrid_and_rerank_both_enabled():
+    """hybrid+rerank 双开(4 开关组合缺的最后一种):融合序被 rerank 排,
+    rerank 失败回退融合序——两层增强叠加不互斥不崩(T2 审查 minor)。"""
+    store, embedder, llm = make_eval_fixture()
+    content = SemanticModelContent(models=list(SIX_TABLE_MODELS))
+    # 向量只指 department(员工表漏)——关键词路补 employee,rerank 再排
+    register_query_vector(llm, "查询所有员工的名字", ["department"])
+    llm.rerank = lambda q, texts, conv_id=None, stage=None: list(range(len(texts)))
+    r = retrieve("查询所有员工的名字", store, embedder,
+                 skip_llm_refine=True, scope=EVAL_SCOPE,
+                 content=content, hybrid_enabled=True,
+                 llm=llm, rerank_enabled=True)
+    names = [m["name"] for m in r.models]
+    assert "employee" in names and "department" in names
