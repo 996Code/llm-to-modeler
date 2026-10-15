@@ -230,12 +230,19 @@ class TestRetrieval:
         assert out["subgraph"]["edges"][0]["type"] == "任职于"
         assert out["chunks"] and out["chunks"][0]["docName"] == "handbook.md"
 
-    def test_intent_parse_degrades_on_llm_failure(self, env):
+    def test_intent_parse_raises_on_llm_failure(self, env):
+        """LLM 意图解析失败 → 抛异常(不静默降级整句关键词)。
+
+        语义裁决(用户要求):LLM 故障时降级出的"整句关键词找种子"在
+        真图上基本零命中,给用户的是假可用——宁可 502 让用户感知,
+        也不要静默劣化。/search 的 502 包装与对话工具的错误冒泡
+        各自接住本异常。"""
         def boom(*a, **k):
             raise RuntimeError("llm down")
         env.llm.chat_json = boom
-        out = retrieval.parse_query_intent(env.app_state, "任意问题?", [])
-        assert out["keywords"] == ["任意问题?"] and out["hop"] == 1
+        import pytest
+        with pytest.raises(RuntimeError, match="llm down"):
+            retrieval.parse_query_intent(env.app_state, "任意问题?", [])
 
     def test_linearize_context(self, env):
         edges = list(env.graph.edges)

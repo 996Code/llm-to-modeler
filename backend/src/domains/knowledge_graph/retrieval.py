@@ -95,23 +95,24 @@ def _log_retrieval_call(app_state, call_type: str, endpoint: str,
 
 def parse_query_intent(app_state, query: str, relation_types: List[Dict],
                        conv_id: Optional[str] = None) -> Dict[str, Any]:
-    """query → {entities, keywords, relation_types, hop};失败降级为整句关键词。"""
+    """query → {entities, keywords, relation_types, hop}。
+
+    LLM 失败直接抛异常(不降级):降级出的"整句关键词找种子"在真图上
+    基本零命中,给用户的是假可用——宁可让 /search 502/对话工具报错
+    使用户感知,也不静默劣化(导入任务链路不经过此处,不受影响)。
+    """
     llm = app_state.llm_client
-    try:
-        prompt = _prompt_loader().render(
-            "knowledge_graph", "query",
-            query=query, relation_types=relation_types or [],
-        )
-        data = llm.chat_json([{"role": "user", "content": prompt}],
-                             temperature=0.0, conv_id=conv_id, stage="kg.query")
-        entities = [str(e).strip() for e in (data.get("entities") or []) if str(e).strip()][:10]
-        keywords = [str(k).strip() for k in (data.get("keywords") or []) if str(k).strip()][:8]
-        hop = data.get("hop")
-        hop = int(hop) if isinstance(hop, (int, str)) and str(hop).isdigit() else 1
-        return {"entities": entities, "keywords": keywords, "hop": max(1, min(hop, 3))}
-    except Exception as e:
-        logger.warning(f"检索意图解析失败,降级整句关键词: {e}")
-        return {"entities": [], "keywords": [query[:40]], "hop": 1}
+    prompt = _prompt_loader().render(
+        "knowledge_graph", "query",
+        query=query, relation_types=relation_types or [],
+    )
+    data = llm.chat_json([{"role": "user", "content": prompt}],
+                         temperature=0.0, conv_id=conv_id, stage="kg.query")
+    entities = [str(e).strip() for e in (data.get("entities") or []) if str(e).strip()][:10]
+    keywords = [str(k).strip() for k in (data.get("keywords") or []) if str(k).strip()][:8]
+    hop = data.get("hop")
+    hop = int(hop) if isinstance(hop, (int, str)) and str(hop).isdigit() else 1
+    return {"entities": entities, "keywords": keywords, "hop": max(1, min(hop, 3))}
 
 
 # ── 两路检索 ─────────────────────────────────────────────────
