@@ -163,3 +163,24 @@ def test_hybrid_and_rerank_both_enabled():
                  llm=llm, rerank_enabled=True)
     names = [m["name"] for m in r.models]
     assert "employee" in names and "department" in names
+
+
+def test_hybrid_logs_fusion(caplog):
+    """T3 观测:融合发生时 INFO 日志可见——关键词命中表(含分)+融合前后
+    top5 变化(rescue 场景复用:向量指 department,关键词补 employee,
+    日志须含 "employee" 与 "hybrid:" 前缀)。"""
+    import logging
+
+    store, embedder, llm = make_eval_fixture()
+    content = SemanticModelContent(models=list(SIX_TABLE_MODELS))
+    register_query_vector(llm, "查询所有员工的名字", ["department"])
+    with caplog.at_level(logging.INFO, logger="domains.chatbi.retrieval"):
+        retrieve("查询所有员工的名字", store, embedder,
+                 skip_llm_refine=True, scope=EVAL_SCOPE,
+                 content=content, hybrid_enabled=True)
+    msgs = [r.getMessage() for r in caplog.records]
+    hybrid_msgs = [m for m in msgs if "hybrid:" in m]
+    assert hybrid_msgs, f"融合 INFO 日志缺失: {msgs}"
+    m0 = hybrid_msgs[0]
+    assert "employee" in m0, f"关键词命中表未入日志: {m0}"
+    assert "department" in m0, f"向量 top 未入日志: {m0}"

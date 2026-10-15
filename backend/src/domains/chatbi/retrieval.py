@@ -263,7 +263,8 @@ def retrieve(
     hybrid_fused = False
     if hybrid_enabled and content is not None and content.models:
         try:
-            from domains.chatbi.hybrid import keyword_scores, rrf_fuse
+            from domains.chatbi.hybrid import (keyword_scores, rrf_fuse,
+                                               tokenize_query)
             kw_scores = keyword_scores(question, content.models)
             if kw_scores:
                 vec_ranked = [h.record.metadata.get("name", h.record.id)
@@ -290,6 +291,14 @@ def retrieve(
                             score=float(kw_scores.get(name, 0.0)))
                 candidates = [by_name[n] for n in fused if n in by_name]
                 hybrid_fused = True
+                # T3 观测: query 词数/关键词命中表(含分)/融合前后 top5——
+                # 融合是否生效、rescue 了谁, 一条日志可判(失败路径已有 warning)
+                logger.info(
+                    "hybrid: q_toks=%d kw_hits=%s vec_top5=%s fused_top5=%s",
+                    len(tokenize_query(question)),
+                    {n: round(s, 1) for n, s in sorted(
+                        kw_scores.items(), key=lambda x: -x[1])},
+                    vec_ranked[:5], fused[:5])
         except Exception as e:
             logger.warning("retrieve 关键词路失败,降级纯向量: %s", e)
 
