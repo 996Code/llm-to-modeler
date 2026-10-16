@@ -915,7 +915,7 @@ class TestImportPipeline:
         assert len(chunks) == 1
         rows = list(env.vector.rows[kb["id"]].keys())
         assert len(rows) >= 2 and all("#" in r for r in rows)
-        assert all(len(env.vector.rows[kb["id"]][r]["text"]) <= 1200 for r in rows)
+        assert all(len(env.vector.rows[kb["id"]][r]["text"]) <= 500 for r in rows)
 
     def test_targeted_chunk_retry(self, env):
         """定向重抽:chunk_ids 只补指定块(非 done),不动图谱、不重抽其他块。"""

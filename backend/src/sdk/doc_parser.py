@@ -221,15 +221,17 @@ def _hard_split(block: str, max_chars: int) -> List[str]:
     return parts
 
 
-def sub_chunks_for_embedding(text: str, size: int = 1200) -> List[str]:
+def sub_chunks_for_embedding(text: str, size: int = 500) -> List[str]:
     """向量化子切:按句读边界切成 ≤size 的段。
 
     抽取块可以是整章(structural_max 上限万级),而 embedding 输入有限
     (本地 bge-m3 实际按 4096 token 截断,超长部分对向量是隐形的;且单
     向量表达长文会语义稀释)。抽取按章、召回按段——子块 id 由调用方
     挂父块(f"{chunk_id}#i"),引用与去重按父块聚合。
+    默认 500:Dify 对标口径——子段越小向量越聚焦、命中越准;连贯性由
+    检索侧父子回带(命中子段回带父块上下文窗口)补足,不靠子段自身。
     """
-    size = max(300, int(size or 1200))
+    size = max(300, int(size or 500))
     return [p for p in _hard_split(text or "", size) if p.strip()]
 
 

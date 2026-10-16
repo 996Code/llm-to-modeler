@@ -59,7 +59,11 @@
       </section>
 
       <section class="rt-card">
-        <div class="rt-title">片段召回 · 向量路 + 全文兜底</div>
+        <div class="rt-title">片段召回 · 向量路 + 全文兜底
+          <a-tag v-if="(result.diagnostics.parentContextHits ?? 0) > 0" color="geekblue" class="rt-sub">
+            {{ result.diagnostics.parentContextHits }} 段已回带父块上下文
+          </a-tag>
+        </div>
         <a-tag v-if="result.diagnostics.vectorDegraded" color="red">向量检索失败,已降级纯图谱</a-tag>
         <a-tag v-if="(result.diagnostics.fulltextHits ?? 0) > 0" color="orange">
           图谱零命中,全文兜底救回 {{ result.diagnostics.fulltextHits }} 条
@@ -69,10 +73,16 @@
             <div class="rt-chunk-head">
               <a-tag color="purple">{{ c.docName || c.docId || '?' }}</a-tag>
               <a-tag v-if="c.source === 'fulltext'" color="orange">全文</a-tag>
+              <a-tag v-if="c.parentContext" color="geekblue">已回带父块上下文</a-tag>
               <span v-if="c.seq !== undefined" class="rt-seq">#{{ c.seq }}</span>
+              <span v-if="c.childSeq !== undefined && c.childSeq !== null" class="rt-seq">· 子段 {{ c.childSeq }}</span>
+              <span v-if="c.parentChars" class="rt-seq">· 父块 {{ c.parentChars }} 字</span>
               <span class="rt-score">{{ (c.score ?? 0).toFixed(4) }}</span>
             </div>
-            <div class="rt-chunk-text">{{ c.text }}</div>
+            <div class="rt-chunk-text" :class="{ expanded: expandedChunks.has(i) }">{{ c.text }}</div>
+            <a v-if="(c.text || '').length > 120" class="rt-expand" @click="toggleChunk(i)">
+              {{ expandedChunks.has(i) ? '收起' : '展开全文(回带上下文)' }}
+            </a>
           </div>
         </template>
         <div v-else class="rt-empty">无命中(向量未启用/零召回且全文兜底无结果)</div>
@@ -99,9 +109,17 @@ const query = ref('')
 const topK = ref(5)
 const loading = ref(false)
 const result = ref<KgRetrieveTestResult | null>(null)
+// 片段展开态(回带窗口长文本默认折叠,点击展开)
+const expandedChunks = ref(new Set<number>())
+
+function toggleChunk(i: number) {
+  const s = new Set(expandedChunks.value)
+  s.has(i) ? s.delete(i) : s.add(i)
+  expandedChunks.value = s
+}
 
 // 切库即弃旧结果:诊断页残留旧库数据 = 误诊(兄弟组件 DocManager/GraphView 同款 watch 惯例)
-watch(() => props.kbId, () => { result.value = null })
+watch(() => props.kbId, () => { result.value = null; expandedChunks.value = new Set() })
 
 const termCols = [
   { title: '意图词', dataIndex: 'term', key: 'term', width: 160 },
@@ -115,6 +133,7 @@ async function run() {
   loading.value = true
   await loadSafely(async () => {
     result.value = await kgRetrieveTest(props.kbId, q, topK.value)
+    expandedChunks.value = new Set()
   })
   loading.value = false
 }
@@ -133,6 +152,8 @@ async function run() {
 .rt-seq { color: #94a3b8; font-size: 12px; }
 .rt-score { margin-left: auto; color: #7c3aed; font-weight: 600; font-family: monospace; }
 .rt-chunk-text { color: #4b5563; font-size: 12.5px; margin-top: 4px; white-space: pre-wrap; max-height: 96px; overflow: hidden; }
+.rt-chunk-text.expanded { max-height: none; overflow: visible; }
+.rt-expand { display: inline-block; margin-top: 4px; font-size: 12px; color: #6366f1; cursor: pointer; }
 .rt-empty { color: #9ca3af; font-size: 12.5px; }
 .rt-type { color: #6b7280; font-weight: 400; }
 </style>

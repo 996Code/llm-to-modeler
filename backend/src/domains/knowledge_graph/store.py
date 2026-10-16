@@ -527,6 +527,25 @@ class KGStore:
             "status": r["status"],
         } for r in rows]
 
+    def get_chunks_by_ids(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
+        """按 id 批量取块(父子回带:向量命中子块拆父 id 后回查父块全文)。
+
+        chunk_id 为 uuid 全局唯一,无需 kb 过滤;返回结构与 list_chunks 同构。
+        """
+        if not chunk_ids:
+            return []
+        ph = ",".join("?" * len(chunk_ids))
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT id, doc_id, kb_id, seq, text, char_count, status "
+                f"FROM kg_chunks WHERE id IN ({ph})", list(chunk_ids)).fetchall()
+        return [{
+            "id": r["id"], "docId": r["doc_id"], "kbId": r["kb_id"],
+            "seq": int(r["seq"]), "text": r["text"],
+            "charCount": int(r["char_count"] or 0),
+            "status": r["status"],
+        } for r in rows]
+
     def mark_chunk(self, chunk_id: str, status: str) -> bool:
         with self._get_conn() as conn:
             cur = conn.execute(

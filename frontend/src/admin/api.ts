@@ -611,7 +611,7 @@ export interface KgSearchResult {
   kb: { id: string; name: string }
   subgraph: KgGraphData
   chunks: { chunkId: string; docName?: string; score?: number; seq?: number; text: string }[]
-  sources: { entities: string[]; chunks: { docName?: string; score?: number; seq?: number }[] }
+  sources: { entities: string[]; chunks: { docName?: string; score?: number; seq?: number; childSeq?: number; parentContext?: boolean; text?: string }[] }
 }
 
 // pack API axios 实例(与 admin 同一把口令;search 用户级也经它,缺省 anonymous)
@@ -790,6 +790,8 @@ export interface KgRetrieveDiagnostics {
   vectorDegraded: boolean
   /** 图谱零命中时全文兜底命中的片段数(P2#12 第三路;0=未触发) */
   fulltextHits?: number
+  /** 父子回带成功回带父块上下文的片段数(0=向量路无回带:全文兜底命中/零召回/降级,均为正常态非故障) */
+  parentContextHits?: number
 }
 export interface KgRetrieveTestResult {
   kb: { id: string; name: string }
@@ -797,8 +799,9 @@ export interface KgRetrieveTestResult {
   seeds: { id?: string; name: string; type?: string | null }[]
   subgraph: { nodes: { id: string; name: string; type?: string | null }[]
               edges: { source: string; target: string; type: string }[] }
-  chunks: { docId?: string; docName?: string; seq?: number
-            score?: number; text?: string; source?: string }[]
+  chunks: { docId?: string; docName?: string; seq?: number; childSeq?: number
+            score?: number; text?: string; source?: string
+            parentContext?: boolean; parentChars?: number }[]
   diagnostics: KgRetrieveDiagnostics
 }
 export async function kgRetrieveTest(

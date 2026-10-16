@@ -46,8 +46,9 @@
                 @click="toggleChunk(i)">
           <span class="kgc-chunk-num">片段 {{ i + 1 }}</span>
           <span class="kgc-chunk-trigger-text">
-            {{ c.docName || '文档' }}{{ c.seq != null ? ` #${c.seq}` : '' }}
+            {{ c.docName || '文档' }}{{ c.seq != null ? ` #${c.seq}` : '' }}{{ c.childSeq != null ? ` · 子段${c.childSeq}` : '' }}
           </span>
+          <span v-if="c.parentContext" class="kgc-callback-badge">回带上下文</span>
           <span v-if="!isCited(i)" class="kgc-chunk-uncited">未引用</span>
           <span v-if="c.score != null" class="kgc-score">{{ (Number(c.score)).toFixed(2) }}</span>
           <DownOutlined class="kgc-chunk-arrow" :class="{ expanded: expandedChunk === i }" />
@@ -56,7 +57,8 @@
         <transition name="kgc-collapse">
           <div v-if="expandedChunk === i && c.text" class="kgc-chunk-text">
             <div class="kgc-chunk-head">
-              <span>{{ c.docName || '文档' }}{{ c.seq != null ? ` · 块 ${c.seq}` : '' }}</span>
+              <span>{{ c.docName || '文档' }}{{ c.seq != null ? ` · 块 ${c.seq}` : '' }}{{ c.childSeq != null ? ` · 子段 ${c.childSeq}` : '' }}</span>
+              <span v-if="c.parentContext" class="kgc-callback-note">命中子段,已回带所属章节上下文</span>
               <span v-if="c.score != null" class="kgc-score">相似度 {{ (Number(c.score)).toFixed(4) }}</span>
             </div>
             <div class="kgc-chunk-body">{{ c.text }}</div>
@@ -76,7 +78,7 @@ import { DownOutlined, FileTextOutlined, LinkOutlined, PartitionOutlined } from 
 
 interface KgNode { id: string; name: string; type?: string; description?: string }
 interface KgEdge { id?: string; source: string; target: string; type?: string; description?: string; evidence?: string }
-interface KgChunk { docId?: string; docName?: string; seq?: number | null; score?: number | null; text?: string }
+interface KgChunk { docId?: string; docName?: string; seq?: number | null; childSeq?: number | null; parentContext?: boolean; score?: number | null; text?: string }
 
 const props = defineProps<{
   result: {
@@ -285,6 +287,17 @@ onBeforeUnmount(() => {
   color: #9ca3af;
   font-size: 10px;
 }
+/* 父子回带徽标(chip 上):提示该片段带回了父块上下文 */
+.kgc-callback-badge {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: rgba(47, 84, 235, 0.08);
+  color: #2f54eb;
+  font-size: 10px;
+}
+/* 展开面板里的回带说明 */
+.kgc-callback-note { color: #2f54eb; font-size: 11px; }
 .kgc-chunk-trigger-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kgc-chunk-arrow { font-size: 10px; color: #9ca3af; transition: transform 0.2s; }
 .kgc-chunk-arrow.expanded { transform: rotate(180deg); color: #2f54eb; }

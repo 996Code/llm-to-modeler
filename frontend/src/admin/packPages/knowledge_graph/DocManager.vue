@@ -18,7 +18,8 @@
               <ul class="dm-chunk-list">
                 <li><b>结构块</b>:识别到章节标题(如"第X章/第X节")时整章一块,保持上下文完整(超长章在句读处兜底再切)</li>
                 <li><b>无结构文本</b>:按句读边界软目标 {{ chunkTargetChars }} 字/块切,保持语义连贯</li>
-                <li><b>向量子切</b>:整章大块向量化前再按 {{ vectorSubChars }} 字切段——抽取看整章(上下文全),检索召回按段(向量不稀释)</li>
+                <li><b>向量子切</b>:整章大块向量化前再按 {{ vectorSubChars }} 字句读切段——抽取看整章(上下文全),检索召回按段(向量不稀释)</li>
+                <li><b>父子回带</b>:检索用小段匹配(语义集中命中准),命中后回带该段在<b>所属整章</b>中前后各约 2000 字的上下文(句读对齐)发给 AI——AI 看到的是连贯上下文,不是碎片;「检索测试」页可看每段回带明细</li>
                 <li>每块的抽取状态可点行内「块明细」查看;块大小可在<b>插件设置</b>调整</li>
               </ul>
             </div>
@@ -214,7 +215,7 @@ const taskByDoc = ref<Record<string, TaskItem>>({})
 const maxMb = 20
 // 切块参数展示值(与后端默认一致;实际以插件设置为准)
 const chunkTargetChars = 1200
-const vectorSubChars = 1200
+const vectorSubChars = 500
 let loadSeq = 0   // 请求序号守卫(切库错序防护)
 
 const columns = [

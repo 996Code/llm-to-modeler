@@ -6,6 +6,7 @@
         → 全文兜底(P2#12):图谱零命中时 kg_chunks PG 全文检索
           (tsvector+GIN,2-gram 分词)补充召回原文片段
         → 向量路:query embedding → 该库 collection top-k chunk(可选)
+        → 父子回带(Dify 对标):命中子段回带父块上下文窗口(句读对齐)
         → 三元组线性化 + 实体详情 + 片段原文
         →(answer.j2)→ 带来源引用的回答
 
@@ -62,6 +63,137 @@ def parse_cited_chunks(answer: str) -> List[int]:
 
 def _cfg(app_state, key, default):
     return runtime.settings_reader(app_state).get(key, default)
+
+
+# ── 父子回带(Dify 对标) ─────────────────────────────────────
+# 向量命中子段 → 回带父块(整章)上下文窗口进 prompt:子段小而聚焦
+# (命中准),LLM 看到的是命中点前后的连贯上下文而非孤立碎段。
+# 我们的父块是章节级(上限万级字符,远大于 Dify 父段 ~1024 字),整章
+# 全文进 prompt 会撞上下文窗口——所以取"以命中子段为中心的窗口"
+# (前后各 _PARENT_WINDOW_CHARS 字,句读对齐),窗口总量已超过 Dify
+# 父段全文,连贯性不吃亏。
+_PARENT_WINDOW_CHARS = 2000      # 命中子段前后各带的父块上下文
+_PARENT_CONTEXT_MAX_CHARS = 5000  # 单块进 prompt 上限(窗口+子段+句读余量)
+_CHUNK_TOTAL_BUDGET_CHARS = 24000  # 全部片段进 prompt 的总字数预算
+_SNAP_SLACK_CHARS = 200           # 句读收口搜索半径
+_SENT_BOUNDARY_RE = re.compile(r"[。！？；!?;\n]")
+
+
+def _snap_start(text: str, start: int, slack: int = _SNAP_SLACK_CHARS) -> int:
+    """窗口头向前收口到最近句读边界(找不到就硬切)。"""
+    lo = max(0, start - slack)
+    last = None
+    for m in _SENT_BOUNDARY_RE.finditer(text, lo, start):
+        last = m.end()
+    return last if last is not None else start
+
+
+def _snap_end(text: str, end: int, slack: int = _SNAP_SLACK_CHARS) -> int:
+    """窗口尾向后收口到最近句读边界(找不到就硬切)。"""
+    hi = min(len(text), end + slack)
+    m = _SENT_BOUNDARY_RE.search(text, end, hi)
+    return m.end() if m else end
+
+
+def _compact(text: str):
+    """压掉空白字符,返回 (紧凑文本, 紧凑索引→原索引映射)。
+
+    子块文本经 _hard_split 重组:句间插入父块没有的 \n 连接符、split
+    又吞掉标点后的空白——子块在父块里直接 find 永不命中。两侧压空白
+    后匹配,窗口边界再映射回原文切片(进 prompt 的是父块原文,不是
+    子块的重组文本)。
+    """
+    chars: List[str] = []
+    idx: List[int] = []
+    for i, ch in enumerate(text):
+        if not ch.isspace():
+            chars.append(ch)
+            idx.append(i)
+    return "".join(chars), idx
+
+
+def parent_context_window(parent_text: str, child_text: str,
+                          before: int = _PARENT_WINDOW_CHARS,
+                          after: int = _PARENT_WINDOW_CHARS,
+                          cap: int = _PARENT_CONTEXT_MAX_CHARS) -> Optional[str]:
+    """以 child_text 在 parent_text 中的位置为中心取上下文窗口(句读对齐)。
+
+    返回 None = 定位失败(child 不在 parent 中,如父块文本已变更),
+    调用方降级用子段自身文本。窗口边界向句读边界收口——截在句中的
+    窗口本身就不连贯,违背回带初衷。超 cap 时从更宽的一侧硬裁(裁剪
+    边不再收口:护栏场景宁可硬切也不放大窗口);宽侧吸收不完 excess
+    (子段自身接近 cap)时仍超,保子段头部硬切。
+    定位取 find 首次命中:子段文本在父块中重复出现(模板句式)时窗口
+    中心可能落在前一处——无偏移存储的已知取舍,内容相同不影响正确性。
+    """
+    if not parent_text or not child_text:
+        return None
+    compact_parent, idx_map = _compact(parent_text)
+    compact_child = "".join(ch for ch in child_text if not ch.isspace())
+    if not compact_child:
+        return None
+    pos_c = compact_parent.find(compact_child)
+    if pos_c < 0:
+        return None
+    pos = idx_map[pos_c]
+    c_end = idx_map[pos_c + len(compact_child) - 1] + 1
+    start = _snap_start(parent_text, max(0, pos - before))
+    end = _snap_end(parent_text, min(len(parent_text), c_end + after))
+    if end - start > cap:
+        excess = end - start - cap
+        left, right = pos - start, end - c_end
+        if left >= right:
+            start = min(pos, start + excess)
+        else:
+            end = max(c_end, end - excess)
+        if end - start > cap:  # 宽侧吸收不完 excess:保子段头部硬切
+            end = start + cap
+    return parent_text[start:end]
+
+
+def _apply_parent_context(store, hits: List[Dict[str, Any]]) -> int:
+    """向量命中子块原地回带父块上下文(改写 text,标注 childSeq)。
+
+    子块 id 形如 {chunk_id}#i(父指针内嵌,无需 Dify 的 ChildChunk 中间
+    表):拆父 id 批量回查 kg_chunks,以命中子段为中心取窗口替换 text。
+    降级语义(不静默丢内容,也不拖垮检索):
+      - 无 #i 的块(全文兜底整章块/旧数据)本就是父块,不回带;
+      - 父块缺失(重导入后向量残留的孤儿子块)→ 保留子段原文;
+      - 父块回查异常 → 整批保留子段原文(告警日志);
+      - 定位失败(父块文本变更)→ 保留子段原文。
+    返回成功回带的条数(诊断口径)。
+    """
+    by_parent: Dict[str, List[Dict[str, Any]]] = {}
+    for h in hits:
+        cid = str(h.get("chunkId") or "")
+        if "#" not in cid:
+            continue
+        pid, _, sub = cid.partition("#")
+        h["childSeq"] = int(sub) if sub.isdigit() else None
+        by_parent.setdefault(pid, []).append(h)
+    if not by_parent:
+        return 0
+    try:
+        rows = {r["id"]: r for r in store.get_chunks_by_ids(list(by_parent))}
+    except Exception as e:
+        logger.warning(f"父块回查失败,回带降级子段原文: {e}")
+        return 0
+    n = 0
+    for pid, group in by_parent.items():
+        row = rows.get(pid)
+        if not row:
+            continue  # 孤儿子块:父块已删(重导入先删后插),保留子段原文
+        ptext = row.get("text") or ""
+        for h in group:
+            h["childText"] = str(h.get("text") or "")  # 原子段留档(rerank/前端高亮用)
+            window = parent_context_window(ptext, h["childText"])
+            if window is None:
+                continue  # 定位失败:保留子段原文
+            h["text"] = window
+            h["parentContext"] = True
+            h["parentChars"] = len(ptext)
+            n += 1
+    return n
 
 
 def _log_retrieval_call(app_state, call_type: str, endpoint: str,
@@ -135,7 +267,8 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     # 测试页与日志共用同一数据源;用户级 /search 不透传该键,防枚举口径不变)
     diagnostics: Dict[str, Any] = {"termDetail": [], "nodesTruncated": None,
                                    "edgesTruncated": None, "maxNodes": None,
-                                   "maxEdges": None, "vectorDegraded": False}
+                                   "maxEdges": None, "vectorDegraded": False,
+                                   "parentContextHits": 0}
     seeds: List[Dict[str, Any]] = []
     subgraph = {"nodes": [], "edges": []}
     if terms:
@@ -315,12 +448,18 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             # 全文兜底已入列的父块同样跳过(第三路与向量路同父不重复)
             seen_parent = {str(h.get("chunkId") or "").split("#", 1)[0]
                            for h in chunks}
+            kept: List[Dict[str, Any]] = []
             for h in hits:
                 parent = str(h.get("chunkId") or "").split("#", 1)[0]
                 if parent in seen_parent:
                     continue
                 seen_parent.add(parent)
                 chunks.append(h)
+                kept.append(h)
+            # 父子回带:命中子段回带父块上下文窗口(检索测试页与真实
+            # 问答共用本函数,一处接线两路生效)。失败降级子段原文
+            # (_apply_parent_context 内消化,不拖垮检索)
+            diagnostics["parentContextHits"] = _apply_parent_context(store, kept)
         except Exception as e:
             # 降级事件本身也入观测:连接建不起来/元数据读失败时,
             # 调用日志里留一条 degraded 记录(否则"为什么只走了图谱路"不可查)。
@@ -378,8 +517,11 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
             parts.append(f"别名: {'、'.join(_defang(a) for a in n['aliases'][:5])}")
         node_details.append(":".join(parts))
 
-    chunk_texts: List[str] = []
-    for i, c in enumerate(retrieved.get("chunks") or []):
+    raw_chunks = retrieved.get("chunks") or []
+    # 备料:来源前缀 + defang 后文本(预算按实际长度扣,不虚占)
+    srcs: List[str] = []
+    texts: List[str] = []
+    for c in raw_chunks:
         src = c.get("docName") or "文档"
         # 跨库检索的 chunk 带 kbName:资料前缀追加库名(〔库名/文档名〕),
         # LLM 回答能标注来源库;单库 chunk 无该键,前缀保持〔文档名〕不变
@@ -387,7 +529,28 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
             src = f"{c['kbName']}/{src}"
         # 文档原文是不可信输入:反引号 defang,防片段内容干扰 answer 模板
         text = (c.get("text") or "").strip().replace("\n", " ").replace("```", "~~~")
-        chunk_texts.append(f"〔{src}〕{text[:600]}")
+        srcs.append(src)
+        texts.append(text)
+    # 预算分配与 chunks 顺序解耦:顺序是引用编号权威源([片段N]↔下标)
+    # 不能动,但预算优先级独立——回带窗口(精准命中)先吃预算。否则图谱
+    # 零命中时全文兜底的整章块先入列先吃光预算,更精准的向量回带窗口
+    # 反被挤到 600 保底(顺序倒挂)。同优先级按分数降序;预算耗尽的
+    # 块退 600 保底(条目保留不静默丢)。
+    caps = [600] * len(raw_chunks)
+    remaining = _CHUNK_TOTAL_BUDGET_CHARS
+    priority = sorted(
+        range(len(raw_chunks)),
+        key=lambda i: (not raw_chunks[i].get("parentContext"),
+                       -float(raw_chunks[i].get("score") or 0.0)))
+    for i in priority:
+        if remaining <= 600:
+            break
+        cap = min(_PARENT_CONTEXT_MAX_CHARS, remaining)
+        caps[i] = cap
+        remaining -= min(len(texts[i]), cap)
+    # 单块上限 5000:回带窗口整段进——600 的旧口径会把窗口腰斩,回带等于白做
+    chunk_texts = [f"〔{srcs[i]}〕{texts[i][:caps[i]]}"
+                   for i in range(len(raw_chunks))]
 
     return {"triples": triples, "node_details": node_details, "chunk_texts": chunk_texts}
 
@@ -423,7 +586,8 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
         _stage("kb_search.rerank", f"重排 {len(retrieved['chunks'])} 个片段…")
         try:
             order = app_state.llm_client.rerank(
-                query, [(c.get("text") or "")[:600] for c in retrieved["chunks"]],
+                query, [((c.get("childText") or c.get("text") or "")[:600])
+                        for c in retrieved["chunks"]],
                 conv_id=conv_id, stage="kg.rerank")
             retrieved["chunks"] = [retrieved["chunks"][i] for i in order]
         except Exception as e:
@@ -455,8 +619,14 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
                 "docName": c.get("docName"),
                 "score": c.get("score"),
                 "seq": c.get("seq"),
-                # 片段原文摘要(前端点击展开看内容;600 字与进 prompt 的截断一致)
-                "text": (c.get("text") or "").strip()[:600],
+                # 命中子段序号(父子回带标注:chip 显示"块N·子段M")
+                "childSeq": c.get("childSeq"),
+                # 是否真实回带了父块上下文(降级命中的子段序号照标,
+                # 但徽标不亮——"回带"必须是真回带)
+                "parentContext": c.get("parentContext"),
+                # 片段原文(前端点击展开看内容):回带窗口整段给,与进
+                # prompt 的口径一致——展开看到的就是 AI 依据的上下文
+                "text": (c.get("text") or "").strip()[:_PARENT_CONTEXT_MAX_CHARS],
             }
             for c in retrieved.get("chunks") or []
         ],
@@ -468,7 +638,12 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
         "kb": {"id": kb["id"], "name": kb.get("name") or ""},
         "intent": retrieved.get("intent"),
         "subgraph": sub,
-        "chunks": retrieved.get("chunks") or [],
+        # 用户级 chunks 瘦身:childText/parentChars 是检索内部诊断字段
+        # (rerank 输入/排障口径),诊断明细归 admin 门 retrieve-test;
+        # childSeq/parentContext 是前端展示字段,保留
+        "chunks": [{k: v for k, v in c.items()
+                    if k not in ("childText", "parentChars")}
+                   for c in retrieved.get("chunks") or []],
         "sources": sources,
     }
 
@@ -569,7 +744,8 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
         _stage("kb_search.rerank", f"重排 {len(merged_chunks)} 个片段…")
         try:
             order = app_state.llm_client.rerank(
-                query, [(c.get("text") or "")[:600] for c in merged_chunks],
+                query, [((c.get("childText") or c.get("text") or "")[:600])
+                        for c in merged_chunks],
                 conv_id=conv_id, stage="kg.rerank")
             merged_chunks = [merged_chunks[i] for i in order]
             retrieved["chunks"] = merged_chunks
@@ -610,7 +786,9 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
                 "kbName": c.get("kbName"),
                 "score": c.get("score"),
                 "seq": c.get("seq"),
-                "text": (c.get("text") or "").strip()[:600],
+                "childSeq": c.get("childSeq"),
+                "parentContext": c.get("parentContext"),
+                "text": (c.get("text") or "").strip()[:_PARENT_CONTEXT_MAX_CHARS],
             }
             for c in merged_chunks
         ],
@@ -623,7 +801,10 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
         "kbs": [{"id": kb["id"], "name": kb.get("name") or ""} for kb in kbs],
         "intent": intent,
         "subgraph": subgraph,
-        "chunks": merged_chunks,
+        # 用户级 chunks 瘦身(与单库 answer_question 同口径)
+        "chunks": [{k: v for k, v in c.items()
+                    if k not in ("childText", "parentChars")}
+                   for c in merged_chunks],
         "sources": sources,
     }
 

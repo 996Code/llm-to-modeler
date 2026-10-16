@@ -61,10 +61,10 @@ groups:
       - key: vector_subchunk_chars
         type: int
         label: 向量子切块字数
-        default: 1200
+        default: 500
         min: 300
         max: 4000
-        help: 向量入库时把块按句读子切的段长(本地 bge-m3 有效输入约 4096 token)
+        help: 向量入库时按句读子切的段长;子段越小命中越准,连贯性由检索时父子回带(命中段回带父块上下文)补足
       - key: llm_batch_size
         type: int
         label: 每批 chunk 数

@@ -834,7 +834,7 @@ def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], co
         # 本就吃不满并发(2 线程 intra_op),段吞吐损失很小;内存上限只是
         # 保险丝,不是给浪费买单的
         embed_batch = max(1, int(_cfg(app_state, "embed_batch_size", 4)))
-        sub_size = max(300, int(_cfg(app_state, "vector_subchunk_chars", 1200)))
+        sub_size = max(300, int(_cfg(app_state, "vector_subchunk_chars", 500)))
         vector_store = runtime.get_vector(app_state)
         rows = []
         for c in chunks:
