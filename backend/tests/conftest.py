@@ -105,7 +105,29 @@ if "test" not in _dbname:
 # 安全闸 2:测试库不得与运行库同库。每个测试都会 TRUNCATE 全部业务表,
 # 若与运行库(backend/.env 的 DATABASE_URL / 运行中服务)同库,跑一次全量
 # 回归就会清空演示数据源/语义层/看板——已两次事故,此闸杜绝第三次。
-_runtime_db = (_cid(os.getenv("DATABASE_URL", "")).get("dbname") or "").lower()
+# 【第三次事故实证 2026-10-17】此闸此前只查 os.getenv("DATABASE_URL")——
+# 独立 shell/worktree agent 的 env 里没有该变量(运行库 DSN 只活在 .env
+# 文件里),闸形同虚设:worktree agent 把 TEST_DATABASE_URL 指向运行库
+# llm_modeler_test(名字含 test 过了闸 1),一次全量清空了 KG 库/会话史/
+# chatbi 演示数据。修复:运行库 DSN 也走 env > backend/.env > 根 .env
+# 同一条解析链,与 main.py 的加载序一致。
+def _resolve_runtime_url() -> str:
+    url = os.getenv("DATABASE_URL", "").strip()
+    if url:
+        return url
+    try:
+        from dotenv import dotenv_values
+        for cand in (BACKEND_ROOT / ".env", BACKEND_ROOT.parent / ".env"):
+            if cand.exists():
+                url = (dotenv_values(cand).get("DATABASE_URL") or "").strip()
+                if url:
+                    return url
+    except ImportError:
+        pass
+    return ""
+
+_runtime_dsn = _resolve_runtime_url()
+_runtime_db = (_cid(_runtime_dsn).get("dbname") or "").lower() if _runtime_dsn else ""
 if _runtime_db and _runtime_db == _dbname:
     pytest.exit(
         f"TEST_DATABASE_URL 与运行库 DATABASE_URL 同库('{_dbname}')——"
