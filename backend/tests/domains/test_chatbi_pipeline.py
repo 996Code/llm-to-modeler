@@ -313,6 +313,58 @@ class TestClarifyTable:
 
 # ── 场景 4: 澄清场景③(结果异常 → 自动修正 → ask 兜底) ────────
 
+# ── 场景 3b: 澄清后 resume 重跑(引擎挂起重放路径回归) ────────
+
+class TestClarifyResumeRerun:
+    def test_table_confirm_resume_completes_query(self, env, monkeypatch):
+        """resume 回归:表澄清挂起 → 用户选表 → 引擎重放工具,管线应完整
+        跑通出结果。首跑挂在 retrieve_schema,重跑时 state 里残留首跑的
+        _need_clarify/clarify_kind/_result(带 AskSpec)——run_pipeline 自清
+        _need_clarify,但 _result 若不被清理,execute_sql 等步骤被守卫短路,
+        check_result 取 state["execute_result"] 抛 KeyError(浏览器实测
+        '工具执行失败: execute_result' 的根因)。"""
+        import domains.chatbi.retrieval as retrieval_mod
+        import domains.chatbi.stores as stores_mod
+        from domains.chatbi.retrieval import RetrievalResult
+
+        def fake_retrieve_context(*a, **kw):
+            return {"retrieval": RetrievalResult(models=[], no_match_reason="无法匹配到相关表"),
+                    "model_names": [], "schema_context": "", "allowed_columns": set(),
+                    "metrics_hint": ""}
+        monkeypatch.setattr(stores_mod, "get_vector",
+                            lambda app_state: object())
+        monkeypatch.setattr(retrieval_mod, "retrieve_context", fake_retrieve_context)
+        # resume 后管线继续走 think→SQL→执行→图表,各阶段合法编排
+        # (FakeLLM chat_json 原样返回编排值——dict/str 均按生产契约)
+        sql = ('SELECT u.city AS "城市", COUNT(*) AS "订单数" '
+               'FROM public.biz_orders o JOIN public.biz_users u '
+               'ON o.user_id = u.id GROUP BY u.city')
+        llm = FakeLLM({
+            "chatbi.think": {"tables": ["biz_orders(订单表)"],
+                             "aggregation": "COUNT", "caveats": []},
+            "chatbi.generate_sql": f"```sql\n{sql}\n```",
+            "chatbi.chart": {"chart_type": "bar",
+                             "title": "各城市订单数", "x": "城市", "y": "订单数"},
+        })
+        # 首跑: 触发表澄清挂起
+        result1, state = _run(env, "各城市订单数量", llm)
+        assert result1.ask is not None
+        assert state.get("clarify_kind") == "table_confirm"
+        assert state.get("_result") is not None  # 首跑的 AskSpec 结果残留
+
+        # 模拟引擎 resume: clarify_gate 注入 clarify_answers 后重放工具
+        # (生产路径 state 由 checkpoint 持久化带着残留键进来)
+        state["clarify_answers"] = {"未匹配到数据表": "订单表"}
+        from sdk.tool import ToolContext
+        ctx = ToolContext(**{**env["ctx_kw"], "llm_client": llm})
+        result2 = env["tool"].execute(state, ctx)
+
+        # 修复前: KeyError 'execute_result' 被引擎包成 error_for_llm
+        assert result2.error_for_llm is None, result2.error_for_llm
+        assert result2.artifact_type == "data"
+        assert result2.formatted is not None
+
+
 class TestClarifyResultAbnormal:
     def test_auto_heal_on_all_null_then_success(self, env):
         # 首版 SQL 产生全 NULL JOIN → 自检异常 → suggestion 自动修正 → 复检通过

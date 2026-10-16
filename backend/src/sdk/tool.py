@@ -293,8 +293,13 @@ class CompositeTool(Tool):
         break,答案永远没人消费。清理动作归 SDK 契约层(引擎不认识
         插件私有键,只透传 tool_state)。
         """
-        # resume 后自清中断标记(首轮执行时这些 key 不存在,pop 无副作用)
+        # resume 后自清中断标记(首轮执行时这些 key 不存在,pop 无副作用)。
+        # _result 同清:首跑挂起时它是带 AskSpec 的中断载体,不清会让
+        # execute_sql/check_result/visualize 的 `state.get("_result")` 守卫
+        # 短路全部步骤,finalize 取 execute_result 直接 KeyError——
+        # 与 _need_clarify 同源同清(resume 重跑=管线从头再来)。
         state.pop("_need_clarify", None)
+        state.pop("_result", None)
         # 发送 pipeline 定义给前端
         if self.pipeline_steps:
             ctx.emit("pipeline_definition", {

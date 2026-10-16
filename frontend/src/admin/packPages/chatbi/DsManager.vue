@@ -56,7 +56,14 @@
             <a-button size="small" type="link" @click="viewSemantic(record)"
                       :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">语义层</a-button>
             <a-button size="small" type="link" @click="emit('open-graph', record.id)"
-                      :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">图谱</a-button>            <a-popconfirm title="删除数据源及其语义层/向量数据?" ok-text="删除" ok-type="danger"
+                      :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">图谱</a-button>
+            <a-popconfirm title="强制重建该数据源的语义向量索引?(切换向量后端/检索异常时的兜底)"
+                          ok-text="重建" @confirm="rebuildIndex(record)">
+              <a-button size="small" type="link"
+                        :loading="rebuildingId === record.id"
+                        :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">重建索引</a-button>
+            </a-popconfirm>
+            <a-popconfirm title="删除数据源及其语义层/向量数据?" ok-text="删除" ok-type="danger"
                           @confirm="removeDs(record)">
               <a-button size="small" type="link" danger>删除</a-button>
             </a-popconfirm>
@@ -190,6 +197,19 @@ const showCreate = ref(false)
 const creating = ref(false)
 const healthInfo = ref<any>(null)
 const healthCheckingId = ref('')
+const rebuildingId = ref('')
+
+async function rebuildIndex(record: any) {
+  rebuildingId.value = record.id
+  try {
+    const { data } = await chatbiApi.post(`/datasources/${record.id}/rebuild-index`)
+    message.success(`索引已重建(r${data.revision}, ${data.indexed} 条)`)
+  } catch (e: any) {
+    message.error(errText(e, '索引重建失败'))
+  } finally {
+    rebuildingId.value = ''
+  }
+}
 const bulkHealth = ref(false)
 
 const form = reactive({ name: '', db_type: 'postgresql', host: '', port: 5432,

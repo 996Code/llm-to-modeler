@@ -749,6 +749,50 @@ def _graph_index_rebuilder(request: Request, ds_id: str, content,
     return _rebuild
 
 
+@router.post("/datasources/{ds_id}/rebuild-index", dependencies=[Depends(admin_required)])
+async def rebuild_index_endpoint(ds_id: str, request: Request):
+    """强制重建数据源的语义向量索引(管理端兜底入口)。
+
+    背景:语义层保存/图谱变更会自动重建,但两类场景没有入口——
+    ① 切换向量后端(Milvus→PG)后存量索引需重灌;
+    ② active 指针指向历史脏分区名(如带 token 后缀的 schema_rN_tM)时,
+    同版本重建被 CAS「仅更高版本可翻转」挡住,永远翻不正。
+    实现:revision 取 max(指针版本, 语义层版本)+1 —— 必高于脏指针,
+    CAS 必过;向量后端按当前设置解析(默认 pg)。
+    """
+    from domains.chatbi import indexing, semantic, stores
+    from domains.chatbi.llm_compat import LLMCompat
+    from domains.chatbi.stores import get_or_create_scope, get_active_doc_id
+    import re as _re
+
+    db = _db()
+    info = datasources.get_datasource(db, ds_id)
+    if not info:
+        raise HTTPException(404, "数据源不存在")
+    content, ver = semantic.load_content(db, ds_id)
+    if content is None or not content.models:
+        raise HTTPException(422, "数据源尚未扫描语义层, 无可重建的索引")
+
+    scope = get_or_create_scope(db, ds_id)
+    prev_doc = get_active_doc_id(db, scope)
+    m = _re.match(r"^schema_r(\d+)", prev_doc or "")
+    active_v = int(m.group(1)) if m else 0
+    revision = max(active_v, ver or 0) + 1
+
+    _rb = indexing.rebuild_index(
+        content, ds_id,
+        stores.get_vector(request.app.state),
+        stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+        db=db, revision=revision)
+    if getattr(_rb, "error", None):
+        raise HTTPException(502, f"索引重建失败: {_rb.error}")
+    indexed = getattr(_rb, "indexed_count", 0)
+    _audit(request, "datasource", "rebuild_index", resource_id=ds_id,
+           detail={"revision": revision, "indexed": indexed})
+    return {"rebuild": True, "revision": revision,
+            "indexed": indexed, "scope": scope}
+
+
 @router.post("/datasources/{ds_id}/graph/relationship", dependencies=[Depends(admin_required)])
 async def graph_add_relationship(ds_id: str, body: GraphRelationshipIn, request: Request):
     """新增图谱关系——源/目标表 + ON 列级校验,写回语义层新版本 + 重建索引 + 审计。

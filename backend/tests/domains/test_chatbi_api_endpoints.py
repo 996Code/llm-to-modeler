@@ -231,3 +231,69 @@ class TestFirstPutRequiresExpected:
         r = c.put(f"/datasources/{ds_id}/semantic-models",
                   json={"content": {"models": []}})
         assert r.status_code == 428
+
+
+class TestRebuildIndexEndpoint:
+    """遗留①回归: 切向量后端/脏 active 指针后无入口重建索引的兜底端点。"""
+
+    def _patch_vector(self, monkeypatch):
+        """内存向量库替身 + 可用 embedder(正交假向量,8 维)。"""
+        from domains.chatbi import stores as cb_stores
+        from domains.chatbi.stores import ChatBIVectorStore
+        from tests.domains.test_chatbi_retrieval import FakeSdkVector
+
+        fake = FakeSdkVector()
+
+        class FakeEmbedder:
+            def __init__(self):
+                self.dim = None
+
+            def embed(self, texts):
+                self.dim = 8
+                return [[1.0 if i == j else 0.0 for i in range(8)]
+                        for j in range(len(texts))]
+
+        monkeypatch.setattr(cb_stores, "get_vector", lambda state: ChatBIVectorStore(fake))
+        monkeypatch.setattr(cb_stores, "get_embedder", lambda llm, stage="chatbi.embed": FakeEmbedder())
+        return fake
+
+    def test_rebuild_ok_and_flips_pointer(self, client, ds_id, monkeypatch):
+        c, db = client
+        fake = self._patch_vector(monkeypatch)
+        r = c.post(f"/datasources/{ds_id}/rebuild-index")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["rebuild"] is True and data["indexed"] > 0
+        assert data["revision"] >= 1
+        # active 指针翻到本次 revision 分区
+        from domains.chatbi.stores import get_or_create_scope, get_active_doc_id
+        scope = get_or_create_scope(db, ds_id)
+        assert get_active_doc_id(db, scope).startswith(f"schema_r{data['revision']}")
+
+    def test_rebuild_over_stale_pointer_version(self, client, ds_id, monkeypatch):
+        """脏指针(version 高于语义版本, 如带 token 后缀的 schema_r21_t15)
+        → revision 取 max+1 必越过, CAS 必过(同版本重建被挡的根因场景)。"""
+        c, db = client
+        fake = self._patch_vector(monkeypatch)
+        from domains.chatbi.stores import (get_or_create_scope,
+                                           set_active_doc_id)
+        scope = get_or_create_scope(db, ds_id)
+        # 伪造脏指针: version=99(远高于语义版本), 分区名不存在
+        set_active_doc_id(db, scope, "schema_r99_t15", 99)
+        r = c.post(f"/datasources/{ds_id}/rebuild-index")
+        assert r.status_code == 200, r.text
+        assert r.json()["revision"] == 100  # max(99, 语义v)+1
+
+    def test_unknown_ds_404(self, client):
+        c, _ = client
+        r = c.post("/datasources/no-such/rebuild-index")
+        assert r.status_code == 404
+
+    def test_unscanned_ds_422(self, client, monkeypatch):
+        c, db = client
+        self._patch_vector(monkeypatch)
+        from domains.chatbi import datasources
+        info = datasources.create_datasource(
+            db, "未扫库", "postgresql", "localhost", 5432, "x", "u", "p")
+        r = c.post(f"/datasources/{info.id}/rebuild-index")
+        assert r.status_code == 422
