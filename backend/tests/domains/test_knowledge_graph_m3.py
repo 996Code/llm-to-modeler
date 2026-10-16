@@ -63,6 +63,8 @@ class MockLLM:
         if stage == "kg.induce_schema":
             return self.induce_result
         if stage == "kg.consolidate":
+            self.consolidate_prompts = getattr(self, "consolidate_prompts", [])
+            self.consolidate_prompts.append(content)
             return {"merges": self.consolidate_result or []}
         return {}
 
@@ -1533,6 +1535,35 @@ class TestLLMConsolidation:
             eligible_types={"person", "creature"})
         assert stats["applied"] == 0 and stats["rejected"] == 1
         assert {k[1] for k in graph.nodes if k[0] == kb["id"]} == {"甲山", "乙洞"}
+
+    def test_prescreen_small_kb_full_roster(self, env):
+        """P2#9 规模门槛(小库侧锚定):名录不超过单批上限时跳过预筛,
+        全量送 LLM——'齐天大圣/孙悟空'这类字符串不相似、仅语义可判同
+        的对必须保留(预筛无门槛全启用的第一版把这 6 个场景全弄挂了)。"""
+        env.llm.consolidate_result = [
+            {"a": "齐天大圣", "b": "孙悟空", "reason": "同物"}]
+        kb, doc = _make_doc(env, "小库全量", ["[E:玉帝]宣[E:齐天大圣]做个官[E:孙悟空]应了"])
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        q = t["result"]["quality"]
+        assert q["llmMergeProposals"] == 1 and q["llmMergeApplied"] == 1
+        assert q.get("prescreened", 0) == 0  # 小库:预筛未启用
+
+    def test_prescreen_large_kb_filters_unsuspicious(self, env, monkeypatch):
+        """P2#9 预筛(大库侧锚定):名录超单批上限 → 类型分桶+相似度
+        预筛先砍名单,不相似实体不得进入 LLM 名录;相似对保留进视野。"""
+        monkeypatch.setattr(tasks, "_CONSOLIDATE_BATCH", 2)  # 3 实体即"大库"
+        env.llm.consolidate_result = []
+        paragraphs = ["[E:孙悟空]大闹天宫。", "[E:孙悟饭]也在。", "[E:太白金星]献策。"]
+        kb, doc = _make_doc(env, "大库预筛", paragraphs)
+        t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
+        assert t["status"] == "succeeded", t["error"]
+        q = t["result"]["quality"]
+        assert q["prescreened"] == 1      # 只有 孙悟空/孙悟饭(字符重合 0.5)
+        assert q["prescreenCandidates"] == 2
+        roster = "\n".join(env.llm.consolidate_prompts)
+        assert "孙悟空" in roster and "孙悟饭" in roster
+        assert "太白金星" not in roster  # 与谁都不可疑 → 不进 LLM 名录
 
 
 # ── 类型族兼容(person↔creature) ────────────────────────────────

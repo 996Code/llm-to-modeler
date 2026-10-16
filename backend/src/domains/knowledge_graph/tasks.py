@@ -730,6 +730,8 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         "llmMergeProposals": consolidation.get("proposals", 0),
         "llmMergeApplied": consolidation.get("applied", 0),
         "llmMergeRejected": consolidation.get("rejected", 0),
+        "prescreened": consolidation.get("prescreened", 0),
+        "prescreenCandidates": consolidation.get("candidates", 0),
     }
     handle.log(
         f"导入完成({final_status}): {entity_total} 实体 / {relation_total} 关系"
@@ -1384,7 +1386,8 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
 
     Returns: {"proposals", "applied", "rejected"}(质量报告字段)。
     """
-    stats = {"proposals": 0, "applied": 0, "rejected": 0}
+    stats = {"proposals": 0, "applied": 0, "rejected": 0,
+             "prescreened": 0, "candidates": 0}
     entities = graph.list_entities(kb_id)
     if eligible_types is not None:
         entities = [e for e in entities if (e.get("type") or "") in eligible_types]
@@ -1392,6 +1395,21 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
         return stats
     by_name = {e["normalized"]: e for e in entities}
     chunk_texts = {c["id"]: (c.get("text") or "") for c in store.list_chunks(doc_id)}
+
+    # P2#9 预筛:类型分桶+Levenshtein/字符重合+别名桥接,仅可疑对涉及的
+    # 实体送 LLM(此前全量名录分批——千级库每批都是全量调用)。
+    # 规模门槛:单批以内的名录本就只花 1 次调用,预筛省不了成本,反会
+    # 滤掉"字符串不相似、仅 LLM 语义可判同"的核心对(齐天大圣/孙悟空)
+    # ——身份复合的价值恰恰在这类对上,小库必须全量送审。
+    from domains.knowledge_graph.dedup_prescreen import prescreen_pairs
+    if len(entities) > _CONSOLIDATE_BATCH:
+        suspicious = prescreen_pairs(entities)
+        stats["prescreened"] = len(suspicious)
+        if not suspicious:
+            return stats
+        candidate_names = {name for pair in suspicious for name in pair}
+        stats["candidates"] = len(candidate_names)
+        entities = [e for e in entities if e["normalized"] in candidate_names]
 
     entities.sort(key=lambda e: (e.get("type") or "", e["normalized"]))
     total_batches = (len(entities) + _CONSOLIDATE_BATCH - 1) // _CONSOLIDATE_BATCH
