@@ -3,14 +3,17 @@
 【检索链路】
   query →(query.j2)→ 检索意图{entities, keywords, hop}
         → 图谱路:find_entities 精确/包含匹配 → BFS 邻域子图(限量)
+        → 全文兜底(P2#12):图谱零命中时 kg_chunks PG 全文检索
+          (tsvector+GIN,2-gram 分词)补充召回原文片段
         → 向量路:query embedding → 该库 collection top-k chunk(可选)
         → 三元组线性化 + 实体详情 + 片段原文
         →(answer.j2)→ 带来源引用的回答
 
 【降级语义】
-  - LLM 意图解析失败 → 直接用整个 query 做关键词找种子(不烧重试)
-  - 向量未启用/失败 → 只走图谱路
-  - 图谱无命中且无向量命中 → 让 LLM 明确回答"未找到"(prompt 已约束)
+  - LLM 意图解析失败 → 抛异常(不静默降级,用户裁决)
+  - 向量未启用/失败 → 只走图谱路(+零命中时的全文兜底)
+  - 图谱无命中 → 全文兜底补充召回(开关 fulltext_fallback_enabled,
+    默认开;兜底也失败/无命中 → 让 LLM 明确回答"未找到")
 
 kb_search 对话工具与 POST /search REST 共用本模块;跨库(多库)检索走
 answer_question_multi(意图解析一次/逐库检索/合并策略见其 docstring)。
@@ -239,9 +242,49 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 duration_ms=int((time.monotonic() - _t0) * 1000),
                 error=_err, conv_id=conv_id)
 
+    # 全文兜底(P2#12 第三路):图谱零命中(意图实体/关键词在图上找不到
+    # 种子——别名/错别字/部分匹配场景)时,kg_chunks PG 全文检索补充召回。
+    # 旧路在此场景整体哑火(纯包含匹配对"孔明诸葛亮"这类查询永不命中),
+    # 第三路按 2-gram 全文召回原文片段,让回答仍有资料可依。
+    chunks: List[Dict[str, Any]] = []
+    fulltext_hits: List[Dict[str, Any]] = []
+    if not seeds and _cfg(app_state, "fulltext_fallback_enabled", True):
+        _stage("kb_search.fulltext", "图谱零命中,全文检索文档片段兜底…")
+        _t0 = time.monotonic()
+        _err = None
+        try:
+            _doc_names = {d["id"]: d["filename"]
+                          for d in store.list_documents(kb["id"])}
+            fulltext_hits = store.search_chunks_fulltext(kb["id"], query, limit=10)
+            for h in fulltext_hits:
+                h["docName"] = _doc_names.get(h.get("docId") or "", "")
+            chunks.extend(fulltext_hits)
+        except Exception as e:
+            _err = str(e)
+            # 兜底失败不拖垮检索:降级为"图谱零命中"原语义(LLM 答未找到)
+            logger.warning(f"全文兜底检索失败,降级跳过: {e}")
+        finally:
+            _log_retrieval_call(
+                app_state, "fulltext", "pg:search_chunks_fulltext",
+                request_data={"stage": "kg.fulltext_fallback", "kbId": kb["id"],
+                              "kb": kb.get("name"), "query": query[:200],
+                              "limit": 10},
+                response_data={
+                    "hits": len(fulltext_hits),
+                    "results": [
+                        {"doc": h.get("docName") or h.get("docId") or "?",
+                         "seq": h.get("seq"),
+                         "score": round(float(h.get("score") or 0.0), 4),
+                         "text": (h.get("text") or "").strip()[:120]}
+                        for h in fulltext_hits
+                    ],
+                },
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                error=_err, conv_id=conv_id)
+    diagnostics["fulltextHits"] = len(fulltext_hits)
+
     # 向量路:query embedding → top-k chunk(embedding 本身已由 llm/client
     # 记为 call_type='llm';这里记向量检索的召回量与匹配度)
-    chunks: List[Dict[str, Any]] = []
     if kb.get("vectorEnabled"):
         _stage("kb_search.vector", "向量检索相似文档片段…")
         _t0 = time.monotonic()
@@ -289,8 +332,10 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             # chunk 文本进上下文(docName 已在日志前映射好)。
             # 父块去重:向量子块 id 形如 {chunk_id}#i,同一父块(一章)的
             # 多个段可能同时命中 top_k——按父块保留得分最高的一段,
-            # 否则答案资料里同一章反复出现,挤占召回名额
-            seen_parent = set()
+            # 否则答案资料里同一章反复出现,挤占召回名额。
+            # 全文兜底已入列的父块同样跳过(第三路与向量路同父不重复)
+            seen_parent = {str(h.get("chunkId") or "").split("#", 1)[0]
+                           for h in chunks}
             for h in hits:
                 parent = str(h.get("chunkId") or "").split("#", 1)[0]
                 if parent in seen_parent:
@@ -304,8 +349,9 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             if _search_failed:
                 logger.warning(f"向量检索失败,降级纯图谱: {e}")
                 diagnostics["vectorDegraded"] = True
+                # 全文兜底命中不随降级丢弃(第三路独立于向量路)
                 return {"intent": intent, "seeds": seeds, "subgraph": subgraph,
-                        "chunks": [], "diagnostics": diagnostics}
+                        "chunks": chunks, "diagnostics": diagnostics}
             _log_retrieval_call(
                 app_state, "vector", "milvus:search",
                 request_data={"stage": "kg.vector_search", "kbId": kb["id"],

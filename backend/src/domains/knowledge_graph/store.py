@@ -18,6 +18,7 @@
 """
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -27,6 +28,63 @@ logger = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ── P2#12 全文第三路:2-gram 分词前置(自建最小词典,不引 jieba) ──
+
+# CJK 连续段(基本区;兼容字符由 doc_parser 出口 NFKC 归一化收敛)
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+_ALNUM_RUN_RE = re.compile(r"[A-Za-z0-9]+")
+
+# 最小停用词典:纯虚词组合的 gram 对召回只有噪声(问句里高频出现却
+# 不指向任何实体),查询侧滤除。索引侧不滤(生成列无法感知查询语境)。
+_GRAM_STOPWORDS = {
+    "什么", "怎么", "如何", "哪里", "哪些", "为什么", "是不是", "有没有",
+    "可以", "应该", "能够", "已经", "还是", "以及", "因此", "但是", "然后",
+    "如果", "虽然", "的人", "的事",
+}
+_STOPCHARS = set(
+    "的了吗呢吧啊呀哦嘛么之乎者也在和与跟对从被把让向往上下中"
+    "里外个这那哪你我他她它谁就也都还又再很挺太更最要是着没不")
+
+# 索引侧 2-gram 函数(生成列表达式引用,必须 IMMUTABLE):
+# CJK 连续段切双字滑窗 gram,拉丁/数字段保留原词,空格拼接后交
+# to_tsvector('simple')——'simple' 按空白切 lexeme,正好一 gram 一词。
+# 单字 CJK 段(长度 1)无 bigram,跳过(单字噪声大于信号)。
+_FULLTEXT_FN_DDL = """
+CREATE OR REPLACE FUNCTION kg_cjk_ngrams(src text) RETURNS text
+LANGUAGE sql IMMUTABLE AS $f$
+  SELECT coalesce(string_agg(g, ' '), '')
+  FROM (
+    SELECT substring(r.run, i, 2) AS g
+    FROM (SELECT (regexp_matches(src, '[一-鿿]{2,}', 'g'))[1] AS run) r
+    CROSS JOIN LATERAL generate_series(1, length(r.run) - 1) AS i
+    UNION ALL
+    SELECT (regexp_matches(src, '[A-Za-z0-9]+', 'g'))[1] AS g
+  ) grams
+$f$
+"""
+
+
+def query_grams(query: str) -> List[str]:
+    """查询 → 2-gram 词项(CJK 双字滑窗 + 拉丁/数字原词,停用滤除)。
+
+    与索引侧 kg_cjk_ngrams 同源(gram 集合一致才能命中);额外做查询
+    侧停用滤除与去重。空查询/纯停用 → [](调用方直接短路)。
+    """
+    grams: List[str] = []
+    for run in _CJK_RUN_RE.findall(query or ""):
+        grams.extend(run[i:i + 2] for i in range(len(run) - 1))
+    grams.extend(t.lower() for t in _ALNUM_RUN_RE.findall(query or ""))
+    out: List[str] = []
+    for g in grams:
+        if g in _GRAM_STOPWORDS:
+            continue
+        if len(g) == 2 and g[0] in _STOPCHARS and g[1] in _STOPCHARS:
+            continue
+        if g not in out:
+            out.append(g)
+    return out
 
 
 class KGStore:
@@ -116,6 +174,25 @@ class KGStore:
                     (_now(),))
         except Exception as e:
             logger.warning(f"存量库向量启用迁移失败(不影响启动,下次重试): {e}")
+        # P2#12 全文第三路:kg_chunks 加 tsvector 生成列 + GIN 索引。
+        # 【偏差记录】蓝图原文是 to_tsvector('simple', text),但 PG 'simple'
+        # 配置不切 CJK——连续汉字整句成单 lexeme(实测 '中华人民共和国民法典'
+        # → 一个 token),2-gram 查询永不命中。故把"应用层中文分词前置"
+        # 落成 IMMUTABLE SQL 函数 kg_cjk_ngrams(CJK 双字滑窗 + 拉丁/数字
+        # 原词,空格分隔),生成列对其取 tsvector——分词仍在库外定义、
+        # 不引 jieba/zhparser,与"自建最小词典前置应用层"的选型一致。
+        try:
+            with self._get_conn() as conn:
+                conn.execute(_FULLTEXT_FN_DDL)
+                conn.execute(
+                    "ALTER TABLE kg_chunks ADD COLUMN IF NOT EXISTS search_text tsvector "
+                    "GENERATED ALWAYS AS "
+                    "(to_tsvector('simple'::regconfig, kg_cjk_ngrams(text))) STORED")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_kg_chunks_fulltext "
+                    "ON kg_chunks USING GIN (search_text)")
+        except Exception as e:
+            logger.warning(f"全文索引迁移失败(不影响启动,下次重试): {e}")
 
     # ── 知识库 ─────────────────────────────────────────────
 
@@ -446,3 +523,35 @@ class KGStore:
             cur = conn.execute(
                 "UPDATE kg_chunks SET status = ? WHERE id = ?", (status, chunk_id))
             return cur.rowcount > 0
+
+    def search_chunks_fulltext(
+        self, kb_id: str, query: str, limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """PG 全文检索 kg_chunks(P2#12 第三路:tsvector + GIN + ts_rank)。
+
+        query 经 query_grams 2-gram 分词,OR 拼 ts_query;命中按 ts_rank
+        降序(同分按 seq 稳定)。返回与向量路 hits 同构:
+        {chunkId, docId, seq, text, score, source='fulltext'}——
+        docName/source 由检索编排层(retrieval)补注。
+        """
+        grams = query_grams(query)
+        if not grams or limit <= 0:
+            return []
+        tsq = " | ".join(f"'{g}'" for g in grams)
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT c.id, c.doc_id, c.seq, c.text, c.char_count,
+                          ts_rank(c.search_text, qs.q) AS rank
+                     FROM kg_chunks c
+                     JOIN (SELECT to_tsquery('simple'::regconfig, ?) AS q) qs
+                       ON true
+                    WHERE c.kb_id = ? AND c.search_text @@ qs.q
+                    ORDER BY rank DESC, c.seq ASC
+                    LIMIT ?""",
+                (tsq, kb_id, int(limit)),
+            ).fetchall()
+        return [{
+            "chunkId": r["id"], "docId": r["doc_id"], "seq": int(r["seq"]),
+            "text": r["text"], "charCount": int(r["char_count"] or 0),
+            "score": float(r["rank"]), "source": "fulltext",
+        } for r in rows]

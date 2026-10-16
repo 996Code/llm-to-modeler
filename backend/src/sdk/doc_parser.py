@@ -18,6 +18,7 @@ pypdf/python-docx 的环境仍可用 md/txt 能力。
 import io
 import logging
 import re
+import unicodedata
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -74,15 +75,24 @@ def mime_for(filename: str) -> str:
 # ── 解析:文件字节 → 纯文本 ─────────────────────────────────
 
 def parse_to_text(filename: str, data: bytes) -> str:
-    """按扩展名解析文件为纯文本(无法解析抛 ValueError,由任务层记失败)。"""
+    """按扩展名解析文件为纯文本(无法解析抛 ValueError,由任务层记失败)。
+
+    出口统一 NFKC 归一化(P2#12 坑位②):PDF 提取常带兼容字符
+    (民法典实测出现康熙部首 ⼀/⼱ 而非规范字 一/巾),下游切块/
+    实体抽取/全文检索按字面匹配,不归一则同一字两种形态永不相等。
+    """
     name = (filename or "").lower()
     if name.endswith((".md", ".markdown", ".txt")):
-        return _decode_text(data)
+        return _nfkc(_decode_text(data))
     if name.endswith(".pdf"):
-        return _parse_pdf(data)
+        return _nfkc(_parse_pdf(data))
     if name.endswith(".docx"):
-        return _parse_docx(data)
+        return _nfkc(_parse_docx(data))
     raise ValueError(f"不支持的文件类型: {filename}(支持 md/txt/pdf/docx)")
+
+
+def _nfkc(text: str) -> str:
+    return unicodedata.normalize("NFKC", text)
 
 
 def _decode_text(data: bytes) -> str:
