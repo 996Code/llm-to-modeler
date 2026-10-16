@@ -782,6 +782,23 @@ export async function retryKgChunks(kbId: string, docId: string, chunkIds: strin
   return data
 }
 
+/** D27 块编辑:单块全文(编辑器数据源;列表接口只给 80 字预览)。 */
+export interface KgChunkFull {
+  id: string; seq: number; text: string; charCount: number
+  status: 'done' | 'failed' | 'pending'
+}
+export async function fetchKgChunkText(kbId: string, docId: string, chunkId: string): Promise<KgChunkFull> {
+  const { data } = await kgApi.get(`/kbs/${kbId}/documents/${docId}/chunks/${chunkId}`)
+  return data
+}
+/** D27 块编辑:改文本 → 仅重嵌该块向量(图谱不动,需重导同步)。 */
+export async function updateKgChunk(
+  kbId: string, docId: string, chunkId: string, text: string,
+): Promise<{ chunk: KgChunkFull; vectorUpdated: boolean; warning: string | null }> {
+  const { data } = await kgApi.put(`/kbs/${kbId}/documents/${docId}/chunks/${chunkId}`, { text })
+  return data
+}
+
 /** 单块的抽取产出(实体/关系,块级溯源)。 */
 export interface KgChunkExtraction {
   entities: { name: string; type?: string; description?: string }[]

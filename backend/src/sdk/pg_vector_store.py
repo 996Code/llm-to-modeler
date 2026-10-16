@@ -241,6 +241,19 @@ class PgVectorStore:
             conn.execute(sql.SQL("DELETE FROM {} WHERE doc_id = %s")
                          .format(self._table(scope)), (doc_id,))
 
+    def delete_by_ids(self, scope: str, chunk_ids: List[str]) -> None:
+        """删除指定 chunk_id 的向量(块编辑增量重索引:新文本子段数变少
+        时清掉残留的旧子段,否则旧向量永远参与召回)。表不在 → 静默。"""
+        self._check_scope(scope)
+        if not chunk_ids:
+            return
+        name = self._table_name(scope)
+        with self._pool.connection() as conn:
+            if not self._table_exists(conn, name):
+                return
+            conn.execute(sql.SQL("DELETE FROM {} WHERE chunk_id = ANY(%s)")
+                         .format(self._table(scope)), (list(chunk_ids),))
+
     def existing_chunk_ids(self, scope: str, doc_id: str) -> set:
         """查某文档已存在向量的 chunk_id 集合(向量缺口补偿的判定依据)。"""
         self._check_scope(scope)

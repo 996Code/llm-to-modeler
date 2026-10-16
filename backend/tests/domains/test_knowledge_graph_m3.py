@@ -247,6 +247,10 @@ class FakeVector:
         self.rows[kb_id] = {k: v for k, v in self.rows.get(kb_id, {}).items()
                             if v["doc_id"] != doc_id}
 
+    def delete_by_ids(self, kb_id, chunk_ids):
+        for cid in chunk_ids:
+            self.rows.get(kb_id, {}).pop(cid, None)
+
     def existing_chunk_ids(self, kb_id, doc_id):
         return {cid for cid, r in self.rows.get(kb_id, {}).items()
                 if r["doc_id"] == doc_id}

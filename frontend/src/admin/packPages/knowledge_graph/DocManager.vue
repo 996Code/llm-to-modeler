@@ -153,13 +153,29 @@
               <a v-if="record.status === 'done'" style="margin-left: 0" @click="showExtraction(record)">
                 <EyeOutlined /> 产出
               </a>
+              <a style="margin-left: 0" @click="openChunkEdit(record)">
+                <EditOutlined /> 编辑
+              </a>
               <span v-if="record.status !== 'done'" class="dm-chunks__dim">—</span>
             </template>
           </template>
         </a-table>
         <p class="dm-chunks__hint">
           重试只补选中块(已完成块跳过,图谱不受影响);失败块也会在整文档重导时自动续跑。
+          <b>编辑</b>改文本后仅重建该块向量(未编辑块零重算);<b>图谱实体不随编辑更新</b>——
+          该块抽出的实体/关系仍是旧文本的,需「重导」全量重建。
         </p>
+
+        <!-- D27 块编辑:改文本 → 仅重嵌该块向量 -->
+        <a-modal v-model:open="chunkEdit.open" :title="`编辑块 #${chunkEdit.seq}`"
+                 :confirm-loading="chunkEdit.saving" ok-text="保存并重建向量" cancel-text="取消"
+                 @ok="saveChunkEdit">
+          <a-alert type="warning" show-icon style="margin-bottom: 10px"
+                   message="保存后仅重建该块向量与全文索引;图谱实体需整文档重导才会同步" />
+          <a-textarea v-model:value="chunkEdit.text" :rows="12" :maxlength="50000"
+                      show-count placeholder="块文本" />
+          <div v-if="chunkEdit.warning" class="dm-chunk-edit-warn">{{ chunkEdit.warning }}</div>
+        </a-modal>
 
         <!-- 单块产出抽屉:该块实际抽出的实体与关系(块级溯源) -->
         <a-drawer
@@ -201,13 +217,13 @@ import { message } from 'ant-design-vue'
 import type { UploadChangeParam } from 'ant-design-vue'
 import {
   CheckCircleOutlined, CloudUploadOutlined, CloseCircleOutlined, DeleteOutlined,
-  EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined,
+  EditOutlined, EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined,
   RedoOutlined, SettingOutlined, UnorderedListOutlined,
 } from '@ant-design/icons-vue'
 import {
   KgChunkParams, KgDocument, TaskItem, deleteKgDocument, fetchKgChunkExtraction,
-  fetchKgChunks, fetchKgDocuments, fetchTask, importKgAll, importKgDocument,
-  retryKgChunks, updateKgKb, uploadKgDocuments,
+  fetchKgChunkText, fetchKgChunks, fetchKgDocuments, fetchTask, importKgAll,
+  importKgDocument, retryKgChunks, updateKgChunk, updateKgKb, uploadKgDocuments,
 } from '../../api'
 import type { KgChunkExtraction, KgChunkItem, KgChunksPayload } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
@@ -457,6 +473,53 @@ const extractionDrawer = ref<{
   data: KgChunkExtraction | null
 }>({ open: false, loading: false, seq: -1, data: null })
 
+// ── D27 块编辑:改文本 → 仅重嵌该块向量 ──
+const chunkEdit = ref<{
+  open: boolean; saving: boolean; seq: number
+  chunkId: string; text: string; warning: string
+}>({ open: false, saving: false, seq: -1, chunkId: '', text: '', warning: '' })
+
+async function openChunkEdit(chunk: KgChunkItem) {
+  const doc = chunksDrawer.value.doc
+  if (!doc) return
+  chunkEdit.value = {
+    open: true, saving: false, seq: chunk.seq, chunkId: chunk.id,
+    text: '', warning: '',
+  }
+  // 列表接口只给 80 字预览,编辑器须拉全文
+  await loadSafely(async () => {
+    const full = await fetchKgChunkText(props.kbId, doc.id, chunk.id)
+    chunkEdit.value.text = full.text
+  })
+}
+
+async function saveChunkEdit() {
+  const doc = chunksDrawer.value.doc
+  const ce = chunkEdit.value
+  if (!doc || !ce.text.trim()) {
+    message.warning('块文本不能为空')
+    return
+  }
+  ce.saving = true
+  ce.warning = ''
+  try {
+    const r = await updateKgChunk(props.kbId, doc.id, ce.chunkId, ce.text)
+    if (r.warning) {
+      ce.warning = r.warning
+      message.warning(r.warning)
+    } else {
+      message.success(r.vectorUpdated
+        ? `块 #${ce.seq} 已保存,向量已重建(图谱需重导同步)`
+        : `块 #${ce.seq} 已保存`)
+      ce.open = false
+      await openChunks(doc)
+      emit('changed')
+    }
+  } catch (e) {
+    message.error((e as any)?.response?.data?.detail || '保存失败')
+  } finally { ce.saving = false }
+}
+
 async function showExtraction(chunk: KgChunkItem) {
   const doc = chunksDrawer.value.doc
   if (!doc) return
@@ -540,6 +603,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 }
 .dm-chunks__dim { color: #d1d5db; }
 .dm-chunks__hint { color: #9ca3af; font-size: 12px; margin-top: 10px; }
+.dm-chunk-edit-warn { margin-top: 8px; color: #d97706; font-size: 12.5px; }
 .dm-ext__section { margin-bottom: 18px; }
 .dm-ext__title { font-weight: 600; font-size: 13px; color: #374151; margin-bottom: 8px; }
 .dm-ext__row { margin-bottom: 6px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }

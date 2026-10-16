@@ -644,6 +644,15 @@ class KGStore:
                 "UPDATE kg_chunks SET status = ? WHERE id = ?", (status, chunk_id))
             return cur.rowcount > 0
 
+    def update_chunk_text(self, chunk_id: str, text: str) -> bool:
+        """块编辑(D27):更新块文本。search_text 是生成列,UPDATE 时
+        PG 自动重算——全文检索随编辑即时同步,无需额外维护。"""
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE kg_chunks SET text = ?, char_count = ? WHERE id = ?",
+                (text, len(text), chunk_id))
+            return cur.rowcount > 0
+
     def search_chunks_fulltext(
         self, kb_id: str, query: str, limit: int = 10,
     ) -> List[Dict[str, Any]]:

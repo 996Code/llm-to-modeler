@@ -21,6 +21,7 @@
   GET    /kbs/{id}/stats               库统计(元数据 + 图谱/向量实时数)
   GET    /dependency-status            Neo4j/向量库探针结果(设置页重检用)
 """
+import asyncio
 import hashlib
 import logging
 import re
@@ -603,6 +604,100 @@ async def chunk_extraction(kb_id: str, doc_id: str, chunk_id: str, request: Requ
     if not any(c["id"] == chunk_id for c in store.list_chunks(doc_id)):
         raise HTTPException(404, "块不存在或不属于该文档")
     return _graph(request).chunk_output(kb_id, chunk_id)
+
+
+@router.get("/kbs/{kb_id}/documents/{doc_id}/chunks/{chunk_id}",
+            dependencies=[Depends(admin_required)])
+async def chunk_text_full(kb_id: str, doc_id: str, chunk_id: str, request: Request):
+    """单块全文(D27 块编辑的编辑器数据源;列表接口只给 80 字预览)。"""
+    _kb_or_404(request, kb_id)
+    store = runtime.get_kg_store(request.app.state)
+    doc = store.get_document(doc_id)
+    if not doc or doc["kbId"] != kb_id:
+        raise HTTPException(404, "文档不存在")
+    chunk = next((c for c in store.list_chunks(doc_id) if c["id"] == chunk_id), None)
+    if not chunk:
+        raise HTTPException(404, "块不存在或不属于该文档")
+    return {"id": chunk["id"], "seq": chunk["seq"], "text": chunk["text"],
+            "charCount": chunk["charCount"], "status": chunk["status"]}
+
+
+@router.put("/kbs/{kb_id}/documents/{doc_id}/chunks/{chunk_id}",
+            dependencies=[Depends(admin_required)])
+async def update_chunk(kb_id: str, doc_id: str, chunk_id: str,
+                       request: Request, payload: Dict[str, Any]):
+    """D27 块编辑:改文本 → 仅重建该块向量(增量重索引,未编辑块零重算)。
+
+    语义边界(第一版):向量/全文即时同步(search_text 生成列随 UPDATE
+    重算);**图谱不动**——该块抽取出的实体/关系仍是旧文本的,需「重导」
+    全量重建(前端界面警示同口径)。向量重建失败不回滚文本:如实返回
+    vectorUpdated=false + warning(文本已生效,向量是旧的——比静默假
+    同步诚实)。
+    """
+    _kb_or_404(request, kb_id)
+    store = runtime.get_kg_store(request.app.state)
+    doc = store.get_document(doc_id)
+    if not doc or doc["kbId"] != kb_id:
+        raise HTTPException(404, "文档不存在")
+    chunk = next((c for c in store.list_chunks(doc_id) if c["id"] == chunk_id), None)
+    if not chunk:
+        raise HTTPException(404, "块不存在或不属于该文档")
+
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(422, "块文本不能为空")
+    if len(text) > 50000:
+        raise HTTPException(422, "块文本超长(上限 50000 字,请拆分)")
+
+    store.update_chunk_text(chunk_id, text)
+    logger.info(f"chunk edited: {chunk_id[:8]} (doc={doc_id[:8]}, "
+                f"{chunk['charCount']}→{len(text)} chars)")
+
+    # 增量重嵌:只动这一个块的子段向量
+    kb = store.get_kb(kb_id)
+    warning = None
+    vector_updated = False
+    if kb and kb.get("vectorEnabled"):
+        try:
+            vector_updated = await asyncio.to_thread(
+                _reembed_chunk, request.app.state, kb, doc_id, chunk_id, text)
+        except Exception as e:
+            logger.exception(f"块编辑后向量重建失败: {chunk_id[:8]}")
+            warning = f"文本已保存,但向量重建失败({e})——检索暂用旧向量,可重试编辑或重导"
+    else:
+        warning = "该库向量未启用,仅更新了文本与全文索引"
+
+    fresh = next((c for c in store.list_chunks(doc_id) if c["id"] == chunk_id), None)
+    return {"chunk": fresh, "vectorUpdated": vector_updated, "warning": warning}
+
+
+def _reembed_chunk(app_state, kb: Dict[str, Any], doc_id: str,
+                   chunk_id: str, text: str) -> bool:
+    """单块向量增量重建:重子切→重嵌→upsert→清残留旧子段。
+
+    子段 id 形如 {chunk_id}#i 确定性可算;新文本子段数可能变少,残留的
+    旧 id 必须显式删除(delete_by_ids),否则旧向量永远参与召回。
+    """
+    import time as _time
+    from domains.knowledge_graph import tasks as kg_tasks
+    from sdk.doc_parser import sub_chunks_for_embedding
+    t0 = _time.monotonic()
+    sub_size = max(300, kg_tasks.chunk_params_for(app_state, kb)["vector_subchunk_chars"])
+    vector = runtime.get_vector(app_state)
+    old_ids = {i for i in vector.existing_chunk_ids(kb["id"], doc_id)
+               if i.startswith(f"{chunk_id}#")}
+    subs = sub_chunks_for_embedding(text, sub_size)
+    rows = [{"chunk_id": f"{chunk_id}#{i}", "doc_id": doc_id,
+             "seq": 0, "text": sub} for i, sub in enumerate(subs)]
+    vectors = app_state.llm_client.embeddings(
+        [r["text"] for r in rows], conv_id=None, stage="kg.embed")
+    vector.upsert_chunks(kb["id"], [{**r, "vector": vec} for r, vec in zip(rows, vectors)])
+    stale = old_ids - {r["chunk_id"] for r in rows}
+    if stale:
+        vector.delete_by_ids(kb["id"], sorted(stale))
+    logger.info(f"chunk reembedded: {chunk_id[:8]} ({len(rows)} 段, "
+                f"清残留 {len(stale)}, {_time.monotonic() - t0:.1f}s)")
+    return True
 
 
 @router.post("/kbs/{kb_id}/documents/{doc_id}/import", dependencies=[Depends(admin_required)])
