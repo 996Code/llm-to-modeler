@@ -74,7 +74,7 @@ class ChatTool(Tool):
         capabilities = self._build_capabilities(ctx)
         if capabilities:
             return (
-                "你是低代码平台的智能助手。\n\n"
+                "你是智能助手。\n\n"
                 "当用户的消息与任何具体工具都不匹配时（如打招呼、闲聊、问你是谁），"
                 "用友好自然的中文回复。保持简洁，不要长篇大论。\n\n"
                 "如果用户问你能做什么，简要说明你的能力：\n"

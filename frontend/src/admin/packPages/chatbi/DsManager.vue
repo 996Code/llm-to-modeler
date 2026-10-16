@@ -202,8 +202,8 @@ const rebuildingId = ref('')
 async function rebuildIndex(record: any) {
   rebuildingId.value = record.id
   try {
-    const { data } = await chatbiApi.post(`/datasources/${record.id}/rebuild-index`)
-    message.success(`索引已重建(r${data.revision}, ${data.indexed} 条)`)
+    await chatbiApi.post(`/datasources/${record.id}/rebuild-index`)
+    message.success('索引重建任务已提交,进度见任务中心')
   } catch (e: any) {
     message.error(errText(e, '索引重建失败'))
   } finally {

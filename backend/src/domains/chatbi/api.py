@@ -7,7 +7,8 @@
 端点:
   数据源: GET/POST /datasources, PUT/DELETE /datasources/{id},
           POST /datasources/{id}/health, POST /datasources/{id}/scan,
-          GET  /datasources/{id}/scan
+          GET  /datasources/{id}/scan,
+          POST /datasources/{id}/rebuild-index(强制重建向量索引,异步任务)
   语义层: GET/PUT /datasources/{id}/semantic-models, GET /semantic-diff,
           POST /semantic-rollback
   图谱:   GET /datasources/{id}/graph, GET /datasources/{id}/graph/subgraph,
@@ -751,7 +752,7 @@ def _graph_index_rebuilder(request: Request, ds_id: str, content,
 
 @router.post("/datasources/{ds_id}/rebuild-index", dependencies=[Depends(admin_required)])
 async def rebuild_index_endpoint(ds_id: str, request: Request):
-    """强制重建数据源的语义向量索引(管理端兜底入口)。
+    """强制重建数据源的语义向量索引(管理端兜底入口,后台任务执行)。
 
     背景:语义层保存/图谱变更会自动重建,但两类场景没有入口——
     ① 切换向量后端(Milvus→PG)后存量索引需重灌;
@@ -759,38 +760,31 @@ async def rebuild_index_endpoint(ds_id: str, request: Request):
     同版本重建被 CAS「仅更高版本可翻转」挡住,永远翻不正。
     实现:revision 取 max(指针版本, 语义层版本)+1 —— 必高于脏指针,
     CAS 必过;向量后端按当前设置解析(默认 pg)。
+    执行走任务框架(与 scan 同款):全量 embed 是 CPU 密集操作,async 内
+    同步执行会阻塞整个事件循环;后台=线程池+dedupe 防并发刷+任务中心
+    进度可见(409=已有重建在进行)。
     """
-    from domains.chatbi import indexing, semantic, stores
-    from domains.chatbi.llm_compat import LLMCompat
-    from domains.chatbi.stores import get_or_create_scope, get_active_doc_id
-    import re as _re
+    from domains.chatbi import semantic
+    from sdk.pack_api import DuplicateTaskError
 
     db = _db()
     info = datasources.get_datasource(db, ds_id)
     if not info:
         raise HTTPException(404, "数据源不存在")
-    content, ver = semantic.load_content(db, ds_id)
+    content, _ver = semantic.load_content(db, ds_id)
     if content is None or not content.models:
         raise HTTPException(422, "数据源尚未扫描语义层, 无可重建的索引")
 
-    scope = get_or_create_scope(db, ds_id)
-    prev_doc = get_active_doc_id(db, scope)
-    m = _re.match(r"^schema_r(\d+)", prev_doc or "")
-    active_v = int(m.group(1)) if m else 0
-    revision = max(active_v, ver or 0) + 1
-
-    _rb = indexing.rebuild_index(
-        content, ds_id,
-        stores.get_vector(request.app.state),
-        stores.get_embedder(LLMCompat(request.app.state.llm_client)),
-        db=db, revision=revision)
-    if getattr(_rb, "error", None):
-        raise HTTPException(502, f"索引重建失败: {_rb.error}")
-    indexed = getattr(_rb, "indexed_count", 0)
+    manager = request.app.state.task_manager
+    try:
+        task = manager.submit("chatbi.rebuild_index",
+                              payload={"datasource_id": ds_id},
+                              dedupe_key=f"chatbi:rebuild:{ds_id}")
+    except DuplicateTaskError:
+        raise HTTPException(409, "该数据源已有索引重建任务在进行")
     _audit(request, "datasource", "rebuild_index", resource_id=ds_id,
-           detail={"revision": revision, "indexed": indexed})
-    return {"rebuild": True, "revision": revision,
-            "indexed": indexed, "scope": scope}
+           detail={"task_id": task["id"]})
+    return {"ok": True, "task_id": task["id"]}
 
 
 @router.post("/datasources/{ds_id}/graph/relationship", dependencies=[Depends(admin_required)])

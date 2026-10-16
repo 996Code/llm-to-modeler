@@ -284,6 +284,24 @@ def guarded_rebuild(content, data_source_id, store, embedder, db,
             if cur_v is not None and cur_v != expected_version:
                 return type('R', (), {'error': f'跳过过时构建 v{expected_version} (current v{cur_v})',
                                       'deleted_count': 0, 'indexed_count': 0})()
+            # 下限感知(审查 版本失衡): 指针 version 可能被管理端强制重建
+            # 推高(如脏指针翻正出的 r100)——语义版本(6,7...)若低于它,
+            # CAS「仅更高版本可翻转」会把此后每次自动重建全部静默挡住,
+            # 索引停在旧内容。发布 revision 取 max(指针, 语义)下限,
+            # 内容仍按 expected_version 复查过是最新语义——只是分区号
+            # 不再与语义版本一一对应(读侧只看指针, 无影响)。
+            if cur_v is not None:
+                from domains.chatbi.stores import (get_or_create_scope,
+                                                   get_active_doc_id)
+                import re as _re
+                try:
+                    _scope = get_or_create_scope(db, data_source_id)
+                    _prev = get_active_doc_id(db, _scope) or ""
+                    _m = _re.match(r"^schema_r(\d+)", _prev)
+                    if _m and int(_m.group(1)) >= cur_v:
+                        expected_version = int(_m.group(1)) + 1
+                except Exception:
+                    pass  # 指针读取失败不阻断构建(仍按语义版本发布)
         result = rebuild_index(content, data_source_id, store, embedder, db,
                                revision=expected_version, lease=lease)
         # 构建后复查: 构建期间 current 变了 → 用最新版补建一次

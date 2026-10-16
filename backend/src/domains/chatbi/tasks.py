@@ -40,10 +40,16 @@ def register_tasks(manager, app_state=None) -> None:
         return _task_consolidate_memories(
             handle, app_state, data_source_id=payload.get("data_source_id"))
 
+    def _rebuild_index(handle):
+        payload = handle.payload or {}
+        return _task_rebuild_index(handle, app_state,
+                                   ds_id=payload.get("datasource_id"))
+
     manager.register("chatbi.scan_datasource", _scan, pack_name=PACK_NAME)
     manager.register("chatbi.refresh_semantics", _refresh, pack_name=PACK_NAME)
     manager.register("chatbi.memory.consolidate", _consolidate, pack_name=PACK_NAME)
-    logger.info("chatbi tasks registered: scan_datasource / refresh_semantics / memory.consolidate")
+    manager.register("chatbi.rebuild_index", _rebuild_index, pack_name=PACK_NAME)
+    logger.info("chatbi tasks registered: scan_datasource / refresh_semantics / memory.consolidate / rebuild_index")
     # 三十七审 P1-B: scheduler 启动移出注册函数(纯注册)——由
     # pack_manager._start_pack_lifecycle 在 commit 成功后调用,
     # 失败装配不再启动 scheduler。
@@ -2187,3 +2193,52 @@ def _load_settings(app_state) -> dict:
 def _now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+def _task_rebuild_index(handle, app_state, ds_id: str) -> dict:
+    """强制重建数据源语义向量索引(后台任务)。
+
+    与端点直调的差异(审查 I-1):全语义层逐条 embed 是 CPU 密集操作,
+    async 端点内同步执行会阻塞整个事件循环(所有请求/SSE 卡死);
+    走任务框架=线程池执行+dedupe 防并发刷+任务中心进度可见。
+    revision=max(active 指针版本, 语义层版本)+1——必高于带 token
+    后缀的脏指针, CAS「仅更高版本可翻转」必过。
+    """
+    import re as _re
+    from domains.chatbi import datasources, indexing, runtime, semantic, stores
+    from domains.chatbi.stores import get_or_create_scope, get_active_doc_id
+
+    if not ds_id:
+        raise ValueError("payload 缺 datasource_id")
+    db = runtime.get_pack_db()
+    info = datasources.get_datasource(db, ds_id)
+    if not info:
+        raise ValueError(f"数据源不存在: {ds_id}")
+    content, ver = semantic.load_content(db, ds_id)
+    if content is None or not content.models:
+        raise ValueError("数据源尚未扫描语义层, 无可重建的索引")
+
+    scope = get_or_create_scope(db, ds_id)
+    prev_doc = get_active_doc_id(db, scope)
+    m = _re.match(r"^schema_r(\d+)", prev_doc or "")
+    active_v = int(m.group(1)) if m else 0
+    revision = max(active_v, ver or 0) + 1
+
+    handle.set_progress(5, f"重建索引: v{revision} 分区构建中")
+    handle.log(f"开始重建索引: {info.name} → schema_r{revision}"
+               f"(此前指针 {prev_doc or '无'})")
+    llm = runtime.get_llm(app_state) if app_state else None
+    if llm is None:
+        raise ValueError("LLM 组件不可用, 无法构建 embedding")
+    _rb = indexing.rebuild_index(
+        content, ds_id,
+        stores.get_vector(app_state),
+        stores.get_embedder(llm),
+        db=db, revision=revision)
+    if getattr(_rb, "error", None):
+        raise RuntimeError(f"索引重建失败: {_rb.error}")
+    indexed = getattr(_rb, "indexed_count", 0)
+    handle.set_progress(100, f"重建完成: {indexed} 条已索引")
+    handle.log(f"索引重建完成: v{revision}, {indexed} 条"
+               f"(指针 {prev_doc or '无'} → schema_r{revision})")
+    return {"revision": revision, "indexed": indexed, "scope": scope}

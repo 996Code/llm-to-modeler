@@ -420,6 +420,11 @@ class AskDataTool(CompositeTool):
     def _step_think(self, state, ctx):
         if state.get("_need_clarify") or state.get("_result"):
             return
+        # resume 结果复用:中断前已有执行结果(场景③)——思考/生成/执行
+        # 全链不重跑(temperature=0 也不保证 SQL 复现,检索上下文可能已
+        # 漂移),「按原样展示」承诺的正是复用中断前的 SQL 与数据。
+        if state.get("execute_result") is not None:
+            return
         ctx.emit("stage", "think", "正在分析查询思路...")
         llm = self._get_llm(ctx)
         settings = self._get_settings(ctx)
@@ -455,6 +460,8 @@ class AskDataTool(CompositeTool):
     # ── Step 4: 生成 SQL(T029 分层注入: schema/fewshot/skills/指标/记忆/历史) ──
     def _step_generate_sql(self, state, ctx):
         if state.get("_need_clarify") or state.get("_result"):
+            return
+        if state.get("execute_result") is not None:  # resume 结果复用(场景③)
             return
         ctx.emit("stage", "generate_sql", "正在生成 SQL...")
         llm = self._get_llm(ctx)
@@ -577,6 +584,12 @@ class AskDataTool(CompositeTool):
     # ── Step 5: 执行 + 自愈回环(EXECUTE_SQL + SELF_HEAL, ≤max_rounds) ──
     def _step_execute_sql(self, state, ctx):
         if state.get("_need_clarify") or state.get("_result") or state.get("_error"):
+            return
+        # resume 结果复用:中断前已执行过(场景③挂起在 check_result 时
+        # execute_result 已在)——重跑不再执行 SQL。「按原样展示」语义是
+        # 复用中断前结果;重烧一次除成本外,两次执行间数据可能漂移,
+        # 用户看到的与澄清时的预览不一致。
+        if state.get("execute_result") is not None:
             return
         settings = self._get_settings(ctx)
         ds: datasources.DataSourceInfo = state["ds"]
@@ -726,10 +739,9 @@ class AskDataTool(CompositeTool):
                             return  # 修正成功, 跳过 ask_user(继续后续 step)
 
         # 仍异常 → 主动暂停问用户 (ask_user 场景③: 结果异常)
-        # 现场结果写 state(resume 重跑时 tool_state 保留,"按原样展示"直接复用)
+        # resume 复用载体是 execute_result(已在 state);"按原样展示"经
+        # think/generate/execute 三步的 execute_result 守卫跳过重生成
         state["clarify_kind"] = "result_abnormal"
-        state["abnormal_result"] = {"sql": state["sql"], "columns": result.columns,
-                                    "rows": result.rows}
         state["_need_clarify"] = True
         state["_result"] = ToolResult(
             artifact_type="data",
@@ -962,8 +974,15 @@ class AskDataTool(CompositeTool):
         state["_pipeline_start"] = time.time()
         # ── 澄清回答消费(引擎 resume 注入 state["clarify_answers"]) ──
         # 结构: {question_header: label 或 自由输入文本}
+        # SEC-007 口径:用户输入进 LLM prompt 前清洗——clarify 答案与
+        # user_input 同为用户可控文本,统一过 sanitize_text
         answers = state.get("clarify_answers") or {}
         if answers:
+            try:
+                from sdk.sanitize import sanitize_text
+                answers = {str(k): sanitize_text(str(v)) for k, v in answers.items()}
+            except ImportError:
+                pass
             kind = state.get("clarify_kind")
             if kind == "table_confirm":
                 # 场景②: 用户选中的表(display_name → model.name), 写入

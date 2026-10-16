@@ -412,6 +412,53 @@ class TestClarifyResultAbnormal:
         assert result.ask.questions[0].header == "结果异常"
 
 
+# ── 场景 3c: 结果异常澄清→「按原样展示」resume(结果复用, 不重烧 SQL) ──
+
+class TestShowAsIsResume:
+    def test_show_as_is_reuses_result_no_resql(self, env, monkeypatch):
+        """审查 Important: SDK 清 _result 后场景③「按原样展示」不再被守卫
+        短路——execute_sql 必须凭 execute_result 已存在跳过重执行(结果
+        复用语义), 否则重烧一次 SQL 且两次执行间数据可能漂移。"""
+        null_sql = ('SELECT u.city AS "城市", u.username AS "用户名" '
+                    'FROM public.biz_orders o LEFT JOIN public.biz_users u '
+                    'ON o.user_id = u.id AND u.id = -1')
+
+        class NoFixLLM(FakeLLM):
+            def __init__(self, script):
+                super().__init__(script)
+                self.sql_calls = 0
+
+        # 首跑到场景③挂起(ALL NULL → 自愈失败 → ask)
+        llm = NoFixLLM({
+            "chatbi.think": {"tables": [], "aggregation": "", "caveats": []},
+            "chatbi.generate_sql": f"```sql\n{null_sql}\n```",
+            "chatbi.heal": f"```sql\n{null_sql}\n```",
+        })
+        result1, state = _run(env, "看看数据", llm)
+        assert result1.ask is not None
+        assert result1.ask.questions[0].header == "结果异常"
+        assert state.get("execute_result") is not None  # 中断前已执行
+
+        # 计数 SQL 真实执行次数(resume 前后对比)
+        import domains.chatbi.datasources as ds_mod
+        calls = {"n": 0}
+        _orig = ds_mod.execute_readonly
+        def _counting(*a, **kw):
+            calls["n"] += 1
+            return _orig(*a, **kw)
+        monkeypatch.setattr(ds_mod, "execute_readonly", _counting)
+
+        # resume: 用户选「按原样展示」
+        state["clarify_answers"] = {"结果异常": "按原样展示"}
+        from sdk.tool import ToolContext
+        ctx = ToolContext(**{**env["ctx_kw"], "llm_client": llm})
+        result2 = env["tool"].execute(state, ctx)
+
+        assert result2.error_for_llm is None, result2.error_for_llm
+        assert result2.artifact_type == "data"
+        assert calls["n"] == 0  # 关键断言: 不重烧 SQL
+
+
 # ── 场景 5: 多轮继承(prev_tables 进 state) ───────────────────
 
 class TestMultiTurn:
