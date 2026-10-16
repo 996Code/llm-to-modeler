@@ -28,6 +28,7 @@
   1. module + fn:pack 自己提供的探针函数(懒加载——只在配置齐全后 import,
      签名 fn(resolved_settings: dict) -> None,异常即失败);
   2. kind: http + url_field:通用 HTTP GET 探针(2xx 即通过)。
+  3. kind: pg_vector:平台级 pgvector 探针(实现下沉 SDK,P0-1)。
 平台内置的只有"字段解析 + 声明驱动的探针调度 + 超时 + 缓存"这套机制。
 
 【探针治理】
@@ -219,6 +220,14 @@ def _do_probe(
         resp = httpx.get(url, timeout=_probe_timeout())
         if resp.status_code >= 400:
             raise ValueError(f"HTTP {resp.status_code}")
+        return
+
+    if probe_spec.get("kind") == "pg_vector":
+        # 分层治理 P0-1: pgvector 探针上提 SDK——平台只认识 kind 名,
+        # 探测细节(DSN 解析/扩展检查)在 sdk.vector_store,不破"平台
+        # 不识具体设施"铁律(与 kind:http 只知 URL 同款粒度)。
+        from sdk.vector_store import probe_pg_vector
+        probe_pg_vector(resolved)
         return
 
     module_path = probe_spec.get("module")

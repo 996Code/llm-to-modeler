@@ -39,8 +39,8 @@ def settings_reader(app_state):
 def get_kg_store(app_state) -> KGStore:
     """元数据存储单例(与平台同库同后端:DATABASE_URL,PG-only)。"""
     global _kg_store, _kg_store_fp
-    from services.db import resolve_database_url
-    fingerprint = resolve_database_url() or ""
+    from sdk.relational_store import current_dsn  # P1-3: SDK 门面,不 import 平台 services
+    fingerprint = current_dsn()
     with _kg_store_lock:
         if _kg_store is None or _kg_store_fp != fingerprint:
             _kg_store = KGStore()

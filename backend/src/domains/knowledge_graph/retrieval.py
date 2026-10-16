@@ -29,6 +29,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from domains.knowledge_graph import runtime
+from sdk.observability import (CALL_TYPE_GRAPH as CT_GRAPH,
+                             CALL_TYPE_VECTOR as CT_VECTOR,
+                             CALL_TYPE_FULLTEXT as CT_FULLTEXT)
 
 logger = logging.getLogger(__name__)
 
@@ -65,34 +68,10 @@ def _log_retrieval_call(app_state, call_type: str, endpoint: str,
                         request_data: Dict, response_data: Dict,
                         duration_ms: int, error: Optional[str] = None,
                         conv_id: Optional[str] = None) -> None:
-    """图谱/向量检索调用入 call_logs(失败不影响检索主流程)。
-
-    call_type 用 'graph'/'vector' 与 llm/upstream 并列;stage 并入
-    request_data(与 llm/client.py 的约定一致,管理端据此区分环节)。
-    conv_id 解析与 llm/upstream 同规则:显式参数优先,thread-local 兜底
-    (graph 工作线程绑定了会话上下文,调用方漏传也能关联,链路不断)。
-    """
-    try:
-        cs = getattr(app_state, "conversation_store", None)
-        if cs is None:
-            return
-        if not conv_id:
-            from sdk.call_context import current_conversation_id
-            conv_id = current_conversation_id()
-        from sdk.call_context import current_pack_name
-        cs.save_call_log(
-            call_type=call_type,
-            endpoint=endpoint,
-            request_data=request_data,
-            response_data=response_data,
-            status_code=None if not error else 500,
-            duration_ms=duration_ms,
-            error_message=error,
-            conv_id=conv_id,
-            pack_name=current_pack_name(),
-        )
-    except Exception as e:  # 观测写失败不拖垮检索
-        logger.warning(f"检索调用日志写入失败({endpoint}): {e}")
+    """图谱/向量检索调用入 call_logs——委托 SDK log_pack_call(P0-2)。"""
+    from sdk.observability import log_pack_call
+    log_pack_call(app_state, call_type, endpoint, request_data,
+                  response_data, duration_ms, error=error, conv_id=conv_id)
 
 
 # ── 检索意图解析 ─────────────────────────────────────────────
@@ -265,7 +244,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             logger.warning(f"全文兜底检索失败,降级跳过: {e}")
         finally:
             _log_retrieval_call(
-                app_state, "fulltext", "pg:search_chunks_fulltext",
+                app_state, CT_FULLTEXT, "pg:search_chunks_fulltext",
                 request_data={"stage": "kg.fulltext_fallback", "kbId": kb["id"],
                               "kb": kb.get("name"), "query": query[:200],
                               "limit": 10},
@@ -310,7 +289,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             finally:
                 _scores = [float(h.get("score") or 0.0) for h in hits]
                 _log_retrieval_call(
-                    app_state, "vector", f"{_vector_backend()}:search",
+                    app_state, CT_VECTOR, f"{_vector_backend()}:search",
                     request_data={"stage": "kg.vector_search", "kbId": kb["id"],
                                   "kb": kb.get("name"), "topK": k,
                                   "query": query[:200], "metric": "COSINE"},
@@ -353,7 +332,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 return {"intent": intent, "seeds": seeds, "subgraph": subgraph,
                         "chunks": chunks, "diagnostics": diagnostics}
             _log_retrieval_call(
-                app_state, "vector", f"{_vector_backend()}:search",
+                app_state, CT_VECTOR, f"{_vector_backend()}:search",
                 request_data={"stage": "kg.vector_search", "kbId": kb["id"],
                               "kb": kb.get("name"), "degraded": True},
                 response_data={"hits": 0, "degraded": True},

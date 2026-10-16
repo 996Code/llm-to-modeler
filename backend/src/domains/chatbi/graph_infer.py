@@ -93,6 +93,13 @@ MAX_CONFIDENCE = 0.95
 
 # ── T016: 推断 ────────────────────────────────────────────────
 
+def _as_text(resp):
+    """LLM 响应形状归一((content, meta) 或 str → str),委托 SDK 口径。"""
+    if isinstance(resp, (tuple, list)):
+        return (resp[0] or "") if resp else ""
+    return resp or ""
+
+
 def _strip_table_prefix(name: str) -> str:
     """去掉常见表前缀，便于 xxx_id → xxx 匹配。
 
@@ -249,7 +256,7 @@ def _infer_relationships_batch_by_llm(
             )
             # 宿主契约 .chat → (content, meta) tuple(此前 tuple 直传
             # _parse_json_response, .strip() 必炸 → 关系推断永远降级为空)
-            content = resp[0] if isinstance(resp, (tuple, list)) else resp
+            content = _as_text(resp)
             raw_list = _parse_json_response(content)
             if raw_list is None or not isinstance(raw_list, list):
                 logger.warning(

@@ -167,3 +167,14 @@ def task_conv_id(task_id: str) -> str:
     导入期的模型消耗,零 schema 改动。
     """
     return f"task:{task_id}"
+
+
+class PermanentTaskError(RuntimeError):
+    """永久性任务错误(参数/校验类,重跑结果恒定失败)。
+
+    【分层归属】(分层治理 P0-4: 自 services.task_manager 上提 SDK)
+    任务框架语义的一部分,与 DuplicateTaskError 同居——插件抛此类型
+    跳过自动续跑直接落 failed,不因 import 平台 services 破坏分层
+    (handler 对"重试也无意义"的失败抛本类型;线上实证:校验类错误
+    若续跑会每 5 分钟空转一次循环 3 小时)。
+    """

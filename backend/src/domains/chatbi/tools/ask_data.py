@@ -174,7 +174,7 @@ class AskDataTool(CompositeTool):
     def _get_llm(self, ctx: ToolContext):
         # ctx.llm_client 是引擎裸实例(chat→str);pack 各栈按 (content, meta)
         # 契约编写——统一经 LLMCompat 适配(llm_compat.py 有"unpack 症状"说明)
-        from domains.chatbi.llm_compat import LLMCompat
+        from sdk.llm_compat import LLMCompat
         inner = ctx.llm_client
         return inner if isinstance(inner, LLMCompat) else LLMCompat(inner)
 
@@ -272,7 +272,8 @@ class AskDataTool(CompositeTool):
                 conv_id=ctx.conv_id,
                 rerank_enabled=bool(settings.get("rerank_enabled", False)),
                 hybrid_enabled=bool(
-                    settings.get("hybrid_search_enabled", False)))
+                    settings.get("hybrid_search_enabled", False)),
+                app_state=self._app_state)
             # 注: content 已按位传参(第 2 位),不得再以关键字重复传
             # ——c3285d4 引入的重复实参让本调用必抛 TypeError 被降级
             # 吞掉(向量检索从未真正生效),N1 切 pg 后暴露,此处修复。
@@ -906,7 +907,7 @@ class AskDataTool(CompositeTool):
         try:
             from domains.chatbi import fewshot as fewshot_mod
             from domains.chatbi import stores as cb_stores
-            from domains.chatbi.llm_compat import LLMCompat
+            from sdk.llm_compat import LLMCompat
             llm0 = self._get_llm(ctx)
             fewshot_mod.index_fewshot_example(
                 state.get("user_input", ""), state["sql"],

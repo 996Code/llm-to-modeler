@@ -767,7 +767,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
     lease = RunLease(db, f"run:semantic_write:{ds_id}",
                      holder=f"task:{handle.task_id}", ttl_seconds=900)
     if not lease.acquire():
-        from services.task_manager import PermanentTaskError
+        from sdk.pack_api import PermanentTaskError
         raise PermanentTaskError(
             f"数据源 {info.name} 已有扫描/刷新任务在另一实例执行中"
             f"(执行期租约冲突)——请等待其完成后再试")
@@ -800,7 +800,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         # 写前 fencing(二十审 9.2/10): DB 实查——本地 bool 在进程暂停
         # 窗口内可能失真, 落库前必须以数据库 holder 为准
         if not lease.assert_owned():
-            from services.task_manager import PermanentTaskError
+            from sdk.pack_api import PermanentTaskError
             raise PermanentTaskError(
                 "扫描执行期租约被其他实例接管(本任务停滞超时)——中止落库")
         # 十四审 7.2: rescan 用来源感知 merge(不是 refresh 粗 merge)——
@@ -820,7 +820,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                     db, ds_id, content, source="scan",
                     expected_version=_pre_version, conn=conn))
             if not _ok:
-                from services.task_manager import PermanentTaskError
+                from sdk.pack_api import PermanentTaskError
                 raise PermanentTaskError(
                     "语义落库被事务级 fencing 拒绝(租约已失)——中止")
         except VersionConflictError:
@@ -840,7 +840,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                         db, ds_id, content, source="scan",
                         expected_version=_retry[1], conn=conn))
                 if not _ok:
-                    from services.task_manager import PermanentTaskError
+                    from sdk.pack_api import PermanentTaskError
                     raise PermanentTaskError(
                         "重试落库被事务级 fencing 拒绝(租约已失)——中止")
             else:
@@ -857,7 +857,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         # 向量索引重建 (对标 _run_scan_background 尾部 rebuild_index;
         # 失败降级不阻塞——RAG 检索可用全表降级路径)
         if not lease.assert_owned():
-            from services.task_manager import PermanentTaskError
+            from sdk.pack_api import PermanentTaskError
             raise PermanentTaskError("索引重建前 fencing 失败(租约已失)——中止")
         indexed = 0
         index_status = "ok"
@@ -1019,7 +1019,7 @@ def _task_refresh_semantics(handle, app_state=None) -> dict:
     lease = RunLease(db, "run:refresh_semantics",
                      holder=f"task:{handle.task_id}", ttl_seconds=900)
     if not lease.acquire():
-        from services.task_manager import PermanentTaskError
+        from sdk.pack_api import PermanentTaskError
         raise PermanentTaskError(
             "元数据刷新已在另一实例执行(执行期租约冲突)——本任务退出")
     try:
@@ -1041,7 +1041,7 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
     from domains.chatbi import runtime, semantic, datasources, indexing
     for row in datasources.list_datasources(db, active_only=True):
         if not lease.heartbeat():
-            from services.task_manager import PermanentTaskError
+            from sdk.pack_api import PermanentTaskError
             raise PermanentTaskError(
                 "刷新执行期租约被其他实例接管(本任务停滞超时)——中止剩余数据源")
         # list_datasources 不带 decrypt(password_plain 为空)——同健康巡检

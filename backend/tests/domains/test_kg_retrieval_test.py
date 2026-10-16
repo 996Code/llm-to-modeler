@@ -157,9 +157,11 @@ class TestDependencyStatusBackendAware:
         from fastapi.testclient import TestClient
         from domains.knowledge_graph.api import router
         from domains.knowledge_graph import probes as kg_probes
+        import sdk.vector_store as vs_sdk
 
         called = []
-        monkeypatch.setattr(kg_probes, "pg_vector",
+        # P0-1: pg_vector 探针上提 SDK——monkeypatch 新归属
+        monkeypatch.setattr(vs_sdk, "probe_pg_vector",
                             lambda s: called.append("pg") or None)
         app = FastAPI()
         app.include_router(router, prefix="/api/packs/knowledge_graph")
@@ -170,6 +172,7 @@ class TestDependencyStatusBackendAware:
         body = r.json()
         assert "pg_vector" in body      # 固定键,不再随 env 分流
         assert called == ["pg"]
-        assert not hasattr(kg_probes, "milvus")  # milvus 探针已删
+        assert not hasattr(kg_probes, "milvus")      # milvus 探针已删
+        assert not hasattr(kg_probes, "pg_vector")   # P0-1: 探针已上提 SDK
 
 

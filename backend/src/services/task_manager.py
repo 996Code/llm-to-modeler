@@ -38,13 +38,7 @@ class TaskCancelled(Exception):
     """任务被取消(handler 在检查点抛出,由 _run 统一收尾为 cancelled)。"""
 
 
-class PermanentTaskError(RuntimeError):
-    """永久性任务错误(参数/校验类,重跑结果恒定失败)。
-
-    handler 对"重试也无意义"的失败抛本类型,任务框架据此跳过自动续跑
-    直接落 failed——否则一个写错的定向重抽请求会让续跑链无限空转
-    (线上实证:截短的 chunk id 触发校验错误,每 5 分钟续跑一次循环 3 小时)。
-    """
+from sdk.pack_api import PermanentTaskError  # 分层治理 P0-4:定义上提 SDK
 
 
 class TaskHandle:

@@ -371,7 +371,7 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
     index_rebuilt, index_warning = True, None
     try:
         from domains.chatbi import indexing
-        from domains.chatbi.llm_compat import LLMCompat
+        from sdk.llm_compat import LLMCompat
         _rb = indexing.guarded_rebuild(content, ds_id, stores.get_vector(request.app.state),
                                      stores.get_embedder(LLMCompat(request.app.state.llm_client)),
                                      db=_db(), expected_version=ver)  # 十二审8.2
@@ -445,7 +445,7 @@ async def semantic_rollback(ds_id: str, version: int, request: Request,
     index_rebuilt, index_warning = True, None
     try:
         from domains.chatbi import indexing
-        from domains.chatbi.llm_compat import LLMCompat
+        from sdk.llm_compat import LLMCompat
         _rb = indexing.guarded_rebuild(content, ds_id, stores.get_vector(request.app.state),
                                      stores.get_embedder(LLMCompat(request.app.state.llm_client)),
                                      db=_db(), expected_version=ver)  # 十二审8.2
@@ -530,7 +530,8 @@ async def health_detail_ep(request: Request):
     组件各自独立探测, 一个挂了不影响其他组件上报: 向量库(pgvector)/
     LLM 网关/数据源加密凭据 + 各业务库最近健康状态。
     """
-    vector_key = "pg"  # pgvector 单后端(Milvus 已下线);前端健康组件按此键展示
+    from sdk.vector_store import backend_display_name
+    vector_key = backend_display_name()  # P0-5: 键名单一事实源在 SDK
     components: dict = {}
     # 调度器(三十九审 P1-D): 线程存活/连续 tick 失败/最近 tick——
     # 线程死亡或持续失败必须可见, 不能 health 绿而定时不跑
@@ -572,24 +573,9 @@ async def health_detail_ep(request: Request):
     # LLM 网关: GET /models 真实探针(异步 httpx 不阻塞事件循环;
     # 模型名从 config 读——llm.model 属性不存在, 此前恒显示空)
     try:
-        import httpx
         llm = getattr(request.app.state, "llm_client", None)
-        cfg = getattr(llm, "_config", None) or getattr(llm, "config", None)
-        base = getattr(cfg, "base_url", "") if cfg else ""
-        api_key = getattr(cfg, "api_key", "") if cfg else ""
-        model = getattr(cfg, "model", "") if cfg else ""
-        status, detail = "ok", f"model={model}"
-        if base:
-            try:
-                headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-                async with httpx.AsyncClient(timeout=3.0) as ac:
-                    r = await ac.get(f"{base.rstrip('/')}/models", headers=headers)
-                status = "ok" if r.status_code < 400 else "fail"
-                detail += f" · /models HTTP {r.status_code}"
-            except Exception as pe:
-                status, detail = "fail", f"{detail} · 探针失败: {str(pe)[:120]}"
-        else:
-            status, detail = "unconfigured", "未配置 base_url"
+        # P1-4: 探活逻辑归平台 LLMClient.probe(),不再手拼 /models
+        status, detail = await llm.probe()
         components["llm"] = {"status": status, "detail": detail[:200]}
     except Exception as e:
         components["llm"] = {"status": "fail", "detail": str(e)[:200]}
@@ -735,7 +721,7 @@ def _graph_index_rebuilder(request: Request, ds_id: str, content,
     """图谱变更后的索引重建回调(向量 store/embedder 从 app_state 构造)。"""
     def _rebuild():
         from domains.chatbi import indexing, stores
-        from domains.chatbi.llm_compat import LLMCompat
+        from sdk.llm_compat import LLMCompat
         _rb = indexing.guarded_rebuild(
             content, ds_id,
             stores.get_vector(request.app.state),

@@ -377,16 +377,10 @@ def _apply_foreign_keys(content: SemanticModelContent, foreign_keys: list) -> No
 
 def _chat_text(llm, *, messages: list, temperature=None, stage: str | None = None,
                conv_id: str | None = None) -> str:
-    """调 llm.chat 并归一为文本。
-
-    宿主 LLM 契约: .chat(messages, temperature, stage, conv_id) → (content, meta);
-    个别模块(检索/图谱)按 str 消费 —— 这里两种形态都接受,避免形状耦合。
-    """
-    resp = llm.chat(messages=messages, temperature=temperature,
-                    stage=stage, conv_id=conv_id)
-    if isinstance(resp, (tuple, list)):
-        return (resp[0] or "") if resp else ""
-    return resp or ""
+    """调 llm.chat 并归一为文本(委托 SDK chat_text,P0-3 收敛三处重复)。"""
+    from sdk.llm_compat import chat_text
+    return chat_text(llm, messages=messages, temperature=temperature,
+                     stage=stage, conv_id=conv_id)
 
 
 def _parse_json_response(content: str | None):

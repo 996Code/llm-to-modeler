@@ -226,7 +226,7 @@ def get_llm(app_state) -> Any:
 
     引擎 chat 返回 str, pack 各栈按 (content, meta) 契约编写——
     统一经 LLMCompat 转换(见 llm_compat.py 模块文档的"unpack 症状")。"""
-    from domains.chatbi.llm_compat import LLMCompat
+    from sdk.llm_compat import LLMCompat
     return LLMCompat(app_state.llm_client)
 
 

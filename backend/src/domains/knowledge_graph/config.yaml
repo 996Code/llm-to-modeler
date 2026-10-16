@@ -35,13 +35,12 @@ dependencies:
     probe:
       module: domains.knowledge_graph.probes
       fn: neo4j
-  # 向量后端 pg(pgvector,走平台 DATABASE_URL,Milvus 后端已下线);
-  # 探 pgvector 扩展可用性,不可达只记录状态不阻断加载。
+  # 向量后端 pg(pgvector,走平台 DATABASE_URL);探针用平台内置
+  # kind: pg_vector(实现下沉 SDK,分层治理 P0-1——换向量后端插件零改)。
   pg_vector:
     required: false
     probe:
-      module: domains.knowledge_graph.probes
-      fn: pg_vector
+      kind: pg_vector
 
 # 数据制品(检索返回的子图走 data 制品,前端通用数据卡可展示)
 artifact:

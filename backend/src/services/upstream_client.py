@@ -33,6 +33,8 @@ thread-local 在两个副本间互不可见（真实事故：services 下发了�
 resolve_base 读不到）。
 """
 import logging
+
+from sdk.observability import CALL_TYPE_UPSTREAM
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -338,7 +340,7 @@ class UpstreamClient:
         response_data = response
         try:
             self._conversation_store.save_call_log(
-                call_type="upstream",
+                call_type=CALL_TYPE_UPSTREAM,
                 endpoint=endpoint,
                 request_data=request_data,
                 response_data=response_data,

@@ -147,3 +147,13 @@ class PackRelationalDB:
             migrate_fn(conn)
         logger.info("PackRelationalDB[%s]: locked migration done",
                     self.pack_name)
+
+
+def current_dsn() -> str:
+    """平台存储 DSN 解析门面(P1-3: 插件不 import 平台 services)。
+
+    转发 services.db.resolve_database_url——SDK 门面保分层方向,
+    实现仍在平台(单一事实源)。
+    """
+    from services.db import resolve_database_url
+    return resolve_database_url() or ""

@@ -311,7 +311,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         if unknown:
             # 永久性校验错误:块 ID 写错重跑也恒定失败,标 Permanent 让
             # 框架跳过自动续跑(否则 5 分钟一轮无限空转,线上实证 3 小时)
-            from services.task_manager import PermanentTaskError
+            from sdk.pack_api import PermanentTaskError
             raise PermanentTaskError(f"定向重抽的块不存在: {sorted(unknown)[:3]}…")
         pending = [c for c in pending if c["id"] in want]
         handle.log(f"定向重抽: 指定 {len(want)} 块,待处理 {len(pending)} 块"
@@ -758,7 +758,12 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
     try:
         if kb.get("vectorEnabled"):
             import os
-            current_model = os.getenv("LLM_EMBED_MODEL", "").strip()
+            # P1-1: 模型口径经平台 client 属性(替身/旧实例缺属性时回退 env)
+            _llm_c = getattr(app_state, "llm_client", None)
+            current_model = (getattr(_llm_c, "embed_model", "")
+                             or (os.getenv("LLM_EMBED_MODEL", "").strip()
+                                 if os.getenv("EMBEDDING_BACKEND", "local").strip().lower() == "local"
+                                 else os.getenv("LLM_EMBED_MODEL", "").strip() or "bge-m3"))
             stored_model = (kb.get("embeddingModel") or "").strip()
             # 模型一致性校验:换 embedding 模型 = 换维度,旧 collection 里
             # 的向量与新模型不可比。不校验的话后续 upsert/search 全部静默
@@ -787,11 +792,15 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
         # vectorEnabled=False 只有两种合法态:模型变更保护(上面已处理)或
         # 极旧库未迁移——本地 bge-m3 是定死能力(10-15 裁决:默认启用),
         # 这里兜底补开并走一次维度探测,不再留"未决探测"分支。
-        import os
-        embed_model = os.getenv("LLM_EMBED_MODEL", "").strip()
-        backend = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
-        if backend == "local":
-            embed_model = embed_model or "bge-m3"
+        # P1-1: 模型口径经平台 client 属性(local→bge-m3/api→LLM_EMBED_MODEL);
+        # 替身/旧实例缺属性时回退 env 同款解析
+        _llm_c = getattr(app_state, "llm_client", None)
+        embed_model = getattr(_llm_c, "embed_model", "")
+        if not embed_model:
+            if os.getenv("EMBEDDING_BACKEND", "local").strip().lower() == "local":
+                embed_model = "bge-m3"
+            else:
+                embed_model = os.getenv("LLM_EMBED_MODEL", "").strip()
         if not embed_model:
             raise RuntimeError(
                 "EMBEDDING_BACKEND=api 且 LLM_EMBED_MODEL 未配置,向量能力不可用"

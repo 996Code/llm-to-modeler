@@ -127,7 +127,9 @@ def env(test_url=""):
         # N1 修复后向量检索真实执行:夹具向量(V_ORDERS)命中订单表,
         # 但演示库有 137 张表(测试库累积),超默认阈值 8 会走表澄清
         # 分支——测试要的是完整管线,阈值调大跳过澄清
-        "clarify_table_threshold": 200,
+        # 阈值充分大,免疫共享测试库的表数漂移(历史用例累积,曾 137→236
+        # 让"小库"用例误入 many_tables 分支)
+        "clarify_table_threshold": 10_000,
     })
     # N1 后向量后端默认 pg:测试库 PG 无 chatbi 向量数据,真实检索零召回
     # → 全部走澄清/降级,管线测试断言全崩。fixture 内把 get_vector 换成

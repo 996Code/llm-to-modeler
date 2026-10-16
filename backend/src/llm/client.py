@@ -22,6 +22,8 @@ LLM 调用日志：
 
 import json
 import logging
+
+from sdk.observability import CALL_TYPE_LLM
 import os
 import re
 import time
@@ -106,6 +108,42 @@ class LLMClient:
         # JSON 格式对话（意图识别/字段解析等需要结构化输出的场景）
         result = client.chat_json(messages)
     """
+
+    async def probe(self) -> tuple[str, str]:
+        """LLM 网关连通性探活(P1-4: 探测逻辑归 client 单一实现)。
+
+        Returns: (status, detail)。status ∈ ok/fail/unconfigured。
+        GET {base}/models(3s 超时)——插件健康面板/依赖检测复用,
+        不再各自手拼 HTTP。
+        """
+        cfg = self.config
+        base = getattr(cfg, "base_url", "") or ""
+        api_key = getattr(cfg, "api_key", "") or ""
+        model = getattr(cfg, "model", "") or ""
+        detail = f"model={model}"
+        if not base:
+            return "unconfigured", "未配置 base_url"
+        try:
+            import httpx
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            async with httpx.AsyncClient(timeout=3.0) as ac:
+                r = await ac.get(f"{base.rstrip('/')}/models", headers=headers)
+            status = "ok" if r.status_code < 400 else "fail"
+            return status, f"{detail} · /models HTTP {r.status_code}"
+        except Exception as e:
+            return "fail", f"{detail} · 探针失败: {str(e)[:120]}"
+
+    @property
+    def embed_model(self) -> str:
+        """当前 embeddings 后端的实际出站模型名(P1-1 单一口径)。
+
+        local 固定 bge-m3;api 取 LLM_EMBED_MODEL。插件(如 KG 导入的
+        向量索引指纹)据此判断"模型是否变了",不再各自读平台 env。
+        """
+        if (os.getenv("EMBEDDING_BACKEND", "").strip().lower() == "local"
+                or not os.getenv("EMBEDDING_BACKEND", "").strip()):
+            return "bge-m3"
+        return os.getenv("LLM_EMBED_MODEL", "").strip() or "bge-m3"
 
     def __init__(self, config: Optional[LLMConfig] = None, conversation_store=None):
         """初始化 LLM 客户端。
@@ -226,7 +264,7 @@ class LLMClient:
             if stage:
                 request_data = {**(request_data or {}), "stage": stage}
             self._conversation_store.save_call_log(
-                call_type="llm",
+                call_type=CALL_TYPE_LLM,
                 endpoint=endpoint,
                 request_data=request_data,
                 response_data=response_data,

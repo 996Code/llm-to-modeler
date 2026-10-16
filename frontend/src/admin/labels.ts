@@ -2,6 +2,8 @@
 // 单一事实源——CallLogsTab(调用日志)与 ConversationTrace(会话链路)共用;
 // 新插件的环节名加在这里(第二个带 stage 的插件出现后,可迁到各 pack 目录
 // 由注册表合并,与 packPages/registry.ts 同模式)。
+// 键名与后端 sdk/observability.py 的 CALL_TYPE_* 常量对齐(分层治理
+// P0-2)——新增调用类型时两处同步改,漏一处即"观测键名没同步"前科。
 
 /** 调用类型元数据:标签 + 颜色(graph/vector/fulltext 是知识图谱检索三路) */
 export const CALL_TYPE_META: Record<string, { label: string; color: string }> = {

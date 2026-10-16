@@ -36,10 +36,9 @@ artifact:
 dependencies:
   pg_vector:
     required: false         # 可选: 语义层向量检索(两阶段召回第一阶段);不可用时降级全表清单(对标原系统 SEC-005)。
-                             # 向量存 PG(pgvector,走平台 DATABASE_URL;Milvus 后端已下线)
+                             # 探针用平台内置 kind: pg_vector(实现下沉 SDK,P0-1)
     probe:
-      module: domains.chatbi.probes
-      fn: pg_vector
+      kind: pg_vector
 
 admin:
   settings: settings.schema.yaml

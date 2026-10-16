@@ -650,15 +650,14 @@ async def kb_retrieve_test(request: Request, kb_id: str, payload: Dict[str, Any]
 async def dependency_status(request: Request):
     """对 Neo4j/向量存储各跑一次探针(结果即时,不走缓存)。
 
-    向量探针固定 pg_vector(pgvector 扩展可用性;Milvus 后端已下线,
-    VECTOR_BACKEND 非 pg 值在 resolve_vector_backend 即 fail-fast)。
+    向量探针调 SDK probe_pg_vector(P0-1 上提;本插件不再自持实现);
+    Neo4j 探针为 KG 专属(P2:图模型领域知识留插件)。
     """
-    import os
     from domains.knowledge_graph import probes
+    from sdk.vector_store import probe_pg_vector
     settings = runtime.settings_reader(request.app.state).all()
 
-    def _probe(fn_name: str) -> Dict[str, Any]:
-        fn = getattr(probes, fn_name)
+    def _run(fn) -> Dict[str, Any]:
         try:
             fn(settings)
             return {"ok": True, "detail": ""}
@@ -666,6 +665,6 @@ async def dependency_status(request: Request):
             return {"ok": False, "detail": str(e) or type(e).__name__}
 
     return {
-        "neo4j": _probe("neo4j"),
-        "pg_vector": _probe("pg_vector"),
+        "neo4j": _run(probes.neo4j),
+        "pg_vector": _run(probe_pg_vector),
     }

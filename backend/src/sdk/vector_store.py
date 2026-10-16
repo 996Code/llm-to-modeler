@@ -62,6 +62,15 @@ def resolve_vector_backend() -> str:
     return "pg"
 
 
+def backend_display_name() -> str:
+    """向量后端展示名(分层治理 P0-5: 健康组件/观测键单一事实源)。
+
+    前端健康面板与 chatbi health/detail 的向量组件键都由此派生——
+    下次换向量后端只改本函数与实现,消费方零改。
+    """
+    return "pg"
+
+
 def get_vector_store(settings: Dict[str, Any],
                      collection_prefix: str = "") -> Any:
     """按解析后的配置取/建向量存储单例(指纹 = backend + 连接参数 + 前缀)。
@@ -120,3 +129,25 @@ def reset_vector_store_cache() -> None:
             except Exception:
                 pass
         _cached_stores.clear()
+
+
+def probe_pg_vector(settings: Dict[str, Any]) -> None:
+    """PG 向量后端连通性探针(分层治理 P0-1: 自两插件上提 SDK)。
+
+    DSN 解析与 get_vector_store 同源(pg_vector_url 逃生口 > DATABASE_URL);
+    扩展缺失给明确错误(需 DBA: CREATE EXTENSION vector)。抛异常=探针失败。
+    """
+    import os
+    import psycopg
+
+    dsn = (settings.get("pg_vector_url")
+           or os.getenv("DATABASE_URL", "") or "").strip()
+    if not dsn:
+        raise RuntimeError("DATABASE_URL 未配置——pgvector 向量后端必填")
+    with psycopg.connect(dsn, connect_timeout=3) as conn:
+        row = conn.execute(
+            "SELECT extname FROM pg_extension WHERE extname = 'vector'"
+        ).fetchone()
+        if not row:
+            raise RuntimeError(
+                "pgvector 扩展未安装(需 DBA: CREATE EXTENSION vector)")

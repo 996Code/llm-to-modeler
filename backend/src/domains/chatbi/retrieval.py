@@ -64,6 +64,14 @@ DEFAULT_MAX_SCHEMA_TABLES = 10
 
 # ── JSON 容错解析(自 chat-bi llm_json.py 忠实移植)────────────────────
 
+def _as_text(resp):
+    """LLM 响应形状归一((content, meta) 或 str → str),委托 SDK。"""
+    from sdk.llm_compat import chat_text
+    if isinstance(resp, (tuple, list)):
+        return (resp[0] or "") if resp else ""
+    return resp or ""
+
+
 def parse_json_response(content: Optional[str]) -> Any | None:
     """从 LLM 响应里提取 JSON (容错 markdown 包裹/前后文字)。
 
@@ -143,6 +151,7 @@ def retrieve(
     rerank_enabled: bool = False,
     content: "SemanticModelContent | None" = None,
     hybrid_enabled: bool = False,
+    app_state: Any = None,
 ) -> RetrievalResult:
     """两阶段检索: 向量召回 → LLM 精筛。
 
@@ -198,6 +207,9 @@ def retrieve(
             pointer_errors += 1
             logger.error("retrieve 读 active 指针失败 (scope=%s): %s", sc[:8], e)
             continue
+        import time as _t
+        _t0 = _t.monotonic()
+        _err = None
         try:
             sc_hits = store.search_records(
                 sc,
@@ -209,8 +221,25 @@ def retrieve(
             candidates.extend(sc_hits)
             candidates_by_scope[sc] = sc_hits
         except Exception as e:
+            _err = str(e)
             # 单 scope 检索失败不拖垮跨源合并(与源实现 search 返回空的宁缺毋滥一致)
             logger.warning("retrieve search 失败 (scope=%s): %s", sc[:8], e)
+        finally:
+            # P1-5: 向量检索入 call_logs(观测对齐 KG;此前 chatbi 检索
+            # 零观测,"为什么没召回"排查无线索)
+            from sdk.observability import log_pack_call, CALL_TYPE_VECTOR
+            log_pack_call(
+                app_state, CALL_TYPE_VECTOR, "pg:search_records",
+                request_data={"stage": "chatbi.vector_search",
+                              "scope": sc[:8], "topK": top_k,
+                              "query": question[:200]},
+                response_data={
+                    "hits": len(candidates_by_scope.get(sc) or []),
+                    "topScores": [round(float(h.score), 4) for h in
+                                  (candidates_by_scope.get(sc) or [])[:3]],
+                },
+                duration_ms=int((_t.monotonic() - _t0) * 1000),
+                error=_err, conv_id=conv_id)
     if pointer_errors and pointer_errors == len(scopes):
         logger.error("retrieve: 全部 scope 的 active 指针读取失败, fail-closed")
         return RetrievalResult(
@@ -403,9 +432,8 @@ def _llm_refine(
             stage="chatbi.retrieve.refine",
             conv_id=conv_id,
         )
-        # 宿主契约 .chat → (content, meta) tuple;裸 str 客户端也兼容
-        # (此前直接把 tuple 传 parse_json_response, .strip() 必炸 → 精筛永远降级)
-        content = resp[0] if isinstance(resp, (tuple, list)) else resp
+        # 形状归一(此前 tuple 直传 parse_json_response 必炸 → 精筛永远降级)
+        content = _as_text(resp)
         parsed = parse_json_response(content)
         if parsed is None:
             logger.warning("_llm_refine: LLM 未返回有效 JSON, 降级返回原始召回")
@@ -613,6 +641,7 @@ def retrieve_context(
     conv_id: Optional[str] = None,
     rerank_enabled: bool = False,
     hybrid_enabled: bool = False,
+    app_state: Any = None,
 ) -> Dict[str, Any]:
     """两阶段召回 + schema_context 构建的一站式入口。
 
@@ -633,6 +662,7 @@ def retrieve_context(
         top_k=top_k, score_threshold=score_threshold, conv_id=conv_id,
         rerank_enabled=rerank_enabled,
         content=content, hybrid_enabled=hybrid_enabled,
+        app_state=app_state,
     )
     names = [m["name"] for m in result.models]
     return {
