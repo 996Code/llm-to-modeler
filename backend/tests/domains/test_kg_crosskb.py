@@ -117,6 +117,54 @@ class TestAnswerQuestionMulti:
                                               top_k=1)
         assert len(out["chunks"]) == 1 and out["chunks"][0]["kbName"] == "乙库"
 
+    def test_cross_kb_dedup_keeps_higher_score(self, two_kbs, env, monkeypatch):
+        """D13:同内容跨库重复只留高分者,被挤掉的库记进 dedupFrom。"""
+        kb_a, kb_b = two_kbs
+        vec = PerKbVector({
+            "kbA": [{"chunkId": "cA", "docId": "dA", "seq": 0,
+                     "text": "同一段资料内容。", "score": 0.7}],
+            "kbB": [{"chunkId": "cB", "docId": "dB", "seq": 0,
+                     "text": "同一段资料内容。", "score": 0.9}],
+        })
+        monkeypatch.setattr(retrieval.runtime, "get_vector", lambda state: vec)
+        out = retrieval.answer_question_multi(env.app_state, [kb_a, kb_b], "资料在哪?")
+        assert len(out["chunks"]) == 1            # 重复不占两个名额
+        assert out["chunks"][0]["kbName"] == "乙库"  # 高分者保留
+        assert out["chunks"][0]["dedupFrom"] == ["甲库"]
+
+    def test_cross_kb_dedup_equal_score_keeps_first(self, two_kbs, env, monkeypatch):
+        """D13:同分重复留先入列者(kbs 传入序),稳定可预期。"""
+        kb_a, kb_b = two_kbs
+        vec = PerKbVector({
+            "kbA": [{"chunkId": "cA", "docId": "dA", "seq": 0,
+                     "text": "同一段资料内容。", "score": 0.8}],
+            "kbB": [{"chunkId": "cB", "docId": "dB", "seq": 0,
+                     "text": "同一段资料内容。", "score": 0.8}],
+        })
+        monkeypatch.setattr(retrieval.runtime, "get_vector", lambda state: vec)
+        out = retrieval.answer_question_multi(env.app_state, [kb_a, kb_b], "资料在哪?")
+        assert len(out["chunks"]) == 1
+        assert out["chunks"][0]["kbName"] == "甲库"
+        assert out["chunks"][0]["dedupFrom"] == ["乙库"]
+
+    def test_cross_kb_dedup_frees_top_k_slot(self, two_kbs, env, monkeypatch):
+        """D13:去重腾出的名额给下一名候选(重复不再挤占 top_k)。"""
+        kb_a, kb_b = two_kbs
+        vec = PerKbVector({
+            "kbA": [{"chunkId": "cA", "docId": "dA", "seq": 0,
+                     "text": "同一段资料内容。", "score": 0.95},
+                    {"chunkId": "cA2", "docId": "dA", "seq": 1,
+                     "text": "甲库独有候选。", "score": 0.6}],
+            "kbB": [{"chunkId": "cB", "docId": "dB", "seq": 0,
+                     "text": "同一段资料内容。", "score": 0.9}],
+        })
+        monkeypatch.setattr(retrieval.runtime, "get_vector", lambda state: vec)
+        out = retrieval.answer_question_multi(env.app_state, [kb_a, kb_b], "资料在哪?",
+                                              top_k=2)
+        texts = [c["text"] for c in out["chunks"]]
+        assert len(out["chunks"]) == 2
+        assert "甲库独有候选。" in texts    # 腾出的名额给了它
+
     def test_subgraph_merged(self, two_kbs, env):
         """subgraph 各库 concat:两库节点/边都在,节点 id 带 kb 前缀不冲突。"""
         kb_a, kb_b = two_kbs

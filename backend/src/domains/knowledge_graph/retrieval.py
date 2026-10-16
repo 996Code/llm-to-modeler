@@ -719,6 +719,24 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
             merged_chunks.append(c)
     k = top_k or int(_cfg(app_state, "vector_top_k", 5))
     merged_chunks.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+    # D13 跨库内容去重:同一份资料导入多个库时,同内容(压空白后全文
+    # 相等)会各占一个 top_k 名额——答案资料里同一段反复出现,挤掉
+    # 别的候选。分数降序下同内容首个即高分者,保留它;被挤掉的库记
+    # 进 dedupFrom(可观测:哪些库是同一份资料)。空文本不参与去重。
+    _kept: Dict[str, Dict[str, Any]] = {}
+    dedup_dropped = 0
+    for c in merged_chunks:
+        key = "".join(str(c.get("text") or "").split())
+        if not key:
+            _kept[f"\x00{len(_kept)}"] = c   # 空文本:不去重,占位保序
+            continue
+        if key in _kept:
+            _kept[key].setdefault("dedupFrom", []).append(c.get("kbName") or "")
+            dedup_dropped += 1
+        else:
+            _kept[key] = c
+    if dedup_dropped:
+        merged_chunks = list(_kept.values())   # dict 保序=首次出现序(分数序)
     merged_chunks = merged_chunks[:k]
 
     # subgraph:各库 concat(节点 id 带 kb 前缀不冲突;线性化的 id→name
@@ -728,8 +746,10 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
         "edges": [e for r in per_kb for e in (r.get("subgraph") or {}).get("edges") or []],
     }
     # diagnostics:逐库合并(按库名分组;answer 路径不外透,与单库口径一致)
+    # dedupDropped:D13 跨库内容去重挤掉的重复条数(0=无重复)
     diagnostics = {"perKb": {kb.get("name"): r.get("diagnostics")
-                             for kb, r in zip(kbs, per_kb)}}
+                             for kb, r in zip(kbs, per_kb)},
+                   "dedupDropped": dedup_dropped}
     retrieved = {
         "intent": intent,
         "seeds": [s for r in per_kb for s in r.get("seeds") or []],
