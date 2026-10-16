@@ -117,6 +117,32 @@ if _runtime_db and _runtime_db == _dbname:
     )
 
 _ensure_database(TEST_DATABASE_URL)
+
+# ── 并发互踩根治(脚本层机制,不靠纪律) ────────────────────────
+# 单库+每测试 TRUNCATE 与并发 pytest 进程不兼容(互清对方数据→死锁/假
+# 失败/僵尸连接)。历史上靠"归因前 pgrep 查并发"的纪律防——纪律会滑坡
+# (2026-10-16 实证:23h 僵尸 mock 进程挂 7 连接,全量 46min)。改为库级
+# advisory lock:第二个 pytest 启动即 fail-fast 并报持锁方,锁随会话
+# 断开自动释放(僵尸进程被杀后无需人工清锁)。
+_TEST_LOCK_KEY = 0x7E57  # "TEST" 谐音,任意固定值
+import psycopg as _psycopg
+
+_lock_conn = _psycopg.connect(TEST_DATABASE_URL, autocommit=True)
+_granted = _lock_conn.execute(
+    "SELECT pg_try_advisory_lock(%s)", (_TEST_LOCK_KEY,)).fetchone()[0]
+if not _granted:
+    _holder = _lock_conn.execute(
+        "SELECT pid, application_name, client_addr, "
+        "now()-backend_start AS age FROM pg_stat_activity "
+        "WHERE datname = current_database() AND pid != pg_backend_pid() "
+        "ORDER BY backend_start LIMIT 3").fetchall()
+    _lock_conn.close()
+    pytest.exit(
+        "测试库已被另一个 pytest 会话持有(advisory lock):单库逐测试清表"
+        "与并发不兼容,会互踩出死锁/假失败。\n当前持库连接:\n  "
+        + "\n  ".join(str(h) for h in _holder)
+        + "\n处理:等对方跑完,或 kill 旧进程后重跑。", returncode=4)
+
 # 运行时(Store/graph checkpointer/main lifespan)与测试同库
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
@@ -143,7 +169,13 @@ _TRUNCATE_EXCLUDE = {"checkpoint_migrations"}
 
 @pytest.fixture(scope="session", autouse=True)
 def _init_schema():
-    """会话级建表(四 Store DDL + checkpoint 三表,幂等执行一次,早于首个测试)。"""
+    """会话级建表(四 Store DDL + checkpoint 三表,幂等执行一次,早于首个测试)。
+
+    teardown 顺带清理向量残留表:测试按 scope UUID 建向量表(zz_test_* /
+    kg_* / chatbi_*),每测试新 UUID 一张、TRUNCATE 清单只含注册过的表——
+    历史累积 258 张(2026-10-16 实证,每测试 TRUNCATE 全库扫描越跑越慢)。
+    会话结束 DROP 掉非业务表的向量残留,库水位回到建表基线。
+    """
     from services.conversation_store import ConversationStore
     from services.pack_settings import PackSettingsStore
     from services.platform_settings import PlatformSettingsStore
@@ -162,6 +194,25 @@ def _init_schema():
     with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
         PostgresSaver(conn).setup()
     yield
+    # teardown:清向量残留表(业务表由 _TRUNCATE 白名单管,这里只删
+    # "按 scope 动态建的向量表"——kg_*/chatbi_*/zz_test_* 前缀且不在
+    # 业务表白名单内的)
+    _business = {"bi_probe_t", "biz_orders", "biz_users"}
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        rows = conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
+            "AND (tablename LIKE 'zz_test_%' OR tablename LIKE 'kg_%' "
+            "     OR tablename LIKE 'chatbi_%')").fetchall()
+        for (t,) in rows:
+            if t not in _business:
+                conn.execute(
+                    f'DROP TABLE IF EXISTS public."{t}" CASCADE')
+    # 释放并发守卫锁(显式;进程退出断连也会自动释放,双保险)
+    try:
+        _lock_conn.execute("SELECT pg_advisory_unlock(%s)", (_TEST_LOCK_KEY,))
+        _lock_conn.close()
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
