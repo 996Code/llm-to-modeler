@@ -555,13 +555,6 @@ EMBEDDING_BACKEND=local              # local(默认)/api(云端 OpenAI 兼容 /v
 # LLM_CACHE_ENABLED=0           # 1=chat 结果进程内缓存 24h(全同参数命中;对话场景慎开)
 ```
 
-模型单价（费用观测，可选）：不落 `.env`，部署后经管理端接口配置——
-`PUT /api/admin/settings/model-pricing`，body 如
-`{"models": {"qwen-max": {"input_per_1k": 0.002, "output_per_1k": 0.006}}}`
-（元/千 token）。配好后管理端概览"近 7 天 LLM 费用"卡片与
-`GET /api/admin/costs/summary` 即出按 pack/stage/天的费用聚合；未配单价的
-模型 cost 为 null（只计 token 不计费）。
-
 健康检查：根路径 `GET /health`（运维/K8s 探针）与 `GET /api/health`
 （嵌入代理链别名，宿主探测 AI 服务是否部署用）双端点。
 
