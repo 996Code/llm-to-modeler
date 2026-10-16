@@ -124,7 +124,6 @@ _AUTH_WHITELIST = frozenset([
     "/api/auth/token",
 ])
 
-
 def _get_admin_token() -> str:
     """访问口令(用户在 auth.html 输入的):来自 ADMIN_TOKEN 配置。"""
     return os.getenv("ADMIN_TOKEN", "").strip()
@@ -163,6 +162,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 白名单放行
         path = request.url.path
         if path in _AUTH_WHITELIST or path.startswith("/api/auth/"):
+            return await call_next(request)
+        # 开放 API 面(D25:/api/open/*):平台不重复设门——该面自带
+        # API Key 鉴权(见 domains/knowledge_graph/open_api.py),外部
+        # 宿主没有也不该有管理 token
+        if path.startswith("/api/open/"):
             return await call_next(request)
 
         # 校验 token

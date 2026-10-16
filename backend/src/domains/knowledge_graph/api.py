@@ -199,6 +199,39 @@ async def kb_tree(request: Request):
     return {"items": runtime.get_kg_store(request.app.state).list_kb_tree()}
 
 
+# ── 开放 API Key 管理(D25:宿主推数据;签发/吊销归管理门) ──
+
+@router.get("/kbs/open-api-keys", dependencies=[Depends(admin_required)])
+async def list_open_api_keys(request: Request):
+    """Key 清单(不含哈希/明文——只有签发时返回一次明文)。"""
+    return {"items": runtime.get_kg_store(request.app.state).list_open_api_keys()}
+
+
+@router.post("/kbs/open-api-keys", dependencies=[Depends(admin_required)])
+async def create_open_api_key(request: Request, payload: Dict[str, Any]):
+    """签发 Key:明文 kgk_ 前缀 + 48 hex,仅本次返回(库内只存 SHA-256)。"""
+    import secrets
+    name = str(payload.get("name") or "").strip() or "未命名"
+    plaintext = "kgk_" + secrets.token_hex(24)
+    from domains.knowledge_graph.open_api import _hash_key
+    store = runtime.get_kg_store(request.app.state)
+    rec = store.create_open_api_key(name, _hash_key(plaintext))
+    logger.info(f"open api key issued: {rec['id'][:8]} (name={name})")
+    return {**rec, "key": plaintext}
+
+
+@router.delete("/kbs/open-api-keys/{key_id}", dependencies=[Depends(admin_required)])
+async def revoke_open_api_key(key_id: str, request: Request):
+    store = runtime.get_kg_store(request.app.state)
+    if not store.revoke_open_api_key(key_id):
+        raise HTTPException(404, "Key 不存在或已吊销")
+    logger.info(f"open api key revoked: {key_id[:8]}")
+    return {"success": True}
+
+
+# ── 图谱浏览 ─────────────────────────────────────────────────
+
+
 @router.post("/kbs", dependencies=[Depends(admin_required)])
 async def create_kb(request: Request, payload: Dict[str, Any]):
     name = str(payload.get("name") or "").strip()
@@ -426,6 +459,12 @@ def _sanitize_filename(name: str) -> str:
 
 @router.delete("/kbs/{kb_id}/documents/{doc_id}", dependencies=[Depends(admin_required)])
 async def delete_document(kb_id: str, doc_id: str, request: Request):
+    return delete_document_full(request, kb_id, doc_id)
+
+
+def delete_document_full(request: Request, kb_id: str, doc_id: str) -> Dict[str, Any]:
+    """删文档(联动清理图谱/向量/文件)。管理端与开放 API(D25)共用
+    同一条实现——清理语义只有一份,不会两边漂移。"""
     _kb_or_404(request, kb_id)
     store = runtime.get_kg_store(request.app.state)
     doc = store.get_document(doc_id)
@@ -469,8 +508,6 @@ async def delete_document(kb_id: str, doc_id: str, request: Request):
     logger.info(f"document deleted: {doc_id} (errors={errors})")
     return {"success": True, "cleanupErrors": errors}
 
-
-# ── 图谱浏览 ─────────────────────────────────────────────────
 
 @router.get("/kbs/{kb_id}/graph", dependencies=[Depends(admin_required)])
 async def get_graph_view(kb_id: str, request: Request):

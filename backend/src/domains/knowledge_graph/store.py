@@ -153,6 +153,16 @@ class KGStore:
         )""",
     "CREATE INDEX IF NOT EXISTS idx_kg_chunks_doc ON kg_chunks(doc_id, seq)",
     "CREATE INDEX IF NOT EXISTS idx_kg_chunks_status ON kg_chunks(doc_id, status)",
+    # D25 知识库开放 API:宿主推数据用的 API Key(只存 SHA-256 哈希,
+    # 明文仅签发时返回一次;吊销=软删,审计留痕)
+    """CREATE TABLE IF NOT EXISTS kg_open_api_keys (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        last_used_at TEXT
+    )""",
     ]
 
     def _init_db(self):
@@ -361,6 +371,63 @@ class KGStore:
             )
             return cur.rowcount > 0
 
+    # ── 开放 API Key(D25:宿主推数据) ─────────────────────
+
+    def create_open_api_key(self, name: str, key_hash: str) -> Dict[str, Any]:
+        key_id = str(uuid.uuid4())
+        now = _now()
+        with self._get_conn() as conn:
+            conn.execute(
+                "INSERT INTO kg_open_api_keys (id, name, key_hash, created_at) "
+                "VALUES (?, ?, ?, ?)", (key_id, name, key_hash, now))
+        return self.get_open_api_key(key_id)
+
+    def get_open_api_key(self, key_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM kg_open_api_keys WHERE id = ?", (key_id,)).fetchone()
+        return self._open_key_row(row) if row else None
+
+    def list_open_api_keys(self) -> List[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM kg_open_api_keys ORDER BY created_at DESC").fetchall()
+        return [self._open_key_row(r) for r in rows]
+
+    def revoke_open_api_key(self, key_id: str) -> bool:
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE kg_open_api_keys SET revoked_at = ? WHERE id = ? "
+                "AND revoked_at IS NULL", (_now(), key_id))
+            return cur.rowcount > 0
+
+    def find_open_api_key_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM kg_open_api_keys WHERE key_hash = ?",
+                (key_hash,)).fetchone()
+        return self._open_key_row(row) if row else None
+
+    def touch_open_api_key(self, key_id: str) -> None:
+        """最近使用时间(审计/清理依据;失败不阻断请求)。"""
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    "UPDATE kg_open_api_keys SET last_used_at = ? WHERE id = ?",
+                    (_now(), key_id))
+        except Exception as e:
+            logger.warning(f"open api key touch 失败(不阻断): {e}")
+
+    @staticmethod
+    def _open_key_row(row: dict) -> Dict[str, Any]:
+        d = dict(row)
+        return {
+            "id": d["id"], "name": d["name"],
+            "createdAt": d["created_at"],
+            "revokedAt": d.get("revoked_at"),
+            "lastUsedAt": d.get("last_used_at"),
+        }
+
     def delete_kb(self, kb_id: str) -> bool:
         """级联删元数据(图/向量由调用方清理)。"""
         with self._get_conn() as conn:
@@ -447,6 +514,7 @@ class KGStore:
         allowed = {
             "import_status", "chunk_count", "entity_count", "relation_count",
             "error", "content_hash", "filename", "file_path",
+            "size_bytes", "mime_type",
         }
         sets, params = ["updated_at = ?"], [_now()]
         for k, v in fields.items():
