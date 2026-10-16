@@ -32,8 +32,10 @@ def create_registry(app_state=None) -> ToolRegistry:
     try:
         from domains.chatbi.tools.ask_data import AskDataTool
         from domains.chatbi.tools.switch_chart import SwitchChartTool
+        from domains.chatbi.tools.query_stats import QueryStatsTool
         registry.register(AskDataTool(app_state))
         registry.register(SwitchChartTool(app_state))
+        registry.register(QueryStatsTool(app_state, db=None))
     except PackConfigurationError:
         raise
     except Exception as e:

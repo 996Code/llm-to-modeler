@@ -744,6 +744,13 @@ def handle_result_node(state: GraphState) -> dict:
                 "data": config,
                 "summary": result.summary,
             }
+            # D4 工具输出类型:suppress_output 透传给持久化层——LLM 可见
+            # 历史换短指针(大 JSON 不烧上下文),制品/消息存储保持完整;
+            # link 是给用户/LLM 的完整数据入口(如"查看完整统计")
+            if result.suppress_output:
+                payload["suppressOutput"] = True
+                if result.link:
+                    payload["link"] = result.link
             payload.update(formatted)  # 合并格式化字段
             if title:
                 payload["title"] = title
