@@ -3,12 +3,13 @@
 // 新插件的环节名加在这里(第二个带 stage 的插件出现后,可迁到各 pack 目录
 // 由注册表合并,与 packPages/registry.ts 同模式)。
 
-/** 调用类型元数据:标签 + 颜色(graph/vector 是知识图谱检索两路) */
+/** 调用类型元数据:标签 + 颜色(graph/vector/fulltext 是知识图谱检索三路) */
 export const CALL_TYPE_META: Record<string, { label: string; color: string }> = {
   llm: { label: 'LLM', color: 'purple' },
   upstream: { label: '上游', color: 'cyan' },
   graph: { label: '图谱', color: 'geekblue' },
   vector: { label: '向量', color: 'green' },
+  fulltext: { label: '全文', color: 'orange' },
 }
 
 /** 调用类型在链路时间线的样式类(轨道色 + 标签底色) */
@@ -17,6 +18,7 @@ export const CALL_TYPE_CLS: Record<string, string> = {
   upstream: 'tg-up',
   graph: 'tg-graph',
   vector: 'tg-vector',
+  fulltext: 'tg-fulltext',
 }
 
 /** stage → 中文环节名(管理端链路/调用日志据此区分调用环节) */
@@ -39,6 +41,7 @@ export const STAGE_LABELS: Record<string, string> = {
   'kg.find_entities': '图谱·种子实体匹配',
   'kg.subgraph': '图谱·子图召回',
   'kg.vector_search': '向量·相似检索',
+  'kg.fulltext_fallback': '全文·零命中兜底',
   // 智能问数(chatbi)链路(检索两阶段 + 8 步管线的 LLM 环节)
   'chatbi.embed': '向量·问题向量化',
   'chatbi.retrieve.refine': 'LLM·检索精筛',

@@ -1402,6 +1402,7 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
     # 滤掉"字符串不相似、仅 LLM 语义可判同"的核心对(齐天大圣/孙悟空)
     # ——身份复合的价值恰恰在这类对上,小库必须全量送审。
     from domains.knowledge_graph.dedup_prescreen import prescreen_pairs
+    suspicious: List[Tuple[str, str]] = []
     if len(entities) > _CONSOLIDATE_BATCH:
         suspicious = prescreen_pairs(entities)
         stats["prescreened"] = len(suspicious)
@@ -1411,7 +1412,44 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
         stats["candidates"] = len(candidate_names)
         entities = [e for e in entities if e["normalized"] in candidate_names]
 
-    entities.sort(key=lambda e: (e.get("type") or "", e["normalized"]))
+    # 落批排序:可疑对连通聚簇优先——LLM 每批只看本批名录,若对的两端
+    # 被切进不同批次,该对永远提不出来(预筛保住的恰是这些对)。按
+    # 连通分量聚簇排序让相关实体相邻,同簇尽量落同批;无簇实体(小库
+    # 全量送审路径)按原 (type, normalized) 序。
+    if suspicious:
+        clusters: List[List[str]] = []
+        index_of: Dict[str, int] = {}
+        def _cluster_of(name: str) -> int:
+            return index_of.get(name, -1)
+        for a, b in suspicious:
+            ca, cb = _cluster_of(a), _cluster_of(b)
+            if ca == -1 and cb == -1:
+                index_of[a] = index_of[b] = len(clusters)
+                clusters.append([a, b])
+            elif ca == -1:
+                index_of[a] = cb
+                clusters[cb].append(a)
+            elif cb == -1:
+                index_of[b] = ca
+                clusters[ca].append(b)
+            elif ca != cb:
+                # 合并两簇(小簇并入大簇,重编索引)
+                keep, drop = (ca, cb) if len(clusters[ca]) >= len(clusters[cb]) else (cb, ca)
+                for name in clusters[drop]:
+                    index_of[name] = keep
+                clusters[keep].extend(clusters[drop])
+                clusters[drop] = []
+        clustered_names = [n for c in clusters if c for n in c]
+        cluster_rank = {n: i for i, c in enumerate(clusters) if c for n in c}
+
+        def _batch_key(e: Dict) -> Tuple[int, str, str]:
+            n = e["normalized"]
+            r = cluster_rank.get(n)
+            return (0, f"{r:08d}", n) if r is not None else (1, e.get("type") or "", n)
+
+        entities.sort(key=_batch_key)
+    else:
+        entities.sort(key=lambda e: (e.get("type") or "", e["normalized"]))
     total_batches = (len(entities) + _CONSOLIDATE_BATCH - 1) // _CONSOLIDATE_BATCH
     if handle:
         handle.set_progress(min(99, 60 + 30 // max(1, total_batches)),

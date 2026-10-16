@@ -144,6 +144,7 @@ function itemLineClass(item: { type: string; kind?: string; callType?: string })
     if (item.callType === 'upstream') return 'upcall'
     if (item.callType === 'graph') return 'graphcall'
     if (item.callType === 'vector') return 'vectorcall'
+    if (item.callType === 'fulltext') return 'fulltextcall'
     return 'call'
   }
   switch (item.kind) {
@@ -241,8 +242,10 @@ watch(() => props.convId, load)
 .tr-upcall .tr-rail { background: #06b6d4; }
 .tr-graphcall .tr-rail { background: #3b82f6; }
 .tr-vectorcall .tr-rail { background: #22c55e; }
+.tr-fulltextcall .tr-rail { background: #f97316; }
 .tg-graph { background: #eff6ff; color: #1d4ed8; }
 .tg-vector { background: #f0fdf4; color: #15803d; }
+.tg-fulltext { background: #fff7ed; color: #c2410c; }
 .tr-recall {
   font-size: 11px; color: #2563eb; background: #f0f5ff;
   border-radius: 6px; padding: 1px 8px; font-variant-numeric: tabular-nums;

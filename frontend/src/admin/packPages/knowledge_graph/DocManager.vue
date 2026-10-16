@@ -47,7 +47,7 @@
       <a-button type="primary" :disabled="!importableCount" :loading="importingAll" @click="doImportAll">
         <CloudUploadOutlined /> 导入全部未处理文档
       </a-button>
-      <span class="dm-tip">导入 = 后台任务:LLM 抽取实体关系 → Neo4j 图谱 + Milvus 向量;任务中心可查日志</span>
+      <span class="dm-tip">导入 = 后台任务:LLM 抽取实体关系 → Neo4j 图谱 + PG 向量;任务中心可查日志</span>
     </div>
 
     <!-- 文档表 -->

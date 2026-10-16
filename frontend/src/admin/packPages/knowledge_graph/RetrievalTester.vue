@@ -59,24 +59,28 @@
       </section>
 
       <section class="rt-card">
-        <div class="rt-title">向量路 · 片段召回</div>
+        <div class="rt-title">片段召回 · 向量路 + 全文兜底</div>
         <a-tag v-if="result.diagnostics.vectorDegraded" color="red">向量检索失败,已降级纯图谱</a-tag>
+        <a-tag v-if="(result.diagnostics.fulltextHits ?? 0) > 0" color="orange">
+          图谱零命中,全文兜底救回 {{ result.diagnostics.fulltextHits }} 条
+        </a-tag>
         <template v-if="result.chunks.length">
           <div v-for="(c, i) in result.chunks" :key="i" class="rt-chunk">
             <div class="rt-chunk-head">
               <a-tag color="purple">{{ c.docName || c.docId || '?' }}</a-tag>
+              <a-tag v-if="c.source === 'fulltext'" color="orange">全文</a-tag>
               <span v-if="c.seq !== undefined" class="rt-seq">#{{ c.seq }}</span>
               <span class="rt-score">{{ (c.score ?? 0).toFixed(4) }}</span>
             </div>
             <div class="rt-chunk-text">{{ c.text }}</div>
           </div>
         </template>
-        <div v-else class="rt-empty">无命中(库未启用向量或零召回)</div>
+        <div v-else class="rt-empty">无命中(向量未启用/零召回且全文兜底无结果)</div>
       </section>
     </template>
 
     <a-empty
-      v-else-if="!loading" description="输入问题跑一次检索,看两路召回明细与水位"
+      v-else-if="!loading" description="输入问题跑一次检索,看三路召回明细与水位"
       style="padding: 60px 0"
     />
   </div>

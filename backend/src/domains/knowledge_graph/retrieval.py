@@ -310,7 +310,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             finally:
                 _scores = [float(h.get("score") or 0.0) for h in hits]
                 _log_retrieval_call(
-                    app_state, "vector", "milvus:search",
+                    app_state, "vector", f"{_vector_backend()}:search",
                     request_data={"stage": "kg.vector_search", "kbId": kb["id"],
                                   "kb": kb.get("name"), "topK": k,
                                   "query": query[:200], "metric": "COSINE"},
@@ -353,7 +353,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 return {"intent": intent, "seeds": seeds, "subgraph": subgraph,
                         "chunks": chunks, "diagnostics": diagnostics}
             _log_retrieval_call(
-                app_state, "vector", "milvus:search",
+                app_state, "vector", f"{_vector_backend()}:search",
                 request_data={"stage": "kg.vector_search", "kbId": kb["id"],
                               "kb": kb.get("name"), "degraded": True},
                 response_data={"hits": 0, "degraded": True},
@@ -647,3 +647,11 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
         "chunks": merged_chunks,
         "sources": sources,
     }
+
+def _vector_backend() -> str:
+    """观测 endpoint 前缀:按实际向量后端命名(pg:search / milvus:search)。"""
+    try:
+        from sdk.vector_store import resolve_vector_backend
+        return resolve_vector_backend()
+    except Exception:
+        return "vector"

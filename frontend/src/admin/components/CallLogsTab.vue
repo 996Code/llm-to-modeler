@@ -15,6 +15,7 @@
           <a-select-option value="upstream">上游调用</a-select-option>
           <a-select-option value="graph">图谱检索</a-select-option>
           <a-select-option value="vector">向量检索</a-select-option>
+          <a-select-option value="fulltext">全文检索</a-select-option>
         </a-select>
         <a-select v-model:value="filterPack" style="width: 150px" placeholder="按插件过滤" allow-clear
           @change="search">

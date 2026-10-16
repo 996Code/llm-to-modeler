@@ -71,6 +71,7 @@ from domains.chatbi.models import SemanticModelContent
 # (接线不改语义——点赞/点踩的幅度就是图谱演化既有的 PRAISE/CORRECTION)。
 from domains.chatbi.graph_infer import (
     CORRECTION_PENALTY,
+    MIN_CONFIDENCE,
     PRAISE_BOOST,
     apply_feedback_signals,
 )
@@ -442,13 +443,15 @@ def apply_chat_feedback(
         corrections, praises, existing_relationships)
 
     # 表级置信度微调(蓝图"表/字段置信度"的表级承载; 检索分未随制品
-    # 持久化, 加权退化为固定增量, 见模块头偏差说明)
+    # 持久化, 加权退化为固定增量, 见模块头偏差说明)。下限对齐
+    # MIN_CONFIDENCE(与关系级同款护栏)——0.0 下限可被连续点踩打穿,
+    # 表被压到零后 JOIN 路径排序失去区分度。
     delta = PRAISE_BOOST if direction == "up" else -CORRECTION_PENALTY
     table_updates: dict[str, float] = {}
     for m in content.models:
         if m.name not in table_set:
             continue
-        new_conf = max(0.0, min(1.0, (m.confidence or 0.0) + delta))
+        new_conf = max(MIN_CONFIDENCE, min(1.0, (m.confidence or 0.0) + delta))
         if abs(new_conf - (m.confidence or 0.0)) > 1e-9:
             table_updates[m.name] = new_conf
 

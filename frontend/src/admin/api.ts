@@ -839,6 +839,8 @@ export interface KgRetrieveDiagnostics {
   maxNodes: number | null
   maxEdges: number | null
   vectorDegraded: boolean
+  /** 图谱零命中时全文兜底命中的片段数(P2#12 第三路;0=未触发) */
+  fulltextHits?: number
 }
 export interface KgRetrieveTestResult {
   kb: { id: string; name: string }
@@ -847,7 +849,7 @@ export interface KgRetrieveTestResult {
   subgraph: { nodes: { id: string; name: string; type?: string | null }[]
               edges: { source: string; target: string; type: string }[] }
   chunks: { docId?: string; docName?: string; seq?: number
-            score?: number; text?: string }[]
+            score?: number; text?: string; source?: string }[]
   diagnostics: KgRetrieveDiagnostics
 }
 export async function kgRetrieveTest(

@@ -19,6 +19,7 @@
 import json
 import logging
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -71,7 +72,10 @@ def query_grams(query: str) -> List[str]:
 
     与索引侧 kg_cjk_ngrams 同源(gram 集合一致才能命中);额外做查询
     侧停用滤除与去重。空查询/纯停用 → [](调用方直接短路)。
+    入口 NFKC 归一化:索引侧文本经 doc_parser 出口已 NFKC(全角→半角),
+    查询不归一则全角"ＡＢＣ"/全角数字两边形态不一致,兜底静默零命中。
     """
+    query = unicodedata.normalize("NFKC", query or "")
     grams: List[str] = []
     for run in _CJK_RUN_RE.findall(query or ""):
         grams.extend(run[i:i + 2] for i in range(len(run) - 1))
@@ -181,8 +185,13 @@ class KGStore:
         # 落成 IMMUTABLE SQL 函数 kg_cjk_ngrams(CJK 双字滑窗 + 拉丁/数字
         # 原词,空格分隔),生成列对其取 tsvector——分词仍在库外定义、
         # 不引 jieba/zhparser,与"自建最小词典前置应用层"的选型一致。
+        # 【超时豁免】生成列对存量行全表重写(约 20ms/1200 字 chunk,500+
+        # chunk 即超池级 statement_timeout=10s)——不豁免则迁移永久超时
+        # 静默失败,每次重启重复持 ACCESS EXCLUSIVE 锁。SET LOCAL 只作用
+        # 于本事务,不影响池里其他连接的护栏语义。
         try:
             with self._get_conn() as conn:
+                conn.execute("SET LOCAL statement_timeout = '600s'")
                 conn.execute(_FULLTEXT_FN_DDL)
                 conn.execute(
                     "ALTER TABLE kg_chunks ADD COLUMN IF NOT EXISTS search_text tsvector "

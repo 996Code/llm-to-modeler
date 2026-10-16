@@ -47,6 +47,20 @@ class TestPrescreenPairs:
         assert prescreen_pairs([]) == []
         assert prescreen_pairs([_e("独", "person")]) == []
 
+    def test_cap_keeps_most_suspicious(self):
+        """cap 截断顺序回归(审查 Important):先全量判可疑再按可疑度升序
+        入选——「张三丰 + 变体池 + 张三」场景,lev=1 的高可疑对(张三/张三丰)
+        不得被 lev=2 的平庸变体挤掉(首版先到先得,名录顺序不稳定=随机)。
+        同分平局按 normalized 字典序确定(行为可复现)。"""
+        entities = [_e("张三丰", "person")]
+        # 变体池:两字距(lev=2)的可疑对——分数比 张三/张三丰(lev=1)差
+        entities += [_e(f"张三丰{c}{c}", "person") for c in "abcdefghij"]
+        entities.append(_e("张三", "person"))
+        pairs = prescreen_pairs(entities)
+        assert ("张三", "张三丰") in pairs  # 最可疑对必须在
+        # 确定性:同输入两次结果一致(cap 竞争不随机)
+        assert pairs == prescreen_pairs(entities)
+
     def test_performance_5000(self):
         """千级验收:5000 实体预筛 < 2s(纯 Python 无 IO;首字分桶+单实体
         对上限后 O(n²) 降为桶内配对——极端同前缀构造 1.7s,真实人名/地名

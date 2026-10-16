@@ -134,7 +134,7 @@ class ChatFeedbackIn(BaseModel):
     message_id: str | None = None   # 定位具体消息;缺省取最近一条数据制品消息
     feedback: Literal["up", "down"]  # 非法枚举 Pydantic 直接 422
     tables: list[str] | None = None  # 反馈涉及表;缺省从消息制品 current_tables 解析
-    comment: str | None = None       # 可选文字反馈(点踩原因等, 落事件留痕)
+    comment: str | None = Field(default=None, max_length=500)  # 点踩原因留痕;500 上限防 MB 级文本灌 events 表
 
 
 # ── 数据源管理(移植 data_sources.py 全集,密码永不回显) ────────
@@ -1009,15 +1009,42 @@ async def chat_feedback(body: ChatFeedbackIn, request: Request):
     if artifact is None:
         raise HTTPException(422, "该会话没有可反馈的数据结果消息")
 
-    tables = ([t for t in (body.tables or []) if t]
-              or [t for t in (artifact.get("current_tables") or []) if t]
-              or [t.get("name") for t in (artifact.get("table_provenance")
-                                          or []) if t.get("name")])
+    # 表集来源优先级:body 显式 > 制品 current_tables > 溯源卡表名。
+    # body.tables 必须是消息制品表集的子集——放行任意表名等于允许
+    # 反馈者全局压低/抬高与本次查询无关的表(影响该源所有用户的
+    # JOIN 路径排序)。
+    artifact_tables = ({t for t in (artifact.get("current_tables") or []) if t}
+                       | {t.get("name") for t in (artifact.get("table_provenance")
+                                                  or []) if t.get("name")})
+    if body.tables:
+        unknown = {t for t in body.tables if t} - artifact_tables
+        if unknown:
+            raise HTTPException(
+                422, f"表 {sorted(unknown)} 不在本消息的查询结果表集中, 不可反馈")
+        tables = [t for t in body.tables if t]
+    else:
+        tables = sorted(artifact_tables)
     if not tables:
         raise HTTPException(422, "无法定位反馈涉及的表(消息制品无表集)")
     ds_id = artifact.get("datasource_id")
     if not ds_id:
         raise HTTPException(422, "消息制品缺少 datasource_id, 无法定位语义层")
+
+    # per-user 幂等(防刷):同用户同消息同方向已反馈 → 直接返回成功,
+    # 不再叠加置信度——连续点踩 N 次只生效一次(改投反向仍允许,走
+    # 对应方向的既有幅度)。事件按 (user, message, direction) 查重。
+    try:
+        prior = store.load_events(
+            body.conversation_id, kinds=["feedback"]) or []
+        already = any(
+            (ev.get("payload") or {}).get("user_id") == uid
+            and (ev.get("payload") or {}).get("message_id") == body.message_id
+            and (ev.get("payload") or {}).get("feedback") == body.feedback
+            for ev in prior)
+    except Exception:
+        already = False
+    if already:
+        return {"success": True, "applied_tables": [], "deduplicated": True}
 
     from domains.chatbi import feedback as feedback_mod
     result = feedback_mod.apply_chat_feedback(_db(), ds_id, tables, body.feedback)

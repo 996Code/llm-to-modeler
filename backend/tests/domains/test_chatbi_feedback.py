@@ -211,15 +211,31 @@ class TestFeedbackApplies:
         assert set(r.json()["applied_tables"]) == {"orders", "users"}
         assert _rel_confidence(db, ds_id) == pytest.approx(0.65)
 
-    def test_unknown_tables_success_empty_applied(self, client, ds_id, conv):
-        """表不在语义层 → success + applied_tables 空(宁缺毋滥, 不 5xx)。"""
+    def test_unknown_tables_rejected(self, client, ds_id, conv):
+        """表不在本消息查询结果表集 → 422 拒绝(安全审查 I2:body.tables
+        限定制品表集子集——放行任意表名等于允许反馈者全局压低/抬高
+        与本次查询无关的表,影响该源所有用户的 JOIN 路径排序)。"""
         c, _, app = client
         _enable(app)
         r = c.post("/feedback", headers=H, json={
             "conversation_id": conv["conv_id"], "feedback": "up",
             "tables": ["no_such_table"]})
-        assert r.status_code == 200, r.text
-        assert r.json() == {"success": True, "applied_tables": []}
+        assert r.status_code == 422
+        assert "不在本消息的查询结果表集" in r.json()["detail"]
+
+    def test_feedback_idempotent_per_user(self, client, ds_id, conv):
+        """per-user 幂等(防刷):同用户同消息同方向二次反馈 → success 但
+        applied_tables 空,置信度不叠加(连续点踩 N 次只生效一次)。"""
+        c, db, app = client
+        _enable(app)
+        body = {"conversation_id": conv["conv_id"], "feedback": "down"}
+        r1 = c.post("/feedback", headers=H, json=body)
+        assert r1.status_code == 200 and r1.json()["applied_tables"]
+        after_first = _rel_confidence(db, ds_id)
+        r2 = c.post("/feedback", headers=H, json=body)
+        assert r2.status_code == 200, r2.text
+        assert r2.json() == {"success": True, "applied_tables": [], "deduplicated": True}
+        assert _rel_confidence(db, ds_id) == pytest.approx(after_first)  # 无叠加
 
     def test_feedback_event_persisted(self, client, ds_id, conv):
         """反馈事件落 events 表(kind=feedback, 不进消息重放)。"""
