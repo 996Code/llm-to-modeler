@@ -149,11 +149,17 @@ async function doFinish() {
     if (files.value.length) {
       const up = await uploadKgDocuments(kb.id, files.value)
       const failed = up.filter((r) => !r.ok)
-      if (failed.length) {
-        message.warning(`已建库,但 ${failed.length} 个文件上传失败:${failed.map((f) => `${f.filename}(${f.reason})`).join('; ')}`)
-      } else {
+      const okCount = up.length - failed.length
+      if (okCount) {
+        // 有成功上传的文件就触发导入(部分失败不拖累成功文件);
+        // 失败明细 toast 告知,用户可在文档导入页补传
         await importKgAll(kb.id)
-        message.success(`知识库「${kb.name}」已创建,${files.value.length} 个文档已开始导入(任务中心可查进度)`)
+        message.success(`知识库「${kb.name}」已创建,${okCount} 个文档已开始导入(任务中心可查进度)`)
+      } else {
+        message.warning(`已建库,但 ${failed.length} 个文件上传失败:${failed.map((f) => `${f.filename}(${f.reason})`).join('; ')}`)
+      }
+      if (failed.length) {
+        message.warning(`上传失败 ${failed.length} 个:${failed.map((f) => f.filename).join('、')}(可建库后在「文档导入」页重传)`)
       }
     } else {
       message.success(`知识库「${kb.name}」已创建`)

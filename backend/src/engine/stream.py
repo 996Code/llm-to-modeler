@@ -476,11 +476,13 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
         # D4 工具输出类型:suppress_output 的工具(如查询统计明细)声明
         # "结果文本不进 LLM 上下文"——assistant content(=下轮 LLM 历史
         # 源)换成短指针,制品(data_artifact)照常完整落库;当轮 SSE 已
-        # 带全量给前端,展示不受影响。link 给出完整数据入口。
+        # 带全量给前端,展示不受影响。指针保留 summary 前 80 字结论
+        # (下轮"错误率多少"这类追问 LLM 仍可答;大文本工具也被截住),
+        # link 给出完整数据入口。
         if result_data.get("suppressOutput"):
             link = result_data.get("link") or ""
-            summary = (f"[工具结果已收纳为制品,不占用对话上下文"
-                       f"{f',详见 {link}' if link else ''}]")
+            summary = (f"{summary[:80]}(完整结果已收纳为制品,不占用对话上下文"
+                       f"{f',详见 {link}' if link else ''})")
 
         # 数据型制品(KG 检索子图/查询结果):随 assistant 消息一起落库,
         # 历史恢复时前端用 dataArtifact 重渲染图谱卡/数据卡。

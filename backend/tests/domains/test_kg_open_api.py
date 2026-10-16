@@ -153,6 +153,56 @@ class TestOpenPush:
         assert r.status_code == 404
 
 
+class TestKeyKbBinding:
+
+    def test_key_bound_to_kb_rejected_for_other_kb(self, client):
+        """Key 绑定库 A → 推库 B 403(泄漏面收敛到单库);未绑定 Key 全库可用。"""
+        c, env = client
+        kb_a = _make_kb(env, "绑定A库")
+        kb_b = _make_kb(env, "绑定B库")
+        bound = c.post("/api/packs/knowledge_graph/kbs/open-api-keys",
+                       json={"name": "A专属", "kb_id": kb_a["id"]}).json()["key"]
+        r = c.post(f"/api/open/kb/{kb_b['id']}/documents",
+                   files=_md("x.md", "内容"), headers={"X-Api-Key": bound})
+        assert r.status_code == 403 and "无权" in r.json()["detail"]
+        # 绑定的库本身可用
+        r = c.post(f"/api/open/kb/{kb_a['id']}/documents",
+                   files=_md("y.md", "内容Y"), headers={"X-Api-Key": bound})
+        assert r.status_code == 200
+
+    def test_unbound_key_works_for_all_kbs(self, client):
+        """未绑定 Key(NULL)全库可用(多库宿主的缺省形态)。"""
+        c, env = client
+        kb_a = _make_kb(env, "全库A")
+        kb_b = _make_kb(env, "全库B")
+        key = _issue_key(client)
+        for kb in (kb_a, kb_b):
+            r = c.post(f"/api/open/kb/{kb['id']}/documents",
+                       files=_md("z.md", "内容Z"), headers={"X-Api-Key": key})
+            assert r.status_code == 200
+
+    def test_push_failed_doc_retriggers_import(self, client, monkeypatch):
+        """曾失败的文档再推同内容:不卡死——重新触发导入(断点续跑)。"""
+        c, env = client
+        kb = _make_kb(env, "失败重推库")
+        key = _issue_key(client)
+        first = c.post(f"/api/open/kb/{kb['id']}/documents",
+                       files=_md("f.md", "[E:甲] 会失败的内容"),
+                       headers={"X-Api-Key": key}).json()
+        # 等导入跑完(m3 替身 LLM 不会失败——直接把文档标成 failed 模拟)
+        _wait(env.manager, first["task"]["id"])
+        env.store.update_document(first["document"]["id"], import_status="failed",
+                                  error="模拟失败")
+        again = c.post(f"/api/open/kb/{kb['id']}/documents",
+                       files=_md("f2.md", "[E:甲] 会失败的内容"),
+                       headers={"X-Api-Key": key})
+        assert again.status_code == 200
+        body = again.json()
+        assert body["skipped"] is True
+        assert "重新触发" in body["reason"]
+        assert body.get("task")          # 带重导任务
+
+
 class TestOpenUpdateAndDelete:
 
     def test_update_forces_reimport(self, client):

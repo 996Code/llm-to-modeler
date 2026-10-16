@@ -119,6 +119,20 @@ class TestPackErrorEnvelope:
         result = ToolResult.model_validate(update["tool_result"])
         assert result.error_for_llm == "任意崩溃"          # 原样,无类型标注
 
+    def test_retryable_retry_turns_into_clarification(self):
+        """重试转为追问(ClarificationRaised):不是失败——走追问通道,
+        不被兜底 except 吞成"工具执行失败"(审查 Major 修复锚点)。"""
+        from sdk.tool import ClarificationRaised
+        tool = _ScriptedTool(raises=[
+            PackInvokeError("网关瞬时 500", PackInvokeError.RETRYABLE)])
+        # 重试时抛追问(旧协议)
+        tool.raises.append(ClarificationRaised(["需要补充什么参数?"]))
+        update = _drive(tool)
+        assert tool.execute_calls == 2
+        # 追问走 pending_questions 通道(tool_result=None 触发 rerun 路由)
+        assert update["tool_result"] is None
+        assert update["pending_questions"]["questions"][0]["question"] == "需要补充什么参数?"
+
     def test_invalid_error_type_rejected(self):
         """信封构造防呆:非法 error_type 直接 ValueError(协议错误当场暴露)。"""
         with pytest.raises(ValueError):
@@ -169,7 +183,7 @@ class TestSuppressOutput:
 
     def test_persisted_history_pointer_not_json(self):
         """stream 持久化:suppressOutput → LLM 可见历史(assistant content)
-        是短指针不含 JSON;制品(data_artifact)完整落库。"""
+        是短指针不含 JSON;结论保留前 80 字;制品(data_artifact)完整落库。"""
         from engine.stream import _save_result_conversation
         store = _CaptureStore()
         result_data = {
@@ -183,12 +197,24 @@ class TestSuppressOutput:
         _save_result_conversation(store, "conv-1", "u1", "查询质量怎么样",
                                    result_data, None)
         assistant = [m for m in store.messages if m["role"] == "assistant"][0]
-        # LLM 可见文本 = 指针:不含统计 JSON,含 link 入口
+        # LLM 可见文本 = 指针:不含统计 JSON,含结论与 link 入口
         assert "query_count" not in assistant["content"]
+        assert "共 42 次查询" in assistant["content"]      # 结论保留
         assert "不占用对话上下文" in assistant["content"]
         assert "/admin#metrics" in assistant["content"]
         # 制品完整(消息存储的一部分,历史回放渲染明细卡)
         assert assistant["data_artifact"] == result_data["data"]
+
+    def test_persisted_history_big_summary_truncated(self):
+        """大 summary 工具:指针截 80 字——大文本不随结论回流烧 token。"""
+        from engine.stream import _save_result_conversation
+        store = _CaptureStore()
+        big = "统计明细" * 200   # 800 字
+        _save_result_conversation(store, "conv-1", "u1", "问",
+                                  {"artifactType": "data", "data": {"r": 1},
+                                   "summary": big, "suppressOutput": True}, None)
+        assistant = [m for m in store.messages if m["role"] == "assistant"][0]
+        assert len(assistant["content"]) < 80 + 60   # 80 字结论+指针文案
 
     def test_persisted_history_normal_summary_kept(self):
         """未 suppress 的结果:assistant content 照旧是 summary(回归)。"""

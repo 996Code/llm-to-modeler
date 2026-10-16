@@ -15,8 +15,12 @@
 即失效。校验通过刷新 last_used_at(审计)。
 
 【幂等语义】同库同内容(content_hash)已存在 → 返回既有文档 +
-skipped=true,不重复上传不重复导入(宿主重试/对账推送安全)。
+skipped=true,不重复上传(宿主重试/对账推送安全);既有文档曾导入
+失败/部分失败时重新触发导入(断点续跑),不让宿主卡死在 skipped。
+已知边界:查重-建行之间无唯一约束,极端并发同内容推送可能产生
+重复文档行(管理端上传同款竞态,概率低;宿主按串行推送约定使用)。
 """
+import asyncio
 import hashlib
 import logging
 from typing import Any, Dict, Tuple
@@ -56,6 +60,11 @@ async def api_key_required(request: Request) -> Dict[str, Any]:
         raise HTTPException(401, "API Key 无效")
     if rec["revokedAt"]:
         raise HTTPException(401, "API Key 已吊销")
+    # 库绑定:Key 只能操作绑定的库(NULL=全库)——泄漏面从"任意库可删"
+    # 收敛到单库;403 与 401 区分(宿主排障知道是权限不是 Key 失效)
+    kb_id = request.path_params.get("kb_id")
+    if rec.get("kbId") and kb_id and rec["kbId"] != kb_id:
+        raise HTTPException(403, "API Key 无权访问该知识库")
     store.touch_open_api_key(rec["id"])
     return rec
 
@@ -64,7 +73,9 @@ def _read_validated_file(request: Request, file: UploadFile) -> Tuple[str, bytes
     """读上传文件 + 类型/大小/解析校验(与管理端上传同口径)。
 
     返回 (filename, data);非法当场 422(与上传预检一致:坏文件不进
-    导入队列再炸)。
+    导入队列再炸)。解析异常捕 Exception(坏 PDF/DOCX 抛的是
+    pypdf/zipfile 的异常,不只 ValueError——与管理端口径一致)。
+    调用方须在 to_thread 里跑(PDF 解析秒级,别阻塞事件循环)。
     """
     from domains.knowledge_graph.api import _sanitize_filename
     filename = _sanitize_filename(file.filename or "unnamed")
@@ -72,6 +83,9 @@ def _read_validated_file(request: Request, file: UploadFile) -> Tuple[str, bytes
         raise HTTPException(422, "不支持的格式(仅 md/txt/pdf/docx)")
     settings = runtime.settings_reader(request.app.state)
     max_bytes = max(1, int(settings.get("max_upload_mb", 20))) * 1024 * 1024
+    declared = int(file.size or 0)
+    if declared and declared > max_bytes:
+        raise HTTPException(422, f"超过单文件上限 {max_bytes // 1024 // 1024}MB")
     data = b""
     while True:
         part = file.file.read(1024 * 1024)
@@ -84,7 +98,7 @@ def _read_validated_file(request: Request, file: UploadFile) -> Tuple[str, bytes
         raise HTTPException(422, "空文件")
     try:
         parse_to_text(filename, data)
-    except ValueError as e:
+    except Exception as e:
         raise HTTPException(422, f"解析失败: {e}")
     return filename, data
 
@@ -110,16 +124,21 @@ def _write_doc_file(request: Request, kb_id: str, doc_id: str,
 async def push_document(kb_id: str, request: Request, file: UploadFile = File(...)):
     """推送文档:上传 + 自动触发导入。幂等(同库同内容跳过)。"""
     _kb_or_404_open(request, kb_id)
-    filename, data = _read_validated_file(request, file)
+    filename, data = await asyncio.to_thread(_read_validated_file, request, file)
     store = runtime.get_kg_store(request.app.state)
 
     content_hash = hashlib.sha256(data).hexdigest()
     dup = store.get_document_by_hash(kb_id, content_hash)
     if dup:
-        # 幂等:同内容已在库中(可能已导入/导入中)——不重复上传不重复
-        # 触发导入,返回既有文档 + skipped 标记(宿主重试/对账安全)
-        return {"skipped": True, "reason": "同内容文件已存在",
-                "document": dup, "duplicateOf": dup["id"]}
+        # 幂等:同内容已在库中——不重复上传。已成功(succeeded)直接跳过
+        # (宿主重试/对账安全);曾失败/部分失败则重新触发导入(断点续跑
+        # 只补剩余块)——否则宿主重试永远等不到重导,只能靠 PUT force
+        if dup["importStatus"] in ("succeeded", "importing", "uploaded"):
+            return {"skipped": True, "reason": "同内容文件已存在",
+                    "document": dup, "duplicateOf": dup["id"]}
+        task = _submit_import(request, kb_id, dup["id"], force=False)
+        return {"skipped": True, "reason": "同内容文件已存在(此前导入未完成,已重新触发)",
+                "document": dup, "duplicateOf": dup["id"], "task": task}
 
     doc = store.create_document(
         kb_id=kb_id, filename=filename, mime_type=mime_for(filename),
@@ -142,7 +161,7 @@ async def update_document(kb_id: str, doc_id: str, request: Request,
     doc = store.get_document(doc_id)
     if not doc or doc["kbId"] != kb_id:
         raise HTTPException(404, "文档不存在")
-    filename, data = _read_validated_file(request, file)
+    filename, data = await asyncio.to_thread(_read_validated_file, request, file)
 
     content_hash = hashlib.sha256(data).hexdigest()
     dup = store.get_document_by_hash(kb_id, content_hash)

@@ -151,6 +151,9 @@ async def chunk_preview(
         raise HTTPException(422, "不支持的格式(仅 md/txt/pdf/docx)")
     settings = runtime.settings_reader(request.app.state)
     max_bytes = max(1, int(settings.get("max_upload_mb", 20))) * 1024 * 1024
+    declared = int(file.size or 0)
+    if declared and declared > max_bytes:
+        raise HTTPException(422, f"超过单文件上限 {max_bytes // 1024 // 1024}MB")
     data = await file.read()
     if not data:
         raise HTTPException(422, "空文件")
@@ -213,10 +216,13 @@ async def create_open_api_key(request: Request, payload: Dict[str, Any]):
     """签发 Key:明文 kgk_ 前缀 + 48 hex,仅本次返回(库内只存 SHA-256)。"""
     import secrets
     name = str(payload.get("name") or "").strip() or "未命名"
+    kb_id = str(payload.get("kb_id") or "").strip() or None
+    if kb_id and not runtime.get_kg_store(request.app.state).get_kb(kb_id):
+        raise HTTPException(422, "kb_id 指向的知识库不存在")
     plaintext = "kgk_" + secrets.token_hex(24)
     from domains.knowledge_graph.open_api import _hash_key
     store = runtime.get_kg_store(request.app.state)
-    rec = store.create_open_api_key(name, _hash_key(plaintext))
+    rec = store.create_open_api_key(name, _hash_key(plaintext), kb_id=kb_id)
     logger.info(f"open api key issued: {rec['id'][:8]} (name={name})")
     return {**rec, "key": plaintext}
 
@@ -642,6 +648,15 @@ async def update_chunk(kb_id: str, doc_id: str, chunk_id: str,
     chunk = next((c for c in store.list_chunks(doc_id) if c["id"] == chunk_id), None)
     if not chunk:
         raise HTTPException(404, "块不存在或不属于该文档")
+
+    # 并发守卫(同删除端点口径):导入进行中拒绝编辑——导入任务用的是
+    # 启动时快照的旧文本,编辑重嵌之后任务批次回写会把旧文本向量写回,
+    # 文本/向量/图谱三方漂移且不可自愈
+    from domains.knowledge_graph import tasks as kg_tasks
+    inflight = kg_tasks._inflight_task_id(request.app.state, doc_id)
+    if inflight:
+        raise HTTPException(
+            409, f"该文档正在导入中(任务 {inflight[:8]}…),请等任务结束再编辑")
 
     text = str(payload.get("text") or "").strip()
     if not text:

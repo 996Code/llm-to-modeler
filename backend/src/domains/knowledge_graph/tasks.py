@@ -167,6 +167,15 @@ _CHUNK_PARAM_DEFAULTS = {
     "chunk_structural_max_chars": 10000,
     "vector_subchunk_chars": 500,
 }
+# 上限钳制(与 settings.schema.yaml 同源):手写库行/坏 JSON 可能带 10^9
+# 级值,doc_parser 只钳下限——不钳上限会产出超大块
+_CHUNK_PARAM_CEILINGS = {
+    "chunk_target_chars": 8000,
+    "chunk_overlap_chars": 500,
+    "chunk_max_chars": 16000,
+    "chunk_structural_max_chars": 50000,
+    "vector_subchunk_chars": 4000,
+}
 
 
 def chunk_params_for(app_state, kb: Optional[Dict[str, Any]]) -> Dict[str, int]:
@@ -177,9 +186,12 @@ def chunk_params_for(app_state, kb: Optional[Dict[str, Any]]) -> Dict[str, int]:
         if v is None:
             v = _cfg(app_state, key, default)
         try:
-            out[key] = int(v)
+            v = int(v)
         except (TypeError, ValueError):
-            out[key] = default
+            v = default
+        # 只钳上限:下限由 doc_parser 各自防呆(且 pack 设置可低于 schema
+        # 最小值——m3 测试夹具 target=100 是合法存量口径)
+        out[key] = min(v, _CHUNK_PARAM_CEILINGS[key])
     return out
 
 

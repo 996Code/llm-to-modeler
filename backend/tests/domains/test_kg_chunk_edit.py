@@ -149,6 +149,18 @@ class TestChunkEdit:
                      json={"text": "x" * 50001}).status_code == 422
         assert c.put(f"{base}/nope", json={"text": "y"}).status_code == 404
 
+    def test_edit_rejected_while_importing(self, client, monkeypatch):
+        """并发守卫:导入进行中编辑 → 409(防旧文本向量被任务回写漂移)。"""
+        c, env = client
+        kb, doc, chunks = _imported_doc(env, "并发库", ["[E:甲] 内容。"])
+        from domains.knowledge_graph import tasks as kg_tasks
+        monkeypatch.setattr(kg_tasks, "_inflight_task_id",
+                            lambda state, doc_id: "task-1234")
+        r = c.put(f"/api/packs/knowledge_graph/kbs/{kb['id']}/documents/"
+                  f"{doc['id']}/chunks/{chunks[0]['id']}",
+                  json={"text": "新文本。"})
+        assert r.status_code == 409 and "导入中" in r.json()["detail"]
+
     def test_graph_not_touched(self, client):
         """第一版语义边界:编辑不动图谱(实体/关系仍是旧文本的)。"""
         c, env = client

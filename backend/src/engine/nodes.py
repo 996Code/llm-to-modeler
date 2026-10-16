@@ -398,6 +398,41 @@ def _pack_error_result(error: Exception, is_retry: bool = False) -> ToolResult:
     )
 
 
+def _clarify_to_result(ce: ClarificationRaised) -> ToolResult:
+    """旧协议追问异常 → v4 ToolResult.ask(首执行与 retryable 重试共用)。
+
+    question 为 JSON 字符串(含 question/options/header)时按结构化
+    透传(pack 自建点选卡);纯文本维持开放问题+自由输入。
+    """
+    import json as _json
+    questions = []
+    for q in ce.questions:
+        parsed = None
+        if isinstance(q, str) and q.startswith("{"):
+            try:
+                cand = _json.loads(q)
+                if isinstance(cand, dict) and "question" in cand \
+                        and isinstance(cand.get("options"), list):
+                    parsed = cand
+            except ValueError:
+                pass
+        if parsed:
+            questions.append(AskQuestion(
+                question=parsed["question"],
+                header=parsed.get("header") or "补充信息",
+                options=[AskOption(label=o.get("label", ""),
+                                   description=o.get("description", ""))
+                         for o in parsed["options"] if isinstance(o, dict)],
+            ))
+        else:
+            questions.append(AskQuestion(
+                question=q if isinstance(q, str) else str(q),
+                header="补充信息",
+                options=[AskOption(label="自行输入", description="")],
+            ))
+    return ToolResult(ask=AskSpec(questions=questions), summary="需要补充信息")
+
+
 def execute_tool_node(state: GraphState) -> dict:
     """执行选中的工具。
 
@@ -501,42 +536,7 @@ def execute_tool_node(state: GraphState) -> dict:
         # 执行工具主逻辑，类比 Java toolService.execute(state, ctx)
         result = tool.execute(tool_state, ctx)
     except ClarificationRaised as ce:
-        # 工具请求追问（旧协议：抛异常）。必须先于 Exception 捕获——
-        # 否则会被下面的兜底 except 吞成 error_for_llm，前端看到的是
-        # "工具执行失败: ['请问…']" 而不是追问卡片。
-        # 转成 v4 的 ToolResult.ask，走下方统一的 interrupt 机制。
-        # question 为 JSON 字符串(含 question/options/header)时按结构化
-        # 透传(pack 自建点选卡);纯文本维持开放问题+自由输入。
-        import json as _json
-        questions = []
-        for q in ce.questions:
-            parsed = None
-            if isinstance(q, str) and q.startswith("{"):
-                try:
-                    cand = _json.loads(q)
-                    if isinstance(cand, dict) and "question" in cand \
-                            and isinstance(cand.get("options"), list):
-                        parsed = cand
-                except ValueError:
-                    pass
-            if parsed:
-                questions.append(AskQuestion(
-                    question=parsed["question"],
-                    header=parsed.get("header") or "补充信息",
-                    options=[AskOption(label=o.get("label", ""),
-                                       description=o.get("description", ""))
-                             for o in parsed["options"] if isinstance(o, dict)],
-                ))
-            else:
-                questions.append(AskQuestion(
-                    question=q if isinstance(q, str) else str(q),
-                    header="补充信息",
-                    options=[AskOption(label="自行输入", description="")],
-                ))
-        result = ToolResult(
-            ask=AskSpec(questions=questions),
-            summary="需要补充信息",
-        )
+        result = _clarify_to_result(ce)
     except PackInvokeError as pie:
         # D6 错误契约信封:工具按错误性质声明,引擎按类分流。
         # 必须先于 Exception 捕获——否则三类语义全被兜底 except 抹平成
@@ -544,11 +544,14 @@ def execute_tool_node(state: GraphState) -> dict:
         if pie.error_type == PackInvokeError.RETRYABLE:
             # 瞬时故障(网络抖动/超时):同参数重执行一次。只重试一次——
             # 持续故障该回流给用户,引擎不做指数退避长循环(那是任务框架
-            # 的职责,见 task_manager._maybe_auto_retry 的分层)
-            logger.warning(
-                f"Tool {tool_name} retryable error, retrying once: {pie.message}")
+            # 的职责,见 task_manager._maybe_auto_retry 的分层)。
+            # retryable 的契约=工具声明重执行安全(幂等或无副作用)
             try:
                 result = tool.execute(tool_state, ctx)
+            except ClarificationRaised as ce:
+                # 重试转为追问:不是失败,同外层追问通道转换(不能落进
+                # 下面的兜底 except 被吞成"工具执行失败")
+                result = _clarify_to_result(ce)
             except Exception as retry_e:
                 # 重试再失败按普通错误回流(含仍是 PackInvokeError 的情形:
                 # 二次瞬时失败说明上游真不稳,不再无限重试)

@@ -159,6 +159,7 @@ class KGStore:
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         key_hash TEXT NOT NULL UNIQUE,
+        kb_id TEXT,                   -- 绑定库(NULL=全部库);泄漏面收敛
         created_at TEXT NOT NULL,
         revoked_at TEXT,
         last_used_at TEXT
@@ -184,6 +185,13 @@ class KGStore:
                              "ADD COLUMN IF NOT EXISTS chunk_params TEXT")
         except Exception as e:
             logger.warning(f"库级分段参数列迁移失败(不影响启动,下次重试): {e}")
+        # D25 开放 Key 库绑定列:存量表无 kb_id(泄漏面收敛到单库)
+        try:
+            with self._get_conn() as conn:
+                conn.execute("ALTER TABLE kg_open_api_keys "
+                             "ADD COLUMN IF NOT EXISTS kb_id TEXT")
+        except Exception as e:
+            logger.warning(f"开放 Key 绑定列迁移失败(不影响启动,下次重试): {e}")
         # 一次性迁移:存量"未决"库(vector_enabled=0 且无 embedding_model
         # 记录——曾因探测失败落 0)翻转为启用——本地 bge-m3 定死能力。
         # 模型变更显式关闭的库(0 且有模型记录)不动:那是向量兼容性保护态。
@@ -373,13 +381,14 @@ class KGStore:
 
     # ── 开放 API Key(D25:宿主推数据) ─────────────────────
 
-    def create_open_api_key(self, name: str, key_hash: str) -> Dict[str, Any]:
+    def create_open_api_key(self, name: str, key_hash: str,
+                             kb_id: Optional[str] = None) -> Dict[str, Any]:
         key_id = str(uuid.uuid4())
         now = _now()
         with self._get_conn() as conn:
             conn.execute(
-                "INSERT INTO kg_open_api_keys (id, name, key_hash, created_at) "
-                "VALUES (?, ?, ?, ?)", (key_id, name, key_hash, now))
+                "INSERT INTO kg_open_api_keys (id, name, key_hash, kb_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?)", (key_id, name, key_hash, kb_id, now))
         return self.get_open_api_key(key_id)
 
     def get_open_api_key(self, key_id: str) -> Optional[Dict[str, Any]]:
@@ -423,6 +432,7 @@ class KGStore:
         d = dict(row)
         return {
             "id": d["id"], "name": d["name"],
+            "kbId": d.get("kb_id"),
             "createdAt": d["created_at"],
             "revokedAt": d.get("revoked_at"),
             "lastUsedAt": d.get("last_used_at"),
