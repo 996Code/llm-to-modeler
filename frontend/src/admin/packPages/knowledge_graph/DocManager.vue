@@ -48,8 +48,17 @@
       <a-button type="primary" :disabled="!importableCount" :loading="importingAll" @click="doImportAll">
         <CloudUploadOutlined /> 导入全部未处理文档
       </a-button>
+      <a-button size="small" @click="openChunkConfig"><SettingOutlined /> 分段配置</a-button>
       <span class="dm-tip">导入 = 后台任务:LLM 抽取实体关系 → Neo4j 图谱 + PG 向量;任务中心可查日志</span>
     </div>
+
+    <!-- D33 分段重配(已有库):调参与预览同向导;保存为库级参数,重导入生效 -->
+    <a-modal v-model:open="chunkConfigOpen" title="分段配置(重导入后生效)" :width="880"
+             :confirm-loading="chunkConfigSaving" ok-text="保存" cancel-text="取消" @ok="saveChunkConfig">
+      <ChunkConfigPanel v-model="chunkParams" :files="[]" />
+      <a-alert type="warning" show-icon style="margin-top: 10px"
+               message="保存仅影响后续导入;已导入文档需「重导」才会按新分段重建(图谱实体随重导同步重建)" />
+    </a-modal>
 
     <!-- 文档表 -->
     <a-table
@@ -193,16 +202,18 @@ import type { UploadChangeParam } from 'ant-design-vue'
 import {
   CheckCircleOutlined, CloudUploadOutlined, CloseCircleOutlined, DeleteOutlined,
   EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined,
-  RedoOutlined, UnorderedListOutlined,
+  RedoOutlined, SettingOutlined, UnorderedListOutlined,
 } from '@ant-design/icons-vue'
 import {
-  KgDocument, TaskItem, deleteKgDocument, fetchKgChunkExtraction, fetchKgChunks,
-  fetchKgDocuments, fetchTask, importKgAll, importKgDocument, retryKgChunks, uploadKgDocuments,
+  KgChunkParams, KgDocument, TaskItem, deleteKgDocument, fetchKgChunkExtraction,
+  fetchKgChunks, fetchKgDocuments, fetchTask, importKgAll, importKgDocument,
+  retryKgChunks, updateKgKb, uploadKgDocuments,
 } from '../../api'
 import type { KgChunkExtraction, KgChunkItem, KgChunksPayload } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
+import ChunkConfigPanel from './ChunkConfigPanel.vue'
 
-const props = defineProps<{ kbId: string; refreshTick?: number }>()
+const props = defineProps<{ kbId: string; refreshTick?: number; chunkParams?: KgChunkParams | null }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
 const loadSafely = inject<LoadSafely>('loadSafely')!
 
@@ -213,10 +224,43 @@ const importingAll = ref(false)
 const uploadResults = ref<{ filename: string; ok: boolean; reason?: string }[]>([])
 const taskByDoc = ref<Record<string, TaskItem>>({})
 const maxMb = 20
-// 切块参数展示值(与后端默认一致;实际以插件设置为准)
+// 切块参数展示值(与后端默认一致;实际以插件设置/库级参数为准)
 const chunkTargetChars = 1200
 const vectorSubChars = 500
 let loadSeq = 0   // 请求序号守卫(切库错序防护)
+
+// ── D33 分段重配(已有库):库级参数,保存后重导入生效 ──
+const chunkConfigOpen = ref(false)
+const chunkConfigSaving = ref(false)
+const chunkParams = ref<Required<KgChunkParams>>({
+  chunk_target_chars: 1200, chunk_overlap_chars: 100, chunk_max_chars: 3000,
+  chunk_structural_max_chars: 10000, vector_subchunk_chars: 500,
+})
+
+function openChunkConfig() {
+  // 库级参数优先,未配置项回默认(与后端解析链同口径)
+  const cp = props.chunkParams || {}
+  chunkParams.value = {
+    chunk_target_chars: cp.chunk_target_chars ?? 1200,
+    chunk_overlap_chars: cp.chunk_overlap_chars ?? 100,
+    chunk_max_chars: cp.chunk_max_chars ?? 3000,
+    chunk_structural_max_chars: cp.chunk_structural_max_chars ?? 10000,
+    vector_subchunk_chars: cp.vector_subchunk_chars ?? 500,
+  }
+  chunkConfigOpen.value = true
+}
+
+async function saveChunkConfig() {
+  chunkConfigSaving.value = true
+  try {
+    await updateKgKb(props.kbId, { chunk_params: { ...chunkParams.value } })
+    message.success('分段配置已保存(重导入文档后生效)')
+    chunkConfigOpen.value = false
+    emit('changed')
+  } catch (e) {
+    message.error((e as any)?.response?.data?.detail || '保存失败')
+  } finally { chunkConfigSaving.value = false }
+}
 
 const columns = [
   { title: '文件', key: 'filename', ellipsis: true },

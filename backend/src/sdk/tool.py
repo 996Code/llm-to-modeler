@@ -179,6 +179,11 @@ class ToolResult(BaseModel):
       工具未声明——前端按"可保存"处理)
     - validation_errors: 校验错误列表(引擎透传给 SSE result 事件,
       不解析内部结构;None=无错误信息)
+    - suppress_output: True=制品照常进 artifact/消息存储,但工具结果
+      文本不回流 LLM 上下文(大 JSON 烧 token 的场景,如查询统计明细;
+      引擎在拼 LLM 历史处尊重此标记,见 nodes.py)
+    - link: 前端可点的引用链接(如"查看完整统计")——suppress_output
+      丢弃正文后,用户/LLM 仍有一个入口定位完整数据
     """
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -194,6 +199,9 @@ class ToolResult(BaseModel):
     validation_errors: Optional[list] = None
     # ── 前端展示字段显式通道(同为 extra 魔法键升格) ──
     formatted: dict = Field(default_factory=dict)
+    # ── D4 工具输出类型:大制品不烧 LLM 上下文 ──
+    suppress_output: bool = False
+    link: Optional[str] = None
 
 
 class ClarificationRaised(Exception):
@@ -201,6 +209,37 @@ class ClarificationRaised(Exception):
     v4 起统一改用 ToolResult.ask。新代码不应再抛此异常。"""
     def __init__(self, questions: list[str]):
         self.questions = questions
+
+
+class PackInvokeError(Exception):
+    """工具调用失败的结构化错误信封(D6,对标 Dify 错误契约)。
+
+    归属 SDK 的理由:与 ClarificationRaised 同居——两者都是"工具抛出、
+    引擎按类型分流"的调用协议异常,协议语义归 SDK(引擎只做映射,零
+    领域知识);而 PermanentTaskError 是任务框架(services 层)的契约,
+    分层不同不混放。
+
+    工具对上游调用失败按**性质**抛本类型,引擎据此分流(见
+    engine/nodes.py execute_tool_node):
+    - retryable:   瞬时故障(网络抖动/超时)→ 引擎同参数自动重试一次
+    - permanent:   恒定失败(校验拒绝/数据不存在)→ 直接终止,重试无意义
+    - credential:  凭据/配置错误(密钥失效/未配置)→ 终止并提示检查插件配置
+
+    未抛本类型的普通异常行为不变(向后兼容:兜底 except 包装成笼统
+    error_for_llm,与 D6 之前完全一致)。
+    """
+
+    RETRYABLE = "retryable"
+    PERMANENT = "permanent"
+    CREDENTIAL = "credential"
+
+    def __init__(self, message: str, error_type: str = PERMANENT):
+        if error_type not in (self.RETRYABLE, self.PERMANENT, self.CREDENTIAL):
+            raise ValueError(
+                f"error_type 必须是 retryable/permanent/credential 之一, 收到 {error_type!r}")
+        super().__init__(message)
+        self.message = message          # 人类可读错误文案(回流 error_for_llm)
+        self.error_type = error_type    # 引擎分流依据(三类之一)
 
 
 class Tool(ABC):

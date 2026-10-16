@@ -572,6 +572,16 @@ export interface KgKnowledgeBase {
   /** 层级树(10-15):kb=知识库 | folder=纯分组目录;parentId 指向目录(顶层 null) */
   kind?: 'kb' | 'folder'
   parentId?: string | null
+  /** D33 建库向导:库级分段参数(键与插件设置同名;null=未配置回退插件设置) */
+  chunkParams?: KgChunkParams | null
+}
+/** D33:库级分段参数(建库向导配置/设置页重配;范围与后端校验一致) */
+export interface KgChunkParams {
+  chunk_target_chars?: number
+  chunk_overlap_chars?: number
+  chunk_max_chars?: number
+  chunk_structural_max_chars?: number
+  vector_subchunk_chars?: number
 }
 /** 层级树节点:folder 带 children 递归;kb 叶子带文档/实体/关系计数 */
 export interface KgTreeNode extends KgKnowledgeBase {
@@ -672,6 +682,7 @@ export async function fetchKgTemplates(): Promise<KgTemplate[]> {
 }
 export async function createKgKb(payload: {
   name: string; description?: string; template?: string; parent_id?: string | null
+  chunk_params?: KgChunkParams
 }): Promise<KgKnowledgeBase> {
   const { data } = await kgApi.post('/kbs', payload)
   return data
@@ -691,8 +702,32 @@ export async function moveKbNode(
   const { data } = await kgApi.put(`/kbs/${id}/move`, { parent_id: parentId })
   return data
 }
-export async function updateKgKb(id: string, payload: { name?: string; description?: string; schema?: KgSchema }): Promise<KgKnowledgeBase> {
+export async function updateKgKb(id: string, payload: { name?: string; description?: string; schema?: KgSchema; chunk_params?: KgChunkParams }): Promise<KgKnowledgeBase> {
   const { data } = await kgApi.put(`/kbs/${id}`, payload)
+  return data
+}
+/** D33 建库向导:分段实时预览——与导入同一条切块代码路径,预览=导入。 */
+export interface KgChunkPreviewItem {
+  seq: number; charCount: number; preview: string; subChunks: number
+}
+export interface KgChunkPreviewResult {
+  filename: string; textChars: number
+  chunks: KgChunkPreviewItem[]
+  stats: { chunkCount: number; subChunkTotal: number; minChars: number; maxChars: number; avgChars: number }
+}
+export async function kgChunkPreview(
+  file: File, params: Required<KgChunkParams>,
+): Promise<KgChunkPreviewResult> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('target', String(params.chunk_target_chars))
+  form.append('overlap', String(params.chunk_overlap_chars))
+  form.append('max_chars', String(params.chunk_max_chars))
+  form.append('structural_max', String(params.chunk_structural_max_chars))
+  form.append('vector_sub', String(params.vector_subchunk_chars))
+  const { data } = await kgApi.post('/kbs/chunk-preview', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
   return data
 }
 export async function deleteKgKb(id: string): Promise<{ success: boolean; cleanupErrors: string[] }> {

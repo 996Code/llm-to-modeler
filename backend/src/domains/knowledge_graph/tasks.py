@@ -157,6 +157,32 @@ def _cfg(app_state, key: str, default):
     return runtime.settings_reader(app_state).get(key, default)
 
 
+# D33 建库向导:分段参数解析链 库级(建库配置/设置页重配)> 插件设置 > 默认。
+# 键与插件设置同名;库级值经 api 层校验过范围,这里只做 int 收口(防
+# 手写库行/坏 JSON 漏网,doc_parser 还有最后一层防呆钳制)
+_CHUNK_PARAM_DEFAULTS = {
+    "chunk_target_chars": 1200,
+    "chunk_overlap_chars": 100,
+    "chunk_max_chars": 3000,
+    "chunk_structural_max_chars": 10000,
+    "vector_subchunk_chars": 500,
+}
+
+
+def chunk_params_for(app_state, kb: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    kb_params = (kb or {}).get("chunkParams") or {}
+    out: Dict[str, int] = {}
+    for key, default in _CHUNK_PARAM_DEFAULTS.items():
+        v = kb_params.get(key)
+        if v is None:
+            v = _cfg(app_state, key, default)
+        try:
+            out[key] = int(v)
+        except (TypeError, ValueError):
+            out[key] = default
+    return out
+
+
 # ── 导入流水线 ───────────────────────────────────────────────
 
 def run_import_document(handle) -> Dict[str, Any]:
@@ -241,12 +267,13 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         handle.log(f"文档解析: {len(data)}B → {len(text)} 字符({doc['filename'].rsplit('.', 1)[-1]} 格式)",
                    raw_bytes=len(data), text_chars=len(text))
 
+        _cp = chunk_params_for(app_state, kb)
         chunks = chunk_text(
             text,
-            target_chars=_cfg(app_state, "chunk_target_chars", 1200),
-            overlap_chars=_cfg(app_state, "chunk_overlap_chars", 100),
-            max_chars=_cfg(app_state, "chunk_max_chars", 3000),
-            structural_max_chars=_cfg(app_state, "chunk_structural_max_chars", 10000),
+            target_chars=_cp["chunk_target_chars"],
+            overlap_chars=_cp["chunk_overlap_chars"],
+            max_chars=_cp["chunk_max_chars"],
+            structural_max_chars=_cp["chunk_structural_max_chars"],
         )
         if not chunks:
             store.update_document(doc_id, import_status="failed", error="文档无有效文本")
@@ -256,8 +283,8 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         handle.log(f"结构感知切块: {len(chunks)} 块(每块 {min(lens)}~{max(lens)} 字,平均 {sum(lens) // len(lens)})",
                    chunks=len(chunks), min_chars=min(lens), max_chars=max(lens),
                    avg_chars=sum(lens) // len(lens),
-                   target=_cfg(app_state, "chunk_target_chars", 1200),
-                   overlap=_cfg(app_state, "chunk_overlap_chars", 100))
+                   target=_cp["chunk_target_chars"],
+                   overlap=_cp["chunk_overlap_chars"])
         handle.set_progress(_W_PARSE, f"切块完成: {len(chunks)} 块")
 
     # 1) 清理旧贡献。
@@ -834,7 +861,7 @@ def _vectorize_chunks(handle, app_state, store, kb: Dict, chunks: List[Dict], co
         # 本就吃不满并发(2 线程 intra_op),段吞吐损失很小;内存上限只是
         # 保险丝,不是给浪费买单的
         embed_batch = max(1, int(_cfg(app_state, "embed_batch_size", 4)))
-        sub_size = max(300, int(_cfg(app_state, "vector_subchunk_chars", 500)))
+        sub_size = max(300, chunk_params_for(app_state, kb)["vector_subchunk_chars"])
         vector_store = runtime.get_vector(app_state)
         rows = []
         for c in chunks:
@@ -1945,7 +1972,8 @@ def run_induce_schema(handle) -> Dict[str, Any]:
 
     conv_id = task_conv_id(handle.task_id)
     handle.set_progress(10, "收集文档样本")
-    samples = _collect_samples(store, kb_id, sample_target, limit_chars=1500)
+    samples = _collect_samples(store, kb_id, sample_target, limit_chars=1500,
+                               chunk_params=chunk_params_for(app_state, kb))
     if not samples:
         raise RuntimeError("库内没有可用文本(先上传并导入文档,或直接用模板本体)")
     handle.log(f"样本收集: {len(samples)} 段 / 共 {sum(len(s) for s in samples)} 字"
@@ -1996,7 +2024,8 @@ def run_induce_schema(handle) -> Dict[str, Any]:
             "samples": len(samples)}
 
 
-def _collect_samples(store, kb_id: str, target: int, limit_chars: int) -> List[str]:
+def _collect_samples(store, kb_id: str, target: int, limit_chars: int,
+                     chunk_params: Optional[Dict[str, int]] = None) -> List[str]:
     """抽样:与抽取同视角——优先已切块的 chunk,无 chunk 则用同一条切块器
     现切全书,再跨全书均匀取样(中间优先,不从文件头顺取)。
 
@@ -2005,13 +2034,21 @@ def _collect_samples(store, kb_id: str, target: int, limit_chars: int) -> List[s
     全书开头是目录页,归纳结果全是书籍结构)。全部候选被过滤时退化为
     取密度最低的块——带噪声归纳好过硬失败,提示语会说明样本质量。
     """
+    _cp = chunk_params or {}
     texts: List[str] = []
     for doc in store.list_documents(kb_id):
         chunks = store.list_chunks(doc["id"], status="done") or store.list_chunks(doc["id"])
         if not chunks and doc["filePath"]:
             try:
                 text = parse_to_text(doc["filename"], Path(doc["filePath"]).read_bytes())
-                chunks = chunk_text(text)  # 与导入同一切块器,采样/抽取同粒度
+                # 与导入同一切块器+同一套分段参数,采样/抽取同粒度
+                chunks = chunk_text(
+                    text,
+                    target_chars=_cp.get("chunk_target_chars", 1200),
+                    overlap_chars=_cp.get("chunk_overlap_chars", 100),
+                    max_chars=_cp.get("chunk_max_chars", 3000),
+                    structural_max_chars=_cp.get("chunk_structural_max_chars", 10000),
+                )
             except Exception:
                 continue
         for c in chunks or []:

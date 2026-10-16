@@ -7,7 +7,7 @@
         <div class="kg-side-head">
           <div class="kg-side-title"><PartitionOutlined class="kg-side-icon" /> 知识库</div>
           <div class="kg-side-btns">
-            <a-button size="small" type="primary" @click="openCreate"><PlusOutlined /> 新建库</a-button>
+            <a-button size="small" type="primary" @click="wizardRef?.show()"><PlusOutlined /> 新建库</a-button>
             <a-tooltip title="新建文件夹(仅作分组目录)">
               <a-button size="small" @click="openFolderCreate"><FolderAddOutlined /></a-button>
             </a-tooltip>
@@ -56,7 +56,7 @@
               </template>
             </a-tree>
             <!-- 树空态:引导新建 -->
-            <div v-if="!tree.length" class="kb-item-empty" @click="openCreate">
+            <div v-if="!tree.length" class="kb-item-empty" @click="wizardRef?.show()">
               <PlusOutlined class="kb-item-empty-icon" />
               <div>还没有知识库<br>点此创建第一个</div>
             </div>
@@ -99,7 +99,8 @@
           <a-tabs v-model:activeKey="tab" size="small">
             <a-tab-pane key="docs">
               <template #tab><FileTextOutlined /> 文档导入</template>
-              <DocManager :kb-id="currentKbId" :refresh-tick="refreshTick" @changed="loadKbs" />
+              <DocManager :kb-id="currentKbId" :refresh-tick="refreshTick"
+                          :chunk-params="currentKb?.chunkParams ?? null" @changed="loadKbs" />
             </a-tab-pane>
             <a-tab-pane key="graph">
               <template #tab><NodeIndexOutlined /> 图谱浏览</template>
@@ -127,33 +128,10 @@
       </section>
     </div>
 
-    <!-- 建库弹窗:选本体模板起步(自原库管理页并入)+可选父目录 -->
-    <a-modal v-model:open="createOpen" title="新建知识库" :confirm-loading="creating"
-             ok-text="创建" cancel-text="取消" @ok="doCreate">
-      <a-form layout="vertical" style="margin-top: 8px">
-        <a-form-item label="名称" required>
-          <a-input v-model:value="form.name" placeholder="如:产品手册、组织人事库" :maxlength="60" />
-        </a-form-item>
-        <a-form-item label="描述">
-          <a-input v-model:value="form.description" placeholder="可选" :maxlength="200" />
-        </a-form-item>
-        <a-form-item label="所属目录">
-          <a-select v-model:value="form.parentId" :options="parentOptions" />
-        </a-form-item>
-        <a-form-item label="本体模板(建库后可在「本体设置」页完全自定义)">
-          <div class="kg-templates">
-            <div
-              v-for="t in templates" :key="t.key" class="kg-tpl"
-              :class="{ on: form.template === t.key }" @click="form.template = t.key"
-            >
-              <div class="kg-tpl-title">{{ t.title }}</div>
-              <div class="kg-tpl-desc">{{ t.description }}</div>
-              <div class="kg-tpl-meta">{{ t.entityCount }} 实体类型 / {{ t.relationCount }} 关系类型</div>
-            </div>
-          </div>
-        </a-form-item>
-      </a-form>
-    </a-modal>
+    <!-- D33 建库三步向导:基本信息+上传 → 分段配置+实时预览 → 确认导入
+         (替换原"新建库"简单弹窗——分段参数从插件设置里挪到建库时可视化调参) -->
+    <KbWizard ref="wizardRef" :templates="templates" :parent-options="parentOptions"
+              @created="onWizardCreated" />
 
     <!-- 新建文件夹弹窗:简单输入(纯分组目录,不存文档) -->
     <a-modal v-model:open="folderOpen" title="新建文件夹" :confirm-loading="folderCreating"
@@ -200,8 +178,8 @@ import {
   PartitionOutlined, PlusOutlined, SwapOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import {
-  KgKnowledgeBase, KgTemplate, KgTreeNode, createKgFolder, createKgKb,
-  deleteKgKb, fetchKgKbTree, fetchKgTemplates, moveKbNode, updateKgKb,
+  KgKnowledgeBase, KgTemplate, KgTreeNode, createKgFolder, deleteKgKb,
+  fetchKgKbTree, fetchKgTemplates, moveKbNode, updateKgKb,
 } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
 import {
@@ -211,6 +189,7 @@ import DocManager from './DocManager.vue'
 import SchemaEditor from './SchemaEditor.vue'
 import GraphView from './GraphView.vue'
 import RetrievalTest from './RetrievalTester.vue'
+import KbWizard from './KbWizard.vue'
 
 const loadSafely = inject<LoadSafely>('loadSafely')!
 
@@ -266,16 +245,20 @@ function onTreeSelect(keys: (string | number)[]) {
   currentKbId.value = keys.length ? String(keys[0]) : ''
 }
 
-// ── 建库(原弹窗+可选父目录) ──────────────────────
+// ── 建库(D33 三步向导) ──────────────────────────────
 const templates = ref<KgTemplate[]>([])
-const createOpen = ref(false)
-const creating = ref(false)
-const form = ref({ name: '', description: '', template: 'general', parentId: '' })
+const wizardRef = ref<InstanceType<typeof KbWizard> | null>(null)
 
 const parentOptions = computed(() => [
   { value: '', label: '（顶层）' },
   ...folderOptions.value.map((f) => ({ value: f.id, label: f.path })),
 ])
+
+function onWizardCreated(kbId: string) {
+  currentKbId.value = kbId
+  tab.value = 'docs'
+  loadKbs()
+}
 
 onMounted(async () => {
   loadKbs()
@@ -283,33 +266,6 @@ onMounted(async () => {
     templates.value = await fetchKgTemplates()
   })
 })
-
-function openCreate() {
-  form.value = { name: '', description: '', template: 'general', parentId: '' }
-  createOpen.value = true
-}
-
-async function doCreate() {
-  if (!form.value.name.trim()) {
-    message.warning('请输入知识库名称')
-    return
-  }
-  creating.value = true
-  await loadSafely(async () => {
-    const kb = await createKgKb({
-      name: form.value.name.trim(),
-      description: form.value.description.trim(),
-      template: form.value.template,
-      parent_id: form.value.parentId || null,
-    })
-    message.success(`知识库「${kb.name}」已创建`)
-    createOpen.value = false
-    currentKbId.value = kb.id
-    tab.value = 'docs'
-    loadKbs()
-  })
-  creating.value = false
-}
 
 // ── 新建文件夹(简单输入弹窗) ──────────────────────
 const folderOpen = ref(false)
@@ -516,15 +472,4 @@ async function doDeleteCurrent() {
 .kg-empty-icon { font-size: 30px; color: #c9cdd4; }
 .kg-empty-title { font-weight: 700; font-size: 15px; color: #4e5969; margin-top: 8px; }
 .kg-empty-sub { font-size: 12.5px; color: #9ca3af; margin-top: 4px; }
-
-.kg-templates { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.kg-tpl {
-  border: 1px solid #e6ebf2; border-radius: 10px; padding: 10px 12px; cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
-}
-.kg-tpl:hover { border-color: #a5b4fc; }
-.kg-tpl.on { border-color: #2f54eb; background: #f5f7ff; }
-.kg-tpl-title { font-weight: 600; font-size: 13px; color: #1f2937; }
-.kg-tpl-desc { font-size: 12px; color: #6b7280; margin: 4px 0 2px; }
-.kg-tpl-meta { font-size: 11px; color: #94a3b8; }
 </style>

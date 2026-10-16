@@ -25,14 +25,15 @@ import hashlib
 import logging
 import re
 import shutil
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
 from sdk.pack_api import admin_required
 from domains.knowledge_graph import runtime
 from sdk.doc_parser import (
-    allowed_extension, mime_for, parse_to_text,
+    allowed_extension, chunk_text, mime_for, parse_to_text,
+    sub_chunks_for_embedding,
 )
 from domains.knowledge_graph.schema_templates import (
     get_template_schema, list_templates,
@@ -59,6 +60,41 @@ def _graph(request: Request):
         raise HTTPException(503, f"Neo4j 连接失败: {e}")
 
 
+# ── D33 建库向导:分段参数(库级,键与插件设置同名;范围与
+#    settings.schema.yaml 同源——改 schema 时同步这里) ─────────
+_CHUNK_PARAM_RANGES = {
+    "chunk_target_chars": (200, 8000),
+    "chunk_overlap_chars": (0, 500),
+    "chunk_max_chars": (500, 16000),
+    "chunk_structural_max_chars": (1000, 50000),
+    "vector_subchunk_chars": (300, 4000),
+}
+
+
+def _validated_chunk_params(payload: Dict[str, Any]) -> Optional[Dict[str, int]]:
+    """校验库级分段参数(422 拒非法;None=请求未带,保持现值)。"""
+    raw = payload.get("chunk_params")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise HTTPException(422, "chunk_params 必须是对象")
+    out: Dict[str, int] = {}
+    for key, (lo, hi) in _CHUNK_PARAM_RANGES.items():
+        if key not in raw:
+            continue
+        try:
+            v = int(raw[key])
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"chunk_params.{key} 须为整数")
+        if not lo <= v <= hi:
+            raise HTTPException(422, f"chunk_params.{key} 须在 {lo}~{hi}")
+        out[key] = v
+    unknown = set(raw) - set(_CHUNK_PARAM_RANGES)
+    if unknown:
+        raise HTTPException(422, f"未知的分段参数: {', '.join(sorted(unknown))}")
+    return out
+
+
 # ── 知识库 CRUD ─────────────────────────────────────────────
 
 @router.get("/kbs", dependencies=[Depends(admin_required)])
@@ -83,6 +119,76 @@ async def kb_templates(request: Request):
     return {"items": list_templates()}
 
 
+@router.post("/kbs/chunk-preview", dependencies=[Depends(admin_required)])
+async def chunk_preview(
+    request: Request,
+    file: UploadFile = File(...),
+    target: int = Form(1200),
+    overlap: int = Form(100),
+    max_chars: int = Form(3000),
+    structural_max: int = Form(10000),
+    vector_sub: int = Form(500),
+):
+    """D33 建库向导:分段实时预览——与导入同一条切块代码路径
+    (parse_to_text + chunk_text + sub_chunks_for_embedding),预览
+    看到的块=导入落库的块(验收口径:逐块一致)。
+
+    Body: multipart,file=文档 + 五个分段参数(Form)。
+    Returns: {filename, textChars, chunks[{seq,charCount,preview,subChunks}], stats}
+    """
+    params = {
+        "chunk_target_chars": target, "chunk_overlap_chars": overlap,
+        "chunk_max_chars": max_chars, "chunk_structural_max_chars": structural_max,
+        "vector_subchunk_chars": vector_sub,
+    }
+    for key, (lo, hi) in _CHUNK_PARAM_RANGES.items():
+        if not lo <= int(params[key]) <= hi:
+            raise HTTPException(422, f"{key} 须在 {lo}~{hi}")
+
+    filename = _sanitize_filename(file.filename or "unnamed")
+    if not allowed_extension(filename):
+        raise HTTPException(422, "不支持的格式(仅 md/txt/pdf/docx)")
+    settings = runtime.settings_reader(request.app.state)
+    max_bytes = max(1, int(settings.get("max_upload_mb", 20))) * 1024 * 1024
+    data = await file.read()
+    if not data:
+        raise HTTPException(422, "空文件")
+    if len(data) > max_bytes:
+        raise HTTPException(422, f"超过单文件上限 {max_bytes // 1024 // 1024}MB")
+    try:
+        text = parse_to_text(filename, data)
+    except ValueError as e:
+        raise HTTPException(422, f"解析失败: {e}")
+
+    chunks = chunk_text(
+        text,
+        target_chars=params["chunk_target_chars"],
+        overlap_chars=params["chunk_overlap_chars"],
+        max_chars=params["chunk_max_chars"],
+        structural_max_chars=params["chunk_structural_max_chars"],
+    )
+    items = []
+    sub_total = 0
+    for c in chunks:
+        subs = sub_chunks_for_embedding(c["text"], params["vector_subchunk_chars"])
+        sub_total += len(subs)
+        items.append({
+            "seq": c["seq"], "charCount": c["char_count"],
+            "preview": c["text"][:200], "subChunks": len(subs),
+        })
+    lens = [c["char_count"] for c in chunks]
+    return {
+        "filename": filename, "textChars": len(text),
+        "chunks": items,
+        "stats": {
+            "chunkCount": len(chunks), "subChunkTotal": sub_total,
+            "minChars": min(lens) if lens else 0,
+            "maxChars": max(lens) if lens else 0,
+            "avgChars": (sum(lens) // len(lens)) if lens else 0,
+        },
+    }
+
+
 @router.get("/kbs/tree", dependencies=[Depends(admin_required)])
 async def kb_tree(request: Request):
     """层级树(10-15 用户需求:左侧需要是有层级的树)。
@@ -105,6 +211,8 @@ async def create_kb(request: Request, payload: Dict[str, Any]):
     # kind 取值)由 store.create_kb 校验,ValueError → 422。
     kind = str(payload.get("kind") or "kb").strip()
     parent_id = payload.get("parent_id") or None
+    # D33 建库向导:库级分段参数(仅 kb 有意义;folder 忽略)
+    chunk_params = _validated_chunk_params(payload) if kind == "kb" else None
 
     store = runtime.get_kg_store(request.app.state)
     if store.get_kb_by_name(name):
@@ -115,6 +223,7 @@ async def create_kb(request: Request, payload: Dict[str, Any]):
             schema_json=get_template_schema(template) if kind == "kb" else None,
             schema_template=template if kind == "kb" else "",
             kind=kind, parent_id=str(parent_id) if parent_id else None,
+            chunk_params=chunk_params,
         )
     except ValueError as e:
         raise HTTPException(422, str(e))
@@ -149,6 +258,7 @@ async def update_kb(kb_id: str, request: Request, payload: Dict[str, Any]):
         kb_id, name=name,
         description=str(payload.get("description") or "").strip() if payload.get("description") is not None else None,
         schema_json=schema,
+        chunk_params=_validated_chunk_params(payload),
     )
     return store.get_kb(kb_id)
 

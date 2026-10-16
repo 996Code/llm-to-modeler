@@ -46,7 +46,8 @@ from langgraph.types import interrupt
 
 from engine.graph_state import GraphState
 from engine.state_keys import STATE_CONTEXT_ARTIFACT as CONTEXT_ARTIFACT
-from sdk.tool import ToolResult, ToolContext, AskSpec, AskQuestion, AskOption, ClarificationRaised
+from sdk.tool import (ToolResult, ToolContext, AskSpec, AskQuestion, AskOption,
+                      ClarificationRaised, PackInvokeError)
 from sdk.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -359,6 +360,44 @@ def check_confidence_node(state: GraphState) -> dict:
     }
 
 
+def _pack_error_result(error: Exception, is_retry: bool = False) -> ToolResult:
+    """PackInvokeError → ToolResult(D6 信封的引擎侧映射,文案按类型标注)。
+
+    - permanent: 标注"永久性"——用户知道重试无意义,直接换问法/修数据
+    - credential: 给出"请检查插件配置/密钥"指引——密钥错不是用户提问
+      的错,笼统"执行失败"只会让人反复重问
+    - retryable(重试再失败): 标注已自动重试过,持续故障应稍后再试
+    - 普通异常: 调用方走兜底分支,不进本函数(向后兼容不变)
+    """
+    if isinstance(error, PackInvokeError):
+        if error.error_type == PackInvokeError.CREDENTIAL:
+            return ToolResult(
+                error_for_llm=f"{error.message}(请检查插件配置/密钥是否正确)",
+                summary=f"凭据/配置错误: {error.message}",
+            )
+        if error.error_type == PackInvokeError.PERMANENT:
+            return ToolResult(
+                error_for_llm=f"{error.message}[永久性错误,重试无意义]",
+                summary=f"永久性错误: {error.message}",
+            )
+        # retryable 且重试再失败
+        return ToolResult(
+            error_for_llm=(f"{error.message}[已自动重试一次仍失败, "
+                           f"上游可能持续故障,请稍后再试]"),
+            summary=f"重试后仍失败: {error.message}",
+        )
+    # 重试路径抛的普通异常:按旧兜底语义包装(带重试标注便于排查)
+    if is_retry:
+        return ToolResult(
+            error_for_llm=str(error),
+            summary=f"工具执行失败(重试后): {error}",
+        )
+    return ToolResult(
+        error_for_llm=str(error),
+        summary=f"工具执行失败: {error}",
+    )
+
+
 def execute_tool_node(state: GraphState) -> dict:
     """执行选中的工具。
 
@@ -498,8 +537,31 @@ def execute_tool_node(state: GraphState) -> dict:
             ask=AskSpec(questions=questions),
             summary="需要补充信息",
         )
+    except PackInvokeError as pie:
+        # D6 错误契约信封:工具按错误性质声明,引擎按类分流。
+        # 必须先于 Exception 捕获——否则三类语义全被兜底 except 抹平成
+        # 笼统"工具执行失败"(密钥错和网络抖动对用户不可区分的根因)。
+        if pie.error_type == PackInvokeError.RETRYABLE:
+            # 瞬时故障(网络抖动/超时):同参数重执行一次。只重试一次——
+            # 持续故障该回流给用户,引擎不做指数退避长循环(那是任务框架
+            # 的职责,见 task_manager._maybe_auto_retry 的分层)
+            logger.warning(
+                f"Tool {tool_name} retryable error, retrying once: {pie.message}")
+            try:
+                result = tool.execute(tool_state, ctx)
+            except Exception as retry_e:
+                # 重试再失败按普通错误回流(含仍是 PackInvokeError 的情形:
+                # 二次瞬时失败说明上游真不稳,不再无限重试)
+                logger.exception(f"Tool {tool_name} retry failed")
+                result = _pack_error_result(retry_e, is_retry=True)
+        else:
+            # permanent:恒定失败,重试无意义;credential:凭据/配置问题,
+            # 用户侧有动作(检查插件配置/密钥)——两者都直接终止回流,
+            # 文案按类型标注(见 _pack_error_result)
+            result = _pack_error_result(pie)
     except Exception as e:
         # 工具执行抛异常：包装成 error 结果，不让流程崩
+        # 普通异常(非 PackInvokeError)行为与 D6 之前完全一致(向后兼容)
         logger.exception(f"Tool {tool_name} execution failed")
         result = ToolResult(
             error_for_llm=str(e),

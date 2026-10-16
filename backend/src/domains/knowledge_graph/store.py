@@ -166,6 +166,14 @@ class KGStore:
                              "ADD COLUMN IF NOT EXISTS parent_id TEXT")
         except Exception as e:
             logger.warning(f"层级树列迁移失败(不影响启动,下次重试): {e}")
+        # D33 建库向导:库级分段参数(建库时配置/设置页重配;JSON,键与
+        # 插件设置同名)。NULL=未配置,导入时回退插件设置。
+        try:
+            with self._get_conn() as conn:
+                conn.execute("ALTER TABLE kg_knowledge_bases "
+                             "ADD COLUMN IF NOT EXISTS chunk_params TEXT")
+        except Exception as e:
+            logger.warning(f"库级分段参数列迁移失败(不影响启动,下次重试): {e}")
         # 一次性迁移:存量"未决"库(vector_enabled=0 且无 embedding_model
         # 记录——曾因探测失败落 0)翻转为启用——本地 bge-m3 定死能力。
         # 模型变更显式关闭的库(0 且有模型记录)不动:那是向量兼容性保护态。
@@ -213,6 +221,7 @@ class KGStore:
         schema_template: str = "",
         kind: str = "kb",
         parent_id: Optional[str] = None,
+        chunk_params: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         if kind not in ("kb", "folder"):
             raise ValueError(f"kind 须为 kb|folder,实际: {kind}")
@@ -228,12 +237,15 @@ class KGStore:
             conn.execute(
                 """INSERT INTO kg_knowledge_bases
                    (id, name, description, schema_json, schema_template,
-                    vector_enabled, kind, parent_id, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    vector_enabled, kind, parent_id, chunk_params,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (kb_id, name, description,
                  json.dumps(schema_json, ensure_ascii=False) if schema_json else None,
                  schema_template, 1 if kind == "kb" else 0,
-                 kind, parent_id, now, now),
+                 kind, parent_id,
+                 json.dumps(chunk_params, ensure_ascii=False) if chunk_params else None,
+                 now, now),
             )
         return self.get_kb(kb_id)
 
@@ -318,7 +330,7 @@ class KGStore:
 
     def update_kb(
         self, kb_id: str, name: Optional[str] = None, description: Optional[str] = None,
-        schema_json: Optional[Dict] = None,
+        schema_json: Optional[Dict] = None, chunk_params: Optional[Dict] = None,
     ) -> bool:
         sets, params = ["updated_at = ?"], [_now()]
         if name is not None:
@@ -328,6 +340,9 @@ class KGStore:
         if schema_json is not None:
             sets.append("schema_json = ?")
             params.append(json.dumps(schema_json, ensure_ascii=False))
+        if chunk_params is not None:
+            sets.append("chunk_params = ?")
+            params.append(json.dumps(chunk_params, ensure_ascii=False))
         params.append(kb_id)
         with self._get_conn() as conn:
             cur = conn.execute(
@@ -363,6 +378,13 @@ class KGStore:
                 schema = json.loads(d["schema_json"])
             except (ValueError, TypeError):
                 schema = None
+        # 库级分段参数(D33 建库向导):坏 JSON 不炸启动,按未配置回退
+        chunk_params = None
+        if d.get("chunk_params"):
+            try:
+                chunk_params = json.loads(d["chunk_params"])
+            except (ValueError, TypeError):
+                chunk_params = None
         return {
             "id": d["id"], "name": d["name"], "description": d.get("description") or "",
             "schema": schema, "schemaTemplate": d.get("schema_template") or "",
@@ -373,6 +395,8 @@ class KGStore:
             "kind": d.get("kind") or "kb",
             "parentId": d.get("parent_id"),
             "status": d.get("status") or "active",
+            # D33:库级分段参数(None=未配置,导入回退插件设置)
+            "chunkParams": chunk_params,
             "createdAt": d["created_at"], "updatedAt": d["updated_at"],
         }
 
