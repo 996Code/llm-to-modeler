@@ -35,22 +35,13 @@ dependencies:
     probe:
       module: domains.knowledge_graph.probes
       fn: neo4j
-  # 向量后端默认 pg(pgvector,走平台 DATABASE_URL);探针按 VECTOR_BACKEND
-  # 分流(dependency_status 端点实现)——pg 探 pgvector 扩展,milvus 探
-  # Milvus 连通。milvus 仅 VECTOR_BACKEND=milvus 时需要,未配置/不可达
-  # 只记录状态,不阻断加载(存量部署切 pg 后停掉 Milvus 不影响本插件)。
+  # 向量后端 pg(pgvector,走平台 DATABASE_URL,Milvus 后端已下线);
+  # 探 pgvector 扩展可用性,不可达只记录状态不阻断加载。
   pg_vector:
     required: false
     probe:
       module: domains.knowledge_graph.probes
       fn: pg_vector
-  milvus:
-    required: false
-    fields:
-      - milvus_uri
-    probe:
-      module: domains.knowledge_graph.probes
-      fn: milvus
 
 # 数据制品(检索返回的子图走 data 制品,前端通用数据卡可展示)
 artifact:

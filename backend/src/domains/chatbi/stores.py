@@ -6,8 +6,8 @@
   - Embedder 缓存/批处理逻辑 ← chat-bi embedder.py LocalEmbedder
     (文本→向量 LRU 缓存 + 空列表直返;加载逻辑被引擎 llm.embeddings 取代,
     EMBEDDING_BACKEND 由引擎 env 决定,pack 不再关心 local/api);
-  - ChatBI 自己的 Mock/Milvus 封装**不移植**——SDK 已有等价设施
-    (sdk.vector_store.MilvusVectorStore),本模块只做"记录模型 ↔ chunk 模型"适配。
+  - ChatBI 源系统的向量封装不移植——SDK 已有等价设施
+    (sdk.vector_store / pg_vector_store),本模块只做"记录模型 ↔ chunk 模型"适配。
 
 【与源实现的物理映射】(语义等价,物理形态不同——差异点见各成员 docstring)
   - 源: 全部数据源共用一个 collection,靠 metadata.data_source_id 标量过滤;
@@ -35,7 +35,7 @@ from sdk.scope_registry import new_scope_id, register_prefix, unregister_prefix
 logger = logging.getLogger(__name__)
 
 PACK_NAME = "chatbi"
-VECTOR_PREFIX = "chatbi"   # Milvus collection 名前缀(装配期经 register_prefix 登记)
+VECTOR_PREFIX = "chatbi"   # 向量表名前缀(装配期经 register_prefix 登记)
 
 # collection 内 doc_id 分区:语义层索引 / few-shot 示例
 # (对应源实现的 semantic_models / fewshot 两个逻辑 collection)
@@ -133,7 +133,7 @@ class ChatBIEmbedder:
 # ── 向量存储适配(ChatBI 记录模型 ↔ SDK chunk 模型)──────────────────
 
 class ChatBIVectorStore:
-    """SDK MilvusVectorStore 的 ChatBI 适配壳。
+    """SDK 向量存储(PgVectorStore)的 ChatBI 适配壳。
 
     源实现的 store.upsert/search/delete_by_filter 三件套在本仓库的对应:
       - upsert(records)            → upsert_records(scope, records, doc_id)
@@ -141,7 +141,7 @@ class ChatBIVectorStore:
          建库前按首个向量维度 ensure_collection,幂等)
       - search(query_vector, ...)  → search_records(scope, ...)
         (doc_id 分区取代 data_source_id 标量过滤;score_threshold 在
-         适配层后置过滤——SDK search 无阈值参数,与源 Milvus 实现的
+         适配层后置过滤——SDK search 无阈值参数,与源实现的
          "limit=top_k 后过滤"行为一致)
       - delete_by_filter({ds})     → delete_doc(scope, DOC_SCHEMA)
         (返回删除数量,供 rebuild_index 日志/验证;用 count 前后差值计算)
@@ -151,7 +151,7 @@ class ChatBIVectorStore:
         self._sdk = sdk_store
 
     def ping(self) -> None:
-        """底层 Milvus 真实连通性探针(委托 SDK ping = list_collections)。
+        """底层向量库真实连通性探针(委托 SDK ping)。
 
         健康端点用(四审 P1: 此前"适配对象可构造"就显示 ok——配置错了
         也绿, 假阳性)。
@@ -162,7 +162,7 @@ class ChatBIVectorStore:
     def _chunk_id(rec: VectorRecord) -> str:
         """VectorRecord → SDK chunk_id(物理主键, ≤64 字符)。
 
-        十八审 P0-2/P1: chunk_id 是 Milvus 全局主键, doc_id 只是过滤字段——
+        十八审 P0-2/P1: chunk_id 是向量表全局主键, doc_id 只是过滤字段——
         主键必须包含 revision 与 metric 的 owner model, 否则:
           - 新 revision upsert 直接覆盖旧 active 行(隔离不存在);
           - 跨表同名 metric 相互覆盖(121 表库 312 实例仅 190 唯一名)。

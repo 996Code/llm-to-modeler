@@ -9,7 +9,7 @@
     优先、列只取中文 display_name、data_type 不进文本、指标公式是匹配关键。
 
 【与本仓库设施的对接差异】(语义等价)
-  - 向量库:SDK MilvusVectorStore(经 stores.ChatBIVectorStore 适配),
+  - 向量库:SDK PgVectorStore(经 stores.ChatBIVectorStore 适配),
     每数据源一个 scope → collection chatbi_{scope}_v1;
     源实现的 delete_by_filter({"data_source_id"}) → delete_doc(scope, DOC_SCHEMA)。
   - Embedder:ChatBIEmbedder(llm.embeddings 底座,批量一次调用);
@@ -123,7 +123,7 @@ def build_index(
     Args:
         content: 语义层内容 (models + metrics)
         data_source_id: 数据源 id (进 record metadata, 供调试/多源追溯)
-        store: ChatBIVectorStore (SDK MilvusVectorStore 适配壳)
+        store: ChatBIVectorStore (SDK PgVectorStore 适配壳)
         embedder: ChatBIEmbedder (llm.embeddings 底座)
         db: pack 关系库 (scope 未显式给出时用于解析/签发数据源 scope_id)
         scope: 显式指定的物理 scope (优先于 db 解析;测试直连用)
@@ -372,7 +372,7 @@ def rebuild_index(
 
     # ── legacy 路径: 删旧 + 建新(无版本号的兼容调用方) ──
     # 1. 删旧: 该 scope 的语义层分区(同数据源维度, few-shot 分区不受影响)
-    #    首次建索引时 collection 尚不存在——Milvus 抛 collection not found,
+    #    首次建索引时向量表尚不存在——PG 报 表不存在,
     #    视为"无旧索引可删"(docstring 边界情况第一条), 继续建新。
     #    此前把该异常当删除失败直接 return, 导致首次扫描永远建不出索引。
     try:

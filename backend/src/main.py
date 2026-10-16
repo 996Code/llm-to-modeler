@@ -222,7 +222,7 @@ async def lifespan(app: FastAPI):
         task_manager.close()  # 关闭后台任务线程池(在跑任务下次启动标 interrupted)
     except Exception:
         logger.warning("task manager close failed", exc_info=True)
-    # pack 卸载钩子:释放各插件自持的连接(Neo4j/Milvus 等)——与热切换
+    # pack 卸载钩子:释放各插件自持的连接(Neo4j/向量库等)——与热切换
     # 禁用 pack 走同一个 unload() 契约
     try:
         import importlib

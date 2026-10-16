@@ -2,13 +2,13 @@
 
 【模块定位】
 图/向量存储下沉 SDK 后,多个插件(knowledge_graph、未来的 NL2BI、
-RAG、记忆库…)共用同一套 Neo4j/Milvus 实例。隔离从"巧合"(恰好
+RAG、记忆库…)共用同一套 Neo4j/PG 实例。隔离从"巧合"(恰好
 kb_id 是 UUID、恰好 collection 叫 kg_*)升级为"机制":
 
   1. 前缀登记:每个使用 SDK 存储的插件声明一个全局唯一前缀,登记进
      进程级注册表;两个插件撞前缀在装配期就 fail-fast,而不是运行期
      互相读写对方的数据。
-  2. scope 签发:传给 store 的 scope_id(图属性/Milvus collection 名
+  2. scope 签发:传给 store 的 scope_id(图属性/向量表名
      的组成部分)必须是服务端签发的不可预测 ID——本模块的
      new_scope_id() 或调用方自己的 UUID 生成。契约见 new_scope_id
      的 docstring。
@@ -40,7 +40,7 @@ def register_prefix(prefix: str, owner: str) -> None:
 
     Args:
         prefix: 前缀标识(建议短小、全小写,如 "kg" / "bi" / "rag")。
-            它会出现在 Neo4j 约束/索引名与 Milvus collection 名里,
+            它会出现在 Neo4j 约束/索引名与向量表名里,
             是该插件全部存储对象的命名空间边界。
         owner: 声明方标识(约定传 pack 名,报错信息可定位)。
 
@@ -99,7 +99,7 @@ def is_scope_id_safe(scope_id: str) -> bool:
     store 实现层用它做入口防御(不满足即拒收),把契约从文档变成
     代码强制——用户输入直传 scope_id 在 store 门口就被拦下。
     不用 uuid.UUID() 宽松解析:它接受花括号/URN/大写/无连字符等形态,
-    其中花括号形态会进 collection 名(Milvus 命名受限),大写形态
+    其中花括号形态会进表名(命名受限),大写形态
     破坏归一化唯一性。
     """
     return isinstance(scope_id, str) and bool(_UUID_STRICT.fullmatch(scope_id))

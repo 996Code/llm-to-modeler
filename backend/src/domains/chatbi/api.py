@@ -527,12 +527,10 @@ async def slow_queries_ep(ds_id: str, request: Request, limit: int = 20, days: i
 async def health_detail_ep(request: Request):
     """系统状态详情(对标源 T050 /health/detail)。
 
-    组件各自独立探测, 一个挂了不影响其他组件上报: 向量库(Milvus)/
+    组件各自独立探测, 一个挂了不影响其他组件上报: 向量库(pgvector)/
     LLM 网关/数据源加密凭据 + 各业务库最近健康状态。
     """
-    import os
-    _backend = os.getenv("VECTOR_BACKEND", "pg").strip().lower()
-    vector_key = "milvus" if _backend == "milvus" else "pg"
+    vector_key = "pg"  # pgvector 单后端(Milvus 已下线);前端健康组件按此键展示
     components: dict = {}
     # 调度器(三十九审 P1-D): 线程存活/连续 tick 失败/最近 tick——
     # 线程死亡或持续失败必须可见, 不能 health 绿而定时不跑
@@ -755,7 +753,7 @@ async def rebuild_index_endpoint(ds_id: str, request: Request):
     """强制重建数据源的语义向量索引(管理端兜底入口,后台任务执行)。
 
     背景:语义层保存/图谱变更会自动重建,但两类场景没有入口——
-    ① 切换向量后端(Milvus→PG)后存量索引需重灌;
+    ① 向量后端迁移(Milvus→PG)后存量索引需重灌;
     ② active 指针指向历史脏分区名(如带 token 后缀的 schema_rN_tM)时,
     同版本重建被 CAS「仅更高版本可翻转」挡住,永远翻不正。
     实现:revision 取 max(指针版本, 语义层版本)+1 —— 必高于脏指针,

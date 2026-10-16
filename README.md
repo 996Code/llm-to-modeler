@@ -14,7 +14,7 @@
 | 前端 | Vue 3 + TypeScript + Vite + Ant Design Vue + Pinia + AntV G6（图谱可视化） |
 | 后端 | Python 3.12 + FastAPI + LangGraph StateGraph |
 | LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型；embedding 同协议） |
-| 存储 | PostgreSQL（对话/审计/任务/checkpoint + 向量 pgvector，必填）+ Neo4j（图谱，可选）+ Milvus（向量可选后端，仅 `VECTOR_BACKEND=milvus`） |
+| 存储 | PostgreSQL（对话/审计/任务/checkpoint + 向量 pgvector，必填）+ Neo4j（图谱，可选） |
 | 上游 | AssetClient 抽象（HTTP 适配；地址请求级解析：宿主 services 表按请求下发） |
 
 ---
@@ -83,7 +83,7 @@
 │  │  │                                                            │   │
 │  │  ├── scope_registry.py  ★ 存储命名空间隔离(前缀登记+scope签发)│   │
 │  │  ├── graph_store.py     ★ Neo4j 图存储(GraphStore Protocol)  │   │
-│  │  ├── vector_store.py    ★ Milvus 向量存储(VectorStore Protocol)│   │
+│  │  ├── vector_store.py    ★ 向量存储工厂(VectorStore Protocol)│   │
 │  │  └── doc_parser.py      ★ md/txt/pdf/docx 解析+切块          │   │
 │  └──────────────────────────┬───────────────────────────────────┘   │
 │                              │                                       │
@@ -260,7 +260,7 @@ domains/
 ├── knowledge_graph/      ← 知识图谱插件(全能力形态示例)
 │   ├── pack.py           ← 四钩子齐备: create_registry + create_api_router
 │   │                        + register_tasks + unload
-│   ├── config.yaml       ← manifest: 依赖声明(neo4j/milvus)+管理页+设置页
+│   ├── config.yaml       ← manifest: 依赖声明(neo4j/pg_vector)+管理页+设置页
 │   ├── settings.schema.yaml ← 声明式设置页 schema(管理端自动渲染)
 │   ├── api.py            ← 插件自有 HTTP API(挂 /api/packs/knowledge_graph)
 │   ├── tasks.py          ← 后台任务: 导入流水线(断点续跑/熔断/进度心跳)
@@ -403,7 +403,7 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 
 ### 4.3 knowledge_graph — 知识图谱 + 向量检索（全能力插件）
 
-自然语言驱动的知识库：上传文档 → LLM 抽取实体/关系入 Neo4j、切块向量化入 PG(pgvector,默认;Milvus 可选) →
+自然语言驱动的知识库：上传文档 → LLM 抽取实体/关系入 Neo4j、切块向量化入 PG(pgvector) →
 对话里"查一下知识库里""张伟向谁汇报"直接命中（`kb_search` 工具），答案带三元组证据
 与原文引用。
 
@@ -416,7 +416,7 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 | 检索可观测 | 三路库调用入 `call_logs`（graph/vector/fulltext 类型）:逐词种子命中、子图召回量+三元组明细+截断水位、向量逐条相似度分数、全文兜底命中明细——会话链路与调用日志页均可查 |
 | 插件 HTTP API | `/api/packs/knowledge_graph/*`:知识库 CRUD/文档上传/导入/图谱查询/增量展开/检索问答（管理页与宿主直调） |
 | 管理页 | 管理端动态 Tab:知识库工作条（选库/建库/删库）+ 文档导入 + G6 图谱浏览（单击详情/双击展开邻居/悬停高亮一阶邻域）+ 本体设置（模板起步/LLM 归纳/类型审核） |
-| 依赖门控 | manifest 声明 neo4j 依赖与向量后端探针(pg 默认/milvus 可选);未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
+| 依赖门控 | manifest 声明 neo4j/pg_vector 依赖与探针;未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
 
 **SDK 存储下沉**：图/向量/文档解析能力已下沉 `sdk/`（`graph_store` / `vector_store` /
 `doc_parser` / `scope_registry`）,带命名空间隔离契约（前缀登记 fail-fast + scope_id
@@ -533,12 +533,11 @@ APP_MEM_LIMIT=8g               # 应用容器内存护栏
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your-password
-# ── 向量后端（默认 pg；Milvus 已降为可选后端）──
-# VECTOR_BACKEND=pg        # 默认。向量存 PostgreSQL(pgvector 扩展 + HNSW 余弦索引),
+# ── 向量存储（pgvector 单后端;Milvus 已下线移除）──
+# VECTOR_BACKEND=pg        # 默认且唯一。向量存 PostgreSQL(pgvector 扩展 + HNSW 余弦索引),
 #                          # 走 DATABASE_URL 同库,建表时自动 CREATE EXTENSION vector
 #                          # (目标 PG 需装 pgvector;无权限时报错并提示找 DBA 授权)。
-# VECTOR_BACKEND=milvus    # 切回 Milvus:需配下方 MILVUS_* 并运行 Milvus 服务。
-MILVUS_URI=http://localhost:19530
+#                          # 存量 .env 带 VECTOR_BACKEND=milvus 会在启动时 fail-fast 提示改 pg。
 LLM_EMBED_MODEL=bge-m3              # 默认本地 ONNX(EMBEDDING_BACKEND=local,零 API 费用)
 EMBEDDING_BACKEND=local              # local(默认)/api(云端 OpenAI 兼容 /v1/embeddings)
 
@@ -735,7 +734,7 @@ llm-to-modler/
 │       │   ├── sanitize.py        # Unicode 隐写清洗
 │       │   ├── scope_registry.py  # ★ 存储命名空间隔离(前缀登记+scope签发)
 │       │   ├── graph_store.py     # ★ Neo4j 图存储(GraphStore Protocol)
-│       │   ├── vector_store.py    # ★ Milvus 向量存储(VectorStore Protocol)
+│       │   ├── vector_store.py    # ★ 向量存储(VectorStore Protocol)
 │       │   └── doc_parser.py      # ★ md/txt/pdf/docx 解析+切块
 │       │
 │       ├── domains/               # ★ Domain Packs (领域知识全部在此)
@@ -858,8 +857,7 @@ SDK 存储设施（前缀登记 + scope 签发隔离契约）。
 
 前后端合并为一个一体容器（nginx 伺服静态/反代 + uvicorn 跑 API），
 外加 Neo4j（图谱）一个依赖服务；向量存 PostgreSQL（pgvector，与平台
-存储同库同容器）。Milvus 为可选后端，默认不启动——仅
-`VECTOR_BACKEND=milvus` 时用 `docker compose --profile milvus up -d` 启用。
+存储同库同容器，Milvus 后端已随服务下线移除）。
 
 ```bash
 # 1. 准备配置
@@ -878,7 +876,7 @@ vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD、POSTGRES_PASSWORD 等
 ```
 
 - 应用入口：`http://<主机>:19090/ai-modeler/`（`HOST_PORT` 可改）
-- 数据落盘：`./data/postgres`（PG 数据，含向量表）、`./data/app`（上传文件）、`./data/neo4j`、`./data/milvus`（仅启用 milvus profile 时）
+- 数据落盘：`./data/postgres`（PG 数据，含向量表）、`./data/app`（上传文件）、`./data/neo4j`
 - embedding 模型：首次部署自动下载到 `./data/models/embedding/`（bge-m3，~543MB），
   跨版本复用；`EMBEDDING_BACKEND=local` 启用本地向量化
 - 镜像构建：`deploy.sh` 在 docker run 容器内预构建（前端 dist / 后端 .deps / nginx deb），
@@ -889,7 +887,5 @@ vim .env   # 填 LLM_API_KEY、NEO4J_PASSWORD、POSTGRES_PASSWORD 等
 `backend/scripts/migrate_sqlite_to_pg.py` 脚本头部的 runbook(幂等可重跑,
 不随镜像/部署分发)。
 
-**存量升级（Milvus → PG 向量迁移，一次性,手动执行）**：向量默认后端已切
-pg(pgvector),曾用 Milvus 的部署升级后按需迁移——停 app 后在宿主跑
-`backend/scripts/migrate_milvus_to_pg.py`(幂等,按 doc 补缺口不覆盖新数据;
-Milvus 不可达/无数据时自动跳过),runbook 见脚本头部。
+**存量升级（Milvus → PG 向量迁移）**：迁移脚本已随 Milvus 下线移除——曾用
+Milvus 的部署直接重新导入文档/重扫语义层即可（用户裁决：老数据可重新写入）。

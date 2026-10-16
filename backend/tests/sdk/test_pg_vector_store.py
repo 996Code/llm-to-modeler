@@ -228,32 +228,17 @@ class TestFactoryBackend:
         finally:
             vs.reset_vector_store_cache()
 
-    def test_factory_backend_in_cache_key(self, monkeypatch):
-        """同 prefix 不同 backend 各一份缓存(热切换不互踢)。"""
-        calls = []
-        real_cls = vs.MilvusVectorStore
-
-        def fake_ctor(uri, user="", password="", collection_prefix="kg"):
-            calls.append(collection_prefix)
-            s = real_cls.__new__(real_cls)
-            s._client, s._prefix = None, collection_prefix
-            return s
-
-        monkeypatch.setattr(vs, "MilvusVectorStore", fake_ctor)
+    def test_factory_backend_milvus_failfast(self, monkeypatch):
+        """VECTOR_BACKEND=milvus(已下线)→ fail-fast 报错指引改 pg,
+        而非静默落回 pg 让"以为在用 Milvus"的部署继续蒙着跑。"""
+        monkeypatch.setenv("VECTOR_BACKEND", "milvus")
         vs._cached_stores.clear()
         try:
-            pg_store = vs.get_vector_store({}, collection_prefix="kg")
-            monkeypatch.setenv("VECTOR_BACKEND", "milvus")
-            milvus_store = vs.get_vector_store(
-                {"milvus_uri": "http://x"}, collection_prefix="kg")
-            assert isinstance(pg_store, PgVectorStore)
-            assert not isinstance(milvus_store, PgVectorStore)
-            assert calls == ["kg"]
-            # 切回 pg 命中旧缓存(不重建、不互踢)
-            monkeypatch.delenv("VECTOR_BACKEND", raising=False)
-            assert vs.get_vector_store({}, collection_prefix="kg") is pg_store
+            with pytest.raises(ValueError, match="pgvector 单后端"):
+                vs.get_vector_store({}, collection_prefix="kg")
         finally:
             vs.reset_vector_store_cache()
+            monkeypatch.delenv("VECTOR_BACKEND", raising=False)
 
 
 class TestPgConnectionSelfHeal:

@@ -24,7 +24,7 @@
           - SOME_API_KEY
 
 【铁律:平台零领域知识】
-本模块不认识 neo4j/milvus/任何具体设施。探针有两种表达:
+本模块不认识 neo4j/pgvector/任何具体设施。探针有两种表达:
   1. module + fn:pack 自己提供的探针函数(懒加载——只在配置齐全后 import,
      签名 fn(resolved_settings: dict) -> None,异常即失败);
   2. kind: http + url_field:通用 HTTP GET 探针(2xx 即通过)。

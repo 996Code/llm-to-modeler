@@ -17,7 +17,7 @@
   v1 教训: 检索无结果不 fallback 不随机选表 → 返回友好提示
 
 设计要点(与源差异仅接入方式,流程 1:1):
-  - 向量库:SDK MilvusVectorStore(经 stores.ChatBIVectorStore 适配),
+  - 向量库:SDK PgVectorStore(经 stores.ChatBIVectorStore 适配),
     每数据源一个 scope → collection chatbi_{scope}_v1;
     源实现 data_source_id 标量过滤 → scope 定位(per-scope 物理隔离);
     data_source_id 为空 → 全部活跃数据源 scope 合并召回(等价 filter=None)。
@@ -148,7 +148,7 @@ def retrieve(
 
     Args:
         question: 用户自然语言问题
-        store: ChatBIVectorStore (SDK Milvus 适配壳;测试可注入替身)
+        store: ChatBIVectorStore (SDK pgvector 适配壳;测试可注入替身)
         embedder: ChatBIEmbedder
         data_source_id: 限定数据源 (多租户/多源隔离, 对标 RAG-005;
             None = 全部活跃数据源合并召回, 等价源实现的无过滤检索)

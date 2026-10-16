@@ -1,15 +1,7 @@
 # chatbi 插件声明式设置页(设置页 > env > 默认;热生效)
+# 基础设施组已删——向量走平台 DATABASE_URL(pgvector),无独立连接配置
 version: 1
 groups:
-  - key: infra
-    title: 基础设施依赖
-    fields:
-      - key: milvus_uri
-        type: string
-        label: Milvus 地址
-        env: MILVUS_URI
-        placeholder: http://milvus:19530
-        help: 可选——向量默认存 PG(pgvector,走 DATABASE_URL);仅 VECTOR_BACKEND=milvus 时需要
   - key: security
     title: 凭据加密
     fields:

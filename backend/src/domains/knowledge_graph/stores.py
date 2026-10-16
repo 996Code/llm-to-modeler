@@ -7,7 +7,7 @@ SDK 图/向量存储(graph_store/vector_store)的调用参数由调用方注入;
 
   - Neo4j 约束/索引前缀 "kg_"(存量约束 kg_entity_key/kg_entity_name
     原样兼容,数据无缝);
-  - Milvus collection 前缀 "kg"(存量 kg_{kb_id}_v1 原样兼容)。
+  - 向量表前缀 "kg"(存量 kg_{kb_id}_v1 原样兼容)。
 
 前缀登记是幂等的(同 owner 重复登记合法),装配/热切换反复经过这里
 不会炸;撞前缀(别的插件声明了 kg)会在装配期 fail-fast。
@@ -44,7 +44,7 @@ def get_graph(app_state) -> sdk_graph.Neo4jGraphStore:
 
 
 def get_vector(app_state) -> sdk_vector.VectorStore:
-    """向量存储单例(默认 pg/pgvector;VECTOR_BACKEND=milvus 时切 Milvus)。"""
+    """向量存储单例(pg/pgvector;Milvus 后端已下线)。"""
     from domains.knowledge_graph import runtime
     _ensure_prefix_registered()
     settings = runtime.settings_reader(app_state).all()

@@ -1,6 +1,7 @@
 # =============================================================================
-# llm-to-modeler 完整部署栈（单容器 app + Neo4j + PostgreSQL(含 pgvector 向量);
-# Milvus 为可选后端,默认不启动——VECTOR_BACKEND=milvus 时用 --profile milvus 启用）
+# llm-to-modeler 完整部署栈（单容器 app + Neo4j + PostgreSQL(含 pgvector 向量)）
+# 向量存储默认且仅走 PG(pgvector)——VECTOR_BACKEND=milvus 后端已随
+# Milvus 下线移除,如需恢复见 git 历史本文件的 milvus 服务块。
 #
 # app 镜像由 deploy/deploy.sh 预构建（纯 COPY、零联网 build），compose 负责
 # 声明式管理：启停/替换/日志/数据卷。版本经 TAG 环境变量切换：
@@ -33,17 +34,13 @@ services:
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=${NEO4J_USER:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:?请在 .env 配置 NEO4J_PASSWORD}
-      - MILVUS_URI=http://milvus:19530
-      # 向量后端:默认 pg(pgvector,走下方 postgres 服务,零额外容器);
-      # 切回 Milvus 时设 VECTOR_BACKEND=milvus 并启用 milvus profile:
-      #   docker compose --profile milvus up -d
-      - VECTOR_BACKEND=${VECTOR_BACKEND:-pg}
+      # 向量后端:pg(pgvector,走下方 postgres 服务,零额外容器)
+      - VECTOR_BACKEND=pg
       # 存储后端:平台 PG-only,DATABASE_URL 必填(默认指向下方 postgres 服务)。
       # 显式设 DATABASE_URL 改指外部 PG 时注意:本地 postgres 服务仍会启动且
       # POSTGRES_PASSWORD 仍必填(可给随机值;多余容器可手动停,app 不依赖其
       # 健康)。存量 SQLite 迁移:停 app 容器后跑
       # backend/scripts/migrate_sqlite_to_pg.py(幂等,见其头部 runbook)。
-      # 存量 Milvus 向量数据迁移:backend/scripts/migrate_milvus_to_pg.py。
       - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-llm}:${POSTGRES_PASSWORD:?请在 .env 配置 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-llm_modeler}}
       # PG 连接池(services/db.py 读取;默认 2/8)
       - PG_POOL_MIN=${PG_POOL_MIN:-2}
@@ -88,33 +85,6 @@ services:
       timeout: 10s
       retries: 10
       start_period: 40s
-
-  # ── Milvus 向量库(可选后端:仅 VECTOR_BACKEND=milvus 时需要) ──
-  # N1 起向量默认存 PG(pgvector,见下方 postgres 服务),本服务默认不启动
-  # (profiles 隔离);需要 Milvus 时:
-  #   docker compose --profile milvus up -d
-  # 存量 Milvus 数据迁移到 PG:backend/scripts/migrate_milvus_to_pg.py。
-  milvus:
-    image: milvusdb/milvus:v2.4.0
-    container_name: llm-modeler-milvus
-    restart: unless-stopped
-    profiles: ["milvus"]
-    command: ["milvus", "run", "standalone"]
-    environment:
-      - TZ=Asia/Shanghai
-      - ETCD_USE_EMBED=true
-      - ETCD_DATA_DIR=/var/lib/milvus/etcd
-      - COMMON_STORAGETYPE=local
-    ports:
-      - "${MILVUS_PORT:-19530}:19530"
-    volumes:
-      - ./data/milvus:/var/lib/milvus
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
-      interval: 30s
-      timeout: 20s
-      retries: 5
-      start_period: 90s
 
   # ── PostgreSQL（存储后端：承载会话/调用日志/任务/插件设置/KG 元数据/
   #    LangGraph checkpoint + 向量存储(pgvector HNSW);平台 PG-only,

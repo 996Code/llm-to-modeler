@@ -1,38 +1,14 @@
-"""SDK 通用向量存储 —— 双后端:pg(默认,pgvector)/ Milvus(可选)。
+"""SDK 通用向量存储 —— pgvector 单后端(PG 内向量列 + HNSW)。
 
-【模块定位】
-从 knowledge_graph 插件下沉的通用向量设施:按 scope 物理隔离的
-collection/表管理 + 向量写入/删除/相似度检索。零领域知识——只收
-"文本 + 向量"对,不认识 embedding 模型/知识库/文档(embedding 由
-调用方生成后传入;SDK 不依赖任何 LLM 配置,测试可用 Fake 向量)。
+【演进】向量存储曾为 Milvus(独立服务)→ N1 切 PG(pgvector)→ Milvus
+服务下线后切换后端一并移除(死路径不留)。VECTOR_BACKEND env 仍被
+读取但仅接受 "pg"(存量 .env 带旧值时启动报错提示,而非静默漂移)。
 
-【后端选择】(env VECTOR_BACKEND,默认 pg)
-  - pg:     PgVectorStore(sdk/pg_vector_store.py,PostgreSQL + pgvector
-            HNSW 余弦索引,psycopg 直连 DATABASE_URL)——平台 PG-only
-            收敛后的默认;
-  - milvus: MilvusVectorStore(本文件,2.4/2.5,pymilvus)——保留为
-            可选后端,存量部署经 VECTOR_BACKEND=milvus 切回。
-  两实现同方法集(VectorStore Protocol)、同命名规则(collection_name)、
-  同检索语义(score 越高越相似,阈值后置过滤在适配层),上层零改动。
+存储形态:每 scope 一张表 {prefix}_{scope 去 - 换 _}_v1
+  (chunk_id 主键 / doc_id 分区 / seq / text / embedding VECTOR 列 + HNSW),
+与 KG chunk / ChatBI 语义模型索引共用本 Protocol。
 
-【数据模型】(每 scope 一个 collection,物理隔离)
-  collection 名 = {collection_prefix}_{scope 转下划线}_v1
-  字段: chunk_id VARCHAR(64) PK / doc_id VARCHAR / seq INT64 /
-        text VARCHAR(65535) / vector FLOAT_VECTOR(dim)
-  索引: HNSW(metric=COSINE, M=16, efConstruction=200)
-  写后 flush——读己之写(检索立刻可见)。
-
-【命名空间隔离(与 scope_registry 契约配套)】
-  - collection_prefix:每个使用方插件声明自己的前缀并 register_prefix
-    登记("kg"/"bi"/"rag"...),collection 名天然不撞;
-  - scope_id 契约:所有方法首参必须是服务端签发的 UUID
-    (scope_registry.new_scope_id() 或调用方自签),入口防御拒收
-    用户输入直传。
-
-【连接管理】进程级单例 + 指纹缓存(含前缀),双检锁纪律同 graph_store。
-
-【测试替身】VectorStore Protocol 声明了替身需实现的完整方法集;
-单测用内存 Fake,不要求真实 Milvus。
+单测用内存 Fake,不要求真实 PG。
 """
 import logging
 import os
@@ -42,11 +18,6 @@ from typing import Any, Dict, List, Optional, Protocol
 from sdk.scope_registry import check_scope_id
 
 logger = logging.getLogger(__name__)
-
-# collection 字段(MilvusClient quick-setup 固定骨架 + 标量字段由 schema 定义)
-_VECTOR_FIELD = "vector"
-_ID_FIELD = "chunk_id"
-_MAX_TEXT_LEN = 65535  # VARCHAR 上限(Milvus 2.4)
 
 
 class VectorStore(Protocol):
@@ -71,254 +42,53 @@ def collection_name(collection_prefix: str, scope_id: str) -> str:
     return f"{collection_prefix}_{scope_id.replace('-', '_')}_v1"
 
 
-class MilvusVectorStore:
-    """每 scope 一个 collection 的向量存取。
-
-    Args:
-        collection_prefix: collection 名前缀(命名空间边界;调用方需先
-            在 scope_registry 登记该前缀),必传——由使用方声明。
-    """
-
-    def __init__(self, uri: str, user: str = "", password: str = "",
-                 collection_prefix: str = ""):
-        if not collection_prefix:
-            raise ValueError("collection_prefix 必传,由使用方声明命名空间")
-        self._uri = uri
-        self._user = user
-        self._password = password
-        self._connect()
-        self._prefix = collection_prefix
-
-    def _connect(self) -> None:
-        """建/重建 Milvus 客户端(自愈路径复用同一份连接参数)。"""
-        from pymilvus import MilvusClient
-        # timeout=5: 连接/请求级超时——健康探针 ping 在 Milvus 停机时
-        # 快速失败变红, 而不是挂起等默认长超时(四审验收场景 8)
-        self._client = MilvusClient(
-            uri=self._uri, user=self._user or None,
-            password=self._password or None,
-            timeout=5,
-        )
-
-    def _with_reconnect(self, fn, *args, **kwargs):
-        """连接失效自愈:ConnectionNotExist(连接被关闭/空闲断链)时重建
-        客户端重试一次。真实事故:uvicorn --reload 的 unload 钩子 close 了
-        缓存连接,在途任务报 should create connection first——不自愈则
-        只能重启进程。仅对连接类异常重试,其余原样上抛。"""
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            if "ConnectionNotExist" not in type(e).__name__ and \
-               "should create connection" not in str(e):
-                raise
-            logger.warning(f"milvus 连接失效,重建后重试一次: {e}")
-            self._connect()
-            return fn(*args, **kwargs)
-
-    def _check_scope(self, scope_id: str) -> None:
-        """scope_id 契约入口防御(公共实现见 scope_registry.check_scope_id)。"""
-        check_scope_id(scope_id)
-
-    def _name(self, scope: str) -> str:
-        return collection_name(self._prefix, scope)
-
-    # ── 生命周期 ───────────────────────────────────────────
-
-    def ping(self) -> None:
-        self._with_reconnect(self._client.list_collections)
-
-    def close(self) -> None:
-        try:
-            self._client.close()
-        except Exception:
-            logger.warning("milvus client close failed", exc_info=True)
-
-    # ── collection 管理 ────────────────────────────────────
-
-    def ensure_collection(self, scope: str, dim: int) -> None:
-        """建库 collection(幂等)。dim 来自建库时的一次 embedding 探测。"""
-        self._check_scope(scope)
-        name = self._name(scope)
-        if self._with_reconnect(self._client.has_collection, name):
-            return
-        from pymilvus import DataType
-        schema = self._client.create_schema(auto_id=False, enable_dynamic_field=False)
-        schema.add_field(_ID_FIELD, DataType.VARCHAR, is_primary=True, max_length=64)
-        schema.add_field("doc_id", DataType.VARCHAR, max_length=64)
-        schema.add_field("seq", DataType.INT64)
-        schema.add_field("text", DataType.VARCHAR, max_length=_MAX_TEXT_LEN)
-        schema.add_field(_VECTOR_FIELD, DataType.FLOAT_VECTOR, dim=dim)
-        index_params = self._client.prepare_index_params()
-        index_params.add_index(
-            field_name=_VECTOR_FIELD, index_type="HNSW",
-            metric_type="COSINE", params={"M": 16, "efConstruction": 200},
-        )
-        self._client.create_collection(
-            collection_name=name, schema=schema, index_params=index_params,
-        )
-        logger.info(f"milvus collection created: {name} (dim={dim})")
-
-    def drop_collection(self, scope: str) -> None:
-        self._check_scope(scope)
-        name = self._name(scope)
-        if self._with_reconnect(self._client.has_collection, name):
-            self._client.drop_collection(name)
-            logger.info(f"milvus collection dropped: {name}")
-
-    # ── 数据操作 ───────────────────────────────────────────
-
-    def upsert_chunks(self, scope: str, items: List[Dict[str, Any]]) -> int:
-        """写入/覆盖 chunk 向量。items: [{chunk_id, doc_id, seq, text, vector}]。"""
-        self._check_scope(scope)
-        if not items:
-            return 0
-        name = self._name(scope)
-        # pymilvus MilvusClient.upsert 的参数名是 data(2.4/2.5 一致)
-        rows = [{
-            _ID_FIELD: it["chunk_id"],
-            "doc_id": it["doc_id"],
-            "seq": int(it.get("seq") or 0),
-            "text": str(it["text"])[:_MAX_TEXT_LEN],
-            _VECTOR_FIELD: it["vector"],
-        } for it in items]
-        self._with_reconnect(
-            self._client.upsert, collection_name=name, data=rows)
-        # flush 让写入立刻可见(search/stats 一致性;单文档块数量小,代价可忽略)
-        try:
-            self._client.flush(collection_name=name)
-        except Exception:
-            logger.warning("milvus flush failed(数据最终一致,不影响导入)", exc_info=True)
-        return len(rows)
-
-    def delete_by_doc(self, scope: str, doc_id: str) -> None:
-        """删除某文档的全部向量(重导入清理路径)。删除后 flush,防旧数据复现。"""
-        self._check_scope(scope)
-        name = self._name(scope)
-        self._client.delete(collection_name=name, filter=f'doc_id == "{doc_id}"')
-        try:
-            self._client.flush(collection_name=name)
-        except Exception:
-            logger.warning("milvus flush failed after delete", exc_info=True)
-
-    def existing_chunk_ids(self, scope: str, doc_id: str) -> set:
-        """查某文档已存在向量的 chunk_id 集合(向量缺口补偿的判定依据)。
-
-        只取主键:大批量文档也只回 id 列表,Milvus query 默认上限 1000 行/
-        次,这里按游标翻页取全量。
-        """
-        self._check_scope(scope)
-        name = self._name(scope)
-        expr = f'doc_id == "{doc_id}"'
-        ids: set = set()
-        offset = 0
-        while True:
-            rows = self._with_reconnect(
-                self._client.query,
-                collection_name=name, filter=expr,
-                output_fields=[_ID_FIELD], limit=1000, offset=offset,
-            ) or []
-            ids.update(r[_ID_FIELD] for r in rows if r.get(_ID_FIELD) is not None)
-            if len(rows) < 1000:
-                return ids
-            offset += 1000
-
-    def search(
-        self, scope: str, query_vector: List[float], top_k: int = 5,
-        doc_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """相似度检索(COSINE,分数越高越相似)。"""
-        self._check_scope(scope)
-        expr = f'doc_id == "{doc_id}"' if doc_id else None
-        results = self._with_reconnect(
-            self._client.search,
-            collection_name=self._name(scope),
-            data=[query_vector],
-            limit=top_k,
-            filter=expr,
-            output_fields=["doc_id", "seq", "text"],
-            search_params={"metric_type": "COSINE", "params": {"ef": 64}},
-        )
-        hits: List[Dict[str, Any]] = []
-        for result in (results or []):
-            for hit in result:
-                entity = hit.get("entity") or {}
-                hits.append({
-                    "chunkId": hit.get("id"),
-                    "docId": entity.get("doc_id"),
-                    "seq": entity.get("seq"),
-                    "text": entity.get("text") or "",
-                    "score": hit.get("distance"),
-                })
-        return hits
-
-    def count(self, scope: str) -> int:
-        self._check_scope(scope)
-        name = self._name(scope)
-        if not self._client.has_collection(name):
-            return 0
-        stats = self._client.get_collection_stats(name)
-        return int(stats.get("row_count") or 0)
-
-
 # ── 进程级单例(设置热改时重建) ────────────────────────────────
 
-_cached_stores: Dict[tuple, Any] = {}   # 指纹 → store(pg/milvus 混存,键含 backend)
+_cached_stores: Dict[tuple, Any] = {}   # 指纹 → store(按前缀多槽)
 _cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络 IO)
 _build_lock = threading.Lock()     # 串行化连接构建
 
-# 支持的向量后端:pg(默认,pgvector)/ milvus(可选)
-_BACKENDS = ("pg", "milvus")
-
-
 def resolve_vector_backend() -> str:
-    """解析向量后端(env VECTOR_BACKEND;默认 pg,未知值 fail-fast)。"""
+    """解析向量后端:仅 pg(Milvus 后端已随服务下线移除)。
+
+    env 仍读取——存量 .env 带 VECTOR_BACKEND=milvus 时 fail-fast 报错
+    指引改 pg,而非静默落回 pg 让"以为在用 Milvus"的部署继续蒙着跑。
+    """
     backend = (os.getenv("VECTOR_BACKEND", "") or "pg").strip().lower()
-    if backend not in _BACKENDS:
+    if backend != "pg":
         raise ValueError(
-            f"未知 VECTOR_BACKEND: {backend!r}(可选: {'/'.join(_BACKENDS)})")
-    return backend
+            f"未知 VECTOR_BACKEND: {backend!r}——向量存储现为 pgvector 单后端"
+            "(Milvus 已下线),请将 .env 的 VECTOR_BACKEND 删除或设为 pg。")
+    return "pg"
 
 
 def get_vector_store(settings: Dict[str, Any],
                      collection_prefix: str = "") -> Any:
     """按解析后的配置取/建向量存储单例(指纹 = backend + 连接参数 + 前缀)。
 
-    后端由 env VECTOR_BACKEND 决定(默认 pg):
-      - pg:     PgVectorStore,连接串取 settings["pg_vector_url"](逃生口,
-                无 pack schema 字段时用)或 env DATABASE_URL;
-      - milvus: MilvusVectorStore,连接三元组取 milvus_* 设置。
+    后端固定 pg(pgvector),连接串取 settings["pg_vector_url"](逃生口,
+    无 pack schema 字段时用)或 env DATABASE_URL。
 
     多 pack 各自的前缀并存(chatbi 与 knowledge_graph 同时活跃):单槽
     缓存会让两 pack 互踢——后到者 close 掉前者的连接,前者下一次调用
     报 ConnectionNotExist(曾经只在检索日志里看到"should create
     connection first"的根因)。按指纹各存一份,连接数 = 活跃前缀数(≤2);
-    指纹含 backend 维度,热切换 VECTOR_BACKEND 时新旧后端不互踩
-    (旧连接留给在途任务,随下次 reset 回收)。
 
     锁纪律/失败纪律同 graph_store.get_graph_store:命中路径轻锁,构建
     在锁外,构建失败清缓存不留坏连接。
     """
-    backend = resolve_vector_backend()
-    if backend == "milvus":
-        fp = ("milvus", settings.get("milvus_uri"), settings.get("milvus_user"),
-              settings.get("milvus_password"), collection_prefix)
+    resolve_vector_backend()  # 仅校验(非 pg 报错);后端固定 pg
+    from sdk.pg_vector_store import PgVectorStore
+    dsn = (settings.get("pg_vector_url")
+           or os.getenv("DATABASE_URL", "") or "").strip()
+    if not dsn:
+        raise RuntimeError(
+            "向量存储(pgvector)需要 PostgreSQL 连接串:请在 env 配置 "
+            "DATABASE_URL(与平台存储同库,pgvector 扩展由建表时自动启用)。")
+    fp = ("pg", dsn, collection_prefix)
 
-        def build() -> Any:
-            return MilvusVectorStore(
-                uri=fp[1], user=fp[2] or "", password=fp[3] or "",
-                collection_prefix=collection_prefix)
-    else:
-        from sdk.pg_vector_store import PgVectorStore
-        dsn = (settings.get("pg_vector_url")
-               or os.getenv("DATABASE_URL", "") or "").strip()
-        if not dsn:
-            raise RuntimeError(
-                "VECTOR_BACKEND=pg 需要 PostgreSQL 连接串:请在 env 配置 "
-                "DATABASE_URL(与平台存储同库,pgvector 扩展由建表时自动启用)。")
-        fp = ("pg", dsn, collection_prefix)
-
-        def build() -> Any:
-            return PgVectorStore(dsn=dsn, collection_prefix=collection_prefix)
+    def build() -> Any:
+        return PgVectorStore(dsn=dsn, collection_prefix=collection_prefix)
 
     with _cache_lock:
         hit = _cached_stores.get(fp)

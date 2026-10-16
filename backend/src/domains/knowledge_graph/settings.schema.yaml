@@ -28,21 +28,6 @@ groups:
         env: NEO4J_DATABASE
         default: neo4j
         help: 社区版只有默认库 neo4j
-      - key: milvus_uri
-        type: string
-        label: Milvus 地址
-        env: MILVUS_URI
-        placeholder: http://localhost:19530
-        help: 可选——向量默认存 PG(pgvector,走 DATABASE_URL);仅 VECTOR_BACKEND=milvus 时需要
-      - key: milvus_user
-        type: string
-        label: Milvus 用户
-        env: MILVUS_USER
-        help: 未开启认证的实例留空
-      - key: milvus_password
-        type: secret
-        label: Milvus 密码
-        env: MILVUS_PASSWORD
 
   - key: extraction
     title: 抽取与批次

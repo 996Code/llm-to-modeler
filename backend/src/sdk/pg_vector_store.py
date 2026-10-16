@@ -1,8 +1,8 @@
 """PgVectorStore —— SDK 通用向量存储(PostgreSQL + pgvector 扩展)。
 
 【模块定位】
-与 MilvusVectorStore 同构的 VectorStore Protocol 实现(N1:向量库从
-Milvus 切换到 PG,VECTOR_BACKEND 默认 pg)。零领域知识铁律不变——
+VectorStore Protocol 的 pgvector 实现(N1 从 Milvus 迁移而来,
+Milvus 后端已下线)。零领域知识铁律不变——
 只收"文本 + 向量"对,不认识 embedding 模型/知识库/文档;psycopg 直连
 DATABASE_URL,不 import services/domains(与 relational_store 的
 依赖倒置不同:向量存储无共享池需求,自建小池自管生命周期)。
@@ -14,13 +14,13 @@ DATABASE_URL,不 import services/domains(与 relational_store 的
         seq BIGINT / text VARCHAR / embedding vector(dim)
   索引: HNSW(embedding vector_cosine_ops)——余弦距离检索
 
-【检索语义(与 Milvus 适配层 COSINE 对齐)】
+【检索语义(COSINE)】
   pgvector `<=>` 是余弦距离(0=同向,2=反向);score = 1 - 距离,即
-  余弦相似度,越高越相似——与 Milvus COSINE 适配层返回的分数同口径,
+  余弦相似度,越高越相似(与 N1 迁移前 Milvus 口径一致,存量分数可比),
   领域侧的阈值后置过滤(宁缺毋滥)无需任何改动。
   ORDER BY embedding <=> %s::vector LIMIT k 可走 HNSW 索引。
 
-【表缺失语义(与 Milvus collection 缺失行为对齐)】
+【表缺失语义】
   count/search/delete/existing_chunk_ids → 空结果静默(检索路径
   "库还没建"不是错误);upsert → RuntimeError fail-fast(写入路径
   漏建表是调用方 bug,静默丢数据比报错更有害)。
@@ -29,8 +29,8 @@ DATABASE_URL,不 import services/domains(与 relational_store 的
 下 psycopg 连接不可跨线程共用,池化是线程安全的最低成本方案;close()
 关池。进程级单例 + 指纹缓存(含 backend 维度)见 vector_store.get_vector_store。
 
-【老数据】不做 Milvus→PG 自动迁移(用户裁决:可重新写入);存量部署
-如需搬数据,可选跑 backend/scripts/migrate_milvus_to_pg.py(幂等)。
+【老数据】不做 Milvus→PG 自动迁移(用户裁决:可重新写入)——
+存量部署重新导入即可。
 """
 import logging
 import re
@@ -118,7 +118,7 @@ class PgVectorStore:
             logger.warning("pg vector pool close failed", exc_info=True)
 
     def _with_reconnect(self, fn, *args, **kwargs):
-        """连接失效自愈(与 MilvusVectorStore._with_reconnect 同款语义):
+        """连接失效自愈:
         PG 重启/网络断后池内连接失效,OperationalError 时重建池重试一次。
         仅对连接类异常重试,其余原样上抛。"""
         try:
@@ -268,7 +268,7 @@ class PgVectorStore:
         """
 
         ORDER BY embedding <=> %s::vector LIMIT k 可走 HNSW 索引;
-        doc_id 过滤在索引扫描后施加(与 Milvus 标量过滤同语义)。
+        doc_id 过滤在索引扫描后施加。
         表不在 → 空结果(检索路径"库还没建"不是错误)。
         """
         self._check_scope(scope)
@@ -276,7 +276,7 @@ class PgVectorStore:
         qvec = _vec_literal(query_vector)
         with self._pool.connection() as conn:
             if not self._table_exists(conn, name):
-                # 行为与 Milvus"缺 collection 抛异常→调用方降级"殊途同归
+                # 行为语义:缺表抛异常→调用方降级
                 # (chatbi 单 scope 跳过/kg 向量路降级),但补 warning 留痕:
                 # 静默零痕迹会让"为什么没召回"在排查时无线索(功能对齐审查)
                 logger.warning("pg vector search: 表不存在(库还没建?) scope=%s",

@@ -649,7 +649,7 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
     }
 
 def _vector_backend() -> str:
-    """观测 endpoint 前缀:按实际向量后端命名(pg:search / milvus:search)。"""
+    """观测 endpoint 前缀(向量检索统一 pg:search)。"""
     try:
         from sdk.vector_store import resolve_vector_backend
         return resolve_vector_backend()

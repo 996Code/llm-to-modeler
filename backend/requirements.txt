@@ -31,7 +31,6 @@ PyYAML>=6.0,<6.1                       # pack config.yaml 解析(阶段 1)
 
 # ── 知识图谱插件(knowledge_graph pack)自有依赖 ──
 neo4j>=5.0                             # 图谱存储 driver(Neo4j 5 服务端)
-pymilvus>=2.4,<2.6                     # 向量存储(Milvus 2.4/2.5 服务端;3.x 需 2.6 服务端)
 pypdf>=4.0                             # PDF 文档解析
 python-docx>=1.1                       # DOCX 文档解析
 

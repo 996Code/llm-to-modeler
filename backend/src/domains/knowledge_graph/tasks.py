@@ -3,13 +3,13 @@
 【导入流水线(kg.import_document)】
   解析 → 结构感知切块 → 向量准备(可选) → 逐批 LLM 抽取(批内并行,
   批间串行:更新已知实体词表 + 落 checkpoint) → 本体约束过滤 →
-  Neo4j 幂等 MERGE + Milvus upsert → 统计回写
+  Neo4j 幂等 MERGE + PG 向量 upsert → 统计回写
 
 【防护机制】(全部可配,见 settings.schema.yaml"抽取与批次"组)
   - 单块重试 llm_max_retries;连续失败熔断 failure_threshold
   - 协作式取消(每批次检查点);文档被并发删除检测(每批次校验存在)
   - chunk 级 checkpoint(status=done 的块重跑跳过 → 断点续跑)
-  - 幂等:重导先清理该 doc 旧数据(Neo4j 引用计数 + Milvus 按 doc 删)
+  - 幂等:重导先清理该 doc 旧数据(Neo4j 引用计数 + 向量按 doc 删)
 
 【观测】
   - LLM 抽取/向量化调用 conv_id 记 task:{id} → 现有调用日志界面可追溯
@@ -262,7 +262,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
 
     # 1) 清理旧贡献。
     #    只有"全量重导"(force / 首次导入 / 无任何已完成块的失败重跑)才清理;
-    #    续跑路径(resume=True)严禁清理——已完成块的贡献只存在于 Neo4j/Milvus
+    #    续跑路径(resume=True)严禁清理——已完成块的贡献只存在于 Neo4j/向量表
     #    里,清了又不重抽(done 块被跳过)等于永久丢数据。
     graph = runtime.get_graph(app_state)   # 抽取批写入/收尾统计都要用,无条件获取
     if resume:
@@ -278,7 +278,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             try:
                 runtime.get_vector(app_state).delete_by_doc(kb_id, doc_id)
             except Exception as e:
-                handle.log(f"Milvus 旧向量清理失败(继续导入,完成后可重试): {e}", level="warn")
+                handle.log(f"旧向量清理失败(继续导入,完成后可重试): {e}", level="warn")
 
     # 3) 向量准备(模型未配置 → 纯图谱模式,不阻断)
     vector_ready = _prepare_vector(handle, app_state, store, kb, conv_id)
@@ -620,7 +620,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
 
     # 5.5) 向量缺口补偿:done 块的向量在当批写入失败时只告警,而重跑会
     # 跳过 done 块——缺口因此永久留存(该块不参与向量召回)。这里按
-    # Milvus 实存反向核对补齐,幂等(无缺口时一次 query 零成本返回)。
+    # 向量实存反向核对补齐,幂等(无缺口时一次 query 零成本返回)。
     if vector_ready:
         _backfill_vectors(handle, app_state, store, kb, doc_id, conv_id)
 

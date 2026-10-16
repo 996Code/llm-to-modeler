@@ -2,7 +2,7 @@
 
 【职责】
   把"平台组件(app.state 上的 settings_store / llm_client) + 插件自有存储
-  (KGStore / Neo4jGraphStore / MilvusVectorStore)"收敛成一组简单取用函数,
+  (KGStore / Neo4jGraphStore / 向量存储)"收敛成一组简单取用函数,
   供 api.py / tasks.py 共用,避免各自拼装。
 
 【连接生命周期】
@@ -55,7 +55,7 @@ def get_graph(app_state):
 
 
 def get_vector(app_state):
-    """Milvus 向量存储(同上)。"""
+    """向量存储(pgvector;同上)。"""
     from domains.knowledge_graph import stores
     return stores.get_vector(app_state)
 

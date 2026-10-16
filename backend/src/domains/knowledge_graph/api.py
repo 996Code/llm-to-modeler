@@ -11,7 +11,7 @@
   GET    /kbs/{id}                     库详情 + 图谱实时计数
   PUT    /kbs/{id}                     改库 {name?, description?, schema?}
   PUT    /kbs/{id}/move                移动节点 {parent_id: string|null}
-  DELETE /kbs/{id}                     删库(联动 Neo4j/Milvus/文件/元数据;
+  DELETE /kbs/{id}                     删库(联动 Neo4j/向量/文件/元数据;
                                        folder 需空,有子节点 422)
   GET    /kbs/{id}/documents           文档列表
   POST   /kbs/{id}/documents           上传(multipart files,多文件;查重跳过)
@@ -19,7 +19,7 @@
   GET    /kbs/{id}/graph               图谱浏览(限量节点+邻接边;过滤 q/types)
   GET    /kbs/{id}/graph/expand        点击节点增量展开(1 跳)
   GET    /kbs/{id}/stats               库统计(元数据 + 图谱/向量实时数)
-  GET    /dependency-status            Neo4j/Milvus 探针结果(设置页重检用)
+  GET    /dependency-status            Neo4j/向量库探针结果(设置页重检用)
 """
 import hashlib
 import logging
@@ -207,7 +207,7 @@ async def delete_kb(kb_id: str, request: Request):
         if kb.get("vectorEnabled"):
             runtime.get_vector(request.app.state).drop_collection(kb_id)
     except Exception as e:
-        errors.append(f"milvus: {e}")
+        errors.append(f"vector: {e}")
     doc_dir = runtime.files_root() / kb_id
     if doc_dir.exists():
         shutil.rmtree(doc_dir, ignore_errors=True)
@@ -346,7 +346,7 @@ async def delete_document(kb_id: str, doc_id: str, request: Request):
         if kb and kb.get("vectorEnabled") and doc["importStatus"] in imported_states:
             runtime.get_vector(request.app.state).delete_by_doc(kb_id, doc_id)
     except Exception as e:
-        errors.append(f"milvus: {e}")
+        errors.append(f"vector: {e}")
     # 文件与元数据
     stored_path = store.document_file_path(doc_id)
     if stored_path:
@@ -650,9 +650,8 @@ async def kb_retrieve_test(request: Request, kb_id: str, payload: Dict[str, Any]
 async def dependency_status(request: Request):
     """对 Neo4j/向量存储各跑一次探针(结果即时,不走缓存)。
 
-    向量探针按 VECTOR_BACKEND 分流:pg(默认)探 PG(pgvector 扩展
-    可用性),milvus 才探 Milvus——删 Milvus 后设置页不再误报红
-    (功能对齐审查:换向量库,平台/插件状态口径同步更新)。
+    向量探针固定 pg_vector(pgvector 扩展可用性;Milvus 后端已下线,
+    VECTOR_BACKEND 非 pg 值在 resolve_vector_backend 即 fail-fast)。
     """
     import os
     from domains.knowledge_graph import probes
@@ -666,9 +665,7 @@ async def dependency_status(request: Request):
         except Exception as e:
             return {"ok": False, "detail": str(e) or type(e).__name__}
 
-    backend = os.getenv("VECTOR_BACKEND", "pg").strip().lower()
-    vector_probe = "milvus" if backend == "milvus" else "pg_vector"
     return {
         "neo4j": _probe("neo4j"),
-        backend: _probe(vector_probe),
+        "pg_vector": _probe("pg_vector"),
     }

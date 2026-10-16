@@ -3,17 +3,29 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_PROBE_CONNECT_TIMEOUT = 3
 
-def milvus(fields: dict) -> bool:
-    """Milvus 连通性探针(向量检索;配置解析链: 设置页 > env > 默认)。"""
-    uri = (fields.get("milvus_uri") or "").strip()
-    if not uri:
+
+def pg_vector(fields: dict) -> bool:
+    """PG 向量后端连通性(语义层向量检索;pgvector 单后端)。
+
+    走 DATABASE_URL(与平台存储同实例);扩展缺失给明确错误
+    (需 DBA: CREATE EXTENSION vector)。
+    """
+    import os
+    import psycopg
+
+    dsn = os.getenv("DATABASE_URL", "").strip()
+    if not dsn:
         return False
     try:
-        from pymilvus import connections
-        connections.connect(alias="chatbi_probe", uri=uri, timeout=3)
-        connections.disconnect(alias="chatbi_probe")
+        with psycopg.connect(dsn, connect_timeout=_PROBE_CONNECT_TIMEOUT) as conn:
+            row = conn.execute(
+                "SELECT extname FROM pg_extension WHERE extname = 'vector'"
+            ).fetchone()
+            if not row:
+                raise RuntimeError("pgvector 扩展未安装(需 DBA: CREATE EXTENSION vector)")
         return True
     except Exception as e:
-        logger.warning("chatbi milvus 探针失败: %s", e)
+        logger.warning("chatbi pg_vector 探针失败: %s", e)
         return False

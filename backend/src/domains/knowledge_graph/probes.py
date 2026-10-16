@@ -3,7 +3,7 @@
 签名约定:fn(resolved_settings: dict) -> None;抛异常 = 探针失败。
 拿到的是本插件全部配置的最终值(设置页保存值 > env > 默认)。
 
-探针实现各自 import 驱动库(neo4j / pymilvus)——这两个依赖只属于本插件,
+探针实现各自 import 驱动库(neo4j / psycopg)——这两个依赖只属于本插件,
 平台的 requirements 里也由本插件引入。
 
 【超时纪律】探针必须自带短超时:平台的 future.result(timeout=3) 只放弃
@@ -31,22 +31,6 @@ def neo4j(settings: dict) -> None:
         driver.verify_connectivity()
     finally:
         driver.close()
-
-
-def milvus(settings: dict) -> None:
-    """Milvus 连通性:列 collection(轻量 RPC,兼作鉴权验证)。"""
-    from pymilvus import MilvusClient
-
-    client = MilvusClient(
-        uri=settings.get("milvus_uri"),
-        user=settings.get("milvus_user") or None,
-        password=settings.get("milvus_password") or None,
-        timeout=_PROBE_CONNECT_TIMEOUT,
-    )
-    try:
-        client.list_collections(timeout=_PROBE_CONNECT_TIMEOUT)
-    finally:
-        client.close()
 
 
 def pg_vector(settings: dict) -> None:

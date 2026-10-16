@@ -34,14 +34,12 @@ artifact:
       - {title: 切换图表, desc: 把上一步结果换成饼图, prompt: 换成饼图, icon: chart}
 
 dependencies:
-  milvus:
+  pg_vector:
     required: false         # 可选: 语义层向量检索(两阶段召回第一阶段);不可用时降级全表清单(对标原系统 SEC-005)。
-                             # 向量默认存 PG(pgvector,走平台 DATABASE_URL);仅 VECTOR_BACKEND=milvus 时需要本依赖
-    fields:
-      - milvus_uri
+                             # 向量存 PG(pgvector,走平台 DATABASE_URL;Milvus 后端已下线)
     probe:
       module: domains.chatbi.probes
-      fn: milvus
+      fn: pg_vector
 
 admin:
   settings: settings.schema.yaml

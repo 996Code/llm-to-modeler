@@ -14,7 +14,7 @@
 - bge-large-zh-v1.5: 512 token 上限,我们的 chunk 目标 1200 字/max 3000 字,
   截断率 67%-87%,长篇小说段落后半段信息对向量检索完全不可见
 - bge-m3: 4096 token 上限(实测 ONNX 支持),完整编码 3000 字 chunk 无截断;
-  1024 维与云端一致,Milvus collection 无需重建;XLM-RoBERTa tokenizer,
+  1024 维与云端一致,向量表维度兼容;XLM-RoBERTa tokenizer,
   不需要 token_type_ids;543MB 比 bge-large 多 232MB,但换来了
   不做截断的完整语义表示
 
