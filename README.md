@@ -80,6 +80,8 @@
 │  │  ├── pack_api.py    插件 HTTP API 鉴权/身份辅助              │   │
 │  │  ├── asset_client.py AssetClient ABC (submit/query)          │   │
 │  │  ├── sanitize.py    Unicode 隐写清洗                         │   │
+│  │  ├── llm_compat.py  LLM 响应形状归一(自插件上提 SDK)         │   │
+│  │  ├── observability.py 观测常量+log_pack_call 通用打点        │   │
 │  │  │                                                            │   │
 │  │  ├── scope_registry.py  ★ 存储命名空间隔离(前缀登记+scope签发)│   │
 │  │  ├── graph_store.py     ★ Neo4j 图存储(GraphStore Protocol)  │   │
@@ -137,12 +139,12 @@
 ### 架构试金石
 
 ```bash
-# Engine 层不能包含任何领域知识
-grep -rE "form|formCode|template|field|leave|请假|知识库|knowledge" backend/src/engine/
+# Engine 层不能包含任何领域知识(领域标识/插件名零出现)
+grep -rE "formCode|leaveType|请假|kb_id|chatbi|njmind" backend/src/engine/
 # → 必须返回空
 # SDK 层零领域知识(存储设施不认识 LLM/本体/知识库)
 grep -rn "kg_" backend/src/sdk/graph_store.py backend/src/sdk/vector_store.py
-# → 仅默认参数值命中(存量数据兼容)
+# → 仅注释命中(存量数据兼容说明)
 ```
 
 ---
@@ -267,8 +269,16 @@ domains/
 │   ├── store.py          ← 领域元数据(kg_ 三表, PG)
 │   ├── stores.py         ← SDK 存储适配层(前缀登记+工厂单例)
 │   ├── retrieval.py      ← 混合检索问答(图谱+向量+全文兜底三路)
-│   ├── probes.py         ← 依赖连通性探针(装配期)
+│   ├── probes.py         ← 领域专属探针(neo4j;pg_vector 探针平台内置,实现下沉 SDK)
 │   └── tools/kb_search.py
+│
+├── chatbi/               ← 智能问数插件(NL2SQL+图表,全能力形态)
+│   ├── tools/            ← ask_data(8步管线) / switch_chart
+│   ├── api.py / tasks.py / config.yaml / settings.schema.yaml
+│   └── schema_graph / semantic / retrieval / memory / feedback / hybrid …
+│
+├── njmind_bpm/           ← 流程/审批流配置插件(generate_process)
+├── njmind_list/          ← 列表页配置插件(generate_list)
 │
 └── (新插件只需创建目录 + pack.py + tools/ → 自动发现, 零配置上线)
 ```
@@ -410,18 +420,40 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 | 组成 | 说明 |
 |------|------|
 | 导入流水线（后台任务） | 解析→切块→批内并行 LLM 抽取→本体约束→图+向量双写;**断点续跑**（块级 checkpoint,done = 已入图）、连续失败熔断、进度心跳（批次 N/M + 已抽取 X/Y 块） |
-| 实体消歧（别名合并） | 同一人物跨块不同写法（张小凡/鬼厉）不再裂成多节点:抽取词表播种既有实体+别名,收尾按"别名指认+类型一致"合并碎片（机制详见 `ARCHITECTURE.md`「长文档导入」）。零猜测:正文没指认的永不并。诛仙实测 563 实体收敛至 397 |
+| 实体消歧（别名合并） | 同一人物跨块不同写法（张小凡/鬼厉）不再裂成多节点:抽取词表播种既有实体+别名,收尾按"别名指认+类型一致"合并碎片（机制详见 `ARCHITECTURE.md`「长文档导入」;大库名录先类型分桶+编辑距离预筛,仅可疑对送 LLM）。零猜测:正文没指认的永不并。诛仙实测 563 实体收敛至 397 |
 | 长文档导入 | 全局 LLM 限速（RPM/TPM 双令牌桶 + 429 全局退避）;`extraction_model` 设置可单独给导入换更快的模型（对话/检索链路不受影响）;失败自动续跑（非欠费/鉴权/永久性校验错误,5 分钟退避,**预算跨续跑链封顶**,重启不再卡 retry_scheduled 中间态）;滑窗 ETA 预估 |
 | 混合检索问答 | 意图解析→图谱子图 + 向量双路召回→LLM 组织答案（带证据链）;**图谱零命中（别名/错别字/部分匹配）时全文兜底**（kg_chunks tsvector+GIN,2-gram 分词,`fulltext_fallback_enabled` 默认开）,兜底命中标 `source='fulltext'`;embedding 未配置时自动降级纯图谱。**升级注意**:首次启动建全文索引对存量 kg_chunks 全表重写（一次性,迁移已放开 600s 超时）,期间 kg_chunks 短暂锁表;存量文档的全文索引按旧文本计算——**重点 PDF 建议重导入**以吃到 NFKC 归一化+全文索引完整收益 |
 | 检索可观测 | 三路库调用入 `call_logs`（graph/vector/fulltext 类型）:逐词种子命中、子图召回量+三元组明细+截断水位、向量逐条相似度分数、全文兜底命中明细——会话链路与调用日志页均可查 |
-| 插件 HTTP API | `/api/packs/knowledge_graph/*`:知识库 CRUD/文档上传/导入/图谱查询/增量展开/检索问答（管理页与宿主直调） |
-| 管理页 | 管理端动态 Tab:知识库工作条（选库/建库/删库）+ 文档导入 + G6 图谱浏览（单击详情/双击展开邻居/悬停高亮一阶邻域）+ 本体设置（模板起步/LLM 归纳/类型审核） |
+| 插件 HTTP API | `/api/packs/knowledge_graph/*`:知识库树 CRUD/文档上传/导入/图谱查询/增量展开/检索问答/检索测试（管理页与宿主直调）;`GET /dependency-status` 返回 Neo4j/向量库探针结果（设置页重检用） |
+| 管理页 | 管理端动态 Tab,左右分栏:左侧库树（文件夹/子库层级,建/移/删）+ 右侧详情四子页——文档导入 / G6 图谱浏览（单击详情/双击展开邻居/悬停高亮一阶邻域）/ 本体设置（模板起步/LLM 归纳/类型审核）/ 检索测试（意图/种子命中/子图水位/向量分数可视化） |
 | 依赖门控 | manifest 声明 neo4j/pg_vector 依赖与探针;未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
 
 **SDK 存储下沉**：图/向量/文档解析能力已下沉 `sdk/`（`graph_store` / `vector_store` /
 `doc_parser` / `scope_registry`）,带命名空间隔离契约（前缀登记 fail-fast + scope_id
-服务端签发）。后续插件（NL2BI 报表、RAG、记忆库…）三行代码接入全套隔离存储设施,
+服务端签发）。ChatBI 已照此接入（`chatbi` 前缀）,后续插件（RAG、记忆库…）三行代码
+接入全套隔离存储设施,
 详见 `backend/src/domains/ARCHITECTURE.md`「SDK 存储设施」。
+
+### 4.4 chatbi — 智能问数（NL2SQL + 图表，全能力插件）
+
+自然语言查业务库：数据源管理 → 语义层/图谱检索（向量+关键词 RRF 混合）→ SQL
+生成/自愈/三层校验 → 执行 → 图表卡（数据来源折叠区含表 schema 卡/JOIN 路径/执行
+SQL,与引用编号构成可信度双件套）。移植自独立 chat-bi 平台，领域能力全量保留
+（语义层版本/记忆/反馈闭环/Skills/多轮/澄清）。
+
+| 组成 | 说明 |
+|------|------|
+| 主工具 | `ask_data`（8 步管线）/ `switch_chart`（换图表类型） |
+| 插件 HTTP API | `/api/packs/chatbi/*`：数据源 CRUD/扫描/语义层版本/图谱浏览/记忆/指标/健康面板;`POST /datasources/{id}/rebuild-index`（强制重建向量索引,异步任务）;`POST /feedback`（对话卡点赞/点踩 → 表/关系置信度微调,开关默认关） |
+| 后台任务 | scan_datasource / refresh_semantics / memory.consolidate / rebuild_index |
+| 管理页 | 管理端动态 Tab：数据源管理/语义层/图谱浏览 |
+| 依赖门控 | pg_vector 可选（未配置降级全表清单,对标原系统 SEC-005） |
+
+### 4.5 njmind_bpm / njmind_list — 流程与列表配置
+
+BPM 审批流配置（`generate_process`）与列表页配置（`generate_list`）两个插件,
+上游走 njmind-modeler Java 侧纯计算端点（parse/render 零持久化,落库走 designer
+原保存流程）。
 
 ---
 
@@ -615,6 +647,7 @@ npm install && npm run dev
 | GET/POST | `/api/admin/packs`、`/api/admin/packs/:name/enable\|disable` | **管理端**：插件清单与启停（热生效） |
 | GET/PUT | `/api/admin/packs/:name/settings` | **管理端**：插件设置读写（声明式设置页） |
 | POST | `/api/admin/packs/:name/recheck` | **管理端**：依赖重新检测（补配后热加载，无需重启） |
+| GET/PUT | `/api/admin/settings/display`、GET `/api/settings/display` | 平台显示设置（链路思考/检索结果显示开关;管理端写,对话页只读共读） |
 | GET | `/api/admin/conversations/:id/trace` | **管理端**：会话链路追踪（事件流+调用日志统一时间线） |
 | GET | `/api/admin/stats` | **管理端**：概览统计 |
 | GET | `/api/tasks`、`/api/tasks/:id`、`/api/tasks/:id/logs` | **任务中心**：任务列表/详情/结构化日志 |
@@ -676,7 +709,7 @@ npm install && npm run dev
 | 意图路由决策（选领域/选工具/是否兜底） | 引擎自动 trace 打点 + LLM 调用明细 |
 | LLM 调用（**完整 prompt 与响应**、token 用量、耗时、环节标签 stage） | `call_logs`（按 conv_id 关联；`LLM_LOG_FULL=0` 可退回摘要模式） |
 | 上游 API 调用（请求/响应全文、状态码、耗时） | `call_logs`（会话归属经线程上下文自动绑定，插件零改动） |
-| **图谱/向量检索**（种子词与逐词命中、子图召回量与三元组明细、向量逐条相似度分数） | `call_logs`（call_type=graph/vector；检索摘要行直接可读，明细展开可查） |
+| **图谱/向量/全文检索**（种子词与逐词命中、子图召回量与三元组明细、向量逐条相似度分数、全文兜底命中明细;ChatBI 检索同入观测） | `call_logs`（call_type=graph/vector/fulltext,常量收敛 `sdk/observability.py`；检索摘要行直接可读，明细展开可查） |
 | 工具执行（工具名、耗时、ok/ask/error 结论） | 引擎自动 trace 打点 |
 | 插件内部业务步骤 | pack 调 `ctx.trace()` 写入（见插件指南 §2.2） |
 | 后台任务（导入流水线批次/块级明细） | 任务日志（请求级结构化，任务中心抽屉查看） |
@@ -713,28 +746,33 @@ llm-to-modler/
 │       │   ├── graph.py           # StateGraph 构建 + compile
 │       │   ├── graph_state.py     # GraphState TypedDict
 │       │   ├── nodes.py           # 节点函数 (classify/execute/handle)
-│       │   ├── stream.py          # graph.stream → SSE 桥接
+│       │   ├── stream.py           # graph.stream → SSE 桥接
+│       │   ├── sse.py             # SSE 事件格式 + StreamManager(线程安全)
 │       │   ├── conversation.py    # 多轮对话管理
 │       │   ├── compression.py     # 上下文压缩 + build_compressed_history
 │       │   ├── prompt_loader.py   # Jinja2 模板加载
-│       │   │   ├── state_keys.py      # 跨模块状态键常量 (engine ↔ pack ↔ 前端)
-│       │   │   ├── log_config.py      # 日志配置 (loguru: 控制台 + logs/app.log 轮转)
-│       │   │   └── logging_filter.py  # 日志脱敏
+│       │   ├── state_keys.py      # 跨模块状态键常量 (engine ↔ pack ↔ 前端)
+│       │   ├── log_config.py      # 日志配置 (loguru: 控制台 + logs/app.log 轮转)
+│       │   └── logging_filter.py  # 日志脱敏
 │       │
 │       ├── sdk/                   # ★ SDK 层 (协议定义 + 通用存储设施)
 │       │   ├── tool.py            # Tool/CompositeTool/ToolResult(含 formatted 显式通道)
-│       │   ├── prompt_loader.py    # PromptLoader(自 engine 下沉)
-│       │   ├── call_context.py     # 请求级 conv_id thread-local(自 services 下沉)
-│       │   ├── asset_client.py     # AssetClient(通用)/ConfigAssetClient(配置类) 两层
-│       │   ├── pack_api.py         # 插件门面(admin鉴权/配置读取器/任务异常,依赖倒置)
+│       │   ├── prompt_loader.py   # PromptLoader(自 engine 下沉)
+│       │   ├── call_context.py    # 请求级 conv_id thread-local(自 services 下沉)
+│       │   ├── asset_client.py    # AssetClient(通用)/ConfigAssetClient(配置类) 两层
+│       │   ├── pack_api.py        # 插件门面(admin鉴权/配置读取器/任务异常 PermanentTaskError,依赖倒置)
 │       │   ├── registry.py        # ToolRegistry (自动发现)
 │       │   ├── pack_router.py     # PackRouter 协议 (一级/二级路由)
-│       │   ├── pack_api.py        # 插件 HTTP API 鉴权/身份辅助
-│       │   ├── asset_client.py    # AssetClient ABC
 │       │   ├── sanitize.py        # Unicode 隐写清洗
+│       │   ├── llm_compat.py      # LLMCompat/chat_text 响应形状归一(自 chatbi 下沉)
+│       │   ├── observability.py   # call_type 观测常量 + log_pack_call 通用打点
+│       │   ├── catalog.py         # 目录名词确定性匹配原语(中文名→code)
+│       │   ├── env_config.py      # SDK 强类型 env 配置解析
 │       │   ├── scope_registry.py  # ★ 存储命名空间隔离(前缀登记+scope签发)
 │       │   ├── graph_store.py     # ★ Neo4j 图存储(GraphStore Protocol)
-│       │   ├── vector_store.py    # ★ 向量存储(VectorStore Protocol)
+│       │   ├── vector_store.py    # ★ 向量存储工厂(pgvector 单后端;probe_pg_vector/backend_display_name)
+│       │   ├── pg_vector_store.py # ★ pgvector 实现(HNSW 余弦,连接自愈)
+│       │   ├── relational_store.py # ★ pack 关系型存储通道(PG,pack 独立 schema)
 │       │   └── doc_parser.py      # ★ md/txt/pdf/docx 解析+切块
 │       │
 │       ├── domains/               # ★ Domain Packs (领域知识全部在此)
@@ -749,18 +787,27 @@ llm-to-modler/
 │       │   │
 │       │   ├── leave_application/ # 请假申请插件 (演示域)
 │       │   │
-│       │   └── knowledge_graph/   # ★ 知识图谱插件 (全能力形态)
-│       │       ├── pack.py        # 四钩子: registry/api_router/tasks/unload
-│       │       ├── config.yaml    # manifest(依赖声明/管理页/设置页)
-│       │       ├── settings.schema.yaml  # 声明式设置页
-│       │       ├── api.py         # 插件 HTTP API(/api/packs/knowledge_graph)
-│       │       ├── tasks.py       # 导入流水线(断点续跑/熔断/心跳)
-│       │       ├── store.py       # 领域元数据(kg_ 三表)
-│       │       ├── stores.py      # SDK 存储适配层
-│       │       ├── retrieval.py   # 混合检索问答
-│       │       ├── probes.py      # 依赖探针
-│       │       ├── tools/kb_search.py
-│       │       └── prompts/
+│       │   ├── knowledge_graph/   # ★ 知识图谱插件 (全能力形态)
+│       │   │   ├── pack.py        # 四钩子: registry/api_router/tasks/unload
+│       │   │   ├── config.yaml    # manifest(依赖声明/管理页/设置页)
+│       │   │   ├── settings.schema.yaml  # 声明式设置页
+│       │   │   ├── api.py         # 插件 HTTP API(/api/packs/knowledge_graph)
+│       │   │   ├── tasks.py       # 导入流水线(断点续跑/熔断/心跳)
+│       │   │   ├── store.py       # 领域元数据(kg_ 三表)
+│       │   │   ├── stores.py      # SDK 存储适配层
+│       │   │   ├── retrieval.py   # 混合检索问答
+│       │   │   ├── probes.py      # 领域专属探针(neo4j;pg_vector 探针下沉 SDK)
+│       │   │   ├── tools/kb_search.py
+│       │   │   └── prompts/
+│       │   │
+│       │   ├── chatbi/            # ★ 智能问数插件 (NL2SQL+图表, 全能力形态)
+│       │   │   ├── tools/         # ask_data(8步) / switch_chart
+│       │   │   ├── api.py / tasks.py / settings.schema.yaml
+│       │   │   └── schema_graph / semantic / retrieval / hybrid
+│       │   │       / memory / feedback / indexing / graph_infer …
+│       │   │
+│       │   ├── njmind_bpm/        # 流程/审批流配置插件
+│       │   └── njmind_list/       # 列表页配置插件
 │       │
 │       ├── adapters/              # 适配器
 │       │   └── http_asset_client.py  # HTTP 上游实现
@@ -771,15 +818,18 @@ llm-to-modler/
 │       │   ├── admin.py           # 管理端(会话/调用日志/插件/设置/统计)
 │       │   ├── tasks.py           # 任务中心(列表/日志/取消/SSE)
 │       │   ├── meta.py            # /api/meta/packs
+│       │   ├── settings.py        # 显示设置(用户级只读端点)
 │       │   ├── health.py          # /health
 │       │   └── auth.py            # 统一认证(token 签发 + AuthMiddleware)
 │       │
 │       ├── llm/
 │       │   ├── client.py          # LLM 客户端 (OpenAI 兼容, 支持多模态)
 │       │   ├── local_embeddings.py # 本地 ONNX 向量化(bge-m3, EMBEDDING_BACKEND=local)
+│       │   ├── embed_cache.py     # 嵌入缓存(LRU+TTL 24h,重复文本零出站)
 │       │   └── rate_limit.py       # 全局限速(RPM/TPM 双桶+EMA 校准)
 │       │
 │       └── services/
+│           ├── db.py                  # PG 存储引擎(psycopg3 连接池+占位符翻译)
 │           ├── conversation_store.py  # PG 会话存储(psycopg 连接池)
 │           ├── upstream_client.py     # 上游客户端
 │           ├── task_manager.py        # ★ 后台任务框架(队列串行/取消/SSE)
@@ -789,17 +839,19 @@ llm-to-modler/
 │           ├── pack_dependency.py     # 依赖门控装配
 │           ├── pack_settings.py       # 插件设置(设置页>env>默认)
 │           ├── pack_state.py          # 启停状态持久化
+│           ├── platform_settings.py   # 平台级 KV 设置(显示设置)
 │           └── call_context.py        # 调用上下文(会话归属绑定)
 │
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── chat/              # 聊天组件 (ChatPanel/ChatInput/ClarificationCard/KgGraphCard)
+│   │   │   ├── chat/              # 聊天组件 (ChatPanel/ChatInput/KgGraphCard/BiChartCard/TurnTraceModal)
 │   │   │   └── json/              # JSON 查看器
 │   │   ├── admin/                 # ★ 管理端(独立多页入口)
 │   │   │   ├── components/        # 概览/会话/调用日志/任务中心/插件/设置抽屉
 │   │   │   └── packPages/         # 插件自定义管理页(注册表动态 Tab)
-│   │   │       └── knowledge_graph/  # 文档导入/G6 图谱浏览/本体设置
+│   │   │       ├── knowledge_graph/  # 库树+文档导入/G6 图谱浏览/本体设置/检索测试
+│   │   │       └── chatbi/        # 数据源管理/语义层/图谱浏览/看板/记忆/Skills
 │   │   ├── layouts/               # 独立/嵌入布局
 │   │   ├── stores/                # Pinia 状态管理
 │   │   ├── services/              # API 调用 + SSE
@@ -848,8 +900,8 @@ ChatTool 通过 `ctx.registry.all()` 动态查询所有已注册工具的能力�
 
 插件不只是"几个工具"：manifest 声明依赖（探针实测、fail-closed 装配）、声明式设置页、
 自定义管理页（前端注册表动态 Tab）、自有 HTTP API（热挂卸）、后台任务（队列串行/断点
-续跑/取消/结构化日志）——知识图谱插件是首个全能力示范，后续 NL2BI 等插件照此形态复用
-SDK 存储设施（前缀登记 + scope 签发隔离契约）。
+续跑/取消/结构化日志）——知识图谱插件是首个全能力示范，ChatBI（智能问数）已照此形态
+复用 SDK 存储设施（前缀登记 + scope 签发隔离契约）。
 
 ---
 

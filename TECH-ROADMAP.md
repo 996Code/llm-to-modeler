@@ -17,6 +17,8 @@
 > | `GET /api/skills/*` 上游代理路由 | 已删除；上游访问统一走 chat 链路内的 AssetClient |
 > | `mcp_server.py`（`/mcp` 对外协议面） | 已删除；对外集成面是嵌入契约（iframe + chat SSE）+ 插件自有 HTTP API（`/api/packs/{name}`） |
 > | `/api/health` 的 `upstream` 字段 | 已删除；健康检查只回答本服务存活 |
+> | SQLite 会话/任务存储 | 已收敛 PG-only（DATABASE_URL 必填 fail-closed）；存量迁移 runbook 见 `backend/scripts/migrate_sqlite_to_pg.py` |
+> | Milvus 向量后端（独立服务 + `VECTOR_BACKEND=milvus`） | 已全量移除（b491193）；向量存 PostgreSQL pgvector 单后端（与平台同库，HNSW 余弦） |
 >
 > SDK 消息（MODELER_*→已演进为嵌入契约信封协议）、modify 管线（全量→已改
 > 增量指令集两相式）等其余演进同此处理。
@@ -1710,10 +1712,12 @@ App.vue
 
 ## 11. 部署
 
-> **⚠ 本章为历史拓扑,已过时。** 当前部署形态(2026-09-09):
-> - 单容器 app(nginx 静态/反代 + uvicorn API,HOST_PORT 19090)+ Neo4j + Milvus 三服务 compose
+> **⚠ 本章为历史拓扑,已过时。** 当前部署形态(2026-10-16):
+> - 单容器 app(nginx 静态/反代 + uvicorn API,HOST_PORT 19090)+ Neo4j + PostgreSQL
+>   (pgvector,与平台存储同库)三服务 compose——**Milvus 已全量移除**(b491193),
+>   向量存 PG pgvector 单后端
 > - 一键发布:仓库根 `./deploy.sh`(git pull → 前端 pnpm build → 后端 pip → 纯 COPY 打镜像 → compose 切换 → 健康探测,失败自动回滚)
-> - 数据统一 `./data/` 下(app/neo4j/milvus/logs);embedding 模型自动下载到 `data/models/embedding/`(bge-m3 ONNX)
+> - 数据统一 `./data/` 下(app/postgres/neo4j/logs);embedding 模型自动下载到 `data/models/embedding/`(bge-m3 ONNX)
 > - 统一认证:ADMIN_TOKEN 兼作全站口令,auth.html 门禁页换 24h token,签名密钥随重启轮换
 > 以下原始记录仅作演进参考。
 
