@@ -52,8 +52,10 @@ def _suspicion_score(ea: Dict, eb: Dict) -> float:
 
     名对全积取最优:同名(别名/本体互指)=0 最可疑;编辑距离(仅字数
     差 ≤_LEV_MAX 时计算)为主信号;字符重合 ≥_OVERLAP_MIN 兜底(折算
-    10-overlap,排在一切编辑距离命中之后)。判可疑与排序共用本函数,
-    cap 竞争不重算。
+    10-overlap,排在一切编辑距离命中之后)。本函数只服务精确判可疑
+    (_suspicious,堆内存活对的终审);cap 竞争(prescreen_pairs 堆
+    入选)不用它——那里用更廉价的字符集 Jaccard 代理分内联计算,
+    存活对再回本函数终审,两层各司其职。
     """
     best = float("inf")
     for na in _names_of(ea):

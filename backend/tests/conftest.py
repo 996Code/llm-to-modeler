@@ -131,15 +131,20 @@ _lock_conn = _psycopg.connect(TEST_DATABASE_URL, autocommit=True)
 _granted = _lock_conn.execute(
     "SELECT pg_try_advisory_lock(%s)", (_TEST_LOCK_KEY,)).fetchone()[0]
 if not _granted:
+    # 精确诊断:只报真正持有本 advisory lock 的连接(pg_locks JOIN
+    # pg_stat_activity)——旧查询按 datname 列同库全部连接,会把无辜
+    # 连接(如泄漏的 mock 上游连接)误报成持锁者,误导排查方向。
     _holder = _lock_conn.execute(
-        "SELECT pid, application_name, client_addr, "
-        "now()-backend_start AS age FROM pg_stat_activity "
-        "WHERE datname = current_database() AND pid != pg_backend_pid() "
-        "ORDER BY backend_start LIMIT 3").fetchall()
+        "SELECT a.pid, a.application_name, a.client_addr, "
+        "now()-a.backend_start AS age, state "
+        "FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid "
+        "WHERE l.locktype = 'advisory' AND l.objid = %s "
+        "AND a.pid != pg_backend_pid()",
+        (_TEST_LOCK_KEY,)).fetchall()
     _lock_conn.close()
     pytest.exit(
         "测试库已被另一个 pytest 会话持有(advisory lock):单库逐测试清表"
-        "与并发不兼容,会互踩出死锁/假失败。\n当前持库连接:\n  "
+        "与并发不兼容,会互踩出死锁/假失败。\n当前持锁连接:\n  "
         + "\n  ".join(str(h) for h in _holder)
         + "\n处理:等对方跑完,或 kill 旧进程后重跑。", returncode=4)
 
@@ -199,14 +204,22 @@ def _init_schema():
     # 业务表白名单内的)
     _business = {"bi_probe_t", "biz_orders", "biz_users"}
     with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        # 残留表可能被泄漏连接持锁(僵尸 mock 进程等)——DROP 默认无
+        # 超时会无限挂起拖死整个 teardown。限 5s:拿不到锁的表跳过并
+        # 告警,不阻断其余表的清理与后续的锁释放。
+        conn.execute("SET lock_timeout = '5s'")
         rows = conn.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'public' "
             "AND (tablename LIKE 'zz_test_%' OR tablename LIKE 'kg_%' "
             "     OR tablename LIKE 'chatbi_%')").fetchall()
         for (t,) in rows:
             if t not in _business:
-                conn.execute(
-                    f'DROP TABLE IF EXISTS public."{t}" CASCADE')
+                try:
+                    conn.execute(
+                        f'DROP TABLE IF EXISTS public."{t}" CASCADE')
+                except psycopg.errors.LockNotAvailable:
+                    print(f"\n[conftest] teardown: 表 {t} 被持锁连接占用"
+                          f"(lock_timeout 5s 到期), 跳过 DROP")
     # 释放并发守卫锁(显式;进程退出断连也会自动释放,双保险)
     try:
         _lock_conn.execute("SELECT pg_advisory_unlock(%s)", (_TEST_LOCK_KEY,))

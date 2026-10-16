@@ -26,9 +26,10 @@
     (scope_registry.new_scope_id() 或调用方自己的 UUID),禁止用户输入
     直传——入口用 is_scope_id_safe 防御。
 
-【连接管理】进程级单例 + 指纹缓存(含 prefix):配置热改时重建 driver、
-关闭旧连接;双检锁纪律——缓存命中只拿轻锁,连接构建在锁外。所有
-方法线程安全(driver 自带连接池)。
+【连接管理】进程级多槽指纹缓存(含 prefix):各指纹独立持有 driver,
+互不驱逐;配置热改出新指纹时新建连接,reset 时统一关闭。双检锁纪律
+——缓存命中只拿轻锁,连接构建在锁外。所有方法线程安全(driver 自带
+连接池)。
 
 【测试替身】单测用内存 Fake 替换(见 tests/),不要求真实 Neo4j;
 GraphStore Protocol 声明了替身需实现的完整方法集。
@@ -836,8 +837,7 @@ class Neo4jGraphStore:
 
 # ── 进程级单例(设置热改时重建) ────────────────────────────────
 
-_cached_store: Optional[Neo4jGraphStore] = None
-_cached_fp: tuple = ()
+_cached_stores: Dict[tuple, Neo4jGraphStore] = {}   # 指纹 → store(多槽)
 _cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络 IO)
 _build_lock = threading.Lock()     # 串行化连接构建(网络 IO 在锁外做)
 
@@ -849,57 +849,60 @@ def get_graph_store(settings: Dict[str, Any], **model_kwargs: Any) -> Neo4jGraph
     rel_type/scope_prop)——不同插件的图模型不同,指纹必须含它们,
     否则同连接下两个前缀的插件会互相拿到对方的缓存对象。
 
+    缓存按指纹多槽(vector_store.get_vector_store 同款):单槽会在换
+    指纹时驱逐旧连接——两个图模型插件并存时后到者 close 掉前者的
+    driver, 前者下一次调用报 Driver closed(互踢 bug)。多槽下连接数
+    = 活跃指纹数, 各自独立存活。
+
     锁纪律:缓存命中路径只拿 _cache_lock(微秒级);连接构建(含
     ensure_constraints 的网络往返,Neo4j 慢时秒级)在锁外做——否则一个
     重建动作会让所有并发 /search 与导入线程在锁上排队。
-    失败纪律:构建失败清缓存,绝不留下"已 close 却仍被缓存"的 driver
-    (否则配置回退到旧指纹时会持续返回坏连接)。
+    失败纪律:构建失败清本指纹槽,绝不留下"已 close 却仍被缓存"的
+    driver(否则配置回退到旧指纹时会持续返回坏连接);其他指纹的槽
+    不受牵连。
     """
-    global _cached_store, _cached_fp
     fp = (
         settings.get("neo4j_uri"), settings.get("neo4j_user"),
         settings.get("neo4j_password"), settings.get("neo4j_database"),
         tuple(sorted(model_kwargs.items())),
     )
+
+    def build() -> Neo4jGraphStore:
+        store = Neo4jGraphStore(
+            uri=fp[0], user=fp[1] or "neo4j", password=fp[2] or "",
+            database=fp[3] or "neo4j", **model_kwargs,
+        )
+        store.ensure_constraints()
+        return store
+
     with _cache_lock:
-        if _cached_store is not None and _cached_fp == fp:
-            return _cached_store
+        hit = _cached_stores.get(fp)
+        if hit is not None:
+            return hit
 
     with _build_lock:
         with _cache_lock:   # 双检:排队期间可能已被同指纹线程建好
-            if _cached_store is not None and _cached_fp == fp:
-                return _cached_store
+            hit = _cached_stores.get(fp)
+            if hit is not None:
+                return hit
         try:
-            store = Neo4jGraphStore(
-                uri=fp[0], user=fp[1] or "neo4j", password=fp[2] or "",
-                database=fp[3] or "neo4j", **model_kwargs,
-            )
-            store.ensure_constraints()
+            store = build()
         except Exception:
             with _cache_lock:
-                if _cached_store is not None:
-                    try:
-                        _cached_store.close()
-                    except Exception:
-                        pass
-                _cached_store, _cached_fp = None, ()
+                _cached_stores.pop(fp, None)
             raise
-        old = None
         with _cache_lock:
-            old = _cached_store
-            _cached_store, _cached_fp = store, fp
-        if old is not None and old is not store:
-            try:
-                old.close()
-            except Exception:
-                pass
+            _cached_stores[fp] = store
         return store
 
 
 def reset_graph_store_cache() -> None:
-    """测试辅助:清单例。"""
-    global _cached_store, _cached_fp
+    """测试辅助:清单例(关闭全部指纹槽的连接)。"""
     with _cache_lock:
-        if _cached_store is not None:
-            _cached_store.close()
-        _cached_store, _cached_fp = None, ()
+        stores = list(_cached_stores.values())
+        _cached_stores.clear()
+    for s in stores:
+        try:
+            s.close()
+        except Exception:
+            pass

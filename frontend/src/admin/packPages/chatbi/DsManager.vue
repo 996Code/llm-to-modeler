@@ -81,11 +81,11 @@
     <a-drawer v-model:open="metricsOpen" width="620"
               :title="`查询指标 · ${metricsDs?.name || ''}`">
       <a-spin :spinning="metricsLoading">
-        <!-- 依赖健康(milvus/llm 真实探针;三审 P2) -->
+        <!-- 依赖健康(pg 向量库/llm 真实探针;三审 P2;Milvus 已下线) -->
         <div v-if="healthDetail" class="dep-line">
           <a-tag v-for="(c, k) in healthDetail.components" :key="k"
                  :color="c.status === 'ok' ? 'green' : (c.status === 'unconfigured' ? 'default' : 'red')">
-            {{ { milvus: '向量库(Milvus)', pg: '向量库(PG)', llm: 'LLM 网关', fernet: '加密' }[k] || k }}: {{ c.status }}
+            {{ { pg: '向量库(PG)', llm: 'LLM 网关', fernet: '加密' }[k] || k }}: {{ c.status }}
           </a-tag>
           <a-tooltip :title="Object.values(healthDetail.components).map((c: any) => c.detail).join('\n')">
             <span class="muted" style="font-size:12px;cursor:help">详情</span>

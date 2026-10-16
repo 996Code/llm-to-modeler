@@ -1027,6 +1027,7 @@ def reset_caches() -> None:
     一处即全清(双单例时期只清 stores._db 会漏 runtime._db)。
     """
     from domains.chatbi import runtime
-    sdk_vector.reset_vector_store_cache()
+    # 只清本 pack 前缀的槽——清全部会拆掉 knowledge_graph 等其他 pack 的活连接
+    sdk_vector.reset_vector_store_cache(VECTOR_PREFIX)
     runtime.reset_runtime_cache()
     unregister_prefix(VECTOR_PREFIX, owner=PACK_NAME)

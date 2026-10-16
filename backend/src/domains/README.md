@@ -112,7 +112,8 @@ domains/
 │   ├── tasks.py             # 后台任务（导入流水线）
 │   ├── store.py / stores.py # 领域元数据 + SDK 存储适配层
 │   ├── retrieval.py         # 混合检索问答
-│   └── probes.py            # 依赖探针
+│   └── probes.py            # 领域专属探针（neo4j;pg_vector 探针为平台内置,实现下沉 SDK）
+├── chatbi/                  # 智能问数插件（NL2SQL,全能力形态）
 └── my_pack/                 # 你的工具包
     ├── __init__.py
     ├── pack.py              # 必需
@@ -195,7 +196,7 @@ class ToolResult:
 ## 测试工具包
 
 ```bash
-# 后端测试(490+ 条全量)
+# 后端测试(1400+ 条全量)
 cd backend
 ./venv/bin/python -m pytest tests/ -q
 
@@ -223,7 +224,7 @@ A: 检查：
 3. 工具名称唯一
 
 **Q: 插件显示"依赖未配置"？**
-A: manifest 声明了 `dependencies` 的插件（如 knowledge_graph 需要 Neo4j/Milvus）,
+A: manifest 声明了 `dependencies` 的插件（如 knowledge_graph 需要 Neo4j/pg_vector）,
 配好 env 或管理端→插件→设置里补配,再点"重新检测"热加载。
 
 **Q: 如何使用 LLM？**

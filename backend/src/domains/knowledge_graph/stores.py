@@ -75,5 +75,6 @@ def reset_caches() -> None:
             f"unload 跳过连接释放与前缀注销:{busy} 个导入任务在途(随任务结束/进程退出回收)")
         return
     sdk_graph.reset_graph_store_cache()
-    sdk_vector.reset_vector_store_cache()
+    # 只清本 pack 前缀的槽——清全部会拆掉 chatbi 等其他 pack 的活连接
+    sdk_vector.reset_vector_store_cache(VECTOR_PREFIX)
     unregister_prefix("kg", owner=PACK_NAME)

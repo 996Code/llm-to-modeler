@@ -371,9 +371,9 @@ async def update_semantic_models(ds_id: str, body: SemanticContentIn, request: R
     index_rebuilt, index_warning = True, None
     try:
         from domains.chatbi import indexing
-        from sdk.llm_compat import LLMCompat
+        from domains.chatbi.runtime import get_llm
         _rb = indexing.guarded_rebuild(content, ds_id, stores.get_vector(request.app.state),
-                                     stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+                                     stores.get_embedder(get_llm(request.app.state)),
                                      db=_db(), expected_version=ver)  # 十二审8.2
         if _rb is not None and getattr(_rb, "error", None):
             raise RuntimeError(f"索引重建失败: {_rb.error}")
@@ -445,9 +445,9 @@ async def semantic_rollback(ds_id: str, version: int, request: Request,
     index_rebuilt, index_warning = True, None
     try:
         from domains.chatbi import indexing
-        from sdk.llm_compat import LLMCompat
+        from domains.chatbi.runtime import get_llm
         _rb = indexing.guarded_rebuild(content, ds_id, stores.get_vector(request.app.state),
-                                     stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+                                     stores.get_embedder(get_llm(request.app.state)),
                                      db=_db(), expected_version=ver)  # 十二审8.2
         if _rb is not None and getattr(_rb, "error", None):
             raise RuntimeError(f"索引重建失败: {_rb.error}")
@@ -721,11 +721,11 @@ def _graph_index_rebuilder(request: Request, ds_id: str, content,
     """图谱变更后的索引重建回调(向量 store/embedder 从 app_state 构造)。"""
     def _rebuild():
         from domains.chatbi import indexing, stores
-        from sdk.llm_compat import LLMCompat
+        from domains.chatbi.runtime import get_llm
         _rb = indexing.guarded_rebuild(
             content, ds_id,
             stores.get_vector(request.app.state),
-            stores.get_embedder(LLMCompat(request.app.state.llm_client)),
+            stores.get_embedder(get_llm(request.app.state)),
             db=_db(), expected_version=expected_version)  # 十二审8.2
         # RebuildResult.error 是真实的失败契约(五审 5.2): 转 raise 让
         # 端点的 except 分支把 index_rebuilt 标 False, 不谎报成功
@@ -1055,10 +1055,13 @@ async def chat_feedback(body: ChatFeedbackIn, request: Request):
     # per-user 幂等(防刷):同用户同消息同方向已反馈 → 直接返回成功,
     # 不再叠加置信度——连续点踩 N 次只生效一次(改投反向仍允许,走
     # 对应方向的既有幅度)。事件按 (user, message, direction) 查重。
+    # message_id 为空(流式新消息前端没有 id)不参与幂等——(user,
+    # None, direction) 会误吞同会话不同消息的同向反馈;无 id 的重复
+    # 点击由前端 feedbackVote 状态挡, 服务端不靠空键去重。
     try:
         prior = store.load_events(
             body.conversation_id, kinds=["feedback"]) or []
-        already = any(
+        already = body.message_id is not None and any(
             (ev.get("payload") or {}).get("user_id") == uid
             and (ev.get("payload") or {}).get("message_id") == body.message_id
             and (ev.get("payload") or {}).get("feedback") == body.feedback

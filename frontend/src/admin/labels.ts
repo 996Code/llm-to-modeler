@@ -46,6 +46,7 @@ export const STAGE_LABELS: Record<string, string> = {
   'kg.fulltext_fallback': '全文·零命中兜底',
   // 智能问数(chatbi)链路(检索两阶段 + 8 步管线的 LLM 环节)
   'chatbi.embed': '向量·问题向量化',
+  'chatbi.vector_search': '向量·语义检索',
   'chatbi.retrieve.refine': 'LLM·检索精筛',
   'chatbi.think': 'LLM·预思考',
   'chatbi.generate_sql': 'LLM·SQL 生成',

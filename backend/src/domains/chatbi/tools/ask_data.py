@@ -173,7 +173,10 @@ class AskDataTool(CompositeTool):
 
     def _get_llm(self, ctx: ToolContext):
         # ctx.llm_client 是引擎裸实例(chat→str);pack 各栈按 (content, meta)
-        # 契约编写——统一经 LLMCompat 适配(llm_compat.py 有"unpack 症状"说明)
+        # 契约编写——统一经 LLMCompat 适配(llm_compat.py 有"unpack 症状"说明)。
+        # isinstance 防御不可去: 引擎注入形状是裸 LLMClient(改它是大重构),
+        # 而测试替身可能已按 (content, meta) 契约直接注入 LLMCompat——
+        # 重复包装虽被 LLMCompat 透传兼容, 显式判一次让契约归属清晰。
         from sdk.llm_compat import LLMCompat
         inner = ctx.llm_client
         return inner if isinstance(inner, LLMCompat) else LLMCompat(inner)
@@ -907,7 +910,6 @@ class AskDataTool(CompositeTool):
         try:
             from domains.chatbi import fewshot as fewshot_mod
             from domains.chatbi import stores as cb_stores
-            from sdk.llm_compat import LLMCompat
             llm0 = self._get_llm(ctx)
             fewshot_mod.index_fewshot_example(
                 state.get("user_input", ""), state["sql"],

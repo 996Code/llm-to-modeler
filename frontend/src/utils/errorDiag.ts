@@ -8,9 +8,10 @@ export type ErrorCategory = 'llm-upstream' | 'retrieval' | 'execution' | 'unknow
 
 export function classifyError(err: string): ErrorCategory {
   const t = (err || '').toLowerCase()
-  // 存储设施关键词优先于通用连接词:milvus/neo4j 的 connection 错误
-  // 是检索设施故障,不是 LLM 上游(审查抓出的误分类)
-  if (t.includes('milvus') || t.includes('neo4j') || t.includes('vector')
+  // 存储设施关键词优先于通用连接词:neo4j/pgvector 的 connection 错误
+  // 是检索设施故障,不是 LLM 上游(审查抓出的误分类;Milvus 已下线,
+  // 关键词与后端 engine/stream.py 落库侧同口径)
+  if (t.includes('neo4j') || t.includes('vector')
       || t.includes('graph') || t.includes('检索')) {
     return 'retrieval'
   }

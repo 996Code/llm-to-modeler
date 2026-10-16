@@ -265,6 +265,29 @@ def _get_build_lock(ds_id: str):
         return _index_build_locks[ds_id]
 
 
+def _pointer_floor_revision(db, data_source_id, semantic_v):
+    """指针下限感知(审查 版本失衡): 返回发布 revision 的下限。
+
+    active 指针 version 可能被管理端强制重建推高(如脏指针翻正出的
+    r100)——语义版本(6,7...)若低于它, CAS「仅更高版本可翻转」会把
+    此后每次自动重建全部静默挡住。发布 revision 取 max(指针, 语义)
+    下限, 内容仍按语义版本复查过是最新——只是分区号不再与语义版本
+    一一对应(读侧只看指针, 无影响)。指针读取失败不阻断构建(返回
+    语义版本, 仍按语义版本发布)。
+    """
+    import re as _re
+    from domains.chatbi.stores import get_active_doc_id
+    try:
+        _scope = get_or_create_scope(db, data_source_id)
+        _prev = get_active_doc_id(db, _scope) or ""
+        _m = _re.match(r"^schema_r(\d+)", _prev)
+        if _m and int(_m.group(1)) >= semantic_v:
+            return int(_m.group(1)) + 1
+    except Exception:
+        pass
+    return semantic_v
+
+
 def guarded_rebuild(content, data_source_id, store, embedder, db,
                     expected_version=None, lease=None):
     """带 datasource 级串行锁和版本前后复查的 rebuild_index 包装。
@@ -279,39 +302,38 @@ def guarded_rebuild(content, data_source_id, store, embedder, db,
     lock = _get_build_lock(data_source_id)
     with lock:
         # 构建前校验: expected_version 不匹配说明有更新版本, 旧构建让路
+        # entry_semantic_v: 进入时的语义版本——构建后复查的基准。
+        # 不能复用 expected_version 变量做复查基准: 指针下限感知会把
+        # 它改写为指针+1(如 101), 复查 cur_v(语义 7) != 101 恒真,
+        # 每次自动重建都触发一次多余的全量补建 embed。
+        entry_semantic_v = None
         if expected_version is not None:
-            _, cur_v = semantic.load_content(db, data_source_id)
-            if cur_v is not None and cur_v != expected_version:
-                return type('R', (), {'error': f'跳过过时构建 v{expected_version} (current v{cur_v})',
+            _, entry_semantic_v = semantic.load_content(db, data_source_id)
+            if entry_semantic_v is not None and entry_semantic_v != expected_version:
+                return type('R', (), {'error': f'跳过过时构建 v{expected_version} (current v{entry_semantic_v})',
                                       'deleted_count': 0, 'indexed_count': 0})()
-            # 下限感知(审查 版本失衡): 指针 version 可能被管理端强制重建
-            # 推高(如脏指针翻正出的 r100)——语义版本(6,7...)若低于它,
-            # CAS「仅更高版本可翻转」会把此后每次自动重建全部静默挡住,
-            # 索引停在旧内容。发布 revision 取 max(指针, 语义)下限,
-            # 内容仍按 expected_version 复查过是最新语义——只是分区号
-            # 不再与语义版本一一对应(读侧只看指针, 无影响)。
-            if cur_v is not None:
-                from domains.chatbi.stores import (get_or_create_scope,
-                                                   get_active_doc_id)
-                import re as _re
-                try:
-                    _scope = get_or_create_scope(db, data_source_id)
-                    _prev = get_active_doc_id(db, _scope) or ""
-                    _m = _re.match(r"^schema_r(\d+)", _prev)
-                    if _m and int(_m.group(1)) >= cur_v:
-                        expected_version = int(_m.group(1)) + 1
-                except Exception:
-                    pass  # 指针读取失败不阻断构建(仍按语义版本发布)
+            # 下限感知: 指针 version 高于语义版本时按指针+1 发布
+            if entry_semantic_v is not None:
+                expected_version = _pointer_floor_revision(
+                    db, data_source_id, entry_semantic_v)
         result = rebuild_index(content, data_source_id, store, embedder, db,
                                revision=expected_version, lease=lease)
-        # 构建后复查: 构建期间 current 变了 → 用最新版补建一次
+        # 构建后复查: 构建期间语义版本真变了(≠进入时的语义版本) →
+        # 用最新版补建一次。进入时无语义内容(被并发清空)则退回用
+        # expected_version 判断, 保持"构建期间出现新内容→补建"原语义。
         _, cur_v = semantic.load_content(db, data_source_id)
-        if cur_v is not None and expected_version is not None and cur_v != expected_version:
-            from domains.chatbi import semantic as _sem
-            latest_content, _ = _sem.load_content(db, data_source_id)
+        baseline = entry_semantic_v if entry_semantic_v is not None \
+            else expected_version
+        if cur_v is not None and baseline is not None and cur_v != baseline:
+            latest_content, _ = semantic.load_content(db, data_source_id)
             if latest_content is not None:
+                # 补建 revision 同样做指针下限感知: 首次构建可能已把
+                # 指针推高, 低 revision 补建会被 CAS 拒翻转, 白做一次
+                # 全量 embed 还留下孤儿分区。
                 result = rebuild_index(latest_content, data_source_id,
-                                       store, embedder, db, revision=cur_v,
+                                       store, embedder, db,
+                                       revision=_pointer_floor_revision(
+                                           db, data_source_id, cur_v),
                                        lease=lease)
         return result
 

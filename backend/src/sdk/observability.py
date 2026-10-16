@@ -11,6 +11,10 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# 缺装配只报一次(模块级 flag 防重复刷屏——每次库调用都走本 helper,
+# 无 flag 会在观测持续缺失期间每条调用刷一行 error)
+_missing_store_warned = False
+
 # call_logs.call_type 枚举(前端 labels.ts 的 CALL_TYPE_META 与此对齐)
 CALL_TYPE_LLM = "llm"
 CALL_TYPE_UPSTREAM = "upstream"
@@ -32,6 +36,15 @@ def log_pack_call(app_state, call_type: str, endpoint: str,
     try:
         cs = getattr(app_state, "conversation_store", None)
         if cs is None:
+            # 缺装配不得静默——观测数据会无声丢失, 排查时只能靠猜。
+            # 报一次后不再刷屏(本 helper 每条库调用都过, 见模块级 flag 注释)。
+            global _missing_store_warned
+            if not _missing_store_warned:
+                _missing_store_warned = True
+                logger.error(
+                    "观测未装配: app_state.conversation_store 缺失, "
+                    "pack 调用日志(call_logs)将不落库——检查装配链"
+                    "(main.py 是否把 conversation_store 挂上 app.state)")
             return
         if not conv_id:
             from sdk.call_context import current_conversation_id

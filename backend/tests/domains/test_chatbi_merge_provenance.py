@@ -901,6 +901,55 @@ class TestIndexRevisionNamespace:
         assert get_active_doc_id(pg_engine, "never-indexed-scope") is None
 
 
+class TestGuardedRebuildPointerFloorSingleEmbed:
+    """审查修复回归: 指针 version 高于语义版本时, 自动重建只 embed 一次.
+
+    修复前: 指针下限感知把 expected_version 改写为指针+1(如 101)后,
+    构建后复查 cur_v(语义 1) != 101 恒真 → 每次自动重建都触发一次
+    多余的全量补建 embed(CAS 拒翻转还留下孤儿分区)。
+    """
+
+    def test_pointer_above_semantic_embeds_once(self, pg_engine):
+        from datetime import datetime, timezone
+        from domains.chatbi import semantic
+        from domains.chatbi.indexing import guarded_rebuild
+        from domains.chatbi.stores import (set_active_doc_id,
+                                           get_active_doc_id)
+
+        ds, scope = "floor-ds", "floor-scope"
+        now = datetime.now(timezone.utc).isoformat()
+        with pg_engine.connect() as conn:
+            conn.execute(
+                "INSERT INTO chatbi_data_sources "
+                "(id, name, db_type, host, port, database, username, "
+                "encrypted_password, is_active, scan_status, scan_progress, "
+                "scan_stage, scan_error, scope_id, created_at, updated_at) "
+                "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
+                "'done', 100, '', '', ?, ?, ?)", (ds, scope, now, now))
+        content = _idx_content("a")
+        assert semantic.save_content(pg_engine, ds, content,
+                                     expected_version=0) == 1
+        # 脏指针: 管理端强制重建把指针推到 r100(远高于语义版本 1)
+        set_active_doc_id(pg_engine, scope, "schema_r100", 100)
+
+        class _CountingEmbedder:
+            def __init__(self):
+                self.calls = 0
+
+            def embed(self, texts):
+                self.calls += 1
+                return [[0.1, 0.2] for _ in texts]
+
+        emb = _CountingEmbedder()
+        r = guarded_rebuild(content, ds, _FakeVectorStore(), emb,
+                            db=pg_engine, expected_version=1)
+        assert r is not None and getattr(r, "error", None) is None
+        assert emb.calls == 1, \
+            f"指针>语义版本触发双倍 embed: {emb.calls} 次"
+        # 指针按指针+1 下限翻转(语义 1 < 指针 100, 不能往回翻)
+        assert get_active_doc_id(pg_engine, scope) == "schema_r101"
+
+
 # ════════════════════════════════════════════════════════════════
 # 十八审反例回归: 人工 composite / revision 物理隔离 / 同名指标 /
 # conflict 契约 / 报告生命周期 / 调度租约

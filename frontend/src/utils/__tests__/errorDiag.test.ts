@@ -9,8 +9,7 @@ describe('classifyError', () => {
     expect(classifyError('embed down')).toBe('llm-upstream')
   })
 
-  it('检索类:milvus/neo4j/vector/graph 归 retrieval', () => {
-    expect(classifyError('milvus connection pool exhausted')).toBe('retrieval')
+  it('检索类:neo4j/vector/graph 归 retrieval', () => {
     expect(classifyError('neo4j 服务不可用')).toBe('retrieval')
     expect(classifyError('vector search failed')).toBe('retrieval')
   })
@@ -26,7 +25,7 @@ describe('classifyError', () => {
   })
 
   it('大小写不敏感', () => {
-    expect(classifyError('MILVUS DOWN')).toBe('retrieval')
+    expect(classifyError('NEO4J DOWN')).toBe('retrieval')
     expect(classifyError('Sql Error')).toBe('execution')
   })
 })

@@ -225,10 +225,13 @@ class TestFeedbackApplies:
 
     def test_feedback_idempotent_per_user(self, client, ds_id, conv):
         """per-user 幂等(防刷):同用户同消息同方向二次反馈 → success 但
-        applied_tables 空,置信度不叠加(连续点踩 N 次只生效一次)。"""
+        applied_tables 空,置信度不叠加(连续点踩 N 次只生效一次)。
+        幂等键含 message_id——缺省(流式新消息无 id)不参与幂等,
+        见 test_feedback_no_message_id_not_dedup。"""
         c, db, app = client
         _enable(app)
-        body = {"conversation_id": conv["conv_id"], "feedback": "down"}
+        body = {"conversation_id": conv["conv_id"], "feedback": "down",
+                "message_id": conv["msg_id"]}
         r1 = c.post("/feedback", headers=H, json=body)
         assert r1.status_code == 200 and r1.json()["applied_tables"]
         after_first = _rel_confidence(db, ds_id)
@@ -236,6 +239,28 @@ class TestFeedbackApplies:
         assert r2.status_code == 200, r2.text
         assert r2.json() == {"success": True, "applied_tables": [], "deduplicated": True}
         assert _rel_confidence(db, ds_id) == pytest.approx(after_first)  # 无叠加
+
+    def test_feedback_no_message_id_not_dedup(self, client, ds_id, conv):
+        """message_id 缺省(流式新消息前端无 id)不做幂等去重——
+        (user, None, direction) 空键会误吞同会话不同消息的同向反馈。"""
+        c, _, app = client
+        _enable(app)
+        # 会话里再补一轮不同消息的数据制品(模拟另一条流式查询轮)
+        conv["store"].add_message(
+            conv_id=conv["conv_id"], role="assistant", content="又一轮查询",
+            data_artifact={
+                "datasource_id": ds_id,
+                "current_tables": ["orders"],
+                "sql": "SELECT 2",
+            })
+        r1 = c.post("/feedback", headers=H, json={
+            "conversation_id": conv["conv_id"], "feedback": "up"})
+        r2 = c.post("/feedback", headers=H, json={
+            "conversation_id": conv["conv_id"], "feedback": "up"})
+        assert r1.status_code == 200 and r2.status_code == 200
+        assert not r1.json().get("deduplicated")
+        assert r2.json()["applied_tables"], \
+            "空 message_id 被幂等键误吞(同会话不同消息的同向反馈丢失)"
 
     def test_feedback_event_persisted(self, client, ds_id, conv):
         """反馈事件落 events 表(kind=feedback, 不进消息重放)。"""

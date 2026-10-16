@@ -120,15 +120,25 @@ def get_vector_store(settings: Dict[str, Any],
         return store
 
 
-def reset_vector_store_cache() -> None:
-    """测试辅助:清单例。"""
+def reset_vector_store_cache(prefix: Optional[str] = None) -> None:
+    """清单例(测试辅助 / pack unload 钩子)。
+
+    prefix=None 清全部前缀的槽(兼容旧测试全量用法);指定前缀只清
+    该 pack 的槽——pack unload 钩子必须传各自前缀:多槽缓存下,清全部
+    会让"禁用 KG"顺手拆掉 chatbi 的活连接(互踢 bug 的 unload 侧残留)。
+    指纹元组末位是 collection_prefix, 据此匹配归属。
+    """
     with _cache_lock:
-        for s in _cached_stores.values():
+        targets = [fp for fp in _cached_stores
+                   if prefix is None or fp[-1] == prefix]
+        for fp in targets:
+            s = _cached_stores.pop(fp, None)
+            if s is None:
+                continue
             try:
                 s.close()
             except Exception:
                 pass
-        _cached_stores.clear()
 
 
 def probe_pg_vector(settings: Dict[str, Any]) -> None:

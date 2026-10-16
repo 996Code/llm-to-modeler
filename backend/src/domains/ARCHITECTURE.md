@@ -383,19 +383,23 @@ fail-fast。每个 pack 的原子完整性要求由自身 manifest 的 `runtime_
 
 配套机制：
 
-- **依赖门控**：manifest `dependencies` 声明外部设施（neo4j/milvus）+ 探针,
+- **依赖门控**：manifest `dependencies` 声明外部设施（neo4j/pg_vector）+ 探针,
   未配置 fail-closed 不可启用;配置解析链 设置页 > env > 默认,补配后热加载
-  （`services/pack_dependency.py`）
+  （`services/pack_dependency.py`）。pg_vector 探针为平台内置
+  `kind: pg_vector`（实现下沉 `sdk/vector_store.probe_pg_vector`,换向量
+  后端插件零改）;插件自有探针只留领域专属设施（如 KG 的 neo4j）
 - **检索可观测**：插件对图/向量库的每次调用自行写 `call_logs`
   （call_type=graph/vector,与 llm/upstream 同表同视图）——请求含参数
   （种子词/hops/topK）,响应含结果与质量指标（逐词命中/召回量/截断水位/
-  逐条相似度分数）。参考 `knowledge_graph/retrieval.py` 的
-  `_log_retrieval_call`;SDK 存储层不记日志（零领域知识,观测归插件）
+  逐条相似度分数）。call_type 枚举常量与通用记录 helper 收敛在
+  `sdk/observability.py`（`log_pack_call`,KG `_log_retrieval_call` 委托
+  化）;SDK 存储层不记日志（零领域知识,观测归插件）
 - **后台任务框架**：`mgr.submit(..., queue_key=...)` 提交——同 key FIFO 串行
   （如同库导入不并发写图）、协作式取消、进度/结构化日志推送、SSE 事件流、
-  SQLite 持久化（`services/task_manager.py` / `task_store.py` / `api/tasks.py`）。
+  PG 持久化（`services/task_manager.py` / `task_store.py` / `api/tasks.py`）。
   失败自动续跑的边界:致命错误(鉴权/欠费/配额)与**永久性错误**
-  （`PermanentTaskError`,校验类、重跑恒定失败,如定向重抽的块不存在）
+  （`PermanentTaskError`——定义在 `sdk/pack_api.py`,插件层不 import 平台
+  services;校验类、重跑恒定失败,如定向重抽的块不存在）
   都不续跑;续跑预算跨链继承封顶(max_auto_retry 是整条链的上限,不每轮重置);
   重启时 retry_scheduled 一并收敛 interrupted(定时器线程已随进程消亡)
 - **管理页**：manifest `admin.page` 声明组件 key,管理端注册表动态挂 Tab
@@ -480,7 +484,7 @@ def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
 - 实现 `pack.py` 和工具类
 - 系统自动发现和加载
 
-## SDK 存储设施(graph_store / vector_store / doc_parser / scope_registry)
+## SDK 存储设施(graph_store / vector_store / doc_parser / scope_registry / relational_store)
 
 知识图谱插件孵化出的通用存储能力已下沉 `sdk/`,供后续插件(NL2BI 报表、
 RAG、记忆库…)复用。**SDK 零领域知识**:不认识 LLM/embedding/知识库/
@@ -493,8 +497,9 @@ RAG、记忆库…)复用。**SDK 零领域知识**:不认识 LLM/embedding/知�
 |---|---|---|
 | `sdk/scope_registry.py` | 前缀登记 + scope 签发(隔离机制核心) | 撞前缀装配期 fail-fast |
 | `sdk/graph_store.py` | Neo4j 图存储(`GraphStore` Protocol) | 标签/属性/约束名参数化 |
-| `sdk/vector_store.py` | Milvus 向量存储(`VectorStore` Protocol) | collection 前缀参数化 |
+| `sdk/vector_store.py` | pgvector 向量存储(`VectorStore` Protocol,实现 `pg_vector_store.py`;Milvus 后端已移除) | collection 前缀参数化;`probe_pg_vector`/`backend_display_name` 供依赖门控与健康键复用 |
 | `sdk/doc_parser.py` | md/txt/pdf/docx 解析 + 结构感知切块 | 纯函数,零存储概念 |
+| `sdk/relational_store.py` | pack 关系型存储通道(PG,pack 独立 schema,共享平台连接池) | pack 名白名单校验,DDL 落 pack schema |
 
 ### 数据隔离契约(所有使用方必须遵守)
 
@@ -533,11 +538,11 @@ vector.ensure_collection(scope_id, dim=embedding_dim)
 
 三个 SDK 调用 + 两条契约 = 完整的隔离存储设施;Protocol(`GraphStore`/
 `VectorStore`)声明了替身需实现的最小方法集,单测用内存 Fake 即可
-(参考 tests/sdk/test_graph_vector_sdk.py 与 knowledge_graph 的测试替身)。
+(参考 tests/sdk/test_pg_vector_store.py 与 knowledge_graph 的测试替身)。
 
 ### 边界(明确不放进 SDK 的)
 
-- SQLite 元数据层(kg_ 三表)——领域模型本身,各插件自管;
+- PG 元数据层(kg_ 三表,pack 独立 schema)——领域模型本身,各插件自管;
 - 检索编排(意图解析/双路融合)——含 LLM 调用,违反零领域知识;
 - 抽取流水线(批次/熔断/checkpoint)——知识图谱领域逻辑。
 
