@@ -706,6 +706,19 @@ export async function updateKgKb(id: string, payload: { name?: string; descripti
   const { data } = await kgApi.put(`/kbs/${id}`, payload)
   return data
 }
+/** 检索数据权限(嵌入模式):每库允许的用户/角色;空=全开放。 */
+export interface KgKbAcl {
+  users: string[]
+  roles: string[]
+}
+export async function fetchKgKbAcl(kbId: string): Promise<KgKbAcl> {
+  const { data } = await kgApi.get(`/kbs/${kbId}/acl`)
+  return data
+}
+export async function saveKgKbAcl(kbId: string, acl: KgKbAcl): Promise<KgKbAcl> {
+  const { data } = await kgApi.put(`/kbs/${kbId}/acl`, acl)
+  return data
+}
 /** D33 建库向导:分段实时预览——与导入同一条切块代码路径,预览=导入。 */
 export interface KgChunkPreviewItem {
   seq: number; charCount: number; preview: string; subChunks: number

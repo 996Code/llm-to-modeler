@@ -114,6 +114,10 @@
               <template #tab><ExperimentOutlined /> 检索测试</template>
               <RetrievalTest :kb-id="currentKbId" />
             </a-tab-pane>
+            <a-tab-pane key="acl">
+              <template #tab><SafetyOutlined /> 数据权限</template>
+              <AclEditor :kb-id="currentKbId" />
+            </a-tab-pane>
           </a-tabs>
         </template>
 
@@ -175,7 +179,7 @@ import type { TreeDataItem } from 'ant-design-vue/es/tree'
 import {
   ApartmentOutlined, DeleteOutlined, EditOutlined, ExperimentOutlined,
   FileTextOutlined, FolderAddOutlined, FolderOutlined, NodeIndexOutlined,
-  PartitionOutlined, PlusOutlined, SwapOutlined, SyncOutlined,
+  PartitionOutlined, PlusOutlined, SafetyOutlined, SwapOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import {
   KgKnowledgeBase, KgTemplate, KgTreeNode, createKgFolder, deleteKgKb,
@@ -189,6 +193,7 @@ import DocManager from './DocManager.vue'
 import SchemaEditor from './SchemaEditor.vue'
 import GraphView from './GraphView.vue'
 import RetrievalTest from './RetrievalTester.vue'
+import AclEditor from './AclEditor.vue'
 import KbWizard from './KbWizard.vue'
 
 const loadSafely = inject<LoadSafely>('loadSafely')!

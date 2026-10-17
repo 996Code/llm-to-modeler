@@ -100,6 +100,16 @@ class KbSearchTool(Tool):
         # kwargs 里的 message 会被丢弃(表单工具同款约定)
         ctx.emit("stage", "kb_search.resolve", "正在解析问题与选定知识库…")
 
+        # ── 数据权限(嵌入模式:宿主传 user_id/角色才生效) ──
+        # 角色走 pack_params.knowledge_graph.user_roles(宿主按请求透传,
+        # 引擎零改动);user_id 走 ctx.user_id(X-User-Id)。未传身份则
+        # 整条 ACL 短路,行为与之前完全一致
+        from domains.knowledge_graph import acl as kg_acl
+        perm_user, perm_roles = kg_acl.request_identity(
+            getattr(ctx, "user_id", ""),
+            (state.get("pack_params") or {}).get("knowledge_graph", {}).get("user_roles"))
+        perm_on = kg_acl.has_identity(perm_user, perm_roles)
+
         # ── 知识库解析 ──
         # 优先级:本轮显式指定 > 会话记忆 > 宿主默认 > 唯一库自动 > 跨全部库。
         # 会话记忆(ctx.session_state,scope=knowledge_graph):只绑定单库——
@@ -123,20 +133,35 @@ class KbSearchTool(Tool):
             kb_source = "explicit"
             if not kb:
                 return ToolResult(error_for_llm=f"知识库「{explicit_hint}」不存在")
+            if perm_on and not kg_acl.kb_allowed(store, kb["id"], perm_user, perm_roles):
+                # 显式指定但无权:诚实拒绝(不静默空结果——用户明确要查它)
+                ctx.trace("kb_search.acl", f"无权访问「{explicit_hint}」", "warn", detail={
+                    "kb": explicit_hint, "user": perm_user, "roles": perm_roles})
+                return ToolResult(
+                    reply=f"您没有访问知识库「{explicit_hint}」的权限。"
+                          "如需访问请联系管理员开通。",
+                    summary=f"知识库「{explicit_hint}」无访问权限")
             kbs = [kb]
         else:
             # folder 是纯分组节点:不存文档/无向量,跨库检索目标里排除
             kbs = [k for k in store.list_kbs() if k.get("kind") != "folder"]
+            # ACL 过滤(跨库/记忆/默认/唯一库自动都基于过滤后的列表)
+            if perm_on:
+                kbs, denied = kg_acl.filter_kbs(store, kbs, perm_user, perm_roles)
+                if denied:
+                    ctx.trace("kb_search.acl", f"过滤 {len(denied)} 个无权库", "warn", detail={
+                        "denied": denied, "user": perm_user, "roles": perm_roles})
             if mem_kb_name:
-                # 会话记忆:绑定的库还在就直接沿用(多轮免重复解析的核心)
+                # 会话记忆:绑定的库还在(且有权)就直接沿用
                 kb = next((k for k in kbs if k["name"] == mem_kb_name), None)
                 if kb is not None:
                     kb_source = "memory"
                 elif mem:
-                    mem.pop("kb")  # 绑定的库已删除,清记忆回到跨库检索
+                    # 绑定的库已删除或权限被收回,清记忆回到跨库检索
+                    mem.pop("kb")
                     mem_event = "invalidate"
             if kb is None and host_hint:
-                # 宿主默认兜底(记忆优先于它;指向的库失效则继续往下走)
+                # 宿主默认兜底(记忆优先于它;指向的库失效/无权则继续往下走)
                 kb = next((k for k in kbs if k["name"] == host_hint), None)
                 if kb is not None:
                     kb_source = "pack_params"
@@ -146,6 +171,10 @@ class KbSearchTool(Tool):
             if not kbs:
                 if mem_event:
                     _trace_invalidate(ctx)
+                if perm_on:
+                    return ToolResult(
+                        reply="当前没有您可访问的知识库。如需访问请联系管理员开通。",
+                        summary="无可访问知识库(权限过滤后)")
                 return ToolResult(
                     reply="当前还没有任何知识库。请先在「知识图谱」管理页创建知识库并导入文档。",
                     summary="无可用知识库")

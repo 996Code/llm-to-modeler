@@ -164,6 +164,15 @@ class KGStore:
         revoked_at TEXT,
         last_used_at TEXT
     )""",
+    # 检索数据权限(嵌入模式):每库允许的用户/角色;空=全开放
+    """CREATE TABLE IF NOT EXISTS kg_kb_acl (
+        id TEXT PRIMARY KEY,
+        kb_id TEXT NOT NULL,
+        subject_type TEXT NOT NULL,   -- user | role
+        subject_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (kb_id, subject_type, subject_id)
+    )""",
     ]
 
     def _init_db(self):
@@ -437,6 +446,39 @@ class KGStore:
             "revokedAt": d.get("revoked_at"),
             "lastUsedAt": d.get("last_used_at"),
         }
+
+    # ── 检索数据权限 ACL(嵌入模式) ───────────────────────
+
+    def set_kb_acl(self, kb_id: str, users: List[str], roles: List[str]) -> None:
+        """全量替换某库的 ACL(管理端/接口写入)。空列表=清空=回到全开放。"""
+        now = _now()
+        rows = [(str(uuid.uuid4()), kb_id, "user", u, now) for u in users] + \
+               [(str(uuid.uuid4()), kb_id, "role", r, now) for r in roles]
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM kg_kb_acl WHERE kb_id = ?", (kb_id,))
+            conn.executemany(
+                "INSERT INTO kg_kb_acl (id, kb_id, subject_type, subject_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?)", rows)
+
+    def get_kb_acl(self, kb_id: str) -> Dict[str, List[str]]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT subject_type, subject_id FROM kg_kb_acl "
+                "WHERE kb_id = ? ORDER BY created_at", (kb_id,)).fetchall()
+        users = [r["subject_id"] for r in rows if r["subject_type"] == "user"]
+        roles = [r["subject_id"] for r in rows if r["subject_type"] == "role"]
+        return {"users": users, "roles": roles}
+
+    def get_all_kb_acl(self) -> Dict[str, List[Dict[str, str]]]:
+        """全量 ACL(检索过滤一次读齐,逐库查会有 N 次往返)。"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT kb_id, subject_type, subject_id FROM kg_kb_acl").fetchall()
+        out: Dict[str, List[Dict[str, str]]] = {}
+        for r in rows:
+            out.setdefault(r["kb_id"], []).append(
+                {"subjectType": r["subject_type"], "subjectId": r["subject_id"]})
+        return out
 
     def delete_kb(self, kb_id: str) -> bool:
         """级联删元数据(图/向量由调用方清理)。"""
