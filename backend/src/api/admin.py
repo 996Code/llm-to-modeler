@@ -121,8 +121,14 @@ async def admin_stats(request: Request):
     stats["authMode"] = "open" if not get_admin_token() else "token"
     pack_state = getattr(request.app.state, "pack_state", None)
     if pack_state is not None:
+        # env 硬控口径:白名单配置时 discovered 也按清单算——"1/6"会让
+        # 人以为还有 5 个可开,实际启动注册就被 env 锁死了
+        from services.pack_state import env_pack_whitelist
+        whitelist = env_pack_whitelist()
+        discovered = (len([n for n in pack_state.discovered_names()
+                           if whitelist is None or n in whitelist]))
         stats["packs"] = {
-            "discovered": len(pack_state.discovered_names()),
+            "discovered": discovered,
             "enabled": len(pack_state.enabled_names()),
         }
     return stats
