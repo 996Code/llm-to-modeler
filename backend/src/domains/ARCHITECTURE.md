@@ -560,7 +560,8 @@ vector.ensure_collection(scope_id, dim=embedding_dim)
 | 服务商限额 | 全局 RPM/TPM 双令牌桶(所有 LLM 出站路径统一取配额,含 json_object 直连路径);429 触发全局指数退避(30s→60s→120s→240s,上限600s),成功即清;TPM 估算系数按响应真实 usage EMA 校准——换模型(不同 tokenizer)后自动收敛,无需手动留余量 | `llm_rpm_limit` / `llm_tpm_limit`(0 = 不限) |
 | 失败恢复 | 块级 checkpoint(done = 已入图,续跑只补剩余块);任务级自动续跑(非欠费/鉴权/永久性校验错误,5 分钟退避后重新入队,可取消;预算跨续跑链封顶) | `import_max_auto_retry`(默认3) |
 | 命名一致性 | **实体消歧**:启动把图内存量实体(+别名)播种进抽取词表;收尾按"名字∈对方aliases+同类型"的文本指认并查集合并(关系边真迁移、碎片名保留进别名)——跨块不同写法(张小凡/鬼厉)不裂成多节点 | — |
-| 进度可观测 | 滑窗 ETA(最近10块平均耗时×剩余÷并发);逐块日志(实体/关系数、prompt 规模、词表命中、LLM 耗时);调用日志记 `rateLimitWaitMs` 区分"排队慢"与"模型慢" | — |
+| 进度可观测 | 滑窗 ETA(最近10块平均耗时×剩余÷并发);逐块日志(实体/关系数、prompt 规模、词表命中、LLM 耗时,**文档级 total/done**——前端徽章"X/Y 块"按此口径,组内行数做分母会恒等失真);调用日志记 `rateLimitWaitMs` 区分"排队慢"与"模型慢" | — |
+| 摘要块(D14) | 导入收尾 LLM 概括首尾节选(200 字),`seq=-1` status=done 入 kg_chunks+向量化——"XX 文档主要讲什么"式抽象问法(无具体实体/关键词)零召回兜底;重导幂等(先删旧摘要),LLM 失败降级跳过不阻断 | — |
 
 **切块对齐**:`doc_parser` 结构感知切块带章节软边界(中文章节标题
 "第X章/序章/尾声"等与 markdown `#` 同等对待),章节头起新块且整章
@@ -572,3 +573,11 @@ vector.ensure_collection(scope_id, dim=embedding_dim)
 全程 6.7 小时(词表带别名后单块 LLM 耗时 60~110s);瓶颈排序:
 抽取模型速度 > 并行度 > 限速配额。给导入换快模型(`extraction_model`)
 是第一优化项。
+
+**关思考(线上性能根因,2026-10-17 实证)**:客户端层对模型名含
+`qwen3` 的出站自动注入 `extra_body={"enable_thinking": False}`
+(`llm/client.py` 的 `_thinking_off_kwargs`,chat/chat_json 两路同注,
+定死无 env 开关)。根因:思考型模型做结构化抽取时"思考几分钟产物
+仍是同一份 JSON",却把非流式 300s 总时长超时顶爆(99.22 实测开思考
+avg 224s/max 889s 全超时,关思考后同款请求 6.0s);非 qwen3 模型
+不传该参数(dashscope 方言,发其他提供商 400)。
