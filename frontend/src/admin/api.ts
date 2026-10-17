@@ -727,6 +727,38 @@ export async function saveKgKbAcl(kbId: string, acl: { users: string[]; roles: s
   const { data } = await kgApi.put(`/kbs/${kbId}/acl`, acl)
   return data
 }
+
+/** D32 标注回复:问题→标准答案(相似≥0.90 命中直接返回不走检索)。 */
+export interface KgAnnotation {
+  id: string
+  kbId: string
+  question: string
+  answer: string
+  enabled: boolean
+  source: string
+  createdAt?: string
+  updatedAt?: string
+}
+export async function fetchKgAnnotations(kbId: string): Promise<KgAnnotation[]> {
+  const { data } = await kgApi.get(`/kbs/${kbId}/annotations`)
+  return data.items
+}
+export async function saveKgAnnotation(
+  kbId: string, annotationId: string | null, question: string, answer: string,
+): Promise<KgAnnotation> {
+  const { data } = annotationId
+    ? await kgApi.put(`/kbs/${kbId}/annotations/${annotationId}`, { question, answer })
+    : await kgApi.post(`/kbs/${kbId}/annotations`, { question, answer })
+  return data
+}
+export async function setKgAnnotationEnabled(
+  kbId: string, annotationId: string, enabled: boolean,
+): Promise<unknown> {
+  return kgApi.put(`/kbs/${kbId}/annotations/${annotationId}`, { enabled })
+}
+export async function deleteKgAnnotation(kbId: string, annotationId: string): Promise<unknown> {
+  return kgApi.delete(`/kbs/${kbId}/annotations/${annotationId}`)
+}
 /** D33 建库向导:分段实时预览——与导入同一条切块代码路径,预览=导入。 */
 export interface KgChunkPreviewItem {
   seq: number; charCount: number; preview: string; subChunks: number
