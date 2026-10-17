@@ -798,8 +798,9 @@ async def list_chunks(kb_id: str, doc_id: str, request: Request):
     items = [{
         "id": c["id"], "seq": c["seq"], "status": c["status"],
         "charCount": c["charCount"],
-        # D29 块命中统计:被 LLM 引用次数("哪些知识真被用")
-        "hitCount": int(c.get("hit_count") or 0),
+        # D29 块命中统计:被 LLM 引用次数("哪些知识真被用")。
+        # store 层已是 camelCase 键(审查修复:此前读 snake 键恒 0)
+        "hitCount": int(c.get("hitCount") or 0),
         "preview": (c["text"] or "").strip().replace("\n", " ")[:80],
     } for c in chunks]
     summary = {
@@ -865,6 +866,10 @@ async def update_chunk(kb_id: str, doc_id: str, chunk_id: str,
     chunk = next((c for c in store.list_chunks(doc_id) if c["id"] == chunk_id), None)
     if not chunk:
         raise HTTPException(404, "块不存在或不属于该文档")
+    if chunk["seq"] < 0:
+        # D14 摘要块(seq=-1):导入收尾自动生成/覆盖,手工编辑会被下次
+        # 重导冲掉——如实拒绝而非静默接受
+        raise HTTPException(422, "摘要块由导入自动维护,不支持手工编辑(重导即重新生成)")
 
     # 并发守卫(同删除端点口径):导入进行中拒绝编辑——导入任务用的是
     # 启动时快照的旧文本,编辑重嵌之后任务批次回写会把旧文本向量写回,

@@ -795,9 +795,15 @@ class KGStore:
                 (chunk_id, kb_id, doc_id, text, len(text), now))
         return chunk_id
 
-    def list_chunks(self, doc_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_chunks(self, doc_id: str, status: Optional[str] = None,
+                    include_summary: bool = False) -> List[Dict[str, Any]]:
+        """文档块列表。include_summary=False(默认)排除摘要块(seq=-1)——
+        抽取块口径(total/pending/续跑判定)不得被 D14 摘要块污染(审查修复:
+        摘要曾计入 total 让进度分母多 1、断点续跑误判有已完成块)。"""
         sql = "SELECT * FROM kg_chunks WHERE doc_id = ?"
         params: list = [doc_id]
+        if not include_summary:
+            sql += " AND seq >= 0"
         if status:
             sql += " AND status = ?"
             params.append(status)
@@ -822,7 +828,7 @@ class KGStore:
         ph = ",".join("?" * len(chunk_ids))
         with self._get_conn() as conn:
             rows = conn.execute(
-                f"SELECT id, doc_id, kb_id, seq, text, char_count, status "
+                f"SELECT id, doc_id, kb_id, seq, text, char_count, status, hit_count "
                 f"FROM kg_chunks WHERE id IN ({ph})", list(chunk_ids)).fetchall()
         return [{
             "id": r["id"], "docId": r["doc_id"], "kbId": r["kb_id"],

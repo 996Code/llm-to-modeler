@@ -72,3 +72,51 @@ class TestAnswerBumpsHits:
         by_seq = {r["seq"]: r for r in store.list_chunks(doc["id"])}
         assert by_seq[0]["hitCount"] == 1   # 被引用 +1
         assert by_seq[1]["hitCount"] == 0   # 未引用不动
+
+
+class TestChunksEndpointEcho:
+    """审查修复锚:chunks 端点 hitCount 回显(store 返回 camelCase 键)。"""
+
+    def test_端点回显hitCount(self, env, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from domains.knowledge_graph import runtime
+        from domains.knowledge_graph.api import router as kg_router
+
+        monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+        app = FastAPI()
+        app.include_router(kg_router, prefix="/api/packs/knowledge_graph")
+        app.state.llm_client = env.llm
+        app.state.settings_store = None
+        monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
+        client = TestClient(app)
+
+        kb = env.store.create_kb("端点回显库", "")
+        doc = env.store.create_document(kb["id"], "t.txt", "text/plain", 5,
+                                        "/dev/null", "h-echo")
+        env.store.replace_chunks(doc["id"], kb["id"],
+                                 [{"seq": 0, "text": "唯一块"}])
+        cid = env.store.list_chunks(doc["id"])[0]["id"]
+        env.store.bump_chunk_hits([cid])
+
+        r = client.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}"
+                       f"/documents/{doc['id']}/chunks")
+        assert r.status_code == 200
+        items = r.json()["items"]
+        assert items[0]["hitCount"] == 1  # 此前读 snake 键恒 0
+
+
+class TestSummaryNotInChunkList:
+    """审查修复锚:摘要块(seq=-1)不进抽取块口径。"""
+
+    def test_list_chunks默认排除摘要(self, env):
+        kb = env.store.create_kb("口径库", "")
+        doc = env.store.create_document(kb["id"], "t.txt", "text/plain", 5,
+                                        "/dev/null", "h-cal")
+        env.store.replace_chunks(doc["id"], kb["id"],
+                                 [{"seq": 0, "text": "正文块"}])
+        env.store.upsert_summary_chunk(doc["id"], kb["id"], "摘要块")
+        # 默认:只有正文块(total 不被摘要污染)
+        assert len(env.store.list_chunks(doc["id"])) == 1
+        # 显式包含:两块
+        assert len(env.store.list_chunks(doc["id"], include_summary=True)) == 2

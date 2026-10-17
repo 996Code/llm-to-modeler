@@ -774,7 +774,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     # 文档行重新查(pending 为空的续跑/全跳过场景不进抽取循环,_doc 未定义)
     _generate_summary_chunk(handle, app_state, store, kb,
                             store.get_document(doc_id) or {},
-                            store.list_chunks(doc_id), conv_id)
+                            store.list_chunks(doc_id, include_summary=False), conv_id)
 
     # 7) 收尾统计
     final_status = "partial" if failed_chunks else "succeeded"

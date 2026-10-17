@@ -66,23 +66,25 @@ def _cfg(app_state, key, default):
 
 
 def _reorder_lost_in_middle(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """D15 奇偶重排:高分片段占头尾,低分占中段(lost-in-middle 缓解)。
+    """D15 首尾拉链重排(lost-in-middle 缓解):对**当前位置序**做两端交替。
 
-    LLM 对长上下文的开头/结尾注意力强、中段弱(评测锚:Dify 蓝图 D15,
-    触发条件=长上下文中段证据被忽略)。策略:score 降序排好后,前半段
-    (最相关)依次占头部偶数位(0,2,4…),后半段反向占奇数位(…5,3,1)
-    ——即最相关的两块在位置 0 和 1 尾端,中段留给低分块。
+    LLM 对长上下文的开头/结尾注意力强、中段弱。不重排序——顺序本身
+    是相关度判断的结果(rerank 开时=rerank 序,关时=召回序),重排会
+    把 rerank 的判序丢弃(审查修复:初版按陈旧 score 重排,rerank 白烧)。
+    拉链铺位:当前位置第 1 名放 0,第 2 名放**末位**,第 3 名放 1,
+    第 4 名放倒数第 2…两端向中间收拢——最高分占头、次高分占尾、
+    中段留给末位块。
 
     纯顺序变换:chunks 顺序即引用编号权威源,重排后 [片段:N] 自动
     对齐新序,无数据增删。块数 ≤3 时无中段可言,原序返回(零成本)。
     """
     if len(chunks) <= 3:
         return chunks
-    ranked = sorted(chunks, key=lambda c: -float(c.get("score") or 0.0))
-    half = (len(ranked) + 1) // 2
-    out: List[Dict[str, Any]] = [None] * len(chunks)  # type: ignore[list-item]
-    out[::2] = ranked[:half]           # 前半(高分)→ 头部偶数位,位置 0 = 最高分
-    out[1::2] = ranked[half:][::-1]    # 后半(低分)反向 → 尾端奇数位紧随
+    out: List[Dict[str, Any]] = []
+    tail: List[Dict[str, Any]] = []
+    for i, c in enumerate(chunks):
+        (out if i % 2 == 0 else tail).append(c)
+    out.extend(reversed(tail))
     return out
 
 
@@ -659,8 +661,8 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
     # 父块;失败静默(统计项不拖垮回答主链路)
     try:
         _cited = parse_cited_chunks(answer)
-        _chunks_now = retrieved.get("chunks") or merged_chunks or []
-        _ids = {( _chunks_now[n - 1].get("chunkId") or "").split("#", 1)[0]
+        _chunks_now = retrieved.get("chunks") or []
+        _ids = {(_chunks_now[n - 1].get("chunkId") or "").split("#", 1)[0]
                 for n in _cited if 0 < n <= len(_chunks_now)}
         if _ids:
             runtime.get_kg_store(app_state).bump_chunk_hits(sorted(_ids))
@@ -857,8 +859,8 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
     # 父块;失败静默(统计项不拖垮回答主链路)
     try:
         _cited = parse_cited_chunks(answer)
-        _chunks_now = retrieved.get("chunks") or merged_chunks or []
-        _ids = {( _chunks_now[n - 1].get("chunkId") or "").split("#", 1)[0]
+        _chunks_now = retrieved.get("chunks") or (merged_chunks or [])
+        _ids = {(_chunks_now[n - 1].get("chunkId") or "").split("#", 1)[0]
                 for n in _cited if 0 < n <= len(_chunks_now)}
         if _ids:
             runtime.get_kg_store(app_state).bump_chunk_hits(sorted(_ids))

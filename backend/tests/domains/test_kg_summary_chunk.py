@@ -63,7 +63,7 @@ class TestSummaryChunk:
         assert result["status"] == "succeeded"
 
         # 摘要块落库:seq=-1, status=done, 文本可识别
-        chunks = env.store.list_chunks(doc["id"])
+        chunks = env.store.list_chunks(doc["id"], include_summary=True)
         summaries = [c for c in chunks if c["seq"] == -1]
         assert len(summaries) == 1
         assert summaries[0]["status"] == "done"
@@ -79,7 +79,8 @@ class TestSummaryChunk:
                                        "force": False, "chunk_ids": []})
             kg_tasks.run_import_document(handle)
         # 摘要块只有一条(不是累积)
-        summaries = [c for c in env.store.list_chunks(doc["id"]) if c["seq"] == -1]
+        summaries = [c for c in env.store.list_chunks(doc["id"], include_summary=True)
+                     if c["seq"] == -1]
         assert len(summaries) == 1
 
     def test_LLM失败降级不阻断(self, import_env, monkeypatch):
@@ -121,5 +122,6 @@ class TestSummaryChunk:
         id1 = env.store.upsert_summary_chunk(doc["id"], kb["id"], "第一版摘要")
         id2 = env.store.upsert_summary_chunk(doc["id"], kb["id"], "第二版摘要")
         assert id1 != id2
-        rows = [c for c in env.store.list_chunks(doc["id"]) if c["seq"] == -1]
+        rows = [c for c in env.store.list_chunks(doc["id"], include_summary=True)
+                if c["seq"] == -1]
         assert len(rows) == 1 and rows[0]["text"] == "第二版摘要"
