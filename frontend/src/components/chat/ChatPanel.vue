@@ -53,6 +53,18 @@
       <!-- ===== 消息气泡列表：遍历 store 中的所有消息 ===== -->
       <!-- 用 <template v-for> 包裹：因为每条消息要根据 role 渲染成不同结构 -->
       <template v-for="(msg, i) in store.messages" :key="i">
+
+        <!-- D10 挂起轮续答入口:最后一条 user 之后紧跟提示(该轮回答被打断) -->
+        <div v-if="msg.role === 'user' && i === store.messages.length - 1
+                   && store.currentConversation?.pendingResume && !store.streaming"
+             class="resume-bar">
+          <InfoCircleOutlined class="resume-icon" />
+          <span>该轮回答生成时被打断</span>
+          <a-button size="small" type="primary" ghost @click="store.resumePendingAnswer()">
+            <PlayCircleOutlined /> 继续生成
+          </a-button>
+        </div>
+
         <!-- User message (right-aligned bubble) -->
         <div v-if="msg.role === 'user'" class="message-row user-row">
           <div class="msg-bubble user-bubble">{{ msg.content }}</div>
@@ -354,6 +366,7 @@ import { ref, computed, watch, nextTick, onMounted } from 'vue'
 // 图标组件（ant-design-vue 图标库，按需引入以减小打包体积）
 import {
   UserOutlined, FormOutlined, TableOutlined, CheckOutlined, CloseCircleOutlined,
+  InfoCircleOutlined, PlayCircleOutlined,
   CheckCircleOutlined, EyeOutlined, QuestionCircleOutlined,
   CopyOutlined, RollbackOutlined,
   ContactsOutlined,
@@ -1619,4 +1632,15 @@ watch(() => store.currentConversation?.id, (convId) => {
 .diag-actions a { color: var(--color-primary); font-size: 12.5px; cursor: pointer; }
 .diag-actions a:hover { text-decoration: underline; }
 .diag-retry { color: var(--color-success) !important; }
+
+/* D10 挂起轮续答入口 */
+.resume-bar {
+  display: flex; align-items: center; gap: 10px;
+  margin: 6px 0 10px 44px;
+  padding: 8px 14px;
+  border: 1px dashed #f0c36d; border-radius: 8px;
+  background: #fdf6ec;
+  font-size: 12.5px; color: #8a6d3b;
+}
+.resume-icon { color: #e6a23c; }
 </style>

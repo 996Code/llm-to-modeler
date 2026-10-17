@@ -331,6 +331,21 @@ export async function chat(
 }
 
 /**
+ * D10 历史加载续答:挂起轮断点续跑(生成被打断的那轮,从 checkpoint 继续)。
+ * 与 chat 共用 SSE 回调协议;message 被后端忽略。
+ */
+export async function chatResume(
+  conversationId: string,
+  callbacks: SSECallbacks,
+): Promise<void> {
+  await streamSSE(
+    `${API_BASE}/config/chat/resume`,
+    { message: '', conversation_id: conversationId },
+    callbacks,
+  )
+}
+
+/**
  * SSE 流式读取的核心实现（私有，不对外导出）。
  *
  * 为什么不用 axios？因为 axios 不支持流式读取响应体；这里用原生 fetch + ReadableStream。

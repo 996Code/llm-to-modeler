@@ -91,6 +91,8 @@ export interface Conversation {
   messageCount?: number             // 消息数(列表接口子查询)
   currentConfig?: FormConfig | null // 当前会话最新配置（可选）
   messages?: Message[]              // 该会话的消息列表（可选，列表接口可能不返回）
+  /** D10:最后一条消息是 user 且无 assistant = 该轮回答被打断,可续答 */
+  pendingResume?: boolean
   createdAt?: string                // 创建时间
   updatedAt?: string                // 更新时间
 }
