@@ -445,16 +445,23 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             # 父块去重:向量子块 id 形如 {chunk_id}#i,同一父块(一章)的
             # 多个段可能同时命中 top_k——按父块保留得分最高的一段,
             # 否则答案资料里同一章反复出现,挤占召回名额。
-            # 全文兜底已入列的父块同样跳过(第三路与向量路同父不重复)
-            seen_parent = {str(h.get("chunkId") or "").split("#", 1)[0]
-                           for h in chunks}
+            # 全文兜底已入列的同父块:向量命中**替换**而非跳过——向量
+            # 命中带语义分数+父子回带,整章兜底块只有裸 ts_rank 分;
+            # 原地替换保住位置(引用编号稳定)。图谱零命中(别名/错字
+            # 查询)时两路常同时命中同父,跳过会让回带静默失效。
+            parent_idx = {str(h.get("chunkId") or "").split("#", 1)[0]: i
+                          for i, h in enumerate(chunks)}
             kept: List[Dict[str, Any]] = []
             for h in hits:
                 parent = str(h.get("chunkId") or "").split("#", 1)[0]
-                if parent in seen_parent:
-                    continue
-                seen_parent.add(parent)
-                chunks.append(h)
+                idx = parent_idx.get(parent)
+                if idx is not None:
+                    if "#" in str(chunks[idx].get("chunkId") or ""):
+                        continue   # 已是向量命中(同父多子段):留最高分
+                    chunks[idx] = h  # 替换全文兜底块(向量命中质量更高)
+                else:
+                    chunks.append(h)
+                    parent_idx[parent] = len(chunks) - 1
                 kept.append(h)
             # 父子回带:命中子段回带父块上下文窗口(检索测试页与真实
             # 问答共用本函数,一处接线两路生效)。失败降级子段原文
