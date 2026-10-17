@@ -240,9 +240,19 @@ async def revoke_open_api_key(key_id: str, request: Request):
 
 @router.get("/kbs/{kb_id}/acl", dependencies=[Depends(admin_required)])
 async def get_kb_acl(kb_id: str, request: Request):
-    """某库的检索 ACL:允许的用户/角色。空 = 全开放(默认)。"""
+    """某库的检索 ACL:允许的用户/角色 + 可选字典(宿主同步来的候选)。
+
+    空 ACL = 全开放(默认);options 供前端下拉选择(不做手输)。
+    """
     _kb_or_404(request, kb_id)
-    return runtime.get_kg_store(request.app.state).get_kb_acl(kb_id)
+    store = runtime.get_kg_store(request.app.state)
+    return {
+        **store.get_kb_acl(kb_id),
+        "options": {
+            "users": store.list_subjects("user"),
+            "roles": store.list_subjects("role"),
+        },
+    }
 
 
 @router.put("/kbs/{kb_id}/acl", dependencies=[Depends(admin_required)])
@@ -272,6 +282,40 @@ async def set_kb_acl(kb_id: str, request: Request, payload: Dict[str, Any]):
     runtime.get_kg_store(request.app.state).set_kb_acl(kb_id, users, roles)
     logger.info(f"kb acl set: {kb_id[:8]} (users={len(users)}, roles={len(roles)})")
     return {"users": users, "roles": roles}
+
+
+# ── 数据权限候选字典(宿主同步;ACL 编辑页下拉选择的数据源) ──
+
+@router.post("/subjects/{subject_type}", dependencies=[Depends(admin_required)])
+async def sync_subjects(subject_type: str, request: Request, payload: Dict[str, Any]):
+    """宿主同步用户/角色字典(全量替换)。
+
+    Body: {items: [{id, name?}, ...]}——组织/人员/角色系统变更后由宿主
+    推送;ACL 编辑页的下拉候选即来自这里。宿主侧删除的条目随之消失。
+    subject_type: user | role。
+    """
+    if subject_type not in ("user", "role"):
+        raise HTTPException(422, "subject_type 必须是 user|role")
+    raw = payload.get("items")
+    if not isinstance(raw, list):
+        raise HTTPException(422, "items 必须是数组")
+    items = []
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        sid = str(it.get("id") or "").strip()
+        if sid:
+            items.append({"id": sid, "name": str(it.get("name") or "").strip()})
+    runtime.get_kg_store(request.app.state).sync_subjects(subject_type, items)
+    logger.info(f"subjects synced: {subject_type} ({len(items)} 条)")
+    return {"subjectType": subject_type, "count": len(items)}
+
+
+@router.get("/subjects/{subject_type}", dependencies=[Depends(admin_required)])
+async def list_subjects(subject_type: str, request: Request):
+    if subject_type not in ("user", "role"):
+        raise HTTPException(422, "subject_type 必须是 user|role")
+    return {"items": runtime.get_kg_store(request.app.state).list_subjects(subject_type)}
 
 
 # ── 图谱浏览 ─────────────────────────────────────────────────
@@ -305,6 +349,20 @@ async def create_kb(request: Request, payload: Dict[str, Any]):
         )
     except ValueError as e:
         raise HTTPException(422, str(e))
+    # 向量口径建库预填:本地 bge-m3 定死 dim=1024(10-15 裁决),新库
+    # 建好即显示"向量 dim=1024"不再"待导入探测";其它模型(api 嵌入/
+    # 测试替身)维度未知,留空由首次导入探测回填(与 _prepare_vector
+    # 同一套模型口径,不会误触模型一致性降级)
+    try:
+        from domains.knowledge_graph import tasks as kg_tasks
+        if kind == "kb" and kb.get("vectorEnabled"):
+            model = kg_tasks.embed_model_for(request.app.state)
+            if model == "bge-m3" and not kb.get("vectorDim"):
+                store.set_kb_vector_info(kb["id"], model,
+                                         kg_tasks._LOCAL_EMBED_DIM, True)
+                kb = store.get_kb(kb["id"])
+    except Exception as e:
+        logger.warning(f"建库向量口径预填失败(不影响建库): {e}")
     logger.info(f"kb created: {kb['id']} ({name}, template={template}, kind={kind})")
     return kb
 

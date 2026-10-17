@@ -169,6 +169,8 @@ export interface PacksPayload {
   items: AdminPack[]
   stateFile: string
   source: string
+  /** PACKS_ENABLED 配置时=true:清单 env 锁定,启停开关禁用 */
+  envPinned?: boolean
 }
 
 // ── 口令管理 ──────────────────────────────────────────────
@@ -706,16 +708,22 @@ export async function updateKgKb(id: string, payload: { name?: string; descripti
   const { data } = await kgApi.put(`/kbs/${id}`, payload)
   return data
 }
-/** 检索数据权限(嵌入模式):每库允许的用户/角色;空=全开放。 */
+/** 检索数据权限(嵌入模式):每库允许的用户/角色;空=全开放。
+ *  options = 宿主同步来的候选字典(下拉选择用)。 */
+export interface KgSubjectOption {
+  id: string
+  name: string
+}
 export interface KgKbAcl {
   users: string[]
   roles: string[]
+  options?: { users: KgSubjectOption[]; roles: KgSubjectOption[] }
 }
 export async function fetchKgKbAcl(kbId: string): Promise<KgKbAcl> {
   const { data } = await kgApi.get(`/kbs/${kbId}/acl`)
   return data
 }
-export async function saveKgKbAcl(kbId: string, acl: KgKbAcl): Promise<KgKbAcl> {
+export async function saveKgKbAcl(kbId: string, acl: { users: string[]; roles: string[] }): Promise<KgKbAcl> {
   const { data } = await kgApi.put(`/kbs/${kbId}/acl`, acl)
   return data
 }

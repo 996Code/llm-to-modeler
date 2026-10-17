@@ -137,13 +137,12 @@ class LLMClient:
     def embed_model(self) -> str:
         """当前 embeddings 后端的实际出站模型名(P1-1 单一口径)。
 
-        local 固定 bge-m3;api 取 LLM_EMBED_MODEL。插件(如 KG 导入的
-        向量索引指纹)据此判断"模型是否变了",不再各自读平台 env。
+        解析收敛在 sdk/embedding(单一事实源):local 恒 bge-m3;api 取
+        LLM_EMBED_MODEL。插件(如 KG 导入的向量索引指纹)据此判断
+        "模型是否变了",不再各自读平台 env。
         """
-        if (os.getenv("EMBEDDING_BACKEND", "").strip().lower() == "local"
-                or not os.getenv("EMBEDDING_BACKEND", "").strip()):
-            return "bge-m3"
-        return os.getenv("LLM_EMBED_MODEL", "").strip() or "bge-m3"
+        from sdk.embedding import embed_model as _embed_model
+        return _embed_model()
 
     def __init__(self, config: Optional[LLMConfig] = None, conversation_store=None):
         """初始化 LLM 客户端。
@@ -643,14 +642,14 @@ class LLMClient:
         """
         if mode not in ("document", "query"):
             raise ValueError(f"未知 embeddings mode: {mode}")
-        backend = os.getenv("EMBEDDING_BACKEND", "local").strip().lower()
+        from sdk.embedding import embed_backend, embed_cache_label
+        backend = embed_backend()
         texts = [str(t) for t in texts]
-        # 缓存键 model 口径 = 该后端实际出站模型:api 用 LLM_EMBED_MODEL
-        # (切模型键即变,旧向量不串味);local 恒 bge-m3,用常量标签
-        # (与观测端点 embeddings:local/bge-m3 同源)——不用 config.model,
-        # 那是 chat 模型名,切 chat 模型不应冲掉嵌入缓存
-        key_model = (os.getenv("LLM_EMBED_MODEL", "").strip()
-                     if backend == "api" else "local/bge-m3")
+        # 缓存键 model 口径 = 该后端实际出站模型(sdk/embedding 单一源):
+        # api 用 LLM_EMBED_MODEL(切模型键即变,旧向量不串味);local 用
+        # 常量标签——不用 config.model,那是 chat 模型名,切 chat 模型
+        # 不应冲掉嵌入缓存
+        key_model = embed_cache_label()
         cache_key = embed_cache_key(key_model, mode, texts)
         hit = self._embed_cache.get(cache_key)
         if hit is not None:
@@ -732,9 +731,8 @@ class LLMClient:
         stage: Optional[str] = None,
     ) -> List[List[float]]:
         """云端 API 后端(OpenAI 兼容 /v1/embeddings)。"""
-        model = os.getenv("LLM_EMBED_MODEL", "").strip()
-        if not model:
-            raise RuntimeError("LLM_EMBED_MODEL 未配置,向量能力不可用")
+        from sdk.embedding import embed_model_or_raise
+        model = embed_model_or_raise()
         texts = [str(t) for t in texts]
         start = time.monotonic()
         error = None

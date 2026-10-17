@@ -166,6 +166,17 @@ class TestImportUsesKbParams:
         # 库级 600 生效(pack 是 100):块大小显著大于 pack 口径
         assert max(c["charCount"] for c in chunks) >= 400
 
+    def test_create_kb_prefills_local_dim(self, kb_client):
+        """本地 bge-m3 定死能力:建库即写 dim=1024,不再"待导入探测"。
+        (m3 替身注入了 embed_model 属性,走同源口径不会误触一致性降级)"""
+        c, env = kb_client
+        r = c.post("/api/packs/knowledge_graph/kbs",
+                   json={"name": "dim预填库", "template": "general"})
+        assert r.status_code == 200, r.text
+        kb = r.json()
+        assert kb["vectorDim"] == 1024
+        assert kb["embeddingModel"] in ("bge-m3", "mock-embed")   # 同源口径
+
     def test_kb_without_params_falls_back_to_pack(self, env):
         """未配置库级参数回退插件设置(pack=100,块小)。"""
         kb = env.store.create_kb("回退库", schema_json={"relation_types": []})

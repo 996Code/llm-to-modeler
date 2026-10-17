@@ -44,7 +44,11 @@
               </a-tooltip>
             </div>
           </div>
+          <a-tooltip v-if="payload?.envPinned" title="PACKS_ENABLED 已配置——插件清单由 env 底层锁定,启停已禁用">
+            <a-switch :checked="pack.enabled" disabled />
+          </a-tooltip>
           <a-switch
+            v-else
             :checked="pack.enabled" :loading="toggling === pack.name"
             :disabled="!!toggling || !depOk(pack)"
             @click="(checked: boolean | undefined) => toggle(pack, !!checked)"

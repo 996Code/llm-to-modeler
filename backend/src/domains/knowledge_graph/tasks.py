@@ -195,6 +195,25 @@ def chunk_params_for(app_state, kb: Optional[Dict[str, Any]]) -> Dict[str, int]:
     return out
 
 
+def embed_model_for(app_state) -> str:
+    """当前 embedding 模型口径(建库预填与 _prepare_vector 校验同源)。
+
+    解析收敛在 sdk/embedding(单一事实源):平台 client 属性(替身可
+    注入)优先,fallback 到 sdk 口径(local 恒 bge-m3/api 读 env)。
+    """
+    _llm_c = getattr(app_state, "llm_client", None)
+    m = (getattr(_llm_c, "embed_model", "") or "").strip()
+    if m:
+        return m
+    from sdk.embedding import embed_model
+    return embed_model()
+
+
+# bge-m3 定死维度(本地 ONNX int8 量化输出恒 1024;建库即可预填,
+# 免"待导入探测"——其它模型维度未知,留空由首次导入探测回填)
+from sdk.embedding import LOCAL_EMBED_DIM as _LOCAL_EMBED_DIM
+
+
 # ── 导入流水线 ───────────────────────────────────────────────
 
 def run_import_document(handle) -> Dict[str, Any]:
@@ -796,13 +815,8 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
     handle.set_progress(_W_PARSE + 1, "准备向量存储")
     try:
         if kb.get("vectorEnabled"):
-            import os
-            # P1-1: 模型口径经平台 client 属性(替身/旧实例缺属性时回退 env)
-            _llm_c = getattr(app_state, "llm_client", None)
-            current_model = (getattr(_llm_c, "embed_model", "")
-                             or (os.getenv("LLM_EMBED_MODEL", "").strip()
-                                 if os.getenv("EMBEDDING_BACKEND", "local").strip().lower() == "local"
-                                 else os.getenv("LLM_EMBED_MODEL", "").strip() or "bge-m3"))
+            # 模型口径:平台 client 属性(替身可注入)> sdk/embedding 单一源
+            current_model = embed_model_for(app_state)
             stored_model = (kb.get("embeddingModel") or "").strip()
             # 模型一致性校验:换 embedding 模型 = 换维度,旧 collection 里
             # 的向量与新模型不可比。不校验的话后续 upsert/search 全部静默
@@ -822,8 +836,7 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
                     ["维度探测"], conv_id=conv_id, stage="kg.embed_probe",
                     mode="query")
                 dim = len(probe[0])
-                store.set_kb_vector_info(kb["id"], current_model or "bge-m3",
-                                         dim, True)
+                store.set_kb_vector_info(kb["id"], current_model, dim, True)
             handle.log(f"向量模式: 沿用库配置 dim={dim}(模型 {stored_model or '未记录'})",
                        dim=dim, model=stored_model or "")
             runtime.get_vector(app_state).ensure_collection(kb["id"], dim)
@@ -831,19 +844,7 @@ def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
         # vectorEnabled=False 只有两种合法态:模型变更保护(上面已处理)或
         # 极旧库未迁移——本地 bge-m3 是定死能力(10-15 裁决:默认启用),
         # 这里兜底补开并走一次维度探测,不再留"未决探测"分支。
-        # P1-1: 模型口径经平台 client 属性(local→bge-m3/api→LLM_EMBED_MODEL);
-        # 替身/旧实例缺属性时回退 env 同款解析
-        _llm_c = getattr(app_state, "llm_client", None)
-        embed_model = getattr(_llm_c, "embed_model", "")
-        if not embed_model:
-            if os.getenv("EMBEDDING_BACKEND", "local").strip().lower() == "local":
-                embed_model = "bge-m3"
-            else:
-                embed_model = os.getenv("LLM_EMBED_MODEL", "").strip()
-        if not embed_model:
-            raise RuntimeError(
-                "EMBEDDING_BACKEND=api 且 LLM_EMBED_MODEL 未配置,向量能力不可用"
-                "——请配置后重试(本地后端无需该配置)")
+        embed_model = embed_model_for(app_state)
         probe = app_state.llm_client.embeddings(
             ["维度探测"], conv_id=conv_id, stage="kg.embed_probe", mode="query")
         dim = len(probe[0])

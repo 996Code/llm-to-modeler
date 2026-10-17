@@ -133,13 +133,36 @@ class TestAclEndpoints:
                   json={"users": ["u1", "u1", " u2 "], "roles": ["法务"]})
         assert r.status_code == 200, r.text
         assert r.json() == {"users": ["u1", "u2"], "roles": ["法务"]}  # 去重去空
-        assert c.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/acl").json() == \
-            {"users": ["u1", "u2"], "roles": ["法务"]}
+        body = c.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/acl").json()
+        assert (body["users"], body["roles"]) == (["u1", "u2"], ["法务"])
+        assert body["options"] == {"users": [], "roles": []}   # 未同步字典=空选项
         # 清空回到开放
         assert c.put(f"/api/packs/knowledge_graph/kbs/{kb['id']}/acl",
                      json={"users": [], "roles": []}).status_code == 200
-        assert c.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/acl").json() == \
-            {"users": [], "roles": []}
+        body = c.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/acl").json()
+        assert (body["users"], body["roles"]) == ([], [])
+
+    def test_subjects_sync_and_options(self, client):
+        """宿主同步字典:全量替换+GET /acl 的 options 带出候选。"""
+        c, env = client
+        kb = env.store.create_kb("字典库")
+        r = c.post("/api/packs/knowledge_graph/subjects/user",
+                   json={"items": [{"id": "u1", "name": "张三"}, {"id": "u2"}]})
+        assert r.status_code == 200 and r.json()["count"] == 2
+        c.post("/api/packs/knowledge_graph/subjects/role",
+               json={"items": [{"id": "法务"}, {"id": "管理员", "name": "系统管理员"}]})
+        body = c.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/acl").json()
+        assert body["options"]["users"] == [
+            {"id": "u1", "name": "张三"}, {"id": "u2", "name": "u2"}]
+        assert body["options"]["roles"] == [
+            {"id": "法务", "name": "法务"}, {"id": "管理员", "name": "系统管理员"}]
+        # 再同步(全量替换):u2 消失、u3 出现——宿主删人字典跟着走
+        c.post("/api/packs/knowledge_graph/subjects/user",
+               json={"items": [{"id": "u1", "name": "张三"}, {"id": "u3"}]})
+        body = c.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/acl").json()
+        assert [u["id"] for u in body["options"]["users"]] == ["u1", "u3"]
+        assert c.post("/api/packs/knowledge_graph/subjects/bogus",
+                      json={"items": []}).status_code == 422
 
     def test_put_validation(self, client):
         c, env = client

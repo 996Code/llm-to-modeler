@@ -115,7 +115,21 @@
               <RetrievalTest :kb-id="currentKbId" />
             </a-tab-pane>
             <a-tab-pane key="acl">
-              <template #tab><SafetyOutlined /> 数据权限</template>
+              <template #tab>
+                <span class="kg-acl-tab">
+                  <SafetyOutlined /> 数据权限
+                  <a-popover placement="bottom" trigger="click">
+                    <template #content>
+                      <div class="kg-acl-tip">
+                        <p>仅当宿主传入用户身份(X-User-Id)或角色(pack_params 的 user_roles)时生效;</p>
+                        <p><b>不配置 = 所有人可检索</b>;未传身份时不过滤。</p>
+                        <p>用户/角色候选由宿主经同步接口写入;管理端页面不受此限制。</p>
+                      </div>
+                    </template>
+                    <a class="kg-acl-info" @click.stop><QuestionCircleOutlined /></a>
+                  </a-popover>
+                </span>
+              </template>
               <AclEditor :kb-id="currentKbId" />
             </a-tab-pane>
           </a-tabs>
@@ -179,7 +193,8 @@ import type { TreeDataItem } from 'ant-design-vue/es/tree'
 import {
   ApartmentOutlined, DeleteOutlined, EditOutlined, ExperimentOutlined,
   FileTextOutlined, FolderAddOutlined, FolderOutlined, NodeIndexOutlined,
-  PartitionOutlined, PlusOutlined, SafetyOutlined, SwapOutlined, SyncOutlined,
+  PartitionOutlined, PlusOutlined, QuestionCircleOutlined, SafetyOutlined,
+  SwapOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import {
   KgKnowledgeBase, KgTemplate, KgTreeNode, createKgFolder, deleteKgKb,
@@ -475,6 +490,11 @@ async function doDeleteCurrent() {
   background: #fafbfc;
 }
 .kg-empty-icon { font-size: 30px; color: #c9cdd4; }
+.kg-acl-tab { display: inline-flex; align-items: center; gap: 4px; }
+.kg-acl-info { color: #94a3b8; display: inline-flex; align-items: center; }
+.kg-acl-info:hover { color: #2f54eb; }
+.kg-acl-tip { max-width: 320px; font-size: 12.5px; line-height: 1.8; color: #4b5563; }
+.kg-acl-tip p { margin: 0; }
 .kg-empty-title { font-weight: 700; font-size: 15px; color: #4e5969; margin-top: 8px; }
 .kg-empty-sub { font-size: 12.5px; color: #9ca3af; margin-top: 4px; }
 </style>

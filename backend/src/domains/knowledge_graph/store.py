@@ -173,6 +173,14 @@ class KGStore:
         created_at TEXT NOT NULL,
         UNIQUE (kb_id, subject_type, subject_id)
     )""",
+    # 数据权限选择字典(宿主同步):用户/角色候选,ACL 编辑页下拉选择
+    """CREATE TABLE IF NOT EXISTS kg_subjects (
+        subject_type TEXT NOT NULL,   -- user | role
+        subject_id TEXT NOT NULL,
+        display_name TEXT DEFAULT '', -- 展示名(可选;空则显示 subject_id)
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (subject_type, subject_id)
+    )""",
     ]
 
     def _init_db(self):
@@ -479,6 +487,33 @@ class KGStore:
             out.setdefault(r["kb_id"], []).append(
                 {"subjectType": r["subject_type"], "subjectId": r["subject_id"]})
         return out
+
+    # ── 数据权限选择字典(宿主同步) ───────────────────────
+
+    def sync_subjects(self, subject_type: str,
+                      items: List[Dict[str, str]]) -> None:
+        """全量替换某类型(user/role)的候选字典——宿主组织/角色变更后推送。
+
+        items: [{id, name?}];同步语义为全量(不在本次清单里的旧条目删除),
+        宿主侧删了人/角色,这里跟着消失(残留项会导致 ACL 里选到幽灵主体)。
+        """
+        now = _now()
+        with self._get_conn() as conn:
+            conn.execute(
+                "DELETE FROM kg_subjects WHERE subject_type = ?", (subject_type,))
+            conn.executemany(
+                "INSERT INTO kg_subjects (subject_type, subject_id, display_name, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                [(subject_type, str(it["id"]).strip(),
+                  str(it.get("name") or "").strip(), now) for it in items])
+
+    def list_subjects(self, subject_type: str) -> List[Dict[str, str]]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT subject_id, display_name FROM kg_subjects "
+                "WHERE subject_type = ? ORDER BY subject_id", (subject_type,)).fetchall()
+        return [{"id": r["subject_id"],
+                 "name": r["display_name"] or r["subject_id"]} for r in rows]
 
     def delete_kb(self, kb_id: str) -> bool:
         """级联删元数据(图/向量由调用方清理)。"""

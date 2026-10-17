@@ -460,7 +460,14 @@ def _packs_payload(request: Request) -> Dict[str, Any]:
     all_configs = load_pack_configs(pack_names=pack_state.discovered_names())
 
     items = []
+    # env 硬控(PACKS_ENABLED):配置了白名单 → 管理面只透出清单内的插件
+    # (启动时只注册这些,启停开关随之失效——底层控制);未配置 = 全量
+    # 发现+可启停(现状)。概览计数/插件页/启停接口三者同源
+    from services.pack_state import env_pack_whitelist
+    whitelist = env_pack_whitelist()
     for name in pack_state.discovered_names():
+        if whitelist is not None and name not in whitelist:
+            continue
         cfg = all_configs.get(name, {})
         domain = cfg.get("domain", {}) or {}
         services = cfg.get("services", {}) or {}
@@ -488,6 +495,8 @@ def _packs_payload(request: Request) -> Dict[str, Any]:
         "items": items,
         "stateFile": pack_state.state_path,
         "source": pack_state.source,
+        # env 硬控标记:PACKS_ENABLED 配置时前端隐藏启停开关
+        "envPinned": whitelist is not None,
     }
 
 
@@ -530,6 +539,15 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     # 裸包名 import(非 src.services.*):双根 sys.path 下 src.X 与 X 是两个
     # 模块对象,thread-local(如请求 services 表)跨副本不可见(见 main.py 同款注释)
     from services.pack_manager import assemble_packs
+    from services.pack_state import env_pack_whitelist
+
+    # env 硬控:PACKS_ENABLED 配置时启停被锁(注册集在启动期已定,
+    # 管理面热切换与 env 语义冲突;要改清单请改 env 后重启)
+    whitelist = env_pack_whitelist()
+    if whitelist is not None:
+        raise HTTPException(
+            422, "PACKS_ENABLED 已配置——插件清单由 env 底层锁定,启停已禁用"
+                 "(修改 .env 的 PACKS_ENABLED 后重启生效)")
 
     pack_state = request.app.state.pack_state
     if not pack_state.is_discovered(name):
