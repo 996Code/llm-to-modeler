@@ -142,6 +142,10 @@ class AskDataTool(CompositeTool):
 
     steps = ["resolve_datasource", "retrieve_schema", "think", "generate_sql",
              "execute_sql", "check_result", "visualize", "finalize"]
+    # D9 步骤游标声明:纯 LLM 推理步无副作用,resume 重跑时游标直接跳过
+    # (守卫键 execute_result/clarified_table 仍兜底);数据步不声明——
+    # 各自守卫短路,语义由工具掌控
+    idempotent_steps = {"think", "generate_sql"}
     pipeline_steps = [
         {"key": "resolve_datasource", "label": "连接数据源"},
         {"key": "retrieve_schema", "label": "检索表结构"},

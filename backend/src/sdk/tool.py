@@ -313,9 +313,17 @@ class CompositeTool(Tool):
     - step 内可抛 ClarificationRaised → 立即上抛,Engine 转成 SSE
     - step 内可重跑前序 step 实现 retry(如 validate 失败重跑 generate)
     - 每个 step 自行 emit stage 事件(含详细描述)
+
+    步骤游标(D9):每步完成后推进 state["_step_cursor"];中断(resume)
+    重跑时,声明在 idempotent_steps 里的已完成步直接跳过(省重复
+    LLM/检索调用),未声明的照跑——由各 step 自身的守卫键短路(现有
+    语义不变)。保守增强而非推翻:跳不跳由工具作者声明,SDK 不猜。
     """
     steps: list[str] = []
-    
+
+    # 声明幂等的步骤名(resume 重跑时游标跳过;未声明走守卫短路)
+    idempotent_steps: set[str] = set()
+
     # ── 插件化:Pipeline 步骤定义(用于前端动态渲染) ──
     # 格式: [{"key": "step_name", "label": "步骤描述"}, ...]
     pipeline_steps: list[dict] = []
@@ -339,6 +347,15 @@ class CompositeTool(Tool):
         # 与 _need_clarify 同源同清(resume 重跑=管线从头再来)。
         state.pop("_need_clarify", None)
         state.pop("_result", None)
+        # 步骤游标(D9):resume 重跑时记下上轮完成到哪——本轮开跑前
+        # 读取,声明幂等的已完成步跳过(省重复 LLM/检索);首跑 cursor
+        # 不存在(0),语义不变。_resumed_steps 供链路观测区分跳过原因
+        cursor = int(state.get("_step_cursor") or 0)
+        skipped = []
+        if cursor and self.idempotent_steps:
+            skipped = [s for s in self.steps[:cursor]
+                       if s in self.idempotent_steps]
+        state["_resumed_steps"] = skipped
         # 发送 pipeline 定义给前端
         if self.pipeline_steps:
             ctx.emit("pipeline_definition", {
@@ -346,9 +363,16 @@ class CompositeTool(Tool):
                 "steps": self.pipeline_steps
             })
 
-        for step_name in self.steps:
+        for idx, step_name in enumerate(self.steps):
             # 检查前序 step 是否请求中断
             if state.get("_need_clarify"):
                 break
+            # 游标跳过:resume 场景已完成且声明幂等的步不重跑
+            # (未声明的不跳——由各 step 守卫键短路,语义由工具作者掌控)
+            if cursor and idx < cursor and step_name in self.idempotent_steps:
+                continue
             method = getattr(self, f"_step_{step_name}")
             method(state, ctx)
+            # 游标推进:该步执行完(含被守卫短路)即记已完成——resume
+            # 时"已到此步"的判定以管线顺序为准,与守卫键状态解耦
+            state["_step_cursor"] = idx + 1
