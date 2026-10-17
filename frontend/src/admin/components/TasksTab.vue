@@ -371,7 +371,14 @@ const structuredGroups = computed<LogGroup[]>(() => {
       const ents = g.logs.reduce((s, l) => s + (Number(chunkData(l).entities) || 0), 0)
       const rels = g.logs.reduce((s, l) => s + (Number(chunkData(l).relations) || 0), 0)
       const doneN = g.logs.filter((l) => chunkStateOf(l) !== 'started').length
-      g.badge = `${doneN}/${g.logs.length} 块 · ${ents}e/${rels}r`
+      // 分母优先用日志自带的文档级 total(后端逐块日志携带)——组内行数
+      // 做分母时批跑完分子恒等于分母,永远 1/1、2/2 无信息量。旧任务
+      // 日志无 total 时回落组内口径
+      const lastTotal = Number(chunkData(g.logs[g.logs.length - 1]).total) || 0
+      const lastDone = Number(chunkData(g.logs[g.logs.length - 1]).done) || 0
+      g.badge = lastTotal > 0
+        ? `${lastDone}/${lastTotal} 块 · ${ents}e/${rels}r`
+        : `${doneN}/${g.logs.length} 块 · ${ents}e/${rels}r`
       // 批内并行完成顺序不定:按块序稳定排(started 行与 done 行混排会跳)
       g.logs.sort((a, b) => (Number(chunkData(a).chunk) || 0) - (Number(chunkData(b).chunk) || 0))
       // 基线存组内:耗时对比用各自组的 max(词表增大后批次普遍更慢,
@@ -391,7 +398,8 @@ function groupOf(lg: TaskLogItem): { key: string; title: string } {
   if (m.startsWith('向量模式')) return { key: 'vector', title: '向量准备' }
   if (m.startsWith('抽取配置')) return { key: 'config', title: '抽取配置' }
   if (m.startsWith('批次') && m.includes('开始')) return { key: 'batch', title: m.slice(0, m.indexOf('(')) }
-  if (m.startsWith('块') && (m.includes('抽取完成') || m.includes('抽取失败')))
+  if (m.startsWith('块') && (m.includes('抽取完成') || m.includes('抽取失败')
+    || m.includes('抽取中') || m.includes('处理异常')))
     return { key: 'chunks', title: '逐块抽取' }
   if (m.startsWith('批次') && m.includes('完成')) return { key: 'batchsum', title: m.slice(0, m.indexOf(':')) }
   if (m.startsWith('导入完成') || m.startsWith('样本收集') || m.startsWith('本体归纳'))

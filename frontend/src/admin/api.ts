@@ -418,8 +418,11 @@ export async function saveDisplaySettings(
   const body: Record<string, boolean> = {}
   if (values.showPipeline !== undefined) body.show_pipeline = values.showPipeline
   if (values.showRetrieval !== undefined) body.show_retrieval = values.showRetrieval
-  const { data } = await adminApi.put<DisplaySettings>('/settings/display', body)
-  return data
+  // 响应同样是 snake_case——漏映射会把两个开关都覆盖成 undefined
+  // (关 1 带 2 一起灭、开了要刷新才亮的根因),与 GET 同款转换
+  const { data } = await adminApi.put<{ show_pipeline: boolean, show_retrieval: boolean }>(
+    '/settings/display', body)
+  return { showPipeline: data.show_pipeline, showRetrieval: data.show_retrieval }
 }
 
 // ── 任务中心 ─────────────────────────────────────────────

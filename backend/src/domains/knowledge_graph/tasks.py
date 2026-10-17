@@ -447,10 +447,14 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             handle.log(f"批次 {batch_index} 开始: 块 {seqs}(共 {len(batch)} 块)",
                        batch=batch_index, chunks=seqs)
             # 块级"进行中"事件:块行从启动起就可见(加载态),完成时另发
-            # 终态行——此前只有完成行,进行中的块在前端完全不可见
+            # 终态行——此前只有完成行,进行中的块在前端完全不可见。
+            # total/done=文档级进度分母/分子:前端"逐块抽取"徽章按此
+            # 显示全局进度(组内行数做分母时批跑完分子恒等于分母,
+            # 永远 1/1、2/2 无信息量——日志自带口径,组被切碎也不失真)
             for c in batch:
                 handle.log(f"块 {c['seq']} 抽取中…", chunk=c["seq"],
-                           chunk_state="started", chunk_id=c["id"])
+                           chunk_state="started", chunk_id=c["id"],
+                           total=total, done=done_before + batch_start)
             # 批内进度心跳:LLM 单块抽取分钟级,进度只在批次边界跳变的话
             # 用户侧感知"卡死"(E2E 实测 8 分钟停在 3%)。批开始即按
             # "已提交到 LLM"推进到本批起点,块完成再逐块推进
@@ -492,6 +496,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                         attempt=stats.get("attempt"), duration_ms=stats.get("duration_ms"),
                         prompt_chars=stats.get("prompt_chars"),
                         glossary_size=stats.get("glossary_size"),
+                        total=total, done=done_before + batch_start + completed_in_batch + batch_failed,
                         error=str(e)[:200])
                     continue
                 except Exception as e:
@@ -504,6 +509,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                     handle.log(f"块 {chunk['seq']} 处理异常: {e}", level="warn",
                                chunk=chunk["seq"], chars=len(chunk["text"]),
                                chunk_state="failed", chunk_id=chunk["id"],
+                               total=total, done=done_before + batch_start + completed_in_batch + batch_failed,
                                error=str(e)[:200])
                     continue
                 # 注意:这里不标 done——checkpoint 语义是"图谱已写入",
@@ -522,6 +528,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                     duration_ms=stats.get("duration_ms"),
                     raw_entities=stats.get("raw_entities"),
                     raw_relations=stats.get("raw_relations"),
+                    total=total, done=done_before + batch_start + completed_in_batch + batch_failed + 1,
                     dropped_entities=max(0, (stats.get("raw_entities") or 0) - len(entities)),
                     dropped_relations=max(0, (stats.get("raw_relations") or 0) - len(relations)),
                     attempt=stats.get("attempt"))
