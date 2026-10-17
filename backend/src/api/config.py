@@ -263,3 +263,73 @@ async def chat(req: ChatRequest, request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/chat/resume")
+async def chat_resume(req: ChatRequest, request: Request):
+    """D10 历史加载续答——挂起轮的断点续跑（SSE 流式）。
+
+    场景:回答生成中服务端被打断(重启/崩溃),该轮 user 消息已落库但
+    assistant 未落库(get_conversation 返回 pendingResume=true)。前端
+    历史加载时渲染「继续生成」,点击调本端点。
+
+    机制:LangGraph checkpoint 按 thread_id=conversation_id 持久化,
+    挂起轮的 state 就在库里——续跑时 graph 从 checkpoint 当前节点
+    继续(不重头跑)。防重:先查 graph 状态,无未完成 task(checkpoint
+    已跑完/不存在)时 409,防止重复续答或双答。
+
+    Body: ChatRequest(conversation_id 必填;message 等其余字段忽略)
+    """
+    conv_id = (req.conversation_id or "").strip()
+    if not conv_id:
+        raise HTTPException(422, "conversation_id 不能为空")
+    store = request.app.state.conversation_store
+    user_id = request.headers.get("X-User-Id") or "anonymous"
+    conv = store.get_conversation(conv_id, user_id)
+    if not conv:
+        raise HTTPException(404, "会话不存在")
+    if not conv.get("pendingResume"):
+        raise HTTPException(409, "该会话最后一轮已有回答,无需续答")
+
+    graph = request.app.state.graph
+    config = {"configurable": {"thread_id": conv_id}}
+    try:
+        snap = graph.get_state(config)
+    except Exception as e:
+        logger.warning(f"resume 前置状态查询失败: {e}")
+        snap = None
+    # 无快照/无未完成 task:checkpoint 不存在(图已跑完只是落库窗口错过)
+    # 或已被其它请求续完——都拒绝,不重跑(防双答)
+    if not snap or not snap.tasks:
+        raise HTTPException(409, "该轮已无可续答的挂起状态(checkpoint 已完成或不存在)")
+
+    from engine.stream import stream_graph
+
+    async def stream():
+        async for event in stream_graph(
+            graph=graph,
+            user_input="",
+            conversation_id=conv_id,
+            user_id=conv["userId"] or user_id,   # 会话归属人落库(作者一致)
+            answers=None,
+            image_base64=None,
+            conversation_store=store,
+            conversation_history=None,    # 历史/上下文在 checkpoint state 里已有
+            compressed_summary="",
+            context_artifact=None,
+            forward_headers=_extract_forward_headers(request),
+            services=req.services,
+            packs=req.packs,
+            pack_params=req.pack_params,
+            resume_pending=True,          # 新参:None 输入续跑(见 stream_graph)
+        ):
+            yield event
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )

@@ -132,6 +132,23 @@
               </template>
               <AclEditor :kb-id="currentKbId" />
             </a-tab-pane>
+            <a-tab-pane key="annotations">
+              <template #tab>
+                <span class="kg-acl-tab">
+                  <BookOutlined /> 标注回复
+                  <a-popover placement="bottom" trigger="click">
+                    <template #content>
+                      <div class="kg-acl-tip">
+                        <p>录入「问题 → 标准答案」:用户提问与标注问题强相似(≥0.90)时</p>
+                        <p>直接返回标准答案,不走检索——老答错的问题补课一次,终身正确。</p>
+                      </div>
+                    </template>
+                    <a class="kg-acl-info" @click.stop><QuestionCircleOutlined /></a>
+                  </a-popover>
+                </span>
+              </template>
+              <AnnotationManager :kb-id="currentKbId" />
+            </a-tab-pane>
           </a-tabs>
         </template>
 
@@ -193,7 +210,7 @@ import type { TreeDataItem } from 'ant-design-vue/es/tree'
 import {
   ApartmentOutlined, DeleteOutlined, EditOutlined, ExperimentOutlined,
   FileTextOutlined, FolderAddOutlined, FolderOutlined, NodeIndexOutlined,
-  PartitionOutlined, PlusOutlined, QuestionCircleOutlined, SafetyOutlined,
+  BookOutlined, PartitionOutlined, PlusOutlined, QuestionCircleOutlined, SafetyOutlined,
   SwapOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import {
@@ -209,6 +226,7 @@ import SchemaEditor from './SchemaEditor.vue'
 import GraphView from './GraphView.vue'
 import RetrievalTest from './RetrievalTester.vue'
 import AclEditor from './AclEditor.vue'
+import AnnotationManager from './AnnotationManager.vue'
 import KbWizard from './KbWizard.vue'
 
 const loadSafely = inject<LoadSafely>('loadSafely')!

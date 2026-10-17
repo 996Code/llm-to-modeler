@@ -318,6 +318,86 @@ async def list_subjects(subject_type: str, request: Request):
     return {"items": runtime.get_kg_store(request.app.state).list_subjects(subject_type)}
 
 
+# ── 标注回复 CRUD(D32:知识库标准答案;管理端维护,检索时短路) ──
+
+@router.get("/kbs/{kb_id}/annotations", dependencies=[Depends(admin_required)])
+async def list_kb_annotations(kb_id: str, request: Request):
+    """某库的标注列表(管理端标注页;问题/答案/启停/来源)。"""
+    _kb_or_404(request, kb_id)
+    from domains.knowledge_graph import annotations as kg_annotations
+    return {"items": kg_annotations.list_annotations(request.app.state, kb_id)}
+
+
+@router.post("/kbs/{kb_id}/annotations", dependencies=[Depends(admin_required)])
+async def create_kb_annotation(kb_id: str, request: Request, payload: Dict[str, Any]):
+    """新增标注:问题向量化入库;下次相似提问(≥0.90)直接返回标准答案。
+
+    Body: {question, answer, source?}(source 记来源如"点踩转化",纯溯源)
+    """
+    _kb_or_404(request, kb_id)
+    question = str((payload or {}).get("question") or "").strip()
+    answer = str((payload or {}).get("answer") or "").strip()
+    if not question or not answer:
+        raise HTTPException(422, "question 和 answer 不能为空")
+    from domains.knowledge_graph import annotations as kg_annotations
+    import asyncio
+    item = await asyncio.to_thread(
+        kg_annotations.upsert_annotation, request.app.state,
+        kb_id, question, answer, None,
+        str((payload or {}).get("source") or "").strip())
+    logger.info(f"annotation created: {item['id'][:8]} (kb={kb_id[:8]})")
+    return item
+
+
+@router.put("/kbs/{kb_id}/annotations/{annotation_id}",
+            dependencies=[Depends(admin_required)])
+async def update_kb_annotation(kb_id: str, annotation_id: str,
+                               request: Request, payload: Dict[str, Any]):
+    """更新标注(问题重打向量)/启停。Body: {question?, answer?, enabled?}。"""
+    _kb_or_404(request, kb_id)
+    from domains.knowledge_graph import annotations as kg_annotations
+    import asyncio
+    existing = next((a for a in kg_annotations.list_annotations(
+        request.app.state, kb_id) if a["id"] == annotation_id), None)
+    if not existing:
+        raise HTTPException(404, "标注不存在")
+    enabled = payload.get("enabled")
+    if enabled is not None and "question" not in payload and "answer" not in payload:
+        # 纯启停:不重打向量
+        ok = await asyncio.to_thread(
+            kg_annotations.set_enabled, request.app.state,
+            kb_id, annotation_id, bool(enabled))
+        if not ok:
+            raise HTTPException(404, "标注不存在")
+        return {"id": annotation_id, "enabled": bool(enabled)}
+    question = str(payload.get("question") or existing["question"]).strip()
+    answer = str(payload.get("answer") or existing["answer"]).strip()
+    if not question or not answer:
+        raise HTTPException(422, "question 和 answer 不能为空")
+    item = await asyncio.to_thread(
+        kg_annotations.upsert_annotation, request.app.state,
+        kb_id, question, answer, annotation_id,
+        existing.get("source") or "")
+    if enabled is not None:
+        await asyncio.to_thread(
+            kg_annotations.set_enabled, request.app.state,
+            kb_id, annotation_id, bool(enabled))
+    return item
+
+
+@router.delete("/kbs/{kb_id}/annotations/{annotation_id}",
+               dependencies=[Depends(admin_required)])
+async def delete_kb_annotation(kb_id: str, annotation_id: str, request: Request):
+    _kb_or_404(request, kb_id)
+    from domains.knowledge_graph import annotations as kg_annotations
+    import asyncio
+    if not await asyncio.to_thread(
+            kg_annotations.delete_annotation, request.app.state,
+            kb_id, annotation_id):
+        raise HTTPException(404, "标注不存在")
+    return {"success": True}
+
+
 # ── 图谱浏览 ─────────────────────────────────────────────────
 
 
@@ -953,6 +1033,40 @@ async def search(request: Request, payload: Dict[str, Any]):
     # conv_id 可选:传入则检索调用日志(意图/图/向量/回答)关联该会话,
     # 管理端链路视图里能看到完整检索链;不传保持无会话归属
     conv_id = str((payload or {}).get("conv_id") or "").strip() or None
+
+    # D32 标注短路(前置层):标注命中直接返回标准答案(不走检索)。
+    # 与 kb_search 工具同层;REST 供宿主/前端直调路径也吃同一红利
+    import asyncio
+    from domains.knowledge_graph import annotations as kg_annotations
+    try:
+        hit = None
+        hit_kb = None
+        for k in target:
+            hit = await asyncio.to_thread(
+                kg_annotations.match_annotation, request.app.state, k["id"], query)
+            if hit:
+                hit_kb = k
+                break
+        if hit:
+            logger.info(f"annotation hit: kb={hit_kb['name']}, "
+                        f"score={hit['score']}, q={query[:40]}")
+            return {
+                "answer": hit["answer"],
+                "annotationHit": True,
+                "annotationQuestion": hit["question"],
+                "annotationScore": hit["score"],
+                "cited_chunks": [],
+                "kb": {"id": hit_kb["id"], "name": hit_kb.get("name") or ""},
+                "kbs": [{"id": hit_kb["id"], "name": hit_kb.get("name") or ""}],
+                "intent": None,
+                "subgraph": {"nodes": [], "edges": []},
+                "chunks": [],
+                "sources": {"entities": [], "chunks": []},
+                "user": user,
+            }
+    except Exception as e:
+        logger.warning(f"标注短路层异常(降级常规检索): {e}")
+
     try:
         # 检索链含多次 LLM/图/向量同步调用(LLM_TIMEOUT 默认 300s),
         # 直接在 async 端点里跑会阻塞整个事件循环(其他会话的 SSE 心跳

@@ -471,6 +471,74 @@ export const useConversationStore = defineStore('conversation', () => {
     }
   }
 
+  // D10 历史加载续答:挂起轮断点续跑(该轮 user 已落库,只补 assistant)。
+  // 复用 sendMessage 的 SSE 渲染管线(阶段/结果/错误/结束四回调同款),
+  // 区别:不 push 用户消息、不带追问答案。
+  async function resumePendingAnswer() {
+    const convId = currentConversation.value?.id
+    if (!convId || streaming.value) return
+    streaming.value = true
+    stageMessage.value = '正在继续生成被打断的回答...'
+    const originConvId = convId
+    const isStale = () => currentConversation.value?.id !== originConvId
+    try {
+      await api.chatResume(convId, {
+        onStage: (stage, msg) => {
+          if (isStale()) return
+          stageMessage.value = msg
+          currentStage.value = stage
+        },
+        onPipelineDefinition: (tool, steps) => {
+          if (isStale()) return
+          pipelineSteps.value = steps
+        },
+        onResult: (result) => {
+          if (isStale()) return
+          messages.value.push({
+            role: 'assistant',
+            content: result.summary || (result as any).reply || '',
+            dataResult: (result as any).kg ? result : undefined,
+          })
+          stageMessage.value = ''
+          currentStage.value = ''
+          // 续答完成:清挂起标记(会话末尾不再悬空)
+          if (currentConversation.value) {
+            currentConversation.value.pendingResume = false
+          }
+          loadConversations()
+        },
+        onError: (err) => {
+          if (isStale()) return
+          messages.value.push({
+            role: 'assistant',
+            content: `续答失败: ${err}`,
+            kind: 'error-diag',
+            errorCategory: classifyError(err || ''),
+          })
+          stageMessage.value = ''
+          currentStage.value = ''
+        },
+        onDone: () => {
+          if (isStale()) return
+          stageMessage.value = ''
+          currentStage.value = ''
+        },
+      })
+    } catch (e: any) {
+      if (isStale()) return
+      messages.value.push({
+        role: 'assistant',
+        content: `续答请求失败: ${e.message}`,
+        kind: 'error-diag',
+        errorCategory: classifyError(e.message || ''),
+      })
+    } finally {
+      streaming.value = false
+      stageMessage.value = ''
+      currentStage.value = ''
+    }
+  }
+
 // P2#15 失败诊断:错误文本 → 失败环节分类(给用户"哪坏了"的第一答案)
   // 返回对外暴露的状态/派生值/动作。
   // 注意：return 后这些 ref/computed 就成为 store 的公共 API，
@@ -495,6 +563,7 @@ export const useConversationStore = defineStore('conversation', () => {
     latestDataMessage,
     loadConversations,
     selectConversation,
+    resumePendingAnswer,
     startNewConversation,
     removeConversation,
     sendMessage,

@@ -199,6 +199,45 @@ class KbSearchTool(Tool):
             ctx.trace("kb_search.resolve_kb", f"跨库检索 {len(kbs)} 个知识库", "ok", detail={
                 "kbs": [k["name"] for k in kbs], "source": "all-cross"})
 
+        # ── D32 标注短路(前置层,检索之前) ──
+        # 知识库"老答错同一个问题"的治本件:「问题→标准答案」高阈值
+        # 向量命中直接作答,不走检索——错过的知识补课一次终身正确。
+        # 单库:查该库标注;跨库:逐库试(命中即返回)。短路层故障
+        # 降级常规检索(match_annotation 内消化)
+        try:
+            from domains.knowledge_graph import annotations as kg_annotations
+            hit = None
+            hit_kb = None
+            if kb is not None:
+                hit = kg_annotations.match_annotation(self._app_state, kb["id"], query)
+                hit_kb = kb
+            else:
+                for k in kbs:
+                    hit = kg_annotations.match_annotation(self._app_state, k["id"], query)
+                    if hit:
+                        hit_kb = k
+                        break
+            if hit:
+                ctx.trace("kb_search.annotation", "标注命中(标准答案短路)", "ok", detail={
+                    "kb": hit_kb["name"], "question": hit["question"][:60],
+                    "score": hit["score"]})
+                return ToolResult(
+                    reply=hit["answer"],
+                    summary=f"(标准答案){hit['answer'][:100]}",
+                    artifact={
+                        "type": "kg_search_result",
+                        "kb": {"id": hit_kb["id"], "name": hit_kb["name"]},
+                        "annotationHit": True,
+                        "annotationQuestion": hit["question"],
+                        "annotationScore": hit["score"],
+                        "subgraph": {"nodes": [], "edges": []},
+                        "sources": {"entities": [], "chunks": []},
+                    },
+                    artifact_type="data",
+                )
+        except Exception as e:
+            logger.warning(f"标注短路层异常(降级常规检索): {e}")
+
         # ── 混合检索 + 回答 ──
         # on_stage 把 retrieval 内部各阶段(意图/图谱/子图/向量/组装/回答)
         # 透传成 SSE stage 事件,前端 pipeline 进度条逐步推进

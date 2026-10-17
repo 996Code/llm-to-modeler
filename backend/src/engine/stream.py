@@ -105,6 +105,7 @@ async def stream_graph(
     services: dict = None,
     pack_params: dict = None,
     packs: list = None,
+    resume_pending: bool = False,
 ) -> AsyncGenerator[str, None]:
     """走 LangGraph StateGraph 的 SSE 流(异步生成器)。
 
@@ -114,6 +115,9 @@ async def stream_graph(
       - 遇到 ``interrupt`` 时 ``graph.stream`` 会自动停下,需通过
         ``graph.get_state(config)`` 检查是否真的被中断,取回中断现场
       - 追问恢复:传 ``Command(resume=answers)`` 让 graph 从中断点继续
+      - 挂起续答(D10):``resume_pending=True`` 时以 None 输入重入——
+        graph 从 checkpoint 的当前节点继续(不重头跑,state 已持久化),
+        落库时不再重复写 user 消息(挂起轮的 user 早已在库里)
 
     【Java 类比】
       方法签名 ``AsyncGenerator[str, None]`` ≈ ``Flux<String>``,
@@ -136,6 +140,8 @@ async def stream_graph(
         packs:       宿主插件链路声明(ChatRequest.packs,与 INIT packs 同义)。
                               非空且已装配时一级路由直通该 pack(零 LLM);
                               引擎不写死 pack 名,谁发起请求谁声明插件
+        resume_pending:      D10 挂起续答标记:None 输入从 checkpoint 续跑,
+                              落库跳过 user 消息(挂起轮已写过)
 
     Yields:
         SSE 格式的字符串,直接写给 HTTP 响应体。
@@ -165,6 +171,10 @@ async def stream_graph(
         # 路径 2:追问恢复 —— 用 Command 告诉 graph "这是对之前 interrupt 的回答"
         # graph 会从上次中断的节点继续执行
         input_data = Command(resume=answers)
+    elif resume_pending:
+        # 路径 3:D10 挂起续答 —— None 输入重入,LangGraph 从 checkpoint
+        # 的未完成 task 继续(调用方已 get_state 校验过存在挂起 task)
+        input_data = None
     else:
         # 路径 1:首次提问 —— 构造完整的初始 state
         # 这就是 StateGraph 的"工作内存",所有节点共享读写
@@ -414,6 +424,7 @@ async def stream_graph(
                 _save_result_conversation(
                     conversation_store, conversation_id, user_id,
                     user_input, result_holder["last_result"], context_artifact,
+                    skip_user=resume_pending,
                 )
 
             # 无论成功 / 失败 / 中断,都要发 done 让前端关闭连接
@@ -449,17 +460,24 @@ def _save_conversation(store, conv_id, user_id, user_input, assistant_content):
     if not store or not conv_id or not user_id:
         return
     try:
+        if resume_pending:
+            # D10 挂起续答:该轮 user 消息挂起前已落库,只补 assistant——
+            # 重复写 user 会让历史里同一句问两遍
+            store.add_message(conv_id=conv_id, role="assistant", content=assistant_content)
+            return
         store.add_message(conv_id=conv_id, role="user", content=user_input)
         store.add_message(conv_id=conv_id, role="assistant", content=assistant_content)
     except Exception as e:
         logger.warning(f"Failed to save conversation: {e}")
 
 
-def _save_result_conversation(store, conv_id, user_id, user_input, result_data, context_artifact):
+def _save_result_conversation(store, conv_id, user_id, user_input, result_data, context_artifact,
+                              skip_user: bool = False):
     """保存工具执行结果到对话历史(含配置快照)。
 
     【逻辑】
-      1. 落 user / assistant 两条消息
+      1. 落 user / assistant 两条消息(skip_user=True 跳过 user——D10
+         挂起续答:该轮 user 挂起前已落库,重写会让历史同一句问两遍)
       2. 如果结果里带 config(配置制品),额外存一条带 config_snapshot 的消息
          (审计用:记录"这次操作把配置改成了什么样")
       3. 更新会话的 current_config(存储层字段名,不改):
@@ -471,7 +489,8 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
     try:
         summary = result_data.get("summary", "")
 
-        store.add_message(conv_id=conv_id, role="user", content=user_input)
+        if not skip_user:
+            store.add_message(conv_id=conv_id, role="user", content=user_input)
 
         # D4 工具输出类型:suppress_output 的工具(如查询统计明细)声明
         # "结果文本不进 LLM 上下文"——assistant content(=下轮 LLM 历史

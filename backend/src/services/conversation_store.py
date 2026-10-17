@@ -585,6 +585,11 @@ class ConversationStore:
             "displayTitle": self._derive_display_title(meta["title"], str(first_user or "")),
             "currentConfig": current_config,
             "messages": messages,
+            # D10 历史加载续答:最后一条消息是 user 且其后无 assistant =
+            # 该轮回答未落库(生成中断:服务重启/崩溃打断;SSE 断开不打断
+            # 服务端执行,不算)。前端据此渲染"继续生成"入口
+            "pendingResume": bool(
+                messages and messages[-1].get("role") == "user"),
             "createdAt": meta["created_at"],
             "updatedAt": meta["updated_at"],
         }
