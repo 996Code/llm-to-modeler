@@ -798,6 +798,8 @@ async def list_chunks(kb_id: str, doc_id: str, request: Request):
     items = [{
         "id": c["id"], "seq": c["seq"], "status": c["status"],
         "charCount": c["charCount"],
+        # D29 块命中统计:被 LLM 引用次数("哪些知识真被用")
+        "hitCount": int(c.get("hit_count") or 0),
         "preview": (c["text"] or "").strip().replace("\n", " ")[:80],
     } for c in chunks]
     summary = {

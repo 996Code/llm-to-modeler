@@ -219,6 +219,14 @@ class KGStore:
                              "ADD COLUMN IF NOT EXISTS kb_id TEXT")
         except Exception as e:
             logger.warning(f"开放 Key 绑定列迁移失败(不影响启动,下次重试): {e}")
+        # D29 块命中统计:kg_chunks 加 hit_count(被引用即 +1,
+        # "哪些知识真被用"的治理数据)。默认 0,旧行迁移自动补。
+        try:
+            with self._get_conn() as conn:
+                conn.execute("ALTER TABLE kg_chunks "
+                             "ADD COLUMN IF NOT EXISTS hit_count INTEGER DEFAULT 0")
+        except Exception as e:
+            logger.warning(f"hit_count 列迁移失败(不影响启动,下次重试): {e}")
         # 一次性迁移:存量"未决"库(vector_enabled=0 且无 embedding_model
         # 记录——曾因探测失败落 0)翻转为启用——本地 bge-m3 定死能力。
         # 模型变更显式关闭的库(0 且有模型记录)不动:那是向量兼容性保护态。
@@ -750,6 +758,43 @@ class KGStore:
             )
         return len(chunks)
 
+    def bump_chunk_hits(self, chunk_ids: List[str]) -> int:
+        """D29 块命中计数:被 LLM 引用([片段:N])的块 hit_count+1。
+
+        单条 UPDATE ... IN 语句,失败静默(统计项不拖垮检索主链路)。
+        返回实际更新的行数。
+        """
+        if not chunk_ids:
+            return 0
+        try:
+            with self._get_conn() as conn:
+                ph = ",".join("?" for _ in chunk_ids)
+                cur = conn.execute(
+                    f"UPDATE kg_chunks SET hit_count = COALESCE(hit_count, 0) + 1 "
+                    f"WHERE id IN ({ph})", chunk_ids)
+                return cur.rowcount
+        except Exception as e:
+            logger.warning(f"hit_count 更新失败(统计项,不阻断): {e}")
+            return 0
+
+    def upsert_summary_chunk(self, doc_id: str, kb_id: str, text: str) -> Optional[str]:
+        """D14 摘要块:写入/更新文档级摘要块(seq=-1,status=done)。
+
+        摘要块是"抽象问法兜底"索引——"劳动法主要讲什么"这类无具体实体
+        的问法靠它命中。先删旧摘要再插(重导幂等);不计入 chunk_count
+        (那是抽取块口径,摘要不是切块产物)。
+        """
+        now = _now()
+        chunk_id = str(uuid.uuid4())
+        with self._get_conn() as conn:
+            conn.execute(
+                "DELETE FROM kg_chunks WHERE doc_id = ? AND seq = -1", (doc_id,))
+            conn.execute(
+                """INSERT INTO kg_chunks (id, kb_id, doc_id, seq, text, char_count, status, created_at)
+                   VALUES (?, ?, ?, -1, ?, ?, 'done', ?)""",
+                (chunk_id, kb_id, doc_id, text, len(text), now))
+        return chunk_id
+
     def list_chunks(self, doc_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
         sql = "SELECT * FROM kg_chunks WHERE doc_id = ?"
         params: list = [doc_id]
@@ -764,6 +809,7 @@ class KGStore:
             "seq": int(r["seq"]), "text": r["text"],
             "charCount": int(r["char_count"] or 0),
             "status": r["status"],
+            "hitCount": int(r["hit_count"] or 0) if "hit_count" in r.keys() else 0,
         } for r in rows]
 
     def get_chunks_by_ids(self, chunk_ids: List[str]) -> List[Dict[str, Any]]:
@@ -783,6 +829,7 @@ class KGStore:
             "seq": int(r["seq"]), "text": r["text"],
             "charCount": int(r["char_count"] or 0),
             "status": r["status"],
+            "hitCount": int(r["hit_count"] or 0) if "hit_count" in r.keys() else 0,
         } for r in rows]
 
     def mark_chunk(self, chunk_id: str, status: str) -> bool:

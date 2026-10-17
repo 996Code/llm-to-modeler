@@ -770,7 +770,13 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         handle.log(f"收尾描述连边失败(不影响导入结论): {e}",
                    level="warn", error=str(e)[:200])
 
-    # 6) 收尾统计
+    # 6) D14 摘要块:收尾统计前生成(抽象问法兜底,失败降级不阻断)。
+    # 文档行重新查(pending 为空的续跑/全跳过场景不进抽取循环,_doc 未定义)
+    _generate_summary_chunk(handle, app_state, store, kb,
+                            store.get_document(doc_id) or {},
+                            store.list_chunks(doc_id), conv_id)
+
+    # 7) 收尾统计
     final_status = "partial" if failed_chunks else "succeeded"
     doc_counts = graph.document_counts(kb_id, doc_id)
     entity_total, relation_total = doc_counts["entities"], doc_counts["relations"]
@@ -811,6 +817,56 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         "vectorEnabled": vector_ready, "durationSec": round(duration, 1),
         "quality": quality,
     }
+
+
+def _generate_summary_chunk(handle, app_state, store, kb: Dict, doc: Dict,
+                            chunks: List[Dict], conv_id: str) -> bool:
+    """D14 摘要块:LLM 概括全文 → seq=-1 摘要块 + 向量化入库。
+
+    "劳动法主要讲什么"式抽象问法无具体实体/关键词,三路检索都可能
+    零命中——摘要块把概括性内容做进向量索引兜底。取前若干块文本
+    拼接(全文可能超上下文,首尾块代表性最强),LLM 输出一段摘要。
+    失败只告警跳过(fail-open,纯增强项不阻断导入)。
+    """
+    try:
+        if not chunks:
+            return False
+        # 取首尾共 6 块拼接(结构感知切块下首块=总则/序言,尾块=附则,
+        # 中段重复度高);每块截 600 字控 prompt 规模
+        sample = [chunks[0]] + (chunks[1:3] if len(chunks) > 4 else chunks[1:2]) \
+            + ([chunks[-1]] if len(chunks) > 1 else [])
+        text = "\n".join((c["text"] or "")[:600] for c in sample if c.get("text"))
+        if not text.strip():
+            return False
+        prompt = (
+            f"以下是文档《{doc.get('filename') or ''}》的部分内容(首尾节选)。\n"
+            f"请用 200 字以内概括这份文档的主题和主要内容,直接输出概括,"
+            f"不要任何前缀说明:\n\n{text}"
+        )
+        summary = app_state.llm_client.chat(
+            [{"role": "user", "content": prompt}],
+            temperature=0.2, conv_id=conv_id, stage="kg.summary").strip()
+        if not summary:
+            return False
+        chunk_id = store.upsert_summary_chunk(doc["id"], kb["id"], summary)
+        # 向量化入库(与抽取块同款子切+upsert;摘要短,单段)
+        if kb.get("vectorEnabled"):
+            try:
+                vector_store = runtime.get_vector(app_state)
+                vec = app_state.llm_client.embeddings(
+                    [summary], conv_id=conv_id, stage="kg.embed")[0]
+                vector_store.upsert_chunks(kb["id"], [
+                    {"chunk_id": f"{chunk_id}#0", "doc_id": doc["id"],
+                     "seq": -1, "text": summary, "vector": vec}])
+            except Exception as e:
+                handle.log(f"摘要块向量化失败(图谱不受影响): {e}", level="warn")
+        handle.log(f"摘要块已生成({len(summary)} 字,抽象问法兜底)",
+                   chars=len(summary))
+        return True
+    except Exception as e:
+        handle.log(f"摘要块生成失败(不影响导入结论): {e}", level="warn",
+                   error=str(e)[:200])
+        return False
 
 
 def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:

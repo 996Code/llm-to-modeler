@@ -150,6 +150,12 @@
             <template v-else-if="column.key === 'charCount'">
               <span class="dm-mono">{{ record.charCount }}</span>
             </template>
+            <template v-else-if="column.key === 'hitCount'">
+              <a-tag v-if="record.hitCount > 0" color="blue" class="dm-mono">
+                {{ record.hitCount }} 次引用
+              </a-tag>
+              <span v-else class="dm-chunks__dim">—</span>
+            </template>
             <template v-else-if="column.key === 'preview'">
               <span class="dm-chunks__preview" :title="record.preview">{{ record.preview }}</span>
             </template>
@@ -468,6 +474,7 @@ const chunkColumns = [
   { title: '序号', key: 'seq', width: 70 },
   { title: '状态', key: 'status', width: 90 },
   { title: '字数', key: 'charCount', width: 80 },
+  { title: '引用', key: 'hitCount', width: 90 },
   { title: '内容预览', key: 'preview' },
   { title: '操作', key: 'actions', width: 80 },
 ]

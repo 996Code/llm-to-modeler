@@ -65,6 +65,27 @@ def _cfg(app_state, key, default):
     return runtime.settings_reader(app_state).get(key, default)
 
 
+def _reorder_lost_in_middle(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """D15 奇偶重排:高分片段占头尾,低分占中段(lost-in-middle 缓解)。
+
+    LLM 对长上下文的开头/结尾注意力强、中段弱(评测锚:Dify 蓝图 D15,
+    触发条件=长上下文中段证据被忽略)。策略:score 降序排好后,前半段
+    (最相关)依次占头部偶数位(0,2,4…),后半段反向占奇数位(…5,3,1)
+    ——即最相关的两块在位置 0 和 1 尾端,中段留给低分块。
+
+    纯顺序变换:chunks 顺序即引用编号权威源,重排后 [片段:N] 自动
+    对齐新序,无数据增删。块数 ≤3 时无中段可言,原序返回(零成本)。
+    """
+    if len(chunks) <= 3:
+        return chunks
+    ranked = sorted(chunks, key=lambda c: -float(c.get("score") or 0.0))
+    half = (len(ranked) + 1) // 2
+    out: List[Dict[str, Any]] = [None] * len(chunks)  # type: ignore[list-item]
+    out[::2] = ranked[:half]           # 前半(高分)→ 头部偶数位,位置 0 = 最高分
+    out[1::2] = ranked[half:][::-1]    # 后半(低分)反向 → 尾端奇数位紧随
+    return out
+
+
 # ── 父子回带(Dify 对标) ─────────────────────────────────────
 # 向量命中子段 → 回带父块(整章)上下文窗口进 prompt:子段小而聚焦
 # (命中准),LLM 看到的是命中点前后的连贯上下文而非孤立碎段。
@@ -611,6 +632,11 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
             retrieved["chunks"] = [retrieved["chunks"][i] for i in order]
         except Exception as e:
             logger.warning(f"rerank 失败,降级原召回序: {e}")
+    # D15 奇偶重排(默认开,纯顺序变换零成本):高分占头尾、低分沉中段,
+    # lost-in-middle 缓解。发生在 rerank 之后(rerank 关时对原召回序做),
+    # 编号权威源自动对齐新序——与 rerank 出站调用默认关的口径不同
+    if retrieved.get("chunks") and _cfg(app_state, "reorder_enabled", True):
+        retrieved["chunks"] = _reorder_lost_in_middle(retrieved["chunks"])
     _stage("kb_search.assemble", "整理三元组与文档片段…")
     ctx = linearize_context(retrieved)
 
@@ -627,6 +653,19 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
         [{"role": "user", "content": prompt}],
         temperature=temperature, conv_id=conv_id, stage="kg.answer",
     ).strip()
+
+    # D29 块命中统计:被引用块([片段:N] 解析)hit_count+1——"哪些知识
+    # 真被用"的治理数据。编号权威源=chunks 顺序;子块 id 去掉 #i 归到
+    # 父块;失败静默(统计项不拖垮回答主链路)
+    try:
+        _cited = parse_cited_chunks(answer)
+        _chunks_now = retrieved.get("chunks") or merged_chunks or []
+        _ids = {( _chunks_now[n - 1].get("chunkId") or "").split("#", 1)[0]
+                for n in _cited if 0 < n <= len(_chunks_now)}
+        if _ids:
+            runtime.get_kg_store(app_state).bump_chunk_hits(sorted(_ids))
+    except Exception as e:
+        logger.warning(f"hit_count 统计失败(不阻断): {e}")
 
     # 来源汇总(前端引用展示;chunk 带 text 摘要供点击查看)
     sub = retrieved.get("subgraph") or {}
@@ -791,6 +830,10 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
             retrieved["chunks"] = merged_chunks
         except Exception as e:
             logger.warning(f"rerank 失败,降级原召回序: {e}")
+    # D15 奇偶重排(与单库同款,默认开):高分占头尾低分沉中段
+    if merged_chunks and _cfg(app_state, "reorder_enabled", True):
+        merged_chunks = _reorder_lost_in_middle(merged_chunks)
+        retrieved["chunks"] = merged_chunks
 
     _stage("kb_search.assemble", "整理三元组与文档片段…")
     ctx = linearize_context(retrieved)
@@ -808,6 +851,19 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
         [{"role": "user", "content": prompt}],
         temperature=temperature, conv_id=conv_id, stage="kg.answer",
     ).strip()
+
+    # D29 块命中统计:被引用块([片段:N] 解析)hit_count+1——"哪些知识
+    # 真被用"的治理数据。编号权威源=chunks 顺序;子块 id 去掉 #i 归到
+    # 父块;失败静默(统计项不拖垮回答主链路)
+    try:
+        _cited = parse_cited_chunks(answer)
+        _chunks_now = retrieved.get("chunks") or merged_chunks or []
+        _ids = {( _chunks_now[n - 1].get("chunkId") or "").split("#", 1)[0]
+                for n in _cited if 0 < n <= len(_chunks_now)}
+        if _ids:
+            runtime.get_kg_store(app_state).bump_chunk_hits(sorted(_ids))
+    except Exception as e:
+        logger.warning(f"hit_count 统计失败(不阻断): {e}")
 
     # 来源汇总:实体跨库合并去重(展示名);chunks 带库来源标注
     entities: List[str] = []
