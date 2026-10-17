@@ -144,6 +144,25 @@ class LLMClient:
         from sdk.embedding import embed_model as _embed_model
         return _embed_model()
 
+    @staticmethod
+    def _thinking_off_kwargs(model: str) -> Dict[str, Any]:
+        """qwen3 系模型默认关思考模式(dashscope extra_body)。
+
+        根因实证(2026-10-17 99.22):qwen3.8-max 开思考时,KG 抽取类
+        结构化任务实测 224s(avg)/889s(max)——思考几分钟,产物仍是
+        同一份实体 JSON;非流式下 LLM_TIMEOUT 是总时长上限,300s 掐
+        死长生成(SDK 重试 2 次=901s,call_logs 实锤),任务层零容错
+        全量超时,导入卡死。关思考后同款请求 6.0s 完成、输出完好。
+
+        口径:定死对 qwen3 前缀模型关思考(与 dim 定死同裁决风格,
+        不加 env 开关);非 qwen3 模型不传该参数——extra_body 是
+        dashscope 方言,发给其他提供商会 400。
+        """
+        name = (model or "").lower()
+        if "qwen3" in name:
+            return {"extra_body": {"enable_thinking": False}}
+        return {}
+
     def __init__(self, config: Optional[LLMConfig] = None, conversation_store=None):
         """初始化 LLM 客户端。
 
@@ -380,11 +399,14 @@ class LLMClient:
 
         try:
             # 调 OpenAI 兼容 API，类比 Java openai-java 的 service.createChatCompletion()
+            # qwen3 系默认关思考(_thinking_off_kwargs):开思考的抽取类
+            # 长生成会顶爆非流式总时长超时(线上导入卡死根因,见其 docstring)
             response = self.client.chat.completions.create(
                 model=use_model,
                 messages=messages,
                 temperature=self.config.temperature if temperature is None else temperature,
                 max_tokens=self.config.max_tokens if max_tokens is None else max_tokens,
+                **self._thinking_off_kwargs(use_model),
             )
 
             # choices[0]：取第一个候选回复（n=1 时只有一个），类比 Java response.getChoices().get(0)
@@ -562,6 +584,9 @@ class LLMClient:
             if not has_images:
                 # response_format={"type": "json_object"} 让模型强制输出合法 JSON
                 create_kwargs["response_format"] = {"type": "json_object"}
+            # qwen3 系默认关思考:抽取类长任务思考几分钟产物仍是同一份
+            # JSON,却把非流式总时长顶爆超时(线上导入卡死根因)
+            create_kwargs.update(self._thinking_off_kwargs(use_model))
 
             response = self.client.chat.completions.create(**create_kwargs)  # ** 展开字典为关键字参数
             result = self._extract_json(response)  # 提取并解析 JSON，可能抛异常
