@@ -199,11 +199,24 @@ class LLMClient:
         # max_retries 可配(env LLM_MAX_RETRIES, 默认 2 = SDK 默认):
         # 5xx/连接失败时 SDK 自动指数退避重试。LLM 网关整体不可达的部署
         # (重试注定失败, 只拖慢路由兜底)可调 0 让失败快速冒泡到上层降级。
+        # httpx 传输层保活(线上实证修复 2026-10-17):SDK 默认连接池养空闲
+        # 长连接,而网关侧负载均衡约 60s 掐空闲连接——池里复用死连接时
+        # 请求无限挂到 LLM_TIMEOUT 超时(民法典导入卡死 1h+ 全 300s
+        # timeout 的根因;容器内新连接直连同款请求 62s 成功)。keepalive
+        # 探测让死连接在写前被 TCP 层发现,空闲 30s 回收让池不养陈连接
+        import httpx as _httpx
         self.client = OpenAI(
             base_url=config.base_url,
             api_key=config.api_key or "placeholder-key",  # 占位 key，本地模型忽略
             timeout=config.timeout,
             max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
+            http_client=_httpx.Client(
+                timeout=config.timeout,
+                limits=_httpx.Limits(
+                    max_connections=20, max_keepalive_connections=4,
+                    keepalive_expiry=30.0),
+                transport=_httpx.HTTPTransport(retries=1),
+            ),
         )
 
         logger.info(
