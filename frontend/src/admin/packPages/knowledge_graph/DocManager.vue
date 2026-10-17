@@ -70,6 +70,13 @@
           <FileTextOutlined class="dm-file-icon" :class="extOf(record.filename)" />
           <span class="dm-fname">{{ record.filename }}</span>
         </template>
+        <template v-else-if="column.key === 'metadata'">
+          <template v-if="metaEntries(record).length">
+            <a-tag v-for="[k, v] in metaEntries(record)" :key="k" class="dm-meta-tag"
+                   @click="openMetaEdit(record)">{{ k }}:{{ v }}</a-tag>
+          </template>
+          <a v-else class="dm-meta-add" @click="openMetaEdit(record)">+ 打标</a>
+        </template>
         <template v-else-if="column.key === 'size'">
           <span class="dm-mono">{{ fmtSize(record.sizeBytes) }}</span>
         </template>
@@ -166,6 +173,20 @@
           该块抽出的实体/关系仍是旧文本的,需「重导」全量重建。
         </p>
 
+        <!-- D7 元数据编辑:键值对(检索过滤维度) -->
+        <a-modal v-model:open="metaEdit.open" :title="`元数据 · ${metaEdit.filename}`"
+                 :confirm-loading="metaEdit.saving" ok-text="保存" cancel-text="取消" @ok="saveMeta">
+          <p class="dm-meta-hint">扁平键值(如 部门=销售);检索时宿主传 doc_filter 按此过滤,留空键的行忽略</p>
+          <div v-for="(row, i) in metaEdit.rows" :key="i" class="dm-meta-row">
+            <a-input v-model:value="row.key" placeholder="键(如 部门)" style="width: 35%" :maxlength="64" />
+            <a-input v-model:value="row.value" placeholder="值(如 销售;逗号分隔多值)" style="width: 50%"
+                     :maxlength="128" @pressEnter="saveMeta" />
+            <a-button size="small" type="text" danger @click="metaEdit.rows.splice(i, 1)">删</a-button>
+          </div>
+          <a-button size="small" type="dashed" block style="margin-top: 8px"
+                    @click="metaEdit.rows.push({ key: '', value: '' })">+ 添加</a-button>
+        </a-modal>
+
         <!-- D27 块编辑:改文本 → 仅重嵌该块向量 -->
         <a-modal v-model:open="chunkEdit.open" :title="`编辑块 #${chunkEdit.seq}`"
                  :confirm-loading="chunkEdit.saving" ok-text="保存并重建向量" cancel-text="取消"
@@ -223,7 +244,8 @@ import {
 import {
   KgChunkParams, KgDocument, TaskItem, deleteKgDocument, fetchKgChunkExtraction,
   fetchKgChunkText, fetchKgChunks, fetchKgDocuments, fetchTask, importKgAll,
-  importKgDocument, retryKgChunks, updateKgChunk, updateKgKb, uploadKgDocuments,
+  importKgDocument, retryKgChunks, setKgDocMetadata, updateKgChunk, updateKgKb,
+  uploadKgDocuments,
 } from '../../api'
 import type { KgChunkExtraction, KgChunkItem, KgChunksPayload } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
@@ -266,6 +288,44 @@ function openChunkConfig() {
   chunkConfigOpen.value = true
 }
 
+// ── D7 元数据打标(检索过滤维度) ──
+const metaEdit = ref<{ open: boolean; docId: string; filename: string;
+                       rows: { key: string; value: string }[]; saving: boolean }>(
+  { open: false, docId: '', filename: '', rows: [], saving: false })
+
+function metaEntries(d: KgDocument): [string, string][] {
+  const md = d.docMetadata as Record<string, unknown> | undefined
+  if (!md) return []
+  return Object.entries(md).map(([k, v]) =>
+    [k, Array.isArray(v) ? v.join(',') : String(v)])
+}
+
+function openMetaEdit(d: KgDocument) {
+  metaEdit.value = {
+    open: true, docId: d.id, filename: d.filename, saving: false,
+    rows: metaEntries(d).map(([k, v]) => ({ key: k, value: v })),
+  }
+}
+
+async function saveMeta() {
+  const m = metaEdit.value
+  const metadata: Record<string, string | string[]> = {}
+  for (const r of m.rows) {
+    const k = r.key.trim()
+    if (!k || !r.value.trim()) continue
+    metadata[k] = r.value.includes(',') ? r.value.split(',').map(s => s.trim()).filter(Boolean) : r.value.trim()
+  }
+  m.saving = true
+  try {
+    await setKgDocMetadata(props.kbId, m.docId, metadata)
+    message.success('元数据已保存')
+    m.open = false
+    await load()
+  } catch (e) {
+    message.error((e as any)?.response?.data?.detail || '保存失败')
+  } finally { m.saving = false }
+}
+
 async function saveChunkConfig() {
   chunkConfigSaving.value = true
   try {
@@ -280,6 +340,7 @@ async function saveChunkConfig() {
 
 const columns = [
   { title: '文件', key: 'filename', ellipsis: true },
+  { title: '元数据', key: 'metadata', width: 150 },
   { title: '大小', key: 'size', width: 90 },
   { title: '导入状态', key: 'importStatus', width: 110 },
   { title: '统计', key: 'counts', width: 190 },
@@ -604,6 +665,11 @@ onBeforeUnmount(() => window.clearInterval(timer))
 .dm-chunks__dim { color: #d1d5db; }
 .dm-chunks__hint { color: #9ca3af; font-size: 12px; margin-top: 10px; }
 .dm-chunk-edit-warn { margin-top: 8px; color: #d97706; font-size: 12.5px; }
+.dm-meta-tag { font-size: 11px; cursor: pointer; }
+.dm-meta-add { font-size: 12px; color: #94a3b8; }
+.dm-meta-add:hover { color: #2f54eb; }
+.dm-meta-hint { font-size: 12px; color: #94a3b8; margin-bottom: 10px; }
+.dm-meta-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
 .dm-ext__section { margin-bottom: 18px; }
 .dm-ext__title { font-weight: 600; font-size: 13px; color: #374151; margin-bottom: 8px; }
 .dm-ext__row { margin-bottom: 6px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }

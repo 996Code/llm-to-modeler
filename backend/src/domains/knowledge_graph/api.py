@@ -236,6 +236,45 @@ async def revoke_open_api_key(key_id: str, request: Request):
     return {"success": True}
 
 
+# ── D7 文档元数据(检索过滤维度;管理端维护,检索时下推) ─────
+
+@router.put("/kbs/{kb_id}/documents/{doc_id}/metadata",
+            dependencies=[Depends(admin_required)])
+async def set_doc_metadata(kb_id: str, doc_id: str,
+                           request: Request, payload: Dict[str, Any]):
+    """设置文档元数据(全量替换;空对象=清除过滤维度)。
+
+    Body: {metadata: {"部门":"销售","年份":2026}} 扁平键值;
+    检索时宿主传 doc_filter 按此过滤(与 chat 的 pack_params 同义)。
+    """
+    _kb_or_404(request, kb_id)
+    store = runtime.get_kg_store(request.app.state)
+    doc = store.get_document(doc_id)
+    if not doc or doc["kbId"] != kb_id:
+        raise HTTPException(404, "文档不存在")
+    md = payload.get("metadata")
+    if md is None:
+        md = {}
+    if not isinstance(md, dict):
+        raise HTTPException(422, "metadata 必须是对象")
+    clean = {}
+    for k, v in md.items():
+        key = str(k).strip()[:64]
+        if not key:
+            continue
+        if isinstance(v, list):
+            vals = [str(x).strip()[:128] for x in v if str(x).strip()]
+            if vals:
+                clean[key] = vals
+        else:
+            val = str(v).strip()[:128]
+            if val:
+                clean[key] = val
+    store.set_doc_metadata(doc_id, kb_id, clean)
+    logger.info(f"doc metadata set: {doc_id[:8]} ({len(clean)} 维)")
+    return {"id": doc_id, "docMetadata": clean}
+
+
 # ── 检索数据权限 ACL(嵌入模式;管理端维护,检索时生效) ──────
 
 @router.get("/kbs/{kb_id}/acl", dependencies=[Depends(admin_required)])
@@ -1033,6 +1072,15 @@ async def search(request: Request, payload: Dict[str, Any]):
     # conv_id 可选:传入则检索调用日志(意图/图/向量/回答)关联该会话,
     # 管理端链路视图里能看到完整检索链;不传保持无会话归属
     conv_id = str((payload or {}).get("conv_id") or "").strip() or None
+    # D7 文档元数据过滤(body doc_filter;与 chat 的 pack_params 同义):
+    # 扁平键值 AND 匹配,逐目标库解析白名单后聚合
+    doc_filter_raw = (payload or {}).get("doc_filter")
+    doc_filter = None
+    if isinstance(doc_filter_raw, dict) and doc_filter_raw:
+        doc_filter = set()
+        for k in target:
+            ids = store.filter_doc_ids_by_metadata(k["id"], doc_filter_raw)
+            doc_filter |= (ids if ids is not None else set())
 
     # D32 标注短路(前置层):标注命中直接返回标准答案(不走检索)。
     # 与 kb_search 工具同层;REST 供宿主/前端直调路径也吃同一红利
@@ -1076,7 +1124,8 @@ async def search(request: Request, payload: Dict[str, Any]):
         if len(target) == 1:
             result = await asyncio.to_thread(
                 retrieval.answer_question,
-                request.app.state, target[0], query, conv_id=conv_id, top_k=top_k)
+                request.app.state, target[0], query, conv_id=conv_id, top_k=top_k,
+                doc_filter=doc_filter)
             # 单库也补 kbs 键:响应形状与多库一致(前端/测试统一消费,
             # 不必按库数分支)
             result.setdefault(
@@ -1085,7 +1134,8 @@ async def search(request: Request, payload: Dict[str, Any]):
         else:
             result = await asyncio.to_thread(
                 retrieval.answer_question_multi,
-                request.app.state, target, query, conv_id=conv_id, top_k=top_k)
+                request.app.state, target, query, conv_id=conv_id, top_k=top_k,
+                doc_filter=doc_filter)
         return result | {"user": user}
     except Exception as e:
         # 异常详情只进服务端日志;用户级端点不回显内部错误串(可能带

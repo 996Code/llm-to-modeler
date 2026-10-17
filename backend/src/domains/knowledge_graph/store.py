@@ -185,6 +185,16 @@ class KGStore:
 
     def _init_db(self):
         self.db.init_schema(self._DDL)
+        # D7 metadata 过滤:文档级元数据(扁平键值 {"部门":"销售"}),
+        # 检索时按 pack_params 的 doc_filter 下推(嵌入模式宿主传入生效)
+        try:
+            with self._get_conn() as conn:
+                conn.execute("ALTER TABLE kg_documents "
+                             "ADD COLUMN IF NOT EXISTS doc_metadata JSONB DEFAULT '{}'::jsonb")
+                conn.execute("""CREATE INDEX IF NOT EXISTS idx_kg_docs_metadata
+                                ON kg_documents USING gin (doc_metadata jsonb_path_ops)""")
+        except Exception as e:
+            logger.warning(f"doc_metadata 列迁移失败(不影响启动,下次重试): {e}")
         # 层级树列迁移(10-15 用户需求:左侧树):存量表无 kind/parent_id
         try:
             with self._get_conn() as conn:
@@ -656,6 +666,12 @@ class KGStore:
     @staticmethod
     def _doc_row(row: dict) -> Dict[str, Any]:
         d = dict(row)
+        md = d.get("doc_metadata")
+        if isinstance(md, str):
+            try:
+                md = json.loads(md)
+            except (ValueError, TypeError):
+                md = {}
         return {
             "id": d["id"], "kbId": d["kb_id"], "filename": d["filename"],
             "mimeType": d.get("mime_type") or "", "sizeBytes": d.get("size_bytes") or 0,
@@ -666,8 +682,52 @@ class KGStore:
             "entityCount": d.get("entity_count") or 0,
             "relationCount": d.get("relation_count") or 0,
             "error": d.get("error") or "",
+            "docMetadata": md if isinstance(md, dict) else {},
             "createdAt": d["created_at"], "updatedAt": d["updated_at"],
         }
+
+    def set_doc_metadata(self, doc_id: str, kb_id: str,
+                         metadata: Dict[str, Any]) -> bool:
+        """D7:设置文档元数据(全量替换;空对象=清除过滤维度)。"""
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE kg_documents SET doc_metadata = ?::jsonb, updated_at = ? "
+                "WHERE id = ? AND kb_id = ?",
+                (json.dumps(metadata, ensure_ascii=False), _now(), doc_id, kb_id))
+            return cur.rowcount > 0
+
+    def filter_doc_ids_by_metadata(
+        self, kb_id: str, doc_filter: Dict[str, Any],
+    ) -> Optional[set]:
+        """按元数据过滤返回允许的 doc_id 集合。
+
+        返回 None = 不过滤(调用方未传/过滤条件为空);返回 set(可空)=
+        白名单语义:空集表示没有文档匹配(检索路应零召回,不是全放行)。
+        过滤语义:扁平键值全匹配(AND);值支持单值或数组(OR 任一)。
+        """
+        if not doc_filter:
+            return None
+        clauses, params = [], []
+        for key, val in doc_filter.items():
+            vals = val if isinstance(val, list) else [val]
+            vals = [str(v) for v in vals if v is not None and str(v) != ""]
+            if not vals:
+                continue
+            if len(vals) == 1:
+                clauses.append("doc_metadata ->> %s = %s")
+                params.extend([key, vals[0]])
+            else:
+                ph = ", ".join(["%s"] * len(vals))
+                clauses.append(f"doc_metadata ->> %s IN ({ph})")
+                params.append(key)
+                params.extend(vals)
+        if not clauses:
+            return None
+        sql = ("SELECT id FROM kg_documents WHERE kb_id = %s AND "
+               + " AND ".join(clauses))
+        with self._get_conn() as conn:
+            rows = conn.execute(sql, [kb_id] + params).fetchall()
+        return {r["id"] for r in rows}
 
     # ── 切块(兼 chunk 级 checkpoint) ───────────────────────
 

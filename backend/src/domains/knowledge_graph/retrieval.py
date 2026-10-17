@@ -236,7 +236,8 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     conv_id: Optional[str] = None,
                     top_k: Optional[int] = None,
                     on_stage=None,
-                    intent: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    intent: Optional[Dict[str, Any]] = None,
+                    doc_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """混合检索:返回 {intent, seeds, subgraph, chunks}。
 
     图谱路始终执行;向量路仅 kb.vector_enabled 时执行(失败降级为空)。
@@ -244,6 +245,9 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     intent: 预解析的检索意图(可选;跨库检索 answer_question_multi 传入
     ——所有库共享同一 query 意图,不逐库重复烧 LLM)。传入时跳过意图
     解析与对应 stage 事件(由调用方统一发)。
+    doc_filter: D7 文档元数据过滤(嵌入模式宿主经 pack_params 传入,
+    扁平键值 AND 匹配)——向量路与全文路按 doc 白名单下推;
+    图谱路不过滤(实体跨文档归属,元数据是文档级概念)。空/None 不过滤。
     """
     def _stage(key: str, message: str) -> None:
         if on_stage is not None:
@@ -368,6 +372,9 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             _doc_names = {d["id"]: d["filename"]
                           for d in store.list_documents(kb["id"])}
             fulltext_hits = store.search_chunks_fulltext(kb["id"], query, limit=10)
+            if doc_filter is not None:
+                fulltext_hits = [h for h in fulltext_hits
+                                 if h.get("docId") in doc_filter]
             for h in fulltext_hits:
                 h["docName"] = _doc_names.get(h.get("docId") or "", "")
             chunks.extend(fulltext_hits)
@@ -413,6 +420,9 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             _doc_names = {d["id"]: d["filename"] for d in store.list_documents(kb["id"])}
             try:
                 hits = vector.search(kb["id"], qvec, top_k=k)
+                if doc_filter is not None:
+                    # D7 元数据白名单:向量命中按文档过滤(空集=零召回)
+                    hits = [h for h in hits if h.get("docId") in doc_filter]
                 for h in hits:
                     h["docName"] = _doc_names.get(h.get("docId") or "", "")
             except Exception as e:
@@ -568,7 +578,8 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
                     conv_id: Optional[str] = None,
                     retrieved: Optional[Dict[str, Any]] = None,
                     top_k: Optional[int] = None,
-                    on_stage=None) -> Dict[str, Any]:
+                    on_stage=None,
+                    doc_filter: Optional[set] = None) -> Dict[str, Any]:
     """混合检索 + LLM 综合回答。Returns:
     {answer, cited_chunks, subgraph, chunks, intent, sources}
 
@@ -584,7 +595,8 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
 
     if retrieved is None:
         retrieved = hybrid_retrieve(app_state, kb, query, conv_id=conv_id,
-                                    top_k=top_k, on_stage=_stage)
+                                    top_k=top_k, on_stage=_stage,
+                                    doc_filter=doc_filter)
     # P0#4 rerank:linearize 前对 chunks 重排(排序对象=资料段非子图)。
     # 开关在 KG settings(默认关);失败降级原序不阻断(排序质量项,
     # 与向量路降级同语义)。重排发生在 sources.chunks 构造前——
@@ -660,7 +672,8 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
 def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
                           conv_id: Optional[str] = None,
                           top_k: Optional[int] = None,
-                          on_stage=None) -> Dict[str, Any]:
+                          on_stage=None,
+                          doc_filter: Optional[set] = None) -> Dict[str, Any]:
     """跨库检索 + LLM 综合回答(N3:知识库检索支持跨库)。
 
     合并策略:
@@ -714,7 +727,7 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
                f"({i + 1}/{len(kbs)}) 库「{kb.get('name')}」图谱实体匹配…")
         per_kb.append(hybrid_retrieve(
             app_state, kb, query, conv_id=conv_id, top_k=top_k,
-            on_stage=_stage, intent=intent))
+            on_stage=_stage, intent=intent, doc_filter=doc_filter))
 
     # ── 合并 ──
     # chunks:跨库按相似度排序取全局 top_k;逐条标注库来源(kbName 进

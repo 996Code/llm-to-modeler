@@ -597,6 +597,8 @@ export interface KgDocument {
   importStatus: 'uploaded' | 'importing' | 'succeeded' | 'partial' | 'failed'
   chunkCount: number; entityCount: number; relationCount: number
   error: string; createdAt: string; updatedAt: string
+  /** D7 文档元数据(检索过滤维度;空对象=未打标) */
+  docMetadata?: Record<string, string | string[]>
 }
 export interface KgGraphNode {
   id: string; name: string; normalized?: string; type: string
@@ -725,6 +727,15 @@ export async function fetchKgKbAcl(kbId: string): Promise<KgKbAcl> {
 }
 export async function saveKgKbAcl(kbId: string, acl: { users: string[]; roles: string[] }): Promise<KgKbAcl> {
   const { data } = await kgApi.put(`/kbs/${kbId}/acl`, acl)
+  return data
+}
+
+/** D7 文档元数据:检索过滤维度({"部门":"销售"}扁平键值;doc_filter 匹配)。 */
+export async function setKgDocMetadata(
+  kbId: string, docId: string, metadata: Record<string, string | string[]>,
+): Promise<{ id: string; docMetadata: Record<string, unknown> }> {
+  const { data } = await kgApi.put(
+    `/kbs/${kbId}/documents/${docId}/metadata`, { metadata })
   return data
 }
 

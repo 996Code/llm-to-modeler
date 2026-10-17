@@ -238,6 +238,21 @@ class KbSearchTool(Tool):
         except Exception as e:
             logger.warning(f"标注短路层异常(降级常规检索): {e}")
 
+        # ── D7 文档元数据过滤(嵌入模式:宿主传 doc_filter 才生效) ──
+        # pack_params.knowledge_graph.doc_filter = {"部门":"销售"} 扁平键值
+        # → doc 白名单集合(None=不过滤;空集=无文档匹配→两路零召回)
+        doc_filter_raw = (state.get("pack_params") or {}).get(
+            "knowledge_graph", {}).get("doc_filter")
+        doc_filter = None
+        if isinstance(doc_filter_raw, dict) and doc_filter_raw:
+            doc_filter = store.filter_doc_ids_by_metadata(
+                kb["id"] if kb else (kbs[0]["id"] if len(kbs) == 1 else ""), doc_filter_raw)
+            # 跨库:每库各自解析后并集(白名单跨库聚合;单库直接用)
+            if doc_filter is not None and kb is None:
+                for k in kbs[1:]:
+                    extra = store.filter_doc_ids_by_metadata(k["id"], doc_filter_raw)
+                    doc_filter |= (extra if extra is not None else set())
+
         # ── 混合检索 + 回答 ──
         # on_stage 把 retrieval 内部各阶段(意图/图谱/子图/向量/组装/回答)
         # 透传成 SSE stage 事件,前端 pipeline 进度条逐步推进
@@ -249,12 +264,12 @@ class KbSearchTool(Tool):
                 ctx.trace("kb_search.retrieve", f"检索 {kb['name']}", "info")
                 result = retrieval.answer_question(
                     self._app_state, kb, query, conv_id=ctx.conv_id,
-                    on_stage=_on_stage)
+                    on_stage=_on_stage, doc_filter=doc_filter)
             else:
                 ctx.trace("kb_search.retrieve", f"跨库检索 {len(kbs)} 个知识库", "info")
                 result = retrieval.answer_question_multi(
                     self._app_state, kbs, query, conv_id=ctx.conv_id,
-                    on_stage=_on_stage)
+                    on_stage=_on_stage, doc_filter=doc_filter)
         except Exception as e:
             logger.exception("kb_search 检索失败")
             return ToolResult(error_for_llm=f"知识库检索失败: {e}")
