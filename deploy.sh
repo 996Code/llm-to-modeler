@@ -127,9 +127,9 @@ docker run --rm -v "$PWD/frontend:/app" -v llm_pnpm_store:/root/.pnpm-store -w /
   -e npm_config_registry=https://registry.npmmirror.com \
   "$NODE_IMAGE" sh -c "
     export CI=true &&
-    pnpm config set store-dir /root/.pnpm-store &&
     npm config set registry https://registry.npmmirror.com &&
     npm install -g pnpm@9 &&
+    pnpm config set store-dir /root/.pnpm-store &&
     pnpm config set registry https://registry.npmmirror.com &&
     pnpm install --frozen-lockfile &&
     pnpm run build
