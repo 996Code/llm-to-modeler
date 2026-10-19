@@ -141,8 +141,9 @@ docker run --rm -v "$PWD/backend:/app" -w /app \
   "$PY_IMAGE" sh -c "
     pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
       -r requirements.txt -t /app/.deps &&
+    rm -rf /app/.deps/cv2 /app/.deps/opencv_python-*.dist-info /app/.deps/opencv_python.libs &&
     pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
-      --force-reinstall --no-deps -t /app/.deps opencv-python-headless
+      --no-deps -t /app/.deps opencv-python-headless
   " 2>&1 | tail -2
 [ -d backend/.deps/fastapi ] || { err "后端依赖安装失败"; exit 1; }
 # opencv 覆盖校验:rapidocr 拉入的完整版 opencv-python 需要 X11 系统库
