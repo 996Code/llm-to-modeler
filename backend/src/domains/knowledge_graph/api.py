@@ -29,7 +29,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from sdk.pack_api import admin_required
@@ -115,58 +115,6 @@ async def list_kbs(request: Request):
     except Exception as e:
         logger.warning(f"库列表图谱计数失败,回退文档求和口径: {e}")
     return {"items": items}
-
-
-@router.get("/suggest-questions")
-async def suggest_questions(request: Request,
-                            x_user_id: Optional[str] = Header(None)):
-    """D20 建议问题:输入框下方推荐问法(用户级,对话页消费)。
-
-    纯规则零 LLM 调用(快且稳):高 hit_count 块(D29"哪些知识真被用"
-    的数据直接变推荐语料)+图谱高频实体,模板化生成 3-5 条。无命中
-    数据的冷库给通用引导句。身份传入时按 ACL 过滤可见库。
-    """
-    from domains.knowledge_graph import acl as kg_acl
-    store = runtime.get_kg_store(request.app.state)
-    user, roles = kg_acl.request_identity(x_user_id, None)
-    kbs, _ = kg_acl.filter_kbs(store, store.list_kbs(), user, roles)
-    if not kbs:
-        return {"questions": []}
-    kb = kbs[0]  # 主库(第一个);单库部署占绝对主流
-    try:
-        top = store.top_hit_chunks(kb["id"], limit=3)
-    except Exception:
-        top = []
-    questions = []
-    for c in top:
-        text = (c.get("text") or "").strip()
-        if len(text) >= 12:
-            questions.append(f"关于「{text[:24]}」讲了什么?")
-    try:
-        graph = _graph(request)
-        hot = graph.top_entities(kb["id"], limit=2)
-    except Exception:
-        hot = []
-    for ent in hot:
-        name = (ent.get("name") or "").strip()
-        if name:
-            questions.append(f"{name}相关的内容有哪些?")
-    # 去重+兜底:命中数据不足时补通用引导(冷库仍有引导)。兜底句各不相同
-    # ——同一句连填 3 次是噪音不是引导
-    seen, uniq = set(), []
-    for q in questions:
-        if q not in seen:
-            seen.add(q)
-            uniq.append(q)
-    for fallback in ("这份知识库主要包含哪些内容?",
-                     "知识库里被引用最多的内容是什么?",
-                     "帮我梳理一下库里的关键实体"):
-        if len(uniq) >= 3:
-            break
-        if fallback not in seen:
-            seen.add(fallback)
-            uniq.append(fallback)
-    return {"questions": uniq[:5]}
 
 
 @router.get("/kbs/templates", dependencies=[Depends(admin_required)])

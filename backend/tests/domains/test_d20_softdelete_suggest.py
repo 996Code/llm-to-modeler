@@ -1,21 +1,17 @@
-"""D20 会话软删 + KG 建议问题。
+"""D20 会话软删。
 
 软删:delete 打标记(非物理删)、用户列表/嵌入列表过滤、恢复回列表、
-events 全程保留。建议问题:高 hit 块生成、冷库兜底、ACL 过滤。
+events 全程保留。(D20 建议问法功能已整体下线——用户裁决:没意义还占位置)
 """
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
-from domains.knowledge_graph import runtime
-from domains.knowledge_graph.api import router as kg_router
+from services.conversation_store import ConversationStore
 
 from tests.domains.test_knowledge_graph_m4 import env  # noqa: F401
 
 
 @pytest.fixture()
 def conv_store(tmp_path):
-    from services.conversation_store import ConversationStore
     return ConversationStore(str(tmp_path / "soft_del.db"))
 
 
@@ -62,39 +58,3 @@ class TestSoftDelete:
         deleted = conv_store.list_deleted_conversations()
         assert len(deleted) == 1 and deleted[0]["id"] == c["id"]
         assert deleted[0]["deletedAt"]
-
-
-@pytest.fixture()
-def kg_client(env, monkeypatch):
-    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
-    app = FastAPI()
-    app.include_router(kg_router, prefix="/api/packs/knowledge_graph")
-    app.state.llm_client = env.llm
-    app.state.settings_store = None
-    monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
-    return TestClient(app), env
-
-
-class TestSuggestQuestions:
-
-    def test_高命中块生成(self, kg_client):
-        client, env = kg_client
-        kb = env.store.create_kb("建议库", "")
-        doc = env.store.create_document(kb["id"], "t.txt", "text/plain", 5,
-                                        "/dev/null", "h-sug")
-        env.store.replace_chunks(doc["id"], kb["id"],
-                                 [{"seq": 0, "text": "劳动合同解除的法定条件与程序"}])
-        cid = env.store.list_chunks(doc["id"])[0]["id"]
-        env.store.bump_chunk_hits([cid])
-
-        r = client.get("/api/packs/knowledge_graph/suggest-questions")
-        assert r.status_code == 200
-        qs = r.json()["questions"]
-        assert any("劳动合同解除" in q for q in qs)
-
-    def test_冷库兜底不空(self, kg_client):
-        client, env = kg_client
-        env.store.create_kb("冷库", "")
-        r = client.get("/api/packs/knowledge_graph/suggest-questions")
-        assert r.status_code == 200
-        assert len(r.json()["questions"]) >= 3  # 通用引导兜底

@@ -66,7 +66,6 @@ class GraphStore(Protocol):
     def delete_scope(self, scope: str) -> Dict[str, int]: ...
     def counts(self, scope: str) -> Dict[str, int]: ...
     def document_counts(self, scope: str, doc_id: str) -> Dict[str, int]: ...
-    def top_entities(self, scope: str, limit: int = 5) -> List[Dict]: ...
     def get_graph(self, scope: str, q: str = "",
                   node_types: Optional[List[str]] = None,
                   limit_nodes: int = 80, limit_edges: int = 150) -> Dict[str, Any]: ...
@@ -589,18 +588,6 @@ class Neo4jGraphStore:
                 kb=scope, doc=doc_id,
             ).single()["c"]
         return {"entities": int(entities), "relations": int(relations)}
-
-    def top_entities(self, scope: str, limit: int = 5) -> List[Dict]:
-        """D20 建议问题:按关系度排序的高频实体(度=进出边数,去重口径)。"""
-        self._check_scope(scope)
-        with self._session() as s:
-            rows = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} "
-                f"{{{self._sp}: $kb}}]-() "
-                f"RETURN e.name AS name, count(r) AS deg "
-                f"ORDER BY deg DESC LIMIT $n", kb=scope, n=limit,
-            ).data()
-        return [{"name": r["name"], "degree": int(r["deg"])} for r in rows]
 
     @staticmethod
     def _node_dict(record_node) -> Dict[str, Any]:

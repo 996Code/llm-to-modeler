@@ -60,15 +60,17 @@
              class="resume-bar">
           <InfoCircleOutlined class="resume-icon" />
           <span>该轮回答生成时被打断</span>
-          <a-button size="small" type="primary" ghost @click="store.resumePendingAnswer()">
+          <a class="resume-link" @click="store.resumePendingAnswer()">
             <PlayCircleOutlined /> 继续生成
-          </a-button>
+          </a>
         </div>
 
         <!-- User message (right-aligned bubble) -->
         <div v-if="msg.role === 'user'" class="message-row user-row">
           <div class="user-msg-group">
-            <!-- D20 消息操作条:悬停显示(复制/重发);流式生成中禁用重发 -->
+            <div class="msg-bubble user-bubble">{{ msg.content }}</div>
+            <!-- D20 消息操作条:悬停显示(复制/重发),悬浮在气泡下方右角
+                 ——绝对定位不吃布局,显隐零错位 -->
             <div class="msg-actions">
               <button class="msg-act-btn" title="复制" @click="copyMsg(msg.content)">
                 <CopyOutlined />
@@ -78,7 +80,6 @@
                 <RedoOutlined />
               </button>
             </div>
-            <div class="msg-bubble user-bubble">{{ msg.content }}</div>
           </div>
           <div class="msg-avatar user-avatar">
             <UserOutlined />
@@ -275,7 +276,10 @@
                           @click.stop="openTurnTrace(i)">
                   <NodeIndexOutlined /> 本轮链路
                 </a-button>
-                <a-button size="small" type="link" @click.stop="showJsonViewer(msg.dataResult)">
+                <!-- 查看详情:KG 检索结果在"显示检索结果"关闭时一并隐藏
+                     (卡片都藏了,详情入口留着是死按钮) -->
+                <a-button v-if="!(msg.dataResult.type === 'kg_search_result' && !sysConfig.showRetrieval)"
+                          size="small" type="link" @click.stop="showJsonViewer(msg.dataResult)">
                   <EyeOutlined /> 查看详情
                 </a-button>
                 <!-- P2#14 结果反馈: chatbi 数据卡底部点赞/点踩(datasource_id
@@ -345,8 +349,6 @@
       :streaming="store.streaming"
       :pending-clarification="store.pendingClarification"
       :total-tokens="convTokens"
-      :suggestions="suggestions"
-      :conversation-started="store.messages.length > 0"
     />
 
     <!-- JSON 查看器 Modal：全屏（嵌入模式下 iframe 只有 420px 宽，弹窗必须拉满
@@ -432,10 +434,14 @@ function renderMarkdown(text: string): string {
   if (!text) return ''
   let html = marked.parse(text) as string
   // 片段编号(兼容 [片段3]/[片段:3]/[片段：3]) → 紫色徽标
-  // data-chunk-idx 供点击委托取编号(滚动到 KgGraphCard 对应片段)
-  html = html.replace(
-    /\[片段[:：]?\s*(\d+)\]/g,
-    '<span class="md-ref md-ref-chunk" data-chunk-idx="$1">片段 $1</span>')
+  // data-chunk-idx 供点击委托取编号(滚动到 KgGraphCard 对应片段)。
+  // "显示检索结果"关闭时直接剥掉标记(卡片已隐藏,徽标无处可点,留着
+  // 裸 [片段:N] 文本也是噪音)
+  html = sysConfig.showRetrieval
+    ? html.replace(
+        /\[片段[:：]?\s*(\d+)\]/g,
+        '<span class="md-ref md-ref-chunk" data-chunk-idx="$1">片段 $1</span>')
+    : html.replace(/\[片段[:：]?\s*(\d+)\]/g, '')
   // 实体引用 [实体:x] → 蓝色徽标(x 保留)
   html = html.replace(
     /\[实体[:：]?\s*([^\]<]+)\]/g,
@@ -538,21 +544,6 @@ onMounted(async () => {
   // 挂载时从服务端刷新系统配置（管理端改了显示开关，新会话/刷新即生效；
   // 失败回退 localStorage 缓存再回退默认，见 sysConfig composable）
   refreshSysConfig()
-  // D20 建议问题:KG pack 在场时拉一次(纯规则端点,轻量;失败静默——
-  // 推荐是冷启动引导,没有也不影响主链路)
-  try {
-    const r = await fetch('/ai-modeler/api/packs/knowledge_graph/suggest-questions',
-      { headers: {
-          'X-User-Id': localStorage.getItem('user_id') || 'web-user',
-          // 裸 fetch 不走 axios 拦截器,须自带 Bearer(配置了 ADMIN_TOKEN 的
-          // 部署缺此头会被全局中间件 401,建议问法静默消失)
-          Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}`,
-        } })
-    if (r.ok) {
-      const d = await r.json()
-      suggestions.value = (d.questions || []).slice(0, 5)
-    }
-  } catch { /* 静默 */ }
   try {
     const manifests = await getPackManifests()
     // 主交互 pack：优先声明了 artifact.display 的（制品卡标签/动作取自它）
@@ -1024,8 +1015,6 @@ watch(() => store.stageMessage, () => {
 //   ② 输入框角累计本对话 token(成本感知常显)。
 // call_logs 在工具执行期同步落库, 轮末即可查, 无需后端改动。
 const convTokens = ref(0)
-// D20 建议问题(冷启动引导,输入框上方 chips)
-const suggestions = ref<string[]>([])
 
 /** D20 消息操作条:复制消息文本 */
 async function copyMsg(text: string) {
@@ -1234,12 +1223,20 @@ watch(() => store.currentConversation?.id, (convId) => {
   display: flex;
   gap: 12px;
 }
-/* D20 消息操作条:悬停显示的复制/重发 */
-.user-msg-group { display: flex; align-items: center; gap: 6px; }
-.msg-actions {
-  display: none; gap: 2px;
+/* D20 消息操作条:悬停显示(复制/重发),悬浮在气泡下方右角——
+   绝对定位不吃布局,显隐零错位。宽度上限(75%)设在组上:设在气泡上
+   会相对组宽解析,组先撑到内容宽气泡再被压窄右对齐,左侧留出
+   百余像素死空间,头像与气泡间距虚大(10-19 实测 117px) */
+.user-msg-group {
+  display: flex; flex-direction: column; align-items: flex-end;
+  position: relative; max-width: 75%;
 }
-.user-row:hover .msg-actions { display: inline-flex; }
+.msg-actions {
+  display: inline-flex; gap: 2px;
+  position: absolute; top: calc(100% + 2px); right: 0;
+  visibility: hidden;
+}
+.user-row:hover .msg-actions { visibility: visible; }
 .msg-act-btn {
   border: none; background: none; cursor: pointer;
   color: #b0b3b8; font-size: 13px; padding: 3px 5px;
@@ -1278,7 +1275,6 @@ watch(() => store.currentConversation?.id, (convId) => {
   font-size: 14px;
   line-height: 1.6;
   word-break: break-word;
-  max-width: 75%;
 }
 .user-bubble {
   background: var(--color-primary);
@@ -1691,13 +1687,21 @@ watch(() => store.currentConversation?.id, (convId) => {
 .diag-retry { color: var(--color-success) !important; }
 
 /* D10 挂起轮续答入口 */
+/* D10 续答提示:低调内联小条(灰底文字链),不做警示黄框——打断是
+   常态场景不是异常,视觉重量压到最低 */
 .resume-bar {
-  display: flex; align-items: center; gap: 10px;
-  margin: 6px 0 10px 44px;
-  padding: 8px 14px;
-  border: 1px dashed #f0c36d; border-radius: 8px;
-  background: #fdf6ec;
-  font-size: 12.5px; color: #8a6d3b;
+  display: flex; align-items: center; gap: 8px;
+  margin: 2px 0 12px 44px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: #f5f6f8;
+  font-size: 12.5px; color: #86909c;
+  width: fit-content;
 }
-.resume-icon { color: #e6a23c; }
+.resume-icon { color: #a9b0ba; }
+.resume-link {
+  color: var(--color-primary, #3370ff); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px; margin-left: 4px;
+}
+.resume-link:hover { opacity: 0.8; }
 </style>

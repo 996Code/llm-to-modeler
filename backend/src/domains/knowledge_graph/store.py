@@ -758,16 +758,6 @@ class KGStore:
             )
         return len(chunks)
 
-    def top_hit_chunks(self, kb_id: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """D20 建议问题语料:库内 hit_count 最高的块(D29 数据直接变推荐)。"""
-        with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT id, doc_id, seq, text, hit_count FROM kg_chunks "
-                "WHERE kb_id = ? AND hit_count > 0 AND seq >= 0 "
-                "ORDER BY hit_count DESC LIMIT ?", (kb_id, limit)).fetchall()
-        return [{"id": r["id"], "docId": r["doc_id"], "seq": r["seq"],
-                 "text": r["text"], "hitCount": r["hit_count"]} for r in rows]
-
     def bump_chunk_hits(self, chunk_ids: List[str]) -> int:
         """D29 块命中计数:被 LLM 引用([片段:N])的块 hit_count+1。
 
