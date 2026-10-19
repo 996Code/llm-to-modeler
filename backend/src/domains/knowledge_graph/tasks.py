@@ -71,7 +71,12 @@ def register_tasks(manager, app_state=None) -> None:
 
 
 def _recover_stale_importing(manager) -> bool:
-    """收敛没有存活任务支撑的 importing 文档。
+    """收敛没有存活任务支撑的 importing 文档,并自动重新入队续跑。
+
+    此前只标 failed 等人工重排——部署/重启打断导入后没人补排是常态
+    (10-19 连续三次)。自动续跑幂等:已完成块在 chunk checkpoint 里,
+    重跑只补剩余部分;防循环:永久失败的文档终态是 failed,不会被
+    下次重启重排(只有 importing 状态才触发)。
 
     返回是否完成本次检查；失败不抛出到启动编排，但返回 False 让 pack
     下次装配时重试，而不是被 once guard 永久跳过。
@@ -88,9 +93,29 @@ def _recover_stale_importing(manager) -> bool:
                 if doc_id:
                     active_doc_ids.add(doc_id)
         store = runtime.get_kg_store(_app_state)
-        recovered = store.recover_importing_docs(active_doc_ids)
-        if recovered:
-            logger.info(f"启动收敛: {recovered} 个 importing 文档标记为 failed(任务已被中断)")
+        # ① importing 中断(跑了一半):收敛为 failed 并自动重提
+        stale = store.recover_importing_docs(active_doc_ids)
+        resubmit = {d["id"]: d["kbId"] for d in stale}
+        # ② interrupted 任务(pending 期被打断,文档还是 uploaded 从未开跑):
+        #    不重提就永远没人导。历史中断一并重提——succeeded 文档会被
+        #    幂等跳过,failed 文档按 chunk checkpoint 只补剩余
+        interrupted, _ = manager.store.list_tasks(
+            status="interrupted", task_type="kg.import_document", limit=1000)
+        for t in interrupted:
+            p = t.get("payload") or {}
+            doc_id, kb_id = str(p.get("doc_id") or ""), str(p.get("kb_id") or "")
+            if doc_id and kb_id and doc_id not in resubmit:
+                resubmit[doc_id] = kb_id
+        resubmitted = 0
+        for doc_id, kb_id in resubmit.items():
+            try:
+                submit_import(_app_state, kb_id, doc_id, force=False)
+                resubmitted += 1
+            except Exception as e:  # noqa: BLE001
+                # 入队失败(如文档已删/重复任务):文档保持 failed,人工仍可重排
+                logger.warning(f"中断文档自动续跑入队失败(doc={doc_id}): {e}")
+        if resubmit:
+            logger.info(f"启动自动续跑: {len(resubmit)} 个中断导入,重新入队 {resubmitted} 个")
         return True
     except Exception:
         logger.exception("启动收敛 importing 文档失败(不影响服务启动)")

@@ -638,14 +638,19 @@ class KGStore:
             conn.execute("DELETE FROM kg_chunks WHERE doc_id = ?", (doc_id,))
             return cur.rowcount > 0
 
-    def recover_importing_docs(self, active_doc_ids) -> int:
-        """把没有存活任务支撑的 importing 文档收敛为 failed(启动恢复用)。
+    def recover_importing_docs(self, active_doc_ids) -> List[Dict[str, Any]]:
+        """启动恢复:没有存活任务支撑的 importing 文档收敛为 failed。
 
+        返回中断文档清单(id/kbId)——调用方据此自动重新入队续跑(幂等,
+        已完成块在 chunk checkpoint 里,重跑只补剩余部分)。
         active_doc_ids = 当前确实 pending/running 的导入任务对应的 doc_id
-        (热切换重装配时活任务不能被误伤)。Returns: 收敛的行数。
+        (热切换重装配时活任务不能被误伤)。
         """
         with self._get_conn() as conn:
-            cur = conn.execute(
+            stale_rows = conn.execute(
+                "SELECT id, kb_id FROM kg_documents WHERE import_status = 'importing'",
+            ).fetchall()
+            conn.execute(
                 """UPDATE kg_documents
                    SET import_status = 'failed',
                        error = '服务重启导致导入中断(可重新发起,已完成块会续跑)',
@@ -662,7 +667,9 @@ class KGStore:
                            AND error LIKE ?""",
                     (_now(), doc_id, "服务重启导致导入中断%"),
                 )
-            return cur.rowcount
+            active = set(active_doc_ids)
+            return [{"id": r["id"], "kbId": r["kb_id"]}
+                    for r in stale_rows if r["id"] not in active]
 
     def document_file_path(self, doc_id: str) -> Optional[str]:
         with self._get_conn() as conn:

@@ -263,10 +263,10 @@ class TaskStore:
     def mark_interrupted_on_startup(self) -> List[str]:
         """把上次进程遗留的 pending/running/retry_scheduled 任务标记为 interrupted。
 
-        第一期不自动续跑(handler 的进程内状态已丢失,续跑语义交由各 pack
-        用"幂等重跑"实现——如知识图谱导入按 chunk checkpoint 跳过已完成块)。
-        retry_scheduled 一并收敛:它的续跑定时器是进程内线程,重启即失,
-        不收敛会永远卡在中间态(无任何机制再推动它)。
+        框架层不自动续跑(handler 的进程内状态已丢失);续跑由各 pack 的
+        启动恢复实现——知识图谱导入按 chunk checkpoint 幂等重提中断文档
+        (见 kg tasks._recover_stale_importing)。retry_scheduled 一并收敛:
+        它的续跑定时器是进程内线程,重启即失,不收敛会永远卡在中间态。
         返回被打断的任务 id 列表(日志可见)。
         """
         with self._get_conn() as conn:

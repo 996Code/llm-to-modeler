@@ -316,6 +316,40 @@ def _wait(manager, task_id, timeout=10.0):
     raise AssertionError("任务未在超时内完成")
 
 
+def test_startup_auto_resumes_interrupted_imports(monkeypatch, env):
+    """启动自动续跑:importing 中断文档自动重新入队(幂等续传)。
+
+    10-19 连续三次部署打断导入后无人补排——收敛只标 failed 等人工
+    是常态缺口。防循环锚:入队失败(如文档已删)不阻断,文档保持 failed。
+    """
+    kb = env.store.create_kb("续跑测试库")
+    doc = env.store.create_document(kb["id"], "x.md", "text/markdown", 3,
+                                    "", "hash-auto-resume")
+    env.store.update_document(doc["id"], import_status="importing")
+    # pending 期被打断的排队任务(文档从未开跑,状态 uploaded)
+    kb2 = env.store.create_kb("排队中断库")
+    doc2 = env.store.create_document(kb2["id"], "y.md", "text/markdown", 3,
+                                     "", "hash-queued-interrupted")
+
+    monkeypatch.setattr(tasks, "_app_state", env.app_state)
+    interrupted_tasks = [
+        {"payload": {"doc_id": doc2["id"], "kb_id": kb2["id"]}},
+    ]
+    manager = SimpleNamespace(store=SimpleNamespace(
+        list_tasks=lambda status, task_type, limit:
+            (interrupted_tasks, len(interrupted_tasks)) if status == "interrupted" else ([], 0)))
+    monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
+    submitted = []
+    monkeypatch.setattr(tasks, "submit_import",
+                        lambda state, kb_id, doc_id, force=False:
+                        submitted.append((kb_id, doc_id)) or {"id": "t1"})
+
+    assert tasks._recover_stale_importing(manager) is True
+    # 两类都自动入队:importing 中断 + pending 期中断
+    assert submitted == [(kb["id"], doc["id"]), (kb2["id"], doc2["id"])]
+    assert env.store.get_document(doc["id"])["importStatus"] == "failed"  # 收敛语义不变
+
+
 def test_pack_reenable_runs_startup_recovery_again(monkeypatch):
     """知识图谱热禁用后再启用必须重跑启动收敛。"""
     from domains.knowledge_graph import pack, stores, tasks

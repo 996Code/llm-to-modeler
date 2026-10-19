@@ -218,14 +218,15 @@ def test_pg_kg_store_paths():
         assert ks.mark_chunk(chunks[0]["id"], "done") is True
 
         # ② 启动恢复:先全部收敛再把活任务放回 importing(参数化 LIKE 分支)。
-        #    返回值 = 收敛总数(含活任务);活任务的判定看状态被放回
+        #    返回中断清单(供自动续跑入队);活任务不在清单内
         ks.update_document(doc["id"], import_status="importing")
-        ks.recover_importing_docs(active_doc_ids=[doc["id"]])
+        assert ks.recover_importing_docs(active_doc_ids=[doc["id"]]) == []
         alive = ks.get_document(doc["id"])
         assert alive["importStatus"] == "importing" and alive["error"] == ""
-        ks.recover_importing_docs(active_doc_ids=[])
+        stale = ks.recover_importing_docs(active_doc_ids=[])
         d = ks.get_document(doc["id"])
         assert d["importStatus"] == "failed" and "服务重启" in d["error"]
+        assert stale == [{"id": doc["id"], "kbId": kb["id"]}]
     finally:
         ks.delete_kb(kb["id"])
 

@@ -75,6 +75,19 @@ for arg in "$@"; do
   esac
 done
 
+# ── ⓪ 导入队列守卫:有知识库导入任务在跑/排队时拒绝部署 ──────────────
+# 10-19 两次事故:构建容器与导入队列(OCR 渲染+LLM 抽取)并发,宿主机
+# 负载 338 / 彻底失联。队列排空再发;确要强发 FORCE_DEPLOY=1。
+# (重启后中断导入会自动续跑,但别在跑着的时候叠加构建)
+if [ "${FORCE_DEPLOY:-0}" != "1" ] && command -v curl >/dev/null; then
+  _active=$(curl -sf --max-time 5 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/tasks?status=running" 2>/dev/null | grep -c 'kg.import_document' || true)
+  _queued=$(curl -sf --max-time 5 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/tasks?status=pending" 2>/dev/null | grep -c 'kg.import_document' || true)
+  if [ "${_active:-0}" -gt 0 ] || [ "${_queued:-0}" -gt 0 ]; then
+    err "知识库导入任务进行中(运行 ${_active} / 排队 ${_queued})——与构建并发会压垮宿主机(10-19 两次事故)。等队列排空再部署,或 FORCE_DEPLOY=1 强制"
+    exit 1
+  fi
+fi
+
 command -v docker >/dev/null || { err "docker 未安装"; exit 1; }
 docker info >/dev/null 2>&1 || { err "docker daemon 未运行"; exit 1; }
 [ -f .env ] || { err "缺少 .env（后端 LLM/上游配置）"; exit 1; }
