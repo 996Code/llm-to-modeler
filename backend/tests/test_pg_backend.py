@@ -54,8 +54,17 @@ def test_pg_event_flow_and_messages(conv_store):
 
     assert conv_store.conversation_exists(cid, "pgtest-user")
     assert conv_store.delete_conversation(cid, "pgtest-user") is True
+    # D20 软删:用户视角不可见(读路径过滤 deleted_at),events 保留可恢复
     assert conv_store.get_conversation(cid, "pgtest-user") is None
-    # 级联删除: events 不能残留
+    assert conv_store.get_conversation_any_user(cid) is None
+    assert not conv_store.conversation_exists(cid, "pgtest-user")
+    assert conv_store.load_events(cid) != []
+    # 恢复后重新可见
+    assert conv_store.restore_conversation(cid) is True
+    assert conv_store.get_conversation(cid, "pgtest-user") is not None
+    # 硬删(管理端彻底清理)才级联: events 不能残留
+    assert conv_store.delete_conversation(cid, "pgtest-user") is True
+    assert conv_store.delete_conversation_any_user(cid) is True
     assert conv_store.load_events(cid) == []
 
 

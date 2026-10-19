@@ -522,7 +522,8 @@ class ConversationStore:
         """
         with self._get_conn() as conn:
             row = conn.execute(
-                "SELECT 1 FROM session_meta WHERE conv_id = ? AND user_id = ?",
+                "SELECT 1 FROM session_meta WHERE conv_id = ? AND user_id = ? "
+                "AND deleted_at IS NULL",
                 (conv_id, user_id),
             ).fetchone()
         return row is not None
@@ -555,15 +556,18 @@ class ConversationStore:
         """
         with self._get_conn() as conn:
             if user_id:
-                # 普通用户:WHERE 带 user_id 做权限过滤
+                # 普通用户:WHERE 带 user_id 做权限过滤;软删会话对用户不可见
                 meta = conn.execute(
-                    "SELECT * FROM session_meta WHERE conv_id = ? AND user_id = ?",
+                    "SELECT * FROM session_meta WHERE conv_id = ? AND user_id = ? "
+                    "AND deleted_at IS NULL",
                     (conv_id, user_id),
                 ).fetchone()
             else:
-                # 管理员:不校验归属
+                # 管理员:不校验归属;软删会话经 list_deleted_conversations/
+                # restore_conversation 管理,这里同样不可见
                 meta = conn.execute(
-                    "SELECT * FROM session_meta WHERE conv_id = ?",
+                    "SELECT * FROM session_meta WHERE conv_id = ? "
+                    "AND deleted_at IS NULL",
                     (conv_id,),
                 ).fetchone()
             if not meta:
