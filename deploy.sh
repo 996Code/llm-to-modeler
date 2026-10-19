@@ -140,9 +140,15 @@ rm -rf backend/.deps && mkdir -p backend/.deps
 docker run --rm -v "$PWD/backend:/app" -w /app \
   "$PY_IMAGE" sh -c "
     pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
-      -r requirements.txt -t /app/.deps
+      -r requirements.txt -t /app/.deps &&
+    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
+      --force-reinstall --no-deps -t /app/.deps opencv-python-headless
   " 2>&1 | tail -2
 [ -d backend/.deps/fastapi ] || { err "后端依赖安装失败"; exit 1; }
+# opencv 覆盖校验:rapidocr 拉入的完整版 opencv-python 需要 X11 系统库
+# (libxcb),slim 镜像没有——headless 版 API 相同无 GUI 依赖,强制后装覆盖 cv2
+ls -d backend/.deps/opencv_python_headless-*.dist-info >/dev/null 2>&1 \
+  || { err "opencv-headless 覆盖失败(OCR 将不可用)"; exit 1; }
 log "   .deps 就绪（$(du -sh backend/.deps | awk '{print $1}')）"
 
 # ── ②c nginx deb 预下载（docker run 容器内 apt --download-only）───────
