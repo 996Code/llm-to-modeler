@@ -118,13 +118,16 @@ ensure_image "$NODE_IMAGE"
 ensure_image "$PY_IMAGE"
 ensure_image nginx:stable-alpine
 
-# ── ②a 前端构建（docker run 容器内 pnpm，npmmirror 源）────────────────
+# ── ②a 前端构建（docker run 容器内 pnpm，npmmirror 源 + 持久 store 卷）──
+# pnpm store 卷跨部署复用:首次装包后,后续 install 走本地 store 硬链,
+# 不再全量下载(首次 ~3min,缓存后 <1min)
 log "②a 构建前端（node 容器内 pnpm build）..."
 mkdir -p frontend/dist
-docker run --rm -v "$PWD/frontend:/app" -w /app \
+docker run --rm -v "$PWD/frontend:/app" -v llm_pnpm_store:/root/.pnpm-store -w /app \
   -e npm_config_registry=https://registry.npmmirror.com \
   "$NODE_IMAGE" sh -c "
     export CI=true &&
+    pnpm config set store-dir /root/.pnpm-store &&
     npm config set registry https://registry.npmmirror.com &&
     npm install -g pnpm@9 &&
     pnpm config set registry https://registry.npmmirror.com &&
@@ -134,15 +137,17 @@ docker run --rm -v "$PWD/frontend:/app" -w /app \
 [ -f frontend/dist/index.html ] || { err "前端构建失败"; exit 1; }
 log "   dist 就绪（$(du -sh frontend/dist | awk '{print $1}')）"
 
-# ── ②b 后端依赖（docker run 容器内 pip -t，清华源）────────────────────
+# ── ②b 后端依赖（docker run 容器内 pip -t，清华源 + 持久缓存卷）────────
+# pip 缓存卷跨部署复用:此前 --no-cache-dir + rm -rf .deps 每次全量重下
+# 671MB(实测 ~10min);留缓存后二次起命中 wheel 只解装不下载(~2min)
 log "②b 安装后端依赖（python 容器内 pip -t）..."
 rm -rf backend/.deps && mkdir -p backend/.deps
-docker run --rm -v "$PWD/backend:/app" -w /app \
+docker run --rm -v "$PWD/backend:/app" -v llm_pip_cache:/root/.cache/pip -w /app \
   "$PY_IMAGE" sh -c "
-    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
       -r requirements.txt -t /app/.deps &&
     rm -rf /app/.deps/cv2 /app/.deps/opencv_python-*.dist-info /app/.deps/opencv_python.libs &&
-    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
       --no-deps -t /app/.deps opencv-python-headless
   " 2>&1 | tail -2
 [ -d backend/.deps/fastapi ] || { err "后端依赖安装失败"; exit 1; }
