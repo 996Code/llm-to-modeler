@@ -37,7 +37,7 @@
           >
             <p class="dm-upload-icon"><InboxOutlined /></p>
             <p class="dm-upload-text">点击或拖拽文件到此处</p>
-            <p class="dm-upload-hint">支持 md / txt / pdf / docx,单文件 ≤ 20MB</p>
+            <p class="dm-upload-hint">支持 md / txt / pdf / docx,单文件 ≤ 20MB;扫描版 PDF 导入时自动 OCR 识别</p>
           </a-upload-dragger>
         </a-form-item>
       </a-form>

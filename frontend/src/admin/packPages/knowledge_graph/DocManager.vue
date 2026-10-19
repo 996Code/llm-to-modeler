@@ -10,7 +10,7 @@
       <p class="dm-upload-icon"><InboxOutlined /></p>
       <p class="dm-upload-text">点击或拖拽文件到此处上传</p>
       <p class="dm-upload-hint">
-        支持 md / txt / pdf / docx,单文件 ≤ {{ maxMb }}MB;同库同内容自动去重
+        支持 md / txt / pdf / docx,单文件 ≤ {{ maxMb }}MB;同库同内容自动去重;扫描版 PDF 导入时自动 OCR 识别
         <a-popover placement="bottom" trigger="hover">
           <template #content>
             <div class="dm-chunk-pop">
@@ -49,7 +49,7 @@
         <CloudUploadOutlined /> 导入全部未处理文档
       </a-button>
       <a-button size="small" @click="openChunkConfig"><SettingOutlined /> 分段配置</a-button>
-      <span class="dm-tip">导入 = 后台任务:LLM 抽取实体关系 → Neo4j 图谱 + PG 向量;任务中心可查日志</span>
+      <span class="dm-tip">导入 = 后台任务:解析(扫描件自动 OCR)→ 切块 → LLM 抽取实体关系 → Neo4j 图谱 + PG 向量;任务中心可查日志</span>
     </div>
 
     <!-- D33 分段重配(已有库):调参与预览同向导;保存为库级参数,重导入生效 -->
@@ -130,6 +130,9 @@
           </a-tooltip>
           <a-tooltip title="逐块查看导入状态,定向重试失败块">
             <a style="margin-left: 12px" @click="openChunks(record)"><UnorderedListOutlined /> 块明细</a>
+          </a-tooltip>
+          <a-tooltip title="下载已上传的原始文件">
+            <a style="margin-left: 12px" @click="doDownload(record)"><DownloadOutlined /></a>
           </a-tooltip>
           <a-popconfirm title="删除文档将清除其图谱贡献与向量,确认?" @confirm="doDelete(record)">
             <a class="dm-danger" style="margin-left: 12px"><DeleteOutlined /> 删除</a>
@@ -265,12 +268,12 @@ import { message } from 'ant-design-vue'
 import type { UploadChangeParam } from 'ant-design-vue'
 import {
   BarChartOutlined, CheckCircleOutlined, CloudUploadOutlined, CloseCircleOutlined, DeleteOutlined,
-  EditOutlined, EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined,
+  DownloadOutlined, EditOutlined, EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined,
   RedoOutlined, SettingOutlined, UnorderedListOutlined,
 } from '@ant-design/icons-vue'
 import {
   KgChunkParams, KgDocument, TaskItem, batchDeleteKgDocuments, deleteKgDocument,
-  fetchKgChunkExtraction, fetchKgChunkText, fetchKgChunks, fetchKgDocuments,
+  downloadKgDocument, fetchKgChunkExtraction, fetchKgChunkText, fetchKgChunks, fetchKgDocuments,
   fetchKgUsage, fetchTask, importKgAll, importKgDocument, retryKgChunks,
   setKgDocMetadata, updateKgChunk, updateKgKb, uploadKgDocuments,
 } from '../../api'
@@ -373,7 +376,7 @@ const columns = [
   { title: '统计', key: 'counts', width: 190 },
   { title: '引用', key: 'usage', width: 90 },
   { title: '任务进度', key: 'progress', width: 150 },
-  { title: '操作', key: 'actions', width: 240 },
+  { title: '操作', key: 'actions', width: 300 },
 ]
 
 const importableCount = computed(
@@ -626,6 +629,12 @@ async function doDelete(doc: KgDocument) {  await loadSafely(async () => {
   })
   await load()
   emit('changed')
+}
+
+async function doDownload(doc: KgDocument) {
+  await loadSafely(async () => {
+    await downloadKgDocument(props.kbId, doc)
+  })
 }
 
 // ── D30 批量删除 + 使用统计 ─────────────────────────────────

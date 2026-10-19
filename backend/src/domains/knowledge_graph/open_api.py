@@ -97,7 +97,7 @@ def _read_validated_file(request: Request, file: UploadFile) -> Tuple[str, bytes
     if not data:
         raise HTTPException(422, "空文件")
     try:
-        parse_to_text(filename, data)
+        parse_to_text(filename, data, ocr=False)  # 预检只验坏文件,OCR 留给导入任务
     except Exception as e:
         raise HTTPException(422, f"解析失败: {e}")
     return filename, data

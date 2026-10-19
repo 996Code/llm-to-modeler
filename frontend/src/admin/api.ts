@@ -822,6 +822,16 @@ export async function deleteKgDocument(kbId: string, docId: string): Promise<{ s
   const { data } = await kgApi.delete(`/kbs/${kbId}/documents/${docId}`)
   return data
 }
+/** 下载已上传的原始文件(浏览器另存为原文件名)。 */
+export async function downloadKgDocument(kbId: string, doc: { id: string; filename: string }): Promise<void> {
+  const resp = await kgApi.get(`/kbs/${kbId}/documents/${doc.id}/download`, { responseType: 'blob' })
+  const url = URL.createObjectURL(resp.data)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = doc.filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
 /** D30 批量删除(部分失败不回滚,逐条结果如实返回)。 */
 export async function batchDeleteKgDocuments(kbId: string, docIds: string[]): Promise<{
   deleted: number; failed: number; results: { docId: string; ok: boolean; error?: string }[]

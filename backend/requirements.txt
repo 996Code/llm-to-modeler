@@ -33,6 +33,8 @@ PyYAML>=6.0,<6.1                       # pack config.yaml 解析(阶段 1)
 neo4j>=5.0                             # 图谱存储 driver(Neo4j 5 服务端)
 pypdf>=4.0                             # PDF 文档解析
 python-docx>=1.1                       # DOCX 文档解析
+pypdfium2>=4.30                        # PDF 页面渲染(扫描件 OCR 兜底)
+rapidocr-onnxruntime>=1.4              # 扫描件 OCR(PP-OCR ONNX,中文模型内置)
 
 # ── 日志 ──
 loguru>=0.7,<0.8                       # 集中式日志:控制台+轮转文件(对标 logback)

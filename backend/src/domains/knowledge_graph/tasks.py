@@ -290,11 +290,18 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         handle.set_progress(_W_PARSE, "解析文档")
         try:
             data = Path(doc["filePath"]).read_bytes() if doc["filePath"] else b""
-            text = parse_to_text(doc["filename"], data)
+            parse_stats: Dict[str, int] = {}
+            text = parse_to_text(doc["filename"], data, stats=parse_stats)
         except FileNotFoundError:
             raise RuntimeError("原始文件已不存在,请重新上传")
         except ValueError as e:
             raise RuntimeError(f"文档解析失败: {e}")
+        # 扫描页 OCR 情况让用户可见(任务中心日志)
+        if parse_stats.get("ocrPages"):
+            handle.log(f"检测到 {parse_stats['ocrPages']} 页无文字层(扫描件),"
+                       f"OCR 识别成功 {parse_stats['ocrFilled']} 页",
+                       ocr_pages=parse_stats["ocrPages"],
+                       ocr_filled=parse_stats["ocrFilled"])
         handle.log(f"文档解析: {len(data)}B → {len(text)} 字符({doc['filename'].rsplit('.', 1)[-1]} 格式)",
                    raw_bytes=len(data), text_chars=len(text))
 
@@ -308,7 +315,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         )
         if not chunks:
             store.update_document(doc_id, import_status="failed", error="文档无有效文本")
-            raise RuntimeError("文档解析后无有效文本(空文档/扫描件?)")
+            raise RuntimeError("文档解析后无有效文本(空文档/扫描件 OCR 未识别出文字?)")
         store.replace_chunks(doc_id, kb_id, chunks)
         lens = [len(c["text"]) for c in chunks]
         handle.log(f"结构感知切块: {len(chunks)} 块(每块 {min(lens)}~{max(lens)} 字,平均 {sum(lens) // len(lens)})",

@@ -26,9 +26,11 @@ import hashlib
 import logging
 import re
 import shutil
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from sdk.pack_api import admin_required
 from domains.knowledge_graph import runtime
@@ -687,9 +689,11 @@ async def upload_documents(
                             "duplicateOf": dup["id"]})
             continue
 
-        # 解析预检:能解析才收(坏文件当场拒,不进导入队列再炸)
+        # 解析预检:能解析才收(坏文件当场拒,不进导入队列再炸)。
+        # ocr=False:预检只验坏文件,扫描页 OCR 秒级耗时留给导入任务
+        # (那里结果不丢弃,还能在任务日志里告知用户识别情况)
         try:
-            parse_to_text(filename, data)
+            parse_to_text(filename, data, ocr=False)
         except Exception as e:
             results.append({"filename": f.filename, "ok": False,
                             "reason": f"解析失败: {e}"})
@@ -755,6 +759,27 @@ async def batch_delete_documents(kb_id: str, request: Request,
             results.append({"docId": did, "ok": False, "error": str(e)[:200]})
     ok_n = sum(1 for r in results if r["ok"])
     return {"deleted": ok_n, "failed": len(results) - ok_n, "results": results}
+
+
+@router.get("/kbs/{kb_id}/documents/{doc_id}/download", dependencies=[Depends(admin_required)])
+async def download_document(kb_id: str, doc_id: str, request: Request):
+    """下载已上传的原始文件(存储名=doc_id+扩展名,下载名=原始文件名)。"""
+    _kb_or_404(request, kb_id)
+    store = runtime.get_kg_store(request.app.state)
+    doc = store.get_document(doc_id)
+    if not doc or doc["kbId"] != kb_id:
+        raise HTTPException(404, "文档不存在")
+    if not doc["filePath"]:
+        raise HTTPException(404, "该文档没有已上传的原始文件")
+    path = Path(doc["filePath"])
+    if not path.is_file():
+        raise HTTPException(404, "原始文件已不存在(可能已被清理,请重新上传)")
+    # 边界防御:filePath 虽由上传链路写入,仍校验落在文件根内
+    if not path.resolve().is_relative_to(runtime.files_root().resolve()):
+        raise HTTPException(404, "文件路径非法")
+    return FileResponse(
+        path, media_type=doc["mimeType"] or "application/octet-stream",
+        filename=doc["filename"])
 
 
 @router.get("/kbs/{kb_id}/usage", dependencies=[Depends(admin_required)])

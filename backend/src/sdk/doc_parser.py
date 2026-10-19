@@ -6,9 +6,10 @@
 纯文本结构,任何需要"解析文档再处理"的插件(知识图谱/RAG/报表语料
 入库…)都可复用。
 
-【支持格式】md/txt(UTF-8/GBK/BOM/宽字符容错解码)、pdf(pypdf)、
-docx(python-docx,标题层级还原为 # 前缀)。驱动库延迟 import——不装
-pypdf/python-docx 的环境仍可用 md/txt 能力。
+【支持格式】md/txt(UTF-8/GBK/BOM/宽字符容错解码)、pdf(pypdf,无文字层
+的扫描页自动 OCR 兜底)、docx(python-docx,标题层级还原为 # 前缀)。
+驱动库延迟 import——不装 pypdf/python-docx 的环境仍可用 md/txt 能力;
+OCR 兜底(pypdfium2+rapidocr)同为可选依赖,未安装时保持纯文字层行为。
 
 【安全边界】
 - 扩展名白名单(ALLOWED_EXTENSIONS)+ 解析失败抛 ValueError(调用方
@@ -74,8 +75,15 @@ def mime_for(filename: str) -> str:
 
 # ── 解析:文件字节 → 纯文本 ─────────────────────────────────
 
-def parse_to_text(filename: str, data: bytes) -> str:
+def parse_to_text(filename: str, data: bytes, *, ocr: bool = True,
+                  stats: Dict[str, int] = None) -> str:
     """按扩展名解析文件为纯文本(无法解析抛 ValueError,由任务层记失败)。
+
+    Args:
+        ocr: PDF 无文字层页是否走 OCR 兜底。上传预检传 False——预检只
+            验坏文件,OCR 秒级耗时留给导入任务(结果不丢弃,也不阻塞上传)。
+        stats: 可选出参字典,调用方传入后填充 pages/ocrPages/ocrFilled
+            (任务日志据此告知用户扫描页识别情况)。
 
     出口统一 NFKC 归一化(P2#12 坑位②):PDF 提取常带兼容字符
     (民法典实测出现康熙部首 ⼀/⼱ 而非规范字 一/巾),下游切块/
@@ -85,7 +93,7 @@ def parse_to_text(filename: str, data: bytes) -> str:
     if name.endswith((".md", ".markdown", ".txt")):
         return _nfkc(_decode_text(data))
     if name.endswith(".pdf"):
-        return _nfkc(_parse_pdf(data))
+        return _nfkc(_parse_pdf(data, ocr=ocr, stats=stats))
     if name.endswith(".docx"):
         return _nfkc(_parse_docx(data))
     raise ValueError(f"不支持的文件类型: {filename}(支持 md/txt/pdf/docx)")
@@ -130,19 +138,71 @@ def _decode_text(data: bytes) -> str:
             return fallback
 
 
-def _parse_pdf(data: bytes) -> str:
+def _parse_pdf(data: bytes, ocr: bool = True, stats: Dict[str, int] = None) -> str:
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
-    pages = []
+    texts = []
     for i, page in enumerate(reader.pages):
         try:
-            text = page.extract_text() or ""
+            text = (page.extract_text() or "").strip()
         except Exception as e:  # 单页损坏不整体失败
             logger.warning(f"pdf 第 {i + 1} 页解析失败(跳过): {e}")
             text = ""
-        if text.strip():
-            pages.append(text.strip())
-    return "\n\n".join(pages)
+        texts.append(text)
+    # 无文字层的页(扫描件/文字转曲线防拷贝)走 OCR 兜底
+    sparse = [i for i, t in enumerate(texts) if len(t) < _PAGE_TEXT_SPARSE]
+    if sparse and ocr:
+        texts = _ocr_fill_pages(data, texts, sparse, stats=stats)
+    if stats is not None:
+        stats["pages"] = len(texts)
+        stats["ocrPages"] = len(sparse) if ocr else 0
+        stats["ocrFilled"] = stats.get("ocrFilled", 0)
+    return "\n\n".join(t for t in texts if t)
+
+
+# 一页文字层低于此字符数视为"无文字"(扫描页常带 0~几个水印字符)
+_PAGE_TEXT_SPARSE = 10
+
+
+def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
+                    stats: Dict[str, int] = None) -> List[str]:
+    """扫描页 OCR 兜底:文字层缺失的页渲染成图 → RapidOCR 识别。
+
+    OCR 依赖未安装时保持原行为(返回原文字层),由任务层按"无有效文本"
+    报错——不因可选依赖缺失而炸掉 md/txt/文字层 pdf 的解析。
+    """
+    try:
+        import pypdfium2
+        from rapidocr_onnxruntime import RapidOCR
+    except ImportError as e:
+        logger.warning(f"pdf OCR 兜底不可用(未安装 pypdfium2/rapidocr-onnxruntime): {e}")
+        if stats is not None:
+            stats["ocrFilled"] = 0
+        return texts
+    ocr = RapidOCR()
+    pdf = pypdfium2.PdfDocument(io.BytesIO(data))
+    filled = 0
+    try:
+        for i in sparse_pages:
+            page = pdf[i]
+            try:
+                img = page.render(scale=2.5).to_pil()  # ~180dpi,中文识别与速度的实测平衡点
+                result, _ = ocr(img)
+                ocr_text = "\n".join(r[1] for r in (result or []))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"pdf 第 {i + 1} 页 OCR 失败(跳过): {e}")
+                continue
+            finally:
+                page.close()
+            if len(ocr_text) > len(texts[i]):
+                texts[i] = ocr_text
+                filled += 1
+    finally:
+        pdf.close()
+    if stats is not None:
+        stats["ocrFilled"] = filled
+    logger.info(f"pdf OCR 兜底: {len(sparse_pages)} 页无文字层,识别成功 {filled} 页")
+    return texts
 
 
 def _parse_docx(data: bytes) -> str:
