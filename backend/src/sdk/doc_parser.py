@@ -76,7 +76,8 @@ def mime_for(filename: str) -> str:
 # ── 解析:文件字节 → 纯文本 ─────────────────────────────────
 
 def parse_to_text(filename: str, data: bytes, *, ocr: bool = True,
-                  stats: Dict[str, int] = None) -> str:
+                  stats: Dict[str, int] = None,
+                  on_ocr_progress=None) -> str:
     """按扩展名解析文件为纯文本(无法解析抛 ValueError,由任务层记失败)。
 
     Args:
@@ -84,6 +85,8 @@ def parse_to_text(filename: str, data: bytes, *, ocr: bool = True,
             验坏文件,OCR 秒级耗时留给导入任务(结果不丢弃,也不阻塞上传)。
         stats: 可选出参字典,调用方传入后填充 pages/ocrPages/ocrFilled
             (任务日志据此告知用户扫描页识别情况)。
+        on_ocr_progress: 可选回调 (done, total),OCR 每完成一页调用一次
+            (任务层用它刷新进度,让用户看到 OCR 在动而不是"卡死")。
 
     出口统一 NFKC 归一化(P2#12 坑位②):PDF 提取常带兼容字符
     (民法典实测出现康熙部首 ⼀/⼱ 而非规范字 一/巾),下游切块/
@@ -93,7 +96,8 @@ def parse_to_text(filename: str, data: bytes, *, ocr: bool = True,
     if name.endswith((".md", ".markdown", ".txt")):
         return _nfkc(_decode_text(data))
     if name.endswith(".pdf"):
-        return _nfkc(_parse_pdf(data, ocr=ocr, stats=stats))
+        return _nfkc(_parse_pdf(data, ocr=ocr, stats=stats,
+                               on_ocr_progress=on_ocr_progress))
     if name.endswith(".docx"):
         return _nfkc(_parse_docx(data))
     raise ValueError(f"不支持的文件类型: {filename}(支持 md/txt/pdf/docx)")
@@ -138,7 +142,8 @@ def _decode_text(data: bytes) -> str:
             return fallback
 
 
-def _parse_pdf(data: bytes, ocr: bool = True, stats: Dict[str, int] = None) -> str:
+def _parse_pdf(data: bytes, ocr: bool = True, stats: Dict[str, int] = None,
+               on_ocr_progress=None) -> str:
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
     texts = []
@@ -152,7 +157,8 @@ def _parse_pdf(data: bytes, ocr: bool = True, stats: Dict[str, int] = None) -> s
     # 无文字层的页(扫描件/文字转曲线防拷贝)走 OCR 兜底
     sparse = [i for i, t in enumerate(texts) if len(t) < _PAGE_TEXT_SPARSE]
     if sparse and ocr:
-        texts = _ocr_fill_pages(data, texts, sparse, stats=stats)
+        texts = _ocr_fill_pages(data, texts, sparse, stats=stats,
+                                on_ocr_progress=on_ocr_progress)
     if stats is not None:
         stats["pages"] = len(texts)
         stats["ocrPages"] = len(sparse) if ocr else 0
@@ -165,7 +171,7 @@ _PAGE_TEXT_SPARSE = 10
 
 
 def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
-                    stats: Dict[str, int] = None) -> List[str]:
+                    stats: Dict[str, int] = None, on_ocr_progress=None) -> List[str]:
     """扫描页 OCR 兜底:文字层缺失的页渲染成图 → RapidOCR 识别。
 
     OCR 依赖未安装时保持原行为(返回原文字层),由任务层按"无有效文本"
@@ -179,11 +185,16 @@ def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
         if stats is not None:
             stats["ocrFilled"] = 0
         return texts
+    if on_ocr_progress:
+        try:
+            on_ocr_progress(0, len(sparse_pages))
+        except Exception:  # noqa: BLE001  回调失败不影响识别
+            pass
     ocr = RapidOCR()
     pdf = pypdfium2.PdfDocument(io.BytesIO(data))
     filled = 0
     try:
-        for i in sparse_pages:
+        for n, i in enumerate(sparse_pages):
             page = pdf[i]
             try:
                 img = page.render(scale=2.5).to_pil()  # ~180dpi,中文识别与速度的实测平衡点
@@ -197,6 +208,11 @@ def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
             if len(ocr_text) > len(texts[i]):
                 texts[i] = ocr_text
                 filled += 1
+            if on_ocr_progress:
+                try:
+                    on_ocr_progress(n + 1, len(sparse_pages))
+                except Exception:  # noqa: BLE001
+                    pass
     finally:
         pdf.close()
     if stats is not None:

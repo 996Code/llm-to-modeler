@@ -291,7 +291,13 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         try:
             data = Path(doc["filePath"]).read_bytes() if doc["filePath"] else b""
             parse_stats: Dict[str, int] = {}
-            text = parse_to_text(doc["filename"], data, stats=parse_stats)
+
+            def _ocr_progress(done: int, total: int) -> None:
+                # OCR 逐页心跳:扫描件识别动辄分钟级,不刷新进度用户会以为卡死
+                handle.set_progress(_W_PARSE, f"扫描页 OCR 识别中 {done}/{total} 页")
+
+            text = parse_to_text(doc["filename"], data, stats=parse_stats,
+                                 on_ocr_progress=_ocr_progress)
         except FileNotFoundError:
             raise RuntimeError("原始文件已不存在,请重新上传")
         except ValueError as e:

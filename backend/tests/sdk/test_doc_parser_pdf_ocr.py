@@ -75,7 +75,7 @@ class TestPdfParse:
     def test_sparse_text_triggers_ocr_path(self, monkeypatch):
         """文字层低于阈值(扫描页水印)的页进入 OCR 兜底路径。"""
         captured = {}
-        def fake_fill(data, texts, sparse, stats=None):
+        def fake_fill(data, texts, sparse, stats=None, on_ocr_progress=None):
             captured["sparse"] = sparse
             return texts
         monkeypatch.setattr(doc_parser, "_ocr_fill_pages", fake_fill)
@@ -89,17 +89,20 @@ class TestPdfParse:
         assert text == "Hi"  # 原文字层原样返回
 
     def test_scanned_pdf_ocr_end_to_end(self):
-        """端到端:整页图片 PDF(无文字层)→ OCR 识别出中文,stats 出参带回页数。"""
+        """端到端:整页图片 PDF(无文字层)→ OCR 识别出中文,stats/进度回调齐活。"""
         pytest.importorskip("rapidocr_onnxruntime")
         pytest.importorskip("pypdfium2")
         lines = ["高压电容电桥检定规程", "本规程经国家质量监督检验检疫总局批准"]
         stats = {}
-        text = parse_to_text("scan.pdf", _scanned_pdf(lines), stats=stats)
+        progress = []
+        text = parse_to_text("scan.pdf", _scanned_pdf(lines), stats=stats,
+                             on_ocr_progress=lambda d, t: progress.append((d, t)))
         assert "检定规程" in text
         assert "质量监督" in text
         assert stats["pages"] == 1
         assert stats["ocrPages"] == 1
         assert stats["ocrFilled"] == 1
+        assert progress == [(0, 1), (1, 1)]  # 开始即报 0/1,完成报 1/1
 
     def test_precheck_skips_ocr(self):
         """上传预检(ocr=False):扫描件不做 OCR(秒回),stats 如实记 0。"""
