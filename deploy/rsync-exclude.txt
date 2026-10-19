@@ -17,3 +17,7 @@ doc
 docs
 extracted
 uv.lock
+backend/logs
+backend/.pytest_cache
+.pytest_cache
+*.log
