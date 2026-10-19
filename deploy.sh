@@ -123,6 +123,9 @@ ensure_image nginx:stable-alpine
 # 不再全量下载(首次 ~3min,缓存后 <1min)
 log "②a 构建前端（node 容器内 pnpm build）..."
 mkdir -p frontend/dist
+# 清掉 src 下陈旧的 tsc 编译产物(.js/.js.map,git 不跟踪):vite 解析
+# import 时 .js 优先于 .ts,残留旧 api.js 会让新 api.ts 的导出"消失"
+find frontend/src \( -name '*.js' -o -name '*.js.map' \) -delete
 docker run --rm -v "$PWD/frontend:/app" -v llm_pnpm_store:/root/.pnpm-store \
   --memory 4g --cpus 2 -w /app \
   -e npm_config_registry=https://registry.npmmirror.com \
