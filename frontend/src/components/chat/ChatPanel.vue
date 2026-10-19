@@ -346,6 +346,7 @@
       :pending-clarification="store.pendingClarification"
       :total-tokens="convTokens"
       :suggestions="suggestions"
+      :conversation-started="store.messages.length > 0"
     />
 
     <!-- JSON 查看器 Modal：全屏（嵌入模式下 iframe 只有 420px 宽，弹窗必须拉满
@@ -541,7 +542,12 @@ onMounted(async () => {
   // 推荐是冷启动引导,没有也不影响主链路)
   try {
     const r = await fetch('/ai-modeler/api/packs/knowledge_graph/suggest-questions',
-      { headers: { 'X-User-Id': localStorage.getItem('user_id') || 'web-user' } })
+      { headers: {
+          'X-User-Id': localStorage.getItem('user_id') || 'web-user',
+          // 裸 fetch 不走 axios 拦截器,须自带 Bearer(配置了 ADMIN_TOKEN 的
+          // 部署缺此头会被全局中间件 401,建议问法静默消失)
+          Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}`,
+        } })
     if (r.ok) {
       const d = await r.json()
       suggestions.value = (d.questions || []).slice(0, 5)

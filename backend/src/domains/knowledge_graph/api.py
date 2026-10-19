@@ -151,16 +151,21 @@ async def suggest_questions(request: Request,
         name = (ent.get("name") or "").strip()
         if name:
             questions.append(f"{name}相关的内容有哪些?")
-    # 去重+兜底:不足 3 条补通用引导(冷库无命中数据时仍有引导)
+    # 去重+兜底:命中数据不足时补通用引导(冷库仍有引导)。兜底句各不相同
+    # ——同一句连填 3 次是噪音不是引导
     seen, uniq = set(), []
     for q in questions:
         if q not in seen:
             seen.add(q)
             uniq.append(q)
-    while len(uniq) < 3:
-        uniq.append("这份知识库主要包含哪些内容?")
-        if len(uniq) >= 5:
+    for fallback in ("这份知识库主要包含哪些内容?",
+                     "知识库里被引用最多的内容是什么?",
+                     "帮我梳理一下库里的关键实体"):
+        if len(uniq) >= 3:
             break
+        if fallback not in seen:
+            seen.add(fallback)
+            uniq.append(fallback)
     return {"questions": uniq[:5]}
 
 

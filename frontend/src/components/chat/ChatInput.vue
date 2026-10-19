@@ -15,9 +15,10 @@
 -->
 <template>
   <div class="chat-input-wrap">
-    <!-- D20 建议问题:输入框上方推荐问法(点击即发送);仅无草稿时显示
-         (有输入不打扰);对话开始后隐藏(推荐是冷启动引导) -->
-    <div v-if="(suggestions?.length ?? 0) > 0 && !text && !streaming" class="suggest-bar">
+    <!-- D20 建议问题:输入框上方推荐问法(点击即发送)。仅对话开始后显示
+         ——冷启动时首页已有默认建议卡,这里再出一份是重复;对话开始后
+         建议卡退场,推荐问法接棒。有草稿/生成中不打扰 -->
+    <div v-if="(suggestions?.length ?? 0) > 0 && conversationStarted && !text && !streaming" class="suggest-bar">
       <button
         v-for="q in suggestions" :key="q"
         class="suggest-chip" @click="sendSuggestion(q)"
@@ -106,7 +107,8 @@ const props = defineProps<{
   streaming: boolean                  // 是否正在流式生成（生成时禁用输入）
   pendingClarification?: boolean      // 当前是否处于追问态（影响占位文案）
   totalTokens?: number                // 当前对话累计 token(输入框角常显)
-  suggestions?: string[]              // D20 建议问题(冷启动引导;父组件拉取)
+  suggestions?: string[]              // D20 建议问题(父组件拉取)
+  conversationStarted?: boolean       // 对话是否已开始(建议问法只在开始后显示)
 }>()
 
 // defineEmits：声明本组件会触发的事件（接口契约，类比 Java 的事件总线/回调接口）。
