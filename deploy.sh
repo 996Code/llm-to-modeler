@@ -123,7 +123,8 @@ ensure_image nginx:stable-alpine
 # 不再全量下载(首次 ~3min,缓存后 <1min)
 log "②a 构建前端（node 容器内 pnpm build）..."
 mkdir -p frontend/dist
-docker run --rm -v "$PWD/frontend:/app" -v llm_pnpm_store:/root/.pnpm-store -w /app \
+docker run --rm -v "$PWD/frontend:/app" -v llm_pnpm_store:/root/.pnpm-store \
+  --memory 4g --cpus 2 -w /app \
   -e npm_config_registry=https://registry.npmmirror.com \
   "$NODE_IMAGE" sh -c "
     export CI=true &&
@@ -142,7 +143,8 @@ log "   dist 就绪（$(du -sh frontend/dist | awk '{print $1}')）"
 # 671MB(实测 ~10min);留缓存后二次起命中 wheel 只解装不下载(~2min)
 log "②b 安装后端依赖（python 容器内 pip -t）..."
 rm -rf backend/.deps && mkdir -p backend/.deps
-docker run --rm -v "$PWD/backend:/app" -v llm_pip_cache:/root/.cache/pip -w /app \
+docker run --rm -v "$PWD/backend:/app" -v llm_pip_cache:/root/.cache/pip \
+  --memory 2g --cpus 2 -w /app \
   "$PY_IMAGE" sh -c "
     pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
       -r requirements.txt -t /app/.deps &&
