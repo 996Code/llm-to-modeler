@@ -121,22 +121,24 @@
           <span v-else>-</span>
         </template>
         <template v-else-if="column.key === 'actions'">
-          <a
-            v-if="record.importStatus !== 'importing'"
-            @click="doImport(record, false)"
-          ><CloudUploadOutlined /> {{ record.importStatus === 'succeeded' ? '重导' : '导入' }}</a>
-          <a-tooltip title="忽略已有 checkpoint 与内容判断,全部重抽(本体变更后用)">
-            <a style="margin-left: 12px" @click="doImport(record, true)"><RedoOutlined /> 强制</a>
-          </a-tooltip>
-          <a-tooltip title="逐块查看导入状态,定向重试失败块">
-            <a style="margin-left: 12px" @click="openChunks(record)"><UnorderedListOutlined /> 块明细</a>
-          </a-tooltip>
-          <a-tooltip title="下载已上传的原始文件">
-            <a style="margin-left: 12px" @click="doDownload(record)"><DownloadOutlined /></a>
-          </a-tooltip>
-          <a-popconfirm title="删除文档将清除其图谱贡献与向量,确认?" @confirm="doDelete(record)">
-            <a class="dm-danger" style="margin-left: 12px"><DeleteOutlined /> 删除</a>
-          </a-popconfirm>
+          <a-space :size="14">
+            <a-tooltip v-if="record.importStatus !== 'importing'"
+                       :title="record.importStatus === 'succeeded' ? '重新导入' : '导入'">
+              <a @click="doImport(record, false)"><CloudUploadOutlined /></a>
+            </a-tooltip>
+            <a-tooltip title="强制重导:忽略已有进度与内容判断,全部重抽(本体变更后用)">
+              <a @click="doImport(record, true)"><RedoOutlined /></a>
+            </a-tooltip>
+            <a-tooltip title="块明细:逐块查看导入状态,定向重试失败块">
+              <a @click="openChunks(record)"><UnorderedListOutlined /></a>
+            </a-tooltip>
+            <a-tooltip title="下载已上传的原始文件">
+              <a @click="doDownload(record)"><DownloadOutlined /></a>
+            </a-tooltip>
+            <a-popconfirm title="删除文档将清除其图谱贡献与向量,确认?" @confirm="doDelete(record)">
+              <a class="dm-danger"><DeleteOutlined /></a>
+            </a-popconfirm>
+          </a-space>
         </template>
       </template>
     </a-table>
@@ -376,7 +378,7 @@ const columns = [
   { title: '统计', key: 'counts', width: 190 },
   { title: '引用', key: 'usage', width: 90 },
   { title: '任务进度', key: 'progress', width: 150 },
-  { title: '操作', key: 'actions', width: 300 },
+  { title: '操作', key: 'actions', width: 170 },
 ]
 
 const importableCount = computed(
