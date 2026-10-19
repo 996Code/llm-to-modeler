@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Engine 请求生命周期：从 HTTP 到 SSE",
+    "output": "../engine-request-lifecycle.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1020, 780],
+    "views": [
+      { "id": "entry", "label": "入口装配", "focus": ["client", "api", "pg", "stream"], "note": "请求进入后加载历史、透传头与会话装配。" },
+      { "id": "graph-run", "label": "图执行", "focus": ["stream", "worker", "graph", "llm", "pg"], "note": "工作线程内绑定上下文并驱动 LangGraph 与 LLM。" },
+      { "id": "stream-out", "label": "流式返回", "focus": ["worker", "stream", "client"], "note": "chunk 经事件队列回事件循环，逐事件推给前端。" }
+    ]
+  },
+  "participants": [
+    { "id": "client", "type": "external", "label": "前端", "sublabel": "fetch 流式" },
+    { "id": "api", "type": "backend", "label": "FastAPI", "sublabel": "config.py:193" },
+    { "id": "pg", "type": "database", "label": "PostgreSQL", "sublabel": "会话 + 历史" },
+    { "id": "stream", "type": "backend", "label": "stream_graph", "sublabel": "stream.py" },
+    { "id": "worker", "type": "backend", "label": "工作线程", "sublabel": "run_in_executor" },
+    { "id": "graph", "type": "backend", "label": "LangGraph", "sublabel": "StateGraph" },
+    { "id": "llm", "type": "cloud", "label": "LLM 网关", "sublabel": "OpenAI 兼容" }
+  ],
+  "segments": [
+    { "from": 150, "to": 270, "label": "请求装配" },
+    { "from": 280, "to": 505, "label": "图执行（工作线程）" },
+    { "from": 515, "to": 650, "label": "流式返回与落库" }
+  ],
+  "messages": [
+    { "id": "post-chat", "from": "client", "to": "api", "y": 170, "label": "POST /api/config/chat", "variant": "emphasis" },
+    { "id": "load-history", "from": "api", "to": "pg", "y": 200, "label": "加载会话 + 历史 + 压缩判定", "variant": "default" },
+    { "id": "history-back", "from": "pg", "to": "api", "y": 230, "label": "recent + summary", "variant": "return" },
+    { "id": "call-stream", "from": "api", "to": "stream", "y": 262, "label": "SSE 流式响应", "variant": "emphasis" },
+    { "id": "submit-executor", "from": "stream", "to": "worker", "y": 295, "label": "run_in_executor + 绑定 thread-local", "variant": "default" },
+    { "id": "graph-stream", "from": "worker", "to": "graph", "y": 350, "label": "graph.stream(input, {thread_id})", "variant": "emphasis" },
+    { "id": "intent-llm", "from": "graph", "to": "llm", "y": 380, "label": "意图分类 chat_json", "variant": "default" },
+    { "id": "intent-back", "from": "llm", "to": "graph", "y": 408, "label": "pack + tool + confidence", "variant": "return" },
+    { "id": "checkpoint", "from": "graph", "to": "pg", "y": 435, "label": "PostgresSaver 节点快照", "variant": "dashed" },
+    { "id": "chunk-emit", "from": "graph", "to": "worker", "y": 465, "label": "chunk（stage / result）", "variant": "default" },
+    { "id": "sse-stage", "from": "worker", "to": "client", "y": 535, "label": "SSE: stage / pipeline_definition", "variant": "emphasis" },
+    { "id": "sse-result", "from": "worker", "to": "client", "y": 565, "label": "SSE: result / done", "variant": "emphasis" },
+    { "id": "save-conv", "from": "worker", "to": "pg", "y": 596, "label": "事件流落库", "variant": "dashed" },
+    { "id": "heartbeat", "from": "stream", "to": "client", "y": 628, "label": "心跳 ping 15s", "variant": "dashed" }
+  ],
+  "activations": [
+    { "participant": "api", "from": 165, "to": 270, "type": "backend" },
+    { "participant": "stream", "from": 257, "to": 628, "type": "backend" },
+    { "participant": "worker", "from": 290, "to": 600, "type": "backend" },
+    { "participant": "graph", "from": 345, "to": 475, "type": "backend" },
+    { "participant": "llm", "from": 375, "to": 413, "type": "cloud" },
+    { "participant": "pg", "from": 195, "to": 238, "type": "database" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "线程模型",
+      "items": [
+        "graph 跑在 run_in_executor 工作线程，thread-local 绑定必须在工作线程内完成",
+        "StreamManager 线程安全队列把事件桥回事件循环，finally 清理防串线",
+        "15s 心跳 + 30s keepalive 保证 SSE 不被中间层掐断"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "响应头契约",
+      "items": [
+        "Cache-Control: no-cache, no-transform 禁止代理压缩缓冲",
+        "X-Accel-Buffering: no 禁止 Nginx 缓冲",
+        "事件格式 event/id/data 三行 + 空行分隔"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "降级路径",
+      "items": [
+        "graph 异常 → emit_error + done，连接不中断",
+        "懒建会话失败仅 warning，不阻断请求",
+        "落库失败 Fail-Open：结果已送达用户，仅记日志"
+      ]
+    }
+  ]
+}

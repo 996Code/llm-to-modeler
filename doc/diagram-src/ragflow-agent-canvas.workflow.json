@@ -1,0 +1,309 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RAGFlow Agent 画布执行工作流：触发、调度与人机协同",
+    "output": "../RAGFlow项目学习/图/ragflow-agent-canvas.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "trigger-load",
+        "label": "触发与载入",
+        "focus": [
+          "trigger",
+          "load",
+          "begin"
+        ],
+        "note": "对话、IM 渠道或 Webhook 进入画布。"
+      },
+      {
+        "id": "runtime",
+        "label": "运行时调度",
+        "focus": [
+          "reset",
+          "sysvars",
+          "schedule",
+          "exec"
+        ],
+        "note": "每轮重置防脏值，sys.* 注入，就绪层并行执行。"
+      },
+      {
+        "id": "human-loop",
+        "label": "人机协同",
+        "focus": [
+          "exec",
+          "fillup",
+          "resume",
+          "answer"
+        ],
+        "note": "UserFillUp 断点等待与恢复。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "input",
+      "label": "触发入口"
+    },
+    {
+      "id": "runtime",
+      "label": "运行时调度"
+    },
+    {
+      "id": "component",
+      "label": "组件执行"
+    },
+    {
+      "id": "interact",
+      "label": "人机协同"
+    },
+    {
+      "id": "exceptions",
+      "label": "异常与恢复",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "enter",
+      "label": "触发载入",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "sched",
+      "label": "运行时",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "out",
+      "label": "执行输出",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "trigger",
+    "load",
+    "reset",
+    "sysvars",
+    "schedule",
+    "exec",
+    "answer"
+  ],
+  "nodes": [
+    {
+      "id": "trigger",
+      "lane": "input",
+      "col": 0,
+      "type": "external",
+      "label": "触发",
+      "sublabel": "对话/渠道/Webhook",
+      "width": 150
+    },
+    {
+      "id": "load",
+      "lane": "input",
+      "col": 1,
+      "type": "database",
+      "label": "载入 DSL",
+      "sublabel": "UserCanvas + path 状态",
+      "width": 160
+    },
+    {
+      "id": "begin",
+      "lane": "component",
+      "col": 1,
+      "type": "backend",
+      "label": "Begin 组件",
+      "sublabel": "聊天/Webhook 模式",
+      "width": 150
+    },
+    {
+      "id": "reset",
+      "lane": "runtime",
+      "col": 2,
+      "type": "security",
+      "label": "每轮重置",
+      "sublabel": "非 Begin 清输入输出",
+      "width": 160
+    },
+    {
+      "id": "cancel",
+      "lane": "exceptions",
+      "col": 2,
+      "type": "security",
+      "label": "取消检查",
+      "sublabel": "is_canceled 抛异常",
+      "width": 140
+    },
+    {
+      "id": "sysvars",
+      "lane": "runtime",
+      "col": 3,
+      "type": "backend",
+      "label": "sys.* 注入",
+      "sublabel": "date/query/files/turns",
+      "width": 170
+    },
+    {
+      "id": "fillup",
+      "lane": "interact",
+      "col": 3,
+      "type": "external",
+      "label": "UserFillUp",
+      "sublabel": "等待用户补充·断点",
+      "width": 150
+    },
+    {
+      "id": "resume",
+      "lane": "interact",
+      "col": 4,
+      "type": "external",
+      "label": "回复恢复",
+      "sublabel": "表单值回填后 resume",
+      "width": 160
+    },
+    {
+      "id": "schedule",
+      "lane": "runtime",
+      "col": 4,
+      "type": "messagebus",
+      "label": "就绪层调度",
+      "sublabel": "asyncio 并行批",
+      "width": 150
+    },
+    {
+      "id": "exec",
+      "lane": "component",
+      "col": 4,
+      "type": "cloud",
+      "label": "组件执行",
+      "sublabel": "LLM/检索/代码/迭代",
+      "tag": "20+ 种",
+      "width": 160
+    },
+    {
+      "id": "answer",
+      "lane": "component",
+      "col": 5,
+      "type": "frontend",
+      "label": "Answer 输出",
+      "sublabel": "SSE 事件流",
+      "width": 140
+    },
+    {
+      "id": "usage",
+      "lane": "runtime",
+      "col": 5,
+      "type": "database",
+      "label": "用量汇总",
+      "sublabel": "token/耗时 payload",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "load",
+      "label": "会话请求",
+      "variant": "emphasis"
+    },
+    {
+      "from": "load",
+      "to": "begin",
+      "label": "首组件"
+    },
+    {
+      "from": "load",
+      "to": "reset",
+      "label": "进入运行时",
+      "variant": "emphasis"
+    },
+    {
+      "from": "reset",
+      "to": "sysvars",
+      "label": "本轮干净态"
+    },
+    {
+      "from": "sysvars",
+      "to": "schedule",
+      "label": "变量就绪"
+    },
+    {
+      "from": "schedule",
+      "to": "exec",
+      "label": "并行批",
+      "variant": "emphasis"
+    },
+    {
+      "from": "exec",
+      "to": "answer",
+      "label": "消息流",
+      "variant": "emphasis"
+    },
+    {
+      "from": "answer",
+      "to": "usage",
+      "label": "统计",
+      "variant": "dashed"
+    },
+    {
+      "from": "exec",
+      "to": "fillup",
+      "label": "缺信息暂停",
+      "variant": "dashed"
+    },
+    {
+      "from": "fillup",
+      "to": "resume",
+      "label": "用户回复"
+    },
+    {
+      "from": "resume",
+      "to": "schedule",
+      "label": "断点续跑",
+      "variant": "dashed"
+    },
+    {
+      "from": "schedule",
+      "to": "cancel",
+      "label": "执行前检查",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "每轮重置防脏值",
+      "items": [
+        "除 Begin 外路径组件每轮清空 inputs/outputs，下游引用只解析本轮运行时值（agent/canvas.py:539-549）",
+        "Begin 保留输出以维持既有行为；UserFillUp 捕获值可传播到下游 Agent 的 user_prompt",
+        "这是长对话画布不串状态的根基"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "人机协同断点",
+      "items": [
+        "UserFillUp 组件暂停画布等待用户补充，回复后从断点 resume（canvas.py:577）",
+        "IM 渠道把消息转成表单回复或新提问（api/channels/bootstrap.py:67-83）",
+        "渠道用户按 channel:chat:sender 隔离上下文（bootstrap.py:86-88）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "执行与观测",
+      "items": [
+        "就绪节点分批 asyncio.gather 并行（canvas.py:607-652），全程 SSE 装饰事件（workflow_started 等）",
+        "组件异常走 _ERROR 输出变量不炸画布（component/base.py:507-512）",
+        "结束输出 token/耗时用量 payload（canvas.py:1133）",
+        "延伸阅读：《笔记/05-Agent画布与Agentic检索.md》"
+      ]
+    }
+  ]
+}

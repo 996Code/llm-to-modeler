@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "RAGFlow 会话记忆数据流：抽取、三类记忆与遗忘",
+    "output": "../RAGFlow项目学习/图/ragflow-memory.html",
+    "locale": "zh-CN",
+    "viewBox": [
+      1080,
+      520
+    ],
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "produce",
+        "label": "生产链",
+        "focus": [
+          "msg",
+          "queue",
+          "extract"
+        ],
+        "note": "会话结束异步投递，LLM 抽取三类记忆。"
+      },
+      {
+        "id": "store",
+        "label": "存储双轨",
+        "focus": [
+          "extract",
+          "metamem",
+          "embed"
+        ],
+        "note": "元数据入 MySQL，记忆本体嵌入进检索索引。"
+      },
+      {
+        "id": "consume",
+        "label": "消费与遗忘",
+        "focus": [
+          "embed",
+          "inject",
+          "evict"
+        ],
+        "note": "对话注入召回；超容量按 FIFO 淘汰。"
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "会话消息"
+    },
+    {
+      "label": "任务队列"
+    },
+    {
+      "label": "记忆抽取"
+    },
+    {
+      "label": "存储"
+    },
+    {
+      "label": "使用与淘汰"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "msg",
+      "type": "frontend",
+      "label": "会话消息",
+      "sublabel": "question + answer",
+      "stage": 0,
+      "row": 1,
+      "tag": "异步"
+    },
+    {
+      "id": "queue",
+      "type": "messagebus",
+      "label": "Redis 任务",
+      "sublabel": "save_to_memory",
+      "stage": 1,
+      "row": 1
+    },
+    {
+      "id": "extract",
+      "type": "cloud",
+      "label": "LLM 抽取",
+      "sublabel": "三类记忆判定",
+      "stage": 2,
+      "row": 1,
+      "tag": "LLM"
+    },
+    {
+      "id": "metamem",
+      "type": "database",
+      "label": "Memory 表",
+      "sublabel": "类型/策略/容量",
+      "stage": 3,
+      "row": 0,
+      "tag": "位掩码 1/2/4"
+    },
+    {
+      "id": "embed",
+      "type": "database",
+      "label": "嵌入入索引",
+      "sublabel": "message 索引",
+      "stage": 3,
+      "row": 1
+    },
+    {
+      "id": "inject",
+      "type": "backend",
+      "label": "对话注入",
+      "sublabel": "检索记忆进上下文",
+      "stage": 4,
+      "row": 0
+    },
+    {
+      "id": "evict",
+      "type": "security",
+      "label": "FIFO 淘汰",
+      "sublabel": "超 memory_size",
+      "stage": 4,
+      "row": 2
+    }
+  ],
+  "flows": [
+    {
+      "id": "f-msg-queue",
+      "from": "msg",
+      "to": "queue",
+      "label": "会话落定投递",
+      "classification": "异步任务",
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "id": "f-queue-extract",
+      "from": "queue",
+      "to": "extract",
+      "label": "消费执行",
+      "classification": "LLM 抽取",
+      "variant": "default",
+      "route": "straight"
+    },
+    {
+      "id": "f-extract-meta",
+      "from": "extract",
+      "to": "metamem",
+      "label": "semantic/episodic/procedural",
+      "classification": "元数据",
+      "variant": "default"
+    },
+    {
+      "id": "f-extract-embed",
+      "from": "extract",
+      "to": "embed",
+      "label": "记忆文本",
+      "classification": "本体入库",
+      "variant": "emphasis",
+      "route": "straight",
+      "labelAt": [
+        655,
+        318
+      ]
+    },
+    {
+      "id": "f-embed-inject",
+      "from": "embed",
+      "to": "inject",
+      "label": "相似召回",
+      "classification": "消费",
+      "variant": "default"
+    },
+    {
+      "id": "f-embed-evict",
+      "from": "embed",
+      "to": "evict",
+      "label": "容量水位",
+      "classification": "治理",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "生产链",
+      "items": [
+        "会话保存时异步投递 Redis 任务（memory_api_service.py:337 → memory_message_service.py:376）",
+        "task_executor 消费后 LLM 抽取 semantic/episodic/procedural 三类（memory_message_service.py:445,107）",
+        "抽取结果嵌入写入 message 检索索引（:214）"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "存储双轨",
+      "items": [
+        "Memory 表：memory_type 位掩码（1/2/4）、forgetting_policy、memory_size（db_models.py:1810 起）",
+        "记忆本体不落 MySQL，嵌入进 ES 与对话同引擎检索",
+        "storage_type 支持 table|graph 两种形态"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "消费与遗忘",
+      "items": [
+        "对话时按相似度召回记忆注入上下文",
+        "超 memory_size 按 FIFO 淘汰最旧记忆",
+        "前端 memories 页面可视化查看（web/src/pages/memories）",
+        "延伸阅读：《笔记/08-记忆与上下文.md》"
+      ]
+    }
+  ]
+}

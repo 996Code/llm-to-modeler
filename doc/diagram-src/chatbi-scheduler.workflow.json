@@ -1,0 +1,240 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ChatBI 调度器：30s tick 四任务与租约治理",
+    "output": "../chatbi-scheduler.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "tick",
+        "label": "tick 循环",
+        "focus": [
+          "start",
+          "tick",
+          "guard"
+        ],
+        "note": "daemon 线程 30 秒一轮与异常屏障。"
+      },
+      {
+        "id": "jobs",
+        "label": "四类任务",
+        "focus": [
+          "stats",
+          "gc",
+          "health",
+          "refresh"
+        ],
+        "note": "统计留存、索引 GC、健康巡检、元数据刷新。"
+      },
+      {
+        "id": "lease",
+        "label": "租约与状态",
+        "focus": [
+          "refresh",
+          "status"
+        ],
+        "note": "全局刷新租约与健康状态聚合。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "scheduler",
+      "label": "调度器"
+    },
+    {
+      "id": "jobs",
+      "label": "周期任务"
+    },
+    {
+      "id": "data",
+      "label": "数据面"
+    },
+    {
+      "id": "policy",
+      "label": "治理",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "loop",
+      "label": "循环",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "run",
+      "label": "任务分发",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "report",
+      "label": "状态上报",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "start",
+    "tick",
+    "guard",
+    "stats",
+    "gc",
+    "health",
+    "refresh",
+    "status"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "lane": "scheduler",
+      "col": 0,
+      "type": "backend",
+      "label": "pack.start 钩子",
+      "sublabel": "daemon 线程启动",
+      "width": 140
+    },
+    {
+      "id": "tick",
+      "lane": "scheduler",
+      "col": 1,
+      "type": "messagebus",
+      "label": "_scheduler_tick",
+      "sublabel": "30s 一轮",
+      "width": 140
+    },
+    {
+      "id": "guard",
+      "lane": "scheduler",
+      "col": 2,
+      "type": "security",
+      "label": "异常屏障",
+      "sublabel": "连续失败计数",
+      "width": 130
+    },
+    {
+      "id": "stats",
+      "lane": "jobs",
+      "col": 2,
+      "type": "database",
+      "label": "统计留存清理",
+      "sublabel": "每小时 · 90 天",
+      "width": 140
+    },
+    {
+      "id": "gc",
+      "lane": "jobs",
+      "col": 3,
+      "type": "database",
+      "label": "索引台账 GC",
+      "sublabel": "periodic_index_gc",
+      "width": 140
+    },
+    {
+      "id": "health",
+      "lane": "jobs",
+      "col": 4,
+      "type": "security",
+      "label": "健康巡检",
+      "sublabel": "3 败停用 · 恢复激活",
+      "width": 150
+    },
+    {
+      "id": "refresh",
+      "lane": "jobs",
+      "col": 5,
+      "type": "backend",
+      "label": "元数据刷新",
+      "sublabel": "周期 6h · 全局租约",
+      "width": 150
+    },
+    {
+      "id": "status",
+      "lane": "policy",
+      "col": 5,
+      "type": "messagebus",
+      "label": "scheduler_status",
+      "sublabel": "ok / degraded(≥5 连败)",
+      "width": 170
+    }
+  ],
+  "edges": [
+    {
+      "id": "start-tick",
+      "from": "start",
+      "to": "tick",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tick-guard",
+      "from": "tick",
+      "to": "guard",
+      "variant": "default"
+    },
+    {
+      "id": "guard-stats",
+      "from": "guard",
+      "to": "stats",
+      "variant": "default"
+    },
+    {
+      "id": "stats-gc",
+      "from": "stats",
+      "to": "gc",
+      "variant": "default"
+    },
+    {
+      "id": "gc-health",
+      "from": "gc",
+      "to": "health",
+      "variant": "default"
+    },
+    {
+      "id": "health-refresh",
+      "from": "health",
+      "to": "refresh",
+      "variant": "default"
+    },
+    {
+      "id": "refresh-status",
+      "from": "refresh",
+      "to": "status",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "tick 循环（tasks.py:79-224）",
+      "items": [
+        "pack.start 钩子启动 daemon 线程，30s 一轮",
+        "tick 顶层异常屏障：连续失败计数 consecutive_failures",
+        "四任务：统计留存 / 索引 GC / 健康巡检 / 元数据刷新"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "健康自治",
+      "items": [
+        "check_all_health：连续 3 次失败自动停用数据源",
+        "恢复连通后自动重新激活，无需人工干预",
+        "元数据刷新周期 6h，失败短退避重试 10 次"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "多副本治理",
+      "items": [
+        "刷新走全局租约，防多副本并发刷新",
+        "SCHEDULER_FAIL_THRESHOLD=5：超阈值 pack 健康报 degraded",
+        "scheduler_status 供 health_status 聚合 ok / degraded"
+      ]
+    }
+  ]
+}

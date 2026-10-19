@@ -1,0 +1,318 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ChatBI Schema 检索与图谱扩展链",
+    "output": "../chatbi-schema-retrieval.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "recall",
+        "label": "向量召回",
+        "focus": [
+          "sanitize",
+          "embed",
+          "search",
+          "refine"
+        ],
+        "note": "bge-m3 向量召回 20 候选再 LLM 精筛。"
+      },
+      {
+        "id": "graph",
+        "label": "图谱扩展",
+        "focus": [
+          "refine",
+          "sgraph",
+          "expand",
+          "join"
+        ],
+        "note": "SchemaGraph 邻居扩展与 JOIN 路径预计算。"
+      },
+      {
+        "id": "degrade",
+        "label": "降级路径",
+        "focus": [
+          "embed",
+          "refine",
+          "fallback"
+        ],
+        "note": "向量故障与精筛失败的降级。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "retrieval",
+      "label": "检索主管线"
+    },
+    {
+      "id": "graph",
+      "label": "图谱扩展"
+    },
+    {
+      "id": "infra",
+      "label": "向量设施"
+    },
+    {
+      "id": "policy",
+      "label": "降级与兜底",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "prepare",
+      "label": "输入准备",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "recall",
+      "label": "召回与精筛",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "expand",
+      "label": "图谱扩展",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "sanitize",
+    "embed",
+    "search",
+    "refine",
+    "sgraph",
+    "expand",
+    "join"
+  ],
+  "nodes": [
+    {
+      "id": "sanitize",
+      "lane": "retrieval",
+      "col": 0,
+      "type": "backend",
+      "label": "sanitize + 剥离图表措辞",
+      "sublabel": "SEC-007 输入清洗",
+      "width": 160
+    },
+    {
+      "id": "embed",
+      "lane": "retrieval",
+      "col": 1,
+      "type": "backend",
+      "label": "query embedding",
+      "sublabel": "bge-m3 1024 维",
+      "width": 150
+    },
+    {
+      "id": "search",
+      "lane": "retrieval",
+      "col": 2,
+      "type": "database",
+      "label": "search_records",
+      "sublabel": "阈值 0.35 · top_k 20",
+      "width": 150
+    },
+    {
+      "id": "refine",
+      "lane": "retrieval",
+      "col": 3,
+      "type": "backend",
+      "label": "_llm_refine 精筛",
+      "sublabel": "宁缺毋滥",
+      "tag": "LLM",
+      "width": 140
+    },
+    {
+      "id": "sgraph",
+      "lane": "graph",
+      "col": 3,
+      "type": "messagebus",
+      "label": "SchemaGraph 构建",
+      "sublabel": "节点=表 边=关系",
+      "width": 140
+    },
+    {
+      "id": "expand",
+      "lane": "graph",
+      "col": 4,
+      "type": "messagebus",
+      "label": "邻居扩展",
+      "sublabel": "最短路 + 社区补全",
+      "width": 100
+    },
+    {
+      "id": "join",
+      "lane": "graph",
+      "col": 5,
+      "type": "database",
+      "label": "JOIN 路径预计算",
+      "sublabel": "Dijkstra ≤4 跳",
+      "width": 110
+    },
+    {
+      "id": "local_embed",
+      "lane": "infra",
+      "col": 1,
+      "type": "backend",
+      "label": "本地 onnx 推理",
+      "sublabel": "进程级单例",
+      "width": 130
+    },
+    {
+      "id": "pgvector",
+      "lane": "infra",
+      "col": 2,
+      "type": "database",
+      "label": "pgvector 检索",
+      "sublabel": "per-scope 表（与平台同库）",
+      "width": 130
+    },
+    {
+      "id": "fallback",
+      "lane": "policy",
+      "col": 1,
+      "type": "security",
+      "label": "向量降级",
+      "sublabel": "小库全表 / 大库留空",
+      "width": 130
+    },
+    {
+      "id": "degraded_refine",
+      "lane": "policy",
+      "col": 2,
+      "type": "security",
+      "label": "精筛降级",
+      "sublabel": "返回原始召回",
+      "width": 130
+    },
+    {
+      "id": "bfs",
+      "lane": "policy",
+      "col": 3,
+      "type": "messagebus",
+      "label": "BFS 兜底",
+      "sublabel": "图谱构建失败",
+      "width": 120
+    }
+  ],
+  "edges": [
+    {
+      "id": "sanitize-embed",
+      "from": "sanitize",
+      "to": "embed",
+      "variant": "default"
+    },
+    {
+      "id": "embed-search",
+      "from": "embed",
+      "to": "search",
+      "variant": "default"
+    },
+    {
+      "id": "search-refine",
+      "from": "search",
+      "to": "refine",
+      "label": "20 候选",
+      "variant": "emphasis"
+    },
+    {
+      "id": "refine-sgraph",
+      "from": "refine",
+      "to": "sgraph",
+      "label": "种子表",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sgraph-expand",
+      "from": "sgraph",
+      "to": "expand",
+      "variant": "default"
+    },
+    {
+      "id": "expand-join",
+      "from": "expand",
+      "to": "join",
+      "variant": "default"
+    },
+    {
+      "id": "embed-localembed",
+      "from": "embed",
+      "to": "local_embed",
+      "variant": "dashed"
+    },
+    {
+      "id": "search-pgvector",
+      "from": "search",
+      "to": "pgvector",
+      "variant": "dashed"
+    },
+    {
+      "id": "embed-fallback",
+      "from": "embed",
+      "to": "fallback",
+      "label": "设施故障",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "refine-degraded",
+      "from": "refine",
+      "to": "degraded_refine",
+      "label": "LLM 失败",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "sgraph-bfs",
+      "from": "sgraph",
+      "to": "bfs",
+      "label": "构建失败",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "bfs-expand",
+      "from": "bfs",
+      "to": "expand",
+      "label": "降级扩展",
+      "variant": "dashed",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "两阶段检索（retrieval.py:131-262）",
+      "items": [
+        "embed → resolve_scopes → 读 active 指针 → search_records",
+        "阈值 0.35、top_k 20；身份表反查截断键防越权",
+        "_strip_visualization 先剥离图表措辞再检索"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "图谱扩展（graph_context.py）",
+      "items": [
+        "SchemaGraph：节点=表、边=Relationship 正反向，同对保留高 confidence",
+        "邻居扩展：最短路径 + 距离排序 + 社区补全，max_total=10 防扩散",
+        "JOIN 路径 Dijkstra 预计算，只对种子 + 1-hop 计算"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "降级矩阵",
+      "items": [
+        "向量设施故障：小 schema 全表清单 / 大表留空走澄清",
+        "精筛 LLM 失败 / 非法 JSON：degraded=True 返回原始召回",
+        "图谱构建失败：BFS 兜底扩展，功能不中断"
+      ]
+    }
+  ]
+}

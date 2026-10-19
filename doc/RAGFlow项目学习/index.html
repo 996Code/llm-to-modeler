@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAGFlow 项目学习 · 总览</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.6; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 40px 24px 64px; }
+  header h1 { font-size: 26px; margin-bottom: 6px; }
+  header p { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 32px; }
+  .meta span { background: #fff; border: 1px solid #d0d7de; border-radius: 20px; padding: 3px 12px; font-size: 12px; color: #57606a; }
+  h2 { font-size: 17px; margin: 32px 0 12px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  a.card { display: block; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 14px 16px; text-decoration: none; color: inherit; transition: border-color .15s, box-shadow .15s; }
+  a.card:hover { border-color: #4c6ef5; box-shadow: 0 2px 8px rgba(76,110,245,.12); }
+  .card .name { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+  .card .note { font-size: 13px; color: #57606a; }
+  .card .tag { display: inline-block; margin-top: 8px; font-size: 11px; color: #4c6ef5; background: #eef2ff; border-radius: 4px; padding: 1px 8px; }
+  .card .tag.md { color: #1a7f37; background: #dafbe1; }
+  .card .tag.doc { color: #9a6700; background: #fff8c5; }
+  .path { font-size: 12px; color: #8b949e; margin-top: 20px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>RAGFlow 项目学习</h1>
+    <p>对标 RAGFlow v0.27.2（Python 稳定版 + Go 主干）的全量学习资料：7 张链路图 + 12 个角度笔记 + 升级蓝图。所有结论带 file:line 证据，关键论断经独立复核与第三方审计。</p>
+    <div class="meta">
+      <span>源码：~/cyble-code/ragflow-v0272</span>
+      <span>源码：~/cyble-code/ragflow（Go main）</span>
+      <span>2026-10-13 · 八轮学习+九轮审查定稿</span>
+      <span>Python 锚定 v0.27.2（a024bea）/ Go main 锚定 deb1235（tag ragflow-study-2026-10-13），~/cyble-code 行号永久可验证</span>
+      <span>两场独立核验：复核 10/10 成立 + 审计抽查 12 条 10 属实</span>
+    </div>
+  </header>
+
+  <h2>新成员 30 分钟路径</h2>
+  <div class="grid">
+    <a class="card" href="图/ragflow-system.html"><div class="name">① 组件架构图</div><div class="note">8 分钟看懂"慢工厂+快商店"与三存储分工。</div><span class="tag">step 1</span></a>
+    <a class="card" href="图/ragflow-chat-retrieval.html"><div class="name">② 对话检索时序图</div><div class="note">5 分钟看懂问句工程→混检→引用三段式。</div><span class="tag">step 2</span></a>
+    <a class="card" href="笔记/01-架构与任务体系.html"><div class="name">③ 笔记 01/02</div><div class="note">10 分钟读架构与检索两篇（跳过 §5 细节考古，那是实施参照）。</div><span class="tag">step 3</span></a>
+    <a class="card" href="笔记/ragflow-benchmark-and-upgrade-plan.html"><div class="name">④ 升级蓝图 §1-§3</div><div class="note">7 分钟：差距结论 + P0 四项（含本仓库代码地图与术语表）。</div><span class="tag">step 4</span></a>
+  </div>
+  <p style="font-size:13px;color:#8b949e;">其余笔记与图为按需深读——参与对应 P 项实施时再看。</p>
+
+  <h2>链路图（先看图建立全局）</h2>
+  <div class="grid">
+    <a class="card" href="图/ragflow-system.html"><div class="name">组件架构</div><div class="note">API/执行器分离、Redis Streams 任务、三存储分工与可插拔检索引擎。</div><span class="tag doc">architecture</span></a>
+    <a class="card" href="图/ragflow-doc-ingestion.html"><div class="name">文档导入工作流</div><div class="note">上传入队、DeepDoc 解析、14 种切块模板、LLM 增强与知识编译任务。</div><span class="tag doc">workflow</span></a>
+    <a class="card" href="图/ragflow-chat-retrieval.html"><div class="name">对话检索时序</div><div class="note">问句合成、向量0.3/全文0.7 混检、可选 KGSearch、[ID:n] 引用插入与回跳。</div><span class="tag doc">sequence</span></a>
+    <a class="card" href="图/ragflow-graphrag.html"><div class="name">GraphRAG 数据流</div><div class="note">三档抽取、同名合并、LLM 判同消歧、社区报告与图谱 chunk 化统一索引。</div><span class="tag doc">dataflow</span></a>
+    <a class="card" href="图/ragflow-agent-canvas.html"><div class="name">Agent 画布执行</div><div class="note">每轮重置防脏值、sys.* 变量、就绪层并行调度与 UserFillUp 人机断点。</div><span class="tag doc">workflow</span></a>
+    <a class="card" href="图/ragflow-connector-sync.html"><div class="name">连接器同步</div><div class="note">35+ 数据源、fingerprint 增量跳过、稳定 ID 幂等入库与删除对账。</div><span class="tag doc">workflow</span></a>
+    <a class="card" href="图/ragflow-memory.html"><div class="name">会话记忆数据流</div><div class="note">三类记忆 LLM 抽取、双轨存储（MySQL 元数据+索引本体）、FIFO 遗忘。</div><span class="tag doc">dataflow</span></a>
+  </div>
+
+  <h2>角度笔记（图+文合并页，MD 为源）</h2>
+  <div class="grid">
+    <a class="card" href="笔记/01-架构与任务体系.html"><div class="name">01 · 架构与任务体系</div><div class="note">慢工厂+快商店、任务分发表、worker 回收、Go 重写、三合一内核。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/02-检索链路与引擎.html"><div class="name">02 · 检索链路与引擎</div><div class="note">三段式检索、七引擎抽象、FusionExpr 语义漂移、Go agentic 三通道。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/03-GraphRAG与知识编译.html"><div class="name">03 · GraphRAG 与知识编译</div><div class="note">三档抽取、消歧预筛、社区报告、增量 checkpoint、编译统一体系。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/04-文档理解DeepDoc.html"><div class="name">04 · 文档理解 DeepDoc</div><div class="note">11 类版面、三态执行、表格列语义、18 parser 含 8 外部引擎。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/05-Agent画布与Agentic检索.html"><div class="name">05 · Agent 画布与 Agentic 检索</div><div class="note">每轮重置、UserFillUp 断点、SCA 四件套、三层时间预算、双轨记账。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/06-数据模型与多租户.html"><div class="name">06 · 数据模型与多租户</div><div class="note">37 表全景、三个反直觉设计、四档角色三层防护。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/07-连接器与数据源同步.html"><div class="name">07 · 连接器与数据源同步</div><div class="note">指纹增量、稳定 ID、删除对账、MCP server 克制形态。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/08-记忆与上下文.html"><div class="name">08 · 记忆与上下文</div><div class="note">三类记忆、FIFO 遗忘、full_question 日期锚定、chunk 反馈回路。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/09-评测可观测与性能.html"><div class="name">09 · 评测可观测与性能</div><div class="note">ranx 基准、压测模板、Langfuse 粒度、背压三件套、恢复缺口。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/10-安全与沙箱.html"><div class="name">10 · 安全与沙箱</div><div class="note">认证授权、SSRF 防护、gVisor 沙箱、密钥明文教训、避坑清单。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/11-Prompt工程.html"><div class="name">11 · Prompt 工程</div><div class="note">citation 八类必引、日期锚定、改写八军规、question/query 双轨。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/12-版本演进与避坑.html"><div class="name">12 · 版本演进与避坑</div><div class="note">42 版本时间轴、breaking 清单、性能轨迹、bug 高频区、路线校准。</div><span class="tag md">markdown</span></a>
+    <a class="card" href="笔记/13-业务链路全景.html"><div class="name">13 · 业务链路全景</div><div class="note">串联层：问答九站旅程（带实现细节锚点）、用户旅程、数据一生、运维与社区。</div><span class="tag md">markdown</span></a>
+      <a class="card" href="笔记/16-NL2SQL竞品对标.html"><div class="name">16 · NL2SQL 竞品对标</div><div class="note">Vanna 源码级（三 collection/人审回流祛魅）、DB-GPT EX 口径、WrenAI 口径层+六维对照+TOP3。</div><span class="tag md">markdown</span></a>
+      <a class="card" href="笔记/15-产品商业战略视角.html"><div class="name">15 · 产品商业战略视角</div><div class="note">PM/CEO/竞品三视角：功能价值地图、三年棋局、学习对象校验（NL2SQL 盲区）。</div><span class="tag md">markdown</span></a>
+      <a class="card" href="笔记/14-官方文档地图与盲区补齐.html"><div class="name">14 · 官方文档地图与盲区补齐</div><div class="note">docs/ 111 篇索引（team 域第一的信号）、前端全景、Go ingestion/syncer、API 全清单。</div><span class="tag md">markdown</span></a>
+  </div>
+
+  <h2>升级蓝图（学习成果的落点）</h2>
+  <div class="grid">
+    <a class="card" href="笔记/ragflow-benchmark-and-upgrade-plan.html"><div class="name">RAGFlow 对标与三层升级蓝图</div><div class="note">平台/知识库/问数三层差距总表 + 15 项路线（P0-P2 带验收标准与启动门槛）+ 终局蓝图 + 宿主约束 + 避坑清单。</div><span class="tag md">markdown</span></a>
+  </div>
+
+  <p class="path">返回 <a href="../index.html">doc 总索引</a> · 重建：bash doc/rebuild.sh（ragflow-* 路由至本目录）</p>
+</div>
+</body>
+</html>

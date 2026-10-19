@@ -1,0 +1,260 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "上游适配链：AssetClient 抽象与请求级地址解析",
+    "output": "../platform-upstream.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "resolve",
+        "label": "地址解析",
+        "focus": [
+          "tool",
+          "asset",
+          "resolve",
+          "services"
+        ],
+        "note": "services 表按请求下发与 fail-closed。"
+      },
+      {
+        "id": "call",
+        "label": "出站调用",
+        "focus": [
+          "asset",
+          "resolve",
+          "http",
+          "envelope"
+        ],
+        "note": "清洗、透传与假 200 识别。"
+      },
+      {
+        "id": "config",
+        "label": "配置类委托",
+        "focus": [
+          "asset",
+          "resolve",
+          "http"
+        ],
+        "note": "配置制品走 pack 注入的领域客户端。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "tool",
+      "label": "插件工具"
+    },
+    {
+      "id": "adapter",
+      "label": "适配层"
+    },
+    {
+      "id": "outbound",
+      "label": "出站"
+    },
+    {
+      "id": "policy",
+      "label": "失败语义",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "req",
+      "label": "请求构造",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "out",
+      "label": "出站与归一",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "back",
+      "label": "返回",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "tool",
+    "asset",
+    "resolve",
+    "http",
+    "envelope",
+    "normalize",
+    "result"
+  ],
+  "nodes": [
+    {
+      "id": "tool",
+      "lane": "tool",
+      "col": 0,
+      "type": "backend",
+      "label": "插件工具",
+      "sublabel": "submit_data / query_data",
+      "width": 150
+    },
+    {
+      "id": "services",
+      "lane": "tool",
+      "col": 1,
+      "type": "database",
+      "label": "宿主 services 表",
+      "sublabel": "chat 请求按请求下发",
+      "width": 150
+    },
+    {
+      "id": "result",
+      "lane": "tool",
+      "col": 5,
+      "type": "frontend",
+      "label": "ToolResult",
+      "sublabel": "fail-closed 读 success",
+      "width": 140
+    },
+    {
+      "id": "asset",
+      "lane": "adapter",
+      "col": 1,
+      "type": "backend",
+      "label": "AssetClient",
+      "sublabel": "通用数据 + 配置类委托",
+      "width": 170
+    },
+    {
+      "id": "resolve",
+      "lane": "adapter",
+      "col": 2,
+      "type": "security",
+      "label": "resolve_base",
+      "sublabel": "thread-local services 表",
+      "width": 150
+    },
+    {
+      "id": "http",
+      "lane": "outbound",
+      "col": 3,
+      "type": "cloud",
+      "label": "HTTP 出站",
+      "sublabel": "forward_headers 透传",
+      "width": 140
+    },
+    {
+      "id": "envelope",
+      "lane": "outbound",
+      "col": 4,
+      "type": "security",
+      "label": "假 200 识别",
+      "sublabel": "code≠0 视为失败",
+      "width": 140
+    },
+    {
+      "id": "normalize",
+      "lane": "outbound",
+      "col": 5,
+      "type": "backend",
+      "label": "归一化",
+      "sublabel": "success / errors",
+      "width": 130
+    },
+    {
+      "id": "unresolvable",
+      "lane": "policy",
+      "col": 2,
+      "type": "security",
+      "label": "ServiceUnresolvable",
+      "sublabel": "未下发 fail-closed",
+      "width": 160
+    }
+  ],
+  "edges": [
+    {
+      "id": "tool-asset",
+      "from": "tool",
+      "to": "asset",
+      "variant": "default"
+    },
+    {
+      "id": "asset-resolve",
+      "from": "asset",
+      "to": "resolve",
+      "variant": "emphasis"
+    },
+    {
+      "id": "services-resolve",
+      "from": "services",
+      "to": "resolve",
+      "label": "地址表",
+      "variant": "dashed"
+    },
+    {
+      "id": "resolve-http",
+      "from": "resolve",
+      "to": "http",
+      "label": "解析成功 · sanitize 清洗",
+      "variant": "emphasis"
+    },
+    {
+      "id": "http-envelope",
+      "from": "http",
+      "to": "envelope",
+      "variant": "default"
+    },
+    {
+      "id": "envelope-normalize",
+      "from": "envelope",
+      "to": "normalize",
+      "variant": "default"
+    },
+    {
+      "id": "normalize-result",
+      "from": "normalize",
+      "to": "result",
+      "variant": "emphasis"
+    },
+    {
+      "id": "resolve-unresolvable",
+      "from": "resolve",
+      "to": "unresolvable",
+      "label": "未下发",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "请求级地址解析（upstream_client.py:154）",
+      "items": [
+        "resolve_base 读 thread-local _request_services（chat 请求下发）",
+        "未下发抛 ServiceUnresolvableError——fail-closed 不猜地址",
+        "绑定时机在 run_in_executor 工作线程内，finally 清空"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "双通道委托",
+      "items": [
+        "通用数据：upstream.post/get + sanitize_obj 清洗",
+        "配置制品：pack 经 set_config_api 注入领域客户端整体替换",
+        "forward_headers 白名单透传（x-/authorization/tenant/enterprise）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "诚实失败",
+      "items": [
+        "HTTP 200 + code≠0 的假 200 信封识别为失败",
+        "GET TTL 缓存 300s，失败响应不进缓存",
+        "插件读 success 字段判定，绝不伪造成功"
+      ]
+    }
+  ]
+}

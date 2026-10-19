@@ -1,0 +1,252 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Engine 核心链：LangGraph 四节点编排",
+    "output": "../engine-core-graph.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main-flow",
+        "label": "主执行流",
+        "focus": [
+          "chat",
+          "stream",
+          "classify",
+          "confidence",
+          "execute",
+          "result"
+        ],
+        "note": "跟随一次请求从 HTTP 入口到 SSE 产出的完整路径。"
+      },
+      {
+        "id": "clarify-loop",
+        "label": "追问与恢复",
+        "focus": [
+          "confidence",
+          "ask",
+          "resume",
+          "execute"
+        ],
+        "note": "低置信度追问与 answers 恢复重跑的闭环。"
+      },
+      {
+        "id": "fallback",
+        "label": "兜底路由",
+        "focus": [
+          "classify",
+          "confidence",
+          "execute"
+        ],
+        "note": "无匹配工具时的三级兜底选择。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "http",
+      "label": "HTTP / 流式层"
+    },
+    {
+      "id": "graph",
+      "label": "LangGraph 编排"
+    },
+    {
+      "id": "tool",
+      "label": "工具执行"
+    },
+    {
+      "id": "policy",
+      "label": "追问与恢复",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "intake",
+      "label": "入口装配",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "intent",
+      "label": "意图与路由",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "exec",
+      "label": "执行与产出",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "chat",
+    "stream",
+    "classify",
+    "confidence",
+    "execute",
+    "result"
+  ],
+  "nodes": [
+    {
+      "id": "chat",
+      "lane": "http",
+      "col": 0,
+      "type": "backend",
+      "label": "POST /api/config/chat",
+      "sublabel": "ChatRequest",
+      "width": 150
+    },
+    {
+      "id": "stream",
+      "lane": "http",
+      "col": 1,
+      "type": "backend",
+      "label": "stream_graph",
+      "sublabel": "工作线程 + SSE 队列",
+      "width": 140
+    },
+    {
+      "id": "classify",
+      "lane": "graph",
+      "col": 2,
+      "type": "backend",
+      "label": "classify_intent",
+      "sublabel": "packs 声明路由 + 二级 tool 路由",
+      "tag": "LLM",
+      "width": 200
+    },
+    {
+      "id": "confidence",
+      "lane": "graph",
+      "col": 3,
+      "type": "security",
+      "label": "check_confidence",
+      "sublabel": "置信度门槛 0.6",
+      "width": 140
+    },
+    {
+      "id": "execute",
+      "lane": "tool",
+      "col": 4,
+      "type": "backend",
+      "label": "execute_tool",
+      "sublabel": "preflight + execute",
+      "width": 140
+    },
+    {
+      "id": "ask",
+      "lane": "policy",
+      "col": 3,
+      "type": "security",
+      "label": "interrupt 挂起",
+      "sublabel": "AskSpec 追问",
+      "width": 140
+    },
+    {
+      "id": "resume",
+      "lane": "policy",
+      "col": 5,
+      "type": "messagebus",
+      "label": "Command(resume)",
+      "sublabel": "answers 恢复",
+      "width": 140
+    },
+    {
+      "id": "result",
+      "lane": "tool",
+      "col": 5,
+      "type": "backend",
+      "label": "handle_result",
+      "sublabel": "四态分流 → SSE result/done",
+      "width": 150
+    }
+  ],
+  "edges": [
+    {
+      "id": "chat-stream",
+      "from": "chat",
+      "to": "stream",
+      "label": "装配 state",
+      "variant": "default"
+    },
+    {
+      "id": "stream-classify",
+      "from": "stream",
+      "to": "classify",
+      "label": "thread_id = conv_id",
+      "variant": "emphasis"
+    },
+    {
+      "id": "classify-confidence",
+      "from": "classify",
+      "to": "confidence",
+      "label": "tool + confidence（无匹配走三级兜底）",
+      "variant": "default"
+    },
+    {
+      "id": "confidence-execute",
+      "from": "confidence",
+      "to": "execute",
+      "label": "≥ 0.6 放行",
+      "variant": "emphasis"
+    },
+    {
+      "id": "confidence-ask",
+      "from": "confidence",
+      "to": "ask",
+      "label": "低于阈值",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "resume-execute",
+      "from": "resume",
+      "to": "execute",
+      "label": "rerun 重跑",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "execute-result",
+      "from": "execute",
+      "to": "result",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "图拓扑（graph.py:130-170）",
+      "items": [
+        "START → classify_intent → check_confidence → execute_tool → handle_result → END",
+        "route_by_tool / route_after_result 两条条件边控制流转",
+        "handle_result 判 tool_result=None 且有 tool_name 时回环 rerun",
+        "一级路由 packs 子集声明（nodes.py:761-790）：声明集过滤未装配后剩 1 个→直通零 LLM；多个→LLM 仅在子集内路由；未声明→全量语义路由——谁发起请求谁声明插件（ChatRequest.packs 与 INIT packs 同义）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "追问闭环",
+      "items": [
+        "低置信度或工具 ask 时 interrupt() 挂起，checkpoint 保现场",
+        "前端带 answers 重发 → Command(resume) 注入 clarify_answers",
+        "rerun 从断点重跑工具，不重新分类意图"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "兜底与降级",
+      "items": [
+        "无匹配工具走三级兜底：fallback_tool 声明 → fallback pack 首工具 → 全局首个",
+        "工具异常分类：ClarificationRaised 转 ask，其余转 error ToolResult",
+        "graph 异常 → emit_error + done，SSE 不中断连接"
+      ]
+    }
+  ]
+}

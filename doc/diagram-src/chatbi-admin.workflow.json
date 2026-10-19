@@ -1,0 +1,305 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ChatBI 管理端：API 分域、审计与 m4 看板",
+    "output": "../chatbi-admin.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "gate",
+        "label": "鉴权与审计",
+        "focus": [
+          "admin",
+          "auth",
+          "audit"
+        ],
+        "note": "所有管理端点的双重门禁。"
+      },
+      {
+        "id": "domains",
+        "label": "五大分域",
+        "focus": [
+          "ds_api",
+          "semantic_api",
+          "graph_api",
+          "memory_api",
+          "m4_api"
+        ],
+        "note": "数据源/语义层/图谱/记忆/看板。"
+      },
+      {
+        "id": "version",
+        "label": "语义层版本",
+        "focus": [
+          "semantic_api",
+          "cas",
+          "rollback"
+        ],
+        "note": "乐观锁与回滚。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "gate",
+      "label": "门禁"
+    },
+    {
+      "id": "api",
+      "label": "API 分域"
+    },
+    {
+      "id": "data",
+      "label": "数据面"
+    },
+    {
+      "id": "policy",
+      "label": "一致性",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "auth",
+      "label": "鉴权",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "route",
+      "label": "分域处理",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "audit",
+      "label": "审计落库",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "admin",
+    "auth",
+    "ds_api",
+    "semantic_api",
+    "audit"
+  ],
+  "nodes": [
+    {
+      "id": "admin",
+      "lane": "gate",
+      "col": 0,
+      "type": "external",
+      "label": "管理员",
+      "sublabel": "admin.html 入口",
+      "width": 130
+    },
+    {
+      "id": "auth",
+      "lane": "gate",
+      "col": 1,
+      "type": "security",
+      "label": "admin_required",
+      "sublabel": "全部端点强制",
+      "width": 140
+    },
+    {
+      "id": "audit",
+      "lane": "gate",
+      "col": 5,
+      "type": "database",
+      "label": "_audit 审计",
+      "sublabel": "写操作全记录",
+      "width": 140
+    },
+    {
+      "id": "ds_api",
+      "lane": "api",
+      "col": 2,
+      "type": "backend",
+      "label": "数据源域",
+      "sublabel": "CRUD + health + scan",
+      "width": 150
+    },
+    {
+      "id": "semantic_api",
+      "lane": "api",
+      "col": 3,
+      "type": "backend",
+      "label": "语义层域",
+      "sublabel": "GET/PUT + diff + versions",
+      "width": 150
+    },
+    {
+      "id": "graph_api",
+      "lane": "api",
+      "col": 4,
+      "type": "backend",
+      "label": "图谱域",
+      "sublabel": "subgraph + 关系增删",
+      "width": 140
+    },
+    {
+      "id": "memory_api",
+      "lane": "api",
+      "col": 5,
+      "type": "messagebus",
+      "label": "记忆域",
+      "sublabel": "CRUD + consolidate",
+      "width": 140
+    },
+    {
+      "id": "m4_api",
+      "lane": "data",
+      "col": 5,
+      "type": "frontend",
+      "label": "m4 看板域",
+      "sublabel": "saved-queries + dashboards",
+      "width": 160
+    },
+    {
+      "id": "secret",
+      "lane": "data",
+      "col": 2,
+      "type": "security",
+      "label": "密码 Fernet",
+      "sublabel": "加密存储 · 永不回显",
+      "width": 150
+    },
+    {
+      "id": "probe",
+      "lane": "data",
+      "col": 3,
+      "type": "database",
+      "label": "探针缓存",
+      "sublabel": "保存后 clear",
+      "width": 130
+    },
+    {
+      "id": "cas",
+      "lane": "policy",
+      "col": 3,
+      "type": "security",
+      "label": "乐观锁 CAS",
+      "sublabel": "expected_version",
+      "width": 140
+    },
+    {
+      "id": "rollback",
+      "lane": "policy",
+      "col": 4,
+      "type": "messagebus",
+      "label": "版本回滚",
+      "sublabel": "versions + rollback",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "admin-auth",
+      "from": "admin",
+      "to": "auth",
+      "variant": "emphasis"
+    },
+    {
+      "id": "auth-dsapi",
+      "from": "auth",
+      "to": "ds_api",
+      "variant": "default"
+    },
+    {
+      "id": "dsapi-semantic",
+      "from": "ds_api",
+      "to": "semantic_api",
+      "variant": "default"
+    },
+    {
+      "id": "semantic-audit",
+      "from": "semantic_api",
+      "to": "audit",
+      "label": "写操作",
+      "variant": "emphasis"
+    },
+    {
+      "id": "semantic-graphapi",
+      "from": "semantic_api",
+      "to": "graph_api",
+      "variant": "default"
+    },
+    {
+      "id": "graphapi-memoryapi",
+      "from": "graph_api",
+      "to": "memory_api",
+      "variant": "default"
+    },
+    {
+      "id": "memoryapi-m4",
+      "from": "memory_api",
+      "to": "m4_api",
+      "label": "user_required",
+      "variant": "dashed"
+    },
+    {
+      "id": "dsapi-secret",
+      "from": "ds_api",
+      "to": "secret",
+      "variant": "dashed"
+    },
+    {
+      "id": "semantic-probe",
+      "from": "semantic_api",
+      "to": "probe",
+      "variant": "dashed"
+    },
+    {
+      "id": "semantic-cas",
+      "from": "semantic_api",
+      "to": "cas",
+      "label": "PUT 冲突检测",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "cas-rollback",
+      "from": "cas",
+      "to": "rollback",
+      "label": "版本回退",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "双重门禁（api.py:51-87）",
+      "items": [
+        "全部管理端点 Depends(admin_required)：token 认证或 X-Admin-Token compare_digest",
+        "写操作统一走 _audit 落审计日志",
+        "数据源密码 Fernet 加密存储，永不回显"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "五大分域（api.py + m4.py）",
+      "items": [
+        "数据源：CRUD / health / scan / refresh-metadata",
+        "语义层：GET/PUT + semantic-review + diff + versions + rollback",
+        "图谱：graph / subgraph / join-path-preview / communities / hubs / impact",
+        "记忆：CRUD + consolidate + backfill；m4：saved-queries + dashboards"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "一致性语义",
+      "items": [
+        "语义层 PUT 走 expected_version 乐观锁，冲突 409",
+        "versions + rollback 支持任意版本回退",
+        "settings 保存后 clear_probe_cache，探针即时生效"
+      ]
+    }
+  ]
+}

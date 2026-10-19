@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "LLM Form Modeler 系统总架构（三层六边形）",
+    "output": "../system-architecture.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "request-path", "label": "主请求路径", "focus": ["users", "frontend", "api", "engine", "sdk", "packs"], "note": "跟随一次对话请求从前端经 Engine 到插件执行。" },
+      { "id": "state-and-llm", "label": "状态与模型", "focus": ["engine", "pg", "llm", "embedder"], "note": "隔离 checkpoint 存储、LLM 网关与本地向量三条依赖。" },
+      { "id": "optional-stores", "label": "可选插件存储", "focus": ["packs", "neo4j", "pgvector", "upstream"], "note": "Neo4j / pgvector / 上游服务按插件依赖按需接入。" }
+    ]
+  },
+  "components": [
+    { "id": "users", "type": "external", "label": "用户 / 宿主", "sublabel": "浏览器 · IM", "pos": [40, 300], "size": [130, 60] },
+    { "id": "frontend", "type": "frontend", "label": "Vue 3 前端", "sublabel": "独立 / 嵌入", "pos": [220, 300], "size": [130, 60], "tag": "SSE" },
+    { "id": "api", "type": "backend", "label": "FastAPI", "sublabel": ":18080", "pos": [420, 300], "size": [130, 60] },
+    { "id": "engine", "type": "backend", "label": "Engine 层", "sublabel": "LangGraph", "pos": [620, 120], "size": [150, 64], "tag": "零领域知识" },
+    { "id": "sdk", "type": "backend", "label": "SDK 层", "sublabel": "协议 + 存储", "pos": [620, 300], "size": [150, 60] },
+    { "id": "packs", "type": "backend", "label": "插件域", "sublabel": "chatbi·kg·form·leave", "pos": [620, 480], "size": [160, 70], "tag": "自动发现" },
+    { "id": "pg", "type": "database", "label": "PostgreSQL", "sublabel": "必填", "pos": [880, 120], "size": [140, 60], "tag": "会话·checkpoint·日志" },
+    { "id": "llm", "type": "cloud", "label": "LLM 网关", "sublabel": "OpenAI 兼容", "pos": [880, 300], "size": [140, 60] },
+    { "id": "embedder", "type": "backend", "label": "bge-m3", "sublabel": "本地 onnx", "pos": [880, 480], "size": [140, 60] },
+    { "id": "upstream", "type": "external", "label": "上游服务", "sublabel": "services 寻址", "pos": [420, 480], "size": [130, 60] },
+    { "id": "neo4j", "type": "database", "label": "Neo4j", "sublabel": "图谱·可选", "pos": [1090, 560], "size": [110, 56] },
+    { "id": "pgvector", "type": "database", "label": "pgvector", "sublabel": "向量·PG 同库", "pos": [1090, 660], "size": [110, 56] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Python 后端进程（lifespan 装配）", "wraps": ["api", "engine", "sdk", "packs", "embedder"] },
+    { "kind": "security-group", "label": "可选插件依赖（缺失仅跳过对应 pack）", "wraps": ["neo4j", "pgvector"] }
+  ],
+  "connections": [
+    { "id": "users-frontend", "from": "users", "to": "frontend", "label": "HTTPS", "variant": "emphasis" },
+    { "id": "frontend-api", "from": "frontend", "to": "api", "label": "POST /api/config/chat", "variant": "emphasis", "labelDy": 54 },
+    { "id": "api-engine", "from": "api", "to": "engine", "label": "stream_graph", "fromSide": "right", "toSide": "left" },
+    { "id": "engine-sdk", "from": "engine", "to": "sdk", "label": "ToolContext", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "sdk-packs", "from": "sdk", "to": "packs", "label": "execute()", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "engine-pg", "from": "engine", "to": "pg", "label": "PostgresSaver" },
+    { "id": "sdk-llm", "from": "sdk", "to": "llm", "label": "LLMClient 出口", "variant": "emphasis" },
+    { "id": "llm-embedder", "from": "llm", "to": "embedder", "label": "embeddings 本地后端", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "packs-upstream", "from": "packs", "to": "upstream", "label": "AssetClient", "fromSide": "left", "toSide": "right", "labelDy": -37 },
+    { "id": "packs-neo4j", "from": "packs", "to": "neo4j", "label": "Cypher", "variant": "dashed", "fromSide": "right", "toSide": "left", "via": [[840, 515], [840, 588]] },
+    { "id": "packs-pgvector", "from": "packs", "to": "pgvector", "label": "向量检索", "variant": "dashed", "fromSide": "bottom", "toSide": "left", "via": [[700, 688]] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "三层六边形",
+      "items": [
+        "Engine 层零领域知识：LangGraph 编排意图识别、工具执行与追问恢复",
+        "SDK 层定义 Tool / PackRouter 协议与图、向量、文档存储设施",
+        "插件域自动发现装配，Engine 不感知具体业务"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "存储分工",
+      "items": [
+        "PostgreSQL 必填：会话事件流、checkpoint、call_logs",
+        "Neo4j / pgvector 按插件依赖门控：探针不满足时仅跳过对应插件（向量存 PG pgvector,与平台同库）",
+        "上游地址由宿主 services 表按请求下发，fail-closed 不猜地址"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "双模式前端",
+      "items": [
+        "独立模式三栏布局，嵌入模式 iframe + postMessage 契约",
+        "SSE 流式推送 stage / pipeline_definition / result 事件",
+        "多租户 X-User-Id 贯穿前后端"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,304 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "njmind_form 增量修改链（详细）：两相式 ops 与全量升格",
+    "output": "../form-modify-chain.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "incremental",
+        "label": "增量主路径",
+        "focus": [
+          "source",
+          "catalog",
+          "ops",
+          "apply",
+          "diff"
+        ],
+        "note": "目录 → ops 指令集 → 确定性合并。"
+      },
+      {
+        "id": "upgrade",
+        "label": "全量升格",
+        "focus": [
+          "ops",
+          "full_rewrite",
+          "generate"
+        ],
+        "note": "三条升格触发条件。"
+      },
+      {
+        "id": "contract",
+        "label": "输入契约",
+        "focus": [
+          "validate_input",
+          "source"
+        ],
+        "note": "source_artifact 前置校验。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "修改主链"
+    },
+    {
+      "id": "llm",
+      "label": "LLM 调用"
+    },
+    {
+      "id": "policy",
+      "label": "升格与校验",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "pre",
+      "label": "前置与目录",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "ops",
+      "label": "指令集与合并",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "out",
+      "label": "产出",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "validate_input",
+    "source",
+    "catalog",
+    "ops",
+    "apply",
+    "diff"
+  ],
+  "nodes": [
+    {
+      "id": "validate_input",
+      "lane": "main",
+      "col": 0,
+      "type": "security",
+      "label": "validate_input",
+      "sublabel": "要求 source_artifact",
+      "width": 150
+    },
+    {
+      "id": "source",
+      "lane": "main",
+      "col": 1,
+      "type": "database",
+      "label": "source_artifact",
+      "sublabel": "基线配置",
+      "width": 140
+    },
+    {
+      "id": "catalog",
+      "lane": "main",
+      "col": 2,
+      "type": "backend",
+      "label": "build_catalog",
+      "sublabel": "字段目录",
+      "width": 130
+    },
+    {
+      "id": "ops",
+      "lane": "main",
+      "col": 3,
+      "type": "cloud",
+      "label": "LLM 输出 ops",
+      "sublabel": "add/update/remove 指令集",
+      "width": 160
+    },
+    {
+      "id": "apply",
+      "lane": "main",
+      "col": 4,
+      "type": "backend",
+      "label": "apply_ops",
+      "sublabel": "确定性合并 ≤3 次",
+      "width": 150
+    },
+    {
+      "id": "diff",
+      "lane": "main",
+      "col": 5,
+      "type": "security",
+      "label": "diff 差分校验",
+      "sublabel": "对齐校验 · 失败带错误重跑",
+      "width": 150
+    },
+    {
+      "id": "guide_llm",
+      "lane": "llm",
+      "col": 1,
+      "type": "backend",
+      "label": "fetch_guide",
+      "sublabel": "修改指南注入",
+      "width": 130
+    },
+    {
+      "id": "full_rewrite",
+      "lane": "policy",
+      "col": 3,
+      "type": "security",
+      "label": "全量升格",
+      "sublabel": "LLM 主动 full_rewrite",
+      "width": 150
+    },
+    {
+      "id": "anchor_fail",
+      "lane": "policy",
+      "col": 4,
+      "type": "security",
+      "label": "锚点失败",
+      "sublabel": "超限触发升格",
+      "width": 130
+    },
+    {
+      "id": "unparseable",
+      "lane": "policy",
+      "col": 5,
+      "type": "security",
+      "label": "输出不可解析",
+      "sublabel": "升格兜底",
+      "width": 140
+    },
+    {
+      "id": "generate",
+      "lane": "llm",
+      "col": 4,
+      "type": "cloud",
+      "label": "generate 全量",
+      "sublabel": "带错误重跑",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "vi-source",
+      "from": "validate_input",
+      "to": "source",
+      "variant": "default"
+    },
+    {
+      "id": "source-guide",
+      "from": "source",
+      "to": "guide_llm",
+      "variant": "dashed"
+    },
+    {
+      "id": "source-catalog",
+      "from": "source",
+      "to": "catalog",
+      "variant": "default"
+    },
+    {
+      "id": "catalog-ops",
+      "from": "catalog",
+      "to": "ops",
+      "label": "目录 + 用户指令",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ops-apply",
+      "from": "ops",
+      "to": "apply",
+      "variant": "emphasis"
+    },
+    {
+      "id": "apply-diff",
+      "from": "apply",
+      "to": "diff",
+      "label": "合并结果",
+      "variant": "default"
+    },
+    {
+      "id": "ops-fullrewrite",
+      "from": "ops",
+      "to": "full_rewrite",
+      "label": "主动升格",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "apply-anchorfail",
+      "from": "apply",
+      "to": "anchor_fail",
+      "label": "锚点超限",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "diff-unparseable",
+      "from": "diff",
+      "to": "unparseable",
+      "label": "不可解析",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "fullrewrite-generate",
+      "from": "full_rewrite",
+      "to": "generate",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "anchorfail-generate",
+      "from": "anchor_fail",
+      "to": "generate",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "unparseable-generate",
+      "from": "unparseable",
+      "to": "generate",
+      "variant": "dashed",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "两相式设计（modify_form.py:297-328）",
+      "items": [
+        "第一相：build_catalog 构建字段目录，LLM 只输出 ops 指令集",
+        "第二相：apply_ops 确定性合并，OPS_MAX_ATTEMPTS=3",
+        "LLM 不直接改配置——指令与执行分离，可控可审计"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "三条升格路径",
+      "items": [
+        "LLM 主动声明 full_rewrite（改动面过大）",
+        "锚点失败超限（指令找不到目标字段）",
+        "输出不可解析（指令集语法失败）",
+        "升格后走 generate 全量重写，带错误上下文"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "契约与对齐",
+      "items": [
+        "validate_input 强制要求 source_artifact（无基线不修改）",
+        "diff 对齐键 fieldTitleKey，红删绿增展示",
+        "config 制品支持 view_json / apply / rewind 三动作"
+      ]
+    }
+  ]
+}

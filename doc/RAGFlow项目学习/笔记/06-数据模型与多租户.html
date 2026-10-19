@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>06 · 数据模型与多租户 · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>06 · 数据模型与多租户</h1>
+  <p class="lead">37+ 张表的域划分、三个反直觉设计与权限模型。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  
+  <article>
+<h1>06 · 数据模型与多租户</h1>
+<blockquote>
+<p>37+ 张表的域划分、三个反直觉设计与权限模型。</p>
+</blockquote>
+<h2>1. 表全景（api/db/db_models.py，peewee ORM）</h2>
+<ul>
+<li><strong>租户与模型</strong>：Tenant / UserTenant / InvitationCode / TenantModel* 五件套（模型实例分组管理）/ LLMFactories / LLM / TenantLLM / TenantLangfuse</li>
+<li><strong>知识库域</strong>：Knowledgebase / Document / File / File2Document / <strong>FileCommit+Item（文件版本化）</strong></li>
+<li><strong>任务域</strong>：Task / PipelineOperationLog / SyncLogs</li>
+<li><strong>对话域</strong>：Dialog / Conversation / API4Conversation</li>
+<li><strong>编排域</strong>：UserCanvas / <strong>UserCanvasVersion</strong> / CanvasTemplate / MCPServer</li>
+<li><strong>编译域</strong>：CompilationTemplate + Group</li>
+<li><strong>连接域</strong>：Connector / Connector2Kb</li>
+<li><strong>其他</strong>：Search（独立搜索产品）/ Memory / ChatChannel / SystemSettings</li>
+</ul>
+<h2>2. 三个反直觉设计</h2>
+<ol>
+<li><strong>没有 Message 表也没有 Chunk 表</strong>：消息+引用+错误全以 JSON 内嵌 API4Conversation（message/reference/dsl/thumb_up/round/errors）；chunk 只活在检索引擎。<strong>元数据与检索数据彻底分离</strong>——省 join、天然审计轨迹</li>
+<li><strong>检索参数挂 Dialog 而非知识库</strong>：similarity_threshold / vector_similarity_weight / top_n / <strong>rerank_candidates_count</strong> 都是 Dialog 字段——同一知识库可被不同检索策略的对话复用</li>
+<li><strong>Memory 表自带遗忘策略</strong>：memory_type 位掩码（semantic=1/episodic=2/procedural=4）、forgetting_policy、memory_size、storage_type（table|graph）</li>
+</ol>
+<h2>3. 权限模型</h2>
+<ul>
+<li>角色四档：OWNER/ADMIN/NORMAL/INVITE（api/db/<strong>init</strong>.py:23-27）；INVITE 受邀待确认，同意后升 NORMAL</li>
+<li>三层防护：API 装饰器 login_required → service 层 accessible()（knowledgebase_service.py:569 等）→ SQL where tenant_id</li>
+<li>知识库 TEAM 权限需 joined tenant 匹配（check_team_permission.py:33-37）</li>
+<li>检索按 kb 所属 tenant_ids 限定（dialog_service.py:754-761）</li>
+<li><strong>已知弱点</strong>：accessible 逻辑分散各 service，新端点漏加即越权；ADMIN 语义不完整</li>
+</ul>
+<h2>4. 认证链（api/apps/<strong>init</strong>.py:144-235）</h2>
+<ul>
+<li>_load_user 依次尝试：session cookie（Redis 存储）→ Bearer 头 → itsdangerous JWT → APIToken 表 → BETA token</li>
+<li>密码 werkzeug 哈希；登录口令 RSA 解密（私钥口令硬编码"Welcome"——安全教训）</li>
+<li>OAuth2/OIDC/GitHub 在 api/apps/auth/，state CSRF 校验</li>
+</ul>
+<h2>对我们的启示</h2>
+<ul>
+<li>消息+引用 JSON 内嵌会话：我们扩展 KG/ChatBI 对话功能时可顺手借鉴（会话即审计轨迹）</li>
+<li>检索参数挂对话配置：同一库服务不同检索策略——KG pack 未来加"检索策略配置"时的挂载点参考</li>
+<li>权限：我们宿主管权限（X-User-Id 透传），无需租户体系——但 service 层 accessible 的分散教训要记住（新端点统一走权限门）</li>
+</ul>
+  </article>
+  <nav class="bottom">
+    <a href="05-Agent画布与Agentic检索.html">← 05 · Agent 画布与 Agentic 检索</a>
+    <a href="07-连接器与数据源同步.html">07 · 连接器与数据源同步 →</a>
+  </nav>
+</div>
+</body>
+</html>

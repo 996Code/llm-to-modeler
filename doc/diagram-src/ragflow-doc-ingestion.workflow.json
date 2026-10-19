@@ -1,0 +1,299 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RAGFlow 文档导入工作流：上传、解析、切块与索引",
+    "output": "../RAGFlow项目学习/图/ragflow-doc-ingestion.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "trigger",
+        "label": "上传与调度",
+        "focus": [
+          "upload",
+          "enqueue",
+          "collect"
+        ],
+        "note": "上传建行到任务入队与领任务。"
+      },
+      {
+        "id": "parse-chunk",
+        "label": "解析与切块",
+        "focus": [
+          "deepdoc",
+          "chunker",
+          "enhance"
+        ],
+        "note": "DeepDoc 深度解析与 14 种切块模板、LLM 增强。"
+      },
+      {
+        "id": "index-compile",
+        "label": "索引与知识编译",
+        "focus": [
+          "embed",
+          "kcompile",
+          "writer",
+          "done"
+        ],
+        "note": "嵌入写索引，可选图谱/RAPTOR 等知识编译任务。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "trigger",
+      "label": "上传触发"
+    },
+    {
+      "id": "queue",
+      "label": "任务调度"
+    },
+    {
+      "id": "parse",
+      "label": "解析切块"
+    },
+    {
+      "id": "enhance",
+      "label": "LLM 增强"
+    },
+    {
+      "id": "index",
+      "label": "索引落地"
+    },
+    {
+      "id": "exceptions",
+      "label": "失败与取消",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "queueing",
+      "label": "入队",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "parsing",
+      "label": "解析切块",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "landing",
+      "label": "索引与完成",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "upload",
+    "enqueue",
+    "collect",
+    "deepdoc",
+    "chunker",
+    "embed",
+    "writer",
+    "done"
+  ],
+  "nodes": [
+    {
+      "id": "upload",
+      "lane": "trigger",
+      "col": 0,
+      "type": "frontend",
+      "label": "上传文档",
+      "sublabel": "MinIO + document 行",
+      "width": 150
+    },
+    {
+      "id": "enqueue",
+      "lane": "queue",
+      "col": 1,
+      "type": "messagebus",
+      "label": "任务入队",
+      "sublabel": "task 行 + Redis XADD",
+      "width": 150
+    },
+    {
+      "id": "collect",
+      "lane": "queue",
+      "col": 2,
+      "type": "backend",
+      "label": "领任务",
+      "sublabel": "unacked 恢复 + 取消检测",
+      "width": 160
+    },
+    {
+      "id": "deepdoc",
+      "lane": "parse",
+      "col": 2,
+      "type": "backend",
+      "label": "DeepDoc 解析",
+      "sublabel": "OCR / 版面 / 表格还原",
+      "width": 160
+    },
+    {
+      "id": "chunker",
+      "lane": "parse",
+      "col": 3,
+      "type": "cloud",
+      "label": "切块模板",
+      "sublabel": "naive/qa/laws/resume…",
+      "tag": "14 种",
+      "width": 160
+    },
+    {
+      "id": "enhance",
+      "lane": "enhance",
+      "col": 3,
+      "type": "backend",
+      "label": "LLM 增强",
+      "sublabel": "关键词/问题生成（可选）",
+      "tag": "可选",
+      "width": 170
+    },
+    {
+      "id": "fail",
+      "lane": "exceptions",
+      "col": 3,
+      "type": "security",
+      "label": "失败挂起",
+      "sublabel": "进度回写 · 取消即丢",
+      "width": 150
+    },
+    {
+      "id": "kcompile",
+      "lane": "enhance",
+      "col": 4,
+      "type": "database",
+      "label": "知识编译任务",
+      "sublabel": "graphrag/raptor/mindmap…",
+      "tag": "KB 级",
+      "width": 170
+    },
+    {
+      "id": "embed",
+      "lane": "index",
+      "col": 4,
+      "type": "backend",
+      "label": "向量嵌入",
+      "sublabel": "encode → chunk 向量",
+      "width": 140
+    },
+    {
+      "id": "writer",
+      "lane": "index",
+      "col": 5,
+      "type": "database",
+      "label": "写索引",
+      "sublabel": "ES / Infinity 批量",
+      "width": 140
+    },
+    {
+      "id": "done",
+      "lane": "trigger",
+      "col": 5,
+      "type": "external",
+      "label": "可检索",
+      "sublabel": "progress=1 + 消息留痕",
+      "width": 160
+    }
+  ],
+  "edges": [
+    {
+      "from": "upload",
+      "to": "enqueue",
+      "label": "解析请求",
+      "variant": "emphasis"
+    },
+    {
+      "from": "enqueue",
+      "to": "collect",
+      "label": "Streams 消费组"
+    },
+    {
+      "from": "collect",
+      "to": "deepdoc",
+      "label": "按任务类型分发"
+    },
+    {
+      "from": "deepdoc",
+      "to": "chunker",
+      "label": "结构化文本",
+      "variant": "emphasis"
+    },
+    {
+      "from": "chunker",
+      "to": "enhance",
+      "label": "chunk 列表"
+    },
+    {
+      "from": "chunker",
+      "to": "embed",
+      "label": "跳过增强",
+      "variant": "dashed"
+    },
+    {
+      "from": "enhance",
+      "to": "embed",
+      "label": "带关键词 chunk"
+    },
+    {
+      "from": "embed",
+      "to": "writer",
+      "label": "向量就绪",
+      "variant": "emphasis"
+    },
+    {
+      "from": "writer",
+      "to": "done",
+      "label": "索引可见"
+    },
+    {
+      "from": "kcompile",
+      "to": "writer",
+      "label": "图谱/RAPTOR chunk",
+      "variant": "dashed"
+    },
+    {
+      "from": "deepdoc",
+      "to": "fail",
+      "label": "解析异常",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "任务分发",
+      "items": [
+        "任务类型映射表 TASK_TYPE_TO_PIPELINE_TASK_TYPE：dataflow/raptor/graphrag/mindmap/wiki/skill/timeline 等 13 类（task_executor.py:131-145）",
+        "KB 级任务用假 doc_id 哨兵 + doc_ids 列表 fan-out（:149-161）",
+        "collect 先恢复 unacked 再领新任务，取消任务直接 ack（:247-297）"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "切块与增强",
+      "items": [
+        "ParserType 工厂分发到 14 个切块模板模块（:120-129）",
+        "auto_keywords/auto_questions 入库前 LLM 补关键词与假设问题（:477-535）",
+        "DeepDoc 负责版面识别、表格结构还原、OCR，产出结构化文本"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "进度与容错",
+      "items": [
+        "set_progress 单调更新 progress/progress_msg 写回 MySQL（:229-244）",
+        "worker 按 MAX_TASKS_PER_WORKER 回收进程防 ONNX 内存泄漏（:185-198）",
+        "GraphRAG/RAPTOR 等编译任务与解析任务同队列，靠假 doc_id 区分",
+        "延伸阅读：《笔记/01-架构与任务体系.md、04-文档理解DeepDoc.md》"
+      ]
+    }
+  ]
+}

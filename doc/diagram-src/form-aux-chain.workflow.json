@@ -1,0 +1,396 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "njmind_form 辅助工具链：图片识别、克隆、查询与闲聊",
+    "output": "../pack/form-aux-chain.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "image",
+        "label": "图片识别链",
+        "focus": [
+          "img_in",
+          "img_analyze",
+          "img_gen",
+          "img_validate",
+          "img_out"
+        ],
+        "note": "图片接收 → 多模态视觉解析 → 配置生成 → 校验 → 制品返回。"
+      },
+      {
+        "id": "clone",
+        "label": "克隆链",
+        "focus": [
+          "cl_extract",
+          "cl_fetch",
+          "cl_identity",
+          "cl_validate",
+          "cl_out"
+        ],
+        "note": "LLM 提取源标识 → 查源表单 → 改标识 → 校验 → 输出候选不落库。"
+      },
+      {
+        "id": "query",
+        "label": "查询链",
+        "focus": [
+          "get_ctx",
+          "get_extract",
+          "get_fetch",
+          "get_out"
+        ],
+        "note": "上下文直答优先，无上下文才 LLM 提 formCode 查上游。"
+      },
+      {
+        "id": "chat",
+        "label": "闲聊兜底",
+        "focus": [
+          "chat_prompt",
+          "chat_reply",
+          "chat_out"
+        ],
+        "note": "system prompt 三级降级渲染，纯文本回复。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "image",
+      "label": "image_form 图片识别"
+    },
+    {
+      "id": "clone",
+      "label": "clone_form 克隆"
+    },
+    {
+      "id": "query",
+      "label": "get_form 查询"
+    },
+    {
+      "id": "chat",
+      "label": "chat 闲聊兜底"
+    }
+  ],
+  "phases": [
+    {
+      "id": "intake",
+      "label": "输入与提取",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "gen",
+      "label": "生成与校验",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "out",
+      "label": "制品与回复",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "img_in",
+    "img_analyze",
+    "img_gen",
+    "img_validate",
+    "img_out"
+  ],
+  "nodes": [
+    {
+      "id": "img_in",
+      "lane": "image",
+      "col": 0,
+      "type": "frontend",
+      "label": "图片接收",
+      "sublabel": "preflight + url/base64",
+      "width": 150
+    },
+    {
+      "id": "img_analyze",
+      "lane": "image",
+      "col": 1,
+      "type": "cloud",
+      "label": "analyze_image",
+      "sublabel": "多模态 LLM 视觉解析",
+      "tag": "LLM",
+      "width": 160
+    },
+    {
+      "id": "img_gen",
+      "lane": "image",
+      "col": 2,
+      "type": "cloud",
+      "label": "generate_config",
+      "sublabel": "LLM 生成表单配置",
+      "tag": "LLM",
+      "width": 150
+    },
+    {
+      "id": "img_validate",
+      "lane": "image",
+      "col": 3,
+      "type": "security",
+      "label": "validate",
+      "sublabel": "mode=create 校验",
+      "width": 150
+    },
+    {
+      "id": "img_out",
+      "lane": "image",
+      "col": 4,
+      "type": "backend",
+      "label": "返回制品",
+      "sublabel": "校验失败也返回候选",
+      "width": 160
+    },
+    {
+      "id": "cl_extract",
+      "lane": "clone",
+      "col": 0,
+      "type": "cloud",
+      "label": "提取复制信息",
+      "sublabel": "LLM 抽 source_form_code",
+      "tag": "LLM",
+      "width": 160
+    },
+    {
+      "id": "cl_fetch",
+      "lane": "clone",
+      "col": 1,
+      "type": "database",
+      "label": "查询源表单",
+      "sublabel": "get_artifact",
+      "width": 140
+    },
+    {
+      "id": "cl_identity",
+      "lane": "clone",
+      "col": 2,
+      "type": "backend",
+      "label": "修改标识",
+      "sublabel": "deepcopy + 清 id 字段",
+      "width": 150
+    },
+    {
+      "id": "cl_validate",
+      "lane": "clone",
+      "col": 3,
+      "type": "security",
+      "label": "validate",
+      "sublabel": "mode=create 校验",
+      "width": 140
+    },
+    {
+      "id": "cl_out",
+      "lane": "clone",
+      "col": 4,
+      "type": "backend",
+      "label": "输出候选",
+      "sublabel": "AI 永不落库",
+      "width": 140
+    },
+    {
+      "id": "get_ctx",
+      "lane": "query",
+      "col": 0,
+      "type": "database",
+      "label": "上下文直答",
+      "sublabel": "source_artifact 零 LLM",
+      "width": 160
+    },
+    {
+      "id": "get_extract",
+      "lane": "query",
+      "col": 1,
+      "type": "cloud",
+      "label": "提取 formCode",
+      "sublabel": "LLM 抽表单标识",
+      "tag": "LLM",
+      "width": 150
+    },
+    {
+      "id": "get_fetch",
+      "lane": "query",
+      "col": 2,
+      "type": "database",
+      "label": "查询上游",
+      "sublabel": "get_artifact",
+      "width": 130
+    },
+    {
+      "id": "get_out",
+      "lane": "query",
+      "col": 3,
+      "type": "backend",
+      "label": "返回 artifact",
+      "sublabel": "供后续修改/展示",
+      "width": 150
+    },
+    {
+      "id": "chat_prompt",
+      "lane": "chat",
+      "col": 0,
+      "type": "backend",
+      "label": "渲染 prompt",
+      "sublabel": "chat.j2 / 动态 / 兜底",
+      "width": 160
+    },
+    {
+      "id": "chat_reply",
+      "lane": "chat",
+      "col": 1,
+      "type": "cloud",
+      "label": "LLM 回复",
+      "sublabel": "temperature=0.7",
+      "tag": "LLM",
+      "width": 140
+    },
+    {
+      "id": "chat_out",
+      "lane": "chat",
+      "col": 2,
+      "type": "frontend",
+      "label": "返回文本",
+      "sublabel": "reply 无制品",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "img_in-analyze",
+      "from": "img_in",
+      "to": "img_analyze",
+      "variant": "default"
+    },
+    {
+      "id": "img_analyze-gen",
+      "from": "img_analyze",
+      "to": "img_gen",
+      "variant": "default"
+    },
+    {
+      "id": "img_gen-validate",
+      "from": "img_gen",
+      "to": "img_validate",
+      "variant": "emphasis"
+    },
+    {
+      "id": "img_validate-out",
+      "from": "img_validate",
+      "to": "img_out",
+      "label": "通过/失败均返回",
+      "variant": "default"
+    },
+    {
+      "id": "cl_extract-fetch",
+      "from": "cl_extract",
+      "to": "cl_fetch",
+      "variant": "default"
+    },
+    {
+      "id": "cl_fetch-identity",
+      "from": "cl_fetch",
+      "to": "cl_identity",
+      "variant": "default"
+    },
+    {
+      "id": "cl_identity-validate",
+      "from": "cl_identity",
+      "to": "cl_validate",
+      "variant": "default"
+    },
+    {
+      "id": "cl_validate-out",
+      "from": "cl_validate",
+      "to": "cl_out",
+      "variant": "emphasis"
+    },
+    {
+      "id": "get_ctx-out",
+      "from": "get_ctx",
+      "to": "get_out",
+      "label": "路径A 命中",
+      "variant": "emphasis"
+    },
+    {
+      "id": "get_extract-fetch",
+      "from": "get_extract",
+      "to": "get_fetch",
+      "variant": "default"
+    },
+    {
+      "id": "get_fetch-out",
+      "from": "get_fetch",
+      "to": "get_out",
+      "label": "路径B 查上游",
+      "variant": "default"
+    },
+    {
+      "id": "chat_prompt-reply",
+      "from": "chat_prompt",
+      "to": "chat_reply",
+      "variant": "default"
+    },
+    {
+      "id": "chat_reply-out",
+      "from": "chat_reply",
+      "to": "chat_out",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "图片识别链（image_form.py:43-102）",
+      "items": [
+        "四步：analyze_image → generate_config → validate(mode=create) → 返回制品",
+        "多模态消息兼容 data URL 与纯 base64，修复前双重前缀导致图片识别从未跑通（image_form.py:163-171）",
+        "校验失败仍返回配置交用户决定，不静默丢弃（image_form.py:79-90）",
+        "preflight 校验 njmind-modeler 地址，缺地址 fail-fast 不烧 LLM（image_form.py:39-41，_preflight.py:17-32）",
+        "两次 LLM 调用：视觉解析抽 formName/fields/fieldType，再按平台规范生成配置（image_form.py:182,240）"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "克隆链（clone_form.py:40-99）",
+      "items": [
+        "LLM 提取 source_form_code/new_form_name/new_form_code（clone_form.py:101-131）",
+        "未指定新标识时默认 formCode+'_copy'、formName+'(副本)'，并清 id/createTime 等系统字段（clone_form.py:133-156）",
+        "校验通过输出候选，不调 persist_artifact——AI 永不落库，落库由业务人员决定（clone_form.py:84-86）"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "查询链（get_form.py:73-148）",
+      "items": [
+        "路径A：state.source_artifact 有字段直接摘要回答，零 LLM 不猜 formCode（get_form.py:93-109）",
+        "路径B：LLM 从中文表单名/英文标识提取 formCode，再查上游（get_form.py:111-133,150-200）",
+        "只读工具，产物 artifact 进入 state 供 modify_form 等后续节点复用（get_form.py:142-148）"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "闲聊兜底（chat.py:32-51）",
+      "items": [
+        "system prompt 三级降级：chat.j2 模板 → registry 动态能力清单 → 通用兜底（chat.py:53-89）",
+        "能力清单实时读全部工具 when 描述，新插件注册自动被介绍（chat.py:91-111）",
+        "temperature=0.7 纯文本 reply，无制品（chat.py:46-51）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "路由入口（router.py:50-83）",
+      "items": [
+        "candidate_tools：画布为空时排除 modify_form，保留 image_form/get_form/chat 合法选项（router.py:58-61）",
+        "build_prompt 规则 4/5：查询→get_form、复制→clone_form、图片识别→image_form、闲聊→chat（router.py:77-79）",
+        "LLM 语义主判 + 数据规则复核，不做关键词独裁（router.py:34-48）"
+      ]
+    }
+  ]
+}

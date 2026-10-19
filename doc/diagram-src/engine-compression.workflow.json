@@ -1,0 +1,294 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Engine 上下文压缩链：70% 阈值触发与异步摘要",
+    "output": "../engine-compression.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "trigger",
+        "label": "触发与当轮降级",
+        "focus": [
+          "load",
+          "estimate",
+          "trigger",
+          "recent"
+        ],
+        "note": "token 估算超窗口 70% 时当轮立即降级为 keep-recent。"
+      },
+      {
+        "id": "sidechain",
+        "label": "后台压缩",
+        "focus": [
+          "sidechain",
+          "breaker",
+          "summarize",
+          "events"
+        ],
+        "note": "单线程旁链 LLM 摘要全量历史并落 compacted 事件。"
+      },
+      {
+        "id": "defense",
+        "label": "PTL 防御与降级",
+        "focus": [
+          "summarize",
+          "ptl",
+          "degraded"
+        ],
+        "note": "摘要输入超限时的逐级剥行重试与截断兜底。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "request",
+      "label": "请求路径"
+    },
+    {
+      "id": "side",
+      "label": "压缩旁链（后台线程）"
+    },
+    {
+      "id": "policy",
+      "label": "熔断与降级",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "measure",
+      "label": "估算与触发",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "compress",
+      "label": "后台摘要",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "effect",
+      "label": "下一轮生效",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "load",
+    "estimate",
+    "trigger",
+    "sidechain",
+    "summarize",
+    "events"
+  ],
+  "nodes": [
+    {
+      "id": "load",
+      "lane": "request",
+      "col": 0,
+      "type": "backend",
+      "label": "cm.load",
+      "sublabel": "全量 messages",
+      "width": 130
+    },
+    {
+      "id": "estimate",
+      "lane": "request",
+      "col": 1,
+      "type": "backend",
+      "label": "estimate_tokens",
+      "sublabel": "CJK 1.5 / 英文 4 字符",
+      "width": 140
+    },
+    {
+      "id": "trigger",
+      "lane": "request",
+      "col": 2,
+      "type": "security",
+      "label": "should_compress",
+      "sublabel": "> (窗口−预留) × 70%",
+      "width": 140
+    },
+    {
+      "id": "recent",
+      "lane": "request",
+      "col": 3,
+      "type": "frontend",
+      "label": "keep-recent",
+      "sublabel": "当轮立即用最近 3 轮",
+      "width": 140
+    },
+    {
+      "id": "sidechain",
+      "lane": "side",
+      "col": 3,
+      "type": "messagebus",
+      "label": "CompressionSidechain",
+      "sublabel": "单线程执行器",
+      "width": 150
+    },
+    {
+      "id": "summarize",
+      "lane": "side",
+      "col": 4,
+      "type": "backend",
+      "label": "LLM 摘要",
+      "sublabel": "全量历史（防折叠丢上下文）",
+      "tag": "LLM",
+      "width": 150
+    },
+    {
+      "id": "events",
+      "lane": "side",
+      "col": 5,
+      "type": "database",
+      "label": "事件落库",
+      "sublabel": "compacted + compact_trace",
+      "width": 150
+    },
+    {
+      "id": "breaker",
+      "lane": "policy",
+      "col": 3,
+      "type": "security",
+      "label": "熔断器",
+      "sublabel": "连续 3 败熔断 120s",
+      "width": 140
+    },
+    {
+      "id": "ptl",
+      "lane": "policy",
+      "col": 4,
+      "type": "security",
+      "label": "PTL 防御",
+      "sublabel": "剥最旧 20% 重试 ×3",
+      "width": 140
+    },
+    {
+      "id": "degraded",
+      "lane": "policy",
+      "col": 5,
+      "type": "messagebus",
+      "label": "降级截断",
+      "sublabel": "前 500 字符兜底",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "load-estimate",
+      "from": "load",
+      "to": "estimate",
+      "variant": "default"
+    },
+    {
+      "id": "estimate-trigger",
+      "from": "estimate",
+      "to": "trigger",
+      "label": "token 估算",
+      "variant": "default"
+    },
+    {
+      "id": "trigger-recent",
+      "from": "trigger",
+      "to": "recent",
+      "label": "触发：当轮不等",
+      "variant": "emphasis"
+    },
+    {
+      "id": "trigger-sidechain",
+      "from": "trigger",
+      "to": "sidechain",
+      "label": "compress_async",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sidechain-breaker",
+      "from": "sidechain",
+      "to": "breaker",
+      "label": "先查熔断",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "sidechain-summarize",
+      "from": "sidechain",
+      "to": "summarize",
+      "label": "未熔断",
+      "variant": "default"
+    },
+    {
+      "id": "summarize-ptl",
+      "from": "summarize",
+      "to": "ptl",
+      "label": "输入超限",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "ptl-degraded",
+      "from": "ptl",
+      "to": "degraded",
+      "label": "3 次耗尽",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "summarize-events",
+      "from": "summarize",
+      "to": "events",
+      "label": "成功落库",
+      "variant": "emphasis"
+    },
+    {
+      "id": "degraded-events",
+      "from": "degraded",
+      "to": "events",
+      "label": "degraded 事件",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "events-recent",
+      "from": "events",
+      "to": "recent",
+      "label": "下一轮生效",
+      "variant": "dashed",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "触发与当轮策略",
+      "items": [
+        "估算口径：CJK 1.5 token/字 + 英文 4 字符/token（compression.py:46-59）",
+        "阈值 =（上下文窗口 200K − 预留输出 20K）× 70%",
+        "触发后当轮立即降级 keep-recent（最近 3 轮×2 条），不等待压缩完成"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "旁链设计",
+      "items": [
+        "单线程 ThreadPoolExecutor 串行化压缩任务，避免并发写冲突",
+        "LLM 摘要全量历史而非仅 old 段，防止折叠点丢上下文",
+        "summarize_artifact 状态补偿：工具产出先于压缩点折叠"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "两级防御",
+      "items": [
+        "熔断器：连续 3 次失败熔断 120s，半开自动恢复",
+        "PTL 防御：摘要输入超限每次剥最旧 20% 重试，最多 3 次",
+        "耗尽后降级截断前 500 字符并写 protection_triggered 标记"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11 · Prompt 工程 · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>11 · Prompt 工程</h1>
+  <p class="lead">rag/prompts/ 47 个模板的措辞技巧——可直接迁移进我们的 j2 模板。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  
+  <article>
+<h1>11 · Prompt 工程</h1>
+<blockquote>
+<p>rag/prompts/ 47 个模板的措辞技巧——可直接迁移进我们的 j2 模板。</p>
+</blockquote>
+<h2>1. 引用生成教科书：citation_prompt.md</h2>
+<ul>
+<li><strong>8 类必引</strong>：数字统计 / 时间 / 因果 / 比较 / 技术定义 / 直接引述 / 预测 / 争议观点</li>
+<li><strong>明确不引</strong>：常识、过渡句、LLM 自己的综合推理（"除非直接来自来源"）</li>
+<li>格式铁律：<code>[ID:i][ID:j]</code> 分开不合并、每句最多 4 个、放标点前、不改原文空白</li>
+<li>6 个示例含反例（"巴黎是首都"不引，"1889 建成"要引）与 RTL 处理</li>
+<li>判据口诀：<strong>"fact-checker 需要核实吗？"</strong></li>
+<li>双路径并存：代码后处理（insert_citations 句级相似度）+ 本 LLM pass——前者可靠、后者语义准</li>
+</ul>
+<h2>2. 多轮问句合成：full_question_prompt.md</h2>
+<ul>
+<li>已完整则<strong>原样返回</strong>（不做无谓改写）</li>
+<li><strong>相对日期锚定</strong>：注入 {{today}}/{{yesterday}}/{{tomorrow}}，"上个月"→绝对日期——检索器拿到可直接命中的时间词</li>
+<li>输出语言跟随原问题（可强制 language）</li>
+</ul>
+<h2>3. SCA 缺口→查询改写八军规：sca_query_rewrite.md</h2>
+<ol>
+<li>查询必须点名缺失实体+所需关系/属性</li>
+<li><strong>多跳锚定 bridge value</strong>（"MASH/Cheers 是收视率最高的两集"已解析 → 查"runtime"必须带锚，不能裸查）</li>
+<li>实体+缺失属性直接组合</li>
+<li>消歧限定词仅在证据支持时加；<strong>绝不从问题臆断实体类别</strong>（"Ron Hutchinson 可能是冰球运动员，除非证据确认别写 footballer"）</li>
+<li>查询自包含，<strong>禁代词</strong>（he/it/this）</li>
+<li>一缺口一查询，近重复合并</li>
+<li>不可检索化的缺口丢弃</li>
+<li><strong>多样性</strong>：对照研究史，死角度不 paraphrase 重试；<code>A|B|C</code> 交替查询覆盖一词多实体</li>
+</ol>
+<h2>4. question/query 双轨：multi_queries_gen.md</h2>
+<p>"给 LLM 的问题（5-200 字）"与"给检索器的查询（1-5 关键词）"<strong>分开生成</strong>——语义完整性与检索命中率各取所需；失败驱动（原查询没召回才生成 2-3 个互补查询）。</p>
+<h2>5. 反思分级：reflect.md</h2>
+<ul>
+<li>复杂度评分矩阵：范围/数据依赖/决策点/风险各 1-3 分（共 4-12）</li>
+<li>反思长度三档：简单 50-100 字 / 中等 100-200 / 复杂 200-300——<strong>防反思膨胀</strong></li>
+<li>任务交接段（状态/关键数据/未决项/用户口径状态）不受字数限制</li>
+</ul>
+<h2>6. 其他值得记住的</h2>
+<ul>
+<li><strong>sufficiency_check.md</strong>：极简 JSON 契约 {is_sufficient, reasoning, missing_information[]}——充分性判定最小实现</li>
+<li><strong>sca_select.md</strong>（11.5K 最长）：Sufficient-Context 论文 autorater 判据+三段式评审+Q-CARE 子查询分解</li>
+<li><strong>related_question.md</strong>：相关问题推荐（产品功能，我们暂无）</li>
+<li><strong>rank_memory / summary4memory</strong>：记忆排序与整理</li>
+<li><strong>toc_relevance</strong>：LLM 挑相关章节（TOC 检索增强的 prompt 侧）</li>
+<li><strong>vision_llm_describe</strong>：图表描述（多模态）</li>
+</ul>
+<h2>迁移清单（对应蓝图项）</h2>
+<table>
+<thead>
+<tr>
+<th>技巧</th>
+<th>去处</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>citation 8 类必引+反例</td>
+<td>P0#3 KG answer.j2 引用编号</td>
+</tr>
+<tr>
+<td>相对日期锚定</td>
+<td>ChatBI 多轮（"查上月"→日期区间）</td>
+</tr>
+<tr>
+<td>question/query 双轨</td>
+<td>KG query.j2 升级候选</td>
+</tr>
+<tr>
+<td>八军规</td>
+<td>终局 SCA 检索护栏</td>
+</tr>
+<tr>
+<td>反思分级</td>
+<td>Agent 循环防膨胀（未来）</td>
+</tr>
+</tbody>
+</table>
+<h2>7. 入库增强 prompt 细节（第六轮考古）</h2>
+<ul>
+<li><strong>auto_keywords</strong>（keyword_prompt.md）："text analyzer，提取 top {{topn}} 重要关键词/短语，与原文同语言，英文逗号分隔，只输出关键词"——temperature=0.2，user 消息就是 "Output: "</li>
+<li><strong>auto_questions</strong>（question_prompt.md）："提出 {{topn}} 个问题，语义不重叠、尽量覆盖主要内容、同语言、一行一个、只输出问题"</li>
+<li>后处理：剥 <code>`` 围栏、含 **ERROR** 返回空；关键词按</code>[,，;；、\r\n]+` 切分进 important_kwd；问题按行切进 question_kwd</li>
+<li>限流：chat_limiter 并发 10；缓存 key 带用途标签（见 02 笔记 §5.6）</li>
+</ul>
+  </article>
+  <nav class="bottom">
+    <a href="10-安全与沙箱.html">← 10 · 安全与沙箱</a>
+    <a href="12-版本演进与避坑.html">12 · 版本演进与避坑 →</a>
+  </nav>
+</div>
+</body>
+</html>

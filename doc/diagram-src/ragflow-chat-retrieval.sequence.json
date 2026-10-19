@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "RAGFlow 对话检索时序：问句准备、混合检索与引用生成",
+    "output": "../RAGFlow项目学习/图/ragflow-chat-retrieval.html",
+    "locale": "zh-CN",
+    "viewBox": [
+      1020,
+      690
+    ],
+    "column_fit": "spread",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "query-prep",
+        "label": "问句准备",
+        "focus": [
+          "user",
+          "web",
+          "dialog",
+          "llm"
+        ],
+        "note": "多轮问句合成与关键词增强，发生在检索之前。"
+      },
+      {
+        "id": "hybrid-retrieval",
+        "label": "混合检索",
+        "focus": [
+          "dialog",
+          "search",
+          "engine",
+          "kg"
+        ],
+        "note": "向量+全文加权融合，可选 KGSearch 与 rerank。"
+      },
+      {
+        "id": "answer-cite",
+        "label": "生成与引用",
+        "focus": [
+          "dialog",
+          "llm",
+          "web",
+          "user"
+        ],
+        "note": "句级相似度插入 [ID:n]，chunks 坐标支撑回跳。"
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "用户",
+      "sublabel": "浏览器"
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Web 前端",
+      "sublabel": "chat UI"
+    },
+    {
+      "id": "dialog",
+      "type": "backend",
+      "label": "对话服务",
+      "sublabel": "dialog_service"
+    },
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "LLM",
+      "sublabel": "多提供商"
+    },
+    {
+      "id": "search",
+      "type": "backend",
+      "label": "检索器",
+      "sublabel": "nlp/search"
+    },
+    {
+      "id": "kg",
+      "type": "security",
+      "label": "KGSearch",
+      "sublabel": "graphrag"
+    },
+    {
+      "id": "engine",
+      "type": "database",
+      "label": "ES/Infinity",
+      "sublabel": "向量+BM25"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 264,
+      "label": "问句准备"
+    },
+    {
+      "from": 274,
+      "to": 506,
+      "label": "混合检索"
+    },
+    {
+      "from": 516,
+      "to": 612,
+      "label": "生成与引用"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m1",
+      "from": "user",
+      "to": "web",
+      "y": 160,
+      "label": "提问",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m2",
+      "from": "web",
+      "to": "dialog",
+      "y": 190,
+      "label": "chat（SSE）"
+    },
+    {
+      "id": "m3",
+      "from": "dialog",
+      "to": "llm",
+      "y": 222,
+      "label": "full_question 多轮合成"
+    },
+    {
+      "id": "m4",
+      "from": "llm",
+      "to": "dialog",
+      "y": 252,
+      "label": "完整问句",
+      "variant": "return"
+    },
+    {
+      "id": "m5",
+      "from": "dialog",
+      "to": "llm",
+      "y": 288,
+      "label": "关键词抽取 + 跨语言增强"
+    },
+    {
+      "id": "m6",
+      "from": "llm",
+      "to": "dialog",
+      "y": 318,
+      "label": "关键词",
+      "variant": "return"
+    },
+    {
+      "id": "m7",
+      "from": "dialog",
+      "to": "search",
+      "y": 348,
+      "label": "retrieval 混合检索",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m8",
+      "from": "search",
+      "to": "engine",
+      "y": 378,
+      "label": "向量 0.3 + 全文 0.7"
+    },
+    {
+      "id": "m9",
+      "from": "engine",
+      "to": "search",
+      "y": 408,
+      "label": "候选块",
+      "variant": "return"
+    },
+    {
+      "id": "m10",
+      "from": "search",
+      "to": "kg",
+      "y": 438,
+      "label": "KGSearch（可选）",
+      "variant": "dashed"
+    },
+    {
+      "id": "m11",
+      "from": "kg",
+      "to": "search",
+      "y": 468,
+      "label": "实体/关系/社区块",
+      "variant": "return"
+    },
+    {
+      "id": "m12",
+      "from": "search",
+      "to": "dialog",
+      "y": 498,
+      "label": "chunks + doc_aggs",
+      "variant": "return"
+    },
+    {
+      "id": "m13",
+      "from": "dialog",
+      "to": "llm",
+      "y": 530,
+      "label": "生成答案 + 引用插入 [ID:n]"
+    },
+    {
+      "id": "m14",
+      "from": "dialog",
+      "to": "web",
+      "y": 560,
+      "label": "SSE 答案 + 引用",
+      "variant": "return"
+    },
+    {
+      "id": "m15",
+      "from": "web",
+      "to": "user",
+      "y": 590,
+      "label": "点引用回跳原文",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "web",
+      "from": 178,
+      "to": 598,
+      "type": "frontend"
+    },
+    {
+      "participant": "dialog",
+      "from": 180,
+      "to": 572,
+      "type": "backend"
+    },
+    {
+      "participant": "llm",
+      "from": 216,
+      "to": 260,
+      "type": "cloud"
+    },
+    {
+      "participant": "llm",
+      "from": 282,
+      "to": 324,
+      "type": "cloud"
+    },
+    {
+      "participant": "search",
+      "from": 340,
+      "to": 505,
+      "type": "backend"
+    },
+    {
+      "participant": "kg",
+      "from": 430,
+      "to": 475,
+      "type": "security"
+    },
+    {
+      "participant": "engine",
+      "from": 370,
+      "to": 415,
+      "type": "database"
+    },
+    {
+      "participant": "llm",
+      "from": 524,
+      "to": 566,
+      "type": "cloud"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "检索前问句工程",
+      "items": [
+        "full_question 把多轮上下文合成完整问句（rag/prompts/generator.py:256）",
+        "keyword_extraction + cross_languages 在检索前完成（dialog_service.py:736-745）",
+        "问句准备与检索解耦，任何检索器复用同一套问句"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "混合检索",
+      "items": [
+        "向量与全文加权融合，默认向量 0.3/全文 0.7（vector_similarity_weight，search.py:602），ES 侧取候选后本地重排（search.py:498-523）",
+        "空结果自动放宽阈值复查（:273-293）；rerank 可选且禁分页（:631）",
+        "KGSearch 结果作为伪块 insert(0) 与普通结果并列（dialog_service.py:783-789）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "引用与回跳",
+      "items": [
+        "句级 embedding+token 混合相似度自动插 [ID:n]（nlp/search.py:316-393）",
+        "chunk 携带 doc_id/kb_id/positions 坐标（:764-782）",
+        "前端点引用跳原文高亮位置",
+        "延伸阅读：《笔记/02-检索链路与引擎.md》"
+      ]
+    }
+  ]
+}

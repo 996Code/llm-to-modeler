@@ -1,0 +1,342 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "前端独立模式主界面：布局组装与交互链路",
+    "output": "../frontend/frontend-standalone.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "fork",
+        "label": "入口分岔与组装",
+        "focus": [
+          "app",
+          "hostport",
+          "layout",
+          "history"
+        ],
+        "note": "isEmbedded 判定选择 StandaloneLayout；独立态 HostPort 降级为 NullHostPort。"
+      },
+      {
+        "id": "chat",
+        "label": "发送与结果分流",
+        "focus": [
+          "send",
+          "sse",
+          "cards",
+          "rewind"
+        ],
+        "note": "SSE 事件流到四类卡片的渲染往返另见 frontend-sse-render 图。"
+      },
+      {
+        "id": "inspect",
+        "label": "制品面板与链路追踪",
+        "focus": [
+          "panel",
+          "diff",
+          "token",
+          "trace"
+        ],
+        "note": "diff 基线、版本回滚与按轮次的链路追踪查看。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "入口与模式分岔"
+    },
+    {
+      "id": "layout",
+      "label": "独立布局组装"
+    },
+    {
+      "id": "chat",
+      "label": "聊天区交互"
+    },
+    {
+      "id": "trace",
+      "label": "链路追踪"
+    },
+    {
+      "id": "panel",
+      "label": "制品面板"
+    }
+  ],
+  "phases": [
+    {
+      "id": "entry_phase",
+      "label": "入口与组装",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "dialog",
+      "label": "对话与分流",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "inspect",
+      "label": "查看与交互",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "app",
+    "layout",
+    "send",
+    "sse",
+    "cards",
+    "panel",
+    "diff"
+  ],
+  "nodes": [
+    {
+      "id": "app",
+      "lane": "entry",
+      "col": 0,
+      "type": "frontend",
+      "label": "App.vue 入口",
+      "sublabel": "模式判定",
+      "width": 120
+    },
+    {
+      "id": "hostport",
+      "lane": "entry",
+      "col": 1,
+      "type": "security",
+      "label": "NullHostPort",
+      "sublabel": "独立态降级",
+      "width": 140
+    },
+    {
+      "id": "layout",
+      "lane": "layout",
+      "col": 1,
+      "type": "frontend",
+      "label": "StandaloneLayout",
+      "sublabel": "三栏布局组装",
+      "width": 150
+    },
+    {
+      "id": "history",
+      "lane": "layout",
+      "col": 2,
+      "type": "database",
+      "label": "会话侧栏",
+      "sublabel": "恢复/懒创建",
+      "width": 120
+    },
+    {
+      "id": "send",
+      "lane": "chat",
+      "col": 2,
+      "type": "frontend",
+      "label": "ChatInput 发送",
+      "sublabel": "sendMessage",
+      "width": 130
+    },
+    {
+      "id": "sse",
+      "lane": "chat",
+      "col": 3,
+      "type": "cloud",
+      "label": "SSE 流式渲染",
+      "sublabel": "渲染链另图",
+      "width": 130
+    },
+    {
+      "id": "cards",
+      "lane": "chat",
+      "col": 4,
+      "type": "frontend",
+      "label": "结果卡片分流",
+      "sublabel": "配置/数据/追问/错误",
+      "width": 140
+    },
+    {
+      "id": "rewind",
+      "lane": "chat",
+      "col": 5,
+      "type": "backend",
+      "label": "版本回滚",
+      "sublabel": "git 式切制品",
+      "width": 130
+    },
+    {
+      "id": "panel",
+      "lane": "panel",
+      "col": 4,
+      "type": "frontend",
+      "label": "ResultPanel",
+      "sublabel": "数据/配置视图自适应",
+      "width": 140
+    },
+    {
+      "id": "diff",
+      "lane": "panel",
+      "col": 5,
+      "type": "database",
+      "label": "JsonDiffView",
+      "sublabel": "红删绿增 diff",
+      "width": 130
+    },
+    {
+      "id": "token",
+      "lane": "trace",
+      "col": 3,
+      "type": "messagebus",
+      "label": "轮末回填",
+      "sublabel": "LLM·token 常显",
+      "width": 130
+    },
+    {
+      "id": "trace",
+      "lane": "trace",
+      "col": 5,
+      "type": "external",
+      "label": "TurnTraceModal",
+      "sublabel": "本轮链路时间线",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "app-layout",
+      "from": "app",
+      "to": "layout",
+      "label": "非嵌入",
+      "variant": "emphasis"
+    },
+    {
+      "id": "app-hostport",
+      "from": "app",
+      "to": "hostport",
+      "label": "getHostPort",
+      "variant": "default"
+    },
+    {
+      "id": "layout-history",
+      "from": "layout",
+      "to": "history",
+      "label": "点历史会话",
+      "variant": "default"
+    },
+    {
+      "id": "layout-send",
+      "from": "layout",
+      "to": "send",
+      "label": "输入消息",
+      "variant": "emphasis"
+    },
+    {
+      "id": "send-sse",
+      "from": "send",
+      "to": "sse",
+      "label": "api.chat",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sse-cards",
+      "from": "sse",
+      "to": "cards",
+      "label": "result 分流",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cards-panel",
+      "from": "cards",
+      "to": "panel",
+      "label": "store 状态驱动",
+      "variant": "emphasis"
+    },
+    {
+      "id": "panel-diff",
+      "from": "panel",
+      "to": "diff",
+      "label": "配置视图",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cards-rewind",
+      "from": "cards",
+      "to": "rewind",
+      "label": "回滚到此版本",
+      "variant": "default"
+    },
+    {
+      "id": "cards-trace",
+      "from": "cards",
+      "to": "trace",
+      "label": "本轮链路",
+      "variant": "default"
+    },
+    {
+      "id": "cards-token",
+      "from": "cards",
+      "to": "token",
+      "label": "轮末",
+      "variant": "dashed"
+    },
+    {
+      "id": "hostport-cards",
+      "from": "hostport",
+      "to": "cards",
+      "label": "无 apply 能力",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "模式分岔（App.vue:23 · stores/conversation.ts:93）",
+      "items": [
+        "isEmbedded = URL 带 embed=true 或 window.parent≠window（stores/conversation.ts:93-96）",
+        "独立态 getHostPort 返回 NullHostPort：connected=false、无 apply 能力（composables/hostPort.ts:315-358）",
+        "挂载即 loadConversations() 拉历史会话；INIT 握手仅嵌入态走（App.vue:54-78）"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "三栏组装与懒创建（layouts/StandaloneLayout.vue:16-71）",
+      "items": [
+        "248px 会话侧栏（新建/切换/删除）+ ChatPanel 聊天区 + 40% ResultPanel 制品栏",
+        "新建对话只重置本地不落库，会话 id 由首条消息 result 事件回传（stores/conversation.ts:191-196,295-298）",
+        "点历史会话：dataArtifact 同构合成 formattedData，刷新后图表卡不消失（stores/conversation.ts:151-176）"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "结果交互与回滚（components/chat/ChatPanel.vue:120-240）",
+      "items": [
+        "config 卡与 data 卡互斥分流；独立模式无 apply 能力→「复制 JSON」逃生口（ChatPanel.vue:167-180）",
+        "回滚=git checkout 式只切制品：对话保留、diff 基线取切换前版本（ChatPanel.vue:730-761）",
+        "独立模式 diff 基线兜底为上一份 AI 产出（stores/conversation.ts:369-372）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "链路追踪与 token 回填（components/chat/TurnTraceModal.vue）",
+      "items": [
+        "数据来自 GET /api/conversations/{id}/trace?turn=N——引擎级打点，任何 pack 可用（TurnTraceModal.vue:60,111）",
+        "轮次=该消息前的 user 消息数，与后端 _build_trace 同口径（ChatPanel.vue:557-568）",
+        "assistant 制品快照不进时间线，只留过程性活动（TurnTraceModal.vue:133-135）",
+        "轮末 streaming→false 拉单轮 trace：消息卡回填 LLM 次数/token，输入框累计常显（ChatPanel.vue:828-851）"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "制品面板（components/json/ResultPanel.vue · JsonDiffView.vue）",
+      "items": [
+        "有数据制品默认数据视图，数据/配置并存可切换（ResultPanel.vue:123-128）",
+        "JsonDiffView：2 缩进序列化 + LCS 行级 diff，红删绿增/双侧行号/增删统计（JsonDiffView.vue:52-64）",
+        "复制/下载走浏览器原生 API；「应用」按钮仅嵌入模式渲染（ResultPanel.vue:27,160-176）"
+      ]
+    }
+  ]
+}

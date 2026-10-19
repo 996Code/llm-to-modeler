@@ -1,0 +1,275 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "njmind_list 插件：列表页配置 AI 生成",
+    "output": "../pack/pack-njmind-list.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main",
+        "label": "生成管线",
+        "focus": [
+          "guide",
+          "existing",
+          "parse",
+          "templates",
+          "generate",
+          "validate"
+        ],
+        "note": "指南与画布上下文 → 意图解析 → 模板匹配 → 草稿生成 → SQL 子管线与校验。"
+      },
+      {
+        "id": "sql",
+        "label": "SQL 子管线",
+        "focus": [
+          "generate",
+          "validate"
+        ],
+        "note": "SQL 位 @sql: 占位在 validate 前走 njmind_form 契约重生成。"
+      },
+      {
+        "id": "gate",
+        "label": "确认门",
+        "focus": [
+          "parse",
+          "datasource"
+        ],
+        "note": "数据源缺口结构化追问，__ 前缀头确定性回填。"
+      },
+      {
+        "id": "host",
+        "label": "宿主契约",
+        "focus": [
+          "host_ctx",
+          "repair"
+        ],
+        "note": "artifact 通道回退与重生成回环。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "generate_list 六步"
+    },
+    {
+      "id": "policy",
+      "label": "子管线与确认门",
+      "variant": "exception"
+    },
+    {
+      "id": "host",
+      "label": "宿主契约"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ctx",
+      "label": "上下文装配",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "gen",
+      "label": "草稿生成",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "out",
+      "label": "校验与回显",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "guide",
+    "existing",
+    "parse",
+    "templates",
+    "generate",
+    "validate"
+  ],
+  "nodes": [
+    {
+      "id": "guide",
+      "lane": "main",
+      "col": 0,
+      "type": "database",
+      "label": "fetch_guide",
+      "sublabel": "列表配置指南·字段目录",
+      "width": 180
+    },
+    {
+      "id": "existing",
+      "lane": "main",
+      "col": 1,
+      "type": "database",
+      "label": "fetch_existing",
+      "sublabel": "画布当前列表配置",
+      "width": 160
+    },
+    {
+      "id": "parse",
+      "lane": "main",
+      "col": 2,
+      "type": "cloud",
+      "label": "parse_intents",
+      "sublabel": "LLM 解析配置意图",
+      "tag": "LLM",
+      "width": 150
+    },
+    {
+      "id": "templates",
+      "lane": "main",
+      "col": 3,
+      "type": "database",
+      "label": "fetch_templates",
+      "sublabel": "列/按钮模板匹配",
+      "width": 160
+    },
+    {
+      "id": "generate",
+      "lane": "main",
+      "col": 4,
+      "type": "cloud",
+      "label": "generate",
+      "sublabel": "LLM 生成列表草稿",
+      "tag": "LLM",
+      "width": 150
+    },
+    {
+      "id": "validate",
+      "lane": "main",
+      "col": 5,
+      "type": "security",
+      "label": "validate 校验",
+      "sublabel": "SQL 子管线 · 权威校验",
+      "width": 170
+    },
+    {
+      "id": "datasource",
+      "lane": "policy",
+      "col": 2,
+      "type": "messagebus",
+      "label": "数据源确认门",
+      "sublabel": "结构化追问·确定性回填",
+      "width": 190
+    },
+    {
+      "id": "repair",
+      "lane": "policy",
+      "col": 4,
+      "type": "messagebus",
+      "label": "重生成回环",
+      "sublabel": "机械 ≤4 轮 · 重生成 ≤3",
+      "width": 170
+    },
+    {
+      "id": "host_ctx",
+      "lane": "host",
+      "col": 0,
+      "type": "database",
+      "label": "artifact 通道回退",
+      "sublabel": "INIT 配置 → source_artifact",
+      "width": 200
+    }
+  ],
+  "edges": [
+    {
+      "id": "guide-existing",
+      "from": "guide",
+      "to": "existing",
+      "variant": "default"
+    },
+    {
+      "id": "existing-parse",
+      "from": "existing",
+      "to": "parse",
+      "variant": "default"
+    },
+    {
+      "id": "parse-templates",
+      "from": "parse",
+      "to": "templates",
+      "variant": "default"
+    },
+    {
+      "id": "templates-generate",
+      "from": "templates",
+      "to": "generate",
+      "variant": "default"
+    },
+    {
+      "id": "generate-validate",
+      "from": "generate",
+      "to": "validate",
+      "variant": "emphasis"
+    },
+    {
+      "id": "parse-datasource",
+      "from": "parse",
+      "to": "datasource",
+      "label": "数据源缺口",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "validate-repair",
+      "from": "validate",
+      "to": "repair",
+      "label": "校验失败",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "repair-generate",
+      "from": "repair",
+      "to": "generate",
+      "label": "带错误重跑",
+      "variant": "emphasis",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "六步管线（generate_list.py:156-165）",
+      "items": [
+        "fetch_guide → fetch_existing → parse_intents → fetch_templates → generate → validate",
+        "单一重造回显语义（对齐 BPM 裁决）：生成/修改/重做统一走 generate_list，无 create/update 分流",
+        "重生成 MAX_RETRIES=3，绝不静默失败；机械修复 ≤MAX_MECHANICAL_ROUNDS 轮"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "SQL 过滤子管线（generate_list.py:36-37 复用 _sql_contract）",
+      "items": [
+        "三个 SQL 配置位的 @sql: 占位（及 LLM 违规直写的真 SQL 文本）一律走 njmind_form sql_generate 子管线重生成",
+        "check_sql_fragment 跨 pack 复用：相对年份 EXTRACT/表别名拒绝/MyBatis 标签拒绝（njmind_form/tools/_sql_contract.py）",
+        "本列表数据源字段即 #{} 占位符键空间，own_keys 与 target_columns 同源"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "数据源确认门（generate_list.py:53 起）",
+      "items": [
+        "数据源缺口 → 结构化追问（__ 前缀追问头：apply_field_answers/意图解析均跳过 __ 键）",
+        "宿主 FIELDS 目录驱动候选；回填确定性，不过 LLM"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "宿主 artifact 通道回退（generate_list.py:68-95）",
+      "items": [
+        "UI 聊天路径：designer 每条消息组 context.artifact={config, fields} → tool_state.source_artifact（BPM 同款制品通道）",
+        "artifact 防御性解包：{config, fields} 形态 / config 本体两种兜底",
+        "router 只覆写 build_prompt 不覆写 route（继承元组契约）；list_chat 兜底注册最前"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,431 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "njmind_form 插件：表单生成、增量修改与脚本生成",
+    "output": "../pack/pack-njmind-form.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "create",
+        "label": "生成链",
+        "focus": [
+          "guide",
+          "assets",
+          "fields",
+          "templates",
+          "generate",
+          "validate"
+        ],
+        "note": "从资产列表到配置制品的六步生成。"
+      },
+      {
+        "id": "modify",
+        "label": "增量修改",
+        "focus": [
+          "source",
+          "catalog",
+          "ops",
+          "apply"
+        ],
+        "note": "两相式增量修改与全量升格。"
+      },
+      {
+        "id": "repair",
+        "label": "修复回环",
+        "focus": [
+          "generate",
+          "validate",
+          "repair"
+        ],
+        "note": "本地机械修复与 LLM 重试。"
+      },
+      {
+        "id": "script",
+        "label": "脚本生成",
+        "focus": [
+          "mark",
+          "s_catalog",
+          "s_locate",
+          "s_generate",
+          "s_check",
+          "s_out"
+        ],
+        "note": "字段权限 JS 与过滤 SQL：标记分流 + locate→generate→check 三步管线。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "create",
+      "label": "create_form 六步"
+    },
+    {
+      "id": "modify",
+      "label": "modify_form 两相式"
+    },
+    {
+      "id": "policy",
+      "label": "修复与升格",
+      "variant": "exception"
+    },
+    {
+      "id": "script",
+      "label": "脚本工具三步管线"
+    }
+  ],
+  "phases": [
+    {
+      "id": "collect",
+      "label": "资产与字段",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "gen",
+      "label": "生成与校验",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "out",
+      "label": "制品产出",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "guide",
+    "assets",
+    "fields",
+    "templates",
+    "generate",
+    "validate"
+  ],
+  "nodes": [
+    {
+      "id": "guide",
+      "lane": "create",
+      "col": 0,
+      "type": "backend",
+      "label": "fetch_guide",
+      "sublabel": "失败让用户刷新",
+      "width": 130
+    },
+    {
+      "id": "assets",
+      "lane": "create",
+      "col": 1,
+      "type": "database",
+      "label": "list_assets",
+      "sublabel": "资产清单",
+      "width": 130
+    },
+    {
+      "id": "fields",
+      "lane": "create",
+      "col": 2,
+      "type": "backend",
+      "label": "parse_fields",
+      "sublabel": "LLM 抽取字段",
+      "tag": "LLM",
+      "width": 130
+    },
+    {
+      "id": "templates",
+      "lane": "create",
+      "col": 3,
+      "type": "database",
+      "label": "fetch_templates",
+      "sublabel": "类型无模板 fail-closed",
+      "width": 160
+    },
+    {
+      "id": "generate",
+      "lane": "create",
+      "col": 4,
+      "type": "cloud",
+      "label": "generate",
+      "sublabel": "LLM 生成配置",
+      "tag": "LLM",
+      "width": 130
+    },
+    {
+      "id": "validate",
+      "lane": "create",
+      "col": 5,
+      "type": "security",
+      "label": "validate",
+      "sublabel": "投影 + 机械修复循环",
+      "width": 150
+    },
+    {
+      "id": "source",
+      "lane": "modify",
+      "col": 0,
+      "type": "database",
+      "label": "source_artifact",
+      "sublabel": "基线配置",
+      "width": 140
+    },
+    {
+      "id": "catalog",
+      "lane": "modify",
+      "col": 1,
+      "type": "backend",
+      "label": "build_catalog",
+      "sublabel": "字段目录",
+      "width": 130
+    },
+    {
+      "id": "ops",
+      "lane": "modify",
+      "col": 2,
+      "type": "backend",
+      "label": "LLM 输出 ops 指令集",
+      "sublabel": "add/update/remove",
+      "width": 160
+    },
+    {
+      "id": "apply",
+      "lane": "modify",
+      "col": 3,
+      "type": "backend",
+      "label": "apply_ops",
+      "sublabel": "确定性合并",
+      "width": 130
+    },
+    {
+      "id": "repair",
+      "lane": "policy",
+      "col": 4,
+      "type": "messagebus",
+      "label": "重试回环",
+      "sublabel": "≤4 轮机械 + ≤3 轮 LLM",
+      "width": 160
+    },
+    {
+      "id": "full",
+      "lane": "policy",
+      "col": 2,
+      "type": "security",
+      "label": "全量升格",
+      "sublabel": "锚点失败 → 升格全量",
+      "width": 140
+    },
+    {
+      "id": "mark",
+      "lane": "script",
+      "col": 0,
+      "type": "security",
+      "label": "标记分流",
+      "sublabel": "[script:js/sql] 零 LLM",
+      "width": 150
+    },
+    {
+      "id": "s_catalog",
+      "lane": "script",
+      "col": 1,
+      "type": "database",
+      "label": "build_field_catalog",
+      "sublabel": "递归字段目录蒸馏",
+      "width": 170
+    },
+    {
+      "id": "s_locate",
+      "lane": "script",
+      "col": 2,
+      "type": "backend",
+      "label": "locate 定位",
+      "sublabel": "pack_params / LLM 兜底",
+      "width": 160
+    },
+    {
+      "id": "s_generate",
+      "lane": "script",
+      "col": 3,
+      "type": "cloud",
+      "label": "generate",
+      "sublabel": "LLM 生成 JS/SQL",
+      "tag": "LLM",
+      "width": 140
+    },
+    {
+      "id": "s_check",
+      "lane": "script",
+      "col": 4,
+      "type": "security",
+      "label": "check 校验",
+      "sublabel": "结构+白名单",
+      "width": 130
+    },
+    {
+      "id": "s_out",
+      "lane": "script",
+      "col": 5,
+      "type": "backend",
+      "label": "产物/诚实丢弃",
+      "sublabel": "达限丢弃不谎称",
+      "width": 150
+    }
+  ],
+  "edges": [
+    {
+      "id": "guide-assets",
+      "from": "guide",
+      "to": "assets",
+      "variant": "default"
+    },
+    {
+      "id": "assets-fields",
+      "from": "assets",
+      "to": "fields",
+      "variant": "default"
+    },
+    {
+      "id": "fields-templates",
+      "from": "fields",
+      "to": "templates",
+      "variant": "default"
+    },
+    {
+      "id": "templates-generate",
+      "from": "templates",
+      "to": "generate",
+      "variant": "default"
+    },
+    {
+      "id": "generate-validate",
+      "from": "generate",
+      "to": "validate",
+      "variant": "emphasis"
+    },
+    {
+      "id": "validate-repair",
+      "from": "validate",
+      "to": "repair",
+      "label": "校验失败",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "repair-generate",
+      "from": "repair",
+      "to": "generate",
+      "label": "带错误重跑",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "source-catalog",
+      "from": "source",
+      "to": "catalog",
+      "variant": "default"
+    },
+    {
+      "id": "catalog-ops",
+      "from": "catalog",
+      "to": "ops",
+      "variant": "default"
+    },
+    {
+      "id": "ops-apply",
+      "from": "ops",
+      "to": "apply",
+      "label": "≤3 次尝试",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ops-full",
+      "from": "ops",
+      "to": "full",
+      "label": "升格条件",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "mark-catalog",
+      "from": "mark",
+      "to": "s_catalog",
+      "variant": "default"
+    },
+    {
+      "id": "catalog-locate",
+      "from": "s_catalog",
+      "to": "s_locate",
+      "variant": "default"
+    },
+    {
+      "id": "locate-generate",
+      "from": "s_locate",
+      "to": "s_generate",
+      "variant": "default"
+    },
+    {
+      "id": "sgen-scheck",
+      "from": "s_generate",
+      "to": "s_check",
+      "variant": "emphasis"
+    },
+    {
+      "id": "scheck-sgen",
+      "from": "s_check",
+      "to": "s_generate",
+      "label": "失败重试≤2",
+      "variant": "security",
+      "role": "return"
+    },
+    {
+      "id": "scheck-sout",
+      "from": "s_check",
+      "to": "s_out",
+      "label": "通过",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "生成链（create_form.py:70-457）",
+      "items": [
+        "六步：guide → assets → fields → templates → generate → validate",
+        "字段缺失 needsClarification 追问，resume 合并 clarify_answers",
+        "类型无模板 fail-closed 追问，不猜模板"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "两相式增量修改（modify_form.py:297-328）",
+      "items": [
+        "增量主路径：目录 → LLM 只输出 ops 指令集 → 确定性合并",
+        "OPS_MAX_ATTEMPTS=3；锚点失败超限/不可解析升格全量",
+        "diff 对齐键 fieldTitleKey，config 制品支持 view/apply/rewind"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "修复回环",
+      "items": [
+        "validate 投影 + 本地机械修复循环 ≤4 轮不烧 LLM",
+        "机械修复耗尽 → 带错误与当前配置递归重跑 generate（≤3）",
+        "传输类失败短路，不进重试"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "脚本生成链（generate_js_script.py:105 / generate_filter_sql.py:82）",
+      "items": [
+        "router 按 [script:js]/[script:sql] 标记确定性分流，零 LLM 路由（router.py:39-43）",
+        "locate→generate→check 三步：pack_params 显式定位（弹框零 LLM），悬浮窗 LLM 兜底",
+        "JS 工具 5 个字段权限 slot + 12 个扩展 Profile（字段事件/外链/按钮 7 类/列表 4 类含自定义渲染），URL 类 Profile 有可执行链接门禁（_script_common.py:34-113、generate_js_script.py:50,75）",
+        "目录蒸馏每字段一行，SELECT 选项映射与 ID 串值形态必进目录（_script_common.py:208-258）",
+        "SQL 契约独立成层（_sql_contract.py:26-62，njmind_list 跨 pack 复用）：白名单 + 宏白名单 + 三库黑名单 + 相对年份 EXTRACT + 表别名/MyBatis 标签拒绝",
+        "三契约硬化：相对年份(当年/去年/近3年)强制 EXTRACT(YEAR FROM CURRENT_TIMESTAMP) 动态写法、片段必须裸列名禁表别名前缀、XML 转义比较符（generate_filter_sql.py:72-101）",
+        "check 失败带原因重试 ≤2，达上限诚实丢弃——未过校验不谎称已生成"
+      ]
+    }
+  ]
+}

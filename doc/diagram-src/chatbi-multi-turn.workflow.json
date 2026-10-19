@@ -1,0 +1,290 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ChatBI 多轮对话链：澄清、上下文继承与图表切换",
+    "output": "../chatbi-multi-turn.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "inherit",
+        "label": "上下文继承",
+        "focus": [
+          "ask_data",
+          "history",
+          "session",
+          "generate"
+        ],
+        "note": "多轮间 prev_* 与历史注入。"
+      },
+      {
+        "id": "clarify",
+        "label": "澄清往返",
+        "focus": [
+          "ask_data",
+          "table_confirm",
+          "resume",
+          "seed"
+        ],
+        "note": "表确认澄清与 resume 消费。"
+      },
+      {
+        "id": "switch",
+        "label": "图表切换",
+        "focus": [
+          "switch_chart",
+          "prev_sql",
+          "revalidate"
+        ],
+        "note": "复用上轮 SQL 的重校验重执行。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "turn",
+      "label": "轮次执行"
+    },
+    {
+      "id": "state",
+      "label": "会话记忆（state_scope=chatbi）"
+    },
+    {
+      "id": "policy",
+      "label": "澄清挂起",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "load",
+      "label": "上下文装配",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "run",
+      "label": "本轮执行",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "write",
+      "label": "记忆写回",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "ask_data",
+    "history",
+    "generate",
+    "writeback"
+  ],
+  "nodes": [
+    {
+      "id": "ask_data",
+      "lane": "turn",
+      "col": 0,
+      "type": "backend",
+      "label": "ask_data",
+      "sublabel": "本轮问题",
+      "width": 130
+    },
+    {
+      "id": "history",
+      "lane": "turn",
+      "col": 1,
+      "type": "database",
+      "label": "history_text 注入",
+      "sublabel": "多轮对话历史",
+      "width": 150
+    },
+    {
+      "id": "session",
+      "lane": "state",
+      "col": 1,
+      "type": "database",
+      "label": "session_state 读取",
+      "sublabel": "prev_sql / tables / filters",
+      "width": 170
+    },
+    {
+      "id": "generate",
+      "lane": "turn",
+      "col": 2,
+      "type": "cloud",
+      "label": "生成增强",
+      "sublabel": "上轮筛选 + 记忆注入",
+      "tag": "LLM",
+      "width": 140
+    },
+    {
+      "id": "writeback",
+      "lane": "state",
+      "col": 3,
+      "type": "database",
+      "label": "session 写回",
+      "sublabel": "prev_sql / tables / filters",
+      "width": 170
+    },
+    {
+      "id": "table_confirm",
+      "lane": "policy",
+      "col": 2,
+      "type": "security",
+      "label": "表确认澄清",
+      "sublabel": "clarify_kind=table_confirm",
+      "width": 150
+    },
+    {
+      "id": "resume",
+      "lane": "policy",
+      "col": 3,
+      "type": "messagebus",
+      "label": "resume 消费",
+      "sublabel": "clarify_answers 注入",
+      "width": 140
+    },
+    {
+      "id": "seed",
+      "lane": "turn",
+      "col": 3,
+      "type": "backend",
+      "label": "clarified_table 种子",
+      "sublabel": "跳过检索直接用",
+      "width": 150
+    },
+    {
+      "id": "switch_chart",
+      "lane": "turn",
+      "col": 4,
+      "type": "frontend",
+      "label": "switch_chart",
+      "sublabel": "换饼图/柱状图",
+      "width": 140
+    },
+    {
+      "id": "prev_sql",
+      "lane": "state",
+      "col": 5,
+      "type": "database",
+      "label": "prev_sql 复用",
+      "sublabel": "持久化查询",
+      "width": 140
+    },
+    {
+      "id": "revalidate",
+      "lane": "turn",
+      "col": 5,
+      "type": "security",
+      "label": "重校验重执行",
+      "sublabel": "不盲信历史 SQL",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "askdata-history",
+      "from": "ask_data",
+      "to": "history",
+      "variant": "default"
+    },
+    {
+      "id": "history-generate",
+      "from": "history",
+      "to": "generate",
+      "variant": "default"
+    },
+    {
+      "id": "session-generate",
+      "from": "session",
+      "to": "generate",
+      "label": "prev_* 注入",
+      "variant": "emphasis"
+    },
+    {
+      "id": "generate-writeback",
+      "from": "generate",
+      "to": "writeback",
+      "label": "finalize 写回",
+      "variant": "emphasis"
+    },
+    {
+      "id": "generate-tableconfirm",
+      "from": "generate",
+      "to": "table_confirm",
+      "label": "表多且无种子",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "tableconfirm-resume",
+      "from": "table_confirm",
+      "to": "resume",
+      "label": "用户选表",
+      "variant": "default"
+    },
+    {
+      "id": "resume-seed",
+      "from": "resume",
+      "to": "seed",
+      "label": "clarified_table",
+      "variant": "emphasis"
+    },
+    {
+      "id": "seed-generate",
+      "from": "seed",
+      "to": "generate",
+      "label": "跳过检索",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "id": "switchchart-prevsql",
+      "from": "switch_chart",
+      "to": "prev_sql",
+      "label": "取上轮 SQL",
+      "variant": "default"
+    },
+    {
+      "id": "prevsql-revalidate",
+      "from": "prev_sql",
+      "to": "revalidate",
+      "label": "重过三层校验",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "多轮继承（ask_data.py:88-104）",
+      "items": [
+        "history_text 注入多轮对话历史，保留指代上下文",
+        "prev_tables / prev_filters / prev_chart_config 经 session_state 跨轮传递",
+        "state_scope=chatbi 与 switch_chart 共享同一记忆空间"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "澄清往返",
+      "items": [
+        "表多且无种子 → table_confirm 澄清，选项 = 全量表清单",
+        "resume 时 clarified_table 直接作种子，跳过向量检索",
+        "结果异常澄清：原样展示 / adjust_hint 修一次"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "图表切换（switch_chart.py:50-80）",
+      "items": [
+        "复用 prev_sql 而非重新生成，省 LLM 调用",
+        "对持久化 SQL 重过三层校验——不盲信历史输入",
+        "重执行后走同一图表渲染路径"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,385 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "RAGFlow v0.27.2 组件架构",
+    "output": "../RAGFlow项目学习/图/ragflow-system.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "request-path",
+        "label": "问答请求链路",
+        "focus": [
+          "users",
+          "web",
+          "api",
+          "engine",
+          "mysql"
+        ],
+        "note": "用户请求从前端到混合索引与元数据的主路径。"
+      },
+      {
+        "id": "ingestion-path",
+        "label": "文档导入链路",
+        "focus": [
+          "api",
+          "redis",
+          "executor",
+          "deepdoc",
+          "minio",
+          "engine"
+        ],
+        "note": "任务经 Redis Streams 进入执行器，解析切块后写入索引。"
+      },
+      {
+        "id": "model-obs",
+        "label": "模型与观测",
+        "focus": [
+          "llm",
+          "executor",
+          "deepdoc",
+          "redis"
+        ],
+        "note": "LLM 多提供商调用；OTel/Jaeger 追踪在 compose 内独立容器。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "LLM 提供商",
+      "sublabel": "chat / 嵌入 / 重排",
+      "pos": [
+        40,
+        110
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "tag": "40+ 适配"
+    },
+    {
+      "id": "redis",
+      "type": "messagebus",
+      "label": "Redis",
+      "sublabel": "任务队列 + 缓存",
+      "pos": [
+        230,
+        110
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "executor",
+      "type": "backend",
+      "label": "Task Executor ×N",
+      "sublabel": "任务执行器",
+      "pos": [
+        440,
+        110
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "worker 回收"
+    },
+    {
+      "id": "deepdoc",
+      "type": "backend",
+      "label": "DeepDoc 模型",
+      "sublabel": "OCR / 版面 / TSR",
+      "pos": [
+        680,
+        110
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "tag": "本地推理"
+    },
+    {
+      "id": "users",
+      "type": "external",
+      "label": "用户",
+      "sublabel": "浏览器 / API",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Web 前端",
+      "sublabel": "React + nginx",
+      "pos": [
+        230,
+        300
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "API Server",
+      "sublabel": "Flask :9380",
+      "pos": [
+        440,
+        300
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "engine",
+      "type": "database",
+      "label": "ES / Infinity",
+      "sublabel": "向量 + BM25 索引",
+      "pos": [
+        660,
+        300
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "tag": "可插拔"
+    },
+    {
+      "id": "mcp",
+      "type": "backend",
+      "label": "MCP Server",
+      "sublabel": ":9382（可选）",
+      "pos": [
+        230,
+        490
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "mysql",
+      "type": "database",
+      "label": "MySQL",
+      "sublabel": "元数据 / 任务",
+      "pos": [
+        440,
+        490
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "minio",
+      "type": "database",
+      "label": "MinIO",
+      "sublabel": "文档原件",
+      "pos": [
+        660,
+        490
+      ],
+      "size": [
+        140,
+        60
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Docker Compose 集群（docker/docker-compose*.yml）",
+      "wraps": [
+        "web",
+        "api",
+        "engine",
+        "redis",
+        "executor",
+        "deepdoc",
+        "mcp",
+        "mysql",
+        "minio"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "users-web",
+      "from": "users",
+      "to": "web",
+      "label": "HTTPS",
+      "variant": "emphasis"
+    },
+    {
+      "id": "web-api",
+      "from": "web",
+      "to": "api",
+      "label": "REST / SSE"
+    },
+    {
+      "id": "api-engine",
+      "from": "api",
+      "to": "engine",
+      "label": "混合检索",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": -26
+    },
+    {
+      "id": "api-redis",
+      "from": "api",
+      "to": "redis",
+      "label": "XADD 任务",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDx": -30
+    },
+    {
+      "id": "redis-executor",
+      "from": "redis",
+      "to": "executor",
+      "label": "消费组领任务",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": 67
+    },
+    {
+      "id": "executor-deepdoc",
+      "from": "executor",
+      "to": "deepdoc",
+      "label": "版面 / OCR",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelDy": 70
+    },
+    {
+      "id": "executor-llm",
+      "from": "executor",
+      "to": "llm",
+      "label": "抽取 / 嵌入调用",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          520,
+          60
+        ],
+        [
+          115,
+          60
+        ]
+      ]
+    },
+    {
+      "id": "executor-engine",
+      "from": "executor",
+      "to": "engine",
+      "label": "写索引",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          520,
+          240
+        ],
+        [
+          735,
+          240
+        ]
+      ]
+    },
+    {
+      "id": "api-mysql",
+      "from": "api",
+      "to": "mysql",
+      "label": "元数据读写",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": -52,
+      "labelDy": 24
+    },
+    {
+      "id": "api-minio",
+      "from": "api",
+      "to": "minio",
+      "label": "上传原件",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [
+          620,
+          330
+        ],
+        [
+          620,
+          430
+        ],
+        [
+          730,
+          430
+        ]
+      ]
+    },
+    {
+      "id": "mcp-api",
+      "from": "mcp",
+      "to": "api",
+      "label": "内部 REST",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDx": -32
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "进程拓扑",
+      "items": [
+        "API Server 与 Task Executor 分离，entrypoint.sh 按 --workers 起 N 个执行器（docker/entrypoint.sh）",
+        "执行器自带 worker 回收（MAX_TASKS_PER_WORKER，task_executor.py:198）防 ONNX 内存累积",
+        "MCP / Admin / 沙箱执行器为可选进程；Agent 代码在沙箱执行器中运行"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "任务体系",
+      "items": [
+        "Redis Streams 消费组 + unacked 恢复迭代器（task_executor.py:247-263）",
+        "任务行落 MySQL、消息走 Redis；KB 级任务用假 doc_id fan-out（:149-161）",
+        "任务类型 13+：dataflow/raptor/graphrag/mindmap/wiki/skill/timeline…（:131-145）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "存储分工",
+      "items": [
+        "MySQL：document/task/chunk/dialog 等 40+ 表（api/db/db_models.py）",
+        "MinIO：文档原件；Redis：队列/缓存/锁；Jaeger：OTel 追踪",
+        "检索引擎可插拔：ES / Infinity / OpenSearch（rag/utils/ 连接器族）",
+        "延伸阅读：《笔记/01-架构与任务体系.md》"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,239 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RAGFlow 数据源连接器同步工作流：调度、指纹增量与删除清理",
+    "output": "../RAGFlow项目学习/图/ragflow-connector-sync.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "bind-schedule",
+        "label": "绑定与调度",
+        "focus": [
+          "bind",
+          "schedule",
+          "dispatch"
+        ],
+        "note": "连接器绑定知识库后由到期任务驱动。"
+      },
+      {
+        "id": "incremental",
+        "label": "指纹增量",
+        "focus": [
+          "dispatch",
+          "load_changes",
+          "upsert",
+          "done"
+        ],
+        "note": "fingerprint 相同直接跳过下载与重嵌。"
+      },
+      {
+        "id": "prune-rebuild",
+        "label": "删除与重建",
+        "focus": [
+          "prune",
+          "rebuild",
+          "done"
+        ],
+        "note": "远端删除对账清理；全量重建删旧再同步。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "config",
+      "label": "绑定配置"
+    },
+    {
+      "id": "sched",
+      "label": "任务调度"
+    },
+    {
+      "id": "sync",
+      "label": "增量同步"
+    },
+    {
+      "id": "cleanup",
+      "label": "清理与重建",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "triggering",
+      "label": "调度分发",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "syncing",
+      "label": "增量入库",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "housekeeping",
+      "label": "收尾",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "bind",
+    "schedule",
+    "dispatch",
+    "load_changes",
+    "upsert",
+    "done"
+  ],
+  "nodes": [
+    {
+      "id": "bind",
+      "lane": "config",
+      "col": 0,
+      "type": "frontend",
+      "label": "连接器绑定",
+      "sublabel": "Connector → Connector2Kb",
+      "width": 170
+    },
+    {
+      "id": "schedule",
+      "lane": "sched",
+      "col": 1,
+      "type": "messagebus",
+      "label": "到期调度",
+      "sublabel": "sync + prune 两类任务",
+      "width": 160
+    },
+    {
+      "id": "dispatch",
+      "lane": "sched",
+      "col": 2,
+      "type": "backend",
+      "label": "并发分发",
+      "sublabel": "asyncio.gather 独立进程",
+      "width": 160
+    },
+    {
+      "id": "load_changes",
+      "lane": "sync",
+      "col": 3,
+      "type": "cloud",
+      "label": "拉取变更",
+      "sublabel": "checkpoint + fingerprint 跳过",
+      "tag": "35+ 源",
+      "width": 180
+    },
+    {
+      "id": "upsert",
+      "lane": "sync",
+      "col": 4,
+      "type": "database",
+      "label": "稳定 ID 入库",
+      "sublabel": "hash(kb:conn:ext_id) 幂等",
+      "width": 170
+    },
+    {
+      "id": "prune",
+      "lane": "cleanup",
+      "col": 4,
+      "type": "security",
+      "label": "删除对账",
+      "sublabel": "快照比对清索引",
+      "width": 150
+    },
+    {
+      "id": "rebuild",
+      "lane": "cleanup",
+      "col": 5,
+      "type": "security",
+      "label": "全量重建",
+      "sublabel": "删旧文档+重排期",
+      "width": 150
+    },
+    {
+      "id": "done",
+      "lane": "sched",
+      "col": 5,
+      "type": "external",
+      "label": "完成回写",
+      "sublabel": "poll_range_end 水位",
+      "width": 150
+    }
+  ],
+  "edges": [
+    {
+      "from": "bind",
+      "to": "schedule",
+      "label": "保存配置",
+      "variant": "emphasis"
+    },
+    {
+      "from": "schedule",
+      "to": "dispatch",
+      "label": "到期任务"
+    },
+    {
+      "from": "dispatch",
+      "to": "load_changes",
+      "label": "35+ 连接器",
+      "variant": "emphasis"
+    },
+    {
+      "from": "load_changes",
+      "to": "upsert",
+      "label": "变更文档批次"
+    },
+    {
+      "from": "upsert",
+      "to": "done",
+      "label": "自动解析入库",
+      "variant": "emphasis"
+    },
+    {
+      "from": "schedule",
+      "to": "prune",
+      "label": "prune 任务",
+      "variant": "dashed"
+    },
+    {
+      "from": "schedule",
+      "to": "rebuild",
+      "label": "reindex",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "指纹增量",
+      "items": [
+        "列表 fingerprint 与已存 content_hash 相同则跳过 GetObject 下载与重嵌（sync_data_source.py:395-451）",
+        "首同步全量、后续按 poll_range 水位增量（docs/guides/data_source/add_to_knowledge_base_and_sync.md）",
+        "同步状态全量留痕 SyncLogs：docs/errors/poll_range 可审计（connector_service.py）"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "稳定文档 ID",
+      "items": [
+        "doc_id = hash128(kb_id:connector_id:external_id)，重跑更新原行而非复制（connector_service.py:66-104）",
+        "兼容两代历史 ID 派生，跨库碰撞拒绝写入（:89-104）",
+        "35+ 连接器统一 SyncBase 模板（checkpoint 迭代 + 批量 yield，sync_data_source.py:141）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "删除对账与重建",
+      "items": [
+        "开启 sync_deleted_files 时独立 prune 任务：取远端快照比对，删除端侧孤儿（sync_data_source.py:322-367）",
+        "rebuild：删该连接器全部文档后重新排期全量（connector_service.py:205-240）",
+        "独立 data_sync 进程轮询 due 任务并发执行（sync_data_source.py:2349-2379）",
+        "延伸阅读：《笔记/07-连接器与数据源同步.md》"
+      ]
+    }
+  ]
+}

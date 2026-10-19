@@ -1,0 +1,350 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "平台启动装配链：lifespan 流水线与 pack 装配事务",
+    "output": "../platform-startup-assembly.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "lifespan",
+        "label": "启动流水线",
+        "focus": [
+          "db",
+          "stores",
+          "llm",
+          "assemble",
+          "graph",
+          "serve"
+        ],
+        "note": "main.py lifespan 依次装配各组件。"
+      },
+      {
+        "id": "discovery",
+        "label": "插件发现",
+        "focus": [
+          "scan",
+          "discover",
+          "loadall"
+        ],
+        "note": "目录扫描到白名单过滤到依赖闸门。"
+      },
+      {
+        "id": "transaction",
+        "label": "装配事务",
+        "focus": [
+          "assemble",
+          "prepare",
+          "commit",
+          "finalize"
+        ],
+        "note": "Prepare / Commit / Post-commit 三段与回滚出口。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "lifespan",
+      "label": "main.py lifespan"
+    },
+    {
+      "id": "discovery",
+      "label": "插件发现"
+    },
+    {
+      "id": "assembly",
+      "label": "装配事务"
+    },
+    {
+      "id": "policy",
+      "label": "失败与回滚",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "infra",
+      "label": "基础设施",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "packs",
+      "label": "插件装配",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "serve",
+      "label": "服务就绪",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "db",
+    "stores",
+    "llm",
+    "assemble",
+    "graph",
+    "serve"
+  ],
+  "nodes": [
+    {
+      "id": "db",
+      "lane": "lifespan",
+      "col": 0,
+      "type": "database",
+      "label": "require_database_url",
+      "sublabel": "PG 必填 fail-closed",
+      "width": 150
+    },
+    {
+      "id": "stores",
+      "lane": "lifespan",
+      "col": 1,
+      "type": "backend",
+      "label": "Store 装配",
+      "sublabel": "conv/upstream/settings/tasks",
+      "width": 150
+    },
+    {
+      "id": "llm",
+      "lane": "lifespan",
+      "col": 2,
+      "type": "cloud",
+      "label": "LLMClient",
+      "sublabel": "限速器 + 本地向量",
+      "width": 140
+    },
+    {
+      "id": "assemble",
+      "lane": "lifespan",
+      "col": 3,
+      "type": "backend",
+      "label": "assemble_packs",
+      "sublabel": "装配事务",
+      "width": 140
+    },
+    {
+      "id": "graph",
+      "lane": "lifespan",
+      "col": 4,
+      "type": "backend",
+      "label": "build_graph",
+      "sublabel": "注入 registry/routers",
+      "width": 140
+    },
+    {
+      "id": "serve",
+      "lane": "lifespan",
+      "col": 5,
+      "type": "frontend",
+      "label": "开始服务",
+      "sublabel": "yield",
+      "width": 130
+    },
+    {
+      "id": "scan",
+      "lane": "discovery",
+      "col": 0,
+      "type": "messagebus",
+      "label": "scan_pack_dirs",
+      "sublabel": "含 pack.py 即 pack",
+      "width": 150
+    },
+    {
+      "id": "discover",
+      "lane": "discovery",
+      "col": 1,
+      "type": "messagebus",
+      "label": "discover_packs",
+      "sublabel": "PACKS_ENABLED 白名单",
+      "width": 150
+    },
+    {
+      "id": "loadall",
+      "lane": "discovery",
+      "col": 2,
+      "type": "messagebus",
+      "label": "load_all_packs",
+      "sublabel": "依赖闸门 + 工具查重",
+      "width": 150
+    },
+    {
+      "id": "prepare",
+      "lane": "assembly",
+      "col": 3,
+      "type": "security",
+      "label": "Prepare",
+      "sublabel": "staging + 临时路由展开",
+      "width": 130
+    },
+    {
+      "id": "commit",
+      "lane": "assembly",
+      "col": 4,
+      "type": "security",
+      "label": "Commit",
+      "sublabel": "引用替换 + 挂载",
+      "width": 130
+    },
+    {
+      "id": "finalize",
+      "lane": "assembly",
+      "col": 5,
+      "type": "security",
+      "label": "Finalize",
+      "sublabel": "start/unload 钩子",
+      "width": 130
+    },
+    {
+      "id": "rollback",
+      "lane": "policy",
+      "col": 4,
+      "type": "security",
+      "label": "快照回滚",
+      "sublabel": "_restore_runtime",
+      "width": 130
+    },
+    {
+      "id": "degraded",
+      "lane": "policy",
+      "col": 5,
+      "type": "messagebus",
+      "label": "degraded 模式",
+      "sublabel": "503 守卫 + 如实健康",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "db-stores",
+      "from": "db",
+      "to": "stores",
+      "variant": "default"
+    },
+    {
+      "id": "stores-llm",
+      "from": "stores",
+      "to": "llm",
+      "variant": "default"
+    },
+    {
+      "id": "llm-assemble",
+      "from": "llm",
+      "to": "assemble",
+      "variant": "default"
+    },
+    {
+      "id": "assemble-graph",
+      "from": "assemble",
+      "to": "graph",
+      "label": "成功",
+      "variant": "emphasis"
+    },
+    {
+      "id": "graph-serve",
+      "from": "graph",
+      "to": "serve",
+      "variant": "emphasis"
+    },
+    {
+      "id": "scan-discover",
+      "from": "scan",
+      "to": "discover",
+      "variant": "default"
+    },
+    {
+      "id": "discover-loadall",
+      "from": "discover",
+      "to": "loadall",
+      "variant": "default"
+    },
+    {
+      "id": "loadall-prepare",
+      "from": "loadall",
+      "to": "prepare",
+      "label": "全部失败 RuntimeError",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "prepare-commit",
+      "from": "prepare",
+      "to": "commit",
+      "label": "校验通过",
+      "variant": "emphasis"
+    },
+    {
+      "id": "commit-finalize",
+      "from": "commit",
+      "to": "finalize",
+      "label": "persist 成功",
+      "variant": "emphasis"
+    },
+    {
+      "id": "prepare-rollback",
+      "from": "prepare",
+      "to": "rollback",
+      "label": "Prepare/Commit 失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "rollback-degraded",
+      "from": "rollback",
+      "to": "degraded",
+      "label": "回滚失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "finalize-degraded",
+      "from": "finalize",
+      "to": "degraded",
+      "label": "finalize 失败保持新态",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "assemble-prepare",
+      "from": "assemble",
+      "to": "prepare",
+      "label": "进入事务",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "启动顺序（main.py:96-212）",
+      "items": [
+        "PG 必填 fail-closed，缺库直接拒绝启动",
+        "TaskManager.recover_on_startup 把遗留任务标 interrupted",
+        "PackState 优先级：状态文件 > PACKS_ENABLED env > 全发现"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "装配三段事务（pack_manager.py:76）",
+      "items": [
+        "Prepare：staging handlers + 临时 FastAPI 展开路由 + runtime_contract 校验",
+        "Commit：nodes.configure + app.state 引用替换 + commit_routes",
+        "Finalize：start/unload 钩子，仅 persist 成功后执行"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败语义",
+      "items": [
+        "Prepare/Commit 失败 → 快照回滚；回滚也失败 → AssemblyRollbackFailedError",
+        "PERSISTED 后 finalize 失败：保持新态 + degraded，不与磁盘分裂",
+        "degraded 后中间件对非 /health 请求 503，管理操作被拒"
+      ]
+    }
+  ]
+}

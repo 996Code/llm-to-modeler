@@ -1,0 +1,311 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "SDK 工具协议：钩子链、管线与 ToolResult 四态",
+  "output": "../sdk-tool-protocol.html",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "views": [
+   {
+    "id": "hooks",
+    "label": "钩子链",
+    "focus": [
+     "validate",
+     "preflight",
+     "execute",
+     "format"
+    ],
+    "note": "Engine 依次调用工具协议钩子。"
+   },
+   {
+    "id": "pipeline",
+    "label": "复合工具管线",
+    "focus": [
+     "execute",
+     "pipeline",
+     "clarify"
+    ],
+    "note": "CompositeTool 按步骤执行并支持追问挂起。"
+   },
+   {
+    "id": "result",
+    "label": "四态分流",
+    "focus": [
+     "result",
+     "config",
+     "data",
+     "error"
+    ],
+    "note": "ToolResult 产出后的引擎侧分流。"
+   }
+  ]
+ },
+ "lanes": [
+  {
+   "id": "engine",
+   "label": "Engine 调用方"
+  },
+  {
+   "id": "tool",
+   "label": "工具实现"
+  },
+  {
+   "id": "policy",
+   "label": "追问与恢复",
+   "variant": "exception"
+  },
+  {
+   "id": "out",
+   "label": "产出分流"
+  }
+ ],
+ "phases": [
+  {
+   "id": "pre",
+   "label": "前置校验",
+   "fromCol": 0,
+   "toCol": 1
+  },
+  {
+   "id": "run",
+   "label": "执行",
+   "fromCol": 2,
+   "toCol": 3,
+   "variant": "emphasis"
+  },
+  {
+   "id": "post",
+   "label": "产出",
+   "fromCol": 4,
+   "toCol": 5,
+   "variant": "dashed"
+  }
+ ],
+ "mainPath": [
+  "validate",
+  "preflight",
+  "execute",
+  "result",
+  "config"
+ ],
+ "nodes": [
+  {
+   "id": "validate",
+   "lane": "engine",
+   "col": 0,
+   "type": "security",
+   "label": "validate_input",
+   "sublabel": "语义校验",
+   "width": 140
+  },
+  {
+   "id": "preflight",
+   "lane": "engine",
+   "col": 1,
+   "type": "security",
+   "label": "preflight",
+   "sublabel": "执行前提 fail-fast",
+   "width": 130
+  },
+  {
+   "id": "execute",
+   "lane": "engine",
+   "col": 2,
+   "type": "backend",
+   "label": "execute(state, ctx)",
+   "sublabel": "ToolContext 注入",
+   "width": 150
+  },
+  {
+   "id": "format",
+   "lane": "engine",
+   "col": 3,
+   "type": "backend",
+   "label": "format_result 等",
+   "sublabel": "SSE·压缩·列表消费",
+   "width": 150
+  },
+  {
+   "id": "pipeline",
+   "lane": "tool",
+   "col": 2,
+   "type": "messagebus",
+   "label": "run_pipeline",
+   "sublabel": "_step_* 顺序 · D9 游标",
+   "width": 140
+  },
+  {
+   "id": "clarify",
+   "lane": "policy",
+   "col": 2,
+   "type": "security",
+   "label": "_need_clarify 挂起",
+   "sublabel": "AskSpec + _awaiting 归属",
+   "width": 150
+  },
+  {
+   "id": "resume",
+   "lane": "policy",
+   "col": 1,
+   "type": "messagebus",
+   "label": "clarify_answers",
+   "sublabel": "rerun 注入 · 幂等步跳过",
+   "width": 140
+  },
+  {
+   "id": "result",
+   "lane": "out",
+   "col": 3,
+   "type": "backend",
+   "label": "ToolResult",
+   "sublabel": "四态分流",
+   "width": 130
+  },
+  {
+   "id": "config",
+   "lane": "out",
+   "col": 5,
+   "type": "database",
+   "label": "artifact=config",
+   "sublabel": "存快照 + 应用按钮",
+   "width": 140
+  },
+  {
+   "id": "data",
+   "lane": "out",
+   "col": 4,
+   "type": "frontend",
+   "label": "artifact=data",
+   "sublabel": "数据卡片",
+   "width": 130
+  },
+  {
+   "id": "reply",
+   "lane": "out",
+   "col": 2,
+   "type": "frontend",
+   "label": "reply",
+   "sublabel": "闲聊回复",
+   "width": 120
+  },
+  {
+   "id": "error",
+   "lane": "policy",
+   "col": 4,
+   "type": "security",
+   "label": "error",
+   "sublabel": "error_for_llm",
+   "width": 120
+  }
+ ],
+ "edges": [
+  {
+   "id": "validate-preflight",
+   "from": "validate",
+   "to": "preflight",
+   "variant": "default"
+  },
+  {
+   "id": "preflight-execute",
+   "from": "preflight",
+   "to": "execute",
+   "label": "通过",
+   "variant": "emphasis"
+  },
+  {
+   "id": "execute-pipeline",
+   "from": "execute",
+   "to": "pipeline",
+   "label": "CompositeTool",
+   "variant": "default"
+  },
+  {
+   "id": "pipeline-clarify",
+   "from": "pipeline",
+   "to": "clarify",
+   "label": "字段缺失",
+   "variant": "security",
+   "role": "branch"
+  },
+  {
+   "id": "resume-pipeline",
+   "from": "resume",
+   "to": "pipeline",
+   "label": "rerun 重跑",
+   "variant": "emphasis",
+   "role": "return"
+  },
+  {
+   "id": "execute-format",
+   "from": "execute",
+   "to": "format",
+   "variant": "dashed"
+  },
+  {
+   "id": "execute-result",
+   "from": "execute",
+   "to": "result",
+   "label": "产出",
+   "variant": "emphasis"
+  },
+  {
+   "id": "result-config",
+   "from": "result",
+   "to": "config",
+   "label": "config 型",
+   "variant": "default"
+  },
+  {
+   "id": "result-data",
+   "from": "result",
+   "to": "data",
+   "label": "data 型",
+   "variant": "default"
+  },
+  {
+   "id": "result-reply",
+   "from": "result",
+   "to": "reply",
+   "label": "纯回复",
+   "variant": "default"
+  },
+  {
+   "id": "result-error",
+   "from": "result",
+   "to": "error",
+   "label": "失败",
+   "variant": "security",
+   "role": "error"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "协议钩子（tool.py:206-265）",
+   "items": [
+    "validate_input → preflight → execute 三段钩子链",
+    "format_result / summarize_artifact / title_for 供 SSE、压缩器、会话列表消费",
+    "ClarificationRaised 异常由引擎捕获统一转 ToolResult.ask"
+   ]
+  },
+  {
+   "dot": "rose",
+   "title": "管线恢复语义（tool.py:284-310）",
+   "items": [
+    "run_pipeline 入口自清 _need_clarify 恢复标记",
+    "pipeline_definition 事件先于步骤执行下发前端",
+    "_awaiting 私有标记区分 answers 归属，防交叉误消费"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "artifact 双类型",
+   "items": [
+    "config 型：存 config_snapshot、驱动「应用」按钮与 diff 对齐",
+    "data 型：只存消息、渲染数据卡片（chatbi 图表 / kg 子图）",
+    "handle_result 四态分流：error → reply → artifact → 兜底 error"
+   ]
+  }
+ ]
+}

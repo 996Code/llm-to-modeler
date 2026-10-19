@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 · 文档理解 DeepDoc · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>04 · 文档理解 DeepDoc</h1>
+  <p class="lead">RAGFlow 的文档解析子系统：版面识别、表格还原、OCR 与 8 个可插拔外部引擎。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  <div class="diagram"><div class="bar"><span>链路图：ragflow-doc-ingestion.html</span><a href="../图/ragflow-doc-ingestion.html" target="_blank">新窗口打开 ↗</a></div><iframe src="../图/ragflow-doc-ingestion.html" title="ragflow-doc-ingestion.html" loading="lazy"></iframe></div>
+  <article>
+<h1>04 · 文档理解 DeepDoc</h1>
+<blockquote>
+<p>RAGFlow 的文档解析子系统：版面识别、表格还原、OCR 与 8 个可插拔外部引擎。</p>
+</blockquote>
+<h2>1. 版面识别（deepdoc/vision/）</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-doc-ingestion.html]（parse-chunk 视图）</p>
+</blockquote>
+<ul>
+<li><strong>11 类 block 标签</strong>（layout_recognizer.py:34-46）：Text/Title/Figure/Figure caption/Table/Table caption/Header/Footer/Reference/Equation——图注/表注/公式独立分类</li>
+<li>footer/header/reference 判垃圾（:49）；乱码垃圾门 <code>(cid:N)</code> 模式有专项测试（test_layout_garbage_gate.py）</li>
+<li>YOLOv10 变体（LayoutRecognizer4YOLOv10，:189）</li>
+<li><strong>三态执行自适应</strong>：本地 ONNX（rag/res/deepdoc，HF 自动下载 InfiniFlow/deepdoc）→ 远程 TensorRT DLA 服务（DEEPDOC_URL）→ 昇腾 NPU InferSession（:52-66,289-290）——一套代码三端跑</li>
+</ul>
+<h2>2. 表格与 OCR</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-doc-ingestion.html]（parse-chunk 视图）</p>
+</blockquote>
+<ul>
+<li>TSR 表格结构还原：13 结构标签 Recognizer（table_structure_recognizer.py:30-45），行列合并→Markdown</li>
+<li>OCR：onnxruntime 自推理（ocr.py:32），非 Paddle 直接依赖；乱码检测自动降级</li>
+<li><strong>Excel 表格切块的列语义</strong>（rag/app/table.py）：多级表头解析（合并区域涉及前两行即判复杂表头，:22-37）→ 列名去重（:43-63）→ 每行一 chunk，列角色存进 chunk_data JSON（Infinity 下用 json_extract_string 查询，:563-617）——<strong>表格文档入知识库时保留列语义</strong>，对问数场景有直接参考价值</li>
+</ul>
+<h2>3. 18 个 parser：10 内部格式 + 8 外部引擎</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-doc-ingestion.html]（parse-chunk 视图）</p>
+</blockquote>
+<ul>
+<li>内部：pdf/docx/excel/html/markdown/ppt/txt/epub/json/figure</li>
+<li><strong>可插拔外部引擎</strong>：docling / mineru / mistral / monkeyocrv2 / opendataloader / paddleocr / somark / tcadp</li>
+<li>PDF 三路径：自研 RAGFlowPdfParser / PlainParser（pdf_parser.py:2070）/ VisionParser（:2091）</li>
+<li>naive 切块的 layout 引擎可插拔（DeepDOC/MinerU/Docling/Plain）</li>
+</ul>
+<h2>4. LLM 增强（入库前）</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-doc-ingestion.html]（index-compile 视图）</p>
+</blockquote>
+<ul>
+<li>auto_keywords/auto_questions：入库前 LLM 补关键词与"假设问题"（task_executor.py:477-535）——检索时能被"问题式查询"命中</li>
+<li>TOC 提取：run_toc_from_text+assign_toc_levels 产 toc_kwd chunk（含 ids 区间）</li>
+</ul>
+<h2>对我们的启示</h2>
+<ul>
+<li>我们 md/txt/pdf/docx 四格式<strong>升级不必自研视觉管线</strong>——接 MinerU/Docling 库即可获得版面+表格还原（RAGFlow 自己也把 8 个外部引擎做成可插拔）</li>
+<li>优先级：<strong>表格还原 &gt; 版面重排 &gt; OCR</strong>（njmind 业务文档以 Word/表格为主）</li>
+<li>auto_questions"假设问题"技巧可直接进我们 KG 入库链（提升问题式查询命中）</li>
+</ul>
+  </article>
+  <nav class="bottom">
+    <a href="03-GraphRAG与知识编译.html">← 03 · GraphRAG 与知识编译</a>
+    <a href="05-Agent画布与Agentic检索.html">05 · Agent 画布与 Agentic 检索 →</a>
+  </nav>
+</div>
+</body>
+</html>

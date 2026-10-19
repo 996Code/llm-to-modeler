@@ -1,0 +1,263 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ChatBI ask_data 七步查询管线",
+    "output": "../chatbi-query-chain.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main",
+        "label": "七步主链",
+        "focus": [
+          "resolve",
+          "retrieve",
+          "think",
+          "sql",
+          "exec",
+          "check"
+        ],
+        "note": "从数据源解析到图表生成的完整管线。"
+      },
+      {
+        "id": "clarify",
+        "label": "澄清出口",
+        "focus": [
+          "retrieve",
+          "check",
+          "clarify_r",
+          "clarify_c"
+        ],
+        "note": "两处 fail-closed 澄清挂起点。"
+      },
+      {
+        "id": "heal",
+        "label": "自愈回环",
+        "focus": [
+          "exec",
+          "heal"
+        ],
+        "note": "SQL 失败后的自愈重试循环。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "pipeline",
+      "label": "七步管线"
+    },
+    {
+      "id": "policy",
+      "label": "澄清与自愈",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "understand",
+      "label": "理解与检索",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "generate",
+      "label": "生成与执行",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "deliver",
+      "label": "校验与产出",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "resolve",
+    "retrieve",
+    "think",
+    "sql",
+    "exec",
+    "check"
+  ],
+  "nodes": [
+    {
+      "id": "resolve",
+      "lane": "pipeline",
+      "col": 0,
+      "type": "backend",
+      "label": "resolve_datasource",
+      "sublabel": "会话绑定 ds_id",
+      "width": 150
+    },
+    {
+      "id": "retrieve",
+      "lane": "pipeline",
+      "col": 1,
+      "type": "backend",
+      "label": "retrieve_schema",
+      "sublabel": "两阶段检索 + 图谱扩展",
+      "width": 160
+    },
+    {
+      "id": "think",
+      "lane": "pipeline",
+      "col": 2,
+      "type": "backend",
+      "label": "think",
+      "sublabel": "LLM 分析思路",
+      "width": 120
+    },
+    {
+      "id": "sql",
+      "lane": "pipeline",
+      "col": 3,
+      "type": "backend",
+      "label": "generate_sql",
+      "sublabel": "LLM + 三层校验 + fewshot",
+      "width": 170
+    },
+    {
+      "id": "exec",
+      "lane": "pipeline",
+      "col": 4,
+      "type": "database",
+      "label": "execute_sql",
+      "sublabel": "READ ONLY + LIMIT",
+      "width": 150
+    },
+    {
+      "id": "check",
+      "lane": "pipeline",
+      "col": 5,
+      "type": "security",
+      "label": "check → visualize",
+      "sublabel": "校验 + 图表 + 反哺",
+      "width": 150
+    },
+    {
+      "id": "clarify_r",
+      "lane": "policy",
+      "col": 1,
+      "type": "security",
+      "label": "澄清挂起",
+      "sublabel": "表确认 fail-closed",
+      "width": 140
+    },
+    {
+      "id": "clarify_c",
+      "lane": "policy",
+      "col": 5,
+      "type": "security",
+      "label": "结果异常澄清",
+      "sublabel": "原样 / 调整",
+      "width": 140
+    },
+    {
+      "id": "heal",
+      "lane": "policy",
+      "col": 4,
+      "type": "messagebus",
+      "label": "heal_sql 自愈",
+      "sublabel": "≤2 轮 + 熔断",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "resolve-retrieve",
+      "from": "resolve",
+      "to": "retrieve",
+      "variant": "default"
+    },
+    {
+      "id": "retrieve-think",
+      "from": "retrieve",
+      "to": "think",
+      "variant": "default"
+    },
+    {
+      "id": "think-sql",
+      "from": "think",
+      "to": "sql",
+      "variant": "default"
+    },
+    {
+      "id": "sql-exec",
+      "from": "sql",
+      "to": "exec",
+      "label": "校验通过",
+      "variant": "emphasis"
+    },
+    {
+      "id": "exec-check",
+      "from": "exec",
+      "to": "check",
+      "variant": "default"
+    },
+    {
+      "id": "retrieve-clarify",
+      "from": "retrieve",
+      "to": "clarify_r",
+      "label": "无召回",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "check-clarify",
+      "from": "check",
+      "to": "clarify_c",
+      "label": "异常",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "exec-heal",
+      "from": "exec",
+      "to": "heal",
+      "label": "执行失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "heal-exec",
+      "from": "heal",
+      "to": "exec",
+      "label": "重试",
+      "variant": "emphasis",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "管线步骤（ask_data.py:106-116）",
+      "items": [
+        "七步：resolve → retrieve → think → generate_sql → execute → check → visualize",
+        "LLM 调用 6 处：think / generate_sql / heal / chart / 检索精筛 / 记忆抽取",
+        "finalize 组装 artifact 并写回 prev_sql / prev_tables / prev_filters 会话记忆"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "三处澄清出口",
+      "items": [
+        "无召回 fail-closed：选项 = 全量表清单（table_confirm）",
+        "表多且无种子：要求用户指定种子表",
+        "结果异常：按原样展示 / 帮我调整（result_abnormal）"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "安全与自愈",
+      "items": [
+        "白名单列 = 全语义层，fail-closed 不放行未知列",
+        "执行层 READ ONLY 事务 + LIMIT 注入 + max_rows 截断",
+        "自愈只传错误类别不传原始 DB 错误，≤2 轮 + 三态熔断器"
+      ]
+    }
+  ]
+}

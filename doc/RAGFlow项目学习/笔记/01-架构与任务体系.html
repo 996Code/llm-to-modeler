@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 · 架构与任务体系 · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>01 · 架构与任务体系</h1>
+  <p class="lead">RAGFlow v0.27.2 的进程拓扑、任务执行、部署形态与&quot;解析/编译/编排统一内核&quot;设计。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  <div class="diagram"><div class="bar"><span>链路图：ragflow-system.html</span><a href="../图/ragflow-system.html" target="_blank">新窗口打开 ↗</a></div><iframe src="../图/ragflow-system.html" title="ragflow-system.html" loading="lazy"></iframe></div>
+  <article>
+<h1>01 · 架构与任务体系</h1>
+<blockquote>
+<p>RAGFlow v0.27.2 的进程拓扑、任务执行、部署形态与"解析/编译/编排统一内核"设计。
+配图：<code>../图/ragflow-system.html</code>（组件架构）、<code>../图/ragflow-doc-ingestion.html</code>（导入工作流）</p>
+</blockquote>
+<h2>1. 进程拓扑：慢工厂 + 快商店</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-system.html]（request-path 视图）</p>
+</blockquote>
+<p>RAGFlow 把系统切成两个节奏完全不同的部分：</p>
+<ul>
+<li><strong>Task Executor（慢工厂）</strong>：解析、切块、建图、编译全是重活。Redis Streams 消费组把任务派给 N 个可水平扩的执行器（<code>docker/entrypoint.sh --workers=N</code>）。执行器自带 <strong>worker 自杀式回收</strong>：每完成 MAX_TASKS_PER_WORKER 个任务就退出重启——ONNX 推理库内存池只增不减，重启是最可靠的回收（task_executor.py:185-198 注释明言）。</li>
+<li><strong>API Server（快商店）</strong>：Flask/Quart :9380，只做元数据、检索编排、对话生成，不碰重活。</li>
+<li>可选进程：MCP Server（:9382）、Admin Server、data_sync 同步进程、沙箱执行器（entrypoint.sh 选项）。</li>
+</ul>
+<p><strong>存储四件套</strong>：MySQL 元数据（37+ 表）、MinIO 文档原件、Redis 队列/缓存/锁、检索引擎可插拔（ES/Infinity/OpenSearch/OceanBase+SeekDB/GaussDB/SereneDB 七选一，settings.py:398-424）。Jaeger/OTel 可选 profile。</p>
+<h2>2. 任务执行器内部</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-system.html]（ingestion-path 视图）</p>
+</blockquote>
+<ul>
+<li><strong>领任务</strong>：collect() 先恢复同名 consumer 的 unacked 迭代器，再领新消息；取消任务直接 ack 丢弃（task_executor.py:247-297）</li>
+<li><strong>任务分发表</strong>：TASK_TYPE_TO_PIPELINE_TASK_TYPE 13+ 类——dataflow/raptor/graphrag/mindmap/memory/wiki/skill/structure_graph/structure_mindmap/timeline/session_graph/session_essence/structure（:131-145）</li>
+<li><strong>KB 级 fan-out</strong>：知识编译类任务用假 doc_id 哨兵 + doc_ids 列表（:149-161）——图谱不是特权公民，只是十几种"把文档编译成知识形态"任务之一</li>
+<li><strong>切块模板工厂</strong>：ParserType → 14 个切块模块（naive/qa/laws/paper/manual/resume/table/picture/audio/email/kg/tag…，:120-129）</li>
+<li><strong>进度上报</strong>：set_progress 单调更新 progress/progress_msg 写回 MySQL（:229-244）</li>
+<li><strong>心跳</strong>：report_status 上报 pending/lag/done/failed/current（:1870-1948）</li>
+</ul>
+<h2>3. 部署形态</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-system.html]（model-obs 视图）</p>
+</blockquote>
+<ul>
+<li>compose-base 服务：mysql/minio/redis/infinity/serenedb/oceanbase/seekdb/sandbox-executor-manager/jaeger/nats（v0.27.2 已含 Go 化过渡件）</li>
+<li>资源门槛：CPU≥4 核、RAM≥16GB、盘≥50GB；slim 镜像 1GB vs full 9GB（v0.22 起只发 slim）</li>
+<li>官方镜像仅 x86；Linux/arm64 的 Infinity 不支持（switch_doc_engine.md:18-20）</li>
+</ul>
+<h2>4. Go 主干：重写后的架构（未来形态）</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-system.html]（全图）</p>
+</blockquote>
+<p>main 分支已迁移 Go（Python 仅剩 prompts 与测试工具）：</p>
+<ul>
+<li>分层：cmd/（单 main 按 --mode 起 server/executor/syncer）→ router → handler → service → dao/engine；垂直模块：ingestion（解析流水线）、agent（画布）、rag/agentic-rag（搜索代理）、harness（agent 执行框架）、syncer、mcp、channels</li>
+<li><strong>Prompt 三层加载</strong>：外部 md 可改（service/load_prompt.go:56 运行时读+缓存）→ go:embed 内嵌兜底（internal/rag/prompts/templates.go:43）→ PromptLoader 接口注入（:65）——引擎代码与 prompt 解耦的范本</li>
+<li>任务设施：NATS JetStream 队列（自愈 consumer）；knowledge_compile 用 MySQL 行锁+claim token 竞争消费（详见 03 笔记 §7）</li>
+<li>retry 语义讲究：区分瞬态/客户端错误，流式已输出则不重试（agent.go:134-140）</li>
+</ul>
+<h2>5. rag/flow 数据流 DSL：三合一内核</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-doc-ingestion.html]（trigger 视图）</p>
+</blockquote>
+<p><code>Pipeline(Graph)</code> 直接继承画布引擎（rag/flow/pipeline.py:28）；<code>ProcessBase</code> 继承 agent 的 <code>ComponentBase</code>（base.py:33）——<strong>解析、编译、编排共用一个执行内核</strong>，组件族 chunker/compiler/extractor/parser/tokenizer。dataflow 任务驱动（task_executor.py:797 run_dataflow）。</p>
+<h2>对我们的启示</h2>
+<table>
+<thead>
+<tr>
+<th>RAGFlow 设计</th>
+<th>我们对应</th>
+<th>判定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Redis Streams + 消费组 + unacked</td>
+<td>线程池+queue_key+续跑（单进程）</td>
+<td>单实例契约是明示决策，等真实需求再扩（PG SKIP LOCKED 路线）</td>
+</tr>
+<tr>
+<td>worker 自杀式回收</td>
+<td>不需要（无本地 ONNX 长驻）</td>
+<td>记住手法即可</td>
+</tr>
+<tr>
+<td>假 doc_id fan-out</td>
+<td>pack 任务框架等价</td>
+<td>已有</td>
+</tr>
+<tr>
+<td>Prompt 三层加载</td>
+<td>j2 外部模板</td>
+<td>可加"管理页热改 prompt"（产品化方向）</td>
+</tr>
+<tr>
+<td>三合一内核</td>
+<td>不效仿</td>
+<td>无画布生态，收益不抵复杂度</td>
+</tr>
+</tbody>
+</table>
+<h2>6. 基础设施细节考古（第六轮）</h2>
+<ul>
+<li><strong>KB 级分布式锁</strong>（redis_conn.py:537-565）：key=graphrag_task_{kb_id}，TTL 1200s 无续期；acquire 先 Lua 原子删同值旧锁（幂等重入）再抢；release 用 delete_if_equal（值不匹配不删，防误删他人锁）；外层循环重试总超时 600s</li>
+<li><strong>progress_msg 截断</strong>（task_service.py:132-145）：上限 3000 字符（env 可覆盖）；超限从头丢弃整行直到剩余 ≤3000——按字符截、保行边界、<strong>留尾部最新日志</strong></li>
+<li><strong>并发闸门</strong>（task_executor_limiter.py）：MAX_CONCURRENT_TASKS=5/chunk=1/minio=10/kg=2；实现为 LoopLocalSemaphore（WeakKeyDictionary 按事件循环各建信号量）；超限纯排队不拒绝——task_limiter 在取任务前 acquire，<strong>占满即停止消费新任务（背压）</strong></li>
+</ul>
+  </article>
+  <nav class="bottom">
+    <a href="ragflow-benchmark-and-upgrade-plan.html">← RAGFlow 对标与三层升级蓝图</a>
+    <a href="02-检索链路与引擎.html">02 · 检索链路与引擎 →</a>
+  </nav>
+</div>
+</body>
+</html>

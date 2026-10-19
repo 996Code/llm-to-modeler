@@ -1,0 +1,296 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Prompt 装配链：Jinja2 模板与四级优先级",
+    "output": "../engine-prompt-loader.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "render",
+        "label": "模板渲染",
+        "focus": [
+          "pack_root",
+          "loader",
+          "render",
+          "cache"
+        ],
+        "note": "Jinja2 加载与 section 级缓存。"
+      },
+      {
+        "id": "assemble",
+        "label": "四级装配",
+        "focus": [
+          "assemble",
+          "override",
+          "sections",
+          "template"
+        ],
+        "note": "override 短路到 append 挂尾。"
+      },
+      {
+        "id": "inject",
+        "label": "注入链",
+        "focus": [
+          "lifespan",
+          "build_graph",
+          "ctx",
+          "tool_call"
+        ],
+        "note": "从装配到工具调用的注入路径。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "load",
+      "label": "模板加载"
+    },
+    {
+      "id": "assemble",
+      "label": "四级装配"
+    },
+    {
+      "id": "inject",
+      "label": "运行时注入"
+    }
+  ],
+  "phases": [
+    {
+      "id": "init",
+      "label": "初始化",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "build",
+      "label": "渲染与装配",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "use",
+      "label": "注入消费",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "pack_root",
+    "loader",
+    "render",
+    "assemble",
+    "sections",
+    "template"
+  ],
+  "nodes": [
+    {
+      "id": "pack_root",
+      "lane": "load",
+      "col": 0,
+      "type": "database",
+      "label": "packs_root",
+      "sublabel": "<pack>/prompts/*.j2",
+      "width": 150
+    },
+    {
+      "id": "loader",
+      "lane": "load",
+      "col": 1,
+      "type": "backend",
+      "label": "PromptLoader",
+      "sublabel": "Jinja2 + StrictUndefined",
+      "width": 160
+    },
+    {
+      "id": "render",
+      "lane": "load",
+      "col": 2,
+      "type": "backend",
+      "label": "render",
+      "sublabel": "tojson 保中文",
+      "width": 130
+    },
+    {
+      "id": "cache",
+      "lane": "load",
+      "col": 3,
+      "type": "database",
+      "label": "section 缓存",
+      "sublabel": "无变量 + cacheable",
+      "width": 140
+    },
+    {
+      "id": "assemble",
+      "lane": "assemble",
+      "col": 2,
+      "type": "backend",
+      "label": "assemble",
+      "sublabel": "四级优先级",
+      "width": 130
+    },
+    {
+      "id": "override",
+      "lane": "assemble",
+      "col": 3,
+      "type": "security",
+      "label": "0. override 短路",
+      "sublabel": "完全替换 · 纯文本",
+      "width": 150
+    },
+    {
+      "id": "sections",
+      "lane": "assemble",
+      "col": 4,
+      "type": "backend",
+      "label": "1. 静态 sections",
+      "sublabel": "依次渲染",
+      "width": 140
+    },
+    {
+      "id": "template",
+      "lane": "assemble",
+      "col": 5,
+      "type": "cloud",
+      "label": "2. 主模板",
+      "sublabel": "dynamic + append 挂尾",
+      "width": 130
+    },
+    {
+      "id": "lifespan",
+      "lane": "inject",
+      "col": 0,
+      "type": "backend",
+      "label": "main.lifespan",
+      "sublabel": "装配期创建",
+      "width": 140
+    },
+    {
+      "id": "build_graph",
+      "lane": "inject",
+      "col": 1,
+      "type": "backend",
+      "label": "build_graph",
+      "sublabel": "nodes.configure",
+      "width": 130
+    },
+    {
+      "id": "ctx",
+      "lane": "inject",
+      "col": 2,
+      "type": "security",
+      "label": "ToolContext 注入",
+      "sublabel": "绕过 frozen 挂载",
+      "width": 150
+    },
+    {
+      "id": "tool_call",
+      "lane": "inject",
+      "col": 3,
+      "type": "frontend",
+      "label": "工具调用",
+      "sublabel": "ctx.prompt_loader.render",
+      "width": 150
+    }
+  ],
+  "edges": [
+    {
+      "id": "packroot-loader",
+      "from": "pack_root",
+      "to": "loader",
+      "variant": "default"
+    },
+    {
+      "id": "loader-render",
+      "from": "loader",
+      "to": "render",
+      "variant": "default"
+    },
+    {
+      "id": "render-cache",
+      "from": "render",
+      "to": "cache",
+      "label": "可缓存段",
+      "variant": "dashed"
+    },
+    {
+      "id": "render-assemble",
+      "from": "render",
+      "to": "assemble",
+      "variant": "emphasis"
+    },
+    {
+      "id": "assemble-override",
+      "from": "assemble",
+      "to": "override",
+      "label": "有 override",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "assemble-sections",
+      "from": "assemble",
+      "to": "sections",
+      "label": "无 override",
+      "variant": "default"
+    },
+    {
+      "id": "sections-template",
+      "from": "sections",
+      "to": "template",
+      "variant": "default"
+    },
+    {
+      "id": "lifespan-buildgraph",
+      "from": "lifespan",
+      "to": "build_graph",
+      "variant": "default"
+    },
+    {
+      "id": "buildgraph-ctx",
+      "from": "build_graph",
+      "to": "ctx",
+      "label": "execute_tool 挂载",
+      "variant": "default"
+    },
+    {
+      "id": "ctx-toolcall",
+      "from": "ctx",
+      "to": "tool_call",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "模板加载（sdk/prompt_loader.py:117-127）",
+      "items": [
+        "Jinja2 Environment(FileSystemLoader(packs_root), StrictUndefined)",
+        "tojson 过滤器 ensure_ascii=False，中文不转义",
+        "目录约定：<pack>/prompts/*.j2 与 _sections/ 子目录"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "四级装配优先级（assemble:171-220）",
+      "items": [
+        "0. override 短路：完全替换，纯文本不走 Jinja2",
+        "1. 静态 sections 依次渲染 → 2. 主模板（dynamic 变量）",
+        "3. append 挂尾：纯文本追加；空段过滤，\\n\\n 分隔"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "缓存与注入",
+      "items": [
+        "section 级缓存：仅「无变量 + cacheable」缓存，有变量必重算",
+        "frontmatter 解析缓存；clear_cache 支持热更新",
+        "注入链：lifespan → build_graph → nodes.configure → ToolContext",
+        "工具侧无 prompt_loader 返回空串 + warning（降级不阻断）"
+      ]
+    }
+  ]
+}

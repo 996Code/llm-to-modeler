@@ -1,0 +1,309 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "平台任务中心：后台批量任务调度与可观测",
+    "output": "../platform/platform-task-center.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main",
+        "label": "主链",
+        "focus": [
+          "submit",
+          "pending",
+          "dispatch",
+          "run",
+          "report",
+          "final"
+        ],
+        "note": "提交 → 落库排队 → 串行派发 → 执行上报 → 终态收尾。"
+      },
+      {
+        "id": "cancel",
+        "label": "取消路径",
+        "focus": [
+          "cancel",
+          "checkpoint"
+        ],
+        "note": "pending 直落 cancelled；running 协作式取消。"
+      },
+      {
+        "id": "retry",
+        "label": "自动续跑",
+        "focus": [
+          "run",
+          "retry",
+          "requeue"
+        ],
+        "note": "5 分钟退避重入队，重试预算继承封顶。"
+      },
+      {
+        "id": "obs",
+        "label": "SSE 与恢复",
+        "focus": [
+          "report",
+          "events",
+          "recover"
+        ],
+        "note": "进度/日志双路上报与启动恢复。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "提交到终态"
+    },
+    {
+      "id": "obs",
+      "label": "SSE 与恢复"
+    },
+    {
+      "id": "ctrl",
+      "label": "取消与续跑",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "in",
+      "label": "提交与排队",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "exec",
+      "label": "调度执行与上报",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "out",
+      "label": "终态与恢复",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "submit",
+    "pending",
+    "dispatch",
+    "run",
+    "report",
+    "final"
+  ],
+  "nodes": [
+    {
+      "id": "submit",
+      "lane": "main",
+      "col": 0,
+      "type": "backend",
+      "label": "submit 提交",
+      "sublabel": "dedupe 同临界区防重",
+      "width": 140
+    },
+    {
+      "id": "pending",
+      "lane": "main",
+      "col": 1,
+      "type": "database",
+      "label": "create_task 落库",
+      "sublabel": "pending + FIFO 入队",
+      "width": 140
+    },
+    {
+      "id": "dispatch",
+      "lane": "main",
+      "col": 2,
+      "type": "backend",
+      "label": "dispatch 派发",
+      "sublabel": "queue_key 串行 · 并发≤2",
+      "width": 150
+    },
+    {
+      "id": "run",
+      "lane": "main",
+      "col": 3,
+      "type": "cloud",
+      "label": "handler 执行",
+      "sublabel": "_run + TaskHandle",
+      "tag": "LLM",
+      "width": 140
+    },
+    {
+      "id": "report",
+      "lane": "main",
+      "col": 4,
+      "type": "messagebus",
+      "label": "进度/日志上报",
+      "sublabel": "落库 + SSE 双路",
+      "width": 140
+    },
+    {
+      "id": "final",
+      "lane": "main",
+      "col": 5,
+      "type": "security",
+      "label": "终态收尾",
+      "sublabel": "释放键 · 派发下一个",
+      "width": 150
+    },
+    {
+      "id": "cancel",
+      "lane": "ctrl",
+      "col": 1,
+      "type": "backend",
+      "label": "cancel 请求",
+      "sublabel": "pending 直落 / running 置标志",
+      "width": 170
+    },
+    {
+      "id": "checkpoint",
+      "lane": "ctrl",
+      "col": 2,
+      "type": "security",
+      "label": "检查点自杀",
+      "sublabel": "抛 TaskCancelled → cancelled",
+      "width": 180
+    },
+    {
+      "id": "retry",
+      "lane": "ctrl",
+      "col": 3,
+      "type": "backend",
+      "label": "自动续跑判定",
+      "sublabel": "永久/致命错误不重试",
+      "width": 160
+    },
+    {
+      "id": "requeue",
+      "lane": "ctrl",
+      "col": 5,
+      "type": "database",
+      "label": "5min 退避重入队",
+      "sublabel": "retry_count 继承封顶",
+      "width": 160
+    },
+    {
+      "id": "recover",
+      "lane": "obs",
+      "col": 0,
+      "type": "database",
+      "label": "启动恢复",
+      "sublabel": "标 interrupted · 幂等重跑承接",
+      "width": 180
+    },
+    {
+      "id": "events",
+      "lane": "obs",
+      "col": 4,
+      "type": "messagebus",
+      "label": "SSE events 端点",
+      "sublabel": "snapshot→progress/log/status",
+      "width": 180
+    }
+  ],
+  "edges": [
+    {
+      "id": "submit-pending",
+      "from": "submit",
+      "to": "pending",
+      "variant": "default"
+    },
+    {
+      "id": "pending-dispatch",
+      "from": "pending",
+      "to": "dispatch",
+      "variant": "default"
+    },
+    {
+      "id": "dispatch-run",
+      "from": "dispatch",
+      "to": "run",
+      "variant": "default"
+    },
+    {
+      "id": "run-report",
+      "from": "run",
+      "to": "report",
+      "variant": "emphasis"
+    },
+    {
+      "id": "report-final",
+      "from": "report",
+      "to": "final",
+      "variant": "default"
+    },
+    {
+      "id": "cancel-checkpoint",
+      "from": "cancel",
+      "to": "checkpoint",
+      "label": "running 协作取消",
+      "variant": "default"
+    },
+    {
+      "id": "run-retry",
+      "from": "run",
+      "to": "retry",
+      "label": "失败且可续跑",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "retry-requeue",
+      "from": "retry",
+      "to": "requeue",
+      "variant": "default"
+    },
+    {
+      "id": "report-events",
+      "from": "report",
+      "to": "events",
+      "label": "推帧",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "提交与调度（task_manager.py:241-313）",
+      "items": [
+        "dedupe_key 检查+占位同一临界区——拆两段会 TOCTOU 双双落库（二次走查抓出的竞态）",
+        "queue_key 串行：同 key FIFO 串行（如同库导入不并发写图），无 key 互不阻塞",
+        "派发条件 = 串行键未占用 且 并发未满（TASK_WORKERS 默认 2）"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "执行与收尾（task_manager.py:315-383）",
+      "items": [
+        "_run 全程 try/finally：store 异常也必须释放串行键，否则该键后续任务永久 pending",
+        "TaskHandle.set_progress/log 持久化 + SSE 双路（task_manager.py:58-79）",
+        "终态监听者回调供 pack 释放提交期登记的资源（pending 期取消 finally 不生效，只能靠这里兜底）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "取消与自动续跑（task_manager.py:387-570）",
+      "items": [
+        "cancel：pending 直接落 cancelled；running 置标志等 handler 到检查点自杀；retry_scheduled 取消 = 撤销续跑计划",
+        "续跑 5 分钟固定退避；retry_count 继承封顶——否则恒定失败任务无限空转（线上实证 3 小时 10+ 轮）",
+        "永久性错误（PermanentTaskError）/致命 LLM 错误（欠费/鉴权）不重试"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "SSE 可观测与启动恢复（api/tasks.py:95-155 / task_store.py:263-285）",
+      "items": [
+        "GET /api/tasks/{id}/events：snapshot → progress/log/status + keepalive 保活",
+        "subscribe 先注册监听再拍快照保证不丢事件；满队丢帧按日志 id 游标补齐",
+        "recover_on_startup：遗留 pending/running 标 interrupted，不自动续跑，由 pack 幂等重跑承接",
+        "HTTP API 全集：列表 / 详情 / 日志回放 / 取消 / 类型清单（api/tasks.py:40-96）"
+      ]
+    }
+  ]
+}

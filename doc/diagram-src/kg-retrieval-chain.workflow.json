@@ -1,0 +1,328 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "knowledge_graph 检索链（详细）：知识库解析与混合检索",
+  "output": "../kg-retrieval-chain.html",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "views": [
+   {
+    "id": "resolve",
+    "label": "知识库解析",
+    "focus": [
+     "kb_search",
+     "priority",
+     "ask"
+    ],
+    "note": "六级优先级链确定目标知识库。"
+   },
+   {
+    "id": "hybrid",
+    "label": "混合检索",
+    "focus": [
+     "intent",
+     "graph_path",
+     "vector_path",
+     "fulltext_fallback",
+     "linearize"
+    ],
+    "note": "图谱路与向量路并行；图谱零命中时全文兜底。"
+   },
+   {
+    "id": "answer",
+    "label": "综合回答",
+    "focus": [
+     "linearize",
+     "answer",
+     "artifact"
+    ],
+    "note": "LLM 引用片段回答与制品。"
+   }
+  ]
+ },
+ "lanes": [
+  {
+   "id": "entry",
+   "label": "入口与解析"
+  },
+  {
+   "id": "retrieval",
+   "label": "混合检索"
+  },
+  {
+   "id": "out",
+   "label": "产出"
+  },
+  {
+   "id": "policy",
+   "label": "降级与追问",
+   "variant": "exception"
+  }
+ ],
+ "phases": [
+  {
+   "id": "resolve",
+   "label": "知识库确定",
+   "fromCol": 0,
+   "toCol": 1
+  },
+  {
+   "id": "retrieve",
+   "label": "三路检索",
+   "fromCol": 2,
+   "toCol": 4,
+   "variant": "emphasis"
+  },
+  {
+   "id": "compose",
+   "label": "综合",
+   "fromCol": 5,
+   "toCol": 5,
+   "variant": "dashed"
+  }
+ ],
+ "mainPath": [
+  "kb_search",
+  "priority",
+  "intent",
+  "graph_path",
+  "linearize",
+  "answer"
+ ],
+ "nodes": [
+  {
+   "id": "kb_search",
+   "lane": "entry",
+   "col": 0,
+   "type": "backend",
+   "label": "kb_search",
+   "sublabel": "七步管线入口",
+   "width": 130
+  },
+  {
+   "id": "priority",
+   "lane": "entry",
+   "col": 1,
+   "type": "security",
+   "label": "六级优先级链",
+   "sublabel": "显式>answers>记忆>默认>唯一>追问",
+   "width": 190
+  },
+  {
+   "id": "ask",
+   "lane": "policy",
+   "col": 1,
+   "type": "security",
+   "label": "多库追问",
+   "sublabel": "AskSpec 列表",
+   "width": 130
+  },
+  {
+   "id": "intent",
+   "lane": "retrieval",
+   "col": 2,
+   "type": "cloud",
+   "label": "意图解析",
+   "sublabel": "失败抛异常不降级",
+   "tag": "LLM",
+   "width": 140
+  },
+  {
+   "id": "graph_path",
+   "lane": "retrieval",
+   "col": 3,
+   "type": "database",
+   "label": "图谱路",
+   "sublabel": "find_entities + 子图",
+   "width": 150
+  },
+  {
+   "id": "vector_path",
+   "lane": "retrieval",
+   "col": 4,
+   "type": "database",
+   "label": "向量路",
+   "sublabel": "top-k + 父块去重",
+   "width": 150
+  },
+  {
+   "id": "linearize",
+   "lane": "policy",
+   "col": 4,
+   "type": "backend",
+   "label": "linearize_context",
+   "sublabel": "三元组+片段·D15 奇偶重排",
+   "width": 160
+  },
+  {
+   "id": "answer",
+   "lane": "out",
+   "col": 5,
+   "type": "cloud",
+   "label": "answer.j2 综合",
+   "sublabel": "answer.j2·D29 命中计数",
+   "tag": "LLM",
+   "width": 140
+  },
+  {
+   "id": "artifact",
+   "lane": "out",
+   "col": 4,
+   "type": "frontend",
+   "label": "data 制品",
+   "sublabel": "回答 + G6 子图卡",
+   "width": 140
+  },
+  {
+   "id": "vector_off",
+   "lane": "policy",
+   "col": 5,
+   "type": "messagebus",
+   "label": "纯图谱降级",
+   "sublabel": "向量路失败",
+   "width": 140
+  },
+  {
+   "id": "fulltext_fallback",
+   "lane": "policy",
+   "col": 3,
+   "type": "messagebus",
+   "label": "全文兜底",
+   "sublabel": "tsvector+GIN·并入 chunks 池",
+   "width": 190
+  },
+  {
+   "id": "calllog",
+   "lane": "out",
+   "col": 3,
+   "type": "database",
+   "label": "检索观测",
+   "sublabel": "逐词命中 + 截断水位",
+   "width": 150
+  }
+ ],
+ "edges": [
+  {
+   "id": "kbsearch-priority",
+   "from": "kb_search",
+   "to": "priority",
+   "variant": "default"
+  },
+  {
+   "id": "priority-ask",
+   "from": "priority",
+   "to": "ask",
+   "label": "多库无法确定",
+   "variant": "security",
+   "role": "branch"
+  },
+  {
+   "id": "priority-intent",
+   "from": "priority",
+   "to": "intent",
+   "label": "库确定",
+   "variant": "emphasis"
+  },
+  {
+   "id": "intent-graphpath",
+   "from": "intent",
+   "to": "graph_path",
+   "variant": "default"
+  },
+  {
+   "id": "graphpath-vectorpath",
+   "from": "graph_path",
+   "to": "vector_path",
+   "label": "vectorEnabled",
+   "variant": "default"
+  },
+  {
+   "id": "graphpath-fulltext",
+   "from": "graph_path",
+   "to": "fulltext_fallback",
+   "label": "种子零命中",
+   "variant": "security",
+   "role": "branch"
+  },
+  {
+   "id": "vectorpath-linearize",
+   "from": "vector_path",
+   "to": "linearize",
+   "variant": "default"
+  },
+  {
+   "id": "graphpath-linearize",
+   "from": "graph_path",
+   "to": "linearize",
+   "variant": "dashed",
+   "role": "branch"
+  },
+  {
+   "id": "vectorpath-vectoroff",
+   "from": "vector_path",
+   "to": "vector_off",
+   "label": "向量失败",
+   "variant": "security",
+   "role": "error",
+   "route": "auto"
+  },
+  {
+   "id": "vectoroff-linearize",
+   "from": "vector_off",
+   "to": "linearize",
+   "variant": "dashed",
+   "role": "return"
+  },
+  {
+   "id": "linearize-answer",
+   "from": "linearize",
+   "to": "answer",
+   "variant": "emphasis"
+  },
+  {
+   "id": "answer-artifact",
+   "from": "answer",
+   "to": "artifact",
+   "variant": "default"
+  },
+  {
+   "id": "graphpath-calllog",
+   "from": "graph_path",
+   "to": "calllog",
+   "label": "落 call_logs",
+   "variant": "dashed"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "知识库六级优先级（kb_search.py:109-175）",
+   "items": [
+    "显式指定 > clarify_answers > 会话记忆 > 宿主默认 > 唯一库自动 > 多库追问",
+    "绑定失效清记忆 + trace 记录",
+    "多库时 AskSpec 追问，不猜目标"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "混合检索（retrieval.py:105-332）",
+   "items": [
+    "LLM 意图解析失败直接抛异常（不静默降级）",
+    "图谱路：find_entities 三级降级 + subgraph_around BFS 逐跳限量",
+    "向量路：query embedding → top-k → 父块去重；失败降级纯图谱",
+    "全文兜底：图谱零命中时 kg_chunks tsvector+GIN（2-gram）补充召回，默认开；命中标 source=fulltext，与向量路同父块去重后并入 chunks 池",
+    "linearize_context：三元组 / 实体详情 / 片段，defang 反引号"
+   ]
+  },
+  {
+   "dot": "orange",
+   "title": "产出与观测",
+   "items": [
+    "answer.j2 LLM 综合回答，带 [片段N] 引用",
+    "artifact_type=data：回答摘要 + G6 子图卡",
+    "每次检索落 call_logs：逐词命中与截断水位"
+   ]
+  }
+ ]
+}

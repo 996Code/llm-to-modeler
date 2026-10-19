@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>08 · 记忆与上下文 · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>08 · 记忆与上下文</h1>
+  <p class="lead">会话记忆的生产/存储/消费/遗忘全链，与多轮上下文管理。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  <div class="diagram"><div class="bar"><span>链路图：ragflow-memory.html</span><a href="../图/ragflow-memory.html" target="_blank">新窗口打开 ↗</a></div><iframe src="../图/ragflow-memory.html" title="ragflow-memory.html" loading="lazy"></iframe></div>
+  <article>
+<h1>08 · 记忆与上下文</h1>
+<blockquote>
+<p>会话记忆的生产/存储/消费/遗忘全链，与多轮上下文管理。</p>
+</blockquote>
+<h2>1. 会话记忆体系（v0.23 引入，v0.24 Memory API）</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-memory.html]（produce 视图）</p>
+</blockquote>
+<p><strong>生产链</strong>：
+- 会话保存时异步投递 Redis 任务（memory_api_service.py:337 → memory_message_service.py:376）
+- task_executor 消费 → LLM 抽取 <strong>semantic/episodic/procedural 三类记忆</strong>（:445,107）
+- 抽取结果嵌入写入 message 检索索引（:214）——记忆本体不落 MySQL</p>
+<p><strong>存储双轨</strong>：
+- Memory 表（db_models.py:1810 起）：memory_type 位掩码（1/2/4）、forgetting_policy、memory_size、storage_type（table|graph）、embd_id/llm_id 独立配置
+- 本体进检索引擎与对话同引擎——记忆检索复用混合检索</p>
+<p><strong>消费与遗忘</strong>：
+- 对话时按相似度召回记忆注入上下文
+- 超 memory_size 按 <strong>FIFO 淘汰</strong>最旧记忆
+- 前端 memories 页面可视化（web/src/pages/memories）</p>
+<h2>2. 多轮上下文管理</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-memory.html]（store 视图）</p>
+</blockquote>
+<ul>
+<li><strong>full_question 多轮合成</strong>（generator.py:256）：把多轮对话压成完整独立问句再检索——检索器永远拿到自包含问题；相对日期锚定（{{today}}/{{yesterday}} 注入）</li>
+<li>API4Conversation 消息 JSON 内嵌（含 reference/dsl/round/thumb_up）——会话即审计轨迹</li>
+<li>画布侧：sys.conversation_turns 计数 + 每轮重置防脏值（canvas.py:539-549,576）</li>
+</ul>
+<h2>2.5 对话历史 token 窗口截断（终审补盲）</h2>
+<ul>
+<li><code>message_fit_in</code>（generator.py:69）：按 max_tokens×0.95 <strong>逐条从旧到新裁剪</strong>对话历史（dialog_service.py:840）——多轮上下文不是无限拼接，超窗先丢最旧消息</li>
+<li>对 ChatBI 多轮（"查上月→再查上月环比"）直接相关：历史裁剪策略决定 prev_sql/prev_tables 继承多少</li>
+</ul>
+<h2>3. chunk 级反馈回路（v0.27）</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-memory.html]（consume 视图）</p>
+</blockquote>
+<ul>
+<li>消息 thumbup/thumbdown（chat_api.py:1025）→ ChunkFeedbackService.apply_feedback <strong>按检索分加权</strong>调整 chunk 的 pagerank_fea(0-100)（chunk_feedback_service.py:115-141）</li>
+<li>CHUNK_FEEDBACK_ENABLED 默认关闭；点踩同时降 chunk 权重</li>
+<li>thumb_up 按日聚合于 stats_api.py:38-47</li>
+</ul>
+<h2>4. Go 主干记忆</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-memory.html]（全图）</p>
+</blockquote>
+<p>Memory API + harness/memory（agent 执行框架的记忆组件）；rank_memory prompt 对记忆排序。</p>
+<h2>对我们的启示</h2>
+<ul>
+<li><strong>ChatBI 反馈断头的现成修法</strong>：抄 chunk_feedback 模式——点赞/点踩按检索分加权微调表/字段置信度，开关默认关（蓝图 P2#14）</li>
+<li>三类记忆+遗忘策略：我们 compact_focus 规模暂不需要，记录在案</li>
+<li>full_question 相对日期锚定：ChatBI"查上月销量"多轮场景直接可用（候选增强，未入蓝图编号）</li>
+<li>fewshot 回流加确认门：RAGFlow 的 thumbup 通道证明"人工信号→权重微调"闭环可行且轻量</li>
+</ul>
+  </article>
+  <nav class="bottom">
+    <a href="07-连接器与数据源同步.html">← 07 · 连接器与数据源同步</a>
+    <a href="09-评测可观测与性能.html">09 · 评测、可观测与性能 →</a>
+  </nav>
+</div>
+</body>
+</html>

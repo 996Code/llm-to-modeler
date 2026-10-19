@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · GraphRAG 与知识编译 · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>03 · GraphRAG 与知识编译</h1>
+  <p class="lead">RAGFlow 的图谱构建、消歧、社区报告，以及&quot;知识编译&quot;统一体系。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  <div class="diagram"><div class="bar"><span>链路图：ragflow-graphrag.html</span><a href="../图/ragflow-graphrag.html" target="_blank">新窗口打开 ↗</a></div><iframe src="../图/ragflow-graphrag.html" title="ragflow-graphrag.html" loading="lazy"></iframe></div>
+  <article>
+<h1>03 · GraphRAG 与知识编译</h1>
+<blockquote>
+<p>RAGFlow 的图谱构建、消歧、社区报告，以及"知识编译"统一体系。</p>
+</blockquote>
+<h2>1. 三档抽取</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-graphrag.html]（extract-path 视图）</p>
+</blockquote>
+<ul>
+<li>general（MS GraphRAG 风）/ light（LightRAG，默认）/ ner（spaCy 免 LLM），_select_extractor 分发（general/index.py:122-138）</li>
+<li>两档 LLM 输出同构分隔符协议 <code>entity&lt;|&gt;名&lt;|&gt;类型&lt;|&gt;描述</code>，解析在 utils.py:344-387</li>
+<li>light prompt 要求 content_keywords 并禁止幻觉描述（light/graph_prompt.py:17-48）</li>
+<li>gleaning 追问循环（light/graph_extractor.py:88-104）</li>
+</ul>
+<h2>2. 合并与消歧</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-graphrag.html]（resolve-community 视图）</p>
+</blockquote>
+<ul>
+<li>同名节点 description/source_id 以 <code>&lt;SEP&gt;</code> 追加、边 weight 累加（utils.py:306-336）；整图 networkx 存成一个 chunk（knowledge_graph_kwd="graph"，:564-574）</li>
+<li><strong>消歧省钱技巧</strong>：同类型分桶 → Levenshtein/字符重合预筛（is_similarity，entity_resolution.py:275-289）→ 100 对/批 LLM 判同（:111,152）→ 连通分量合并（:166-187）→ 重算 pagerank</li>
+<li>关系清洗：负向判断正则+主语错配剔除（index.py:650-728）</li>
+</ul>
+<h2>3. 社区报告</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-graphrag.html]（resolve-community 视图）</p>
+</blockquote>
+<ul>
+<li>leiden 分层 → LLM 产 {title,summary,findings,rating,rating_explanation}（community_reports_extractor.py:70-160，校验 :144-153）→ community chunk 写入（index.py:937-967）</li>
+<li>检索按命中实体反查报告 top1（graphrag/search.py:277-295）</li>
+</ul>
+<h2>4. 降维索引与血缘</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-graphrag.html]（index-search 视图）</p>
+</blockquote>
+<ul>
+<li>实体/关系/社区报告全部 chunk 化，source_id 回指 doc_id（utils.py:414-446）</li>
+<li>available_int=0 使图谱块不进普通检索，检索请求强制放开（search.py:643）</li>
+<li>KGSearch：query_rewrite 抽类型/实体 → 实体向量+类型 pagerank 排序+关系向量+n-hop 路径，P(E|Q)=pagerank×sim（search.py:139-221）</li>
+</ul>
+<h2>5. 增量与删除</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-graphrag.html]（全图）</p>
+</blockquote>
+<ul>
+<li>每 doc 子图 checkpoint（index.py:209-253）+ KB 级 Redis 锁+阶段 marker 跳过已完成阶段（:461-474,601,630）</li>
+<li>删文档：软标记 removed_kwd="Y"（document_service.py:549-570）→ 按子图 rebuild_graph（utils.py:869-903），不全量重抽</li>
+<li>v0.26 社区抽取/实体消歧支持 checkpoint+resume（release notes："最贵最耗时环节"）</li>
+</ul>
+<h2>6. 知识编译统一体系（v0.27 的归宿）</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-graphrag.html]（全图）</p>
+</blockquote>
+<p>官方定义（docs/guides/knowledge_compilation/overview.md）：把非结构化文档按"编译模板"生成结构化知识工件——图谱/树/页索引/思维导图/时间线/知识页。</p>
+<ul>
+<li>wiki：MAP（逐 doc 抽行）→ KB 级 REDUCE → PLAN → REFINE，产出 wiki_page/wiki_entity/wiki_relation（dataset_wiki_generator.py:17-41）</li>
+<li>structure_graph/mindmap/timeline/session_graph：run_structure_merge 产出带 compile_kwd+from/to_entity_kwd 的实体/关系行（dataset_structure_merger.py:83-96）</li>
+<li>RAPTOR：<strong>相邻余弦相似度一维分水岭聚类</strong>（非 k-means，阈值百分位+ratio 上限，raptor.py:120），逐层聚类→LLM 摘要递归，≤8 节点塌缩防退化（:369），防死循环保护（:411）</li>
+<li>产品化：CompilationTemplate+Group（内置模板+用户模板组，db_models.py:1603 起）</li>
+<li><strong>演进教训</strong>：GraphRAG/RAPTOR 独立开关三度摇摆，v0.27 收编进编译体系并从 UI 移除旧入口（release_notes.md:95）——"模板+开关"是这类能力的最终形态</li>
+</ul>
+<h2>7. Go 主干的知识编译</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-graphrag.html]（全图）</p>
+</blockquote>
+<p>C++ ThincNER 做 NER/关系抽取（CGO+onnx，ner_extractor.go:17-24）；knowledge_compiler 产超图（tree/structure/wiki/mindmap 变体，scheduler.go:61）；MySQL 行锁+claim token 竞争消费（:103,295）。</p>
+<h2>对我们的启示</h2>
+<ul>
+<li>我们图质量管控（本体约束/原文锚定/三重接地/别名独占）RAGFlow 全无——护城河保持</li>
+<li>可抄：消歧预筛（省钱）、删文档子图重建（图谱瘦身）、社区报告（全局问题能力，做成<strong>可插拔编译通道</strong>）</li>
+<li>不抄：图谱降维 chunk 化（丧失图查询，我们场景是关系链问题）</li>
+</ul>
+  </article>
+  <nav class="bottom">
+    <a href="02-检索链路与引擎.html">← 02 · 检索链路与引擎</a>
+    <a href="04-文档理解DeepDoc.html">04 · 文档理解 DeepDoc →</a>
+  </nav>
+</div>
+</body>
+</html>

@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "会话与认证链：多租户隔离与 Token 签发",
+    "output": "../platform-session-auth.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1000,
+      760
+    ],
+    "views": [
+      {
+        "id": "auth",
+        "label": "Token 签发",
+        "focus": [
+          "client",
+          "auth_api"
+        ],
+        "note": "ADMIN_TOKEN 换签名 token。"
+      },
+      {
+        "id": "tenant",
+        "label": "多租户隔离",
+        "focus": [
+          "client",
+          "api",
+          "store",
+          "pg"
+        ],
+        "note": "X-User-Id 三级降级与服务端过滤。"
+      },
+      {
+        "id": "guard",
+        "label": "中间件校验",
+        "focus": [
+          "client",
+          "middleware",
+          "api"
+        ],
+        "note": "白名单与签名密钥轮换。"
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "前端",
+      "sublabel": "axios 拦截器"
+    },
+    {
+      "id": "middleware",
+      "type": "security",
+      "label": "中间件",
+      "sublabel": "AuthMiddleware"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "会话 API",
+      "sublabel": "conversations"
+    },
+    {
+      "id": "auth_api",
+      "type": "security",
+      "label": "auth 端点",
+      "sublabel": "/api/auth/token"
+    },
+    {
+      "id": "store",
+      "type": "backend",
+      "label": "Store",
+      "sublabel": "ConversationStore"
+    },
+    {
+      "id": "pg",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "行级隔离"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 300,
+      "label": "认证建立"
+    },
+    {
+      "from": 310,
+      "to": 540,
+      "label": "会话读写"
+    },
+    {
+      "from": 550,
+      "to": 700,
+      "label": "越权防护"
+    }
+  ],
+  "messages": [
+    {
+      "id": "login",
+      "from": "client",
+      "to": "auth_api",
+      "y": 170,
+      "label": "POST ADMIN_TOKEN",
+      "variant": "emphasis"
+    },
+    {
+      "id": "issue",
+      "from": "auth_api",
+      "to": "client",
+      "y": 200,
+      "label": "签名 token（24h）",
+      "variant": "return"
+    },
+    {
+      "id": "req",
+      "from": "client",
+      "to": "middleware",
+      "y": 250,
+      "label": "请求 + Authorization + X-User-Id",
+      "variant": "default"
+    },
+    {
+      "id": "verify",
+      "from": "middleware",
+      "to": "api",
+      "y": 320,
+      "label": "签名校验通过",
+      "variant": "emphasis"
+    },
+    {
+      "id": "list",
+      "from": "api",
+      "to": "store",
+      "y": 400,
+      "label": "list(user_id)",
+      "variant": "default"
+    },
+    {
+      "id": "query",
+      "from": "store",
+      "to": "pg",
+      "y": 430,
+      "label": "WHERE user_id 过滤",
+      "variant": "default"
+    },
+    {
+      "id": "rows",
+      "from": "pg",
+      "to": "client",
+      "y": 465,
+      "label": "仅本人会话",
+      "variant": "return"
+    },
+    {
+      "id": "get_other",
+      "from": "client",
+      "to": "api",
+      "y": 560,
+      "label": "GET 他人 conv_id",
+      "variant": "security"
+    },
+    {
+      "id": "check_owner",
+      "from": "api",
+      "to": "store",
+      "y": 595,
+      "label": "归属校验",
+      "variant": "default"
+    },
+    {
+      "id": "not_found",
+      "from": "api",
+      "to": "client",
+      "y": 630,
+      "label": "404（不区分存在/无权）",
+      "variant": "security"
+    },
+    {
+      "id": "chat_guard",
+      "from": "api",
+      "to": "client",
+      "y": 670,
+      "label": "chat 历史加载同样先验归属",
+      "variant": "dashed"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "auth_api",
+      "from": 165,
+      "to": 210,
+      "type": "security"
+    },
+    {
+      "participant": "middleware",
+      "from": 245,
+      "to": 330,
+      "type": "security"
+    },
+    {
+      "participant": "api",
+      "from": 315,
+      "to": 680,
+      "type": "backend"
+    },
+    {
+      "participant": "store",
+      "from": 395,
+      "to": 610,
+      "type": "backend"
+    },
+    {
+      "participant": "pg",
+      "from": 425,
+      "to": 460,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "认证机制（auth.py:76-143）",
+      "items": [
+        "POST /api/auth/token：ADMIN_TOKEN 换 HMAC-SHA256 签名 token，24h 有效",
+        "AuthMiddleware 全局校验；白名单含 /api/health、/api/auth/*",
+        "签名密钥进程随机生成，重启自动轮换"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "多租户三级降级（conversations.py:44）",
+      "items": [
+        "X-User-Id 头 > userId 参数 > anonymous 兜底",
+        "store 层所有读写带 user_id 过滤（服务端强制）",
+        "前端 axios 拦截器统一注入，401 跳 auth.html"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "越权防护",
+      "items": [
+        "GET /{id}：404 不区分「不存在」与「无权」（fail-closed 不泄露存在性）",
+        "chat 历史加载先 conversation_exists 归属校验",
+        "admin 端越权访问会话同样被 user_id 拦截"
+      ]
+    }
+  ]
+}

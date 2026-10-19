@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SDK 存储设施：图 / 向量 / 文档解析与命名空间隔离",
+    "output": "../sdk-storage.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "stores",
+        "label": "三类存储",
+        "focus": [
+          "packs",
+          "graph_store",
+          "vector_store",
+          "doc_parser"
+        ],
+        "note": "插件经 SDK 存储设施访问 Neo4j、pgvector 与文档解析。"
+      },
+      {
+        "id": "namespace",
+        "label": "命名空间契约",
+        "focus": [
+          "registry",
+          "graph_store",
+          "vector_store"
+        ],
+        "note": "前缀登记与 scope_id 服务端签发的隔离防线。"
+      },
+      {
+        "id": "parser",
+        "label": "文档管道",
+        "focus": [
+          "doc_parser",
+          "chunker",
+          "vector_store"
+        ],
+        "note": "结构感知切块到向量子切的导入路径。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "packs",
+      "type": "backend",
+      "label": "插件（kg / chatbi）",
+      "sublabel": "SDK 消费方",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "registry",
+      "type": "security",
+      "label": "scope_registry",
+      "sublabel": "前缀登记 + scope 签发",
+      "pos": [
+        280,
+        280
+      ],
+      "size": [
+        150,
+        60
+      ],
+      "tag": "fail-fast"
+    },
+    {
+      "id": "graph_store",
+      "type": "database",
+      "label": "Neo4jGraphStore",
+      "sublabel": "MERGE 幂等写",
+      "pos": [
+        520,
+        120
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "vector_store",
+      "type": "database",
+      "label": "PgVectorStore",
+      "sublabel": "HNSW / COSINE",
+      "pos": [
+        520,
+        440
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "doc_parser",
+      "type": "backend",
+      "label": "doc_parser",
+      "sublabel": "md/txt/pdf/docx",
+      "pos": [
+        520,
+        280
+      ],
+      "size": [
+        150,
+        60
+      ]
+    },
+    {
+      "id": "chunker",
+      "type": "backend",
+      "label": "结构感知切块",
+      "sublabel": "章节软边界",
+      "pos": [
+        760,
+        280
+      ],
+      "size": [
+        150,
+        60
+      ]
+    },
+    {
+      "id": "neo4j",
+      "type": "external",
+      "label": "Neo4j",
+      "sublabel": "图数据库",
+      "pos": [
+        1000,
+        120
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "pgvector",
+      "type": "external",
+      "label": "PostgreSQL pgvector",
+      "sublabel": "向量列（与平台同库）",
+      "pos": [
+        1000,
+        440
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "embedder",
+      "type": "cloud",
+      "label": "bge-m3",
+      "sublabel": "调用方注入",
+      "pos": [
+        1000,
+        280
+      ],
+      "size": [
+        130,
+        60
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "SDK 存储层（命名空间隔离契约）",
+      "wraps": [
+        "registry",
+        "graph_store",
+        "vector_store",
+        "doc_parser",
+        "chunker"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "packs-registry",
+      "from": "packs",
+      "to": "registry",
+      "label": "登记前缀 / 签发 scope",
+      "variant": "emphasis",
+      "labelDy": 56
+    },
+    {
+      "id": "registry-graph",
+      "from": "registry",
+      "to": "graph_store",
+      "label": "签发 scope",
+      "variant": "default",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "registry-vector",
+      "from": "registry",
+      "to": "vector_store",
+      "label": "签发 scope",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "left"
+    },
+    {
+      "id": "packs-docparser",
+      "from": "registry",
+      "to": "doc_parser",
+      "label": "parse_to_text",
+      "variant": "default"
+    },
+    {
+      "id": "docparser-chunker",
+      "from": "doc_parser",
+      "to": "chunker",
+      "label": "chunk_text",
+      "variant": "default"
+    },
+    {
+      "id": "graph-neo4j",
+      "from": "graph_store",
+      "to": "neo4j",
+      "label": "Cypher",
+      "variant": "emphasis"
+    },
+    {
+      "id": "vector-pgvector",
+      "from": "vector_store",
+      "to": "pgvector",
+      "label": "search / upsert",
+      "variant": "emphasis"
+    },
+    {
+      "id": "chunker-embedder",
+      "from": "chunker",
+      "to": "embedder",
+      "label": "向量子切",
+      "variant": "dashed",
+      "labelDy": 54
+    },
+    {
+      "id": "embedder-vector",
+      "from": "embedder",
+      "to": "vector_store",
+      "label": "向量写入",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "命名空间隔离契约",
+      "items": [
+        "前缀先 register_prefix 登记，撞名装配期 fail-fast",
+        "scope_id 必须服务端签发 UUID，入口 check_scope_id 防御",
+        "collection 名 = {prefix}_{scope}_v1，per-scope 物理隔离"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "图存储语义（graph_store.py）",
+      "items": [
+        "MERGE 锚点 = (scope, normalized_name)，单事务幂等写",
+        "merge_entities 五步合并：自环删除 → 边迁移 → 属性并集",
+        "查询三级降级：精确 → 前缀 → 子串；BFS 逐跳限量子图"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "向量与文档",
+      "items": [
+        "pgvector HNSW 余弦（与平台 PG 同库，建表自动 CREATE EXTENSION）",
+        "连接自愈：OperationalError 重建池重试一次；多 pack 前缀按指纹多槽缓存",
+        "结构感知切块：章节软边界、整章上限、目录合并不碎块",
+        "UTF-8 → GBK → 拒收乱码的解码降级链"
+      ]
+    }
+  ]
+}

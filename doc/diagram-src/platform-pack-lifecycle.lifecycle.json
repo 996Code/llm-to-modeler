@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "插件生命周期状态机：toggle 事务四阶段",
+    "output": "../platform-pack-lifecycle.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1030,
+      640
+    ],
+    "views": [
+      {
+        "id": "happy",
+        "label": "正常路径",
+        "focus": [
+          "pending",
+          "assembled",
+          "persisted",
+          "finalized"
+        ],
+        "note": "toggle 事务四阶段顺序推进。"
+      },
+      {
+        "id": "rollback",
+        "label": "回滚路径",
+        "focus": [
+          "assembled",
+          "rolledback",
+          "degraded"
+        ],
+        "note": "装配失败的反向回滚。"
+      },
+      {
+        "id": "terminal",
+        "label": "降级终态",
+        "focus": [
+          "degraded",
+          "unloaded"
+        ],
+        "note": "不可回滚的降级与卸载。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "toggle 事务阶段"
+    },
+    {
+      "id": "waiting",
+      "label": "互斥与就绪"
+    },
+    {
+      "id": "exceptions",
+      "label": "回滚"
+    },
+    {
+      "id": "terminal",
+      "label": "降级与卸载"
+    }
+  ],
+  "states": [
+    {
+      "id": "disabled",
+      "type": "start",
+      "label": "Disabled",
+      "sublabel": "未启用 / 已禁用",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "初始"
+    },
+    {
+      "id": "pending",
+      "type": "active",
+      "label": "PENDING",
+      "sublabel": "进入 _HOT_RELOAD_LOCK",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "互斥"
+    },
+    {
+      "id": "assembled",
+      "type": "active",
+      "label": "ASSEMBLED",
+      "sublabel": "装配成功未落盘",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "内存态"
+    },
+    {
+      "id": "persisted",
+      "type": "active",
+      "label": "PERSISTED",
+      "sublabel": "状态文件原子写",
+      "lane": "main",
+      "col": 3,
+      "step": "04",
+      "tag": "落盘"
+    },
+    {
+      "id": "finalized",
+      "type": "success",
+      "label": "FINALIZED",
+      "sublabel": "start 钩子完成",
+      "lane": "main",
+      "col": 4,
+      "step": "05",
+      "tag": "就绪"
+    },
+    {
+      "id": "rolledback",
+      "type": "failure",
+      "label": "Rolled Back",
+      "sublabel": "快照恢复内存态",
+      "lane": "exceptions",
+      "col": 0,
+      "yOffset": 78,
+      "tag": "可重试"
+    },
+    {
+      "id": "degraded",
+      "type": "failure",
+      "label": "Degraded",
+      "sublabel": "503 守卫 + 拒管理",
+      "lane": "terminal",
+      "col": 1,
+      "tag": "终态"
+    },
+    {
+      "id": "unloaded",
+      "type": "failure",
+      "label": "Unloaded",
+      "sublabel": "unload 钩子 · 需重启",
+      "lane": "terminal",
+      "col": 2,
+      "tag": "终态"
+    }
+  ],
+  "transitions": [
+    {
+      "from": "disabled",
+      "to": "pending",
+      "variant": "emphasis"
+    },
+    {
+      "id": "pending-assembled",
+      "from": "pending",
+      "to": "assembled",
+      "variant": "default"
+    },
+    {
+      "id": "assembled-persisted",
+      "from": "assembled",
+      "to": "persisted",
+      "variant": "default"
+    },
+    {
+      "id": "persisted-finalized",
+      "from": "persisted",
+      "to": "finalized",
+      "variant": "default"
+    },
+    {
+      "id": "assembled-rolledback",
+      "from": "assembled",
+      "to": "rolledback",
+      "label": "装配失败",
+      "variant": "security",
+      "labelDy": 24
+    },
+    {
+      "id": "rolledback-degraded",
+      "from": "rolledback",
+      "to": "degraded",
+      "label": "回滚失败",
+      "variant": "security",
+      "labelDx": 25
+    },
+    {
+      "id": "persisted-degraded",
+      "from": "persisted",
+      "to": "degraded",
+      "label": "finalize 失败保持新态",
+      "variant": "security",
+      "labelDy": 24
+    },
+    {
+      "id": "finalized-unloaded",
+      "from": "finalized",
+      "to": "unloaded",
+      "label": "disable 差集卸载",
+      "variant": "security",
+      "labelDy": 24
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "事务语义（admin.py:549-675）",
+      "items": [
+        "锁内顺序：改内存(不落盘) → assemble → persist → finalize",
+        "persist 原子写：tmp + os.replace，断电不产生半写状态",
+        "PENDING → ASSEMBLED → PERSISTED → FINALIZED 四阶段推进"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "阶段化失败处理",
+      "items": [
+        "ASSEMBLED 前失败：内存反向 set_enabled + 快照回滚",
+        "回滚本身失败 → pack_runtime_degraded（如实上报）",
+        "PERSISTED 后 finalize 失败：保持新态 + degraded，不与磁盘分裂"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "竞态与多副本",
+      "items": [
+        "_HOT_RELOAD_LOCK 串行化「读 enabled → 装配 → 挂载」全流程",
+        "_MOUNT_LOCK 防挂载记录踩踏，recheck 也进锁",
+        "degraded 后非 /health 请求 503（多副本 fail-closed）"
+      ]
+    }
+  ]
+}

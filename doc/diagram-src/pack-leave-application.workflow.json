@@ -1,0 +1,256 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "leave_application 插件：submit_leave 四步管线",
+    "output": "../pack-leave-application.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main",
+        "label": "四步管线",
+        "focus": [
+          "parse",
+          "validate",
+          "confirm",
+          "submit"
+        ],
+        "note": "从 LLM 解析到上游提交的完整管线。"
+      },
+      {
+        "id": "clarify",
+        "label": "追问与确认",
+        "focus": [
+          "parse",
+          "clarify",
+          "confirm"
+        ],
+        "note": "字段缺失追问与不可逆操作确认门槛。"
+      },
+      {
+        "id": "safety",
+        "label": "安全防线",
+        "focus": [
+          "confirm",
+          "cancel",
+          "submit"
+        ],
+        "note": "取消分支与 fail-closed 提交。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "pipeline",
+      "label": "submit_leave 管线"
+    },
+    {
+      "id": "policy",
+      "label": "追问与确认",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "parse",
+      "label": "解析",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "check",
+      "label": "校验与确认",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "submit",
+      "label": "提交",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "parse",
+    "validate",
+    "confirm",
+    "submit",
+    "result"
+  ],
+  "nodes": [
+    {
+      "id": "parse",
+      "lane": "pipeline",
+      "col": 0,
+      "type": "backend",
+      "label": "parse_info",
+      "sublabel": "LLM 提取五字段",
+      "tag": "LLM",
+      "width": 140
+    },
+    {
+      "id": "validate",
+      "lane": "pipeline",
+      "col": 1,
+      "type": "security",
+      "label": "validate_rules",
+      "sublabel": "AssetClient 上游校验",
+      "width": 150
+    },
+    {
+      "id": "confirm",
+      "lane": "pipeline",
+      "col": 2,
+      "type": "security",
+      "label": "confirm 确认门槛",
+      "sublabel": "_awaiting 归属路由",
+      "width": 150
+    },
+    {
+      "id": "submit",
+      "lane": "pipeline",
+      "col": 3,
+      "type": "database",
+      "label": "submit",
+      "sublabel": "Fail-Closed 读 success",
+      "width": 140
+    },
+    {
+      "id": "result",
+      "lane": "pipeline",
+      "col": 5,
+      "type": "frontend",
+      "label": "data 制品",
+      "sublabel": "审批编号 + 数据卡片",
+      "width": 140
+    },
+    {
+      "id": "clarify",
+      "lane": "policy",
+      "col": 1,
+      "type": "security",
+      "label": "字段追问",
+      "sublabel": "缺类型/日期 → AskSpec",
+      "width": 150
+    },
+    {
+      "id": "cancel",
+      "lane": "policy",
+      "col": 3,
+      "type": "messagebus",
+      "label": "取消分支",
+      "sublabel": "取消词 → _cancelled",
+      "width": 140
+    },
+    {
+      "id": "local",
+      "lane": "policy",
+      "col": 4,
+      "type": "messagebus",
+      "label": "本地降级",
+      "sublabel": "NotImplemented → LOCAL 编号",
+      "width": 170
+    }
+  ],
+  "edges": [
+    {
+      "id": "parse-validate",
+      "from": "parse",
+      "to": "validate",
+      "label": "字段完整",
+      "variant": "default"
+    },
+    {
+      "id": "validate-confirm",
+      "from": "validate",
+      "to": "confirm",
+      "variant": "default"
+    },
+    {
+      "id": "confirm-submit",
+      "from": "confirm",
+      "to": "submit",
+      "label": "用户确认",
+      "variant": "emphasis"
+    },
+    {
+      "id": "submit-result",
+      "from": "submit",
+      "to": "result",
+      "label": "上游成功",
+      "variant": "emphasis"
+    },
+    {
+      "id": "parse-clarify",
+      "from": "parse",
+      "to": "clarify",
+      "label": "关键字段缺失",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "clarify-parse",
+      "from": "clarify",
+      "to": "parse",
+      "label": "answers 累积回写",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "confirm-cancel",
+      "from": "confirm",
+      "to": "cancel",
+      "label": "取消词",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "submit-local",
+      "from": "submit",
+      "to": "local",
+      "label": "NotImplemented",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "local-result",
+      "from": "local",
+      "to": "result",
+      "label": "本地编号",
+      "variant": "dashed",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "解析幂等性（submit_leave.py:103）",
+      "items": [
+        "LLM 提取 applicant/leaveType/startDate/endDate/reason 五字段",
+        "缺失留空不猜默认值，由系统追问用户",
+        "已有完整数据且挂起者非本步骤 → 跳过重解析防死循环"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "确认门槛（不可逆操作）",
+      "items": [
+        "confirm 步必须用户明确回复，空回答重新挂起",
+        "_awaiting 路由区分 answers 归属，防残留回答误当确认",
+        "取消词（取消/不要/算了/不提交）→ 断流不提交"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Fail-Closed 提交",
+      "items": [
+        "上游 success=False 绝不伪造「提交成功 + PENDING 编号」",
+        "错误直达用户，不落 status/approvalId",
+        "AssetClient 未实现时降级本地编号（演示桩场景）"
+      ]
+    }
+  ]
+}

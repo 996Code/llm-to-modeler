@@ -1,0 +1,268 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "前端 SSE 渲染链：事件流到四类卡片",
+    "output": "../frontend-sse-render.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1000,
+      760
+    ],
+    "views": [
+      {
+        "id": "stream",
+        "label": "流解析",
+        "focus": [
+          "input",
+          "api",
+          "store"
+        ],
+        "note": "fetch 流式读取与事件分发。"
+      },
+      {
+        "id": "render",
+        "label": "五路分流",
+        "focus": [
+          "store",
+          "chat",
+          "panel"
+        ],
+        "note": "result 事件到四类卡片的渲染。"
+      },
+      {
+        "id": "clarify",
+        "label": "追问恢复",
+        "focus": [
+          "user",
+          "chat",
+          "store"
+        ],
+        "note": "追问卡片与 answers 回传。"
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "用户",
+      "sublabel": "输入消息"
+    },
+    {
+      "id": "input",
+      "type": "frontend",
+      "label": "ChatInput",
+      "sublabel": "Enter 发送"
+    },
+    {
+      "id": "api",
+      "type": "frontend",
+      "label": "api.chat",
+      "sublabel": "streamSSE"
+    },
+    {
+      "id": "store",
+      "type": "backend",
+      "label": "Pinia store",
+      "sublabel": "conversation.ts"
+    },
+    {
+      "id": "chat",
+      "type": "frontend",
+      "label": "ChatPanel",
+      "sublabel": "消息区"
+    },
+    {
+      "id": "panel",
+      "type": "database",
+      "label": "ResultPanel",
+      "sublabel": "AI 配置面板"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 300,
+      "label": "发送与流建立"
+    },
+    {
+      "from": 310,
+      "to": 545,
+      "label": "事件流处理"
+    },
+    {
+      "from": 552,
+      "to": 700,
+      "label": "渲染与追问"
+    }
+  ],
+  "messages": [
+    {
+      "id": "type",
+      "from": "user",
+      "to": "input",
+      "y": 170,
+      "label": "输入消息",
+      "variant": "default"
+    },
+    {
+      "id": "send",
+      "from": "input",
+      "to": "store",
+      "y": 200,
+      "label": "sendMessage（追问快照）",
+      "variant": "emphasis"
+    },
+    {
+      "id": "chatreq",
+      "from": "store",
+      "to": "api",
+      "y": 235,
+      "label": "api.chat(body)",
+      "variant": "default"
+    },
+    {
+      "id": "stage",
+      "from": "api",
+      "to": "store",
+      "y": 330,
+      "label": "stage → currentStage",
+      "variant": "default"
+    },
+    {
+      "id": "pipedef",
+      "from": "api",
+      "to": "store",
+      "y": 362,
+      "label": "pipeline_definition → steps",
+      "variant": "default"
+    },
+    {
+      "id": "progress",
+      "from": "store",
+      "to": "chat",
+      "y": 397,
+      "label": "管线进度卡渲染",
+      "variant": "emphasis"
+    },
+    {
+      "id": "result",
+      "from": "api",
+      "to": "store",
+      "y": 432,
+      "label": "result 事件五路分流",
+      "variant": "emphasis"
+    },
+    {
+      "id": "datacard",
+      "from": "store",
+      "to": "chat",
+      "y": 467,
+      "label": "数据卡 / 追问卡 / 配置卡",
+      "variant": "default"
+    },
+    {
+      "id": "chart",
+      "from": "store",
+      "to": "panel",
+      "y": 502,
+      "label": "BiChartCard / KG 子图 / diff",
+      "variant": "default"
+    },
+    {
+      "id": "clarifyq",
+      "from": "store",
+      "to": "chat",
+      "y": 562,
+      "label": "needsClarification 追问卡",
+      "variant": "security"
+    },
+    {
+      "id": "answer",
+      "from": "user",
+      "to": "chat",
+      "y": 594,
+      "label": "点选项 / 输入回答",
+      "variant": "default"
+    },
+    {
+      "id": "answers",
+      "from": "chat",
+      "to": "store",
+      "y": 624,
+      "label": "answers 契约回传",
+      "variant": "emphasis"
+    },
+    {
+      "id": "done",
+      "from": "api",
+      "to": "store",
+      "y": 658,
+      "label": "done / error 清阶段态",
+      "variant": "dashed"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "input",
+      "from": 165,
+      "to": 210,
+      "type": "frontend"
+    },
+    {
+      "participant": "store",
+      "from": 195,
+      "to": 668,
+      "type": "backend"
+    },
+    {
+      "participant": "api",
+      "from": 230,
+      "to": 663,
+      "type": "frontend"
+    },
+    {
+      "participant": "chat",
+      "from": 392,
+      "to": 632,
+      "type": "frontend"
+    },
+    {
+      "participant": "panel",
+      "from": 497,
+      "to": 512,
+      "type": "database"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "流解析（api.ts:286-389）",
+      "items": [
+        "fetch + resp.body.getReader() + TextDecoder 增量拼接 buffer",
+        "按 \\n\\n 切事件、残块回填；60s 空闲看门狗 AbortController",
+        "parseSSEEvent 逐行取 event/id/data，解析失败退空对象"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "result 五路分流（conversation.ts:299-393）",
+      "items": [
+        "error / general 闲聊 / needsClarification / data 制品 / config 制品",
+        "懒创建会话在 result.conversationId 采纳",
+        "dataArtifact → formattedData 同构合成，刷新后图表不丢"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "追问状态机",
+      "items": [
+        "发送前快照 wasClarifying（必须在 push 用户消息前读）",
+        "点选项以 {[header]: label} 结构化回传，与打字 {text} 同一契约",
+        "answers 进 chat body → 后端 Command(resume)"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "平台可观测性数据流：调用日志、链路视图与脱敏",
+    "output": "../platform-observability.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      700
+    ],
+    "views": [
+      {
+        "id": "collect",
+        "label": "采集路径",
+        "focus": [
+          "engine",
+          "packs",
+          "logcall",
+          "calllogs"
+        ],
+        "note": "LLM 与上游调用自动埋点入库。"
+      },
+      {
+        "id": "trace",
+        "label": "链路视图",
+        "focus": [
+          "events",
+          "calllogs",
+          "merge",
+          "trace"
+        ],
+        "note": "事件流与调用日志合并成链路视图。"
+      },
+      {
+        "id": "redact",
+        "label": "脱敏防线",
+        "focus": [
+          "logger",
+          "redact"
+        ],
+        "note": "日志输出的六条正则脱敏。"
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "产生"
+    },
+    {
+      "label": "采集"
+    },
+    {
+      "label": "存储"
+    },
+    {
+      "label": "消费"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "Engine / LLMClient",
+      "sublabel": "LLM 出口",
+      "stage": 0,
+      "row": 0
+    },
+    {
+      "id": "packs",
+      "type": "backend",
+      "label": "插件上游调用",
+      "sublabel": "UpstreamClient",
+      "stage": 0,
+      "row": 1
+    },
+    {
+      "id": "logger",
+      "type": "backend",
+      "label": "应用日志",
+      "sublabel": "loguru",
+      "stage": 0,
+      "row": 3
+    },
+    {
+      "id": "events",
+      "type": "database",
+      "label": "会话事件流",
+      "sublabel": "append-only",
+      "stage": 1,
+      "row": 0
+    },
+    {
+      "id": "logcall",
+      "type": "messagebus",
+      "label": "_log_call 埋点",
+      "sublabel": "AOP 埋点",
+      "stage": 1,
+      "row": 1
+    },
+    {
+      "id": "redact",
+      "type": "security",
+      "label": "RedactFilter",
+      "sublabel": "六条正则",
+      "stage": 1,
+      "row": 3
+    },
+    {
+      "id": "calllogs",
+      "type": "database",
+      "label": "call_logs 表",
+      "sublabel": "调用日志表",
+      "stage": 2,
+      "row": 1
+    },
+    {
+      "id": "trace",
+      "type": "frontend",
+      "label": "链路视图 API",
+      "sublabel": "trace API",
+      "stage": 3,
+      "row": 1
+    },
+    {
+      "id": "merge",
+      "type": "backend",
+      "label": "_build_trace 合并",
+      "sublabel": "时间轴合并",
+      "stage": 3,
+      "row": 0
+    }
+  ],
+  "flows": [
+    {
+      "id": "engine-logcall",
+      "from": "engine",
+      "to": "logcall",
+      "label": "调用日志",
+      "classification": "llm",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          100,
+          214
+        ],
+        [
+          315,
+          214
+        ]
+      ]
+    },
+    {
+      "id": "packs-logcall",
+      "from": "packs",
+      "to": "logcall",
+      "classification": "upstream",
+      "variant": "default",
+      "label": "上游日志",
+      "labelDy": -22
+    },
+    {
+      "id": "engine-events",
+      "from": "engine",
+      "to": "events",
+      "classification": "append-only",
+      "variant": "dashed",
+      "label": "trace 事件",
+      "labelDy": -22
+    },
+    {
+      "id": "logcall-calllogs",
+      "from": "logcall",
+      "to": "calllogs",
+      "label": "save_call_log",
+      "classification": "持久化",
+      "variant": "emphasis"
+    },
+    {
+      "id": "events-merge",
+      "from": "events",
+      "to": "merge",
+      "label": "事件流",
+      "classification": "闭轮分段",
+      "variant": "default"
+    },
+    {
+      "id": "calllogs-merge",
+      "from": "calllogs",
+      "to": "merge",
+      "label": "调用记录",
+      "classification": "时间合并",
+      "variant": "default",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "via": [
+        [
+          530,
+          214
+        ],
+        [
+          745,
+          214
+        ]
+      ]
+    },
+    {
+      "id": "merge-trace",
+      "from": "merge",
+      "to": "trace",
+      "label": "链路 JSON",
+      "classification": "汇总",
+      "variant": "emphasis",
+      "labelDx": 45,
+      "labelDy": 24
+    },
+    {
+      "id": "logger-redact",
+      "from": "logger",
+      "to": "redact",
+      "label": "root logger 挂载",
+      "classification": "六条正则",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "采集埋点",
+      "items": [
+        "LLMClient._log_call 与 UpstreamClient._log 双出口埋点",
+        "conv_id 缺省时从线程绑定上下文兜底，链路不断",
+        "LLM_LOG_FULL 开关：完整 prompt（图片转占位符）或摘要"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "链路视图",
+      "items": [
+        "事件流 + 调用日志按时间轴合并，assistant 闭轮分段",
+        "汇总 llm / upstream / graph / vector 次数与耗时",
+        "用户侧与管理端复用同一 _build_trace 实现"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "脱敏防线",
+      "items": [
+        "RedactFilter 六条正则：Bearer / sk- / Authorization / Cookie / x-api-key / JWT",
+        "改写 msg 并清空 args，防止格式化参数泄漏",
+        "挂 root logger，所有模块输出统一过滤"
+      ]
+    }
+  ]
+}

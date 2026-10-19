@@ -1,0 +1,272 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "knowledge_graph 插件：导入与检索双链",
+    "output": "../pack-knowledge-graph.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "import",
+        "label": "导入链",
+        "focus": [
+          "task",
+          "parse",
+          "extract",
+          "batch",
+          "finish"
+        ],
+        "note": "文档解析到图谱落库的后台任务。"
+      },
+      {
+        "id": "search",
+        "label": "检索链",
+        "focus": [
+          "kb_search",
+          "hybrid",
+          "answer"
+        ],
+        "note": "混合检索与 LLM 综合回答。"
+      },
+      {
+        "id": "safety",
+        "label": "校验与熔断",
+        "focus": [
+          "extract",
+          "batch",
+          "circuit"
+        ],
+        "note": "本体过滤与连续失败熔断。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "import",
+      "label": "导入任务（后台）"
+    },
+    {
+      "id": "search",
+      "label": "检索链（在线）"
+    },
+    {
+      "id": "policy",
+      "label": "校验与熔断",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ingest",
+      "label": "解析与抽取",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "persist",
+      "label": "落库与收尾",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "serve",
+      "label": "检索服务",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "task",
+    "parse",
+    "extract",
+    "batch",
+    "finish"
+  ],
+  "nodes": [
+    {
+      "id": "task",
+      "lane": "import",
+      "col": 0,
+      "type": "messagebus",
+      "label": "submit_import 任务",
+      "sublabel": "同库串行 + 断点续跑",
+      "width": 160
+    },
+    {
+      "id": "parse",
+      "lane": "import",
+      "col": 1,
+      "type": "backend",
+      "label": "解析与切块",
+      "sublabel": "doc_parser 结构感知",
+      "width": 140
+    },
+    {
+      "id": "extract",
+      "lane": "import",
+      "col": 2,
+      "type": "cloud",
+      "label": "LLM 批量抽取",
+      "sublabel": "线程池并行",
+      "tag": "LLM",
+      "width": 140
+    },
+    {
+      "id": "batch",
+      "lane": "import",
+      "col": 3,
+      "type": "database",
+      "label": "upsert_batch",
+      "sublabel": "单事务幂等写",
+      "width": 140
+    },
+    {
+      "id": "finish",
+      "lane": "import",
+      "col": 4,
+      "type": "backend",
+      "label": "收尾整理",
+      "sublabel": "合并/去争议/身份复合",
+      "width": 150
+    },
+    {
+      "id": "kb_search",
+      "lane": "search",
+      "col": 3,
+      "type": "frontend",
+      "label": "kb_search",
+      "sublabel": "知识库解析优先级链",
+      "width": 140
+    },
+    {
+      "id": "hybrid",
+      "lane": "search",
+      "col": 4,
+      "type": "backend",
+      "label": "hybrid_retrieve",
+      "sublabel": "图谱路 + 向量路",
+      "width": 150
+    },
+    {
+      "id": "answer",
+      "lane": "search",
+      "col": 5,
+      "type": "cloud",
+      "label": "answer.j2 综合",
+      "sublabel": "LLM 引用片段回答",
+      "width": 140
+    },
+    {
+      "id": "circuit",
+      "lane": "policy",
+      "col": 2,
+      "type": "security",
+      "label": "熔断器",
+      "sublabel": "连续失败阈值",
+      "width": 130
+    },
+    {
+      "id": "validate_kg",
+      "lane": "policy",
+      "col": 3,
+      "type": "security",
+      "label": "四类校验",
+      "sublabel": "本体/别名/悬空/端点",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "task-parse",
+      "from": "task",
+      "to": "parse",
+      "variant": "default"
+    },
+    {
+      "id": "parse-extract",
+      "from": "parse",
+      "to": "extract",
+      "variant": "default"
+    },
+    {
+      "id": "extract-batch",
+      "from": "extract",
+      "to": "batch",
+      "label": "校验通过",
+      "variant": "emphasis"
+    },
+    {
+      "id": "batch-finish",
+      "from": "batch",
+      "to": "finish",
+      "label": "全部批次完成",
+      "variant": "emphasis"
+    },
+    {
+      "id": "extract-validate",
+      "from": "extract",
+      "to": "validate_kg",
+      "label": "逐批校验",
+      "variant": "default"
+    },
+    {
+      "id": "validate-batch",
+      "from": "validate_kg",
+      "to": "batch",
+      "label": "过滤后写入",
+      "variant": "default"
+    },
+    {
+      "id": "extract-circuit",
+      "from": "extract",
+      "to": "circuit",
+      "label": "连续失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "kbsearch-hybrid",
+      "from": "kb_search",
+      "to": "hybrid",
+      "variant": "default"
+    },
+    {
+      "id": "hybrid-answer",
+      "from": "hybrid",
+      "to": "answer",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "导入链（tasks.py:186-746）",
+      "items": [
+        "同库串行 queue_key + 同文档 dedupe，失败可断点续跑",
+        "批内 ThreadPoolExecutor 并行 LLM 抽取，checkpoint 标 done",
+        "收尾：提案合并、向量对账、别名去争议、身份复合、统计回写"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "检索链（kb_search.py:70-219）",
+      "items": [
+        "知识库解析优先级：显式 > answers > 会话记忆 > 宿主默认 > 唯一库 > 追问",
+        "hybrid_retrieve：LLM 意图解析（失败降级关键词）→ 图谱路 + 向量路",
+        "向量路失败降级纯图谱，回答带 [片段N] 引用"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "质量防线",
+      "items": [
+        "四类校验：本体过滤 / 别名独占性 / 悬空关系 / 端点类型",
+        "连续失败达阈值熔断，任务标 failed 可续跑",
+        "每次检索落 call_logs，含逐词命中与截断水位"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,310 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "njmind_form 生成链（详细）：六步到配置制品",
+    "output": "../form-create-chain.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "collect",
+        "label": "资产与字段",
+        "focus": [
+          "guide",
+          "assets",
+          "fields",
+          "clarify"
+        ],
+        "note": "指南、资产清单与字段抽取追问。"
+      },
+      {
+        "id": "gen",
+        "label": "生成与校验",
+        "focus": [
+          "templates",
+          "generate",
+          "validate",
+          "repair"
+        ],
+        "note": "模板 fail-closed 与修复回环。"
+      },
+      {
+        "id": "out",
+        "label": "制品产出",
+        "focus": [
+          "validate",
+          "config_out"
+        ],
+        "note": "config 制品与应用按钮。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "steps",
+      "label": "六步管线"
+    },
+    {
+      "id": "llm",
+      "label": "LLM 调用"
+    },
+    {
+      "id": "policy",
+      "label": "追问与修复",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "collect",
+      "label": "收集",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "gen",
+      "label": "生成",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "check",
+      "label": "校验与产出",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "guide",
+    "assets",
+    "fields",
+    "templates",
+    "generate",
+    "validate"
+  ],
+  "nodes": [
+    {
+      "id": "guide",
+      "lane": "steps",
+      "col": 0,
+      "type": "backend",
+      "label": "fetch_guide",
+      "sublabel": "失败让用户刷新",
+      "width": 130
+    },
+    {
+      "id": "assets",
+      "lane": "steps",
+      "col": 1,
+      "type": "database",
+      "label": "list_assets",
+      "sublabel": "资产清单",
+      "width": 130
+    },
+    {
+      "id": "fields",
+      "lane": "steps",
+      "col": 2,
+      "type": "backend",
+      "label": "parse_fields",
+      "sublabel": "字段抽取",
+      "width": 130
+    },
+    {
+      "id": "templates",
+      "lane": "steps",
+      "col": 3,
+      "type": "database",
+      "label": "fetch_templates",
+      "sublabel": "按字段类型",
+      "width": 140
+    },
+    {
+      "id": "generate",
+      "lane": "steps",
+      "col": 4,
+      "type": "cloud",
+      "label": "generate",
+      "sublabel": "配置生成",
+      "width": 120
+    },
+    {
+      "id": "validate",
+      "lane": "steps",
+      "col": 5,
+      "type": "security",
+      "label": "validate",
+      "sublabel": "投影 + 修复循环",
+      "width": 140
+    },
+    {
+      "id": "fields_llm",
+      "lane": "llm",
+      "col": 2,
+      "type": "cloud",
+      "label": "chat_json",
+      "sublabel": "stage=parse_fields",
+      "width": 130
+    },
+    {
+      "id": "gen_llm",
+      "lane": "llm",
+      "col": 4,
+      "type": "cloud",
+      "label": "chat",
+      "sublabel": "重试带错误上下文",
+      "width": 140
+    },
+    {
+      "id": "clarify",
+      "lane": "policy",
+      "col": 2,
+      "type": "security",
+      "label": "字段追问",
+      "sublabel": "追问 · answers 合并重跑",
+      "width": 130
+    },
+    {
+      "id": "no_template",
+      "lane": "policy",
+      "col": 3,
+      "type": "security",
+      "label": "类型无模板",
+      "sublabel": "fail-closed 追问",
+      "width": 140
+    },
+    {
+      "id": "repair",
+      "lane": "policy",
+      "col": 4,
+      "type": "messagebus",
+      "label": "修复回环",
+      "sublabel": "机械≤4 + LLM≤3",
+      "width": 140
+    },
+    {
+      "id": "config_out",
+      "lane": "policy",
+      "col": 5,
+      "type": "database",
+      "label": "config 制品",
+      "sublabel": "快照 + 应用/回滚",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "guide-assets",
+      "from": "guide",
+      "to": "assets",
+      "variant": "default"
+    },
+    {
+      "id": "assets-fields",
+      "from": "assets",
+      "to": "fields",
+      "variant": "default"
+    },
+    {
+      "id": "fields-templates",
+      "from": "fields",
+      "to": "templates",
+      "variant": "default"
+    },
+    {
+      "id": "templates-generate",
+      "from": "templates",
+      "to": "generate",
+      "variant": "default"
+    },
+    {
+      "id": "generate-validate",
+      "from": "generate",
+      "to": "validate",
+      "variant": "emphasis"
+    },
+    {
+      "id": "fields-fieldsllm",
+      "from": "fields",
+      "to": "fields_llm",
+      "variant": "dashed"
+    },
+    {
+      "id": "generate-genllm",
+      "from": "generate",
+      "to": "gen_llm",
+      "variant": "dashed"
+    },
+    {
+      "id": "fields-clarify",
+      "from": "fields",
+      "to": "clarify",
+      "label": "字段缺失",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "templates-notemplate",
+      "from": "templates",
+      "to": "no_template",
+      "label": "无模板",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "validate-repair",
+      "from": "validate",
+      "to": "repair",
+      "label": "校验失败",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "repair-generate",
+      "from": "repair",
+      "to": "generate",
+      "label": "带错误重跑",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "validate-configout",
+      "from": "validate",
+      "to": "config_out",
+      "label": "通过",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "六步管线（create_form.py:70-457）",
+      "items": [
+        "guide → assets → fields → templates → generate → validate",
+        "fetch_guide 失败 ClarificationRaised 让用户刷新指南",
+        "字段抽取 LLM chat_json，缺字段追问不猜默认"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "fail-closed 点",
+      "items": [
+        "字段类型无模板：追问用户，不猜模板",
+        "resume 时 clarify_answers 合并进原始输入",
+        "传输类失败短路，不进重试循环"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "修复回环（create_form.py:375-453）",
+      "items": [
+        "validate 投影 + 本地机械修复循环 ≤4 轮（不烧 LLM）",
+        "机械修复耗尽 → 带错误与当前配置递归重跑 generate（≤3 轮）",
+        "通过后产出 config 制品：config_snapshot + 应用按钮 + diff 对齐"
+      ]
+    }
+  ]
+}

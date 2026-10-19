@@ -1,0 +1,318 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ChatBI 安全纵深：SQL 三层校验与执行防线",
+    "output": "../chatbi-security.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "validate",
+        "label": "生成期校验",
+        "focus": [
+          "user_input",
+          "sanitize",
+          "extract",
+          "l1",
+          "l2",
+          "l3"
+        ],
+        "note": "输入清洗到三层 SQL 校验。"
+      },
+      {
+        "id": "execute",
+        "label": "执行期纵深",
+        "focus": [
+          "l3",
+          "limit",
+          "readonly"
+        ],
+        "note": "READ ONLY 事务与资源限制。"
+      },
+      {
+        "id": "leak",
+        "label": "泄漏防线",
+        "focus": [
+          "heal",
+          "clean",
+          "memory_scope"
+        ],
+        "note": "自愈、错误文案与记忆隔离。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "input",
+      "label": "输入与生成"
+    },
+    {
+      "id": "validate",
+      "label": "三层校验"
+    },
+    {
+      "id": "execute",
+      "label": "执行纵深"
+    },
+    {
+      "id": "policy",
+      "label": "泄漏防线",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "pre",
+      "label": "输入处理",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "check",
+      "label": "静态校验",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "run",
+      "label": "执行与兜底",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "user_input",
+    "sanitize",
+    "extract",
+    "l1",
+    "l2",
+    "l3",
+    "readonly"
+  ],
+  "nodes": [
+    {
+      "id": "user_input",
+      "lane": "input",
+      "col": 0,
+      "type": "external",
+      "label": "用户输入",
+      "sublabel": "自然语言问题",
+      "width": 130
+    },
+    {
+      "id": "sanitize",
+      "lane": "input",
+      "col": 1,
+      "type": "security",
+      "label": "sanitize 输入清洗",
+      "sublabel": "SEC-007",
+      "width": 140
+    },
+    {
+      "id": "extract",
+      "lane": "input",
+      "col": 2,
+      "type": "backend",
+      "label": "LLM 生成 SQL",
+      "sublabel": "白名单列注入 prompt",
+      "width": 150
+    },
+    {
+      "id": "l1",
+      "lane": "validate",
+      "col": 2,
+      "type": "security",
+      "label": "L1 AST 校验",
+      "sublabel": "sqlglot · 仅 SELECT 族",
+      "width": 150
+    },
+    {
+      "id": "l2",
+      "lane": "validate",
+      "col": 3,
+      "type": "security",
+      "label": "L2 黑名单",
+      "sublabel": "危险函数 + INTO 子句",
+      "width": 140
+    },
+    {
+      "id": "l3",
+      "lane": "validate",
+      "col": 4,
+      "type": "security",
+      "label": "L3 白名单列",
+      "sublabel": "语义层全列 fail-closed",
+      "width": 150
+    },
+    {
+      "id": "readonly",
+      "lane": "execute",
+      "col": 5,
+      "type": "database",
+      "label": "READ ONLY 事务",
+      "sublabel": "READ ONLY + DB 超时",
+      "width": 150
+    },
+    {
+      "id": "limit",
+      "lane": "execute",
+      "col": 4,
+      "type": "database",
+      "label": "LIMIT 注入",
+      "sublabel": "max_rows 截断",
+      "width": 130
+    },
+    {
+      "id": "reject",
+      "lane": "policy",
+      "col": 4,
+      "type": "security",
+      "label": "拒绝执行",
+      "sublabel": "校验不过不执行",
+      "width": 130
+    },
+    {
+      "id": "heal",
+      "lane": "policy",
+      "col": 3,
+      "type": "messagebus",
+      "label": "自愈只传类别",
+      "sublabel": "不传原始 DB 错误",
+      "width": 160
+    },
+    {
+      "id": "clean",
+      "lane": "policy",
+      "col": 5,
+      "type": "security",
+      "label": "_clean_db_error",
+      "sublabel": "错误文案脱敏",
+      "width": 150
+    },
+    {
+      "id": "memory_scope",
+      "lane": "policy",
+      "col": 2,
+      "type": "security",
+      "label": "记忆 scope 隔离",
+      "sublabel": "用户 + 数据源",
+      "width": 150
+    }
+  ],
+  "edges": [
+    {
+      "id": "input-sanitize",
+      "from": "user_input",
+      "to": "sanitize",
+      "variant": "default"
+    },
+    {
+      "id": "sanitize-extract",
+      "from": "sanitize",
+      "to": "extract",
+      "variant": "default"
+    },
+    {
+      "id": "extract-l1",
+      "from": "extract",
+      "to": "l1",
+      "label": "extract_sql_text",
+      "variant": "default"
+    },
+    {
+      "id": "l1-l2",
+      "from": "l1",
+      "to": "l2",
+      "variant": "default"
+    },
+    {
+      "id": "l2-l3",
+      "from": "l2",
+      "to": "l3",
+      "variant": "default"
+    },
+    {
+      "id": "l3-readonly",
+      "from": "l3",
+      "to": "readonly",
+      "label": "三层全过",
+      "variant": "emphasis"
+    },
+    {
+      "id": "l3-limit",
+      "from": "l3",
+      "to": "limit",
+      "label": "通过后注入",
+      "variant": "dashed"
+    },
+    {
+      "id": "limit-readonly",
+      "from": "limit",
+      "to": "readonly",
+      "variant": "dashed"
+    },
+    {
+      "id": "l3-reject",
+      "from": "l3",
+      "to": "reject",
+      "label": "任一层不过",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "readonly-heal",
+      "from": "readonly",
+      "to": "heal",
+      "label": "执行失败",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "readonly-clean",
+      "from": "readonly",
+      "to": "clean",
+      "label": "错误出口",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "extract-memory",
+      "from": "extract",
+      "to": "memory_scope",
+      "label": "记忆检索",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "三层静态校验（sql_validator.py:68-130）",
+      "items": [
+        "L1 AST（sqlglot）：仅 SELECT/UNION/INTERSECT/EXCEPT，拒多语句与 CTE 内写操作",
+        "L2 危险函数黑名单 + INTO 子句拦截",
+        "L3 白名单列 = 语义层全列（含派生标识符），未知列 fail-closed"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "执行期纵深（datasources.py:247-295）",
+      "items": [
+        "READ ONLY 事务：即使校验被绕过也无法写入",
+        "LIMIT 注入 + max_rows 截断 + DB 侧语句超时",
+        "校验不过直接拒绝，不进入执行"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "泄漏防线",
+      "items": [
+        "自愈 prompt 只传错误类别，不传原始 DB 错误（S6）",
+        "_clean_db_error 清洗错误文案后才直达用户",
+        "记忆按 用户+数据源 scope 隔离，防跨租户泄漏"
+      ]
+    }
+  ]
+}

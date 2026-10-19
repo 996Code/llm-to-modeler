@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "RAGFlow GraphRAG 数据流：抽取、合并消歧、社区与统一索引",
+    "output": "../RAGFlow项目学习/图/ragflow-graphrag.html",
+    "locale": "zh-CN",
+    "viewBox": [
+      1080,
+      520
+    ],
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "extract-path",
+        "label": "三档抽取",
+        "focus": [
+          "chunks",
+          "ext-general",
+          "ext-light",
+          "ext-ner",
+          "merge"
+        ],
+        "note": "general/light/ner 三档抽取器产出同构分隔符协议。"
+      },
+      {
+        "id": "resolve-community",
+        "label": "消歧与社区",
+        "focus": [
+          "merge",
+          "resolution",
+          "community"
+        ],
+        "note": "同名合并、LLM 判同消歧、leiden 社区报告。"
+      },
+      {
+        "id": "index-search",
+        "label": "降维索引与检索",
+        "focus": [
+          "chunkify",
+          "index",
+          "kgsearch"
+        ],
+        "note": "图谱元素 chunk 化进统一索引，KGSearch 按 pagerank×sim 召回。"
+      }
+    ]
+  },
+  "stages": [
+    {
+      "label": "文档块"
+    },
+    {
+      "label": "抽取"
+    },
+    {
+      "label": "合并·消歧·社区"
+    },
+    {
+      "label": "统一索引"
+    },
+    {
+      "label": "检索"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "chunks",
+      "type": "database",
+      "label": "文档 chunks",
+      "sublabel": "切块结果",
+      "stage": 0,
+      "row": 1,
+      "tag": "per-doc"
+    },
+    {
+      "id": "ext-general",
+      "type": "cloud",
+      "label": "general 抽取",
+      "sublabel": "MS GraphRAG 风",
+      "stage": 1,
+      "row": 0,
+      "tag": "LLM"
+    },
+    {
+      "id": "ext-light",
+      "type": "cloud",
+      "label": "light 抽取",
+      "sublabel": "LightRAG（默认）",
+      "stage": 1,
+      "row": 1,
+      "tag": "LLM"
+    },
+    {
+      "id": "ext-ner",
+      "type": "backend",
+      "label": "ner 抽取",
+      "sublabel": "spaCy 免 LLM",
+      "stage": 1,
+      "row": 2
+    },
+    {
+      "id": "merge",
+      "type": "backend",
+      "label": "图合并",
+      "sublabel": "同名拼接",
+      "stage": 2,
+      "row": 0,
+      "tag": "networkx"
+    },
+    {
+      "id": "resolution",
+      "type": "security",
+      "label": "实体消歧",
+      "sublabel": "预筛→LLM 判同",
+      "stage": 2,
+      "row": 1,
+      "tag": "连通分量"
+    },
+    {
+      "id": "community",
+      "type": "cloud",
+      "label": "社区报告",
+      "sublabel": "leiden→LLM 摘要",
+      "stage": 2,
+      "row": 2,
+      "tag": "可选"
+    },
+    {
+      "id": "index",
+      "type": "database",
+      "label": "统一索引",
+      "sublabel": "与普通文本同引擎",
+      "stage": 3,
+      "row": 0
+    },
+    {
+      "id": "chunkify",
+      "type": "messagebus",
+      "label": "图谱 chunk 化",
+      "sublabel": "entity/relation/graph",
+      "stage": 3,
+      "row": 1,
+      "tag": "available_int=0"
+    },
+    {
+      "id": "kgsearch",
+      "type": "frontend",
+      "label": "KGSearch",
+      "sublabel": "pagerank × sim",
+      "stage": 4,
+      "row": 1
+    }
+  ],
+  "flows": [
+    {
+      "id": "f-chunks-general",
+      "from": "chunks",
+      "to": "ext-general",
+      "label": "逐块抽取",
+      "classification": "LLM 档",
+      "variant": "default",
+      "labelAt": [
+        150,
+        205
+      ]
+    },
+    {
+      "id": "f-chunks-light",
+      "from": "chunks",
+      "to": "ext-light",
+      "label": "默认档",
+      "classification": "LLM 档",
+      "variant": "emphasis",
+      "route": "straight",
+      "labelAt": [
+        243,
+        314
+      ]
+    },
+    {
+      "id": "f-chunks-ner",
+      "from": "chunks",
+      "to": "ext-ner",
+      "label": "轻量档",
+      "classification": "免 LLM",
+      "variant": "default",
+      "labelAt": [
+        150,
+        340
+      ]
+    },
+    {
+      "id": "f-general-merge",
+      "from": "ext-general",
+      "to": "merge",
+      "label": "同构协议",
+      "classification": "三元组",
+      "variant": "default",
+      "route": "straight",
+      "labelAt": [
+        468,
+        200
+      ]
+    },
+    {
+      "id": "f-light-merge",
+      "from": "ext-light",
+      "to": "merge",
+      "label": "三元组",
+      "classification": "三元组",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-ner-resolution",
+      "from": "ext-ner",
+      "to": "resolution",
+      "label": "候选实体对",
+      "classification": "三元组",
+      "variant": "default"
+    },
+    {
+      "id": "f-merge-resolve",
+      "from": "merge",
+      "to": "resolution",
+      "label": "同名实体桶",
+      "classification": "消歧输入",
+      "variant": "default",
+      "labelAt": [
+        530,
+        215
+      ]
+    },
+    {
+      "id": "f-resolve-community",
+      "from": "resolution",
+      "to": "community",
+      "label": "精简图",
+      "classification": "社区划分",
+      "variant": "default",
+      "labelAt": [
+        530,
+        330
+      ]
+    },
+    {
+      "id": "f-merge-chunkify",
+      "from": "merge",
+      "to": "chunkify",
+      "label": "实体/关系",
+      "classification": "图谱块",
+      "variant": "emphasis"
+    },
+    {
+      "id": "f-community-chunkify",
+      "from": "community",
+      "to": "chunkify",
+      "label": "社区摘要",
+      "classification": "图谱块",
+      "variant": "default"
+    },
+    {
+      "id": "f-chunkify-index",
+      "from": "chunkify",
+      "to": "index",
+      "label": "混合打分入库",
+      "classification": "统一索引",
+      "variant": "emphasis",
+      "labelAt": [
+        765,
+        215
+      ]
+    },
+    {
+      "id": "f-index-kgsearch",
+      "from": "index",
+      "to": "kgsearch",
+      "label": "按需可用",
+      "classification": "检索",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "三档抽取",
+      "items": [
+        "general / light / ner 三档由 _select_extractor 分发（rag/graphrag/general/index.py:122-138）",
+        "两档 LLM 输出同构分隔符协议（entity<|>名<|>类型<|>描述），解析在 utils.py:344-387",
+        "light 档 prompt 要求 content_keywords 并禁止幻觉描述（light/graph_prompt.py:17-48）"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "合并与消歧",
+      "items": [
+        "同名节点 description/source_id 以 <SEP> 追加、边 weight 累加（graphrag/utils.py:306-336）",
+        "消歧：同类型分桶→Levenshtein/字符重合预筛→100 对/批 LLM 判同→连通分量合并（entity_resolution.py:95-197）",
+        "整图为 networkx，存成 knowledge_graph_kwd=graph 的一个 chunk（utils.py:564-574）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "降维索引",
+      "items": [
+        "实体/关系/社区报告全部 chunk 化，source_id 回指 doc_id（utils.py:414-446）",
+        "available_int=0 使图谱块不进普通检索，检索请求强制放开（nlp/search.py:643）",
+        "KGSearch 按 P(E|Q)=pagerank×sim 排序召回（graphrag/search.py:139-221）",
+        "延伸阅读：《笔记/03-GraphRAG与知识编译.md》"
+      ]
+    }
+  ]
+}

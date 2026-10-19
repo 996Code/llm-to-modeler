@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAGFlow 对标与三层升级蓝图 · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>RAGFlow 对标与三层升级蓝图</h1>
+  <p class="lead">2026-10-13 · 基于 RAGFlow v0.27.2 全量源码（Python 稳定版 + Go 主干）与本项目全链路审计</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  
+  <article>
+<h1>RAGFlow 对标与三层升级蓝图</h1>
+<blockquote>
+<p>2026-10-13 · 基于 RAGFlow v0.27.2 全量源码（Python 稳定版 + Go 主干）与本项目全链路审计
+证据标准：所有结论有 file:line；RAGFlow 关键结论已经独立复核（10/10 成立，1 处权重方向已修正）</p>
+</blockquote>
+<h2>0. 产出物索引</h2>
+<table>
+<thead>
+<tr>
+<th>产出</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>组件架构图</td>
+<td>../图/ragflow-system.html</td>
+</tr>
+<tr>
+<td>文档导入工作流</td>
+<td>../图/ragflow-doc-ingestion.html</td>
+</tr>
+<tr>
+<td>对话检索时序</td>
+<td>../图/ragflow-chat-retrieval.html</td>
+</tr>
+<tr>
+<td>GraphRAG 数据流</td>
+<td>../图/ragflow-graphrag.html</td>
+</tr>
+<tr>
+<td>Agent 画布执行</td>
+<td>../图/ragflow-agent-canvas.html</td>
+</tr>
+<tr>
+<td>连接器同步</td>
+<td>../图/ragflow-connector-sync.html</td>
+</tr>
+<tr>
+<td>会话记忆数据流</td>
+<td>../图/ragflow-memory.html</td>
+</tr>
+<tr>
+<td>角度笔记 15 篇</td>
+<td>笔记/ 目录（01-15 + 本蓝图，index.html 总览导航）</td>
+</tr>
+<tr>
+<td>RAGFlow 源码</td>
+<td>~/cyble-code/ragflow-v0272（Python）/ ~/cyble-code/ragflow（Go main）</td>
+</tr>
+</tbody>
+</table>
+<h2>0.5 本仓库代码地图与术语表（F 轮 onboarding 审查补）</h2>
+<p><strong>两套源码根（材料中行号分属两处，勿混淆）</strong>：
+- <code>~/cyble-code/ragflow-v0272</code> = RAGFlow 源码（本材料绝大多数 file:line 指此）
+- 本仓库 = <code>/Users/xiaotaotao/IDEA/njmind/middle/llm-to-modler</code>（蓝图 P0 项里的 retrieval.py/api.py/ask_data.py 等行号指此）</p>
+<p><strong>P0 涉及文件（本仓库）</strong>：
+| 文件 | 作用 |
+|---|---|
+| backend/src/domains/knowledge_graph/api.py | KG REST（/search 在 :484-533） |
+| backend/src/domains/knowledge_graph/retrieval.py | 混合检索编排（answer_question :386-393） |
+| frontend/src/admin/packPages/knowledge_graph/DocManager.vue | KG 管理页（加"检索测试"标签处，现无 tab 结构） |
+| frontend/src/components/chat/KgGraphCard.vue | 对话数据卡（片段手风琴，citedChunks prop） |
+| frontend/src/components/chat/ChatPanel.vue | 对话面板（:211 已接 KgGraphCard） |
+| backend/src/llm/client.py | LLM 客户端（rerank 接口加在此） |</p>
+<p><strong>启动</strong>：<code>./start_dev.sh</code>（后端 :18080 + mock :19999）+ frontend 下 <code>npm run dev</code>。</p>
+<p><strong>术语速查（本仓库概念，RAGFlow 无）</strong>：pack=插件（声明制路由，引擎零领域知识）；call_logs=逐环节调用观测（stage 标记）；宿主=njmind 低代码平台；AssetClient=宿主数据读写契约；artifact+APPLY=AI 产物确认门（AI 不落库）；fail-closed=宁可明确失败不猜测。</p>
+<h2>1. 对标一句话结论</h2>
+<ul>
+<li><strong>平台底座</strong>：我们是"单进程精工"（事务性装配、call_logs 观测做工细），RAGFlow 是"分布式工厂"（任务队列/水平扩展/多引擎）。差距集中在：分布式任务、多 provider 网关、rerank、开放协议。</li>
+<li><strong>knowledge_graph</strong>：我们图质量管控深（本体约束/原文锚定/三重接地），RAGFlow 工程闭环全（增量 checkpoint/删除重建/消歧预筛/社区报告）。差距集中在：检索质量（rerank/全文路）、全局能力（社区报告）、产品化（检索测试/引用回跳）。</li>
+<li><strong>ChatBI</strong>：主管线成熟（八步：七步可见+finalize 收尾，ask_data.py:106-116；自愈/三层校验/query_stats），但检索是单路向量+手调阈值、无评测集、无引用、反馈闭环有断头（点赞/纠正无入口）。</li>
+</ul>
+<h2>2. 差距总表（F 轮魔鬼代言人审查修正：拆为"真差距"与"场景差异"两张——后者是设计选择非差距，不构成补齐方向）</h2>
+<p><strong>真差距（对标确认值得补）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>我们现状</th>
+<th>RAGFlow v0.27.2</th>
+<th>差距评级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LLM 网关 rerank</td>
+<td>无 rerank 接口</td>
+<td>rerank 接口+外置模型</td>
+<td><strong>高</strong>（管线缺口）</td>
+</tr>
+<tr>
+<td>检索融合</td>
+<td>ChatBI 单路向量 0.35 手调阈值</td>
+<td>向量0.3/全文0.7+空结果复查+rerank</td>
+<td><strong>高</strong></td>
+</tr>
+<tr>
+<td>引用可信</td>
+<td>KG 来源列表；ChatBI sql 制品</td>
+<td>[ID:n] 句级插入+坐标回跳</td>
+<td><strong>高</strong>（体验差距）</td>
+</tr>
+<tr>
+<td>评测</td>
+<td>无评测集无准确率回归</td>
+<td>benchmark+公开基准+langfuse</td>
+<td><strong>高</strong></td>
+</tr>
+<tr>
+<td>知识形态</td>
+<td>图谱单一产物</td>
+<td>编译家族（图谱/树/wiki/时间线）</td>
+<td>中（方向参考）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>场景差异·不补齐（插件 vs 平台的设计选择）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>任务体系</td>
+<td>单进程契约是明示决策（deploy/single/README.md:4），等真实多副本需求</td>
+</tr>
+<tr>
+<td>多租户</td>
+<td>宿主管权限（X-User-Id 透传），插件不做租户体系</td>
+</tr>
+<tr>
+<td>开放协议</td>
+<td>MCP/OpenAI 出口按需（终局项），非当前差距</td>
+</tr>
+<tr>
+<td>数据源接入</td>
+<td>走宿主 AssetClient 契约（终局项）</td>
+</tr>
+<tr>
+<td>记忆复杂度</td>
+<td>三类记忆+遗忘策略，我们 compact_focus 规模暂不需要</td>
+</tr>
+</tbody>
+</table>
+<p><strong>原总表（保留供追溯）</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>我们现状</th>
+<th>RAGFlow v0.27.2</th>
+<th>差距评级</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>任务体系</td>
+<td>线程池+queue_key+续跑，单进程（task_manager.py:9-18）</td>
+<td>Redis Streams 消费组+unacked 恢复+心跳+worker 回收</td>
+<td>中（单实例契约是明示决策）</td>
+</tr>
+<tr>
+<td>LLM 网关</td>
+<td>单 OpenAI 兼容+限速+降级；无 rerank/缓存/费用</td>
+<td>40+ provider、encode/encode_queries、rerank 接口、24h 调用缓存</td>
+<td><strong>高</strong>（rerank 是管线缺口）</td>
+</tr>
+<tr>
+<td>检索融合</td>
+<td>KG 双路（图谱+向量）；ChatBI 单路向量 0.35 阈值</td>
+<td>向量0.3/全文0.7 融合+空结果放宽复查+rerank 精排</td>
+<td><strong>高</strong></td>
+</tr>
+<tr>
+<td>引用可信</td>
+<td>KG 来源列表；ChatBI sql/tables 制品</td>
+<td>[ID:n] 句级自动插入+positions 坐标回跳</td>
+<td><strong>高</strong>（产品体验级差距）</td>
+</tr>
+<tr>
+<td>评测</td>
+<td>ChatBI 无评测集；无准确率回归</td>
+<td>benchmark（首token/P50/QPS）+ langfuse 集成</td>
+<td><strong>高</strong></td>
+</tr>
+<tr>
+<td>记忆</td>
+<td>ChatBI 词重叠召回+LLM 整理；会话 compact_focus</td>
+<td>三类记忆（semantic/episodic/procedural）+FIFO 遗忘</td>
+<td>低（我们规模暂不需要）</td>
+</tr>
+<tr>
+<td>数据源接入</td>
+<td>无（手动上传）</td>
+<td>35+ 连接器+fingerprint 增量+删除对账</td>
+<td>中（走宿主 AssetClient 约束）</td>
+</tr>
+<tr>
+<td>多租户</td>
+<td>X-User-Id 透传+会话归属</td>
+<td>tenant/role 四档+三层防护</td>
+<td>低（宿主管权限）</td>
+</tr>
+<tr>
+<td>开放协议</td>
+<td>无 MCP/OpenAI 兼容出口</td>
+<td>MCP+OpenAI+Dify 三协议</td>
+<td>低（按需）</td>
+</tr>
+<tr>
+<td>知识形态</td>
+<td>图谱单一产物</td>
+<td>知识编译家族（图谱/树/wiki/时间线/页索引）</td>
+<td>中（方向参考）</td>
+</tr>
+</tbody>
+</table>
+<h2>3. 近期落地路线（3-6 个月，按性价比排序）</h2>
+<h3>P0（纯产品化，本周级；<strong>评测集先行</strong>——F 轮答辩审查修正：它是 #4 rerank 与 #6 检索混合化的验收前提，没有尺子一切检索改动都是盲改）</h3>
+<ol>
+<li><strong>ChatBI 最小评测集（先行项，P1#5 的前置子集）</strong>：先建 20 条最小用例（evalset.json 形态见 P1#5）——不追求 50-100 条全量，先让 rerank/混合化有基线可比。约 1-2 人天。
+   验收：20 条 query→期望表断言可跑；后续检索改动有 recall 基线数字。
+   <strong>✅ 已完成（2026-10-13，merge ae2eadc）</strong>：基线 <strong>recall@5=1.000</strong>（n=20，正交基假 embedder <strong>管线护栏口径</strong>——embed→索引→召回→阈值任一环断裂即掉 0，非检索质量度量；真实质量度量需真 embed+噪声负例，P1#5 扩容时建立）。SQL 骨架命中 10/10（含 3 条 medium 多表 JOIN 护栏）。全量 1322 passed。<strong>P0#4 rerank 验收注意：护栏口径下 rerank 后应仍=1.000（证链路未断）；质量改善证明需第二口径</strong>。</li>
+<li><strong>KG 检索测试页</strong>：DocManager 加"检索测试"标签。<strong>工作量修正</strong>（二轮审查）：并非纯前端——/search 返回（retrieval.py:386-393）不含 seeds 种子命中与截断水位（nodesTruncated/maxNodes，只进 call_logs，retrieval.py:192-198），需后端小改：answer_question 返回体补 seeds/水位字段（或加 retrieve-only 参数跳过 LLM 回答，省时省钱）。鉴权口径：测试页挂 DocManager（admin_required 门内）；选库走 /kbs 列表（/search 是用户级端点且多库时不回显库名防枚举，api.py:507-509）。
+   验收：任一 query 可视化两路召回明细（意图/种子命中表/子图+截断水位/向量分数）；能回答"为什么没召回 X"；retrieve-only 模式不触发 LLM 回答调用。
+   <strong>✅ 已完成（2026-10-14）</strong>：hybrid_retrieve 返回体纯增量加 diagnostics（termDetail 逐词命中/截断水位/向量降级——此前只进 call_logs）；新管理端 <code>POST /kbs/{kb_id}/retrieve-test</code>（admin 门内，直接调 hybrid_retrieve 跳过 kg.answer——意图解析仍走）；前端 KG 管理页第四 tab「检索测试」四段可视化（意图/种子命中表含红「未命中」/子图计数+水位 tag/向量片段带分数）。浏览器实测两用例（命中:张伟 1/1 命中+未截断+5 片段；未命中:赵六 0/1 红 tag+子图 0/0——"为什么没召回 X"直接可答）。用户级 /search 零改动（防枚举口径不变）。测试 11 用例（含 retrieve-only chat_calls==[] 断言/top_k 端到端锚定/admin 门 401）。<strong>蓝图原文说"DocManager 加标签"实际落 index.vue 第四 tab</strong>（DocManager 只是三 tab 之一，同构等价，终审裁决接受）。<strong>P0 剩余：#4 rerank 接口</strong>。</li>
+<li><strong>KG 答案句尾引用编号</strong>：answer.j2 已有 [片段:N]，约束 LLM 句尾标号；KgGraphCard 片段展开联动（组件已存在且 citedChunks prop 已接线，ChatPanel.vue:211）。<strong>编号权威源</strong>：sources.chunks 顺序为唯一权威，answer.j2 的 [片段:N] 必须与该顺序对齐（现状靠 loop.index 隐式对齐，改为 prompt 显式注入编号列表）；<strong>与 #4 的交互</strong>：rerank 上线后 chunks 顺序以 rerank 后为准，编号在 rerank 之后生成，保证稳定。<strong>点击滚动</strong>：回答文本里 [片段:N] 现为纯文本，需改前端 Markdown 渲染（把 [片段:N] 转为可点击锚点，滚动到 KgGraphCard 对应片段手风琴并展开）。<strong>LLM 不守约束</strong>：不重试（烧钱），放行并在 sources.chunks 顺序对齐上兜底——编号错乱只影响体验不影响事实。
+   验收：答案每个结论句带 [片段:N]，点击滚动到对应片段并展开。
+   <strong>✅ 已完成（2026-10-14，merge e382858）</strong>：answer.j2 显式注入「可用引用编号」总表行；后端 parse_cited_chunks 解析回传（去重升序、越界不滤——前端双界 n&gt;=1 &amp;&amp; n&lt;=len 兜底，T2 裁决）；kb_search artifact 透传；前端徽标 data-chunk-idx+事件委托点击滚动+手风琴展开；KgGraphCard「引用了 N/M 个」双界高亮。浏览器实测 DOM 取证通过（徽标渲染/滚动 inViewport/展开原文/1-of-5 高亮）。全量 1330 passed。<strong>附带修复</strong>：vector_store 单槽缓存改按指纹多槽（chatbi/kg 双 pack 前缀互踢连接根因，实测中发现）。<strong>遗留跟进（终审 minor）</strong>：多槽缓存旧指纹连接不淘汰（热改低频可接受）；点击先滚动后展开时序（居中定位下长面板可能溢出下缘）。<strong>P0 剩余：#2 检索测试页、#4 rerank 接口</strong>。</li>
+<li><strong>平台 rerank 接口</strong>：llm client 增 rerank(query, texts)——<strong>只接外部 API，不绑本地模型</strong>（RAGFlow v0.18 移除内置 rerank："对检索率影响极小但显著增加检索时间"）。<strong>协议参照</strong>：/rerank 并非 OpenAI 官方端点，参照 Cohere/Jina 的 rerank API 形态（POST {query, documents, top_n} → results[{index, relevance_score}]），配置 base_url+model+api_key。<strong>配置落点</strong>：走 env（LLMConfig 同款，与 llm client 现有配置体系一致）；<strong>排序对象</strong>：KG 侧排 chunks+node_details（linearize 前的资料段），ChatBI 侧排候选表——不排 BFS 子图本身（图结构保持，只排进 prompt 的资料顺序）。<strong>开关粒度</strong>：KG/ChatBI 各自 settings.schema.yaml 独立开关（默认关），平台层无全局开关。<strong>日志</strong>：走 _log_retrieval_call（call_type='rerank'，与 graph/vector 同表）。
+   <strong>失败降级</strong>：rerank 是排序质量增强项，不是数据正确性项——调用失败/超时（默认 3s）时<strong>降级为原召回序</strong>继续流程，不阻断检索、不重试烧钱；call_logs 记 rerank stage 且 error 字段留痕（与 KG 向量路降级同款语义，retrieval.py:268-282 先例）。与 fail-closed 的边界：fail-closed 管"数据对不对"（SQL/上游写入），rerank 失败只影响"排序好不好"，降级放行不违反原则。
+   验收：call_logs 出现 rerank stage；KG 进 prompt 的资料段按相关度排序；<strong>人为断掉 rerank 端点，检索链路仍完整返回且日志有 degraded 记录</strong>；排序质量收益用 P0#1 最小评测集基线对比（20 条 recall@5）。
+   <strong>✅ 已完成（2026-10-14，merge 403baa1）——P0 四件套收官</strong>：平台 <code>LLMClient.rerank()</code>（Cohere/Jina 协议 <code>POST {base}/rerank</code>、独立 httpx、env RERANK_BASE_URL/MODEL/API_KEY/TIMEOUT 默认 3s、未配置抛 RuntimeError、观测入 call_logs endpoint=<code>rerank:{model}</code>+stage、索引完整性校验、close() 收口）；KG 侧 answer_question linearize 前重排 chunks（重排在 sources.chunks 构造前=[片段:N] 编号权威源自动对齐，P0#3 遗产兼容）；ChatBI 侧 retrieve() top_k 截断前精排候选（成功跳过 sort；签名加参由 ask_data 传=移植契约）。双插件 rerank_enabled 开关默认关（KG retrieval 组/ChatBI retrieve 组）。<strong>验收对照</strong>：观测✓（15 用例锚定）；KG 资料段重排✓；断端点降级完整返回✓（三层降级测试）；护栏口径 recall@5=1.000 不动✓（评测集回归）=链路未断；质量改善需第二口径（P0#1 注记）。<strong>终审裁决</strong>：平台观测落 call_type='llm' 而非蓝图原文 'rerank'——_log_retrieval_call 是 KG 插件设施平台不可反向依赖，且 admin 聚合只收 'llm'，endpoint+stage 已保过滤性。<strong>遗留 nano</strong>：诊断页（P0#2）序与真实回答序在开关开时不同（retrieve-test 不走 answer_question，设计如此）；KG/ChatBI 降级日志风格不一致。<strong>P0 全部完成：#1 评测集 / #2 检索测试页 / #3 引用编号 / #4 rerank。下一步 P1（评测集扩容→混合化→…）</strong>。</li>
+</ol>
+<h3>P1（检索质量与评测，1-2 个月；<strong>评测集先行</strong>——检索改进的验收都依赖它）</h3>
+<ol>
+<li><strong>ChatBI 评测集（P0#1 最小集扩容）</strong>：50-100 条 query→期望表/SQL 形态用例（参照 RAGFlow"内置公开基准 ms_marco/miracl + 自建用例"双轨，我们以自建业务用例为主），离线回归（不依赖外部服务，断言检索命中与 SQL 骨架）进 pytest。<strong>照抄形态</strong>：evalset.json{query,expected_tables,expected_sql,difficulty} + ranx 算 recall@k/MRR + SQL 比对执行结果集（终局裁决 A5：<strong>骨架比对离线跑，结果集比对连评测集内置 SQLite fixture 库</strong>，不依赖外部服务承诺保持）+ per-query 坏例排序报告。
+   验收：改动检索/生成逻辑后跑评测集，准确率有数字可跟踪；#4 rerank/#6 混合化的效果以本评测集为准绳。
+   <strong>✅ 已完成（2026-10-15，merge 6adb771）</strong>：60 条（easy25/medium26/hard9——h007 审查降级）+ <code>fixture_seed.sql</code>（六表 SQLite 种子 12/4/24/8/8/30 行）+ <code>expected_sql</code> 全量（SQLite 方言，PoC 验证 PG 形态兼容）+ EX 双口径（<strong>投影类 29 条</strong>：期望列按名投影+子多重集比对，27/29 断言≥checked-3；<strong>整行类 31 条</strong>：0/31 只打印——替身无聚合生成能力=口径边界非链路问题，真生成质量留真 LLM 评测）+ MRR@5 指标 + 难度×类别 16 格矩阵 + 坏例降序报告（<code>-s</code> 可见）。<strong>三尺基线：recall@5=1.000 / mrr@5=1.000（n=60，护栏口径）/ EX-proj 27/29（链路连通口径）</strong>。全量 1482 passed。<strong>口径裁决（T1 修复环）</strong>：expected_columns 双口径——非空=投影比对（列名与 cursor 一致），[]=整行比对（聚合/重名列）；分布 29/31 有固化断言防漂移。skeleton=expected_sql 全等有断言。<strong>P1#6 对比工作流就绪</strong>：改检索后跑 <code>pytest tests/domains/test_chatbi_evalset_ex.py -s</code> 看矩阵 diff。<strong>留 P1#6 顺手项</strong>：重名列比对器（m014 投影错位根因）/MRR 空集口径对称/坏例截断放开/骨架交集弱口径/EX 严格多重集（真 LLM 时）。</li>
+<li><strong>ChatBI 检索混合化</strong>：schema 检索加关键词路（终局裁决 A1：①融合公式默认 <strong>RRF</strong>（倒数排名融合，免量纲问题），权重待评测集校准；②包含方向=查询词与表名/列名/注释<strong>双向包含命中</strong>；③RAGFlow 双层权重先例裁决——采用其本地重排层语义（cosine 为主），引擎层配比不抄）（依据：02 号 §1 RAGFlow 混检经验 + ChatBI 审计『单路向量手调阈值』结论）（表名/列名/注释归一化精确+包含匹配）与向量路融合；rerank 前置精排让 LLM 精筛拿到更准的候选（精筛保留"宁缺毋滥"语义，不删除），阈值问题随融合降权（现状锚点：手调 0.35 在 chatbi/retrieval.py:59）。
+   验收：<strong>#1/#5 评测集上</strong>表召回率提升（recall@5 基线对比）；LLM 调用次数不增。
+   <strong>✅ 已完成（2026-10-15，merge 53dadc4）</strong>：新模块 <code>chatbi/hybrid.py</code>（tokenize_query 中文 2-gram+英文数字词+停用词 / keyword_scores 双向包含计分——正向每词+1、反向点名+3 <strong>词边界判定</strong>（审查 major 修复：裸子串会让 order 命中 order_status）/ rrf_fuse Σ1/(60+rank)）；retrieve() 身份过滤后融合候选（关键词新命中从 content 构造 SearchResult，score=匹配分；hybrid_fused 跳过 score sort 防量纲混排）；开关 <code>hybrid_search_enabled</code> 默认关（retrieve 组）。<strong>关键裁决（T2 现场反转）</strong>：融合段从计划"身份过滤前"移到"后"——探针+集成红证实 per-scope dict 重建会丢关键词命中；关键词 record 无 # 键 metadata 已设，移后真等价。<strong>双基线：关=1.000/开=1.000（n=60，只补不删锚定）</strong>；rescue 用例证关键词路独立价值（向量漏召回靠表名/列中文名点名补进）；4 开关态（hybrid×rerank）矩阵全覆盖；融合观测 <code>hybrid: kw_hits=… vec_top5=… fused_top5=…</code> INFO 日志。全量 <strong>1498 passed</strong>（+16）。<strong>真实收益验证路径</strong>：管理端开 hybrid 后看 kw_hits 分布与 vec_top5/fused_top5 差异（rescue 实际发生即收益证据）。<strong>留 minor</strong>：refine prompt score 量纲混杂（规则4 缓解）/多 scope 同名覆盖（ask_data 恒单 scope 不可达）/2-gram 跨词噪声（RRF 秩融合稀释）。</li>
+<li><strong>KG 社区报告</strong>：做成<strong>可插拔编译通道</strong>（KG pack 新可选任务类型，参照 RAGFlow Knowledge Compilation 的"模板+开关"形态，不做成固定特性——其 GraphRAG 三度摇摆后正是收编进编译体系）。<strong>启动门槛（F 轮魔鬼代言人审查补）</strong>：①血统风险——GraphRAG 谱系是 RAGFlow 摇摆最烈+Issue 热点（卡 80-90%）所在，抄的是未稳定解；②需求证据——用户月均提出"这个库整体讲什么"类问题 ≥5 次才启用（当前无此数据，默认不启动）；③评测盲区——现有评测集是 ChatBI 的，KG 侧无量化验收，先补"整体性问题"用例集再动工。<strong>G 轮 PM 建议砍出排期；决策：保留门槛制——默认不启动即不占排期，需求证据出现再议</strong>；收尾五步顺路加 leiden（networkx 内置）+ LLM 社区摘要 + 向量化入库；检索时命中实体反查所属社区。
+   <strong>成本估算</strong>（按实测 563 实体库推算）：leiden 纯代码秒级；社区数约为实体数的 5-10%（~30-60 个），每社区一次 LLM 摘要调用（输入≈社区成员实体名+描述，约 1-2k token，输出 ~300 token）——<strong>一次全量导入增加 30-60 次 LLM 调用、约 5-15 万 token</strong>，与现有抽取批次（276 块 × 每批一次）相比增量 &lt;10%；社区摘要走收尾阶段的限速令牌桶，不新增并发压力。
+   验收："这个库整体讲什么"类问题可答；导入耗时增幅 &lt;20%（LLM 调用增量 &lt;10%）；不启用该通道时行为与现在完全一致。</li>
+<li><strong>平台网关增强</strong>：embeddings 拆 encode/encode_queries（bge-m3 本地后端两模式）；LLM/embedding 结果进程内+Redis 两级缓存（同参 24h）。
+   验收：重复 query 检索链路 LLM 调用数下降可观测。
+   <strong>✅ 已完成（2026-10-15，merge 7ce38c7）——P1 实质收官</strong>：embeddings 拆 <code>encode/encode_queries</code>（mode 参数缺省 document 零变化；查询语义调用点迁移 KG 两处）——<strong>审查 critical 事实纠错</strong>：查询前缀"为这个句子生成表示…"属 bge-<em>-zh-v1.5 系列 instruction，</em><em>bge-m3 官方模型卡明确"不再需要查询前缀"</em><em>——默认无前缀（与存量库口径一致零风险），<code>EMBED_QUERY_PREFIX=1</code> 开关留 v1.5 系模型用；平台嵌入缓存 <code>llm/embed_cache.py</code>（LRU+TTL 24h，键=实际出站 model+mode+texts——chat 模型名不冲嵌入缓存），命中零出站+<code>cache_hit</code> 观测（验收锚点：二次同参零出站断言）；chat 缓存 <code>LLM_CACHE_ENABLED</code> 默认关（全同 messages+model+temperature+max_tokens 命中，查询在限速前=命中不占配额）。全量 </em><em>1508 passed</em><em>（+10）。</em><em>遗留</em><em>：Redis 层未实现（依赖未装+单进程部署进程内已覆盖主收益，蓝图两级降一级+记录）；T1 审查抓的 bge-m3 前缀事实错误是"外部技术论断必须查官方文档"的标杆案例。</em><em>P1 终态：#5 扩容✅ / #6 混合化✅ / #8 网关✅ / #7 社区报告=门槛制默认不启动（不占排期）。剩余 P2（#9-#15 条件启动项）。</em>*</li>
+</ol>
+<h3>P2（工程闭环，2-6 个月）</h3>
+<ol>
+<li><strong>KG 消歧预筛</strong>：全库名录先按类型分桶+Levenshtein/字符重合预筛，仅可疑对送 LLM 身份复合。
+   验收：千级实体库身份复合 LLM 调用量降一个数量级。</li>
+</ol>
+<p><strong>✅ 已完成（2026-10-16，commit b685806）</strong>：<code>dedup_prescreen.py</code> 纯函数（类型分桶→首字符分桶——5000 同前缀实体 81s/485 万对→1.71s/2 万对→Levenshtein≤2/字符重合≥0.5/别名桥接→单实体 8 对上限）+接线 <code>_run_consolidation</code>。<strong>关键裁决：规模门槛</strong>——名录&gt;单批 120 实体才启用预筛，小库全量送审：预筛字符串阈值滤得掉「孙悟空/六耳猕猴」式近似对，滤不掉「齐天大圣/孙悟空」式仅语义可判同的核心对（身份复合的价值恰恰在此），无门槛全启用首版把 m3 六用例全弄挂。质量报告透出 prescreened/prescreenCandidates。测试：预筛 9 用例+接线 2 锚定（小库全量/大库砍名单）。
+10. <strong>KG 删文档图谱瘦身</strong>：删文档时软标记+按受影响子图重建（RAGFlow utils.py:869-903 模式），不全量重抽。
+   验收：删文档后图谱无孤儿实体，耗时与文档规模成正比。</p>
+<p><strong>✅ 已完成（2026-10-16，commit e30d9ae）</strong>：审查裁决现状满足——核心语义（删文档时共享实体去引用保留+孤立实体清理）<code>delete_document</code> 已内建，RAGFlow 软标记重建模式不适用于真图库；补两验收锚定用例固化。
+11. <strong>ChatBI 证据卡升级</strong>：制品补 per-table 行数/最近值样例；前端图表卡"数据来源"可点开 schema 卡。<strong>G 轮 PM 审查：优先级分歧</strong>——PM 判此为 P0 级信任刚需（业务用户第一恐惧="数字哪来的"），工程判 P2；折中判据：P0#1-#4 验收全过且评测基线建立后，升 P1 尾段——与引用编号（#3）构成"可信度双件套"。</p>
+<pre><code>验收：答案可追溯到"用了哪些表哪些字段多少行"。
+</code></pre>
+<p><strong>✅ 已完成（2026-10-15，commit 19da224，P0 验收全过+基线建立后按折中判据升档）</strong>：artifact 新增 <code>table_provenance</code>（current_tables 每表的 schema 卡——列名/中文名/类型/表描述/指标清单，纯语义层组装零查询成本；表级行数不实时 COUNT（大表慢+估算误导），溯源数字面用制品 rowcount）；前端 BiChartCard 新增"<strong>数据来源</strong>"折叠区（表卡+列 chip+JOIN 路径+可展开执行 SQL）。浏览器实测：查询"各城市订单数量"→折叠区 5 张表卡/34 列 chip/SQL 可溯，"数字哪来的"完全可答。全量 1516 passed。与引用编号（#3）构成<strong>可信度双件套</strong>收官。
+12. <strong>KG 全文第三路</strong>：kg_chunks 加 tsvector 列+GIN 索引，检索意图解析失败降级整句时走 PG 全文而非纯包含匹配（锚点：降级点 kg retrieval.py:84-99；kg_chunks DDL 在 store.py:80）。<strong>选型依据</strong>（RAGFlow 三引擎调研）：坚持 Milvus+PG 双路，抄其"表达式对象+每引擎翻译器+权重归一化"抽象，不引第三引擎；中文分词前置应用层（终局裁决 A2：<strong>KG 归一化仅做预处理，不可当分词器</strong>——仓库无分词词典；自建最小词典=实体别名表+表名列名，或引入 jieba，二选一在实施时按 #1 评测集效果定）。已知短板：ts_rank 粗糙、短语检索弱——按"够用"标准验收而非对标 ES。
+    <strong>量化门槛</strong>：构造 20 条"意图解析失败降级"回归 case（含实体名部分匹配/别名/错别字三类），全文路 top-10 命中率 <strong>≥0.6 且比纯包含匹配基线高 ≥15 个百分点</strong>；单查询全文检索延迟 P95 ≤50ms（GIN 索引下）。不达标则回退纯包含匹配并记录差距原因。
+    验收：上述 20 条 case 达标；call_logs 记 fulltext 路径命中明细。</p>
+<p><strong>✅ 已完成（2026-10-16，merge ace9372）</strong>：kg_chunks 加 <code>search_text</code> tsvector 生成列+GIN（幂等迁移）；中文分词前置落成 IMMUTABLE SQL 函数 <code>kg_cjk_ngrams</code>（CJK 双字滑窗+拉丁原词）——PG 'simple' 不切 CJK，蓝图字面 to_tsvector('simple',text) 整句成单 lexeme 永不命中，偏差已记录；查询侧 <code>query_grams</code> 2-gram+最小停用词典（不引 jieba）；<code>search_chunks_fulltext</code>（ts_rank 排序）。触发条件重设计（蓝图注记的 5d9812c 裁决后「降级整句」已不存在）：<strong>图谱零命中兜底</strong>——seeds 空时全文补充召回，开关 <code>fulltext_fallback_enabled</code> 默认开；命中标注 source='fulltext'，与向量路同父块去重，向量降级早退不丢兜底命中。doc_parser 出口 NFKC 归一化（民法典 PDF ⼀/⼱ 兼容字符根因）。<strong>验收</strong>：20 case（部分匹配/别名/错别字）top-10 命中率 <strong>1.00 vs 纯包含基线 0.50（+50pp，门槛 ≥0.6/+15pp）</strong>；P95 1.74ms（≤50ms）；376 测试过。<strong>后记（2026-10-16 b491193）</strong>：蓝图原文"坚持 Milvus+PG 双路"已失效——Milvus 全量移除，向量现为 pgvector 单后端（与平台同库），全文路不受影响。
+13. <strong>平台费用观测</strong>（依据：09 号 RAGFlow『token/耗时留痕但无统一费用落库』缺口反推）：call_logs 已有 token 数，加模型单价配置，管理端出按 pack/stage/天的费用聚合。</p>
+<p><strong>❌ 已剔除（2026-10-16 用户裁决"没有任何意义"）</strong>：曾于 9cfb4f5 落地（单价配置+聚合+卡片），同日整体移除——端点/聚合/前端卡片/测试全删，数据库 model_pricing 键清理。
+14. <strong>ChatBI 反馈闭环接通</strong>（<strong>G 轮 PM 审查：建议提前至 P1</strong>——点赞点踩是业务用户唯一发声渠道+需求证据来源；<strong>决策：P1 末段条件启动，P0#1-#4 验收全过后升档</strong>）:抄 RAGFlow chunk_feedback 模式（chat_api thumbup/down → ChunkFeedbackService 加权调 pagerank_fea，chunk_feedback_service.py:115-141）——给 <code>apply_feedback_signals</code> 补 API 入口（对话卡点赞/纠正按钮），按检索分加权微调表/字段置信度，配置开关默认关闭。
+    验收：点赞/点踩后对应表/字段置信度可观测变化；关闭开关时行为与现在完全一致。</p>
+<p><strong>✅ 已完成（2026-10-16，merge 40aed76）</strong>：<code>chatbi/feedback.py</code>——点赞/点踩 API（用户级+会话归属校验）调 <code>apply_feedback_signals</code>（语义零改动，含下调显式纠正）+前端按钮（ChatPanel 对话卡）+置信度微调接线；开关默认关，关=零行为变化。11 测试过。</p>
+<ol>
+<li><strong>对话失败诊断卡（G 轮 PM 审查新增缺口）</strong>：对话失败无诊断指引（RAGFlow 同病：失败仅弹错误无路）；解析进度无全局视图（我们 SSE 任务中心有基础但对话侧空白）。做法：对话失败时附 call_logs trace 链接的诊断卡（复用现有会话审计 ConversationTrace），指明失败环节与重试入口。
+    验收：对话失败返回带 trace 链接的诊断卡；用户能从失败信息定位到具体环节。</li>
+</ol>
+<p><strong>✅ 已完成（2026-10-15，commit 9c4eaee+d0f216d）</strong>：错误消息升级为诊断卡——失败环节分类（LLM 上游/检索/执行，错误文本关键词推断）+「查看本轮链路」（复用 TurnTraceModal 与 trace 端点，零新后端）+「重试」（重发该轮 user 问题）；<strong>两条失败通道全覆盖</strong>（SSE error 事件 + 工具 result.error——实测发现后者是主路径后补齐）。实测：坏 LLM 地址触发 502 → 红卡"LLM 上游服务故障"+链路弹窗可开。</p>
+<h2>4. 终局蓝图（6-18 个月，方向性）</h2>
+<ul>
+<li><strong>协作差异化机会</strong>：RAGFlow team 域文档量第一（21 篇）但实现最浅（me/team 两档），用户因协作弱迁出至 WeKnora——njmind 宿主自带组织/权限体系，双插件借宿主权限做"天然协作"是零成本差异化。</li>
+<li><strong>平台多副本化</strong>：单实例是明示契约（deploy/single/README.md:4）。扩展路径：PG 任务表+SKIP LOCKED 竞争消费（不引 Redis Streams，维持存储栈单一；<strong>租约心跳必须小于重试退避首值</strong>——RAGFlow Go 版 InProgress 2s&lt;BackOff 5s 的时序教训；无死信队列、超限丢弃靠 DB 状态兜底的取舍可鉴）；SSE 订阅外置为 PG LISTEN/NOTIFY 或轮询（轮询降级照抄 RAGFlow 条件式 refetchInterval：仅活跃任务时 5s，否则停）。前提是出现真实多副本需求，不为架构而架构。</li>
+<li><strong>LLM 网关多 provider</strong>：OpenAI 兼容多基地址 + 模型路由表（哪个 stage 用哪个模型/价格档）；模型 key 加密列（pgcrypto）。</li>
+<li><strong>KG 知识编译家族</strong>：图谱之外增加"大纲层"（文档目录+摘要 chunk）与"FAQ 层"产物，本体模板组产品化（参照 RAGFlow CompilationTemplate 的"内置模板+用户组"）。</li>
+<li><strong>文档理解升级走外部引擎</strong>：接 MinerU/Docling 库获得版面识别+表格还原（RAGFlow 自己也把 8 个外部解析引擎做成可插拔），不自研视觉管线；优先级：表格还原 &gt; 版面重排 &gt; OCR。</li>
+<li><strong>ChatBI 记忆升级</strong>：fewshot 库从"成功即回流"改为"回流+人工确认门"（复用确认门模式）；长期记忆加向量召回替代词重叠。</li>
+<li><strong>宿主数据源接入</strong>：njmind 业务库表结构/数据经 AssetClient 契约同步进 ChatBI 数据源与知识库（同步任务用 pack 任务框架，fingerprint 增量模式照抄 RAGFlow）。</li>
+<li><strong>NL2SQL 竞品对标（G 轮竞品分析师审查新增；H 轮终审修正：从终局提为近期研究项，文献级 1-2 人天，与 P0 实施并行）</strong>：问数侧零竞品研究是当前最大盲区——补对标 Vanna（DDL/文档/历史 SQL 三类语料 RAG 化+反馈自学习，与 ChatBI 架构一一对应）、DB-GPT（语义层+Spider 评测口径）、WrenAI（open context layer 业务口径层，中文企业问数最大痛点是口径非语法）；插件化侧补学 Dify provider/tool 插件协议。</li>
+<li><strong>开放出口（按需）</strong>：MCP server 暴露 kb_search/ask_data 两工具，供外部 Agent 框架调用；OpenAI 兼容对话端点。</li>
+<li><strong>检索充分性护栏（SCA）</strong>：参照 Go 主干四件套——存储/评审分离（评审只看 ranked view 不读原始块）、view-hash NoProgress（两轮视图相同即停）、三层时间预算（总 deadline/轮 headroom/枚举买断加时）、双轨记账进答案（模型 slot 表+框架探针台账）；缺口改写规则直接抄 sca_query_rewrite.md 八军规。详见《05-Agent画布与Agentic检索.md》与《11-Prompt工程.md》。
+  <strong>前置依赖（诚实标注）</strong>：SCA 的本质是"多轮检索循环里的停机判定"，依赖检索层支持多轮往返（检索→评审→改写→再检索）。当前 KG/ChatBI 均为单轮检索架构，ChatBI 自愈回环在 SQL 层不在检索层。<strong>启动条件</strong>（满足其一）：① ChatBI 自愈轮次扩展到检索层（检索失败也触发回环）；② 出现 agentic 检索产品需求（用户要"多角度查证"式问答）。在此之前 SCA 仅为技术储备，不进近期路线——避免"方向正确、落不了地"。</li>
+</ul>
+<h2>5. 宿主集成约束（新增能力必须遵守）</h2>
+<ol>
+<li>数据源接入：config.yaml 声明 services+paths；读写走 AssetClient.query_data/submit_data（sdk/asset_client.py:70-121）；preflight fail-fast。</li>
+<li>结果回写宿主：只走 artifact+前端 APPLY 确认门（ChatPanel.vue:164-167 双判定），落库归宿主；persist_artifact 是预留接口。</li>
+<li>AI 产物两相式：AI 出 ops 指令，代码确定性合并（_incremental_ops.py 模式），未提及字段逐字节不变。</li>
+<li>异常约定：fail-closed（不猜测、不静默回退、半成品不过门）；不自造异常体系。</li>
+<li>iframe 嵌入 token 传递：可参照 RAGFlow root loader 的 ?auth= 参数写 token 模式，但须改为<strong>一次性短时效 token</strong>（防 URL 留痕泄漏）。</li>
+</ol>
+<h2>6. 避坑清单（RAGFlow 的教训，我们直接绕开）</h2>
+<ol>
+<li>模型 key 明文落库（db_models.py:1232）——我们若做模型管理，key 用加密列。</li>
+<li>CORS <code>*</code> 与 Bearer 共存（apps/<strong>init</strong>.py:62）——开放出口时 CORS 白名单。</li>
+<li>检索内容无消毒直接拼 prompt——我们已有 defang（retrieval.py:293-296），保持并扩展到新检索路。</li>
+<li>沙箱 docker.sock 直挂+privileged——若做代码执行沙箱，选 rootless/代理模式。</li>
+<li>混合检索默认权重：向量 0.3/全文 0.7（search.py:602，本次复核修正），别照抄网上"0.7 向量"的说法。</li>
+</ol>
+<h2>7. 已领先项（明确不抄）</h2>
+<ul>
+<li>图谱质量管控：本体约束/原文锚定/别名独占/三重接地身份复合——RAGFlow 全无。</li>
+<li>call_logs 逐环节观测（stage/限速等待/检索词命中明细）——RAGFlow 检索级观测弱于我们。</li>
+<li>pack 声明制路由+事务装配+引擎零领域知识——RAGFlow 无插件抽象。</li>
+<li>单进程内任务续跑/幂等/checkpoint——同等能力不需要分布式代价。</li>
+<li>启动收敛僵死 importing（tasks.py:73-97）——RAGFlow 的永久 RUNNING 无后台清扫器，我们已有该防线。</li>
+</ul>
+<h2>8. 对标保质期与价值度量（H 轮终审补）</h2>
+<p><strong>重对标触发条款</strong>：本体系锚定 2026-10 快照（Python v0.27.2 a024bea / Go main deb1235），以下事件触发局部重对标——①RAGFlow Go 1.0 正式发布（重审 01/02/14 号的 Go 侧结论）；②Vanna/WeKnora 大版本（若已做 NL2SQL 对标）；③6 个月定时复核（2027-04，跑 20 行脚本抽验 file:line 锚文本）。升级时并排克隆新版本，绝不覆盖旧快照。</p>
+<p><strong>业务价值 KPI 映射</strong>（技术验收之上的价值口径，18 个月后答"价值兑现没有"）：
+- 引用编号（#3）→ 引用点击率（用户是否真的在看来源）
+- 证据卡（#11）→ 问数采纳率（业务用户是否敢用 AI 给的数字）
+- 反馈闭环（#14）→ 反馈率（点赞点踩占对话比）
+- 评测集（#1/#5）→ 准确率趋势（回归曲线是否随迭代上升）
+- 检索测试页（#2）→ admin 抱怨工单量（"为什么没召回"类是否下降）
+- 失败诊断卡（#15）→ 失败后重试成功率（用户能否从诊断信息自救）</p>
+  </article>
+  <nav class="bottom">
+    <a href="16-NL2SQL竞品对标.html">← 16 · NL2SQL 竞品对标（Vanna / DB-GPT / WrenAI）</a>
+    <a href="01-架构与任务体系.html">01 · 架构与任务体系 →</a>
+  </nav>
+</div>
+</body>
+</html>

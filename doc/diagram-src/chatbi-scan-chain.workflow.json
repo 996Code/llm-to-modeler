@@ -1,0 +1,228 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ChatBI 数据源扫描链：租约、内省与向量重建",
+    "output": "../chatbi-scan-chain.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "lease",
+        "label": "租约与互斥",
+        "focus": [
+          "task",
+          "lease",
+          "introspect"
+        ],
+        "note": "per-ds 写租约防并发扫描。"
+      },
+      {
+        "id": "enrich",
+        "label": "元数据富化",
+        "focus": [
+          "introspect",
+          "enrich_llm",
+          "cas"
+        ],
+        "note": "从 DDL 提取到 LLM 富化落库。"
+      },
+      {
+        "id": "persist",
+        "label": "落库与索引",
+        "focus": [
+          "cas",
+          "rebuild",
+          "degraded_scan"
+        ],
+        "note": "CAS 乐观锁落库与向量重建。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "task",
+      "label": "任务框架"
+    },
+    {
+      "id": "scan",
+      "label": "扫描管线"
+    },
+    {
+      "id": "enrich",
+      "label": "LLM 富化"
+    },
+    {
+      "id": "policy",
+      "label": "冲突与降级",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "acquire",
+      "label": "获取与内省",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "enrichp",
+      "label": "富化",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "persistp",
+      "label": "落库与索引",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "task",
+    "lease",
+    "introspect",
+    "enrich_llm",
+    "cas",
+    "rebuild"
+  ],
+  "nodes": [
+    {
+      "id": "task",
+      "lane": "task",
+      "col": 0,
+      "type": "messagebus",
+      "label": "scan_datasource 任务",
+      "sublabel": "queue + dedupe + retry",
+      "width": 160
+    },
+    {
+      "id": "lease",
+      "lane": "task",
+      "col": 1,
+      "type": "security",
+      "label": "RunLease 租约",
+      "sublabel": "ttl 900s · 冲突即拒",
+      "width": 140
+    },
+    {
+      "id": "introspect",
+      "lane": "scan",
+      "col": 2,
+      "type": "database",
+      "label": "连库内省",
+      "sublabel": "DDL + 外键提取",
+      "width": 140
+    },
+    {
+      "id": "cas",
+      "lane": "scan",
+      "col": 4,
+      "type": "security",
+      "label": "CAS 落库",
+      "sublabel": "乐观锁 + 冲突重试 + merge 报告",
+      "width": 180
+    },
+    {
+      "id": "rebuild",
+      "lane": "scan",
+      "col": 5,
+      "type": "database",
+      "label": "向量重建",
+      "sublabel": "guarded_rebuild",
+      "width": 140
+    },
+    {
+      "id": "enrich_llm",
+      "lane": "enrich",
+      "col": 3,
+      "type": "cloud",
+      "label": "LLM 富化",
+      "sublabel": "中文 + 指标 + 图谱推断",
+      "tag": "LLM",
+      "width": 160
+    },
+    {
+      "id": "degraded_scan",
+      "lane": "policy",
+      "col": 5,
+      "type": "messagebus",
+      "label": "done_with_warning",
+      "sublabel": "索引降级标记",
+      "width": 150
+    }
+  ],
+  "edges": [
+    {
+      "id": "task-lease",
+      "from": "task",
+      "to": "lease",
+      "variant": "default"
+    },
+    {
+      "id": "lease-introspect",
+      "from": "lease",
+      "to": "introspect",
+      "label": "获得租约",
+      "variant": "emphasis"
+    },
+    {
+      "id": "introspect-enrich",
+      "from": "introspect",
+      "to": "enrich_llm",
+      "variant": "default"
+    },
+    {
+      "id": "enrich-cas",
+      "from": "enrich_llm",
+      "to": "cas",
+      "variant": "default"
+    },
+    {
+      "id": "cas-rebuild",
+      "from": "cas",
+      "to": "rebuild",
+      "label": "成功",
+      "variant": "emphasis"
+    },
+    {
+      "id": "rebuild-degraded",
+      "from": "rebuild",
+      "to": "degraded_scan",
+      "label": "重建失败",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "租约互斥（tasks.py:743-923）",
+      "items": [
+        "RunLease(run:semantic_write:{ds}, ttl 900s)，冲突 → PermanentTaskError",
+        "写与租约行锁同事务（execute_if_owned fenced 落库）",
+        "进度双路回写：任务中心 + 数据源行"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "富化管线（semantic.py:933-1047）",
+      "items": [
+        "连库内省提取 DDL / 信息模式（PG / MySQL 分支）",
+        "LLM 中文富化失败退化列名，不阻塞扫描",
+        "指标推断 + 示例问题 + 图谱推断三段增强"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "一致性语义",
+      "items": [
+        "CAS expected_version 乐观锁，冲突重读重试一次",
+        "向量重建失败 → scan_status=done_with_warning + 降级标记",
+        "finally 释放租约，异常路径不泄漏锁"
+      ]
+    }
+  ]
+}

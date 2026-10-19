@@ -1,0 +1,251 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "嵌入模式契约：宿主与 iframe 的 postMessage 往返",
+    "output": "../frontend-embed-chain.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1000,
+      760
+    ],
+    "views": [
+      {
+        "id": "handshake",
+        "label": "握手",
+        "focus": [
+          "host",
+          "sdk",
+          "child",
+          "port"
+        ],
+        "note": "悬浮球到 iframe 建立与 INIT 下发。"
+      },
+      {
+        "id": "context",
+        "label": "上下文与发送",
+        "focus": [
+          "child",
+          "port",
+          "host",
+          "backend"
+        ],
+        "note": "发消息前拉宿主画布与身份透传。"
+      },
+      {
+        "id": "apply",
+        "label": "应用回写",
+        "focus": [
+          "child",
+          "port",
+          "host"
+        ],
+        "note": "配置应用与回执闭环。"
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "host",
+      "type": "external",
+      "label": "宿主页面",
+      "sublabel": "IM 聊天窗"
+    },
+    {
+      "id": "sdk",
+      "type": "frontend",
+      "label": "embed.js SDK",
+      "sublabel": "悬浮球 + iframe"
+    },
+    {
+      "id": "child",
+      "type": "frontend",
+      "label": "子应用",
+      "sublabel": "EmbeddedLayout"
+    },
+    {
+      "id": "port",
+      "type": "messagebus",
+      "label": "HostPort",
+      "sublabel": "postMessage 信封"
+    },
+    {
+      "id": "backend",
+      "type": "backend",
+      "label": "后端 API",
+      "sublabel": "X-User-Id 隔离"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 330,
+      "label": "握手与初始化"
+    },
+    {
+      "from": 340,
+      "to": 540,
+      "label": "上下文与对话"
+    },
+    {
+      "from": 550,
+      "to": 700,
+      "label": "应用回写"
+    }
+  ],
+  "messages": [
+    {
+      "id": "open",
+      "from": "host",
+      "to": "sdk",
+      "y": 170,
+      "label": "open() 懒建 iframe",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ready",
+      "from": "child",
+      "to": "sdk",
+      "y": 205,
+      "label": "READY",
+      "variant": "default"
+    },
+    {
+      "id": "init",
+      "from": "sdk",
+      "to": "child",
+      "y": 240,
+      "label": "INIT（userId/headers/services/packs）",
+      "variant": "emphasis"
+    },
+    {
+      "id": "bind",
+      "from": "child",
+      "to": "port",
+      "y": 278,
+      "label": "headers → forwardHeaders",
+      "variant": "dashed"
+    },
+    {
+      "id": "getctx",
+      "from": "child",
+      "to": "port",
+      "y": 350,
+      "label": "GET_CONTEXT",
+      "variant": "default"
+    },
+    {
+      "id": "ctxresult",
+      "from": "port",
+      "to": "child",
+      "y": 382,
+      "label": "artifact + revision",
+      "variant": "return"
+    },
+    {
+      "id": "chat",
+      "from": "child",
+      "to": "backend",
+      "y": 418,
+      "label": "chat（context + services）",
+      "variant": "emphasis"
+    },
+    {
+      "id": "sse",
+      "from": "backend",
+      "to": "child",
+      "y": 450,
+      "label": "SSE 流式事件",
+      "variant": "emphasis"
+    },
+    {
+      "id": "authhdr",
+      "from": "child",
+      "to": "backend",
+      "y": 485,
+      "label": "透传头自动携带（SSO）",
+      "variant": "dashed"
+    },
+    {
+      "id": "applyreq",
+      "from": "child",
+      "to": "port",
+      "y": 562,
+      "label": "APPLY（配置制品）",
+      "variant": "default"
+    },
+    {
+      "id": "onapply",
+      "from": "port",
+      "to": "host",
+      "y": 596,
+      "label": "onConfigApply 回调",
+      "variant": "emphasis"
+    },
+    {
+      "id": "applyresult",
+      "from": "host",
+      "to": "child",
+      "y": 632,
+      "label": "APPLY_RESULT 回执",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "sdk",
+      "from": 165,
+      "to": 250,
+      "type": "frontend"
+    },
+    {
+      "participant": "child",
+      "from": 200,
+      "to": 640,
+      "type": "frontend"
+    },
+    {
+      "participant": "port",
+      "from": 273,
+      "to": 638,
+      "type": "messagebus"
+    },
+    {
+      "participant": "backend",
+      "from": 413,
+      "to": 490,
+      "type": "backend"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "信封契约（hostPort.ts）",
+      "items": [
+        "信封 {v, src, id, type, payload}；子→宿 6 类、宿→子含回执",
+        "iframe.onload 与 READY 双路径幂等发 INIT（3s 超时横幅）",
+        "回执按 id 匹配 pending，GET_CONTEXT 失败重试一次",
+        "INIT 下发的 packs 现已贯通到 ChatRequest.packs——窗口声明什么插件链路，后续 chat 消息的一级路由就只在什么链路里走（单插件直通零 LLM）"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "身份与上下文",
+      "items": [
+        "INIT 的 headers 落 forwardHeaders，所有 API 请求自动携带",
+        "发消息前 refreshEmbedContext 拉宿主画布 artifact + revision",
+        "contextKey 存 localStorage，宿主链路断时拦截发送"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "应用闭环",
+      "items": [
+        "「应用」→ GET_CONTEXT 取 revision → port.applyArtifact",
+        "宿主 onConfigApply 处理后回 APPLY_RESULT",
+        "成功 setBaseline；rewindToVersion 支持版本回滚"
+      ]
+    }
+  ]
+}

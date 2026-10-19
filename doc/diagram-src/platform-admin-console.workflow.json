@@ -1,0 +1,366 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "平台管理端：门禁、分域观测与插件热装配",
+    "output": "../platform/platform-admin-console.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "gate",
+        "label": "鉴权门禁",
+        "focus": [
+          "admin_app",
+          "api_client",
+          "gate_check"
+        ],
+        "note": "双令牌与开放模式。"
+      },
+      {
+        "id": "domains",
+        "label": "分域观测",
+        "focus": [
+          "conv_audit",
+          "call_logs",
+          "tasks"
+        ],
+        "note": "跨用户会话 / 调用日志 / 任务中心。"
+      },
+      {
+        "id": "toggle",
+        "label": "启停热装配",
+        "focus": [
+          "toggle",
+          "settings",
+          "assemble",
+          "finalize"
+        ],
+        "note": "锁内事务：装配 → 落盘 → finalize。"
+      },
+      {
+        "id": "failure",
+        "label": "失败语义",
+        "focus": [
+          "assemble",
+          "rollback",
+          "degraded"
+        ],
+        "note": "快照回滚与 degraded 降级。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "domains",
+      "label": "审计观测域"
+    },
+    {
+      "id": "console",
+      "label": "管理前端"
+    },
+    {
+      "id": "gate",
+      "label": "鉴权门禁"
+    },
+    {
+      "id": "packops",
+      "label": "插件启停域"
+    },
+    {
+      "id": "tx",
+      "label": "热切换事务"
+    },
+    {
+      "id": "policy",
+      "label": "失败语义",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "entry",
+      "label": "请求与鉴权",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "branch",
+      "label": "功能分域",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "hot",
+      "label": "热切换与呈现",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "admin_app",
+    "api_client",
+    "gate_check",
+    "toggle",
+    "assemble",
+    "finalize"
+  ],
+  "nodes": [
+    {
+      "id": "admin_app",
+      "lane": "console",
+      "col": 0,
+      "type": "frontend",
+      "label": "AdminApp 管理台",
+      "sublabel": "五 Tab + pack 动态页",
+      "width": 170
+    },
+    {
+      "id": "api_client",
+      "lane": "console",
+      "col": 1,
+      "type": "frontend",
+      "label": "adminApi 双令牌",
+      "sublabel": "X-Admin-Token + Bearer",
+      "width": 170
+    },
+    {
+      "id": "present",
+      "lane": "console",
+      "col": 5,
+      "type": "frontend",
+      "label": "前端呈现",
+      "sublabel": "开关态 · 日志 · 追踪轮次",
+      "width": 170
+    },
+    {
+      "id": "gate_check",
+      "lane": "gate",
+      "col": 2,
+      "type": "security",
+      "label": "require_admin 门禁",
+      "sublabel": "compare_digest 常量时间",
+      "width": 170
+    },
+    {
+      "id": "conv_audit",
+      "lane": "domains",
+      "col": 3,
+      "type": "backend",
+      "label": "跨用户会话审计",
+      "sublabel": "任意用户 list / trace / 删除",
+      "width": 170
+    },
+    {
+      "id": "call_logs",
+      "lane": "domains",
+      "col": 4,
+      "type": "database",
+      "label": "调用日志与统计",
+      "sublabel": "call-logs · stats · audit",
+      "width": 160
+    },
+    {
+      "id": "tasks",
+      "lane": "domains",
+      "col": 5,
+      "type": "messagebus",
+      "label": "任务中心",
+      "sublabel": "SSE 快照 + 轮询兜底",
+      "width": 150
+    },
+    {
+      "id": "toggle",
+      "lane": "packops",
+      "col": 3,
+      "type": "backend",
+      "label": "pack 启停 API",
+      "sublabel": "enable / disable 守卫校验",
+      "width": 170
+    },
+    {
+      "id": "settings",
+      "lane": "packops",
+      "col": 4,
+      "type": "backend",
+      "label": "设置页与 recheck",
+      "sublabel": "schema 补配 · 依赖复检",
+      "width": 160
+    },
+    {
+      "id": "assemble",
+      "lane": "tx",
+      "col": 4,
+      "type": "cloud",
+      "label": "assemble_packs 装配",
+      "sublabel": "总锁内 Prepare / Commit",
+      "width": 180
+    },
+    {
+      "id": "finalize",
+      "lane": "tx",
+      "col": 5,
+      "type": "database",
+      "label": "persist + finalize",
+      "sublabel": "原子落盘 · 生命周期钩子",
+      "width": 170
+    },
+    {
+      "id": "rollback",
+      "lane": "policy",
+      "col": 4,
+      "type": "security",
+      "label": "快照回滚",
+      "sublabel": "按 _tx 确定性恢复",
+      "width": 150
+    },
+    {
+      "id": "degraded",
+      "lane": "policy",
+      "col": 5,
+      "type": "security",
+      "label": "degraded 降级",
+      "sublabel": "503 拒管 + 健康暴露",
+      "width": 160
+    }
+  ],
+  "edges": [
+    {
+      "id": "admin-app-to-api",
+      "from": "admin_app",
+      "to": "api_client",
+      "variant": "default"
+    },
+    {
+      "id": "api-to-gate",
+      "from": "api_client",
+      "to": "gate_check",
+      "variant": "emphasis"
+    },
+    {
+      "id": "gate-to-toggle",
+      "from": "gate_check",
+      "to": "toggle",
+      "label": "启停请求",
+      "variant": "emphasis"
+    },
+    {
+      "id": "toggle-to-assemble",
+      "from": "toggle",
+      "to": "assemble",
+      "label": "锁内热装配",
+      "variant": "emphasis"
+    },
+    {
+      "id": "assemble-to-finalize",
+      "from": "assemble",
+      "to": "finalize",
+      "label": "commit 成功",
+      "variant": "default"
+    },
+    {
+      "id": "gate-to-conv",
+      "from": "gate_check",
+      "to": "conv_audit",
+      "label": "观测请求",
+      "variant": "default"
+    },
+    {
+      "id": "conv-to-logs",
+      "from": "conv_audit",
+      "to": "call_logs",
+      "variant": "default"
+    },
+    {
+      "id": "logs-to-tasks",
+      "from": "call_logs",
+      "to": "tasks",
+      "variant": "default"
+    },
+    {
+      "id": "tasks-to-present",
+      "from": "tasks",
+      "to": "present",
+      "label": "各域回呈",
+      "variant": "default"
+    },
+    {
+      "id": "finalize-to-present",
+      "from": "finalize",
+      "to": "present",
+      "label": "最新装配清单",
+      "variant": "emphasis"
+    },
+    {
+      "id": "toggle-to-settings",
+      "from": "toggle",
+      "to": "settings",
+      "label": "依赖缺失 400",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "settings-to-assemble",
+      "from": "settings",
+      "to": "assemble",
+      "label": "recheck 热装配",
+      "variant": "default"
+    },
+    {
+      "id": "assemble-to-rollback",
+      "from": "assemble",
+      "to": "rollback",
+      "label": "装配/落盘失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "rollback-to-degraded",
+      "from": "rollback",
+      "to": "degraded",
+      "label": "回滚失败",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "finalize-to-degraded",
+      "from": "finalize",
+      "to": "degraded",
+      "label": "finalize 失败",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "统一门禁（admin.py:63-72）",
+      "items": [
+        "全部 /api/admin 端点 Depends(require_admin)：Bearer token 优先，回退 X-Admin-Token（admin.py:63-69）",
+        "口令 compare_digest 常量时间比对；未配置 ADMIN_TOKEN 为开放模式（admin.py:56-60）",
+        "前端拦截器自动注入双令牌，401 统一回 auth.html（api.ts:196-213）"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "平台级分域观测（admin.py:97-385）",
+      "items": [
+        "跨用户会话：list/detail/delete + trace 分轮时间线（admin.py:97,135,315）",
+        "调用日志：call-logs / call-stats 按环节 stage 聚合 token（admin.py:326,348）",
+        "任务中心共用口令走 /api/tasks：SSE 快照 + 轮询兜底（TasksTab.vue:507,542）"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "启停热装配事务（admin.py:484-677）",
+      "items": [
+        "hot_reload_lock 内 set_enabled(persist=False) → assemble → persist → finalize（admin.py:538-574）",
+        "ASSEMBLED 阶段失败按 _tx 快照确定性回滚（pack_manager.py:442-454）",
+        "回滚/finalize 失败置 degraded，503 拒绝后续管理操作（admin.py:615,476）",
+        "设置页补配救活依赖缺失插件，recheck 复用 toggle 事务热装配（admin.py:716,796）"
+      ]
+    }
+  ]
+}

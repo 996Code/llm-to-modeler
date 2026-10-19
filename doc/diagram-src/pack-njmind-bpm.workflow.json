@@ -1,0 +1,294 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "njmind_bpm 插件：流程配置 AI 生成",
+    "output": "../pack/pack-njmind-bpm.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main",
+        "label": "生成管线",
+        "focus": [
+          "guide",
+          "catalog",
+          "parse",
+          "templates",
+          "generate",
+          "render"
+        ],
+        "note": "指南与画布上下文 → 意图解析 → 模板匹配 → 草稿生成 → 上游权威校验。"
+      },
+      {
+        "id": "gate",
+        "label": "确认门",
+        "focus": [
+          "parse",
+          "clarify"
+        ],
+        "note": "分支字段缺口结构化点选；resume 确定性回填零 LLM。"
+      },
+      {
+        "id": "repair",
+        "label": "修复回环",
+        "focus": [
+          "generate",
+          "render",
+          "repair"
+        ],
+        "note": "机械修复 ≤4 轮不烧 LLM，重生成 ≤3 次。"
+      },
+      {
+        "id": "host",
+        "label": "宿主契约",
+        "focus": [
+          "host_ctx",
+          "apply"
+        ],
+        "note": "内存态上下文与 APPLY 只回显不入库。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "generate_process 七步"
+    },
+    {
+      "id": "policy",
+      "label": "确认门与修复",
+      "variant": "exception"
+    },
+    {
+      "id": "host",
+      "label": "宿主契约"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ctx",
+      "label": "上下文装配",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "gen",
+      "label": "草稿生成",
+      "fromCol": 2,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "out",
+      "label": "渲染与回显",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "guide",
+    "catalog",
+    "parse",
+    "templates",
+    "generate",
+    "render"
+  ],
+  "nodes": [
+    {
+      "id": "guide",
+      "lane": "main",
+      "col": 0,
+      "type": "database",
+      "label": "fetch_guide",
+      "sublabel": "节点类型指南·不可用即追问",
+      "width": 180
+    },
+    {
+      "id": "catalog",
+      "lane": "main",
+      "col": 1,
+      "type": "database",
+      "label": "表单字段目录",
+      "sublabel": "宿主 formKey 字段清单",
+      "width": 150
+    },
+    {
+      "id": "parse",
+      "lane": "main",
+      "col": 2,
+      "type": "cloud",
+      "label": "parse_intents",
+      "sublabel": "LLM 解析流程意图",
+      "tag": "LLM",
+      "width": 140
+    },
+    {
+      "id": "templates",
+      "lane": "main",
+      "col": 3,
+      "type": "database",
+      "label": "fetch_templates",
+      "sublabel": "模板匹配·无模板追问",
+      "width": 170
+    },
+    {
+      "id": "generate",
+      "lane": "main",
+      "col": 4,
+      "type": "cloud",
+      "label": "generate",
+      "sublabel": "LLM 生成拓扑+规则",
+      "tag": "LLM",
+      "width": 150
+    },
+    {
+      "id": "render",
+      "lane": "main",
+      "col": 5,
+      "type": "security",
+      "label": "render 校验",
+      "sublabel": "Flowable 转换·权威校验",
+      "width": 170
+    },
+    {
+      "id": "clarify",
+      "lane": "policy",
+      "col": 2,
+      "type": "messagebus",
+      "label": "结构化确认门",
+      "sublabel": "分支字段缺口点选卡",
+      "width": 170
+    },
+    {
+      "id": "repair",
+      "lane": "policy",
+      "col": 4,
+      "type": "messagebus",
+      "label": "修复回环",
+      "sublabel": "机械 ≤4 轮 · 重生成 ≤3",
+      "width": 170
+    },
+    {
+      "id": "host_ctx",
+      "lane": "host",
+      "col": 0,
+      "type": "database",
+      "label": "INIT/GET_CONTEXT",
+      "sublabel": "宿主内存态·含未保存修改",
+      "width": 190
+    },
+    {
+      "id": "apply",
+      "lane": "host",
+      "col": 5,
+      "type": "backend",
+      "label": "APPLY 回显",
+      "sublabel": "只改画布 isSaved=false",
+      "width": 180
+    }
+  ],
+  "edges": [
+    {
+      "id": "guide-catalog",
+      "from": "guide",
+      "to": "catalog",
+      "variant": "default"
+    },
+    {
+      "id": "catalog-parse",
+      "from": "catalog",
+      "to": "parse",
+      "variant": "default"
+    },
+    {
+      "id": "parse-templates",
+      "from": "parse",
+      "to": "templates",
+      "variant": "default"
+    },
+    {
+      "id": "templates-generate",
+      "from": "templates",
+      "to": "generate",
+      "variant": "default"
+    },
+    {
+      "id": "generate-render",
+      "from": "generate",
+      "to": "render",
+      "variant": "emphasis"
+    },
+    {
+      "id": "parse-clarify",
+      "from": "parse",
+      "to": "clarify",
+      "label": "字段缺口",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "render-repair",
+      "from": "render",
+      "to": "repair",
+      "label": "校验失败",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "repair-generate",
+      "from": "repair",
+      "to": "generate",
+      "label": "带错误重跑",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "render-apply",
+      "from": "render",
+      "to": "apply",
+      "label": "校验通过",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "七步管线（generate_process.py:35-45）",
+      "items": [
+        "fetch_guide → fetch_existing → form_catalog → parse_intents → fetch_templates → generate → render",
+        "guide 上游不可用 fail-closed 追问，不硬编（generate_process.py:101-109）",
+        "重生成 MAX_RETRIES=3；仅校验通过才产 artifact"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "单一重造回显工具（router.py:8-24）",
+      "items": [
+        "generate_process 一个工具承担生成/修改/重做——无 create/update 分流，零路由歧义",
+        "画布已有流程时按新描述整体重造；无 LLM 路由降级兜底回 chat（ChatTool 注册最前）",
+        "I2 规则明细合并：重造时用户已配的审批人勾选等从宿主规则继承不丢（generate_process.py:263-282）"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "结构化确认门（generate_process.py:296-326）",
+      "items": [
+        "分支条件引用了表单里不存在的字段 → 每个缺口一问，带候选字段点选卡",
+        "question 为 JSON 字符串（question/options/header）时引擎结构化透传成点选卡（engine/nodes.py ClarificationRaised 处理）",
+        "resume 先确定性回填上一轮点选（不过 LLM 秒级）；自由输入走 parse 重生成"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "权威校验与宿主契约",
+      "items": [
+        "LLM 只产拓扑+规则 JSON，不碰 BPMN XML/坐标/resourceId——XML 由上游 Flowable BpmnModel 转换（设计规格三）",
+        "机械修复 ≤4 轮不烧 LLM（_pipeline_common.MAX_MECHANICAL_ROUNDS），耗尽带错误重跑 generate",
+        "APPLY 只回显画布 isSaved=false，落库走设计器原有保存（AI 不入库不发布）",
+        "enhance_asset_client 钩子注入 pack 专有 transport，main.py 零改动（pack.py:35-43）"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>14 · 官方文档地图与盲区补齐（C 轮） · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>14 · 官方文档地图与盲区补齐（C 轮）</h1>
+  <p class="lead">**轮次对照**：01-12 主体笔记=第一至五轮 ｜ 第六轮=实现细节考古（并入 01/02/11 的 §5/§6）｜ B 轮=前端引用链路深挖（02 §5.10-5.11）｜ 第七轮=业务链路（13 号）｜ C 轮=本篇盲区补齐 ｜ D 轮=四维审查修正（02 §5 多处、12 §6、13 号）｜ E 轮=修复落点验证。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  
+  <article>
+<h1>14 · 官方文档地图与盲区补齐（C 轮）</h1>
+<blockquote>
+<p><strong>轮次对照</strong>：01-12 主体笔记=第一至五轮 ｜ 第六轮=实现细节考古（并入 01/02/11 的 §5/§6）｜ B 轮=前端引用链路深挖（02 §5.10-5.11）｜ 第七轮=业务链路（13 号）｜ C 轮=本篇盲区补齐 ｜ D 轮=四维审查修正（02 §5 多处、12 §6、13 号）｜ E 轮=修复落点验证。</p>
+<p>按"提前全面梳理"方针的收尾轮：docs 官方文档索引、前端全面深读、Go ingestion/syncer、API 全清单与 MCP 深读。本笔记完成后学习体系无欠账。</p>
+</blockquote>
+<h2>1. 官方文档地图（docs/ 共 111 篇）</h2>
+<table>
+<thead>
+<tr>
+<th>域</th>
+<th>篇数</th>
+<th>内容要点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>guides/team</strong></td>
+<td><strong>21</strong></td>
+<td>团队协作（文档量第一的域！协作/邀请/权限/共享的产品叙事中心）</td>
+</tr>
+<tr>
+<td>guides/agent</td>
+<td>18</td>
+<td>画布/组件/调试/发布/渠道</td>
+</tr>
+<tr>
+<td>guides/dataset</td>
+<td>11</td>
+<td>建库/切块模板/配置/元数据</td>
+</tr>
+<tr>
+<td>guides/knowledge_compilation</td>
+<td>6</td>
+<td>编译模板/运行时配置</td>
+</tr>
+<tr>
+<td>administrator/admin</td>
+<td>6</td>
+<td>admin 服务/用户管理/沙箱/CLI/系统状态</td>
+</tr>
+<tr>
+<td>guides/memory</td>
+<td>4</td>
+<td>三类记忆/记忆管理</td>
+</tr>
+<tr>
+<td>guides/file</td>
+<td>4</td>
+<td>文件管理/版本（FileCommit）</td>
+</tr>
+<tr>
+<td>guides/data_source</td>
+<td>4</td>
+<td>连接器分类/配置/同步</td>
+</tr>
+<tr>
+<td>guides/chatchannel</td>
+<td>4</td>
+<td>8 家 IM 渠道接入</td>
+</tr>
+<tr>
+<td>guides/chat</td>
+<td>4</td>
+<td>对话配置/引用</td>
+</tr>
+<tr>
+<td>guides/search</td>
+<td>3</td>
+<td>独立搜索产品</td>
+</tr>
+<tr>
+<td>guides/models</td>
+<td>3</td>
+<td>提供商配置</td>
+</tr>
+<tr>
+<td>develop/mcp</td>
+<td>3</td>
+<td>MCP server 开发</td>
+</tr>
+<tr>
+<td>administrator/migration</td>
+<td>2</td>
+<td>备份迁移/数据库 schema</td>
+</tr>
+<tr>
+<td>administrator/configurations</td>
+<td>2</td>
+<td>service_conf/SSL</td>
+</tr>
+<tr>
+<td>references</td>
+<td>3</td>
+<td>HTTP/Python API 参考</td>
+</tr>
+<tr>
+<td>root</td>
+<td>3</td>
+<td>quickstart/faq/release_notes</td>
+</tr>
+</tbody>
+</table>
+<p><strong>信号解读</strong>：team 域 21 篇文档量第一，但代码里权限只有 me/team 两档且被社区吐槽——<strong>文档投入与实现深度倒挂</strong>，协作是他们"讲了最多、做得最浅"的域（商机：竞品迁移叙事显示用户因协作弱迁出到 WeKnora）。</p>
+<h2>2. 前端全面深读（C 轮，补齐 B 轮）</h2>
+<h3>2.1 状态管理</h3>
+<ul>
+<li>客户端状态 zustand，<strong>全仓仅两个 store</strong>：useGraphStore（画布，devtools+immer）+ useChatStreamStore（SSE 流模块级单例，跨路由存活+会话 LRU 淘汰）</li>
+<li>服务端状态全走 react-query v5：30+ 个 use-<em>-request.ts 按域拆文件；queryKey </em><em>枚举工厂双轨</em>*（新式层级化 DocumentKeys.all/list 便于 invalidate，旧式裸数组并存）；mutation 后统一 invalidateQueries；chunk 创建延迟 1s 再失效</li>
+</ul>
+<h3>2.2 画布编辑器</h3>
+<ul>
+<li>@xyflow/react v12 注册 <strong>27 种 nodeTypes</strong>（emailNode 已注释）+单一 ButtonEdge；连线校验四规则（禁自连/RestrictedUpstreamMap 上游限制/父子容器一致/DFS 环检测）</li>
+<li>表单 react-hook-form watch 实时回写 store（immer 冻结态深拷贝防变异报错）；<strong>DSL 转换集中在 dsl-bridge.ts</strong>（dslToGraph/graphToDsl/importDsl/exportDsl），执行拓扑从 graph 重建 components 后端只读</li>
+<li>单步调试：Begin 参数动态生成 zod schema（string/bool/int/file/object 分支）</li>
+</ul>
+<h3>2.3 数据集管理页</h3>
+<ul>
+<li><strong>无虚拟滚动</strong>：react-table+URL 同步分页；chunk 编辑表单（content/image_id/available/tag 数组）保存后 message.success+延迟 invalidate，无显式"重嵌中"反馈</li>
+<li><strong>条件式轮询</strong>（最值得抄）：refetchInterval 函数式——仅 has_active_tasks 或有 processing 文档时 5000ms，否则停；搜索 useDebounce 500ms 才进 queryKey</li>
+</ul>
+<h3>2.4 API 客户端层</h3>
+<ul>
+<li>双客户端并存过渡：umi-request（@deprecated）→ axios（next-request）；URL 集中字典 api.ts</li>
+<li>拦截器统一：camel↔snake 键转换、Authorization 注入、tenant 附加；响应统一弹错（401 去重后清凭证跳登录）</li>
+<li><strong>SSE 不走 axios</strong>：原生 fetch（拿 ReadableStream）+ eventsource-parser 的 EventSourceParserStream 手动 reader 循环，鉴权头手动注入，AbortSignal 调用方传入</li>
+</ul>
+<h3>2.5 i18n 与主题</h3>
+<ul>
+<li>i18next 17 种语言，仅 en 同步打包，其余<strong>动态 import 懒加载</strong>；单 namespace 顶层 33 域（flow 最大 1100+ 行，en.ts 共 3987 行）</li>
+<li>暗色自研 Context Provider+localStorage+documentElement class；tailwind darkMode:['selector']+CSS 变量全映射；分享页 URL 临时换肤（useSyncThemeFromParams）</li>
+</ul>
+<h3>2.6 工程化</h3>
+<ul>
+<li>路由集中 routes.tsx（90+ 路径+lazy+Suspense）；<strong>root loader 支持 ?auth= 参数写 token 后重定向</strong>（嵌入场景鉴权传递！）；admin 子树按 IS_ENTERPRISE 条件展开</li>
+<li>分层严格：pages/components/hooks/services/utils/interfaces/constants；68 个测试文件（Jest+jsdom+自研 esbuild transformer）；Vite 7+oxlint/oxfmt；dev 挂 why-did-you-render</li>
+</ul>
+<p><strong>Vue 升级映射</strong>：zustand 两 store↔Pinia（<strong>陷阱：模块级 SSE 驱动器组件外调 getState() 在 Pinia 需传入已激活的 pinia 实例</strong>）；queryKey 枚举工厂↔Vue Query 同构；DSL bridge 与连线校验纯逻辑可直接移植；<strong>条件式 refetchInterval 轮询照抄</strong>；?auth= 参数鉴权传递对我们 iframe 嵌入场景有直接参考；60ms 合并刷帧在 Vue 侧等价=节流写 store+shallowRef 防整列表重渲。</p>
+<h2>3. Go 主干 ingestion 与 syncer（C 轮）</h2>
+<h3>3.1 ingestion 管线</h3>
+<ul>
+<li><strong>Pipeline=编译后的 canvas+任务元数据</strong>（ingestion/pipeline/pipeline.go:36-45，从 DSL 编译执行）——"解析也走画布运行时"在 Go 版是字面实现；12 内置模板 go:embed</li>
+<li>组件经 runtime.MustRegister（CategoryIngestion）；chunker→Tokenizer（内嵌 embedder，绑定 KB embd_id）→index_writer 靠 DSL 边衔接；<strong>chunk 分批写、非末批 no-refresh</strong>（省 refresh 开销）</li>
+<li>进度上报更精细：ProgressSink 事件 → 内存高水位 + <strong>1s 定时合批刷库</strong>（对照 Python 的每次写）</li>
+</ul>
+<h3>3.2 解析能力</h3>
+<ul>
+<li>PDF 完全平移（渲染/OCR/DLA 版面/TSR 表格），<strong>PDFium 静态链接+全进程互斥</strong>；ONNX 用 fork 的 onnxruntime_go（CGO+libonnxruntime.a 静态进二进制、dlopen(NULL) 取符号），模型转 .ort+共享权重缓存+会话池</li>
+<li>tcadp/docling/mineru 远端解析适配同存；42 连接器<strong>全量平移且超 Python 版数量</strong></li>
+</ul>
+<h3>3.3 NATS 任务调度（对照 Redis Streams）</h3>
+<ul>
+<li>流 RAGFLOW_TASKS：WorkQueue+DiscardNew、1M 条/1GB 上限；消费者 AckExplicit/MaxDeliver 16/AckWait 60s/BackOff 5-15-30-60s</li>
+<li><strong>无死信队列</strong>（超 16 次即丢，靠 DB 状态重试）；<strong>发布端故意不做 MsgID 去重</strong>——防重靠消费侧 CREATED/SCHEDULED→RUNNING CAS+进程内 claim 集合；心跳 InProgress 2s 必须小于 BackOff[0]（心跳/退避时序约束！）</li>
+<li>syncer 独立流+durable push consumer+DeliverGroup 竞争消费；Duplicates 窗口 10min</li>
+</ul>
+<h3>3.4 syncer 断点</h3>
+<ul>
+<li>checkpoint 存 <strong>JetStream KV 桶</strong>（TTL 7 天），降级内存实现；断点含窗口/游标/重启计数；ErrSyncResumeInvalid 触发<strong>锚点重启</strong>（受 MaxAnchorRestartCount 限制）；完成即删</li>
+<li>prune=全量 slim 快照→retain 集合→DeleteStale；Redis 分布式 ConnectorLock+公平批执行器</li>
+</ul>
+<h3>3.5 双版本并存真相</h3>
+<ul>
+<li><strong>运行时已无 Python</strong>：entrypoint 只拉 Go 单二进制四模式（--api/--syncer/--ingestor/--admin）；Python 仅剩三类资产——rag/prompts 49 个 md（Go main 口径；Python v0.27.2 为 47，Go 运行时读）、tools/ 工具脚本、测试工具链</li>
+<li><strong>重写值不值</strong>：进度/防重/断点语义都比 Python 精细，代价是 ONNX/PDFium 全静态 CGO 构建链复杂（build.sh 大量 ORT 种子逻辑）</li>
+</ul>
+<h2>4. API 全清单与 MCP 深读（C 轮）</h2>
+<h3>4.1 REST API 全景（28 模块约 200 端点，按域）</h3>
+<ul>
+<li><strong>用户/租户</strong>：auth 登录五端点（含 OAuth 回调）+ 找回密码四步 + users/me/models（默认模型必填四 id）+ tenants 成员 CRUD</li>
+<li><strong>数据集</strong>：CRUD + tags/metadata/flattened + <strong>ingestions 摄入任务</strong> + graph 知识图谱 + <strong>artifacts 工件（topics/graph/structure/skills/navigation 子资源）</strong> + index 索引构建 + embedding/check</li>
+<li><strong>文档</strong>：upload/ingest/parse/stop/batch-status + metadata（单/批/summary/config）+ thumbnails/images/preview + <strong>file commits 版本链（diff/changes/tree/content）</strong></li>
+<li><strong>Chunk</strong>：CRUD（新旧两套）+ <strong>/search = /retrieval 同 handler 三别名</strong> + structure/graph</li>
+<li><strong>检索</strong>：searches CRUD+completions 联想 + <strong>dify/retrieval Dify 兼容端点（含 health）</strong></li>
+<li><strong>对话</strong>：chats/sessions/messages + feedback + 语音（speech/transcription）+ mindmap/recommendation + <strong>chat/completions OpenAI 式</strong></li>
+<li><strong>渠道/Bot</strong>：chat-channels（含 runtime 状态）+ chatbots/agentbots/searchbots 三类 Bot 端点 + openai/<chat_id>/chat/completions</li>
+<li><strong>Agent</strong>：CRUD + rerun/reset + <strong>debug 单组件调试 + input-form</strong> + versions + webhook（含 test/logs）+ templates/prompts/tags</li>
+<li><strong>MCP 管理</strong>：servers CRUD + import + test</li>
+<li><strong>连接器</strong>：CRUD + logs + rebuild/test + <strong>三家 OAuth 流（google/box/gmail 的 start/result/callback）</strong></li>
+<li><strong>记忆</strong>：memories CRUD + config + <strong>messages 检索（search/content）</strong></li>
+<li><strong>编译模板</strong>：builtins/wiki-presets + template-groups CRUD</li>
+<li><strong>系统</strong>：ping/version/status/healthz + tokens + stats + providers 全套（connection/instances/models）+ langfuse/api-key + tasks cancel</li>
+</ul>
+<h3>4.2 MCP server 深读（mcp/server/server.py，935 行）</h3>
+<ul>
+<li><strong>ragflow_retrieval</strong>：入参 11 项（question 必填/dataset_ids/similarity_threshold 0.2/vector_weight 0.3/rerank_id/force_refresh 等）；透传 /retrieval 十项；返回 chunks+分页（total_pages 整除向上）+query_info</li>
+<li><strong>双层元数据缓存</strong>（为何 retrieval 前拉元数据的答案）：/retrieval 的 chunk 只带贫字段（document_keyword/dataset_id），必须先逐库拉 dataset+document 元数据才能补文档名/类型/大小——进程内 OrderedDict <strong>LRU 32 条+TTL 300s±30s 随机（防雪崩）</strong>，惰性过期+force_refresh 跳过，异常优雅降级空缓存</li>
+<li><strong>_map_chunk_fields</strong>：保留原始字段+三个增强（dataset_name 查缓存/document_name 别名/整份 document_metadata 挂载）</li>
+<li><strong>鉴权两模式</strong>：self-host 全局 HOST_API_KEY（单租户）；host 模式 AuthMiddleware 每请求 Bearer/x-api-key 提取→scope.state→with_api_key 透传——<strong>租户路由完全由每请求 token 决定，服务端无会话</strong></li>
+<li><strong>无流式</strong>：retrieval 一次性 JSON；SSE/streamable-http 只是 MCP 协议通道不影响工具语义</li>
+</ul>
+<p><strong>对我们 MCP 出口（终局项）的直接映射</strong>：三工具克制形态已验证正确；元数据缓存模式（LRU+随机 TTL 防雪崩+force_refresh 逃生口）照抄；每请求 token 无会话路由与我们 X-User-Id 透传天然同构。</p>
+  </article>
+  <nav class="bottom">
+    <a href="13-业务链路全景.html">← 13 · 业务链路全景</a>
+    <a href="15-产品商业战略视角.html">15 · 产品商业战略视角（G 轮） →</a>
+  </nav>
+</div>
+</body>
+</html>

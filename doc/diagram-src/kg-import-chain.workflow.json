@@ -1,0 +1,333 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "knowledge_graph 导入链（详细）：解析、抽取与收尾",
+  "output": "../kg-import-chain.html",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "views": [
+   {
+    "id": "prepare",
+    "label": "任务与解析",
+    "focus": [
+     "submit",
+     "parse",
+     "chunk"
+    ],
+    "note": "幂等检查到结构切块。"
+   },
+   {
+    "id": "batch",
+    "label": "批内循环",
+    "focus": [
+     "vocab",
+     "extract",
+     "validate",
+     "upsert"
+    ],
+    "note": "并行抽取、四类校验与断点。"
+   },
+   {
+    "id": "finish",
+    "label": "收尾五步",
+    "focus": [
+     "merge_prop",
+     "reconcile",
+     "alias",
+     "identity",
+     "stats",
+     "summary"
+    ],
+    "note": "提案合并到统计回写,D14 摘要块兜底抽象问法。"
+   }
+  ]
+ },
+ "lanes": [
+  {
+   "id": "task",
+   "label": "任务框架"
+  },
+  {
+   "id": "batch",
+   "label": "批内循环"
+  },
+  {
+   "id": "finish",
+   "label": "收尾整理"
+  },
+  {
+   "id": "policy",
+   "label": "失败与续跑",
+   "variant": "exception"
+  }
+ ],
+ "phases": [
+  {
+   "id": "prep",
+   "label": "准备",
+   "fromCol": 0,
+   "toCol": 1
+  },
+  {
+   "id": "loop",
+   "label": "逐批抽取",
+   "fromCol": 2,
+   "toCol": 4,
+   "variant": "emphasis"
+  },
+  {
+   "id": "final",
+   "label": "收尾",
+   "fromCol": 5,
+   "toCol": 5,
+   "variant": "dashed"
+  }
+ ],
+ "mainPath": [
+  "submit",
+  "parse",
+  "chunk",
+  "vocab",
+  "extract",
+  "validate",
+  "upsert",
+  "merge_prop"
+ ],
+ "nodes": [
+  {
+   "id": "submit",
+   "lane": "task",
+   "col": 0,
+   "type": "messagebus",
+   "label": "submit_import",
+   "sublabel": "串行 + dedupe + 幂等",
+   "width": 150
+  },
+  {
+   "id": "parse",
+   "lane": "task",
+   "col": 1,
+   "type": "backend",
+   "label": "parse_to_text",
+   "sublabel": "md/txt/pdf/docx",
+   "width": 140
+  },
+  {
+   "id": "chunk",
+   "lane": "task",
+   "col": 2,
+   "type": "backend",
+   "label": "结构感知切块",
+   "sublabel": "切块 + 清旧贡献",
+   "width": 140
+  },
+  {
+   "id": "vocab",
+   "lane": "batch",
+   "col": 2,
+   "type": "database",
+   "label": "词表播种",
+   "sublabel": "实体词表初始化",
+   "width": 130
+  },
+  {
+   "id": "extract",
+   "lane": "batch",
+   "col": 3,
+   "type": "cloud",
+   "label": "批内并行抽取",
+   "sublabel": "并行抽取 · 熔断可续跑",
+   "tag": "LLM",
+   "width": 150
+  },
+  {
+   "id": "validate",
+   "lane": "batch",
+   "col": 4,
+   "type": "security",
+   "label": "四类校验",
+   "sublabel": "本体/别名/悬空/端点",
+   "width": 150
+  },
+  {
+   "id": "upsert",
+   "lane": "batch",
+   "col": 5,
+   "type": "database",
+   "label": "upsert_batch",
+   "sublabel": "单事务幂等 + 批次 done",
+   "width": 130
+  },
+  {
+   "id": "merge_prop",
+   "lane": "finish",
+   "col": 5,
+   "type": "backend",
+   "label": "提案合并",
+   "sublabel": "关系提案确认",
+   "width": 130
+  },
+  {
+   "id": "reconcile",
+   "lane": "finish",
+   "col": 4,
+   "type": "database",
+   "label": "向量对账",
+   "sublabel": "缺口补写",
+   "width": 130
+  },
+  {
+   "id": "alias",
+   "lane": "finish",
+   "col": 3,
+   "type": "backend",
+   "label": "别名整理",
+   "sublabel": "去争议 + 同类型合并",
+   "width": 150
+  },
+  {
+   "id": "identity",
+   "lane": "finish",
+   "col": 2,
+   "type": "cloud",
+   "label": "身份复合",
+   "sublabel": "LLM 实体归一",
+   "tag": "LLM",
+   "width": 130
+  },
+  {
+   "id": "stats",
+   "lane": "finish",
+   "col": 0,
+   "type": "database",
+   "label": "统计回写",
+   "sublabel": "导入报告",
+   "width": 130
+  },
+  {
+   "id": "summary",
+   "lane": "finish",
+   "col": 1,
+   "type": "backend",
+   "label": "摘要块生成",
+   "sublabel": "D14 抽象问法兜底",
+   "width": 150
+  }
+ ],
+ "edges": [
+  {
+   "id": "idempotent-parse",
+   "from": "submit",
+   "to": "parse",
+   "variant": "default"
+  },
+  {
+   "id": "parse-chunk",
+   "from": "parse",
+   "to": "chunk",
+   "variant": "default"
+  },
+  {
+   "id": "clean-vocab",
+   "from": "chunk",
+   "to": "vocab",
+   "variant": "default"
+  },
+  {
+   "id": "vocab-extract",
+   "from": "vocab",
+   "to": "extract",
+   "variant": "default"
+  },
+  {
+   "id": "extract-validate",
+   "from": "extract",
+   "to": "validate",
+   "label": "逐批校验",
+   "variant": "default"
+  },
+  {
+   "id": "validate-upsert",
+   "from": "validate",
+   "to": "upsert",
+   "label": "过滤后写入",
+   "variant": "emphasis"
+  },
+  {
+   "id": "checkpoint-extract",
+   "from": "upsert",
+   "to": "extract",
+   "label": "下一批",
+   "variant": "dashed",
+   "role": "return"
+  },
+  {
+   "id": "checkpoint-mergeprop",
+   "from": "upsert",
+   "to": "merge_prop",
+   "label": "全部完成",
+   "variant": "emphasis"
+  },
+  {
+   "id": "mergeprop-reconcile",
+   "from": "merge_prop",
+   "to": "reconcile",
+   "variant": "default"
+  },
+  {
+   "id": "reconcile-alias",
+   "from": "reconcile",
+   "to": "alias",
+   "variant": "default"
+  },
+  {
+   "id": "alias-identity",
+   "from": "alias",
+   "to": "identity",
+   "variant": "default"
+  },
+  {
+   "id": "identity-summary",
+   "from": "identity",
+   "to": "summary",
+   "variant": "default"
+  },
+  {
+   "id": "summary-stats",
+   "from": "summary",
+   "to": "stats",
+   "variant": "default"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "任务语义（tasks.py:102-205）",
+   "items": [
+    "queue_key 同库串行，dedupe 同文档唯一，max_auto_retry",
+    "已完成文档幂等跳过；向量缺口自动补偿",
+    "非续跑先清理旧贡献，防止重复实体"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "批内循环（tasks.py:379-612）",
+   "items": [
+    "ThreadPoolExecutor 并行 LLM 抽取，批间串行",
+    "四类校验：本体过滤 / 别名独占性 / 悬空关系 / 端点类型",
+    "每批 checkpoint 标 done，失败可从断点续跑",
+    "连续失败达阈值熔断，任务标 failed"
+   ]
+  },
+  {
+   "dot": "orange",
+   "title": "收尾五步（tasks.py:617-710）",
+   "items": [
+    "提案合并 → 向量对账 → 别名去争议 + 同类型合并",
+    "LLM 身份复合：同义实体归一",
+    "描述连边 + 统计回写，导入报告落库"
+   ]
+  }
+ ]
+}

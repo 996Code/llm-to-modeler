@@ -1,0 +1,221 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ChatBI 反馈闭环：指标反哺、fewshot 与图谱演化",
+    "output": "../chatbi-feedback-loop.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "metric",
+        "label": "指标反哺",
+        "focus": [
+          "query",
+          "persist",
+          "cooccur",
+          "suggest"
+        ],
+        "note": "成功查询的 SQL 聚合反哺指标记忆。"
+      },
+      {
+        "id": "fewshot",
+        "label": "fewshot 学习",
+        "focus": [
+          "query",
+          "saveq"
+        ],
+        "note": "成功样例入库供下一轮召回。"
+      },
+      {
+        "id": "memory",
+        "label": "记忆与图谱",
+        "focus": [
+          "consolidate",
+          "linkage"
+        ],
+        "note": "后台记忆整理与图谱置信度演化。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "online",
+      "label": "在线查询路径"
+    },
+    {
+      "id": "feedback",
+      "label": "反馈写入"
+    },
+    {
+      "id": "background",
+      "label": "后台任务"
+    }
+  ],
+  "phases": [
+    {
+      "id": "queryp",
+      "label": "查询成功",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "writep",
+      "label": "反馈沉淀",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "usep",
+      "label": "后台整理",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "query",
+    "persist",
+    "suggest",
+    "consolidate",
+    "linkage"
+  ],
+  "nodes": [
+    {
+      "id": "query",
+      "lane": "online",
+      "col": 0,
+      "type": "backend",
+      "label": "成功查询",
+      "sublabel": "ask_data finalize",
+      "width": 140
+    },
+    {
+      "id": "saveq",
+      "lane": "online",
+      "col": 1,
+      "type": "database",
+      "label": "save_query",
+      "sublabel": "fewshot 入库 · fail-open",
+      "width": 150
+    },
+    {
+      "id": "persist",
+      "lane": "feedback",
+      "col": 2,
+      "type": "backend",
+      "label": "persist_metric_feedback",
+      "sublabel": "SQL 聚合命中分析",
+      "width": 180
+    },
+    {
+      "id": "cooccur",
+      "lane": "feedback",
+      "col": 3,
+      "type": "database",
+      "label": "co_occurrence +1",
+      "sublabel": "命中已知指标",
+      "width": 150
+    },
+    {
+      "id": "suggest",
+      "lane": "feedback",
+      "col": 4,
+      "type": "database",
+      "label": "metric_suggestion",
+      "sublabel": "单表新聚合",
+      "width": 150
+    },
+    {
+      "id": "consolidate",
+      "lane": "background",
+      "col": 4,
+      "type": "backend",
+      "label": "memory.consolidate",
+      "sublabel": "LLM 合并去重",
+      "tag": "LLM",
+      "width": 150
+    },
+    {
+      "id": "linkage",
+      "lane": "background",
+      "col": 5,
+      "type": "messagebus",
+      "label": "图谱反哺",
+      "sublabel": "linkage 同步 + 置信度演化",
+      "width": 170
+    }
+  ],
+  "edges": [
+    {
+      "id": "query-saveq",
+      "from": "query",
+      "to": "saveq",
+      "variant": "default"
+    },
+    {
+      "id": "query-persist",
+      "from": "query",
+      "to": "persist",
+      "label": "SQL 聚合分析",
+      "variant": "emphasis"
+    },
+    {
+      "id": "persist-cooccur",
+      "from": "persist",
+      "to": "cooccur",
+      "label": "命中已知",
+      "variant": "default"
+    },
+    {
+      "id": "persist-suggest",
+      "from": "persist",
+      "to": "suggest",
+      "label": "新聚合",
+      "variant": "default"
+    },
+    {
+      "id": "suggest-consolidate",
+      "from": "suggest",
+      "to": "consolidate",
+      "label": "待整理记忆",
+      "variant": "dashed"
+    },
+    {
+      "id": "consolidate-linkage",
+      "from": "consolidate",
+      "to": "linkage",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "指标反哺（feedback.py:120-301）",
+      "items": [
+        "SQL 聚合命中已知指标 → co_occurrence 计数 +1",
+        "单表新聚合 → metric_suggestion 记忆（待管理员确认）",
+        "全部 fail-open：反馈失败不影响查询主链"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "fewshot 学习（fewshot.py:58-133）",
+      "items": [
+        "成功查询入向量库 DOC_FEWSHOT 分区",
+        "生成时召回相似问题-SQL 对注入 prompt",
+        "与 Skills / JOIN 路径 / 指标 / 记忆共同注入"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "记忆整理与图谱演化",
+      "items": [
+        "consolidate：按数据源分组 LLM 合并，先写新再标记旧",
+        "完成后 sync_linkage_to_graph 反哺图谱边置信度",
+        "图谱演化：linkage 共现 + 历史 SQL 挖掘隐式关系，乐观锁写回"
+      ]
+    }
+  ]
+}

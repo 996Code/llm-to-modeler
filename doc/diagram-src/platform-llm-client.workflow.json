@@ -1,0 +1,291 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "LLM 客户端治理：限速、降级与退避",
+  "output": "../platform-llm-client.html",
+  "locale": "zh-CN",
+  "quality_profile": "showcase",
+  "views": [
+   {
+    "id": "chat",
+    "label": "chat 主链",
+    "focus": [
+     "caller",
+     "acquire",
+     "create",
+     "reasoning",
+     "success",
+     "logcall"
+    ],
+    "note": "限速取额到 Qwen3 回退的调用链。"
+   },
+   {
+    "id": "json",
+    "label": "chat_json 两级降级",
+    "focus": [
+     "caller",
+     "jsonmode",
+     "fallback",
+     "parse"
+    ],
+    "note": "json_object 失败后的纯文本降级。"
+   },
+   {
+    "id": "govern",
+    "label": "限速与退避",
+    "focus": [
+     "acquire",
+     "create",
+     "backoff"
+    ],
+    "note": "RPM/TPM 令牌桶与 429 全局退避。"
+   }
+  ]
+ },
+ "lanes": [
+  {
+   "id": "call",
+   "label": "调用路径"
+  },
+  {
+   "id": "policy",
+   "label": "失败处理",
+   "variant": "exception"
+  },
+  {
+   "id": "json",
+   "label": "JSON 模式降级"
+  }
+ ],
+ "phases": [
+  {
+   "id": "pre",
+   "label": "配额与出站",
+   "fromCol": 0,
+   "toCol": 2
+  },
+  {
+   "id": "post",
+   "label": "响应处理",
+   "fromCol": 3,
+   "toCol": 4,
+   "variant": "emphasis"
+  },
+  {
+   "id": "log",
+   "label": "观测",
+   "fromCol": 5,
+   "toCol": 5,
+   "variant": "dashed"
+  }
+ ],
+ "mainPath": [
+  "caller",
+  "acquire",
+  "create",
+  "reasoning",
+  "success",
+  "logcall"
+ ],
+ "nodes": [
+  {
+   "id": "caller",
+   "lane": "call",
+   "col": 0,
+   "type": "backend",
+   "label": "调用方",
+   "sublabel": "Engine / 插件",
+   "width": 130
+  },
+  {
+   "id": "acquire",
+   "lane": "call",
+   "col": 1,
+   "type": "security",
+   "label": "rate_limiter.acquire",
+   "sublabel": "RPM/TPM 令牌桶 · 进程单例",
+   "width": 180
+  },
+  {
+   "id": "create",
+   "lane": "call",
+   "col": 2,
+   "type": "cloud",
+   "label": "chat.completions",
+   "sublabel": "chat.completions · 关思考",
+   "width": 150
+  },
+  {
+   "id": "reasoning",
+   "lane": "call",
+   "col": 3,
+   "type": "backend",
+   "label": "Qwen3 回退",
+   "sublabel": "content 空 → reasoning_content",
+   "width": 170
+  },
+  {
+   "id": "success",
+   "lane": "call",
+   "col": 4,
+   "type": "backend",
+   "label": "on_success",
+   "sublabel": "usage 校准估算系数",
+   "width": 150
+  },
+  {
+   "id": "logcall",
+   "lane": "call",
+   "col": 5,
+   "type": "database",
+   "label": "call_logs",
+   "sublabel": "完整/摘要入库",
+   "width": 130
+  },
+  {
+   "id": "backoff",
+   "lane": "policy",
+   "col": 3,
+   "type": "security",
+   "label": "429 全局退避",
+   "sublabel": "30s → 600s 指数",
+   "width": 140
+  },
+  {
+   "id": "error",
+   "lane": "policy",
+   "col": 4,
+   "type": "security",
+   "label": "上抛调用方",
+   "sublabel": "不吞异常",
+   "width": 140
+  },
+  {
+   "id": "jsonmode",
+   "lane": "json",
+   "col": 2,
+   "type": "backend",
+   "label": "json_object 模式",
+   "sublabel": "chat_json 优先直连",
+   "width": 150
+  },
+  {
+   "id": "fallback",
+   "lane": "json",
+   "col": 3,
+   "type": "messagebus",
+   "label": "纯文本降级",
+   "sublabel": "refund 配额后走 chat",
+   "width": 150
+  },
+  {
+   "id": "parse",
+   "lane": "json",
+   "col": 4,
+   "type": "backend",
+   "label": "三级 JSON 提取",
+   "sublabel": "直接/代码块/花括号",
+   "width": 150
+  }
+ ],
+ "edges": [
+  {
+   "id": "caller-acquire",
+   "from": "caller",
+   "to": "acquire",
+   "variant": "default"
+  },
+  {
+   "id": "acquire-create",
+   "from": "acquire",
+   "to": "create",
+   "label": "配额通过",
+   "variant": "emphasis"
+  },
+  {
+   "id": "create-reasoning",
+   "from": "create",
+   "to": "reasoning",
+   "variant": "default"
+  },
+  {
+   "id": "reasoning-success",
+   "from": "reasoning",
+   "to": "success",
+   "variant": "default"
+  },
+  {
+   "id": "success-logcall",
+   "from": "success",
+   "to": "logcall",
+   "variant": "emphasis"
+  },
+  {
+   "id": "create-backoff",
+   "from": "create",
+   "to": "backoff",
+   "label": "429 限流",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "id": "create-error",
+   "from": "create",
+   "to": "error",
+   "label": "其他异常",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "id": "caller-jsonmode",
+   "from": "caller",
+   "to": "jsonmode",
+   "label": "chat_json",
+   "variant": "dashed"
+  },
+  {
+   "id": "jsonmode-fallback",
+   "from": "jsonmode",
+   "to": "fallback",
+   "label": "直连失败",
+   "variant": "security",
+   "role": "branch"
+  },
+  {
+   "id": "fallback-parse",
+   "from": "fallback",
+   "to": "parse",
+   "variant": "default"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "出站治理",
+   "items": [
+    "RPM/TPM 双令牌桶，进程级单例收敛所有出站",
+    "默认注入 Connection: close（new-api 网关坏连接实测）",
+    "LLM_MAX_RETRIES 可配，网关不可达时可设 0 快速冒泡"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "Qwen3 推理模型兼容",
+   "items": [
+    "content 为空且 finish_reason=length 时回退读 reasoning_content",
+    "chat_json 两级降级：json_object → 纯文本 + 三级 JSON 提取",
+    "降级前 refund 配额，两次出站只占一次额度"
+   ]
+  },
+  {
+   "dot": "rose",
+   "title": "限流与失败语义",
+   "items": [
+    "429 触发全局指数退避 30s→600s，后续调用统一等待",
+    "限流错误标记 rate_limit，不算业务失败不烧熔断",
+    "usage EMA 校准 token 估算系数，换模型自动收敛"
+   ]
+  }
+ ]
+}

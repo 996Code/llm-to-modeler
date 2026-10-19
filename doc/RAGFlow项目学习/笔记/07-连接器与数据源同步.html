@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>07 · 连接器与数据源同步 · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>07 · 连接器与数据源同步</h1>
+  <p class="lead">35+ 数据源接入、指纹增量、稳定 ID 幂等与删除对账。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  <div class="diagram"><div class="bar"><span>链路图：ragflow-connector-sync.html</span><a href="../图/ragflow-connector-sync.html" target="_blank">新窗口打开 ↗</a></div><iframe src="../图/ragflow-connector-sync.html" title="ragflow-connector-sync.html" loading="lazy"></iframe></div>
+  <article>
+<h1>07 · 连接器与数据源同步</h1>
+<blockquote>
+<p>35+ 数据源接入、指纹增量、稳定 ID 幂等与删除对账。</p>
+</blockquote>
+<h2>1. 体系结构</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-connector-sync.html]（bind-schedule 视图）</p>
+</blockquote>
+<ul>
+<li><strong>35+ 连接器</strong>（common/data_source/）：GitHub/GitLab/Bitbucket/Azure DevOps、Google Drive/OneDrive/Dropbox/Box/SharePoint/Seafile/WebDAV、Notion/Confluence/Jira/Asana/Airtable/Salesforce/Zendesk、IMAP/Gmail/Outlook、Slack/Discord/Teams、RSS/Sitemap/REST API、MySQL/PostgreSQL/BigQuery、钉钉多维表、xquik</li>
+<li>独立 data_sync 进程轮询 due 任务并发执行（sync_data_source.py:2349-2379）；Go 主干有对应 syncer（checkpoint_store 增量）</li>
+<li>官方文档（docs/guides/data_source/）：首轮全量、后续按刷新间隔增量、可选删除同步</li>
+</ul>
+<h2>2. 指纹增量（防重下载/重嵌）</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-connector-sync.html]（incremental 视图）</p>
+</blockquote>
+<ul>
+<li>列表 fingerprint 与已存 content_hash 相同 → 跳过 GetObject 下载与重嵌（sync_data_source.py:395-451）</li>
+<li>首同步全量、后续按 poll_range 水位增量；同步状态全量留痕 SyncLogs（docs/errors/poll_range 可审计）</li>
+</ul>
+<h2>3. 稳定文档 ID（幂等入库）</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-connector-sync.html]（incremental 视图）</p>
+</blockquote>
+<ul>
+<li>doc_id = hash128(kb_id:connector_id:external_id)，重跑更新原行而非复制（connector_service.py:66-104）</li>
+<li>兼容两代历史 ID 派生（≤v0.25.1 无 kb_id 的旧格式），跨库碰撞拒绝写入</li>
+<li>35+ 连接器统一 SyncBase 模板：checkpoint 迭代 + 批量 yield + 迭代上限 10 万防死循环（:141,1771-1796）</li>
+</ul>
+<h2>4. 删除对账与重建</h2>
+<blockquote>
+<p>🗺 对应链路图：[../图/ragflow-connector-sync.html]（prune-rebuild 视图）</p>
+</blockquote>
+<ul>
+<li>开启 sync_deleted_files 时独立 prune 任务：取远端快照比对，删除端侧孤儿（:322-367）</li>
+<li>rebuild：删该连接器全部文档后重新排期全量（connector_service.py:205-240）；授权在 service 层（非 HTTP 层）——删数据操作必须校验 kb 可达+连接器绑定</li>
+<li>凭证安全：connector_runner 对异常帧 f_locals 敏感键替换 <redacted>（:84,254-257，有回归测试）；SSRF 防护专门模块 common/ssrf_guard.py（DNS pinning 防 rebinding）</li>
+</ul>
+<h2>5. MCP Server（mcp/server/server.py）</h2>
+<p>深读版见《14-官方文档地图与盲区补齐.md》§4.2（入参/双层缓存/字段映射/鉴权/流式全解）。要点：只开 3 工具（retrieval/list_datasets/list_chats）克制形态；元数据 LRU+随机 TTL 防雪崩；每请求 token 无会话路由。</p>
+<h2>对我们的启示</h2>
+<ul>
+<li>宿主数据源接入（终局项）走 AssetClient 契约 + pack 任务框架，<strong>fingerprint 增量模式直接照抄</strong>（我们 KG 已有 content_hash 查重，天然对齐）</li>
+<li>稳定 ID 三元组（kb:connector:external_id）防跨库碰撞的思路可用于 KG 文档 ID</li>
+<li>MCP 出口（终局项）照抄"3 工具+元数据缓存+REST 代理"的克制形态，不贪多</li>
+</ul>
+  </article>
+  <nav class="bottom">
+    <a href="06-数据模型与多租户.html">← 06 · 数据模型与多租户</a>
+    <a href="08-记忆与上下文.html">08 · 记忆与上下文 →</a>
+  </nav>
+</div>
+</body>
+</html>

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Checkpoint 追问恢复链：interrupt 挂起与 Command(resume)",
+    "output": "../engine-checkpoint-resume.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [980, 660],
+    "views": [
+      { "id": "suspend", "label": "挂起", "focus": ["client", "api", "graph", "tool", "pg"], "note": "工具请求追问时图挂起并保存现场。" },
+      { "id": "resume", "label": "恢复", "focus": ["client", "api", "graph", "tool"], "note": "answers 作为新请求恢复断点重跑工具。" },
+      { "id": "durability", "label": "持久化", "focus": ["graph", "pg"], "note": "PostgresSaver 按 thread_id 快照与恢复。" }
+    ]
+  },
+  "participants": [
+    { "id": "client", "type": "external", "label": "前端", "sublabel": "追问卡片" },
+    { "id": "api", "type": "backend", "label": "chat()", "sublabel": "answers 非空判定" },
+    { "id": "graph", "type": "backend", "label": "LangGraph", "sublabel": "execute_tool 节点" },
+    { "id": "tool", "type": "messagebus", "label": "插件工具", "sublabel": "CompositeTool 管线" },
+    { "id": "pg", "type": "database", "label": "PostgreSQL", "sublabel": "PostgresSaver" }
+  ],
+  "segments": [
+    { "from": 150, "to": 330, "label": "第一轮：挂起" },
+    { "from": 340, "to": 560, "label": "第二轮：恢复" }
+  ],
+  "messages": [
+    { "id": "msg1", "from": "client", "to": "api", "y": 165, "label": "「我要请假」（answers 为空）", "variant": "emphasis" },
+    { "id": "msg2", "from": "api", "to": "graph", "y": 195, "label": "初始 state + thread_id=conv_id", "variant": "default" },
+    { "id": "msg3", "from": "graph", "to": "tool", "y": 225, "label": "execute(state, ctx)", "variant": "default" },
+    { "id": "msg4", "from": "tool", "to": "graph", "y": 255, "label": "ToolResult.ask（字段缺失）", "variant": "security" },
+    { "id": "msg5", "from": "graph", "to": "pg", "y": 285, "label": "checkpoint 快照（挂起点）", "variant": "dashed" },
+    { "id": "msg6", "from": "graph", "to": "client", "y": 320, "label": "SSE result: needsClarification + questions", "variant": "security" },
+    { "id": "msg7", "from": "client", "to": "api", "y": 360, "label": "「年假」（answers={text:...}）", "variant": "emphasis" },
+    { "id": "msg8", "from": "api", "to": "graph", "y": 390, "label": "Command(resume=answers)", "variant": "emphasis" },
+    { "id": "msg9", "from": "graph", "to": "pg", "y": 415, "label": "按同 thread_id 取回现场", "variant": "dashed" },
+    { "id": "msg10", "from": "graph", "to": "tool", "y": 445, "label": "interrupt() 返回 answer → rerun", "variant": "default" },
+    { "id": "msg11", "from": "tool", "to": "graph", "y": 475, "label": "ToolResult（artifact / data）", "variant": "default" },
+    { "id": "msg12", "from": "graph", "to": "client", "y": 510, "label": "SSE result / done", "variant": "emphasis" },
+    { "id": "msg13", "from": "graph", "to": "pg", "y": 545, "label": "追问作为 assistant 消息落库（仅一次）", "variant": "dashed" }
+  ],
+  "activations": [
+    { "participant": "api", "from": 160, "to": 200, "type": "backend" },
+    { "participant": "api", "from": 355, "to": 395, "type": "backend" },
+    { "participant": "graph", "from": 190, "to": 330, "type": "backend" },
+    { "participant": "graph", "from": 385, "to": 550, "type": "backend" },
+    { "participant": "tool", "from": 220, "to": 262, "type": "messagebus" },
+    { "participant": "tool", "from": 440, "to": 480, "type": "messagebus" },
+    { "participant": "pg", "from": 280, "to": 292, "type": "database" },
+    { "participant": "pg", "from": 410, "to": 422, "type": "database" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "挂起机制",
+      "items": [
+        "execute_tool 检测 ask 非空 → interrupt() 抛 PauseSignal，流停止不抛异常",
+        "stream.py 主动 get_state 检查 task.interrupts，推 needsClarification 事件",
+        "挂起时 HTTP 响应正常结束，等待是新的 HTTP 请求"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "恢复机制",
+      "items": [
+        "answers 非空 → Command(resume=answers)，不重新分类意图",
+        "interrupt() 返回 answer，注入 tool_state.clarify_answers",
+        "tool_result=None 触发 route_after_result 回环 rerun 重跑工具"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "一致性防线",
+      "items": [
+        "thread_id = conversation_id，每过一个节点自动快照",
+        "追问作为 assistant 消息落库，防 fan-out 重复只落一次",
+        "_awaiting 私有标记区分 answers 归属，防交叉误消费"
+      ]
+    }
+  ]
+}

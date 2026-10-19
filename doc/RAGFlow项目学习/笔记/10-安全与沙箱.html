@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>10 · 安全与沙箱 · RAGFlow 项目学习</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f6f7f9; color: #1f2328; line-height: 1.7; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 24px 64px; }
+  nav.top { font-size: 13px; margin-bottom: 20px; }
+  nav.top a { color: #4c6ef5; text-decoration: none; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .lead { color: #57606a; font-size: 14px; margin-bottom: 24px; }
+  .diagram { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; margin: 24px 0; overflow: hidden; }
+  .diagram .bar { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid #eaeef2; font-size: 13px; color: #57606a; }
+  .diagram .bar a { color: #4c6ef5; text-decoration: none; }
+  .diagram iframe { width: 100%; height: 640px; border: 0; display: block; }
+  article { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 28px 32px; }
+  article h2 { font-size: 19px; margin: 28px 0 10px; padding-left: 10px; border-left: 3px solid #4c6ef5; }
+  article h2:first-child { margin-top: 0; }
+  article h3 { font-size: 16px; margin: 20px 0 8px; }
+  article p { margin: 8px 0; }
+  article ul, article ol { margin: 8px 0 8px 22px; }
+  article li { margin: 4px 0; }
+  article code { background: #eff1f3; border-radius: 4px; padding: 1px 6px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  article pre code { display: block; padding: 12px; overflow-x: auto; }
+  article blockquote { border-left: 3px solid #d0d7de; padding: 2px 14px; margin: 10px 0; color: #57606a; background: #fafbfc; border-radius: 0 6px 6px 0; }
+  article table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  article th, article td { border: 1px solid #d0d7de; padding: 7px 12px; text-align: left; }
+  article th { background: #f6f8fa; }
+  article a { color: #4c6ef5; }
+  article strong { color: #111; }
+  nav.bottom { display: flex; justify-content: space-between; margin-top: 24px; font-size: 14px; }
+  nav.bottom a { color: #4c6ef5; text-decoration: none; background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 8px 16px; }
+  nav.bottom a:hover { border-color: #4c6ef5; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top"><a href="../index.html">← RAGFlow 项目学习 · 总览</a></nav>
+  <h1>10 · 安全与沙箱</h1>
+  <p class="lead">认证授权、文件防护、Agent 沙箱与密钥治理——事实与风险分开列，风险项即我们的避坑清单。</p>
+  <p class="lead" style="font-size:12px;color:#8b949e;">基于 RAGFlow v0.27.2（快照 ~/cyble-code/ragflow-v0272，行号可现场验证）· 2026-10-13 定稿</p>
+  
+  <article>
+<h1>10 · 安全与沙箱</h1>
+<blockquote>
+<p>认证授权、文件防护、Agent 沙箱与密钥治理——事实与风险分开列，风险项即我们的避坑清单。</p>
+</blockquote>
+<h2>1. 认证链</h2>
+<p><strong>事实</strong>：login_required（api/apps/<strong>init</strong>.py:235）依次尝试 session cookie（Redis 存储）→ Bearer → itsdangerous JWT → APIToken 表 → BETA token（:144-213）；密码 werkzeug 哈希；登录口令 RSA 解密；OAuth2/OIDC/GitHub 带 state CSRF 校验。</p>
+<p><strong>风险</strong>：CORS <code>allow_origin="*"</code>（:62）与 Bearer/API-key 共存——任意源可读 API 响应；登录失败区分"邮箱未注册"可枚举用户；RSA 私钥口令硬编码"Welcome"（utils/crypt.py:39）。</p>
+<h2>2. 授权边界</h2>
+<p><strong>事实</strong>：三层防护（API 装饰器 → service accessible() → SQL where tenant_id）；角色四档 OWNER/ADMIN/NORMAL/INVITE。</p>
+<p><strong>风险</strong>：accessible 分散各 service，新端点漏加即越权；ADMIN 语义不完整。</p>
+<h2>3. 文件与输入防护</h2>
+<p><strong>事实</strong>：上传无扩展名/MIME 黑白名单，仅数量限制+全局 1GB；folder 名禁"/"；<strong>SSRF 有专门模块</strong> common/ssrf_guard.py（assert_url_is_safe、DNS pinning 防 rebinding、IPv4-mapped IPv6 归一化）——web/sitemap/rss/rest_api connector 全走它。</p>
+<p><strong>风险</strong>：无类型校验，恶意文档依赖解析器自身加固；SSRF 有环境变量旁路，误配即失效。</p>
+<h2>4. Agent 代码沙箱</h2>
+<p><strong>事实</strong>：executor_manager 容器化执行——gVisor（--runtime=runsc）+ --read-only + 默认 --network none + 内存 256m + 超时 10s（core/container.py:88-116）；/run API token fail-closed+限速+仅绑 loopback；AST 静态黑名单（禁 os/subprocess）；providers 含 local（明示"非沙箱边界"，门控 SANDBOX_LOCAL_ENABLED）/self_managed/e2b（30s 硬限）/aliyun。</p>
+<p><strong>风险</strong>：manager 自身 privileged:true + 挂 docker.sock——DinD 结构，manager 被攻破即宿主 root；AST 黑名单可被动态手段绕过，实际边界全靠 gVisor；local 模式零隔离。</p>
+<h2>5. 密钥治理</h2>
+<p><strong>事实</strong>：TenantLLM.api_key <strong>TextField 明文列</strong>（db_models.py:1232）；AES 加密（PBKDF2 固定 salt）仅用于数据库连接密码；connector_runner 异常帧敏感键 <redacted>（有回归测试）；HTTP 客户端 URL 敏感参数脱敏；service_conf 默认口令 infini_rag_flow。</p>
+<p><strong>风险</strong>：模型 key 明文落库，DB 泄露即全部供应商凭据泄露；固定 salt 削弱加密；默认口令未强制改。</p>
+<h2>6. Prompt Injection 面</h2>
+<p><strong>事实</strong>：检索 chunk 以"ID/Title/Content"树形格式原文拼进 system prompt（generator.py:140-175），<strong>无消毒或包裹标记</strong>；XSS 防护在前端：DOMPurify+rehype-sanitize（答案渲染 LaTeX 预处理后再消毒防 entity 绕过）、SafeImg 拦截 onload。</p>
+<p><strong>风险</strong>：知识库内容可信边界缺失——恶意文档可注入指令操纵 Agent（尤其有代码执行/TLS 工具时）。</p>
+<h2>我们的避坑清单（已写入蓝图第 6 节）</h2>
+<ol>
+<li>模型 key 用加密列（pgcrypto）——不学明文</li>
+<li>开放出口时 CORS 白名单——不学 <code>*</code></li>
+<li>检索内容消毒保持并扩展（我们已有 defang，retrieval.py:293-296）——不学裸拼</li>
+<li>沙箱选 rootless/代理——不学 docker.sock 直挂</li>
+<li>混检权重方向：向量 0.3/全文 0.7（复核修正，别信网传）</li>
+</ol>
+  </article>
+  <nav class="bottom">
+    <a href="09-评测可观测与性能.html">← 09 · 评测、可观测与性能</a>
+    <a href="11-Prompt工程.html">11 · Prompt 工程 →</a>
+  </nav>
+</div>
+</body>
+</html>
