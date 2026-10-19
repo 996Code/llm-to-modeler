@@ -271,10 +271,13 @@ function search() {
 }
 
 function onTableChange(pag: { current?: number; pageSize?: number }) {
-  if (pag.current) page.current = pag.current
-  if (pag.pageSize) {
+  // change 事件载荷永远带 pageSize——不比对旧值就重置 current 的话,
+  // 每次翻页都会被拽回第 1 页(翻页失效的真实根因)
+  if (pag.pageSize && pag.pageSize !== page.pageSize) {
     page.pageSize = pag.pageSize
     page.current = 1
+  } else if (pag.current) {
+    page.current = pag.current
   }
   load()
 }

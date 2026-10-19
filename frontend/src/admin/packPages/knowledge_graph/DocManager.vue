@@ -10,7 +10,7 @@
       <p class="dm-upload-icon"><InboxOutlined /></p>
       <p class="dm-upload-text">点击或拖拽文件到此处上传</p>
       <p class="dm-upload-hint">
-        支持 md / txt / pdf / docx,单文件 ≤ {{ maxMb }}MB;同库同内容自动去重;扫描版 PDF 导入时自动 OCR 识别
+        支持 md / txt / pdf / docx,单文件 ≤ {{ maxMb }}MB;同库同内容自动去重;扫描版 PDF 导入时自动 OCR 识别(pypdfium2 渲染 + RapidOCR)
         <a-popover placement="bottom" trigger="hover">
           <template #content>
             <div class="dm-chunk-pop">
