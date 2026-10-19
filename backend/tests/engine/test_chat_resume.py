@@ -135,22 +135,22 @@ class TestResumeEndpoint:
 
 
 class TestResumePersistence:
-    """resume_pending 落库跳过 user(不重复写)——单测 stream 落库辅助。"""
+    """落库辅助只写 assistant——user 消息在请求到达时已即时落库
+    (流式中断不丢问句),收尾重复写 user 会让历史同一句问两遍。"""
 
     def test_save_skips_user_when_resume(self, app_with_store):
         from engine.stream import _save_conversation, _save_result_conversation
         _, store = app_with_store
         cid = _make_conv(store, with_assistant=False)
-        # 简单版落库:skip_user 只补 assistant
-        _save_conversation(store, cid, "tester", "问个问题", "续答完成", )
-        # (该函数无 skip_user 参数——上面调用是普通路径的回归锚;
-        # skip_user 语义在 _save_result_conversation)
+        # 简单版落库:只补 assistant,不写 user(_make_conv 已预置 1 条)
+        _save_conversation(store, cid, "tester", "问个问题", "续答完成")
         msgs = store.get_messages(cid)
-        assert [m["role"] for m in msgs].count("user") == 1   # 恰一条 user
+        assert [m["role"] for m in msgs].count("user") == 1   # 不重复写 user
+        assert any(m["role"] == "assistant" for m in msgs)
 
         cid2 = _make_conv(store, with_assistant=False)
         _save_result_conversation(store, cid2, "tester", "问个问题",
-                                  {"summary": "结果"}, None, skip_user=True)
+                                  {"summary": "结果"}, None)
         msgs2 = store.get_messages(cid2)
-        assert [m["role"] for m in msgs2].count("user") == 1   # 续答不重写 user
+        assert [m["role"] for m in msgs2].count("user") == 1   # 不重复写 user
         assert any(m["role"] == "assistant" for m in msgs2)

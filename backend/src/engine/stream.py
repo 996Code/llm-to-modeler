@@ -166,6 +166,17 @@ async def stream_graph(
             # 创建失败不阻断对话(消息不落库,但用户当轮还能收到回复)
             logger.warning(f"lazy create conversation failed: {e}")
 
+    # 用户消息即时落库:流式中断(刷新/断连/服务重启)时该轮问题不蒸发——
+    # 历史重载可见,且末条=user 触发 pendingResume,前端给「继续生成」入口。
+    # resume_pending 无新 user 输入不落;追问回答(answers)同为新消息照落。
+    # 收尾落库(_save_*_conversation)只补 assistant,不再重复写 user。
+    if conversation_store and conversation_id and user_id and not resume_pending:
+        try:
+            conversation_store.add_message(
+                conv_id=conversation_id, role="user", content=user_input)
+        except Exception as e:
+            logger.warning(f"Failed to save user message upfront: {e}")
+
     # 构建 graph 的输入
     if answers:
         # 路径 2:追问恢复 —— 用 Command 告诉 graph "这是对之前 interrupt 的回答"
@@ -424,7 +435,6 @@ async def stream_graph(
                 _save_result_conversation(
                     conversation_store, conversation_id, user_id,
                     user_input, result_holder["last_result"], context_artifact,
-                    skip_user=resume_pending,
                 )
 
             # 无论成功 / 失败 / 中断,都要发 done 让前端关闭连接
@@ -452,7 +462,7 @@ async def stream_graph(
 
 
 def _save_conversation(store, conv_id, user_id, user_input, assistant_content):
-    """保存一次问答到 store(简单版,异常不崩)。
+    """保存一轮问答的 assistant 消息(user 已在请求到达时即时落库)。
 
     【容错策略】落库失败只记 warning,不影响主流程——SSE 已经把结果推给前端了,
     落库只是审计用途,失败可接受。
@@ -460,24 +470,16 @@ def _save_conversation(store, conv_id, user_id, user_input, assistant_content):
     if not store or not conv_id or not user_id:
         return
     try:
-        if resume_pending:
-            # D10 挂起续答:该轮 user 消息挂起前已落库,只补 assistant——
-            # 重复写 user 会让历史里同一句问两遍
-            store.add_message(conv_id=conv_id, role="assistant", content=assistant_content)
-            return
-        store.add_message(conv_id=conv_id, role="user", content=user_input)
         store.add_message(conv_id=conv_id, role="assistant", content=assistant_content)
     except Exception as e:
         logger.warning(f"Failed to save conversation: {e}")
 
 
-def _save_result_conversation(store, conv_id, user_id, user_input, result_data, context_artifact,
-                              skip_user: bool = False):
+def _save_result_conversation(store, conv_id, user_id, user_input, result_data, context_artifact):
     """保存工具执行结果到对话历史(含配置快照)。
 
     【逻辑】
-      1. 落 user / assistant 两条消息(skip_user=True 跳过 user——D10
-         挂起续答:该轮 user 挂起前已落库,重写会让历史同一句问两遍)
+      1. user 消息已在请求到达时即时落库,这里只落 assistant(带制品/快照)
       2. 如果结果里带 config(配置制品),额外存一条带 config_snapshot 的消息
          (审计用:记录"这次操作把配置改成了什么样")
       3. 更新会话的 current_config(存储层字段名,不改):
@@ -488,9 +490,6 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
         return
     try:
         summary = result_data.get("summary", "")
-
-        if not skip_user:
-            store.add_message(conv_id=conv_id, role="user", content=user_input)
 
         # D4 工具输出类型:suppress_output 的工具(如查询统计明细)声明
         # "结果文本不进 LLM 上下文"——assistant content(=下轮 LLM 历史
