@@ -15,6 +15,14 @@
 -->
 <template>
   <div class="chat-input-wrap">
+    <!-- D20 建议问题:输入框上方推荐问法(点击即发送);仅无草稿时显示
+         (有输入不打扰);对话开始后隐藏(推荐是冷启动引导) -->
+    <div v-if="(suggestions?.length ?? 0) > 0 && !text && !streaming" class="suggest-bar">
+      <button
+        v-for="q in suggestions" :key="q"
+        class="suggest-chip" @click="sendSuggestion(q)"
+      >{{ q }}</button>
+    </div>
     <!-- 输入框主体；:class 动态加 disabled 类（流式生成时变灰） -->
     <div class="chat-input" :class="{ disabled: streaming }">
       <!-- 图片预览：选了图才显示，v-if 条件渲染 -->
@@ -98,6 +106,7 @@ const props = defineProps<{
   streaming: boolean                  // 是否正在流式生成（生成时禁用输入）
   pendingClarification?: boolean      // 当前是否处于追问态（影响占位文案）
   totalTokens?: number                // 当前对话累计 token(输入框角常显)
+  suggestions?: string[]              // D20 建议问题(冷启动引导;父组件拉取)
 }>()
 
 // defineEmits：声明本组件会触发的事件（接口契约，类比 Java 的事件总线/回调接口）。
@@ -195,9 +204,14 @@ function removeImage() {
   imagePreview.value = null
 }
 
+/** D20 建议问题点击:填入并发送(复用 send 完整链路) */
+function sendSuggestion(q: string) {
+  text.value = q
+  send()
+}
+
 /** 发送：把内容上抛给父组件，并清空本地草稿 */
-function send() {
-  // 双重保险：canSend 为假时直接退出（防止按钮被绕过）
+function send() {  // 双重保险：canSend 为假时直接退出（防止按钮被绕过）
   if (!canSend.value) return
   // 图片可能为 null，统一转 undefined（后端按可选参数处理）
   const img = imageBase64.value || undefined
@@ -277,6 +291,19 @@ function onEnter(e: KeyboardEvent) {
 </script>
 
 <style scoped>
+/* D20 建议问题条:冷启动引导 chips */
+.suggest-bar {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 0 4px 10px;
+}
+.suggest-chip {
+  border: 1px solid var(--border-color, #d9d9d9); border-radius: 14px;
+  background: var(--bg-card, #fff); color: var(--text-secondary, #555);
+  padding: 4px 12px; font-size: 12px; cursor: pointer;
+  transition: all 0.15s;
+}
+.suggest-chip:hover { border-color: #2f54eb; color: #2f54eb; }
+
 .chat-input-wrap {
   padding: 12px 24px 16px;
   background: var(--bg-page);

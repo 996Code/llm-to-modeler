@@ -28,7 +28,7 @@ import re
 import shutil
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 
 from sdk.pack_api import admin_required
 from domains.knowledge_graph import runtime
@@ -113,6 +113,53 @@ async def list_kbs(request: Request):
     except Exception as e:
         logger.warning(f"库列表图谱计数失败,回退文档求和口径: {e}")
     return {"items": items}
+
+
+@router.get("/suggest-questions")
+async def suggest_questions(request: Request,
+                            x_user_id: Optional[str] = Header(None)):
+    """D20 建议问题:输入框下方推荐问法(用户级,对话页消费)。
+
+    纯规则零 LLM 调用(快且稳):高 hit_count 块(D29"哪些知识真被用"
+    的数据直接变推荐语料)+图谱高频实体,模板化生成 3-5 条。无命中
+    数据的冷库给通用引导句。身份传入时按 ACL 过滤可见库。
+    """
+    from domains.knowledge_graph import acl as kg_acl
+    store = runtime.get_kg_store(request.app.state)
+    user, roles = kg_acl.request_identity(x_user_id, None)
+    kbs, _ = kg_acl.filter_kbs(store, store.list_kbs(), user, roles)
+    if not kbs:
+        return {"questions": []}
+    kb = kbs[0]  # 主库(第一个);单库部署占绝对主流
+    try:
+        top = store.top_hit_chunks(kb["id"], limit=3)
+    except Exception:
+        top = []
+    questions = []
+    for c in top:
+        text = (c.get("text") or "").strip()
+        if len(text) >= 12:
+            questions.append(f"关于「{text[:24]}」讲了什么?")
+    try:
+        graph = _graph(request)
+        hot = graph.top_entities(kb["id"], limit=2)
+    except Exception:
+        hot = []
+    for ent in hot:
+        name = (ent.get("name") or "").strip()
+        if name:
+            questions.append(f"{name}相关的内容有哪些?")
+    # 去重+兜底:不足 3 条补通用引导(冷库无命中数据时仍有引导)
+    seen, uniq = set(), []
+    for q in questions:
+        if q not in seen:
+            seen.add(q)
+            uniq.append(q)
+    while len(uniq) < 3:
+        uniq.append("这份知识库主要包含哪些内容?")
+        if len(uniq) >= 5:
+            break
+    return {"questions": uniq[:5]}
 
 
 @router.get("/kbs/templates", dependencies=[Depends(admin_required)])
@@ -682,6 +729,61 @@ def _sanitize_filename(name: str) -> str:
 @router.delete("/kbs/{kb_id}/documents/{doc_id}", dependencies=[Depends(admin_required)])
 async def delete_document(kb_id: str, doc_id: str, request: Request):
     return delete_document_full(request, kb_id, doc_id)
+
+
+@router.post("/kbs/{kb_id}/documents/batch-delete", dependencies=[Depends(admin_required)])
+async def batch_delete_documents(kb_id: str, request: Request,
+                                 payload: Dict[str, Any]):
+    """D30 批量删除:逐文档走单删同一条实现(清理语义不漂移)。
+
+    部分失败不回滚(已删的不复活):返回逐条结果,前端如实展示
+    失败清单(常见原因=导入中守卫 409)。
+    """
+    doc_ids = [str(d) for d in (payload or {}).get("doc_ids") or [] if str(d).strip()]
+    if not doc_ids:
+        raise HTTPException(422, "doc_ids 不能为空")
+    if len(doc_ids) > 50:
+        raise HTTPException(422, "单批上限 50 个文档")
+    results = []
+    for did in doc_ids:
+        try:
+            delete_document_full(request, kb_id, did)
+            results.append({"docId": did, "ok": True})
+        except HTTPException as e:
+            results.append({"docId": did, "ok": False, "error": str(e.detail)})
+        except Exception as e:  # noqa: BLE001
+            results.append({"docId": did, "ok": False, "error": str(e)[:200]})
+    ok_n = sum(1 for r in results if r["ok"])
+    return {"deleted": ok_n, "failed": len(results) - ok_n, "results": results}
+
+
+@router.get("/kbs/{kb_id}/usage", dependencies=[Depends(admin_required)])
+async def kb_usage(kb_id: str, request: Request):
+    """D30 使用检查:块命中聚合(哪些知识真被用,按文档分组)。
+
+    数据源=D29 hit_count。零命中文档也列出(命中数 0)——
+    "从未被引用"本身就是治理信号(该文档是否值得入库)。
+    """
+    _kb_or_404(request, kb_id)
+    store = runtime.get_kg_store(request.app.state)
+    docs = store.list_documents(kb_id)
+    out = []
+    for d in docs:
+        try:
+            chunks = store.list_chunks(d["id"])
+            hits = [c.get("hitCount") or 0 for c in chunks]
+            out.append({
+                "docId": d["id"], "filename": d["filename"],
+                "chunkCount": d["chunkCount"],
+                "hitTotal": sum(hits),
+                "hitChunks": sum(1 for h in hits if h > 0),
+                "topHit": max(hits) if hits else 0,
+            })
+        except Exception as e:  # noqa: BLE001
+            out.append({"docId": d["id"], "filename": d["filename"],
+                        "error": str(e)[:120]})
+    out.sort(key=lambda x: -x.get("hitTotal", 0))
+    return {"items": out}
 
 
 def delete_document_full(request: Request, kb_id: str, doc_id: str) -> Dict[str, Any]:

@@ -164,6 +164,8 @@ class ConversationStore:
         # ── call_logs pack_name 列迁移(零停机:IF NOT EXISTS 幂等,历史数据 NULL) ──
         "ALTER TABLE call_logs ADD COLUMN IF NOT EXISTS pack_name TEXT",
         "CREATE INDEX IF NOT EXISTS idx_call_logs_pack ON call_logs(pack_name, created_at)",
+        # ── D20 会话软删:deleted_at 标记(列表过滤;管理端可查/恢复) ──
+        "ALTER TABLE session_meta ADD COLUMN IF NOT EXISTS deleted_at TEXT",
         """CREATE TABLE IF NOT EXISTS session_pack_state (
             conv_id TEXT NOT NULL,
             scope TEXT NOT NULL,
@@ -282,7 +284,8 @@ class ConversationStore:
         """
         with self._get_conn() as conn:
             row = conn.execute(
-                "SELECT conv_id FROM session_meta WHERE user_id = ? AND context_key = ? ORDER BY updated_at DESC LIMIT 1",
+                "SELECT conv_id FROM session_meta WHERE user_id = ? AND context_key = ? "
+                "AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT 1",
                 (user_id, context_key),
             ).fetchone()
         if not row:
@@ -329,7 +332,7 @@ class ConversationStore:
                          WHERE e.conv_id = m.conv_id AND e.kind = 'user'
                          ORDER BY e.created_at ASC LIMIT 1) AS first_user_payload
                   FROM session_meta m
-                 WHERE m.user_id = ?
+                 WHERE m.user_id = ? AND m.deleted_at IS NULL
                  ORDER BY m.updated_at DESC LIMIT ?
                 """,
                 (user_id, limit),
@@ -494,6 +497,8 @@ class ConversationStore:
                 parts.append(f"COALESCE({expr}, '') = ''")
             if parts:
                 clauses.append("(" + " OR ".join(parts) + ")")
+        # D20 软删过滤:嵌入列表不展示已删(恢复后自动回来)
+        clauses.append("m.deleted_at IS NULL")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return where, params
 
@@ -595,32 +600,47 @@ class ConversationStore:
         }
 
     def delete_conversation(self, conv_id: str, user_id: str) -> bool:
-        """删除会话。校验用户归属,删除成功返回 True。
+        """删除会话(D20 软删:打 deleted_at 标记,events/记忆全保留)。
 
-        【级联删除】
-          PG 表未建外键约束,这里手动级联:先删 session_meta,
-          再删 events 里所有该会话的事件。
+        校验用户归属,成功返回 True。硬删(级联清 events/pack_state)
+        归 delete_conversation_any_user(管理端彻底清理用);软删可经
+        管理端恢复——误删是用户级会话的最高频事故。
 
         Args:
             conv_id: 会话 ID
             user_id: 用户 ID(权限校验)
 
         Returns:
-            True 表示删除了至少一行,False 表示会话不存在或不属于该用户。
+            True 表示标记了删除,False 表示会话不存在/非本人/已删。
         """
         with self._get_conn() as conn:
             cursor = conn.execute(
-                "DELETE FROM session_meta WHERE conv_id = ? AND user_id = ?",
-                (conv_id, user_id),
+                "UPDATE session_meta SET deleted_at = ?, updated_at = ? "
+                "WHERE conv_id = ? AND user_id = ? AND deleted_at IS NULL",
+                (_now(), _now(), conv_id, user_id),
             )
-            # 级联删除以权限校验通过为前提:meta 删 0 行(会话不存在/非本人)
-            # 时绝不动 events/记忆——否则未授权请求能把别人的消息和
-            # 插件记忆毁掉,meta 残留成空壳僵尸会话
-            if cursor.rowcount > 0:
-                conn.execute("DELETE FROM events WHERE conv_id = ?", (conv_id,))
-                conn.execute(
-                    "DELETE FROM session_pack_state WHERE conv_id = ?", (conv_id,))
             return cursor.rowcount > 0
+
+    def restore_conversation(self, conv_id: str) -> bool:
+        """恢复软删会话(管理端)。Returns: 是否真的恢复了(未删/不存在=False)。"""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "UPDATE session_meta SET deleted_at = NULL WHERE conv_id = ? "
+                "AND deleted_at IS NOT NULL", (conv_id,))
+            return cursor.rowcount > 0
+
+    def list_deleted_conversations(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """已软删会话(管理端恢复视图,按删除时间倒序)。"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM session_meta WHERE deleted_at IS NOT NULL "
+                "ORDER BY deleted_at DESC LIMIT ?", (limit,)).fetchall()
+        return [{
+            "id": r["conv_id"], "userId": r["user_id"],
+            "title": r["title"] or "新对话",
+            "createdAt": r["created_at"], "updatedAt": r["updated_at"],
+            "deletedAt": r["deleted_at"],
+        } for r in rows]
 
     def delete_conversation_any_user(self, conv_id: str) -> bool:
         """删除会话(管理员视角,不校验归属)。级联删除 events,语义同 delete_conversation。

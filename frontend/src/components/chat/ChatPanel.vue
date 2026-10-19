@@ -67,7 +67,19 @@
 
         <!-- User message (right-aligned bubble) -->
         <div v-if="msg.role === 'user'" class="message-row user-row">
-          <div class="msg-bubble user-bubble">{{ msg.content }}</div>
+          <div class="user-msg-group">
+            <!-- D20 消息操作条:悬停显示(复制/重发);流式生成中禁用重发 -->
+            <div class="msg-actions">
+              <button class="msg-act-btn" title="复制" @click="copyMsg(msg.content)">
+                <CopyOutlined />
+              </button>
+              <button class="msg-act-btn" title="重发"
+                      :disabled="store.streaming" @click="resendMsg(msg.content)">
+                <RedoOutlined />
+              </button>
+            </div>
+            <div class="msg-bubble user-bubble">{{ msg.content }}</div>
+          </div>
           <div class="msg-avatar user-avatar">
             <UserOutlined />
           </div>
@@ -333,6 +345,7 @@
       :streaming="store.streaming"
       :pending-clarification="store.pendingClarification"
       :total-tokens="convTokens"
+      :suggestions="suggestions"
     />
 
     <!-- JSON 查看器 Modal：全屏（嵌入模式下 iframe 只有 420px 宽，弹窗必须拉满
@@ -368,7 +381,7 @@ import {
   UserOutlined, FormOutlined, TableOutlined, CheckOutlined, CloseCircleOutlined,
   InfoCircleOutlined, PlayCircleOutlined,
   CheckCircleOutlined, EyeOutlined, QuestionCircleOutlined,
-  CopyOutlined, RollbackOutlined,
+  CopyOutlined, RollbackOutlined, RedoOutlined,
   ContactsOutlined,
   SearchOutlined, ShareAltOutlined, FileTextOutlined, ApartmentOutlined, RobotOutlined,
   AppstoreAddOutlined, DownloadOutlined, NodeIndexOutlined,
@@ -524,6 +537,16 @@ onMounted(async () => {
   // 挂载时从服务端刷新系统配置（管理端改了显示开关，新会话/刷新即生效；
   // 失败回退 localStorage 缓存再回退默认，见 sysConfig composable）
   refreshSysConfig()
+  // D20 建议问题:KG pack 在场时拉一次(纯规则端点,轻量;失败静默——
+  // 推荐是冷启动引导,没有也不影响主链路)
+  try {
+    const r = await fetch('/ai-modeler/api/packs/knowledge_graph/suggest-questions',
+      { headers: { 'X-User-Id': localStorage.getItem('user_id') || 'web-user' } })
+    if (r.ok) {
+      const d = await r.json()
+      suggestions.value = (d.questions || []).slice(0, 5)
+    }
+  } catch { /* 静默 */ }
   try {
     const manifests = await getPackManifests()
     // 主交互 pack：优先声明了 artifact.display 的（制品卡标签/动作取自它）
@@ -995,6 +1018,20 @@ watch(() => store.stageMessage, () => {
 //   ② 输入框角累计本对话 token(成本感知常显)。
 // call_logs 在工具执行期同步落库, 轮末即可查, 无需后端改动。
 const convTokens = ref(0)
+// D20 建议问题(冷启动引导,输入框上方 chips)
+const suggestions = ref<string[]>([])
+
+/** D20 消息操作条:复制消息文本 */
+async function copyMsg(text: string) {
+  const ok = await copyText(text)
+  ok ? antdMessage.success('已复制') : antdMessage.error('复制失败')
+}
+
+/** D20 消息操作条:重发该条 user 消息(走标准发送链路) */
+function resendMsg(text: string) {
+  if (store.streaming) return
+  store.sendMessage(text)
+}
 
 watch(() => store.streaming, (busy, was) => {
   if (busy || was === undefined) return
@@ -1191,6 +1228,20 @@ watch(() => store.currentConversation?.id, (convId) => {
   display: flex;
   gap: 12px;
 }
+/* D20 消息操作条:悬停显示的复制/重发 */
+.user-msg-group { display: flex; align-items: center; gap: 6px; }
+.msg-actions {
+  display: none; gap: 2px;
+}
+.user-row:hover .msg-actions { display: inline-flex; }
+.msg-act-btn {
+  border: none; background: none; cursor: pointer;
+  color: #b0b3b8; font-size: 13px; padding: 3px 5px;
+  border-radius: 4px; line-height: 1;
+}
+.msg-act-btn:hover { background: rgba(0, 0, 0, 0.06); color: #2f54eb; }
+.msg-act-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+
 .user-row {
   flex-direction: row-reverse;
 }

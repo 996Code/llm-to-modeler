@@ -61,14 +61,35 @@
     </a-modal>
 
     <!-- 文档表 -->
+    <div class="dm-toolbar">
+      <a-popconfirm
+        :title="`将删除选中的 ${selectedIds.length} 个文档(含图谱贡献与向量),确认?`"
+        :disabled="!selectedIds.length" @confirm="doBatchDelete"
+      >
+        <a-button danger size="small" :disabled="!selectedIds.length" :loading="batchDeleting">
+          <DeleteOutlined /> 批量删除{{ selectedIds.length ? `(${selectedIds.length})` : '' }}
+        </a-button>
+      </a-popconfirm>
+      <a-button size="small" style="margin-left: 8px" @click="loadUsage">
+        <BarChartOutlined /> 使用统计
+      </a-button>
+    </div>
     <a-table
       :columns="columns" :data-source="docs" :loading="loading" row-key="id"
+      :row-selection="{ selectedRowKeys: selectedIds, onChange: (k: string[]) => selectedIds = k }"
       size="middle" :pagination="{ pageSize: 20, showTotal: (t: number) => `共 ${t} 条` }"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'filename'">
           <FileTextOutlined class="dm-file-icon" :class="extOf(record.filename)" />
           <span class="dm-fname">{{ record.filename }}</span>
+        </template>
+        <template v-else-if="column.key === 'usage'">
+          <!-- D30 使用统计:命中总量(D29 数据);未加载时显示加载入口 -->
+          <span v-if="usageById[record.id] !== undefined" class="dm-mono">
+            {{ usageById[record.id] }} 次引用
+          </span>
+          <a v-else class="dm-meta-add" @click="loadUsage">查看</a>
         </template>
         <template v-else-if="column.key === 'metadata'">
           <template v-if="metaEntries(record).length">
@@ -243,15 +264,15 @@ import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import type { UploadChangeParam } from 'ant-design-vue'
 import {
-  CheckCircleOutlined, CloudUploadOutlined, CloseCircleOutlined, DeleteOutlined,
+  BarChartOutlined, CheckCircleOutlined, CloudUploadOutlined, CloseCircleOutlined, DeleteOutlined,
   EditOutlined, EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined,
   RedoOutlined, SettingOutlined, UnorderedListOutlined,
 } from '@ant-design/icons-vue'
 import {
-  KgChunkParams, KgDocument, TaskItem, deleteKgDocument, fetchKgChunkExtraction,
-  fetchKgChunkText, fetchKgChunks, fetchKgDocuments, fetchTask, importKgAll,
-  importKgDocument, retryKgChunks, setKgDocMetadata, updateKgChunk, updateKgKb,
-  uploadKgDocuments,
+  KgChunkParams, KgDocument, TaskItem, batchDeleteKgDocuments, deleteKgDocument,
+  fetchKgChunkExtraction, fetchKgChunkText, fetchKgChunks, fetchKgDocuments,
+  fetchKgUsage, fetchTask, importKgAll, importKgDocument, retryKgChunks,
+  setKgDocMetadata, updateKgChunk, updateKgKb, uploadKgDocuments,
 } from '../../api'
 import type { KgChunkExtraction, KgChunkItem, KgChunksPayload } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
@@ -350,6 +371,7 @@ const columns = [
   { title: '大小', key: 'size', width: 90 },
   { title: '导入状态', key: 'importStatus', width: 110 },
   { title: '统计', key: 'counts', width: 190 },
+  { title: '引用', key: 'usage', width: 90 },
   { title: '任务进度', key: 'progress', width: 150 },
   { title: '操作', key: 'actions', width: 240 },
 ]
@@ -604,6 +626,37 @@ async function doDelete(doc: KgDocument) {  await loadSafely(async () => {
   })
   await load()
   emit('changed')
+}
+
+// ── D30 批量删除 + 使用统计 ─────────────────────────────────
+const selectedIds = ref<string[]>([])
+const batchDeleting = ref(false)
+const usageById = ref<Record<string, number>>({})
+
+async function doBatchDelete() {
+  if (!selectedIds.value.length) return
+  batchDeleting.value = true
+  await loadSafely(async () => {
+    const r = await batchDeleteKgDocuments(props.kbId, selectedIds.value)
+    if (r.failed) {
+      message.warning(`批量删除:${r.deleted} 成功 / ${r.failed} 失败(常见原因:文档导入中)`)
+    } else {
+      message.success(`已删除 ${r.deleted} 个文档`)
+    }
+    selectedIds.value = []
+  })
+  batchDeleting.value = false
+  await load()
+  emit('changed')
+}
+
+async function loadUsage() {
+  await loadSafely(async () => {
+    const d = await fetchKgUsage(props.kbId)
+    const map: Record<string, number> = {}
+    for (const it of d.items) map[it.docId] = it.hitTotal
+    usageById.value = map
+  })
 }
 
 // 任务进度轮询(2s;只轮询未终态的;有任务转终态时刷新文档统计)

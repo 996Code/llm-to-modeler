@@ -822,6 +822,21 @@ export async function deleteKgDocument(kbId: string, docId: string): Promise<{ s
   const { data } = await kgApi.delete(`/kbs/${kbId}/documents/${docId}`)
   return data
 }
+/** D30 批量删除(部分失败不回滚,逐条结果如实返回)。 */
+export async function batchDeleteKgDocuments(kbId: string, docIds: string[]): Promise<{
+  deleted: number; failed: number; results: { docId: string; ok: boolean; error?: string }[]
+}> {
+  const { data } = await kgApi.post(`/kbs/${kbId}/documents/batch-delete`, { doc_ids: docIds })
+  return data
+}
+/** D30 使用检查:块命中按文档聚合(D29 数据的治理视图)。 */
+export async function fetchKgUsage(kbId: string): Promise<{
+  items: { docId: string; filename: string; chunkCount: number;
+           hitTotal: number; hitChunks: number; topHit: number; error?: string }[]
+}> {
+  const { data } = await kgApi.get(`/kbs/${kbId}/usage`)
+  return data
+}
 export async function importKgDocument(kbId: string, docId: string, force = false): Promise<TaskItem> {
   const { data } = await kgApi.post(`/kbs/${kbId}/documents/${docId}/import`, { force })
   return data

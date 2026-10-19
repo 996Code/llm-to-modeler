@@ -595,6 +595,97 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
     return {"triples": triples, "node_details": node_details, "chunk_texts": chunk_texts}
 
 
+# ── D17 检索自主循环(证据不足时补检一轮) ─────────────────────
+
+
+def _judge_evidence(app_state, kb, query: str, retrieved: Dict[str, Any],
+                    conv_id: Optional[str]) -> Optional[str]:
+    """D17 证据充分性判定:不足时返回改写 query(补检用),足够返回 None。
+
+    轻量 chat_json 判定,fail-open(异常/格式坏都 None=按原行为直接
+    回答,补检是增强不是依赖)。零命中不判(摘要块/兜底路已尽力,
+    同 query 补检无增益)。
+    """
+    chunks = retrieved.get("chunks") or []
+    if not chunks:
+        return None
+    preview = "\n".join(
+        f"- 〔{c.get('docName') or '?'}〕{(c.get('text') or '')[:150]}"
+        for c in chunks[:6])
+    prompt = (
+        f"问题:{query}\n知识库「{kb.get('name') or ''}」检索到以下片段:\n{preview}\n\n"
+        "判断这些片段是否足以回答问题。只输出 JSON:"
+        '{"sufficient": true/false, "better_query": "不足时给出的更优检索词'
+        '(换角度,同义改写或拆解子问题;sufficient=true 时留空)"}'
+    )
+    try:
+        data = app_state.llm_client.chat_json(
+            [{"role": "user", "content": prompt}],
+            temperature=0.0, conv_id=conv_id, stage="kg.sufficiency")
+        if not isinstance(data, dict) or data.get("sufficient") is not False:
+            return None
+        bq = str(data.get("better_query") or "").strip()
+        return bq[:120] or None
+    except Exception as e:
+        logger.warning(f"D17 证据判定失败(跳过补检,按原行为回答): {e}")
+        return None
+
+
+def _merge_retrieved(base: Dict[str, Any], extra: Dict[str, Any],
+                     limit: int = 12) -> Dict[str, Any]:
+    """补检结果融合:chunks 按父块 id 去重(同块保留高分),子图并集。
+
+    limit=合并后块数上限(与检索预算同量级——补检也要克制,防上下文
+    膨胀;D16 整文档被否的同一担忧)。
+    """
+    seen: Dict[str, Dict[str, Any]] = {}
+    for c in (base.get("chunks") or []) + (extra.get("chunks") or []):
+        pid = str(c.get("chunkId") or "").split("#", 1)[0]
+        if not pid:
+            continue
+        if pid not in seen or float(c.get("score") or 0) > float(seen[pid].get("score") or 0):
+            seen[pid] = c
+    merged = sorted(seen.values(),
+                    key=lambda c: -float(c.get("score") or 0))[:limit]
+    bsub, esub = base.get("subgraph") or {}, extra.get("subgraph") or {}
+    nodes = {n["id"]: n for n in bsub.get("nodes") or []}
+    for n in esub.get("nodes") or []:
+        nodes.setdefault(n["id"], n)
+    edges = {(e["source"], e["type"], e["target"]): e
+             for e in bsub.get("edges") or []}
+    for e in esub.get("edges") or []:
+        edges.setdefault((e["source"], e["type"], e["target"]), e)
+    return {**base, "chunks": merged,
+            "subgraph": {"nodes": list(nodes.values()),
+                         "edges": list(edges.values())}}
+
+
+def _requery_once(app_state, kbs, query: str, retrieved: Dict[str, Any],
+                  conv_id: Optional[str], top_k: Optional[int],
+                  _stage, doc_filter) -> Dict[str, Any]:
+    """D17 公共接线:单库/多库共用的"判定→补检→融合"一段。
+
+    多库补检走逐库 hybrid_retrieve+轻合并(不递归整个回答函数——
+    那会白烧一次回答生成)。失败降级首轮结果。
+    """
+    from domains.knowledge_graph import runtime as _rt  # noqa: F401(口径引用)
+    bq = _judge_evidence(app_state, kbs[0], query, retrieved, conv_id)
+    if not bq:
+        return retrieved
+    _stage("kb_search.requery", f"证据不足,换角度补检:{bq[:30]}…")
+    try:
+        per_extra = [hybrid_retrieve(app_state, kb, bq, conv_id=conv_id,
+                                     top_k=top_k, on_stage=_stage,
+                                     doc_filter=doc_filter) for kb in kbs]
+        extra = per_extra[0]
+        for r in per_extra[1:]:
+            extra = _merge_retrieved(extra, r)
+        return _merge_retrieved(retrieved, extra)
+    except Exception as e:
+        logger.warning(f"D17 补检失败,降级首轮结果: {e}")
+        return retrieved
+
+
 # ── 综合回答 ─────────────────────────────────────────────────
 
 def answer_question(app_state, kb: Dict[str, Any], query: str,
@@ -620,6 +711,11 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
         retrieved = hybrid_retrieve(app_state, kb, query, conv_id=conv_id,
                                     top_k=top_k, on_stage=_stage,
                                     doc_filter=doc_filter)
+        # D17 检索自主循环(auto_retrieve_loop 默认开,仅补检一轮):
+        # 判定 fail-open,补检失败降级首轮结果
+        if _cfg(app_state, "auto_retrieve_loop", True):
+            retrieved = _requery_once(app_state, [kb], query, retrieved,
+                                      conv_id, top_k, _stage, doc_filter)
     # P0#4 rerank:linearize 前对 chunks 重排(排序对象=资料段非子图)。
     # 开关在 KG settings(默认关);失败降级原序不阻断(排序质量项,
     # 与向量路降级同语义)。重排发生在 sources.chunks 构造前——
@@ -818,6 +914,11 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
         "chunks": merged_chunks,
         "diagnostics": diagnostics,
     }
+    # D17 检索自主循环(与单库同款,判定用合并结果;多库补检走逐库
+    # hybrid_retrieve 轻合并,不递归整个回答函数)
+    if _cfg(app_state, "auto_retrieve_loop", True):
+        retrieved = _requery_once(app_state, kbs, query, retrieved,
+                                  conv_id, top_k, _stage, doc_filter)
 
     # P0#4 rerank:与单库同款——合并后、linearize 前重排;排序后顺序即
     # 编号权威源。开关默认关;失败降级原序不阻断

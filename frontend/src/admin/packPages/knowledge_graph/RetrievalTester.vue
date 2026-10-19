@@ -14,6 +14,14 @@
       <span class="rt-tip">retrieve-only:只跑检索链,不做 LLM 综合回答</span>
     </div>
 
+    <!-- D30 查询历史:最近 8 条留档(localStorage,跨会话),点击回填重跑 -->
+    <div v-if="history.length" class="rt-history">
+      <span class="rt-history-label">最近:</span>
+      <button v-for="h in history" :key="h" class="rt-history-chip"
+              :title="h" @click="query = h; run()">{{ h.slice(0, 18) }}</button>
+      <a class="rt-history-clear" @click="clearHistory">清空</a>
+    </div>
+
     <template v-if="result">
       <section class="rt-card">
         <div class="rt-title">检索意图</div>
@@ -130,6 +138,7 @@ async function run() {
   const q = query.value.trim()
   if (!q) { message.warning('请输入测试问题'); return }
   if (loading.value) return   // 连点守卫:旧响应晚到不得覆盖新一轮
+  pushHistory(q)
   loading.value = true
   await loadSafely(async () => {
     result.value = await kgRetrieveTest(props.kbId, q, topK.value)
@@ -137,10 +146,35 @@ async function run() {
   })
   loading.value = false
 }
+
+// ── D30 查询历史(localStorage 留档,最近 8 条去重) ─────────────
+const HISTORY_KEY = 'kg_retrieve_history'
+const history = ref<string[]>(JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'))
+
+function pushHistory(q: string) {
+  const next = [q, ...history.value.filter(h => h !== q)].slice(0, 8)
+  history.value = next
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(next))
+}
+
+function clearHistory() {
+  history.value = []
+  localStorage.removeItem(HISTORY_KEY)
+}
 </script>
 
 <style scoped>
 .rt-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+/* D30 查询历史 chips */
+.rt-history { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.rt-history-label { font-size: 12px; color: #94a3b8; }
+.rt-history-chip {
+  border: 1px solid #e2e8f0; border-radius: 12px; background: #fff;
+  color: #64748b; font-size: 12px; padding: 2px 10px; cursor: pointer;
+}
+.rt-history-chip:hover { border-color: #2f54eb; color: #2f54eb; }
+.rt-history-clear { font-size: 12px; color: #cbd5e1; }
+.rt-history-clear:hover { color: #ef4444; }
 .rt-tip { color: #94a3b8; font-size: 12px; }
 .rt-card { border: 1px solid #eef1f7; border-radius: 10px; padding: 12px 16px; margin-top: 12px; background: #fff; }
 .rt-title { font-weight: 600; font-size: 13.5px; color: #1f2937; margin-bottom: 8px; }

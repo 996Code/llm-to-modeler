@@ -138,7 +138,7 @@ async def admin_stats(request: Request):
 
 @router.get("/conversations")
 async def admin_list_conversations(request: Request):
-    """全量会话分页列表(不限用户)。
+    """全量会话分页列表(不限用户;D20 起默认不含软删,deleted=1 查看)。
 
     Query 参数:
       limit/offset: 分页(limit 上限 200,防止一次拉爆内存)
@@ -163,6 +163,24 @@ async def admin_list_conversations(request: Request):
         limit=limit, offset=offset, user_id=user_id, q=q, packs=packs)
     total = store.count_all_conversations(user_id=user_id, q=q, packs=packs)
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+# ── D20 会话软删恢复 ──────────────────────────────────────────
+
+@router.get("/conversations/deleted")
+async def admin_list_deleted_conversations(request: Request):
+    """已软删会话列表(恢复视图,按删除时间倒序)。"""
+    store = request.app.state.conversation_store
+    return {"items": store.list_deleted_conversations(limit=100)}
+
+
+@router.post("/conversations/{conv_id}/restore")
+async def admin_restore_conversation(conv_id: str, request: Request):
+    """恢复软删会话(用户列表立即可见,events/记忆全程未动)。"""
+    store = request.app.state.conversation_store
+    if not store.restore_conversation(conv_id):
+        raise HTTPException(404, "会话不存在或未处于删除态")
+    return {"success": True}
 
 
 @router.get("/conversations/{conv_id}")

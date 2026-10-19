@@ -143,11 +143,16 @@ class TestPackState:
         assert store.get_pack_state("no-such-conv", "knowledge_graph") == {}
 
     def test_delete_conversation_cascades(self, store):
-        """会话删除级联清理记忆(不留僵尸绑定)。"""
+        """会话删除(D20 软删):列表不可见+可恢复;记忆保留供恢复后使用。"""
         conv_id = store.create_conversation("user1")["id"]
         store.set_pack_state(conv_id, "knowledge_graph", {"kb": "库一"})
-        store.delete_conversation(conv_id, "user1")
-        assert store.get_pack_state(conv_id, "knowledge_graph") == {}
+        assert store.delete_conversation(conv_id, "user1") is True
+        # 软删:列表过滤(用户侧不可见)
+        assert all(c["id"] != conv_id for c in store.list_conversations("user1"))
+        # 恢复:记忆与可见性完整回来
+        assert store.restore_conversation(conv_id) is True
+        assert store.get_pack_state(conv_id, "knowledge_graph") == {"kb": "库一"}
+        assert any(c["id"] == conv_id for c in store.list_conversations("user1"))
 
     def test_size_cap_rejects_abuse(self, store):
         """超体积上限拒绝(防插件把记忆当数据存储滥用)。"""
@@ -173,9 +178,10 @@ class TestPackState:
         assert store.get_pack_state(conv_id, "knowledge_graph") == {"kb": "库一"}
         assert store.get_conversation(conv_id, "owner") is not None  # 原会话完好
 
-        # 本人删除:正常级联
+        # 本人删除:D20 软删(打标记;记忆保留,恢复后回来)
         assert store.delete_conversation(conv_id, "owner") is True
-        assert store.get_pack_state(conv_id, "knowledge_graph") == {}
+        assert store.get_pack_state(conv_id, "knowledge_graph") == {"kb": "库一"}
+        assert store.restore_conversation(conv_id) is True
 
 
 class TestCallLogsPackFilter:
