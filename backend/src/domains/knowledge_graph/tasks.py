@@ -119,9 +119,13 @@ def _recover_stale_importing(manager) -> bool:
                 note = "(已重新入队续跑)"
             else:
                 continue  # 文档在但缺 kb_id 的残行:留置待人工
-            manager.store.update_task(
-                t["id"], status="cancelled",
-                title=f"{t.get('title') or ''}{note}")
+            # 逐行隔离:单行更新失败(如列白名单拒收)不中断整轮扫描
+            try:
+                manager.store.update_task(
+                    t["id"], status="cancelled",
+                    title=f"{t.get('title') or ''}{note}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"中断任务关闭标注失败(task={t.get('id')}): {e}")
         resubmitted = 0
         for doc_id, kb_id in resubmit.items():
             try:

@@ -21,3 +21,4 @@ backend/logs
 backend/.pytest_cache
 .pytest_cache
 *.log
+backend/debs

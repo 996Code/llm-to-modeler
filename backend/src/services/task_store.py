@@ -178,6 +178,7 @@ class TaskStore:
             "status", "progress", "progress_message", "result",
             "error", "started_at", "finished_at",
             "retry_count", "auto_retry_at",  # 自动续跑状态列
+            "title",  # 展示名可改:启动收敛给历史中断行标注"已由成功导入取代"
         }
         cols, params = [], []
         for k, v in fields.items():

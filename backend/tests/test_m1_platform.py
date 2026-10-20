@@ -759,3 +759,19 @@ class TestAuditFixes:
         assert result["status"] == "succeeded"          # 幂等返回
         with m._lock:
             assert t["id"] not in m._cancel_flags       # 无孤儿标志
+
+
+def test_task_store_title_updatable(tmp_path):
+    """title 在 update_task 白名单内:启动收敛给历史中断行标注
+    "已由成功导入取代"(真实 store 验证,假 manager 单测拦不住白名单)。"""
+    from services.task_store import TaskStore
+
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    task = store.create_task(
+        task_type="kg.import_document", title="导入: x", queue_key="q",
+        payload={})
+    assert store.update_task(
+        task["id"], status="cancelled", title="导入: x(已由成功导入取代)")
+    t = store.get_task(task["id"])
+    assert t["status"] == "cancelled"
+    assert "已由成功导入取代" in t["title"]
