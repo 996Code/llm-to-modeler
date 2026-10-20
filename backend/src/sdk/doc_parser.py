@@ -78,16 +78,22 @@ def mime_for(filename: str) -> str:
 
 def parse_to_text(filename: str, data: bytes, *, ocr: bool = True,
                   stats: Dict[str, int] = None,
-                  on_ocr_progress=None) -> str:
+                  on_ocr_progress=None,
+                  ocr_engine: str = "rapidocr",
+                  page_ocr=None) -> str:
     """按扩展名解析文件为纯文本(无法解析抛 ValueError,由任务层记失败)。
 
     Args:
         ocr: PDF 无文字层页是否走 OCR 兜底。上传预检传 False——预检只
             验坏文件,OCR 秒级耗时留给导入任务(结果不丢弃,也不阻塞上传)。
-        stats: 可选出参字典,调用方传入后填充 pages/ocrPages/ocrFilled
-            (任务日志据此告知用户扫描页识别情况)。
+        stats: 可选出参字典,调用方传入后填充 pages/ocrPages/ocrFilled/
+            ocrEngine(任务日志据此告知用户扫描页识别情况与所用引擎)。
         on_ocr_progress: 可选回调 (done, total),OCR 每完成一页调用一次
             (任务层用它刷新进度,让用户看到 OCR 在动而不是"卡死")。
+        ocr_engine: 扫描页识别引擎。rapidocr(默认,本地 PP-OCR)/llm
+            (调用方注入 page_ocr 回调接多模态大模型——SDK 零领域知识,
+            不认识 LLM 客户端,只认"图片进文本出"的函数)。
+        page_ocr: engine=llm 时的识别回调 (PIL.Image) -> str。
 
     出口统一 NFKC 归一化(P2#12 坑位②):PDF 提取常带兼容字符
     (民法典实测出现康熙部首 ⼀/⼱ 而非规范字 一/巾),下游切块/
@@ -98,7 +104,8 @@ def parse_to_text(filename: str, data: bytes, *, ocr: bool = True,
         return _nfkc(_decode_text(data))
     if name.endswith(".pdf"):
         return _nfkc(_parse_pdf(data, ocr=ocr, stats=stats,
-                               on_ocr_progress=on_ocr_progress))
+                               on_ocr_progress=on_ocr_progress,
+                               ocr_engine=ocr_engine, page_ocr=page_ocr))
     if name.endswith(".docx"):
         return _nfkc(_parse_docx(data))
     raise ValueError(f"不支持的文件类型: {filename}(支持 md/txt/pdf/docx)")
@@ -144,7 +151,8 @@ def _decode_text(data: bytes) -> str:
 
 
 def _parse_pdf(data: bytes, ocr: bool = True, stats: Dict[str, int] = None,
-               on_ocr_progress=None) -> str:
+               on_ocr_progress=None, ocr_engine: str = "rapidocr",
+               page_ocr=None) -> str:
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
     texts = []
@@ -159,11 +167,14 @@ def _parse_pdf(data: bytes, ocr: bool = True, stats: Dict[str, int] = None,
     sparse = [i for i, t in enumerate(texts) if len(t) < _PAGE_TEXT_SPARSE]
     if sparse and ocr:
         texts = _ocr_fill_pages(data, texts, sparse, stats=stats,
-                                on_ocr_progress=on_ocr_progress)
+                                on_ocr_progress=on_ocr_progress,
+                                ocr_engine=ocr_engine, page_ocr=page_ocr)
     if stats is not None:
         stats["pages"] = len(texts)
         stats["ocrPages"] = len(sparse) if ocr else 0
         stats["ocrFilled"] = stats.get("ocrFilled", 0)
+        if sparse and ocr:
+            stats["ocrEngine"] = ocr_engine
     return "\n\n".join(t for t in texts if t)
 
 
@@ -204,26 +215,45 @@ def _render_scale(page) -> float:
 
 
 def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
-                    stats: Dict[str, int] = None, on_ocr_progress=None) -> List[str]:
-    """扫描页 OCR 兜底:文字层缺失的页渲染成图 → RapidOCR 识别。
+                    stats: Dict[str, int] = None, on_ocr_progress=None,
+                    ocr_engine: str = "rapidocr", page_ocr=None) -> List[str]:
+    """扫描页 OCR 兜底:文字层缺失的页渲染成图 → 识别。
 
+    ocr_engine: rapidocr(默认,本地 PP-OCR)/ llm(调用方注入的 page_ocr
+    回调——任务层接多模态大模型;SDK 零领域知识,只认回调本身)。
     OCR 依赖未安装时保持原行为(返回原文字层),由任务层按"无有效文本"
     报错——不因可选依赖缺失而炸掉 md/txt/文字层 pdf 的解析。
     """
-    try:
-        import pypdfium2
-        import rapidocr_onnxruntime  # noqa: F401  仅探测依赖;实例走 _ocr_engine() 单例
-    except ImportError as e:
-        logger.warning(f"pdf OCR 兜底不可用(未安装 pypdfium2/rapidocr-onnxruntime): {e}")
+    import pypdfium2
+
+    def _degrade(reason: str) -> List[str]:
+        logger.warning(reason)
         if stats is not None:
             stats["ocrFilled"] = 0
         return texts
+
+    if ocr_engine == "llm":
+        if page_ocr is None:
+            return _degrade("pdf OCR 引擎=llm 但未注入识别回调(page_ocr),跳过 OCR")
+
+        def _recognize(img) -> str:
+            return (page_ocr(img) or "").strip()
+    else:
+        try:
+            import rapidocr_onnxruntime  # noqa: F401  仅探测;实例走 _ocr_engine() 单例
+        except ImportError as e:
+            return _degrade(f"pdf OCR 兜底不可用(未安装 rapidocr-onnxruntime): {e}")
+        _ocr = _ocr_engine()
+
+        def _recognize(img) -> str:
+            result, _ = _ocr(img)
+            return "\n".join(r[1] for r in (result or []))
+
     if on_ocr_progress:
         try:
             on_ocr_progress(0, len(sparse_pages))
         except Exception:  # noqa: BLE001  回调失败不影响识别
             pass
-    ocr = _ocr_engine()
     pdf = pypdfium2.PdfDocument(io.BytesIO(data))
     filled = 0
     try:
@@ -234,9 +264,8 @@ def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
                 # 内存峰值只有一份;进度回调在锁外,不阻塞下一个任务
                 with _OCR_INFER_LOCK:
                     img = page.render(scale=_render_scale(page)).to_pil()
-                    result, _ = ocr(img)
-                    ocr_text = "\n".join(r[1] for r in (result or []))
-                    del img, result
+                    ocr_text = _recognize(img)
+                    del img
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"pdf 第 {i + 1} 页 OCR 失败(跳过): {e}")
                 continue
@@ -254,7 +283,8 @@ def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
         pdf.close()
     if stats is not None:
         stats["ocrFilled"] = filled
-    logger.info(f"pdf OCR 兜底: {len(sparse_pages)} 页无文字层,识别成功 {filled} 页")
+    logger.info(f"pdf OCR 兜底({ocr_engine}): "
+                f"{len(sparse_pages)} 页无文字层,识别成功 {filled} 页")
     return texts
 
 

@@ -110,7 +110,7 @@
    "col": 1,
    "type": "backend",
    "label": "parse_to_text",
-   "sublabel": "md/txt/pdf/docx",
+   "sublabel": "md/txt/pdf/docx·扫描页 OCR",
    "width": 140
   },
   {
@@ -303,7 +303,7 @@
  "cards": [
   {
    "dot": "cyan",
-   "title": "任务语义（tasks.py:102-205）",
+   "title": "任务语义（tasks.py:128-163）",
    "items": [
     "queue_key 同库串行，dedupe 同文档唯一，max_auto_retry",
     "已完成文档幂等跳过；向量缺口自动补偿",
@@ -311,8 +311,17 @@
    ]
   },
   {
+   "dot": "cyan",
+   "title": "文档解析与 OCR（doc_parser.py·tasks.py:186-250）",
+   "items": [
+    "无文字层页渲染成图 → OCR 兜底,引擎可配:rapidocr(本地 PP-OCR)或 llm(多模态模型逐页逐字转录)",
+    "llm 引擎须配 ocr_model(设置保存按 required_when 校验);任务日志带引擎名与逐页进度",
+    "资源治理:模型进程级单例、推理线程封顶、逐页推理锁、渲染长边封顶 2000px"
+   ]
+  },
+  {
    "dot": "emerald",
-   "title": "批内循环（tasks.py:379-612）",
+   "title": "批内循环（tasks.py:500-770）",
    "items": [
     "ThreadPoolExecutor 并行 LLM 抽取，批间串行",
     "四类校验：本体过滤 / 别名独占性 / 悬空关系 / 端点类型",
@@ -322,7 +331,7 @@
   },
   {
    "dot": "orange",
-   "title": "收尾五步（tasks.py:617-710）",
+   "title": "收尾五步（tasks.py:770-918）",
    "items": [
     "提案合并 → 向量对账 → 别名去争议 + 同类型合并",
     "LLM 身份复合：同义实体归一",

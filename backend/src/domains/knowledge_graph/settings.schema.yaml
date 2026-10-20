@@ -150,6 +150,20 @@ groups:
         min: 0
         max: 10
         help: 失败(非欠费/鉴权类)后 5 分钟自动重新入队;块级断点保证只跑剩余部分
+      - key: ocr_engine
+        type: enum
+        label: 扫描件 OCR 引擎
+        options: [rapidocr, llm]
+        default: rapidocr
+        env: KG_OCR_ENGINE
+        help: PDF 无文字层页的识别引擎;llm = 逐页图片走全局网关多模态模型(耗时/费用高于本地 rapidocr)
+      - key: ocr_model
+        type: string
+        label: 大模型 OCR 模型
+        env: KG_OCR_MODEL
+        placeholder: 如 qwen3.7(多模态)
+        required_when: {key: ocr_engine, equals: llm}
+        help: 仅引擎=llm 时必填;须为支持图片输入的多模态模型,开发环境用 qwen3.7
 
   - key: retrieval
     title: 检索与问答

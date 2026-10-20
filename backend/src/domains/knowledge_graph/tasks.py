@@ -19,6 +19,7 @@
   批次间串行的核心收益:把已抽取实体 top-K 注入后续 prompt,约束跨块
   命名一致性(合并质量的根本保障)。
 """
+import io
 import logging
 import re
 import time
@@ -182,6 +183,52 @@ def _cfg(app_state, key: str, default):
     return runtime.settings_reader(app_state).get(key, default)
 
 
+def _ocr_engine_config(app_state) -> Tuple[str, str]:
+    """读 OCR 引擎设置(ocr_engine/ocr_model)。
+
+    llm 未配 ocr_model 时抛 RuntimeError——设置页保存已被 required_when
+    拦截,这里是兜底(env 直配绕过 UI 时任务失败并明示,不静默)。
+    """
+    engine = str(_cfg(app_state, "ocr_engine", "rapidocr") or "rapidocr")
+    model = str(_cfg(app_state, "ocr_model", "") or "").strip()
+    if engine == "llm" and not model:
+        raise RuntimeError("大模型 OCR 已启用(ocr_engine=llm)但未配置"
+                           " ocr_model——请在插件设置中配置多模态模型(如 qwen3.7)")
+    return engine, model
+
+
+# LLM OCR 逐页提示词:多模态模型默认爱"描述图片",必须锁死逐字转录口径
+_LLM_OCR_PROMPT = (
+    "逐字转录这张文档扫描页中的全部文字:保持原有阅读顺序与换行,"
+    "表格按行转录;不要解释、总结、翻译或添加任何说明文字;"
+    "页面确实没有文字时输出空字符串。"
+)
+
+
+def _make_llm_page_ocr(app_state, model: str, conv_id: Optional[str]):
+    """构造 llm 引擎的页识别回调:PIL.Image → PNG base64 → 多模态 chat。
+
+    doc_parser 只认"图片进文本出"的回调(零领域知识),LLM 客户端/
+    模型名/提示词都归任务层;调用记 call_logs(stage=kg.ocr)可取证。
+    """
+    import base64
+
+    def _page_ocr(img) -> str:
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return app_state.llm_client.chat(
+            [{"role": "user", "content": [
+                {"type": "text", "text": _LLM_OCR_PROMPT},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/png;base64,{b64}"}},
+            ]}],
+            temperature=0.0, conv_id=conv_id, stage="kg.ocr", model=model,
+        ).strip()
+
+    return _page_ocr
+
+
 # D33 建库向导:分段参数解析链 库级(建库配置/设置页重配)> 插件设置 > 默认。
 # 键与插件设置同名;库级值经 api 层校验过范围,这里只做 int 收口(防
 # 手写库行/坏 JSON 漏网,doc_parser 还有最后一层防呆钳制)
@@ -313,6 +360,12 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                    pending=len(chunks) - done_n - failed_n)
     else:
         handle.set_progress(_W_PARSE, "解析文档")
+        # OCR 引擎按插件设置:rapidocr(默认,本地)/llm(多模态大模型,
+        # 逐页图片调用);未配模型时 _ocr_engine_config 直接抛错明示
+        ocr_engine, ocr_model = _ocr_engine_config(app_state)
+        page_ocr = None
+        if ocr_engine == "llm":
+            page_ocr = _make_llm_page_ocr(app_state, ocr_model, conv_id)
         try:
             data = Path(doc["filePath"]).read_bytes() if doc["filePath"] else b""
             parse_stats: Dict[str, int] = {}
@@ -324,17 +377,22 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                            ocr_done=done, ocr_total=total)
 
             text = parse_to_text(doc["filename"], data, stats=parse_stats,
-                                 on_ocr_progress=_ocr_progress)
+                                 on_ocr_progress=_ocr_progress,
+                                 ocr_engine=ocr_engine, page_ocr=page_ocr)
         except FileNotFoundError:
             raise RuntimeError("原始文件已不存在,请重新上传")
         except ValueError as e:
             raise RuntimeError(f"文档解析失败: {e}")
-        # 扫描页 OCR 情况让用户可见(任务中心日志)
+        # 扫描页 OCR 情况让用户可见(任务中心日志;引擎随行——换引擎可感知)
         if parse_stats.get("ocrPages"):
+            _eng = parse_stats.get("ocrEngine") or "rapidocr"
+            if _eng == "llm":
+                _eng = f"llm:{ocr_model}"
             handle.log(f"检测到 {parse_stats['ocrPages']} 页无文字层(扫描件),"
-                       f"OCR 识别成功 {parse_stats['ocrFilled']} 页",
+                       f"OCR({_eng}) 识别成功 {parse_stats['ocrFilled']} 页",
                        ocr_pages=parse_stats["ocrPages"],
-                       ocr_filled=parse_stats["ocrFilled"])
+                       ocr_filled=parse_stats["ocrFilled"],
+                       ocr_engine=_eng)
         handle.log(f"文档解析: {len(data)}B → {len(text)} 字符({doc['filename'].rsplit('.', 1)[-1]} 格式)",
                    raw_bytes=len(data), text_chars=len(text))
 

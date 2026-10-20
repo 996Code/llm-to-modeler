@@ -91,7 +91,7 @@
           <div class="msg-avatar assistant-avatar">
             <RobotOutlined />
           </div>
-          <div class="msg-body">
+          <div class="msg-body" :data-msg-index="i">
             <!-- P2#15 失败诊断卡:错误消息渲染为可定位/可查链路/可重试的卡片
                  (替代裸文本;失败环节分类+本轮链路入口+重发上一问) -->
             <div v-if="msg.kind === 'error-diag'" class="diag-card">
@@ -372,6 +372,26 @@
                     :conversation-id="traceConvId"
                     :turn-index="traceTurnIndex"
                     :title="traceTitle" />
+
+    <!-- 引用浮层:检索卡隐藏(showRetrieval=false)时,[片段N] 徽标点击
+         弹出片段原文+来源文档+下载——引用是答案的一部分,开关只藏过程卡 -->
+    <template v-if="citePop">
+      <div class="cite-pop-overlay" @click="citePop = null"></div>
+      <div class="cite-pop" :style="{ left: citePop.x + 'px', top: citePop.y + 'px' }">
+        <div class="cite-pop-head">
+          <FileTextOutlined />
+          <span class="cite-pop-doc">{{ citePop.chunk.docName || '文档' }}</span>
+          <span v-if="citePop.chunk.kbName" class="cite-pop-kb">{{ citePop.chunk.kbName }}</span>
+        </div>
+        <div class="cite-pop-text">{{ citePop.chunk.text || '(无原文)' }}</div>
+        <div class="cite-pop-foot">
+          <a-button v-if="citePop.chunk.kbId && citePop.chunk.docId" size="small"
+                    type="link" @click="downloadCiteFile">
+            <DownloadOutlined /> 下载来源文件
+          </a-button>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -394,7 +414,7 @@ import {
 import { Modal, message as antdMessage } from 'ant-design-vue'
 // 单轮 trace 拉取(轮末给消息卡补 LLM 次数/token, 输入框累计对话 token)
 // + chatbi 结果反馈(P2#14 点赞/点踩)
-import { getConversationTrace, sendChatbiFeedback } from '../../services/api'
+import { downloadKgSourceFile, getConversationTrace, sendChatbiFeedback } from '../../services/api'
 // 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
 import { useConversationStore } from '../../stores/conversation'
 import { copyText } from '../../utils/clipboard'
@@ -434,14 +454,12 @@ function renderMarkdown(text: string): string {
   if (!text) return ''
   let html = marked.parse(text) as string
   // 片段编号(兼容 [片段3]/[片段:3]/[片段：3]) → 紫色徽标
-  // data-chunk-idx 供点击委托取编号(滚动到 KgGraphCard 对应片段)。
-  // "显示检索结果"关闭时直接剥掉标记(卡片已隐藏,徽标无处可点,留着
-  // 裸 [片段:N] 文本也是噪音)
-  html = sysConfig.showRetrieval
-    ? html.replace(
-        /\[片段[:：]?\s*(\d+)\]/g,
-        '<span class="md-ref md-ref-chunk" data-chunk-idx="$1">片段 $1</span>')
-    : html.replace(/\[片段[:：]?\s*(\d+)\]/g, '')
+  // data-chunk-idx 供点击委托取编号:检索卡显示时滚动到卡片对应片段,
+  // 隐藏时弹出引用浮层(原文+来源+下载)——引用是答案的一部分,
+  // 开关只藏"过程数据",引用交互不随之下线
+  html = html.replace(
+    /\[片段[:：]?\s*(\d+)\]/g,
+    '<span class="md-ref md-ref-chunk" data-chunk-idx="$1">片段 $1</span>')
   // 实体引用 [实体:x] → 蓝色徽标(x 保留)
   html = html.replace(
     /\[实体[:：]?\s*([^\]<]+)\]/g,
@@ -469,22 +487,24 @@ function renderMarkdown(text: string): string {
 }
 
 /** md-content 容器事件委托:[片段N] 徽标点击 → 滚动到本条消息的
- *  KgGraphCard 对应片段手风琴并展开。徽标是 v-html 注入的纯 DOM,
- *  无法逐个绑监听——容器统一接 click,按 class 识别。
- *  双界过滤:编号 <1(如 [片段:0])或 > chunks.length(如 [片段:99],
- *  LLM 编造)时锚点不存在,一律静默忽略不动作。 */
+ *  KgGraphCard 对应片段手风琴并展开;检索卡隐藏(showRetrieval=false)
+ *  时改弹引用浮层(片段原文+来源文档+下载)——引用交互归答案自身。
+ *  徽标是 v-html 注入的纯 DOM,无法逐个绑监听——容器统一接 click,
+ *  按 class 识别。双界过滤:编号 <1(如 [片段:0])或 > chunks.length
+ *  (如 [片段:99],LLM 编造)时数据不存在,一律静默忽略不动作。 */
 function onMdRefClick(e: MouseEvent) {
-  // 检索结果显示关闭时点击变 no-op：图谱卡未渲染，锚点本就找不到；
-  // 显式短路避免空查询，也让意图自文档化
-  if (!sysConfig.showRetrieval) return
   const el = (e.target as HTMLElement)?.closest?.('.md-ref-chunk') as HTMLElement | null
   if (!el) return
   const idx = Number(el.dataset.chunkIdx)
   if (!Number.isInteger(idx) || idx < 1) return
-  // 作用域限定本条消息:多轮对话每条 assistant 消息有自己的图谱卡,
+  // 作用域限定本条消息:多轮对话每条 assistant 消息有自己的图谱卡/数据,
   // 向上找 .msg-body 再查锚点,避免命中别的消息的片段
-  const scope = el.closest('.msg-body')
+  const scope = el.closest('.msg-body') as HTMLElement | null
   if (!scope) return
+  if (!sysConfig.showRetrieval) {
+    openCitePopover(e, scope, idx)
+    return
+  }
   const anchor = scope.querySelector(`[data-chunk-anchor="${idx}"]`) as HTMLElement | null
   if (!anchor) return  // 越界编号:锚点只对有效片段渲染(1..chunks.length)
   anchor.scrollIntoView({ block: 'center', behavior: 'smooth' })
@@ -492,6 +512,28 @@ function onMdRefClick(e: MouseEvent) {
   anchor.dispatchEvent(new CustomEvent('kg-scroll-chunk', {
     detail: idx - 1, bubbles: true,
   }))
+}
+
+// ── 引用浮层(检索卡隐藏时的 [片段N] 交互) ──
+const citePop = ref<{ x: number; y: number; chunk: any } | null>(null)
+
+function openCitePopover(e: MouseEvent, scope: HTMLElement, idx: number) {
+  const msgIdx = Number(scope.dataset.msgIndex)
+  const chunk = store.messages[msgIdx]?.dataResult?.sources?.chunks?.[idx - 1]
+  if (!chunk) return
+  const r = (e.target as HTMLElement).getBoundingClientRect()
+  // 左/上边界钳制:嵌入模式 iframe 窄容器里不让浮层出屏
+  const x = Math.min(Math.max(8, r.left), window.innerWidth - 356)
+  const y = r.bottom + 6 > window.innerHeight - 240 ? Math.max(8, r.top - 236) : r.bottom + 6
+  citePop.value = { x, y, chunk }
+}
+
+function downloadCiteFile() {
+  const c = citePop.value?.chunk
+  if (!c?.kbId || !c?.docId) return
+  downloadKgSourceFile(c.kbId, c.docId, c.docName || 'document').catch(() => {
+    antdMessage.error('下载失败(文件可能已被清理)')
+  })
 }
 
 /** 从回答文本提取被引用的片段编号([片段N] 徽标;KG 回答专用)。
@@ -1704,4 +1746,27 @@ watch(() => store.currentConversation?.id, (convId) => {
   display: inline-flex; align-items: center; gap: 4px; margin-left: 4px;
 }
 .resume-link:hover { opacity: 0.8; }
+
+/* ── 引用浮层(检索卡隐藏时的片段徽标交互) ── */
+.cite-pop-overlay { position: fixed; inset: 0; z-index: 60; }
+.cite-pop {
+  position: fixed; z-index: 61; width: min(340px, 86vw);
+  background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14); padding: 10px 12px;
+}
+.cite-pop-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 600; color: #1f2937;
+}
+.cite-pop-doc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cite-pop-kb {
+  flex: none; font-weight: 400; font-size: 11px; color: #6b7280;
+  background: #f3f4f6; border-radius: 6px; padding: 0 6px;
+}
+.cite-pop-text {
+  margin: 8px 0; max-height: 180px; overflow: auto;
+  font-size: 12px; line-height: 1.6; color: #374151;
+  white-space: pre-wrap; word-break: break-all;
+}
+.cite-pop-foot { text-align: right; }
 </style>

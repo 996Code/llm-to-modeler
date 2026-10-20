@@ -791,6 +791,8 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
         "entities": [n["name"] for n in sub.get("nodes") or []][:20],
         "chunks": [
             {
+                # 来源库定位(前端"下载来源文件"用:kbId+docId 定位端点)
+                "kbId": kb["id"],
                 "docId": c.get("docId"),
                 "docName": c.get("docName"),
                 "score": c.get("score"),
@@ -886,6 +888,7 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
     for kb, r in zip(kbs, per_kb):
         for c in r.get("chunks") or []:
             c["kbName"] = kb.get("name") or ""
+            c["kbId"] = kb["id"]
             merged_chunks.append(c)
     k = top_k or int(_cfg(app_state, "vector_top_k", 5))
     merged_chunks.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
@@ -1000,6 +1003,8 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
                 "seq": c.get("seq"),
                 "childSeq": c.get("childSeq"),
                 "parentContext": c.get("parentContext"),
+                "kbId": c.get("kbId"),
+                "kbName": c.get("kbName"),
                 "text": (c.get("text") or "").strip()[:_PARENT_CONTEXT_MAX_CHARS],
             }
             for c in merged_chunks

@@ -60,6 +60,11 @@
               <span>{{ c.docName || '文档' }}{{ c.seq != null ? ` · 块 ${c.seq}` : '' }}{{ c.childSeq != null ? ` · 子段 ${c.childSeq}` : '' }}</span>
               <span v-if="c.parentContext" class="kgc-callback-note">命中子段,已回带所属章节上下文</span>
               <span v-if="c.score != null" class="kgc-score">相似度 {{ (Number(c.score)).toFixed(4) }}</span>
+              <!-- 下载来源文件(原始上传件):图标+悬浮提示;旧制品无 kbId 不亮 -->
+              <button v-if="c.kbId && c.docId" class="kgc-dl-btn"
+                      title="下载来源文件" @click.stop="downloadChunk(c)">
+                <DownloadOutlined />
+              </button>
             </div>
             <div class="kgc-chunk-body">{{ c.text }}</div>
           </div>
@@ -74,11 +79,14 @@
 // G6 v5 按需动态导入(参考 chat-bi SchemaGraph 的成熟用法)——只有出现
 // 图谱结果时才加载 G6 chunk,主包零增量。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { DownOutlined, FileTextOutlined, LinkOutlined, PartitionOutlined } from '@ant-design/icons-vue'
+import { DownOutlined, DownloadOutlined, FileTextOutlined, LinkOutlined, PartitionOutlined } from '@ant-design/icons-vue'
+import { message } from 'ant-design-vue'
+
+import { downloadKgSourceFile } from '../../services/api'
 
 interface KgNode { id: string; name: string; type?: string; description?: string }
 interface KgEdge { id?: string; source: string; target: string; type?: string; description?: string; evidence?: string }
-interface KgChunk { docId?: string; docName?: string; seq?: number | null; childSeq?: number | null; parentContext?: boolean; score?: number | null; text?: string }
+interface KgChunk { docId?: string; docName?: string; seq?: number | null; childSeq?: number | null; parentContext?: boolean; score?: number | null; text?: string; kbId?: string; kbName?: string }
 
 const props = defineProps<{
   result: {
@@ -112,6 +120,14 @@ function onScrollChunk(e: Event) {
 // 该片段是否被回答引用([片段N] 编号从 1 起,数组下标从 0 起)
 function isCited(i: number): boolean {
   return (props.citedChunks || []).includes(i + 1)
+}
+
+// 下载片段所属的来源文件(原始上传件);kbId 缺失(旧制品)时不亮按钮
+function downloadChunk(c: KgChunk) {
+  if (!c.kbId || !c.docId) return
+  downloadKgSourceFile(c.kbId, c.docId, c.docName || 'document').catch(() => {
+    message.error('下载失败(文件可能已被清理)')
+  })
 }
 
 const box = ref<HTMLElement | null>(null)
@@ -341,4 +357,11 @@ onBeforeUnmount(() => {
   max-height: 0;
   opacity: 0;
 }
+
+/* 下载来源文件:行内图标按钮(悬浮提示),不占文字位 */
+.kgc-dl-btn {
+  margin-left: auto; border: none; background: transparent; cursor: pointer;
+  color: #6b7280; padding: 2px 6px; border-radius: 6px; line-height: 1;
+}
+.kgc-dl-btn:hover { background: #f0f5ff; color: #2563eb; }
 </style>

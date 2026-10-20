@@ -112,6 +112,10 @@ class TestAnswerQuestionMulti:
         assert len(out["chunks"]) == 2
         assert out["chunks"][0]["kbName"] == "乙库" and out["chunks"][0]["score"] == 0.95
         assert out["chunks"][1]["kbName"] == "甲库" and out["chunks"][1]["score"] == 0.88
+        # sources.chunks 带 kbId(引用下载定位:kbId+docId)
+        assert out["sources"]["chunks"][0]["kbId"] == "kbB"
+        assert out["sources"]["chunks"][0]["kbName"] == "乙库"
+        assert out["sources"]["chunks"][1]["kbId"] == "kbA"
 
     def test_chunks_cross_kb_top_k(self, two_kbs, env):
         """合并后取全局 top_k:top_k=1 只留最高分(跨库挤占单库名额)。"""
@@ -217,6 +221,9 @@ class TestAnswerQuestionMulti:
         assert out["kb"] == {"id": "kbA", "name": "甲库"}
         assert out["kbs"] == [{"id": "kbA", "name": "甲库"}]
         assert counter["n"] == 1
+        # 单库 sources.chunks 也带 kbId(引用下载定位)
+        assert out["sources"]["chunks"]
+        assert all(c["kbId"] == "kbA" for c in out["sources"]["chunks"])
         # 单库路径(answer_question)行为不变回归:同库同问,回答/来源一致
         single = retrieval.answer_question(env.app_state, kb_a, "甲在哪?")
         assert single["answer"] == out["answer"]

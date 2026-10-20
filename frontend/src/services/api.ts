@@ -497,3 +497,18 @@ function parseSSEEvent(raw: string): { type: string; data: any; seq?: number } |
     return { type, data: {}, seq }
   }
 }
+
+/** 下载知识库来源文件(对话引用下载)。
+ *  blob 拉取 + 本地保存;Authorization/X-User-Id 由实例拦截器自动注入
+ *  (token 模式下即"登录即可下载"口径)。 */
+export async function downloadKgSourceFile(kbId: string, docId: string, filename: string): Promise<void> {
+  const resp = await api.get(
+    `/packs/knowledge_graph/kbs/${kbId}/documents/${docId}/download`,
+    { responseType: 'blob' })
+  const url = URL.createObjectURL(resp.data)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename || 'document'
+  a.click()
+  URL.revokeObjectURL(url)
+}

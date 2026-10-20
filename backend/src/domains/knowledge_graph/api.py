@@ -714,7 +714,10 @@ async def batch_delete_documents(kb_id: str, request: Request,
     return {"deleted": ok_n, "failed": len(results) - ok_n, "results": results}
 
 
-@router.get("/kbs/{kb_id}/documents/{doc_id}/download", dependencies=[Depends(admin_required)])
+# 对话用户可下载:答案引用的来源文件是回答的一部分,"查看/下载依据"
+# 不只属于管理员。token 模式下全局中间件仍要求 Authorization(登录即可);
+# kbId+docId 双定位 + 文件根边界防御不变
+@router.get("/kbs/{kb_id}/documents/{doc_id}/download")
 async def download_document(kb_id: str, doc_id: str, request: Request):
     """下载已上传的原始文件(存储名=doc_id+扩展名,下载名=原始文件名)。"""
     _kb_or_404(request, kb_id)

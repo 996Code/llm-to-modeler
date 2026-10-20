@@ -135,6 +135,35 @@ def resolve_with_saved(pack_name: str, store: Optional["PackSettingsStore"]) -> 
     return resolve_all(pack_name, saved=saved, schema=schema), schema
 
 
+def check_conditional_required(
+    schema: Optional[Dict[str, Any]],
+    effective: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    """跨字段组合校验:required_when 声明的"条件必填"。
+
+    schema 字段可声明 `required_when: {key: <触发键>, equals: <触发值>}`——
+    触发键的生效值等于触发值时,本字段必须非空(空 = None/空白)。生效值
+    由调用方按三级合并链算好传入(部分保存时"另一键已有值"也能正确判定)。
+    Returns: [{field, message}],空列表 = 通过。
+    """
+    errors: List[Dict[str, str]] = []
+    for field in iter_fields(schema):
+        rw = field.get("required_when")
+        if not isinstance(rw, dict) or "key" not in rw:
+            continue
+        trigger = effective.get(rw.get("key"))
+        if str(trigger) != str(rw.get("equals")):
+            continue
+        value = effective.get(field.get("key"))
+        if value is None or str(value).strip() == "":
+            errors.append({
+                "field": field.get("key"),
+                "message": (f"当 {rw.get('key')}={rw.get('equals')} 时,"
+                            f"「{field.get('label') or field.get('key')}」为必填项"),
+            })
+    return errors
+
+
 # ── 校验与掩码 ──────────────────────────────────────────────────
 
 def validate_values(

@@ -835,12 +835,17 @@ async def admin_put_pack_settings(name: str, request: Request, payload: Dict[str
         raise HTTPException(422, "请求体必须是 {\"values\": {...}}")
 
     clean, errors = validate_values(schema, values)
-    if errors:
-        raise HTTPException(422, detail={"message": "配置校验失败", "errors": errors})
-
+    # 跨字段条件必填(required_when):按"已存值+本次提交"的合并生效值判定,
+    # 部分保存(只改触发键、目标键早已配好)不会被误拦
     store = getattr(request.app.state, "settings_store", None)
     if store is None:
         raise HTTPException(503, "设置存储未初始化")
+    from services.pack_settings import check_conditional_required, resolve_all
+    effective = resolve_all(
+        name, saved={**store.get_values(name), **clean}, schema=schema)
+    errors += check_conditional_required(schema, effective)
+    if errors:
+        raise HTTPException(422, detail={"message": "配置校验失败", "errors": errors})
     store.save_values(name, clean)
     # 配置变了,探针结果缓存必须作废——否则补配后 60s 内 enable 路径仍
     # 命中旧的失败缓存,把"配置已改对"的插件继续拒载(设置页救活主路径)。

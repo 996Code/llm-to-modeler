@@ -75,7 +75,7 @@ class TestPdfParse:
     def test_sparse_text_triggers_ocr_path(self, monkeypatch):
         """文字层低于阈值(扫描页水印)的页进入 OCR 兜底路径。"""
         captured = {}
-        def fake_fill(data, texts, sparse, stats=None, on_ocr_progress=None):
+        def fake_fill(data, texts, sparse, **kwargs):
             captured["sparse"] = sparse
             return texts
         monkeypatch.setattr(doc_parser, "_ocr_fill_pages", fake_fill)
@@ -141,3 +141,54 @@ class TestOcrResourceGovernance:
         big = pypdfium2.PdfDocument(io.BytesIO(_minimal_text_pdf("Hi", size=(1000, 1500))))
         assert doc_parser._render_scale(big[0]) == pytest.approx(2000 / 1500)
         big.close()
+
+
+class TestOcrLlmEngine:
+    """llm 引擎分支:识别走注入回调(多模态大模型由任务层接),不碰 RapidOCR。"""
+
+    def test_llm_engine_uses_callback(self):
+        """回调识别的文本落位,stats 记引擎,进度逐页上报。"""
+        pytest.importorskip("pypdfium2")
+        seen = []
+
+        def fake_page_ocr(img):
+            seen.append(type(img).__name__)
+            return "高压电容电桥检定规程"
+
+        stats = {}
+        progress = []
+        text = parse_to_text("scan.pdf", _scanned_pdf(["高压电容电桥检定规程"]),
+                             stats=stats,
+                             on_ocr_progress=lambda d, t: progress.append((d, t)),
+                             ocr_engine="llm", page_ocr=fake_page_ocr)
+        assert "高压电容电桥检定规程" in text
+        assert seen == ["Image"]                     # 回调收到的是渲染位图(PIL)
+        assert stats["ocrEngine"] == "llm"
+        assert stats["ocrFilled"] == 1
+        assert progress == [(0, 1), (1, 1)]
+
+    def test_llm_engine_without_callback_degrades(self):
+        """engine=llm 但回调未注入:降级返回原文字层,不抛异常。"""
+        stats = {}
+        text = parse_to_text("scan.pdf", _scanned_pdf(["x"]), ocr_engine="llm",
+                             page_ocr=None, stats=stats)
+        assert text == ""
+        assert stats["ocrFilled"] == 0
+
+    def test_llm_engine_page_failure_skipped(self):
+        """单页识别失败(如模型不吃图):跳过该页不炸整体。"""
+        def boom(img):
+            raise RuntimeError("model does not support image input")
+
+        stats = {}
+        text = parse_to_text("scan.pdf", _scanned_pdf(["甲"]), ocr_engine="llm",
+                             page_ocr=boom, stats=stats)
+        assert text == ""
+        assert stats["ocrFilled"] == 0
+
+    def test_llm_engine_independent_of_rapidocr(self, monkeypatch):
+        """llm 引擎不依赖 rapidocr(未装 rapidocr 的环境照跑)。"""
+        monkeypatch.setitem(sys.modules, "rapidocr_onnxruntime", None)
+        text = parse_to_text("scan.pdf", _scanned_pdf(["高压电容电桥检定规程"]),
+                             ocr_engine="llm", page_ocr=lambda img: "识别文本")
+        assert "识别文本" in text

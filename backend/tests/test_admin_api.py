@@ -496,3 +496,57 @@ def test_display_settings_validation(client):
     # 拒绝后值未被污染
     assert client.get("/api/settings/display").json() == {
         "show_pipeline": True, "show_retrieval": True}
+
+
+# ── 插件设置保存:required_when 条件必填 ────────────────────────
+
+def test_pack_settings_conditional_required(tmp_path, monkeypatch):
+    """KG 设置 ocr_engine=llm 而未配 ocr_model:保存 422 拦下;配齐放行。
+
+    部分保存语义:先前已存 ocr_model、本次只改 ocr_engine 也不误拦
+    (按"已存值+本次提交"的合并生效值判定)。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN_TOKEN)
+    monkeypatch.delenv("PACKS_ENABLED", raising=False)
+    monkeypatch.delenv("KG_OCR_MODEL", raising=False)
+    monkeypatch.delenv("KG_OCR_ENGINE", raising=False)
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from services.conversation_store import ConversationStore
+    from services.pack_settings import PackSettingsStore
+    from src.services.pack_state import PackState
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.state.pack_state = PackState(
+        str(tmp_path / "pack_state.json"), ["knowledge_graph"])
+    app.state.settings_store = PackSettingsStore(str(tmp_path / "settings.db"))
+    app.state.conversation_store = ConversationStore(str(tmp_path / "conv.db"))
+    app.state.pack_tools = {}
+
+    with TestClient(app) as c:
+        # 先把模型配好,再单独切引擎(部分保存)——不误拦
+        r = c.put("/api/admin/packs/knowledge_graph/settings",
+                  headers=_auth_headers(),
+                  json={"values": {"ocr_model": "qwen3.7"}})
+        assert r.status_code == 200, r.text
+        r = c.put("/api/admin/packs/knowledge_graph/settings",
+                  headers=_auth_headers(),
+                  json={"values": {"ocr_engine": "llm"}})
+        assert r.status_code == 200, r.text
+
+        # 清掉模型再切 llm → 422,错误指到 ocr_model
+        r = c.put("/api/admin/packs/knowledge_graph/settings",
+                  headers=_auth_headers(),
+                  json={"values": {"ocr_model": ""}})
+        assert r.status_code == 422
+        fields = {e["field"] for e in r.json()["detail"]["errors"]}
+        assert "ocr_model" in fields
+
+        # 配齐 → 放行
+        r = c.put("/api/admin/packs/knowledge_graph/settings",
+                  headers=_auth_headers(),
+                  json={"values": {"ocr_model": "qwen3.7"}})
+        assert r.status_code == 200, r.text

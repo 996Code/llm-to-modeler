@@ -82,3 +82,27 @@ class TestDownloadDocument:
             kb["id"], "ghost.md", "text/markdown", 0, "", hashlib.sha256(b"x").hexdigest())
         r = c.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/documents/{doc['id']}/download")
         assert r.status_code == 404
+
+    def test_token_mode_requires_login_not_admin(self, env, monkeypatch, tmp_path):
+        """token 模式:全局中间件要求 Authorization(登录即可下载);
+        端点本身不再要求管理员头——对话用户引用下载走同一门。"""
+        monkeypatch.setenv("ADMIN_TOKEN", "secret")
+        from api.auth import AuthMiddleware, router as auth_router
+
+        app = FastAPI()
+        app.add_middleware(AuthMiddleware)
+        app.include_router(auth_router)
+        app.include_router(kg_router, prefix="/api/packs/knowledge_graph")
+        app.state.llm_client = env.llm
+        app.state.settings_store = None
+        monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
+        monkeypatch.setattr(runtime, "get_graph", lambda state: env.graph)
+        monkeypatch.setattr(runtime, "get_vector", lambda state: env.vector)
+        c = TestClient(app)
+
+        kb, doc, content = _mk_doc_with_file(env, "引用来源.pdf")
+        url = f"/api/packs/knowledge_graph/kbs/{kb['id']}/documents/{doc['id']}/download"
+        assert c.get(url).status_code == 401          # 无 token:全局中间件拦
+        token = c.post("/api/auth/token", json={"secret": "secret"}).json()["token"]
+        r = c.get(url, headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200 and r.content == content  # 普通登录 token 即可

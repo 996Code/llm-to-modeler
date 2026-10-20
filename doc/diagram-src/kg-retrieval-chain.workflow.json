@@ -25,7 +25,8 @@
      "graph_path",
      "vector_path",
      "fulltext_fallback",
-     "linearize"
+     "linearize",
+     "requery"
     ],
     "note": "图谱路与向量路并行；图谱零命中时全文兜底。"
    },
@@ -97,7 +98,7 @@
    "col": 0,
    "type": "backend",
    "label": "kb_search",
-   "sublabel": "七步管线入口",
+   "sublabel": "十步管线·进度单调",
    "width": 130
   },
   {
@@ -171,7 +172,7 @@
    "col": 4,
    "type": "frontend",
    "label": "data 制品",
-   "sublabel": "回答 + G6 子图卡",
+   "sublabel": "回答·子图卡·引用下载",
    "width": 140
   },
   {
@@ -200,6 +201,16 @@
    "label": "检索观测",
    "sublabel": "逐词命中 + 截断水位",
    "width": 150
+  },
+  {
+   "id": "requery",
+   "lane": "retrieval",
+   "col": 5,
+   "type": "cloud",
+   "label": "证据补检",
+   "sublabel": "判定→改写→融合回 linearize",
+   "tag": "LLM",
+   "width": 140
   }
  ],
  "edges": [
@@ -292,12 +303,18 @@
    "to": "calllog",
    "label": "落 call_logs",
    "variant": "dashed"
+  },
+  {
+   "id": "vector-requery",
+   "from": "vector_path",
+   "to": "requery",
+   "variant": "default"
   }
  ],
  "cards": [
   {
    "dot": "cyan",
-   "title": "知识库六级优先级（kb_search.py:109-175）",
+   "title": "知识库六级优先级（kb_search.py:141-256）",
    "items": [
     "显式指定 > clarify_answers > 会话记忆 > 宿主默认 > 唯一库自动 > 多库追问",
     "绑定失效清记忆 + trace 记录",
@@ -306,13 +323,14 @@
   },
   {
    "dot": "emerald",
-   "title": "混合检索（retrieval.py:105-332）",
+   "title": "混合检索与补检（retrieval.py:258-708）",
    "items": [
     "LLM 意图解析失败直接抛异常（不静默降级）",
     "图谱路：find_entities 三级降级 + subgraph_around BFS 逐跳限量",
     "向量路：query embedding → top-k → 父块去重；失败降级纯图谱",
     "全文兜底：图谱零命中时 kg_chunks tsvector+GIN（2-gram）补充召回，默认开；命中标 source=fulltext，与向量路同父块去重后并入 chunks 池",
-    "linearize_context：三元组 / 实体详情 / 片段，defang 反引号"
+    "linearize_context：三元组 / 实体详情 / 片段，defang 反引号",
+    "证据补检（D17）：证据不足 → 换角度改写一次 → 补检意图全库共享、逐库补检 → 父块去重融合"
    ]
   },
   {
@@ -320,8 +338,10 @@
    "title": "产出与观测",
    "items": [
     "answer.j2 LLM 综合回答，带 [片段N] 引用",
-    "artifact_type=data：回答摘要 + G6 子图卡",
-    "每次检索落 call_logs：逐词命中与截断水位"
+    "artifact_type=data：回答摘要 + G6 子图卡，sources.chunks 带 kbId",
+    "每次检索落 call_logs：逐词命中与截断水位",
+    "引用下载：检索卡片段面板可下载来源文件（登录 token 即可）；卡片隐藏时 [片段N] 徽标弹引用浮层（原文+来源+下载）",
+    "进度条单行道：十步步骤表 + 单调闸门，跨库/补检的回退 stage 不上屏"
    ]
   }
  ]
