@@ -56,6 +56,13 @@ onMounted(() => {
     const port = getHostPort()
     port.init().then((r) => {
       if (!r) {
+        // 轻嵌入豁免:?hostless=1 显式声明无宿主是预期形态(如 embed-test
+        // 测试页);或 URL 自带身份(userId/roles)。数据权限链路不依赖画布
+        const q = new URLSearchParams(window.location.search)
+        if (q.get('hostless') || q.get('userId') || q.get('roles')) {
+          void store.startNewConversation()
+          return
+        }
         // 3s 无 INIT（宿主未实现契约/链路断）：显式报错而非静默降级——
         // 横幅告诉用户 AI 无法读写画布，避免"AI 笨"的误解
         store.hostLinkError = '宿主握手失败（3 秒内未收到 INIT）：AI 将无法读写画布，请刷新页面重试'

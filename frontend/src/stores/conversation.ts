@@ -42,25 +42,31 @@ export async function refreshEmbedContext() {
     await new Promise((r) => setTimeout(r, 300))
     hostCtx = await port.getContext()
   }
-  if (!hostCtx) return null // 链路异常：让调用方拦截
-  const contextKey = localStorage.getItem('embedded_context_key') || undefined
-  const services = (port as any).hostServices as Record<string, string> | undefined
-  // 宿主 INIT 声明的插件链路集（packs）原样沿用到 chat 请求——与 INIT
-  // 同名同义：单插件宿主（表单/列表/流程设计器）后端直通（零 LLM）；
-  // 多插件声明后端在子集内路由（候选收窄）
-  const packs = port.packs
-  // embed 模式的 URL 角色通道:?roles=A,B → pack_params.knowledge_graph.
-  // user_roles(ACL 判定输入)。宿主 GET_CONTEXT 的 packParams 优先,
-  // URL 只补 knowledge_graph.user_roles 一项——嵌入测试页/无宿主协议的
-  // 轻嵌入用这条通道传身份,生产宿主仍走 GET_CONTEXT 不受影响。
-  let packParams = hostCtx.packParams ?? undefined
-  const urlRoles = new URLSearchParams(window.location.search).get('roles')?.trim()
+  // embed 模式的 URL 身份通道:?roles=A,B → pack_params.knowledge_graph.
+  // user_roles(ACL 判定输入);?userId 由 userIdentity 层消费(X-User-Id)。
+  // 宿主 GET_CONTEXT 的 packParams 优先,URL 只补 knowledge_graph.user_roles
+  // 一项——无宿主协议的轻嵌入(如 embed-test 测试页)也经此注入身份,
+  // 生产宿主不受影响。
+  const urlQuery = new URLSearchParams(window.location.search)
+  const urlRoles = urlQuery.get('roles')?.trim()
+  const urlIdentity = !!(urlRoles || urlQuery.get('userId'))
+  const hostless = urlQuery.get('hostless') === '1'
+  let packParams = hostCtx?.packParams
   if (urlRoles) {
     const roles = urlRoles.split(',').map(r => r.trim()).filter(Boolean)
     if (roles.length) {
       packParams = { ...(packParams || {}), knowledge_graph: { ...(packParams?.knowledge_graph || {}), user_roles: roles } }
     }
   }
+  // 链路异常且无 URL 身份/hostless 声明:让调用方拦截
+  if (!hostCtx && !urlIdentity && !hostless) return null
+  if (!hostCtx) hostCtx = {} // 无宿主的轻嵌入(URL 身份或 hostless 声明):继续,只注入身份
+  const contextKey = localStorage.getItem('embedded_context_key') || undefined
+  const services = (port as any).hostServices as Record<string, string> | undefined
+  // 宿主 INIT 声明的插件链路集（packs）原样沿用到 chat 请求——与 INIT
+  // 同名同义：单插件宿主（表单/列表/流程设计器）后端直通（零 LLM）；
+  // 多插件声明后端在子集内路由（候选收窄）
+  const packs = port.packs
   return {
     context: {
       [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
@@ -69,8 +75,6 @@ export async function refreshEmbedContext() {
     },
     services: services || undefined,
     packs: packs ?? undefined,
-    // 宿主随 GET_CONTEXT 下发的 pack 级参数（如 njmind_form 的流程节点目录），
-    // 原样透传给后端工具层；旧宿主不带 → undefined（请求体不发该字段）
     pack_params: packParams,
   }
 }
