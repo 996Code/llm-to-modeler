@@ -49,6 +49,18 @@ export async function refreshEmbedContext() {
   // 同名同义：单插件宿主（表单/列表/流程设计器）后端直通（零 LLM）；
   // 多插件声明后端在子集内路由（候选收窄）
   const packs = port.packs
+  // embed 模式的 URL 角色通道:?roles=A,B → pack_params.knowledge_graph.
+  // user_roles(ACL 判定输入)。宿主 GET_CONTEXT 的 packParams 优先,
+  // URL 只补 knowledge_graph.user_roles 一项——嵌入测试页/无宿主协议的
+  // 轻嵌入用这条通道传身份,生产宿主仍走 GET_CONTEXT 不受影响。
+  let packParams = hostCtx.packParams ?? undefined
+  const urlRoles = new URLSearchParams(window.location.search).get('roles')?.trim()
+  if (urlRoles) {
+    const roles = urlRoles.split(',').map(r => r.trim()).filter(Boolean)
+    if (roles.length) {
+      packParams = { ...(packParams || {}), knowledge_graph: { ...(packParams?.knowledge_graph || {}), user_roles: roles } }
+    }
+  }
   return {
     context: {
       [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
@@ -59,7 +71,7 @@ export async function refreshEmbedContext() {
     packs: packs ?? undefined,
     // 宿主随 GET_CONTEXT 下发的 pack 级参数（如 njmind_form 的流程节点目录），
     // 原样透传给后端工具层；旧宿主不带 → undefined（请求体不发该字段）
-    pack_params: hostCtx.packParams ?? undefined,
+    pack_params: packParams,
   }
 }
 
