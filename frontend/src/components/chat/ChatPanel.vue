@@ -223,10 +223,10 @@
 
             <!-- ===== 数据卡片 (artifact_type=data: 非配置类结果) ===== -->
             <!-- v-else-if 确保与 config-card 互斥:一条消息不会同时渲染两种卡片。
-                 检索结果隐藏开关:KG 检索结果卡在 showRetrieval 关闭时整卡不渲染
-                 (答案文本照常,引用徽标点击变 no-op,见 onMdRefClick) -->
+                 KG 检索结果卡常驻(开关只切档位):开=完整卡,关=精简参考文档清单
+                 (KgGraphCard 的 compact 档),引用文件全貌与下载入口始终可见 -->
             <div
-              v-else-if="msg.dataResult && !(msg.dataResult.type === 'kg_search_result' && !sysConfig.showRetrieval)"
+              v-else-if="msg.dataResult"
               class="data-card"
             >
               <div class="data-card-header">
@@ -246,11 +246,13 @@
                   :artifact="msg.dataResult"
                   :detail="msg.formattedData"
                 />
-                <!-- 知识图谱检索结果:专用子图卡片(G6 懒加载渲染 + 来源引用) -->
+                <!-- 知识图谱检索结果:专用子图卡片(G6 懒加载渲染 + 来源引用);
+                     compact=精简档(仅参考文档清单) -->
                 <KgGraphCard
                   v-else-if="msg.dataResult?.type === 'kg_search_result'"
                   :result="msg.dataResult"
                   :cited-chunks="kgCitedChunks(msg)"
+                  :compact="!sysConfig.showRetrieval"
                 />
                 <!-- 遍历「提取后的可显示字段」（getDataDisplayFields 已做中文化与过滤） -->
                 <div v-else v-for="(value, key) in getDataDisplayFields(msg.dataResult)" :key="key" class="data-field">
@@ -373,8 +375,8 @@
                     :turn-index="traceTurnIndex"
                     :title="traceTitle" />
 
-    <!-- 引用浮层:检索卡隐藏(showRetrieval=false)时,[片段N] 徽标点击
-         弹出片段原文+来源文档+下载——引用是答案的一部分,开关只藏过程卡 -->
+    <!-- 引用浮层:检索卡精简档(compact)时,[片段N] 徽标点击弹片段原文;
+         下载统一走卡片底部的参考文档清单,浮层不再放下载入口 -->
     <template v-if="citePop">
       <div class="cite-pop-overlay" @click="citePop = null"></div>
       <div class="cite-pop" :style="{ left: citePop.x + 'px', top: citePop.y + 'px' }">
@@ -384,12 +386,6 @@
           <span v-if="citePop.chunk.kbName" class="cite-pop-kb">{{ citePop.chunk.kbName }}</span>
         </div>
         <div class="cite-pop-text">{{ citePop.chunk.text || '(无原文)' }}</div>
-        <div class="cite-pop-foot">
-          <a-button v-if="citePop.chunk.kbId && citePop.chunk.docId" size="small"
-                    type="link" @click="downloadCiteFile">
-            <DownloadOutlined /> 下载来源文件
-          </a-button>
-        </div>
       </div>
     </template>
   </div>
@@ -414,7 +410,7 @@ import {
 import { Modal, message as antdMessage } from 'ant-design-vue'
 // 单轮 trace 拉取(轮末给消息卡补 LLM 次数/token, 输入框累计对话 token)
 // + chatbi 结果反馈(P2#14 点赞/点踩)
-import { downloadKgSourceFile, getConversationTrace, sendChatbiFeedback } from '../../services/api'
+import { getConversationTrace, sendChatbiFeedback } from '../../services/api'
 // 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
 import { useConversationStore } from '../../stores/conversation'
 import { copyText } from '../../utils/clipboard'
@@ -487,8 +483,8 @@ function renderMarkdown(text: string): string {
 }
 
 /** md-content 容器事件委托:[片段N] 徽标点击 → 滚动到本条消息的
- *  KgGraphCard 对应片段手风琴并展开;检索卡隐藏(showRetrieval=false)
- *  时改弹引用浮层(片段原文+来源文档+下载)——引用交互归答案自身。
+ *  KgGraphCard 对应片段手风琴并展开;卡片精简档(compact,showRetrieval
+ *  关闭)时片段手风琴不渲染,改弹引用浮层看片段原文(下载走参考文档清单)。
  *  徽标是 v-html 注入的纯 DOM,无法逐个绑监听——容器统一接 click,
  *  按 class 识别。双界过滤:编号 <1(如 [片段:0])或 > chunks.length
  *  (如 [片段:99],LLM 编造)时数据不存在,一律静默忽略不动作。 */
@@ -526,14 +522,6 @@ function openCitePopover(e: MouseEvent, scope: HTMLElement, idx: number) {
   const x = Math.min(Math.max(8, r.left), window.innerWidth - 356)
   const y = r.bottom + 6 > window.innerHeight - 240 ? Math.max(8, r.top - 236) : r.bottom + 6
   citePop.value = { x, y, chunk }
-}
-
-function downloadCiteFile() {
-  const c = citePop.value?.chunk
-  if (!c?.kbId || !c?.docId) return
-  downloadKgSourceFile(c.kbId, c.docId, c.docName || 'document').catch(() => {
-    antdMessage.error('下载失败(文件可能已被清理)')
-  })
 }
 
 /** 从回答文本提取被引用的片段编号([片段N] 徽标;KG 回答专用)。

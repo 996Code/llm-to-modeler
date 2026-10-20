@@ -144,7 +144,10 @@
     </a-table>
 
     <!-- 块明细抽屉:逐块导入状态 + 定向重试(批次是执行时的动态分组,持久状态在块级) -->
-    <a-drawer v-model:open="chunksDrawer.open" width="720" :title="`块明细 · ${chunksDrawer.doc?.filename || ''}`">
+    <!-- :push=false 关闭嵌套抽屉推挤——内部"抽取产出"抽屉打开时,本抽屉
+         会被 antd 默认向左推 180px,表现为"块明细位置突变" -->
+    <a-drawer v-model:open="chunksDrawer.open" width="720" :push="false"
+              :title="`块明细 · ${chunksDrawer.doc?.filename || ''}`">
       <div v-if="chunksDrawer.payload" class="dm-chunks">
         <div class="dm-chunks__summary">
           <a-tag>共 {{ chunksDrawer.payload.summary.total }} 块</a-tag>
@@ -186,15 +189,22 @@
               <span class="dm-chunks__preview" :title="record.preview">{{ record.preview }}</span>
             </template>
             <template v-else-if="column.key === 'actions'">
-              <a v-if="record.status !== 'done'" @click="retryOneChunk(record)">
-                <RedoOutlined /> 重试
-              </a>
-              <a v-if="record.status === 'done'" style="margin-left: 0" @click="showExtraction(record)">
-                <EyeOutlined /> 产出
-              </a>
-              <a style="margin-left: 0" @click="openChunkEdit(record)">
-                <EditOutlined /> 编辑
-              </a>
+              <!-- 行内按钮图标化:文字进悬浮提示,不占列宽(操作列规约) -->
+              <a-tooltip title="重试该块(只补此块,已完成块跳过)">
+                <a v-if="record.status !== 'done'" @click="retryOneChunk(record)">
+                  <RedoOutlined />
+                </a>
+              </a-tooltip>
+              <a-tooltip title="查看抽取产出(实体/关系)">
+                <a v-if="record.status === 'done'" @click="showExtraction(record)">
+                  <EyeOutlined />
+                </a>
+              </a-tooltip>
+              <a-tooltip title="编辑块文本(仅重建该块向量,图谱不随编辑更新)">
+                <a @click="openChunkEdit(record)">
+                  <EditOutlined />
+                </a>
+              </a-tooltip>
               <span v-if="record.status !== 'done'" class="dm-chunks__dim">—</span>
             </template>
           </template>

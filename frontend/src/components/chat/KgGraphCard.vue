@@ -11,6 +11,26 @@
       <a-tag v-if="chunkHits" class="kgc-tag">{{ chunkHits }} 片段引用</a-tag>
     </div>
 
+    <!-- 精简档(compact):只显示参考文档清单——图谱/片段手风琴等过程
+         明细全收起,"显示检索结果"关闭时用户仍能看到引用了哪些文件并下载 -->
+    <template v-if="compact">
+      <div v-if="refDocs.length" class="kgc-refdocs">
+        <span class="kgc-src-label"><FileTextOutlined /> 参考文档 · {{ refDocs.length }} 个</span>
+        <div v-for="d in refDocs" :key="(d.kbId || '') + '/' + (d.docId || '')" class="kgc-refdoc-row">
+          <span class="kgc-refdoc-name" :title="d.docName">{{ d.docName }}</span>
+          <span v-if="d.kbName" class="kgc-refdoc-kb">{{ d.kbName }}</span>
+          <span class="kgc-refdoc-n">{{ d.chunkCount }} 处引用</span>
+          <button v-if="d.kbId && d.docId" class="kgc-dl-btn"
+                  title="下载来源文件" @click="downloadChunk(d)">
+            <DownloadOutlined />
+          </button>
+        </div>
+      </div>
+      <div v-else class="kgc-refdocs kgc-refdocs--empty">本轮回答未引用具体文档片段</div>
+    </template>
+
+    <!-- 完整档:图谱 + 引用实体 + 片段手风琴 + 参考文档清单 -->
+    <template v-else>
     <!-- 迷你力导图(G6 v5 动态导入,不进主包;悬停高亮一阶邻居) -->
     <div v-show="nodes.length" ref="box" class="kgc-chart" />
 
@@ -60,17 +80,27 @@
               <span>{{ c.docName || '文档' }}{{ c.seq != null ? ` · 块 ${c.seq}` : '' }}{{ c.childSeq != null ? ` · 子段 ${c.childSeq}` : '' }}</span>
               <span v-if="c.parentContext" class="kgc-callback-note">命中子段,已回带所属章节上下文</span>
               <span v-if="c.score != null" class="kgc-score">相似度 {{ (Number(c.score)).toFixed(4) }}</span>
-              <!-- 下载来源文件(原始上传件):图标+悬浮提示;旧制品无 kbId 不亮 -->
-              <button v-if="c.kbId && c.docId" class="kgc-dl-btn"
-                      title="下载来源文件" @click.stop="downloadChunk(c)">
-                <DownloadOutlined />
-              </button>
             </div>
             <div class="kgc-chunk-body">{{ c.text }}</div>
           </div>
         </transition>
       </div>
     </div>
+
+    <!-- 参考文档清单(下载统一入口;两档常驻,被引用文件去重) -->
+    <div v-if="refDocs.length" class="kgc-refdocs">
+      <span class="kgc-src-label"><FileTextOutlined /> 参考文档 · {{ refDocs.length }} 个</span>
+      <div v-for="d in refDocs" :key="(d.kbId || '') + '/' + (d.docId || '')" class="kgc-refdoc-row">
+        <span class="kgc-refdoc-name" :title="d.docName">{{ d.docName }}</span>
+        <span v-if="d.kbName" class="kgc-refdoc-kb">{{ d.kbName }}</span>
+        <span class="kgc-refdoc-n">{{ d.chunkCount }} 处引用</span>
+        <button v-if="d.kbId && d.docId" class="kgc-dl-btn"
+                title="下载来源文件" @click="downloadChunk(d)">
+          <DownloadOutlined />
+        </button>
+      </div>
+    </div>
+    </template>
   </div>
 </template>
 
@@ -97,7 +127,25 @@ const props = defineProps<{
   }
   /** 回答文本里被引用的片段编号([片段N]);空数组=回答未引任何片段 */
   citedChunks?: number[]
+  /** 精简档:只显示参考文档清单(图谱/片段手风琴收起)——
+   *  "显示检索结果"关闭时用,引用文件全貌与下载入口仍在 */
+  compact?: boolean
 }>()
+
+/** 参考文档清单:被引用片段按文档去重(下载统一入口,两档常驻) */
+const refDocs = computed(() => {
+  const chunks = props.result.sources?.chunks || []
+  const cited = new Set(props.citedChunks || [])
+  const byDoc = new Map<string, { docId?: string; kbId?: string; docName: string; kbName?: string; chunkCount: number }>()
+  chunks.forEach((c, i) => {
+    if (!cited.has(i + 1)) return
+    const key = `${c.kbId || ''}/${c.docId || ''}/${c.docName || ''}`
+    const row = byDoc.get(key) || { docId: c.docId, kbId: c.kbId, docName: c.docName || '文档', kbName: c.kbName, chunkCount: 0 }
+    row.chunkCount += 1
+    byDoc.set(key, row)
+  })
+  return [...byDoc.values()]
+})
 
 const nodes = computed<KgNode[]>(() => props.result.subgraph?.nodes || [])
 const edges = computed<KgEdge[]>(() => props.result.subgraph?.edges || [])
@@ -143,6 +191,8 @@ function _esc(s: unknown): string {
 }
 
 onMounted(async () => {
+  // 精简档不渲染图谱:连 G6 chunk 都不加载(省资源;卡片只有参考文档清单)
+  if (props.compact) return
   if (!nodes.value.length || !box.value) return
   const G6 = await import('@antv/g6')
   if (!box.value) return  // 卸载竞态
@@ -364,4 +414,21 @@ onBeforeUnmount(() => {
   color: #6b7280; padding: 2px 6px; border-radius: 6px; line-height: 1;
 }
 .kgc-dl-btn:hover { background: #f0f5ff; color: #2563eb; }
+
+/* ── 参考文档清单(下载统一入口,两档常驻) ── */
+.kgc-refdocs { margin-top: 10px; }
+.kgc-refdoc-row {
+  display: flex; align-items: center; gap: 8px; padding: 4px 0;
+  border-bottom: 1px dashed #eef0f4; font-size: 12px;
+}
+.kgc-refdoc-row:last-child { border-bottom: none; }
+.kgc-refdoc-name {
+  color: #1f2937; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kgc-refdoc-kb {
+  flex: none; font-size: 11px; color: #6b7280;
+  background: #f3f4f6; border-radius: 6px; padding: 0 6px;
+}
+.kgc-refdoc-n { margin-left: auto; flex: none; color: #9ca3af; }
+.kgc-refdocs--empty { color: #9ca3af; font-size: 12px; padding: 4px 0; }
 </style>
