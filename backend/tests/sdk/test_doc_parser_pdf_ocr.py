@@ -13,14 +13,14 @@ from sdk.doc_parser import parse_to_text
 
 # ── 测试素材构造 ─────────────────────────────────────────────
 
-def _minimal_text_pdf(text: str) -> bytes:
+def _minimal_text_pdf(text: str, size=(612, 792)) -> bytes:
     """手写最小 PDF:单页,内容流一个 Tj 文本对象(有真实文字层)。"""
     stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {size[0]} {size[1]}] "
+         f"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>").encode(),
         b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
@@ -110,3 +110,34 @@ class TestPdfParse:
         text = parse_to_text("scan.pdf", _scanned_pdf(["高压电容电桥检定规程"]), ocr=False, stats=stats)
         assert text == ""  # 预检只验坏文件,文字层为空不算失败
         assert stats["ocrPages"] == 0
+
+
+class TestOcrResourceGovernance:
+    """OCR 资源治理:单例复用 + 线程封顶 + 渲染尺寸封顶。"""
+
+    def test_ocr_engine_singleton(self):
+        """多次取引擎是同一实例——模型/内存只占一份。"""
+        pytest.importorskip("rapidocr_onnxruntime")
+        assert doc_parser._ocr_engine() is doc_parser._ocr_engine()
+
+    def test_ocr_threads_capped(self):
+        """三个 ONNX session 的 intra_op 线程数 = 封顶值(默认 -1 吃满所有核)。"""
+        pytest.importorskip("rapidocr_onnxruntime")
+        engine = doc_parser._ocr_engine()
+        for part in (engine.text_det, engine.text_cls, engine.text_rec):
+            ort = part.infer if hasattr(part, "infer") else part.session  # det/cls 挂 infer,rec 挂 session
+            opts = ort.session.get_session_options()
+            assert opts.intra_op_num_threads == doc_parser._OCR_INTRA_THREADS
+
+    def test_render_scale_capped_by_max_side(self):
+        """大页面渲染倍率压到长边=2000(RapidOCR 内部降采样线),A4 维持 2.5。"""
+        pytest.importorskip("pypdfium2")
+        import io
+
+        import pypdfium2
+        a4 = pypdfium2.PdfDocument(io.BytesIO(_minimal_text_pdf("Hi")))
+        assert doc_parser._render_scale(a4[0]) == pytest.approx(2.5)  # 2000/792≈2.53>2.5
+        a4.close()
+        big = pypdfium2.PdfDocument(io.BytesIO(_minimal_text_pdf("Hi", size=(1000, 1500))))
+        assert doc_parser._render_scale(big[0]) == pytest.approx(2000 / 1500)
+        big.close()

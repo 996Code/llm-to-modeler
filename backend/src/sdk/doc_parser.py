@@ -19,6 +19,7 @@ OCR 兜底(pypdfium2+rapidocr)同为可选依赖,未安装时保持纯文字层�
 import io
 import logging
 import re
+import threading
 import unicodedata
 from typing import Any, Dict, List
 
@@ -169,6 +170,38 @@ def _parse_pdf(data: bytes, ocr: bool = True, stats: Dict[str, int] = None,
 # 一页文字层低于此字符数视为"无文字"(扫描页常带 0~几个水印字符)
 _PAGE_TEXT_SPARSE = 10
 
+# ── OCR 资源治理(单例 + 线程/并发封顶) ─────────────────────
+# RapidOCR 默认 intra_op_num_threads=-1:det/cls/rec 三个 ONNX session 每个
+# 都吃满全部核;而 TaskManager 允许不同库的导入并行(TASK_WORKERS,默认 2),
+# 叠加起来就是线程超额订阅的 CPU 风暴 + 双份模型内存。三道闸:
+# ① 进程级单例——模型只加载一份;② 线程封顶——牺牲单任务速度换整机稳定;
+# ③ 推理锁——并行导入的 OCR 段逐页串行,任意时刻只有一张渲染位图在内存。
+_OCR_INTRA_THREADS = 2
+_OCR_RENDER_SCALE = 2.5  # ~180dpi,中文识别与速度的实测平衡点(上限)
+_OCR_MAX_SIDE = 2000     # 对齐 RapidOCR Global.max_side_len 的内部降采样线
+_OCR_ENGINE = None
+_OCR_ENGINE_LOCK = threading.Lock()
+_OCR_INFER_LOCK = threading.Lock()
+
+
+def _ocr_engine():
+    """进程级 RapidOCR 单例(懒加载,双检锁)。"""
+    global _OCR_ENGINE
+    if _OCR_ENGINE is None:
+        with _OCR_ENGINE_LOCK:
+            if _OCR_ENGINE is None:
+                from rapidocr_onnxruntime import RapidOCR
+                _OCR_ENGINE = RapidOCR(intra_op_num_threads=_OCR_INTRA_THREADS)
+    return _OCR_ENGINE
+
+
+def _render_scale(page) -> float:
+    """渲染倍率:2.5 封顶,且长边不超过 2000——超线的大图 RapidOCR 内部
+    也会缩回 2000,先渲大图只是白占内存(A4@2.5 长边 2105px,缩掉 ~10%)。"""
+    w, h = page.get_size()
+    longest = max(w, h)
+    return min(_OCR_RENDER_SCALE, _OCR_MAX_SIDE / longest) if longest > 0 else _OCR_RENDER_SCALE
+
 
 def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
                     stats: Dict[str, int] = None, on_ocr_progress=None) -> List[str]:
@@ -179,7 +212,7 @@ def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
     """
     try:
         import pypdfium2
-        from rapidocr_onnxruntime import RapidOCR
+        import rapidocr_onnxruntime  # noqa: F401  仅探测依赖;实例走 _ocr_engine() 单例
     except ImportError as e:
         logger.warning(f"pdf OCR 兜底不可用(未安装 pypdfium2/rapidocr-onnxruntime): {e}")
         if stats is not None:
@@ -190,16 +223,20 @@ def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
             on_ocr_progress(0, len(sparse_pages))
         except Exception:  # noqa: BLE001  回调失败不影响识别
             pass
-    ocr = RapidOCR()
+    ocr = _ocr_engine()
     pdf = pypdfium2.PdfDocument(io.BytesIO(data))
     filled = 0
     try:
         for n, i in enumerate(sparse_pages):
             page = pdf[i]
             try:
-                img = page.render(scale=2.5).to_pil()  # ~180dpi,中文识别与速度的实测平衡点
-                result, _ = ocr(img)
-                ocr_text = "\n".join(r[1] for r in (result or []))
+                # 渲染+推理整体持锁:位图 ~10MB/页,并行导入时逐页排队,
+                # 内存峰值只有一份;进度回调在锁外,不阻塞下一个任务
+                with _OCR_INFER_LOCK:
+                    img = page.render(scale=_render_scale(page)).to_pil()
+                    result, _ = ocr(img)
+                    ocr_text = "\n".join(r[1] for r in (result or []))
+                    del img, result
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"pdf 第 {i + 1} 页 OCR 失败(跳过): {e}")
                 continue
