@@ -156,8 +156,14 @@ log "   dist 就绪（$(du -sh frontend/dist | awk '{print $1}')）"
 
 # ── ②b 后端依赖（docker run 容器内 pip -t，清华源 + 持久缓存卷）────────
 # pip 缓存卷跨部署复用:此前 --no-cache-dir + rm -rf .deps 每次全量重下
-# 671MB(实测 ~10min);留缓存后二次起命中 wheel 只解装不下载(~2min)
+# 671MB(实测 ~10min);留缓存后二次起命中 wheel 只解装不下载(~2min)。
+# requirements 未变时直接跳过整步(sha 戳比对;FORCE_DEPS=1 强刷)
 log "②b 安装后端依赖（python 容器内 pip -t）..."
+REQ_SHA=$(sha256sum backend/requirements.txt | awk '{print $1}')
+if [ "${FORCE_DEPS:-0}" != "1" ] && [ -d backend/.deps/fastapi ] \
+   && [ "$(cat backend/.deps/.requirements.sha256 2>/dev/null)" = "$REQ_SHA" ]; then
+  log "   .deps 缓存命中（requirements 未变），跳过安装"
+else
 rm -rf backend/.deps && mkdir -p backend/.deps
 docker run --rm -v "$PWD/backend:/app" -v llm_pip_cache:/root/.cache/pip \
   --memory 2g --cpus 2 -w /app \
@@ -173,7 +179,9 @@ docker run --rm -v "$PWD/backend:/app" -v llm_pip_cache:/root/.cache/pip \
 # (libxcb),slim 镜像没有——headless 版 API 相同无 GUI 依赖,强制后装覆盖 cv2
 ls -d backend/.deps/opencv_python_headless-*.dist-info >/dev/null 2>&1 \
   || { err "opencv-headless 覆盖失败(OCR 将不可用)"; exit 1; }
+echo "$REQ_SHA" > backend/.deps/.requirements.sha256
 log "   .deps 就绪（$(du -sh backend/.deps | awk '{print $1}')）"
+fi
 
 # ── ②c nginx deb 预下载（docker run 容器内 apt --download-only）───────
 # 注意：--download-only 的 .deb 落在容器 /var/cache/apt/archives（含 partial/ 临时
@@ -181,14 +189,20 @@ log "   .deps 就绪（$(du -sh backend/.deps | awk '{print $1}')）"
 # update，已下载的 deb 不重复拉）。全部失败即退出——debs 缺失时 Dockerfile
 # 里 dpkg -i 也会失败，这里更早暴露问题。
 log "②c 预下载 nginx deb..."
+# 缓存命中即跳过(FORCE_DEBS=1 强刷):nginx/curl 的 deb 与基础镜像基本
+# 不联动,每次重下是发布最大耗时(清华源 apt 实测 9~14 分钟)
+if [ "${FORCE_DEBS:-0}" != "1" ] \
+   && [ "$(ls backend/debs/*.deb 2>/dev/null | wc -l)" -ge 2 ]; then
+  log "   debs 缓存命中（$(ls backend/debs/*.deb | wc -l) 个包），跳过下载"
+else
 rm -rf backend/debs && mkdir -p backend/debs
 debs_ok=0
 for attempt in 1 2 3; do
   docker run --rm -v "$PWD/backend:/app" -w /app \
     "$PY_IMAGE" sh -c "
       # Debian 换清华源：默认官方源在国内极慢（apt 步骤曾是发布耗时大头）
-      echo 'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main' > /etc/apt/sources.list &&
-      echo 'deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main' >> /etc/apt/sources.list &&
+      echo 'deb https://mirrors.aliyun.com/debian/ bookworm main' > /etc/apt/sources.list &&
+      echo 'deb https://mirrors.aliyun.com/debian/ bookworm-updates main' >> /etc/apt/sources.list &&
       apt-get update -qq &&
       apt-get install -y --download-only --no-install-recommends nginx curl >/dev/null &&
       cp /var/cache/apt/archives/*.deb /app/debs/
@@ -198,6 +212,7 @@ done
 [ "$debs_ok" -eq 1 ] && [ "$(ls backend/debs/*.deb 2>/dev/null | wc -l)" -ge 1 ] \
   || { err "nginx deb 下载失败"; exit 1; }
 log "   debs 就绪（$(ls backend/debs | wc -l) 个包）"
+fi
 
 # ── ②d embedding 模型(bge-m3 int8 ~543MB;首次下载,后续复用) ──────────
 # 模型放在 data/models/embedding/ 下,docker-compose 挂载到容器内
