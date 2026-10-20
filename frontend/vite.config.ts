@@ -46,7 +46,7 @@ export default defineConfig({
         // 管理端独立页面(/ai-modeler/admin.html):与主聊天应用平行的多页入口
         admin: resolve(__dirname, 'admin.html'),
         // 嵌入数据权限测试页(仅测试用):身份注入 + iframe 嵌入对话
-        embedtest: resolve(__dirname, 'embed-test.html'),
+        embedtest: resolve(__dirname, '知识库-嵌入-测试.html'),
         embed: resolve(__dirname, 'src/embed.ts'),
       },
       output: {

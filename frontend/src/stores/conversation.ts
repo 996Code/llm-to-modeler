@@ -51,7 +51,7 @@ export async function refreshEmbedContext() {
   const urlRoles = urlQuery.get('roles')?.trim()
   const urlIdentity = !!(urlRoles || urlQuery.get('userId'))
   const hostless = urlQuery.get('hostless') === '1'
-  let packParams = hostCtx?.packParams
+  let packParams: Record<string, unknown> | undefined = hostCtx?.packParams ?? undefined
   if (urlRoles) {
     const roles = urlRoles.split(',').map(r => r.trim()).filter(Boolean)
     if (roles.length) {
@@ -60,7 +60,8 @@ export async function refreshEmbedContext() {
   }
   // 链路异常且无 URL 身份/hostless 声明:让调用方拦截
   if (!hostCtx && !urlIdentity && !hostless) return null
-  if (!hostCtx) hostCtx = {} // 无宿主的轻嵌入(URL 身份或 hostless 声明):继续,只注入身份
+  // 无宿主的轻嵌入(URL 身份或 hostless 声明):继续走,只注入身份
+  const ctx = hostCtx ?? { artifact: null, revision: null }
   const contextKey = localStorage.getItem('embedded_context_key') || undefined
   const services = (port as any).hostServices as Record<string, string> | undefined
   // 宿主 INIT 声明的插件链路集（packs）原样沿用到 chat 请求——与 INIT
@@ -69,8 +70,8 @@ export async function refreshEmbedContext() {
   const packs = port.packs
   return {
     context: {
-      [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
-      revision: hostCtx.revision ?? null,
+      [CONTEXT_KEY_ARTIFACT]: ctx.artifact ?? undefined,
+      revision: ctx.revision ?? null,
       contextKey,
     },
     services: services || undefined,
