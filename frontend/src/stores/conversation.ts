@@ -36,32 +36,36 @@ import { classifyError } from '../utils/errorDiag'
 export async function refreshEmbedContext() {
   const port = getHostPort()
   if (!port.connected) return undefined
-  // 拉宿主最新画布；失败先重试一次（瞬时抖动），仍失败则判链路异常
-  let hostCtx = await port.getContext()
-  if (!hostCtx) {
-    await new Promise((r) => setTimeout(r, 300))
-    hostCtx = await port.getContext()
-  }
+
   // embed 模式的 URL 身份通道:?roles=A,B → pack_params.knowledge_graph.
   // user_roles(ACL 判定输入);?userId 由 userIdentity 层消费(X-User-Id)。
   // 宿主 GET_CONTEXT 的 packParams 优先,URL 只补 knowledge_graph.user_roles
-  // 一项——无宿主协议的轻嵌入(如 embed-test 测试页)也经此注入身份,
+  // 一项——无宿主协议的轻嵌入(如 kb-embed-test 测试页)也经此注入身份,
   // 生产宿主不受影响。
   const urlQuery = new URLSearchParams(window.location.search)
   const urlRoles = urlQuery.get('roles')?.trim()
   const urlIdentity = !!(urlRoles || urlQuery.get('userId'))
   const hostless = urlQuery.get('hostless') === '1'
-  let packParams: Record<string, unknown> | undefined = hostCtx?.packParams ?? undefined
-  if (urlRoles) {
-    const roles = urlRoles.split(',').map(r => r.trim()).filter(Boolean)
-    if (roles.length) {
-      packParams = { ...(packParams || {}), knowledge_graph: { ...(packParams?.knowledge_graph || {}), user_roles: roles } }
+
+  // hostless 或带 URL 身份:跳过宿主握手(无宿主时 getContext 要 10s
+  // 超时×2=20s,每条消息都卡),直接走轻嵌入路径
+  if (hostless || urlIdentity) {
+    const packParams = urlRoles ? { knowledge_graph: { user_roles: urlRoles.split(',').map(r => r.trim()).filter(Boolean) } } : undefined
+    return {
+      context: { [CONTEXT_KEY_ARTIFACT]: null, revision: null, contextKey: localStorage.getItem('embedded_context_key') || undefined },
+      services: undefined,
+      packs: undefined,
+      pack_params: packParams as Record<string, unknown> | undefined,
     }
   }
-  // 链路异常且无 URL 身份/hostless 声明:让调用方拦截
-  if (!hostCtx && !urlIdentity && !hostless) return null
-  // 无宿主的轻嵌入(URL 身份或 hostless 声明):继续走,只注入身份
-  const ctx = hostCtx ?? { artifact: null, revision: null }
+
+  // 拉宿主最新画布;失败先重试一次(瞬时抖动),仍失败则判链路异常
+  let hostCtx = await port.getContext()
+  if (!hostCtx) {
+    await new Promise((r) => setTimeout(r, 300))
+    hostCtx = await port.getContext()
+  }
+  if (!hostCtx) return null // 链路异常:让调用方拦截
   const contextKey = localStorage.getItem('embedded_context_key') || undefined
   const services = (port as any).hostServices as Record<string, string> | undefined
   // 宿主 INIT 声明的插件链路集（packs）原样沿用到 chat 请求——与 INIT
@@ -70,13 +74,13 @@ export async function refreshEmbedContext() {
   const packs = port.packs
   return {
     context: {
-      [CONTEXT_KEY_ARTIFACT]: ctx.artifact ?? undefined,
-      revision: ctx.revision ?? null,
+      [CONTEXT_KEY_ARTIFACT]: hostCtx.artifact ?? undefined,
+      revision: hostCtx.revision ?? null,
       contextKey,
     },
     services: services || undefined,
     packs: packs ?? undefined,
-    pack_params: packParams,
+    pack_params: hostCtx.packParams ?? undefined,
   }
 }
 
