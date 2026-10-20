@@ -15,7 +15,10 @@
 import pytest
 
 from domains.knowledge_graph import retrieval
-from domains.knowledge_graph.tools.kb_search import KbSearchTool
+from domains.knowledge_graph.tools.kb_search import (
+    KbSearchTool, _PIPELINE_STEPS, make_monotonic_stage,
+)
+from tests.domains.test_kg_auto_requery import _SufficiencyLLM
 from tests.domains.test_knowledge_graph_m4 import (  # noqa: F401  fixture 复用
     _ctx, _mem_conv, env, search_client,
 )
@@ -353,3 +356,72 @@ class TestSearchEndpointCrossKb:
         client, _ = search_client
         assert client.post("/api/packs/knowledge_graph/search",
                            json={"query": "x"}).status_code == 404
+
+
+# ── 进度条单行道(10-20 线上"执行链路不断跳"回归) ─────────────
+
+class TestPipelineMonotonicStage:
+    """步骤表覆盖检索层全部 stage 键;上屏序列按步骤表单调,回退/未知键不上屏。"""
+
+    def test_steps_cover_all_stage_keys(self):
+        """retrieval 层实际会发的 10 个键全在步骤表——缺一个前端匹配不到就整条清零。"""
+        assert {s["key"] for s in _PIPELINE_STEPS} == {
+            "kb_search.resolve", "kb_search.intent", "kb_search.graph",
+            "kb_search.subgraph", "kb_search.fulltext", "kb_search.vector",
+            "kb_search.requery", "kb_search.rerank", "kb_search.assemble",
+            "kb_search.answer",
+        }
+        order = [s["key"] for s in _PIPELINE_STEPS]
+        # 时间顺序:补检在向量检索后、重排前
+        assert (order.index("kb_search.vector") < order.index("kb_search.requery")
+                < order.index("kb_search.rerank"))
+
+    def test_regressed_stage_dropped(self):
+        """跨库第二/三库与补检轮重发的回退 stage 不上屏(进度条不倒跳)。"""
+        out = []
+        emit = make_monotonic_stage(lambda k, m: out.append(k))
+        emit("kb_search.graph", "库1")
+        emit("kb_search.subgraph", "库1")
+        emit("kb_search.vector", "库1")
+        emit("kb_search.graph", "库2")           # 逐库回退,不上屏
+        emit("kb_search.subgraph", "库2")
+        emit("kb_search.vector", "库2")           # 同步骤换文案,上屏(进度不跳)
+        emit("kb_search.requery", "核查/补检")    # 前进,上屏
+        emit("kb_search.intent", "补检轮重发")    # 回退,不上屏
+        emit("kb_search.assemble", "组装")
+        assert out == ["kb_search.graph", "kb_search.subgraph", "kb_search.vector",
+                       "kb_search.vector", "kb_search.requery", "kb_search.assemble"]
+
+    def test_unknown_stage_dropped(self):
+        """不在步骤表的键不上屏(此前会让前端进度条整条清零)。"""
+        out = []
+        emit = make_monotonic_stage(lambda k, m: out.append(k))
+        emit("kb_search.whatever", "未知键")
+        emit("kb_search.intent", "已知键")
+        assert out == ["kb_search.intent"]
+
+    def test_fulltext_zero_hit_flow(self):
+        """图谱零命中 → 全文兜底 → 向量:全程单调(万用表零命中场景)。"""
+        out = []
+        emit = make_monotonic_stage(lambda k, m: out.append(k))
+        emit("kb_search.graph", "匹配")
+        emit("kb_search.fulltext", "兜底")
+        emit("kb_search.vector", "向量")
+        assert out == ["kb_search.graph", "kb_search.fulltext", "kb_search.vector"]
+
+    def test_cross_kb_requery_e2e_monotonic(self, two_kbs, env):
+        """端到端:跨两库 + 证据不足补检,上屏 stage 按步骤表严格单调。"""
+        llm = _SufficiencyLLM(sufficient=False, better="甲和乙的职务是什么")
+        llm.query_result = {"entities": ["甲", "乙"], "keywords": [], "hop": 1}
+        env.app_state.llm_client = llm
+        out = []
+        on_stage = make_monotonic_stage(lambda k, m: out.append(k))
+        kb_a, kb_b = two_kbs
+        retrieval.answer_question_multi(env.app_state, [kb_a, kb_b], "甲和乙在哪?",
+                                        on_stage=on_stage)
+        order = [s["key"] for s in _PIPELINE_STEPS]
+        idxs = [order.index(k) for k in out]
+        assert idxs == sorted(idxs), f"上屏 stage 必须单调,实际 {out}"
+        assert out.count("kb_search.intent") == 1   # 补检轮共享意图,不再重发
+        assert "kb_search.requery" in out           # 补检步骤真实点亮
+        assert out[-1] == "kb_search.answer"

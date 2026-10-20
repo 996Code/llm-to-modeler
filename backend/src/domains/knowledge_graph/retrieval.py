@@ -299,7 +299,8 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     seeds: List[Dict[str, Any]] = []
     subgraph = {"nodes": [], "edges": []}
     if terms:
-        _stage("kb_search.graph", f"图谱实体匹配({len(terms)} 个种子词)…")
+        _stage("kb_search.graph",
+               f"库「{kb.get('name')}」图谱实体匹配({len(terms)} 个种子词)…")
         _t0 = time.monotonic()
         _err = None
         try:
@@ -660,6 +661,18 @@ def _merge_retrieved(base: Dict[str, Any], extra: Dict[str, Any],
                          "edges": list(edges.values())}}
 
 
+def _merged_relation_types(kbs: List[Dict[str, Any]]) -> List[Any]:
+    """多库 relation_types 合并去重(保持传入顺序)——意图解析的共享口径。"""
+    rel_types, seen = [], set()
+    for kb in kbs:
+        for rt in (kb.get("schema") or {}).get("relation_types") or []:
+            name = rt.get("name") if isinstance(rt, dict) else str(rt)
+            if name and name not in seen:
+                seen.add(name)
+                rel_types.append(rt)
+    return rel_types
+
+
 def _requery_once(app_state, kbs, query: str, retrieved: Dict[str, Any],
                   conv_id: Optional[str], top_k: Optional[int],
                   _stage, doc_filter) -> Dict[str, Any]:
@@ -669,14 +682,21 @@ def _requery_once(app_state, kbs, query: str, retrieved: Dict[str, Any],
     那会白烧一次回答生成)。失败降级首轮结果。
     """
     from domains.knowledge_graph import runtime as _rt  # noqa: F401(口径引用)
+    _stage("kb_search.requery", "核查检索证据是否充分…")
     bq = _judge_evidence(app_state, kbs[0], query, retrieved, conv_id)
     if not bq:
         return retrieved
     _stage("kb_search.requery", f"证据不足,换角度补检:{bq[:30]}…")
     try:
+        # 补检意图一次解析、全库共享(与首轮同款硬约束):逐库重解析会
+        # 白烧 N 次 kg.query LLM(线上 3 库实测多耗 ~6.5s),且重发
+        # kb_search.intent 让前端进度条倒退
+        bq_intent = parse_query_intent(
+            app_state, bq, _merged_relation_types(kbs), conv_id=conv_id)
         per_extra = [hybrid_retrieve(app_state, kb, bq, conv_id=conv_id,
                                      top_k=top_k, on_stage=_stage,
-                                     doc_filter=doc_filter) for kb in kbs]
+                                     intent=bq_intent, doc_filter=doc_filter)
+                     for kb in kbs]
         extra = per_extra[0]
         for r in per_extra[1:]:
             extra = _merge_retrieved(extra, r)
@@ -848,20 +868,13 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
 
     # ── 意图解析一次(所有库共享) ──
     _stage("kb_search.intent", "解析检索意图(实体/关键词/跳数)…")
-    _rel_types, _seen_rt = [], set()
-    for kb in kbs:
-        for rt in (kb.get("schema") or {}).get("relation_types") or []:
-            _name = rt.get("name") if isinstance(rt, dict) else str(rt)
-            if _name and _name not in _seen_rt:
-                _seen_rt.add(_name)
-                _rel_types.append(rt)
-    intent = parse_query_intent(app_state, query, _rel_types, conv_id=conv_id)
+    intent = parse_query_intent(
+        app_state, query, _merged_relation_types(kbs), conv_id=conv_id)
 
-    # ── 逐库检索(共享意图,图谱/向量各库独立) ──
+    # ── 逐库检索(共享意图,图谱/向量各库独立;graph 阶段由
+    # hybrid_retrieve 自带库名上报,不在此重复发) ──
     per_kb: List[Dict[str, Any]] = []
-    for i, kb in enumerate(kbs):
-        _stage("kb_search.graph",
-               f"({i + 1}/{len(kbs)}) 库「{kb.get('name')}」图谱实体匹配…")
+    for kb in kbs:
         per_kb.append(hybrid_retrieve(
             app_state, kb, query, conv_id=conv_id, top_k=top_k,
             on_stage=_stage, intent=intent, doc_filter=doc_filter))

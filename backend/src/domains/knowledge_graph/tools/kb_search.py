@@ -28,6 +28,47 @@ def _trace_invalidate(ctx) -> None:
               "warn", detail={"memoryEvent": "invalidate"})
 
 
+# ── 进度条步骤定义(前端 pipeline 前缀匹配推进) ──────────────
+# 顺序即时间顺序:fulltext 是图谱零命中的兜底(与 subgraph 互斥),
+# requery=证据核查/补检在检索后、重排前;证据充分或开关关闭时该步
+# 静默跳过(前端按 assemble 前缀直接跳进,与 rerank 同款无副作用)。
+_PIPELINE_STEPS = [
+    {"key": "kb_search.resolve", "label": "解析问题与知识库"},
+    {"key": "kb_search.intent", "label": "解析检索意图"},
+    {"key": "kb_search.graph", "label": "图谱实体匹配"},
+    {"key": "kb_search.subgraph", "label": "扩展关联子图"},
+    {"key": "kb_search.fulltext", "label": "全文兜底检索"},
+    {"key": "kb_search.vector", "label": "向量检索文档"},
+    {"key": "kb_search.requery", "label": "证据核查补检"},
+    {"key": "kb_search.rerank", "label": "重排检索片段"},
+    {"key": "kb_search.assemble", "label": "整理检索依据"},
+    {"key": "kb_search.answer", "label": "综合回答"},
+]
+
+
+def make_monotonic_stage(emit_fn):
+    """把 stage 上屏事件钳成"单行道":按 _PIPELINE_STEPS 顺序单调推进。
+
+    跨库检索逐库循环、证据补检轮会重发 graph→subgraph→vector→intent 等
+    回退 stage,前端进度条(线性步骤+前缀匹配)跟着来回倒跳;不在步骤表
+    的键更会让进度条整条清零(10-20 线上"执行链路不断跳"根因)。回退/
+    未知键不上屏——进度语义归工具层管,检索层保持如实打点。
+
+    emit_fn: 实际推送函数 (key, message)。
+    """
+    order = {s["key"]: i for i, s in enumerate(_PIPELINE_STEPS)}
+    shown = [0]
+
+    def _on_stage(key: str, message: str) -> None:
+        idx = order.get(key)
+        if idx is None or idx < shown[0]:
+            return
+        shown[0] = idx
+        emit_fn(key, message)
+
+    return _on_stage
+
+
 class KbSearchTool(Tool):
     """知识库检索问答。"""
 
@@ -78,27 +119,13 @@ class KbSearchTool(Tool):
 
         # ── pipeline 进度定义(前端分步进度条) ──
         # 与 CompositeTool.pipeline_definition 同一事件契约:工具开始时下发
-        # 步骤集,后续每个 stage 事件按 key 前缀匹配推进进度条。
-        # 步骤粒度对齐检索链路的真实阶段(retrieval.hybrid_retrieve 内部
-        # 逐段回调 on_stage):意图→图谱匹配→子图扩展→向量检索→组装→回答
-        ctx.emit("pipeline_definition", {
-            "tool": self.name,
-            "steps": [
-                {"key": "kb_search.resolve", "label": "解析问题与知识库"},
-                {"key": "kb_search.intent", "label": "解析检索意图"},
-                {"key": "kb_search.graph", "label": "图谱实体匹配"},
-                {"key": "kb_search.subgraph", "label": "扩展关联子图"},
-                {"key": "kb_search.vector", "label": "向量检索文档"},
-                # rerank 开关开启时才有该阶段事件;不开时进度条按前缀
-                # 匹配直接跳到 assemble,无副作用
-                {"key": "kb_search.rerank", "label": "重排检索片段"},
-                {"key": "kb_search.assemble", "label": "整理检索依据"},
-                {"key": "kb_search.answer", "label": "综合回答"},
-            ],
-        })
+        # 步骤集,后续每个 stage 事件经单调闸门后按 key 前缀推进进度条
+        ctx.emit("pipeline_definition", {"tool": self.name, "steps": _PIPELINE_STEPS})
         # 注意 message 必须位置传参:nodes.py 的 emit 按位置参数个数分发,
         # kwargs 里的 message 会被丢弃(表单工具同款约定)
-        ctx.emit("stage", "kb_search.resolve", "正在解析问题与选定知识库…")
+        _emit_stage = make_monotonic_stage(
+            lambda key, message: ctx.emit("stage", key, message))
+        _emit_stage("kb_search.resolve", "正在解析问题与选定知识库…")
 
         # ── 数据权限(嵌入模式:宿主传 user_id/角色才生效) ──
         # 角色走 pack_params.knowledge_graph.user_roles(宿主按请求透传,
@@ -254,10 +281,11 @@ class KbSearchTool(Tool):
                     doc_filter |= (extra if extra is not None else set())
 
         # ── 混合检索 + 回答 ──
-        # on_stage 把 retrieval 内部各阶段(意图/图谱/子图/向量/组装/回答)
-        # 透传成 SSE stage 事件,前端 pipeline 进度条逐步推进
+        # on_stage 把 retrieval 内部各阶段(意图/图谱/子图/全文兜底/向量/
+        # 补检/组装/回答)经单调闸门转成 SSE stage 事件——检索层如实打点,
+        # 上屏口径(进度条单行道)由这里的闸门保证
         def _on_stage(key: str, message: str) -> None:
-            ctx.emit("stage", key, message)
+            _emit_stage(key, message)
 
         try:
             if kb is not None:

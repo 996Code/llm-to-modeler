@@ -72,6 +72,52 @@ class TestJudgeEvidence:
                                    _retrieved(0.8), "c")) <= 120
 
 
+class TestRequerySharedIntent:
+    """补检意图一次解析、全库共享(此前逐库重烧 kg.query,线上 3 库白耗 ~6.5s)。"""
+
+    def test_多库意图只解析一次且共享(self, env, monkeypatch):
+        llm = _SufficiencyLLM(sufficient=False, better="换个角度的检索词")
+        env.app_state.llm_client = llm
+        counter = {"n": 0}
+        orig = llm.chat_json
+
+        def counting(messages, **kw):
+            if kw.get("stage") == "kg.query":
+                counter["n"] += 1
+            return orig(messages, **kw)
+
+        monkeypatch.setattr(llm, "chat_json", counting)
+        captured = []
+        monkeypatch.setattr(
+            retrieval, "hybrid_retrieve",
+            lambda state, kb, q, **kw: captured.append(kw) or _retrieved(0.5))
+        kbs = [{"id": "k1", "name": "库一", "schema": {"relation_types": []}},
+               {"id": "k2", "name": "库二", "schema": {"relation_types": []}}]
+        stages = []
+        retrieval._requery_once(env.app_state, kbs, "原问题", _retrieved(0.8),
+                                "c", None, lambda k, m: stages.append(k), None)
+        assert counter["n"] == 1, f"补检意图应只解析 1 次,实际 {counter['n']}"
+        assert len(captured) == 2
+        assert captured[0]["intent"] is captured[1]["intent"]  # 同一意图对象
+        # 补检轮 hybrid 不再各自触发意图解析(传了共享 intent)
+        assert all(kw.get("intent") is not None for kw in captured)
+
+    def test_核查阶段先于判定上报(self, env, monkeypatch):
+        """kb_search.requery 先报"核查证据"再报"换角度补检"(判定期也有反馈)。"""
+        env.app_state.llm_client = _SufficiencyLLM(sufficient=False, better="改写词")
+        monkeypatch.setattr(
+            retrieval, "hybrid_retrieve",
+            lambda state, kb, q, **kw: _retrieved(0.5))
+        stages = []
+        retrieval._requery_once(env.app_state, [{"id": "k", "name": "库",
+                                                 "schema": {}}], "q",
+                                _retrieved(0.8), "c", None,
+                                lambda k, m: stages.append((k, m)), None)
+        requery_msgs = [m for k, m in stages if k == "kb_search.requery"]
+        assert requery_msgs[0].startswith("核查")
+        assert requery_msgs[1].startswith("证据不足")
+
+
 class TestMergeRetrieved:
 
     def test_父块去重保留高分(self):
