@@ -98,15 +98,30 @@ def _recover_stale_importing(manager) -> bool:
         stale = store.recover_importing_docs(active_doc_ids)
         resubmit = {d["id"]: d["kbId"] for d in stale}
         # ② interrupted 任务(pending 期被打断,文档还是 uploaded 从未开跑):
-        #    不重提就永远没人导。历史中断一并重提——succeeded 文档会被
-        #    幂等跳过,failed 文档按 chunk checkpoint 只补剩余
+        #    不重提就永远没人导。历史中断行按文档当前状态分流——已 succeeded
+        #    的不重放(重放只是幂等空转,还会把任务中心刷满空记录),关闭并
+        #    标注"已由成功导入取代";待续跑的重新入队,旧行同步关闭防残留
         interrupted, _ = manager.store.list_tasks(
             status="interrupted", task_type="kg.import_document", limit=1000)
         for t in interrupted:
             p = t.get("payload") or {}
             doc_id, kb_id = str(p.get("doc_id") or ""), str(p.get("kb_id") or "")
-            if doc_id and kb_id and doc_id not in resubmit:
-                resubmit[doc_id] = kb_id
+            if not doc_id:
+                continue
+            doc = store.get_document(doc_id)
+            if doc is None:
+                note = "(文档已删除)"
+            elif doc.get("importStatus") == "succeeded":
+                note = "(已由成功导入取代)"
+            elif kb_id:
+                if doc_id not in resubmit:
+                    resubmit[doc_id] = kb_id
+                note = "(已重新入队续跑)"
+            else:
+                continue  # 文档在但缺 kb_id 的残行:留置待人工
+            manager.store.update_task(
+                t["id"], status="cancelled",
+                title=f"{t.get('title') or ''}{note}")
         resubmitted = 0
         for doc_id, kb_id in resubmit.items():
             try:
@@ -183,18 +198,13 @@ def _cfg(app_state, key: str, default):
     return runtime.settings_reader(app_state).get(key, default)
 
 
-def _ocr_engine_config(app_state) -> Tuple[str, str]:
-    """读 OCR 引擎设置(ocr_engine/ocr_model)。
+def _ocr_engine_config(app_state) -> str:
+    """读 OCR 引擎设置(ocr_engine:rapidocr 默认/llm)。
 
-    llm 未配 ocr_model 时抛 RuntimeError——设置页保存已被 required_when
-    拦截,这里是兜底(env 直配绕过 UI 时任务失败并明示,不静默)。
+    llm 模式用全局 LLM 模型(随 LLM_MODEL 环境变量/平台配置),不单独
+    配模型——中转站/网关换模型时 OCR 自动跟随。
     """
-    engine = str(_cfg(app_state, "ocr_engine", "rapidocr") or "rapidocr")
-    model = str(_cfg(app_state, "ocr_model", "") or "").strip()
-    if engine == "llm" and not model:
-        raise RuntimeError("大模型 OCR 已启用(ocr_engine=llm)但未配置"
-                           " ocr_model——请在插件设置中配置多模态模型(如 qwen3.7)")
-    return engine, model
+    return str(_cfg(app_state, "ocr_engine", "rapidocr") or "rapidocr")
 
 
 # LLM OCR 逐页提示词:多模态模型默认爱"描述图片",必须锁死逐字转录口径
@@ -205,11 +215,11 @@ _LLM_OCR_PROMPT = (
 )
 
 
-def _make_llm_page_ocr(app_state, model: str, conv_id: Optional[str]):
+def _make_llm_page_ocr(app_state, conv_id: Optional[str]):
     """构造 llm 引擎的页识别回调:PIL.Image → PNG base64 → 多模态 chat。
 
-    doc_parser 只认"图片进文本出"的回调(零领域知识),LLM 客户端/
-    模型名/提示词都归任务层;调用记 call_logs(stage=kg.ocr)可取证。
+    doc_parser 只认"图片进文本出"的回调(零领域知识),LLM 客户端/提示词
+    都归任务层;模型走全局配置(model=None),调用记 call_logs(stage=kg.ocr)。
     """
     import base64
 
@@ -223,7 +233,7 @@ def _make_llm_page_ocr(app_state, model: str, conv_id: Optional[str]):
                 {"type": "image_url",
                  "image_url": {"url": f"data:image/png;base64,{b64}"}},
             ]}],
-            temperature=0.0, conv_id=conv_id, stage="kg.ocr", model=model,
+            temperature=0.0, conv_id=conv_id, stage="kg.ocr",
         ).strip()
 
     return _page_ocr
@@ -360,12 +370,18 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                    pending=len(chunks) - done_n - failed_n)
     else:
         handle.set_progress(_W_PARSE, "解析文档")
-        # OCR 引擎按插件设置:rapidocr(默认,本地)/llm(多模态大模型,
-        # 逐页图片调用);未配模型时 _ocr_engine_config 直接抛错明示
-        ocr_engine, ocr_model = _ocr_engine_config(app_state)
+        # OCR 引擎按插件设置:rapidocr(默认,本地)/llm(全局多模态模型,
+        # 逐页图片调用;模型随 LLM_MODEL 配置,不单独设)
+        ocr_engine = _ocr_engine_config(app_state)
         page_ocr = None
         if ocr_engine == "llm":
-            page_ocr = _make_llm_page_ocr(app_state, ocr_model, conv_id)
+            page_ocr = _make_llm_page_ocr(app_state, conv_id)
+        # 引擎标签贯穿心跳与完成日志——逐页进度里就能看出当前用的哪个引擎
+        if ocr_engine == "llm":
+            _gm = getattr(getattr(app_state, "llm_client", None), "config", None)
+            ocr_label = f"OCR(llm:{getattr(_gm, 'model', '') or '全局模型'})"
+        else:
+            ocr_label = "OCR(rapidocr)"
         try:
             data = Path(doc["filePath"]).read_bytes() if doc["filePath"] else b""
             parse_stats: Dict[str, int] = {}
@@ -373,7 +389,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             def _ocr_progress(done: int, total: int) -> None:
                 # OCR 逐页心跳走任务日志:扫描件识别动辄分钟级,日志带时间戳
                 # 更显眼;进度条位置保持"解析文档"不被刷屏
-                handle.log(f"扫描页 OCR 识别中 {done}/{total} 页",
+                handle.log(f"扫描页 {ocr_label} 识别中 {done}/{total} 页",
                            ocr_done=done, ocr_total=total)
 
             text = parse_to_text(doc["filename"], data, stats=parse_stats,
@@ -385,14 +401,11 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             raise RuntimeError(f"文档解析失败: {e}")
         # 扫描页 OCR 情况让用户可见(任务中心日志;引擎随行——换引擎可感知)
         if parse_stats.get("ocrPages"):
-            _eng = parse_stats.get("ocrEngine") or "rapidocr"
-            if _eng == "llm":
-                _eng = f"llm:{ocr_model}"
             handle.log(f"检测到 {parse_stats['ocrPages']} 页无文字层(扫描件),"
-                       f"OCR({_eng}) 识别成功 {parse_stats['ocrFilled']} 页",
+                       f"{ocr_label} 识别成功 {parse_stats['ocrFilled']} 页",
                        ocr_pages=parse_stats["ocrPages"],
                        ocr_filled=parse_stats["ocrFilled"],
-                       ocr_engine=_eng)
+                       ocr_engine=ocr_label)
         handle.log(f"文档解析: {len(data)}B → {len(text)} 字符({doc['filename'].rsplit('.', 1)[-1]} 格式)",
                    raw_bytes=len(data), text_chars=len(text))
 

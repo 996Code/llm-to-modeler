@@ -333,11 +333,14 @@ def test_startup_auto_resumes_interrupted_imports(monkeypatch, env):
 
     monkeypatch.setattr(tasks, "_app_state", env.app_state)
     interrupted_tasks = [
-        {"payload": {"doc_id": doc2["id"], "kb_id": kb2["id"]}},
+        {"id": "t2", "title": "导入: y.md",
+         "payload": {"doc_id": doc2["id"], "kb_id": kb2["id"]}},
     ]
+    closed = []
     manager = SimpleNamespace(store=SimpleNamespace(
         list_tasks=lambda status, task_type, limit:
-            (interrupted_tasks, len(interrupted_tasks)) if status == "interrupted" else ([], 0)))
+            (interrupted_tasks, len(interrupted_tasks)) if status == "interrupted" else ([], 0),
+        update_task=lambda task_id, **fields: closed.append((task_id, fields)) or True))
     monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
     submitted = []
     monkeypatch.setattr(tasks, "submit_import",
@@ -348,6 +351,45 @@ def test_startup_auto_resumes_interrupted_imports(monkeypatch, env):
     # 两类都自动入队:importing 中断 + pending 期中断
     assert submitted == [(kb["id"], doc["id"]), (kb2["id"], doc2["id"])]
     assert env.store.get_document(doc["id"])["importStatus"] == "failed"  # 收敛语义不变
+    # 重新入队后旧 interrupted 行关闭标注,不再残留
+    assert closed and closed[0][0] == "t2"
+    assert closed[0][1]["status"] == "cancelled"
+    assert "已重新入队续跑" in closed[0][1]["title"]
+
+
+def test_startup_recovery_skips_succeeded_interrupted(monkeypatch, env):
+    """历史 interrupted 分流:文档已 succeeded → 不重放(防任务中心刷满幂等
+    空转记录),关闭标注"已由成功导入取代";文档已删 → 关闭"文档已删除"。"""
+    kb = env.store.create_kb("分流测试库")
+    done_doc = env.store.create_document(kb["id"], "done.md", "text/markdown",
+                                         3, "", "hash-superseded")
+    env.store.update_document(done_doc["id"], import_status="succeeded")
+
+    monkeypatch.setattr(tasks, "_app_state", env.app_state)
+    rows = [
+        {"id": "t-done", "title": "导入: done.md",
+         "payload": {"doc_id": done_doc["id"], "kb_id": kb["id"]}},
+        {"id": "t-gone", "title": "导入: gone.md",
+         "payload": {"doc_id": "not-exist-doc", "kb_id": kb["id"]}},
+    ]
+    closed = []
+    manager = SimpleNamespace(store=SimpleNamespace(
+        list_tasks=lambda status, task_type, limit:
+            (rows, len(rows)) if status == "interrupted" else ([], 0),
+        update_task=lambda task_id, **fields: closed.append((task_id, fields)) or True))
+    monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
+    submitted = []
+    monkeypatch.setattr(tasks, "submit_import",
+                        lambda state, kb_id, doc_id, force=False:
+                        submitted.append((kb_id, doc_id)) or {"id": "t1"})
+
+    assert tasks._recover_stale_importing(manager) is True
+    assert submitted == []  # 已成功的文档不重放(旧行为会幂等空转刷记录)
+    by_id = {tid: fields for tid, fields in closed}
+    assert by_id["t-done"]["status"] == "cancelled"
+    assert "已由成功导入取代" in by_id["t-done"]["title"]
+    assert by_id["t-gone"]["status"] == "cancelled"
+    assert "文档已删除" in by_id["t-gone"]["title"]
 
 
 def test_pack_reenable_runs_startup_recovery_again(monkeypatch):

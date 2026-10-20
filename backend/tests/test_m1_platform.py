@@ -112,20 +112,23 @@ class TestPackSettings:
         errs = check_conditional_required(schema, {"engine": "llm", "model": ""})
         assert errs and errs[0]["field"] == "model" and "必填" in errs[0]["message"]
 
-    def test_conditional_required_partial_save_merge(self, settings_store):
-        """部分保存的合并生效值:本次只改触发键,目标键早已存好 → 不误拦。"""
-        from services.pack_settings import read_settings_schema
-        schema = read_settings_schema("knowledge_graph")
-        assert schema is not None
-        # 已存 ocr_model,本次只保存 ocr_engine=llm
-        saved = {**{"ocr_model": "qwen3.7"}, **{"ocr_engine": "llm"}}
-        effective = resolve_all("knowledge_graph", saved=saved, schema=schema)
+    def test_conditional_required_partial_save_merge(self):
+        """部分保存的合并生效值:本次只改触发键,目标键早已存好 → 不误拦
+        (校验入口按"已存值+本次提交"合并后判定;此处直接喂合并结果)。"""
+        schema = {"groups": [{"key": "g", "title": "t", "fields": [
+            {"key": "engine", "type": "enum", "options": ["local", "llm"],
+             "default": "local"},
+            {"key": "model", "type": "string", "label": "模型",
+             "required_when": {"key": "engine", "equals": "llm"}},
+        ]}]}
+        # 已存 model,本次只改 engine=llm → 合并生效值齐全,不拦
+        effective = resolve_all("x", saved={"engine": "llm", "model": "qwen"},
+                                schema=schema)
         assert check_conditional_required(schema, effective) == []
         # 目标键从未配置 → 拦下
-        effective = resolve_all("knowledge_graph",
-                                saved={"ocr_engine": "llm"}, schema=schema)
+        effective = resolve_all("x", saved={"engine": "llm"}, schema=schema)
         errs = check_conditional_required(schema, effective)
-        assert errs and errs[0]["field"] == "ocr_model"
+        assert errs and errs[0]["field"] == "model"
 
     def test_mask_secrets(self):
         schema = {"groups": [{"key": "g", "title": "t", "fields": [

@@ -156,14 +156,7 @@ groups:
         options: [rapidocr, llm]
         default: rapidocr
         env: KG_OCR_ENGINE
-        help: PDF 无文字层页的识别引擎;llm = 逐页图片走全局网关多模态模型(耗时/费用高于本地 rapidocr)
-      - key: ocr_model
-        type: string
-        label: 大模型 OCR 模型
-        env: KG_OCR_MODEL
-        placeholder: 如 qwen3.7(多模态)
-        required_when: {key: ocr_engine, equals: llm}
-        help: 仅引擎=llm 时必填;须为支持图片输入的多模态模型,开发环境用 qwen3.7
+        help: PDF 无文字层页的识别引擎;llm = 逐页图片走全局 LLM 网关的多模态模型(随 LLM_MODEL 环境变量),识别更全但耗时/费用高于本地 rapidocr
 
   - key: retrieval
     title: 检索与问答
