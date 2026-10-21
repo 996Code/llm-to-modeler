@@ -114,6 +114,13 @@ async def lifespan(app: FastAPI):
     from services.platform_settings import PlatformSettingsStore
     app.state.platform_settings_store = PlatformSettingsStore(database_url=database_url)
 
+    # 外部 MCP server 注册表 + SDK server 装载器接线(依赖倒置)
+    from services.mcp_registry import McpServerStore
+    from sdk.mcp_client import register_server_loader
+    mcp_store = McpServerStore(database_url=database_url)
+    app.state.mcp_server_store = mcp_store
+    register_server_loader(lambda code: mcp_store.get_by_code(code))
+
     # 通用后台任务框架(任务表/日志表 + 线程池调度;handler 由 pack 注册)
     from services.task_store import TaskStore
     from services.task_manager import TaskManager

@@ -24,12 +24,18 @@
   PUT    /api/admin/settings/display          → 保存显示设置(部分更新;用户级只读端点共读)
   GET    /api/admin/settings/mcp              → MCP 接入设置状态(不回显 key 明文,只报 configured)
   PUT    /api/admin/settings/mcp              → 保存 MCP API Key(全局单 key;清空即停用对外 MCP 端点)
+  GET    /api/admin/mcp/servers               → 外部 MCP server 注册表(含 status/tools_snapshot)
+  POST   /api/admin/mcp/servers               → 注册外部 server(注册即探测;失败 pending 不阻塞)
+  PUT    /api/admin/mcp/servers/{id}          → 改配置(改完重探测)
+  DELETE /api/admin/mcp/servers/{id}          → 删除注册
+  POST   /api/admin/mcp/servers/{id}/refresh  → 手动重探测(回写 status+tools_snapshot)
 
 【热切换链路】
 enable/disable → PackState.set_enabled(落盘 data/pack_state.json)
               → pack_manager.assemble_packs(重新加载 + nodes.configure + 换 app.state)
 新请求立即生效,无需重启;重启后 PackState 从状态文件还原。
 """
+import asyncio
 import logging
 import os
 import secrets
@@ -135,6 +141,73 @@ async def put_mcp(request: Request, _: None = Depends(require_admin)):
     if errors:
         raise HTTPException(422, errors)
     return {"configured": bool(merged["api_key"])}
+
+
+# ── 外部 MCP server 注册表(mcp_servers CRUD + 探测) ────────────
+
+def _mcp_store(request: Request):
+    from services.mcp_registry import McpServerStore
+    store = getattr(request.app.state, "mcp_server_store", None)
+    if store is None:
+        store = McpServerStore()
+        request.app.state.mcp_server_store = store
+    return store
+
+
+@router.get("/mcp/servers")
+async def list_mcp_servers(request: Request, _: None = Depends(require_admin)):
+    return _mcp_store(request).list_servers()
+
+
+@router.post("/mcp/servers")
+async def create_mcp_server(request: Request, _: None = Depends(require_admin)):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "请求体必须是 JSON")
+    try:
+        # to_thread:探测(list_remote_tools→asyncio.run)不能在本 loop 线程跑,
+        # 且网络 IO(默认可达 30s)不该卡死网关事件循环
+        return await asyncio.to_thread(
+            _mcp_store(request).create_server,
+            name=str(payload.get("name") or "").strip(),
+            code=str(payload.get("code") or "").strip(),
+            url=str(payload.get("url") or "").strip(),
+            headers=payload.get("headers") or {},
+            timeout=float(payload.get("timeout") or 30),
+            read_timeout=float(payload.get("read_timeout") or 300))
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@router.put("/mcp/servers/{sid}")
+async def update_mcp_server(sid: str, request: Request,
+                            _: None = Depends(require_admin)):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "请求体必须是 JSON")
+    try:
+        return await asyncio.to_thread(
+            _mcp_store(request).update_server, sid, **payload)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.delete("/mcp/servers/{sid}")
+async def delete_mcp_server(sid: str, request: Request,
+                            _: None = Depends(require_admin)):
+    _mcp_store(request).delete_server(sid)
+    return {"ok": True}
+
+
+@router.post("/mcp/servers/{sid}/refresh")
+async def refresh_mcp_server(sid: str, request: Request,
+                             _: None = Depends(require_admin)):
+    try:
+        return await asyncio.to_thread(_mcp_store(request).apply_probe, sid)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 # ── 概览统计 ──────────────────────────────────────────────────
