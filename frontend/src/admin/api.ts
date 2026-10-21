@@ -956,6 +956,78 @@ export async function kgRetrieveTest(
   return data
 }
 
+// ── MCP 服务管理(注册外部 MCP server + 对外接入 key) ─────────
+
+/** 外部 MCP server 注册行(与 GET /api/admin/mcp/servers 契约对齐)。 */
+export interface McpTool {
+  name: string
+  description: string
+}
+
+export interface McpServer {
+  id: string
+  name: string
+  /** 插件引用标识(小写字母/数字/-/_) */
+  code: string
+  url: string
+  headers: Record<string, string>
+  timeout: number
+  read_timeout: number
+  status: 'connected' | 'pending'
+  tools_snapshot: McpTool[]
+  created_at: string
+  updated_at?: string
+}
+
+/** 新增/编辑提交体(编辑不改 code)。 */
+export interface McpServerBody {
+  name: string
+  code?: string
+  url: string
+  headers: Record<string, string>
+  timeout: number
+  read_timeout: number
+}
+
+export async function listMcpServers(): Promise<McpServer[]> {
+  const { data } = await adminApi.get('/mcp/servers')
+  return data
+}
+
+/** 注册(注册即探测;失败 pending 不阻塞,如实返回)。 */
+export async function createMcpServer(body: McpServerBody): Promise<McpServer> {
+  const { data } = await adminApi.post('/mcp/servers', body)
+  return data
+}
+
+/** 改配置(改完重探测)。 */
+export async function updateMcpServer(id: string, body: Omit<McpServerBody, 'code'>): Promise<McpServer> {
+  const { data } = await adminApi.put(`/mcp/servers/${id}`, body)
+  return data
+}
+
+export async function deleteMcpServer(id: string): Promise<void> {
+  await adminApi.delete(`/mcp/servers/${id}`)
+}
+
+/** 手动重探测(回写 status + tools_snapshot)。 */
+export async function refreshMcpServer(id: string): Promise<McpServer> {
+  const { data } = await adminApi.post(`/mcp/servers/${id}/refresh`)
+  return data
+}
+
+/** 对外接入 key 状态(不回显明文,只报 configured)。 */
+export async function fetchMcpKeyStatus(): Promise<{ configured: boolean }> {
+  const { data } = await adminApi.get('/settings/mcp')
+  return data
+}
+
+/** 保存/清空 MCP API Key(清空即停用对外 MCP 端点)。 */
+export async function saveMcpKey(apiKey: string): Promise<{ configured: boolean }> {
+  const { data } = await adminApi.put('/settings/mcp', { api_key: apiKey })
+  return data
+}
+
 // ── 小工具 ────────────────────────────────────────────────
 
 /** ISO 时间戳 → 本地可读时间(列表展示用)。 */
