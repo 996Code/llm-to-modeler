@@ -929,8 +929,12 @@ class AskDataTool(CompositeTool):
             state.pop("show_as_is", None)
             return
         # 场景③ resume 自由输入: 作为修正方向 heal 一次(带用户描述)
+        # mcp 守卫: state["sql"] 是工具调用 JSON, heal_sql(SQL 修正器)吃
+        # JSON 必产废 SQL → execute_readonly(mcp) 未捕获 ValueError 炸管线
+        # ——mcp 跳过修正, 原结果直接进 check(异常则走 ask 澄清)。
+        is_mcp = state["ds"].db_type == "mcp"
         adjust_hint = state.pop("adjust_hint", None)
-        if adjust_hint:
+        if adjust_hint and not is_mcp:
             ctx.emit("stage", "check_result", "按您的描述调整查询...")
             llm0 = self._get_llm(ctx)
             heal0 = heal_sql(llm0, state["sql"], adjust_hint,
@@ -955,8 +959,11 @@ class AskDataTool(CompositeTool):
             return
 
         # 结果异常 → 先自动修正(suggestion 作纠正方向, 占自愈配额, AEE-003)
+        # mcp 守卫: 同 adjust_hint——heal_sql/execute_readonly 均不适用
+        # 工具调用 JSON, mcp 直接走 ask 澄清(用户重问/按原样展示)。
         heal_rounds = int(state.get("heal_rounds", 0))
-        if check.suggestion and heal_rounds < max_rounds:
+        if (check.suggestion and heal_rounds < max_rounds
+                and not is_mcp):
             heal_rounds += 1  # 先占配额(与 SQL 自愈循环一致)
             ctx.emit("stage", "check_result", f"结果异常({check.issue.value}), 自动修正中...")
             llm = self._get_llm(ctx)

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from sdk.tool import Tool, ToolResult, ToolContext
@@ -55,17 +56,6 @@ class SwitchChartTool(Tool):
                               error_for_llm="没有可切换的历史查询",
                               summary="本会话还没有查询结果, 请先提问再切换图表")
 
-        # SEC S7 (对标 agent.py CHART_MODIFY): prev_sql 来自持久化状态,
-        # 必须重新校验——即使上轮已校验, 语义层/白名单可能已变更, 且
-        # 持久化数据可能被篡改。空白名单 = 只做 AST 层校验(与源一致)。
-        from domains.chatbi.security.sql_validator import validate_sql
-        revalidation = validate_sql(prev_sql, allowed_columns=set())
-        if not revalidation.ok:
-            logger.warning("switch_chart: prev_sql 校验失败: %s", revalidation.reason)
-            return ToolResult(artifact_type="data",
-                              error_for_llm="上轮 SQL 已不再合规, 请重新提问",
-                              summary="上轮 SQL 校验未通过, 请重新提问, 我会生成新的查询。")
-
         ds_id = sess.get("datasource_id") if sess else None
         db = self._db or _lazy_db()
         # D6 错误契约信封试点:数据源密码解密失败是凭据/配置类错误
@@ -80,15 +70,46 @@ class SwitchChartTool(Tool):
             raise
         settings = self._settings or _lazy_settings(ctx)
 
-        ctx.emit("stage", "switch_chart", "正在重跑查询并切换图表...")
-        result = datasources.execute_readonly(
-            ds, prev_sql,
-            max_rows=int(settings.get("sql_max_rows", 10000)),
-            timeout_seconds=int(settings.get("sql_execution_timeout", 30)))
-        if not result.ok:
-            return ToolResult(artifact_type="data",
-                              error_for_llm=f"重跑查询失败: {result.error}",
-                              summary="切换图表失败: 查询执行失败")
+        # ── mcp 分支: prev_sql 是工具调用 JSON(与 ask_data state["sql"]
+        # 双语义同源)——sqlglot 校验必失败, 重放走 execute_mcp_tool。
+        # SQL 路径零改动(校验/执行同原逻辑)。
+        if ds.db_type == "mcp":
+            try:
+                tool_call = json.loads(prev_sql)
+            except (ValueError, TypeError):
+                logger.warning("switch_chart: mcp prev_sql 非合法工具调用 JSON")
+                return ToolResult(artifact_type="data",
+                                  error_for_llm="上轮查询已损坏, 请重新提问",
+                                  summary="上轮工具调用已损坏, 请重新提问, 我会生成新的查询。")
+            ctx.emit("stage", "switch_chart", "正在重跑查询并切换图表...")
+            result = datasources.execute_mcp_tool(
+                ds, tool_call,
+                max_rows=int(settings.get("sql_max_rows", 10000)))
+            if not result.ok:
+                return ToolResult(artifact_type="data",
+                                  error_for_llm=f"重跑查询失败: {result.error}",
+                                  summary="切换图表失败: 查询执行失败")
+        else:
+            # SEC S7 (对标 agent.py CHART_MODIFY): prev_sql 来自持久化状态,
+            # 必须重新校验——即使上轮已校验, 语义层/白名单可能已变更, 且
+            # 持久化数据可能被篡改。空白名单 = 只做 AST 层校验(与源一致)。
+            from domains.chatbi.security.sql_validator import validate_sql
+            revalidation = validate_sql(prev_sql, allowed_columns=set())
+            if not revalidation.ok:
+                logger.warning("switch_chart: prev_sql 校验失败: %s", revalidation.reason)
+                return ToolResult(artifact_type="data",
+                                  error_for_llm="上轮 SQL 已不再合规, 请重新提问",
+                                  summary="上轮 SQL 校验未通过, 请重新提问, 我会生成新的查询。")
+
+            ctx.emit("stage", "switch_chart", "正在重跑查询并切换图表...")
+            result = datasources.execute_readonly(
+                ds, prev_sql,
+                max_rows=int(settings.get("sql_max_rows", 10000)),
+                timeout_seconds=int(settings.get("sql_execution_timeout", 30)))
+            if not result.ok:
+                return ToolResult(artifact_type="data",
+                                  error_for_llm=f"重跑查询失败: {result.error}",
+                                  summary="切换图表失败: 查询执行失败")
 
         prev_config = (sess.get("prev_chart_config") if sess else None) or {}
         wanted = _guess_chart_type(state.get("user_input", "")) or "bar"
