@@ -309,7 +309,9 @@ async function create() {
     const body = form.db_type === 'mcp'
       ? { name: form.name.trim(), db_type: 'mcp', host: form.mcp_server,
           database: form.mcp_tool.trim(), port: 0, username: '', password: '' }
-      : { ...form }
+      : { name: form.name.trim(), db_type: form.db_type, host: form.host.trim(),
+          port: form.port, database: form.database.trim(),
+          username: form.username, password: form.password }
     await chatbiApi.post('/datasources', body)
     message.success('数据源已创建')
     showCreate.value = false
