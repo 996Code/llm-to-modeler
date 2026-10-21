@@ -82,12 +82,13 @@ def _now() -> str:
 
 
 def normalize_name(name: str) -> str:
-    """实体名归一化:去首尾空白 + 全角转半角 + 统一小写 + **去内部空格**。
+    """实体名归一化:去首尾空白 + 全角转半角 + 统一小写 + 去内部空格 + 统一破折号。
 
     全角→半角覆盖 ASCII 区间(全角空格/字母/数字/标点),中文原样保留。
     去内部空格:标准号"JJF 1092-2002"(文档里的写法)与"JJF1092-2002"
-    (用户输入/文件名)是同一个东西——不去空格 find_entities 永远对不上
-    (实测 jjf1092-2002 ≠ jjf 1092-2002 导致图谱路零命中)。
+    (用户输入/文件名)是同一个东西——不去空格 find_entities 永远对不上。
+    统一破折号:文档里常用 em-dash(— U+2014)/en-dash(– U+2013),
+    用户输入用普通连字符(-)——归一化后须相等。
     """
     if not name:
         return ""
@@ -101,6 +102,8 @@ def normalize_name(name: str) -> str:
             out.append(chr(code - 0xFEE0))
         elif ch == " ":
             continue  # 半角空格也去掉(标准号/编号匹配)
+        elif ch in ("\u2014", "\u2013", "\u2012", "\u2015"):  # em/en dash 统一为 -
+            out.append("-")
         else:
             out.append(ch)
     return "".join(out).lower()
