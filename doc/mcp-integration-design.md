@@ -12,7 +12,7 @@
 
 ## 2. 第一部分：对外 MCP Server
 
-- 官方 `mcp` SDK（low-level `Server` + `StreamableHTTPSessionManager(stateless=True, json_response=True)`，RAGFlow 同款无状态模式）挂载 `/api/mcp`（依赖 `mcp>=1.28,<1.29` 已在 requirements）。
+- 官方 `mcp` SDK（low-level `Server` + `StreamableHTTPSessionManager(stateless=True, json_response=True)`，RAGFlow 同款无状态模式）挂载 `/api/mcp`（依赖 `mcp>=1.28,<1.29` 已在 requirements）。对外访问统一走项目前缀网关：`http://<host>/ai-modeler/api/mcp`（网关剥前缀转后端，与前端/开放 API 同约定；管理页面板按当前 origin 动态展示）。
 - **鉴权：全局单 key**。platform_settings 配一个 `mcp_api_key`（管理端设置页可改），请求头 `X-Api-Key` 校验，不匹配 401。不搞 key 表/签发/吊销——内网够用。
 - **工具面：声明制自动生成**。pack 的 `config.yaml` 加 `mcp_tools:` 列表声明对外暴露哪些工具（默认不暴露）。转换器把内部 Tool（name/description/input_schema）自动转成 MCP 工具，零手写。
 - `kb_search` 描述里动态拼上知识库清单（外部 AI 一次 tools/list 就知道有哪些库）。

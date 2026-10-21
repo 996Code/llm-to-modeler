@@ -11,7 +11,7 @@
             <div class="pk-help-title"><ApiOutlined /> 注册的外部 MCP server 供插件引用</div>
             <div class="pk-help-body">
               注册即探测:连接成功保存工具快照,失败标记"待连接"不阻塞。
-              对外接入 key 配好后,外部 AI 工具可经 <code>/api/mcp</code> 调用本平台工具;清空 key 即停用该端点。
+              对外接入 key 配好后,外部 AI 工具可经 <code>{{ mcpEndpoint }}</code> 调用本平台工具;清空 key 即停用该端点。
             </div>
           </div>
         </template>
@@ -22,7 +22,7 @@
     </div>
 
     <div class="mcp-key-row">
-      <span class="mcp-key-label">对外接入(外部 AI 工具连 <code>/api/mcp</code>)</span>
+      <span class="mcp-key-label">对外接入(外部 AI 工具连 <code>{{ mcpEndpoint }}</code>)</span>
       <a-tag :color="keyConfigured ? 'green' : 'red'">
         {{ keyConfigured ? '已启用' : '未配置 Key' }}
       </a-tag>
@@ -142,6 +142,8 @@ const loadSafely = inject<LoadSafely>('loadSafely')!
 const servers = ref<McpServer[]>([])
 const loading = ref(false)
 const keyConfigured = ref(false)
+// 对外端点带项目前缀(网关剥前缀转后端 /api/mcp;vite base 与生产 nginx 同约定)
+const mcpEndpoint = `${window.location.origin}/ai-modeler/api/mcp`
 const apiKeyInput = ref('')
 const savingKey = ref(false)
 const open = ref(false)
