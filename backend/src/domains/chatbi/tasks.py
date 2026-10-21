@@ -746,6 +746,54 @@ class IndexRebuildDegraded(RuntimeError):
     """
 
 
+def _scan_mcp_datasource(handle, db, info, ds_id, lease, progress) -> dict:
+    """mcp 数据源扫描分支(工具=表/参数=列,设计从简)。
+
+    与关系库分支的差异: 无业务库可内省——list_tools 的工具清单即
+    "表结构";跳过 _connect_business/内省/LLM 富化/指标推断/示例
+    问题/向量索引重建(工具描述由 server 提供,无注释可补;检索走
+    全表降级路径)。进度回写/租约 fencing/CAS 落库复用既有机制。
+    隔离性: sdk.mcp_client 用模块引用形式(惰性 import,monkeypatch
+    打在模块属性上才生效——datasources.check_health 同款)。
+    """
+    from domains.chatbi import datasources, semantic
+    from sdk import mcp_client
+
+    progress(20, "获取 MCP 工具清单")
+    tools = mcp_client.list_tools(info.host)
+    # 限定工具过滤(控制器裁决): info.database 非空(=tool_name)时只合成该工具
+    if info.database:
+        tools = [t for t in tools if t.get("name") == info.database]
+    progress(60, f"合成语义层({len(tools)} 个工具)")
+    content = semantic.synthesize_mcp_content(tools)
+    # 写前 fencing + CAS 落库(与关系库分支同机制;租约已互斥同数据源
+    # 的并发扫描/刷新,版本冲突只剩扫描期间的管理员手工编辑——如实
+    # 失败可重扫,不做重试)
+    if not lease.assert_owned():
+        from sdk.pack_api import PermanentTaskError
+        raise PermanentTaskError(
+            "扫描执行期租约被其他实例接管(本任务停滞超时)——中止落库")
+    _pre = semantic.load_content(db, ds_id)
+    _pre_version = _pre[1] if _pre and _pre[0] is not None else 0
+    _ok, version = lease.execute_if_owned(
+        lambda conn: semantic.save_content(
+            db, ds_id, content, source="scan",
+            expected_version=_pre_version, conn=conn))
+    if not _ok:
+        from sdk.pack_api import PermanentTaskError
+        raise PermanentTaskError(
+            "语义落库被事务级 fencing 拒绝(租约已失)——中止")
+    progress(90, "扫描完成")
+    datasources.update_datasource(
+        db, ds_id, scan_status="done", scan_progress=100,
+        scan_stage=f"完成: {len(content.models)} 个工具",
+        scanned_at=_now_iso())
+    handle.log(f"MCP 扫描完成: {len(content.models)} 个工具已入库 (语义 v{version})")
+    return {"models": len(content.models), "indexed": 0,
+            "ok": True, "index_rebuild": "skipped",
+            "datasource_id": ds_id}
+
+
 def _task_scan_datasource(handle, app_state=None) -> dict:
     """扫描任务入口。payload: {datasource_id, rescan: bool}。"""
     from domains.chatbi import runtime, semantic, datasources
@@ -787,6 +835,11 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
     datasources.update_datasource(db, ds_id, scan_status="scanning",
                                   scan_progress=0, scan_stage="开始扫描", scan_error="")
     try:
+        # mcp 分支: 工具清单即"表结构"——list_tools → 合成 → 落库,
+        # 跳过 _connect_business/内省/LLM 富化/索引重建(设计从简)
+        if info.db_type == "mcp":
+            return _scan_mcp_datasource(handle, db, info, ds_id,
+                                        lease, progress)
         # 十三审 7.1 P0: scan 加 CAS——persist=False + 外层 save 传 expected_version
         # (此前 persist=True 内部 save 不带 expected, 后台扫描可静默覆盖管理员编辑)
         from domains.chatbi.graph_infer import VersionConflictError
@@ -1048,6 +1101,13 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
         # 的既有教训: 不解密直连必失败(fe_sendauth: no password supplied)。
         # 此前定时刷新自迁移以来一直在任务层静默失败(脚本验证绕过了本层)。
         info = datasources.get_datasource(db, row.id, decrypt=True) or row
+        # mcp: 无业务库可结构内省——自动刷新对 mcp 无意义(工具清单由
+        # server 提供, 变化靠手动重扫);不跳过会每轮必报
+        # "不支持的数据库类型: mcp" 假失败
+        if info.db_type == "mcp":
+            results.append({"datasource_id": info.id, "ok": True,
+                            "skipped": "mcp_manual_rescan_only"})
+            continue
         write_lease = RunLease(db, f"run:semantic_write:{info.id}",
                                holder=f"task:{handle.task_id}", ttl_seconds=900)
         if not write_lease.acquire():

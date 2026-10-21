@@ -344,6 +344,49 @@ def _build_content(introspected: dict) -> SemanticModelContent:
     return SemanticModelContent(version=1, models=models)
 
 
+# ── mcp 数据源合成(工具=表/参数=列;设计从简,不做 LLM 富化) ────────
+
+# JSON Schema 类型 → Column.data_type(不认识的默认 string)
+_MCP_TYPE_MAP = {
+    "string": "string", "integer": "integer", "number": "number",
+    "boolean": "boolean", "array": "array", "object": "object", "null": "null",
+}
+
+
+def synthesize_mcp_content(tools: list[dict]) -> SemanticModelContent:
+    """MCP 工具清单 → SemanticModelContent(工具=表/参数=列)。
+
+    mcp 数据源无业务库可内省——sdk.mcp_client.list_tools 返回的工具
+    清单即"表结构": 每工具一个 Model(name=display_name=工具名,
+    description=工具描述), columns=inputSchema.properties 逐项
+    (name=display_name=参数名, data_type=JSON Schema 类型映射)。
+    设计从简: 不做 LLM 富化/指标推断/示例问题(工具描述由 server
+    提供,无注释可补);source/confidence 沿用 _Inferred 默认。
+    """
+    models: list[Model] = []
+    for tool in tools or []:
+        schema = tool.get("inputSchema") or {}
+        columns = [
+            Column(
+                name=str(pname),
+                display_name=str(pname),
+                data_type=_MCP_TYPE_MAP.get(
+                    (prop or {}).get("type"), "string"),
+            )
+            for pname, prop in (schema.get("properties") or {}).items()
+        ]
+        models.append(Model(
+            name=tool.get("name") or "",
+            display_name=tool.get("name") or "",
+            description=tool.get("description") or None,
+            columns=columns,
+            relationships=[],
+            metrics=[],
+            calculated_fields=[],
+        ))
+    return SemanticModelContent(version=1, models=models)
+
+
 def _apply_foreign_keys(content: SemanticModelContent, foreign_keys: list) -> None:
     """外键 → Relationship(source=foreign_key, confidence=1.0, 基数 N:1)。
 
