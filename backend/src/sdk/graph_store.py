@@ -82,9 +82,12 @@ def _now() -> str:
 
 
 def normalize_name(name: str) -> str:
-    """实体名归一化:去首尾空白 + 全角转半角 + 统一小写(merge 锚点)。
+    """实体名归一化:去首尾空白 + 全角转半角 + 统一小写 + **去内部空格**。
 
     全角→半角覆盖 ASCII 区间(全角空格/字母/数字/标点),中文原样保留。
+    去内部空格:标准号"JJF 1092-2002"(文档里的写法)与"JJF1092-2002"
+    (用户输入/文件名)是同一个东西——不去空格 find_entities 永远对不上
+    (实测 jjf1092-2002 ≠ jjf 1092-2002 导致图谱路零命中)。
     """
     if not name:
         return ""
@@ -93,9 +96,11 @@ def normalize_name(name: str) -> str:
     for ch in s:
         code = ord(ch)
         if code == 0x3000:  # 全角空格
-            out.append(" ")
+            continue
         elif 0xFF01 <= code <= 0xFF5E:  # 全角 ASCII 区
             out.append(chr(code - 0xFEE0))
+        elif ch == " ":
+            continue  # 半角空格也去掉(标准号/编号匹配)
         else:
             out.append(ch)
     return "".join(out).lower()

@@ -27,9 +27,11 @@ class TestNormalizeName:
         assert normalize_name("") == ""
 
     def test_fullwidth(self):
-        # 全角字母/数字/空格 → 半角
+        # 全角字母/数字 → 半角;全角空格与半角空格都去掉(标准号匹配:
+        # "JJF 1092-2002" 与 "JJF1092-2002" 归一化后必须相等)
         assert normalize_name("Ｎｅｏ４ｊ") == "neo4j"
-        assert normalize_name("知识　图谱") == "知识 图谱"
+        assert normalize_name("知识　图谱") == "知识图谱"
+        assert normalize_name("JJF 1092-2002") == normalize_name("JJF1092-2002")
 
     def test_chinese_untouched(self):
         assert normalize_name("知识图谱插件") == "知识图谱插件"
