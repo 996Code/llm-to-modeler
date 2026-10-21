@@ -178,6 +178,14 @@ async def lifespan(app: FastAPI):
         app.state, sorted(pack_state.enabled_names()), app=app)
     finalize_assembly(app.state, _summary["_tx"])
 
+    # 对外 MCP server(无状态 Streamable HTTP;API Key 由管理端 platform_settings 配)
+    # mount 在 "/api" 前缀(子应用内路由 /mcp):Starlette Mount 的匹配正则带
+    # 尾斜杠要求,mount("/api/mcp") 会让无尾斜杠的 POST /api/mcp 进不了子应用
+    # (外层 307,官方 client 不跟随)——见 services/mcp_server.py 挂法说明
+    from services.mcp_server import build_mcp_asgi_app, startup_mcp, shutdown_mcp
+    app.mount("/api", build_mcp_asgi_app(app.state))
+    await startup_mcp(app)
+
     # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）
     # build_graph 装配节点（classify_intent/execute_tool/handle_result）并编译
     # msgpack 反序列化白名单：从各 pack manifest 的 domain.msgpack_classes
@@ -222,6 +230,11 @@ async def lifespan(app: FastAPI):
         task_manager.close()  # 关闭后台任务线程池(在跑任务下次启动标 interrupted)
     except Exception:
         logger.warning("task manager close failed", exc_info=True)
+    # 停 MCP session manager(退出其任务组;与 startup 对称,失败不阻断后续收尾)
+    try:
+        await shutdown_mcp()
+    except Exception:
+        logger.warning("mcp shutdown failed", exc_info=True)
     # pack 卸载钩子:释放各插件自持的连接(Neo4j/向量库等)——与热切换
     # 禁用 pack 走同一个 unload() 契约
     try:

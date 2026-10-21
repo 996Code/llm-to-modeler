@@ -1,0 +1,180 @@
+"""对外 MCP server——内部 Tool 自动转 MCP 工具,无状态 Streamable HTTP。
+
+【链路】pack config.yaml 的 mcp_tools 声明(fail-closed 默认不暴露)
+→ iter_exposed_tools 过滤 registry → tool_to_mcp(name/description/
+input_schema 三件套直转)→ call_tool 里构造最小 state+ToolContext 执行
+(工具是同步的,asyncio.to_thread 跑;超时 60s)。
+
+工具可选实现 mcp_description(app_state) 钩子,动态丰富对外描述
+(如 kb_search 拼知识库清单)——缺省用 tool.description。
+"""
+import asyncio
+import hmac
+import json
+import logging
+from typing import Any, List
+
+import mcp.types as types
+from mcp.server.lowlevel import Server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Mount, Route
+
+from sdk.tool import Tool, ToolContext, ToolResult
+
+logger = logging.getLogger(__name__)
+
+TOOL_TIMEOUT_S = 60.0
+_session_manager: StreamableHTTPSessionManager | None = None
+# run() 返回的 async context manager 必须持有同一个实例:manager 的 run()
+# 有单次守卫(第二次调用直接 RuntimeError),shutdown 复用 startup 时
+# 进过的那个 cm 才能正确退出任务组——brief 原稿 shutdown 里再次 run()
+# 会触发 "can only be called once per instance"。
+_session_cm = None
+
+
+def iter_exposed_tools(app_state: Any) -> List[Tool]:
+    """按各 pack manifest 的 mcp_tools 声明收集要暴露的工具。"""
+    registry = getattr(app_state, "registry", None)
+    configs = getattr(app_state, "pack_configs", None) or {}
+    out: List[Tool] = []
+    for cfg in configs.values():
+        for name in (cfg or {}).get("mcp_tools") or []:
+            tool = registry.get(name) if registry else None
+            if tool is not None and tool not in out:
+                out.append(tool)
+    return out
+
+
+def tool_to_mcp(tool: Tool, app_state: Any) -> types.Tool:
+    desc = tool.description
+    enrich = getattr(tool, "mcp_description", None)
+    if callable(enrich):
+        try:
+            desc = enrich(app_state) or desc
+        except Exception:
+            logger.warning(f"mcp_description 失败,用默认描述: {tool.name}",
+                           exc_info=True)
+    return types.Tool(name=tool.name, description=desc,
+                      inputSchema=tool.input_schema())
+
+
+def _make_ctx(app_state: Any) -> ToolContext:
+    """无会话上下文:conversation/conv_id 为空 → trace 静默跳过(sdk/tool.py:131)。"""
+    return ToolContext(
+        llm_client=getattr(app_state, "llm_client", None),
+        asset_client=getattr(app_state, "asset_client", None),
+        conversation=None, emit=lambda *a, **k: None,
+        conv_id=None, registry=getattr(app_state, "registry", None),
+        session_state=None, user_id="mcp",
+    )
+
+
+def run_tool(app_state: Any, name: str, args: dict) -> dict:
+    """同步执行一个内部工具并转 MCP 结果 dict(error_for_llm 如实抛出)。"""
+    registry = getattr(app_state, "registry", None)
+    tool = registry.get(name) if registry else None
+    if tool is None:
+        raise RuntimeError(f"tool not found: {name}")
+    state = dict(args or {})
+    state.setdefault("pack_params", {})
+    err = tool.validate_input(state)
+    if err:
+        raise RuntimeError(f"输入校验失败: {err}")
+    result = tool.execute(state, _make_ctx(app_state))  # to_thread 外层包裹
+    if isinstance(result, ToolResult) and result.error_for_llm:
+        raise RuntimeError(result.error_for_llm)
+    return {"reply": result.reply, "summary": result.summary,
+            "artifact": result.artifact}
+
+
+def build_mcp_server(app_state: Any) -> Server:
+    server = Server("llm-modeler-mcp")
+
+    @server.list_tools()
+    async def _list() -> list[types.Tool]:
+        return [tool_to_mcp(t, app_state) for t in iter_exposed_tools(app_state)]
+
+    @server.call_tool()
+    async def _call(name: str, args: dict) -> list[types.TextContent]:
+        coro = asyncio.to_thread(run_tool, app_state, name, args)
+        result = await asyncio.wait_for(coro, timeout=TOOL_TIMEOUT_S)
+        return [types.TextContent(
+            type="text",
+            text=json.dumps(result, ensure_ascii=False, default=str))]
+
+    return server
+
+
+def build_mcp_asgi_app(app_state: Any) -> Starlette:
+    """无状态 entry:key 校验(fail-closed:未配置 503/错 key 401)后交 session manager。
+
+    路由形态(同 ragflow):子应用内 Route("/mcp")+Mount("/mcp"),由调用方
+    mount 在 "/api" 前缀下,对外 URL 即 /api/mcp。不能用 mount("/api/mcp")
+    +子 Route("/"):Starlette Mount 的匹配正则要求尾斜杠(^/api/mcp/.*$),
+    客户端 POST 恰好打 /api/mcp(无尾斜杠)时请求根本进不了子应用(外层
+    路由器 307 到带斜杠形式,官方 client 不跟随重定向);子侧补 Route("")
+    也不可行(Route 构造断言 path 必须以 / 开头)——mount 到 "/api" 让
+    无尾斜杠的 /api/mcp 在子应用里精确命中 Route("/mcp") 是唯一通路。
+    """
+    manager_holder: dict = {}
+
+    class Entry:
+        async def __call__(self, scope, receive, send):
+            request = Request(scope, receive)
+            from services.platform_settings import (
+                get_platform_settings_store, get_mcp_settings)
+            key = (request.headers.get("X-Api-Key") or "").strip()
+            expected = get_mcp_settings(
+                get_platform_settings_store(request))["api_key"]
+            if not expected:
+                resp = JSONResponse({"detail": "MCP 未启用:管理端未配置 MCP API Key"},
+                                    status_code=503)
+            elif not hmac.compare_digest(key, expected):
+                resp = JSONResponse({"detail": "MCP API Key 无效"}, status_code=401)
+            else:
+                resp = None
+            if resp is not None:
+                await resp(scope, receive, send)
+                return
+            await manager_holder["manager"].handle_request(scope, receive, send)
+
+    entry = Entry()
+    manager = StreamableHTTPSessionManager(
+        app=build_mcp_server(app_state), event_store=None,
+        json_response=True, stateless=True)
+    manager_holder["manager"] = manager
+    setattr(app_state, "_mcp_manager", manager)  # startup_mcp 从这里取
+    sub = Starlette(routes=[
+        Route("/mcp", endpoint=entry, methods=["GET", "POST", "DELETE"]),
+        Mount("/mcp", app=entry),
+    ])
+    # 子 Starlette 会在 scope 里覆盖 app=self,Entry 内 get_platform_settings_store
+    # 走 request.app.state——把网关的 app.state 透传给子应用,读到的才是
+    # lifespan 装配好的 platform_settings_store(而不是在子应用上再懒建一个)。
+    sub.state = app_state
+    return sub
+
+
+async def startup_mcp(app: Any) -> None:
+    """启动 session manager(main lifespan / 测试 fixture 各调一次;幂等)。"""
+    global _session_manager, _session_cm
+    if _session_manager is not None:
+        return
+    manager = getattr(app.state, "_mcp_manager", None)
+    if manager is None:
+        return
+    cm = manager.run()
+    await cm.__aenter__()
+    _session_manager = manager
+    _session_cm = cm
+
+
+async def shutdown_mcp() -> None:
+    global _session_manager, _session_cm
+    if _session_manager is not None:
+        await _session_cm.__aexit__(None, None, None)
+        _session_manager = None
+        _session_cm = None
