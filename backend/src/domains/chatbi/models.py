@@ -133,7 +133,9 @@ class DataSourceInfo:
     """数据源连接信息(datasource_to_url/引擎/健康检查/扫描的统一入参)。
 
     password 以 Fernet 密文存储(security.encrypt_password),运行时解密使用;
-    db_type: mysql | postgresql。
+    db_type: mysql | postgresql | mcp。
+    mcp 映射: host=MCP server code, database=tool_name(可空), port=0,
+    username/password 为空串(encrypted_password 直存空串,不经 Fernet)。
     """
     id: str = ""
     name: str = ""

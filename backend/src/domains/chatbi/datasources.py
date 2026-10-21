@@ -72,6 +72,10 @@ def decrypt_password(encrypted: str) -> str:
 
 # ── 注册表 CRUD(chatbi_data_sources) ─────────────────────────
 
+# mcp: host=server code, database=tool_name(可空), port=0, 密码空串直存
+_SUPPORTED_DB_TYPES = ("mysql", "postgresql", "mcp")
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -100,9 +104,17 @@ def _row_to_info(row: dict) -> DataSourceInfo:
 def create_datasource(db, name: str, db_type: str, host: str, port: int,
                       database: str, username: str, password: str,
                       is_active: bool = True) -> DataSourceInfo:
-    """新建数据源(密码 Fernet 加密落库;密文永不回传)。"""
-    if db_type not in ("mysql", "postgresql"):
+    """新建数据源(密码 Fernet 加密落库;密文永不回传)。
+
+    mcp 例外: 无凭据可加密, 密码空串直存空串(跳过 Fernet);
+    host 必填(=server code)。
+    """
+    if db_type not in _SUPPORTED_DB_TYPES:
         raise ValueError(f"不支持的数据库类型: {db_type}")
+    if db_type == "mcp" and not (host or "").strip():
+        raise ValueError("mcp 数据源 host 必填(=MCP server code)")
+    encrypted = ("" if (db_type == "mcp" and not password)
+                 else encrypt_password(password))
     ds_id = str(uuid.uuid4())
     now = _now()
     with db.connect() as conn:
@@ -112,7 +124,7 @@ def create_datasource(db, name: str, db_type: str, host: str, port: int,
                 encrypted_password, is_active, scan_status, scan_progress, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', 0, ?, ?)""",
             (ds_id, name, db_type, host, int(port), database, username,
-             encrypt_password(password), 1 if is_active else 0, now, now))
+             encrypted, 1 if is_active else 0, now, now))
     return get_datasource(db, ds_id, decrypt=True)
 
 
@@ -138,8 +150,20 @@ def list_datasources(db, active_only: bool = False) -> list:
     return [_row_to_info(dict(r)) for r in rows]
 
 
+def _current_db_type(db, ds_id: str) -> str:
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT db_type FROM chatbi_data_sources WHERE id = ?", (ds_id,)).fetchone()
+    return row["db_type"] if row else ""
+
+
 def update_datasource(db, ds_id: str, **fields) -> bool:
-    """更新可变字段。password 特殊处理:明文 → Fernet 加密;列名白名单防注入。"""
+    """更新可变字段。password 特殊处理:明文 → Fernet 加密;列名白名单防注入。
+
+    mcp 行密码空串直存空串(与 create 同契约);db_type 值同 create 白名单。
+    """
+    if "db_type" in fields and fields["db_type"] not in _SUPPORTED_DB_TYPES:
+        raise ValueError(f"不支持的数据库类型: {fields['db_type']}")
     allowed = {"name", "db_type", "host", "port", "database", "username",
                "is_active", "scan_status", "scan_progress", "scan_stage",
                "scan_error", "scanned_at"}
@@ -147,7 +171,10 @@ def update_datasource(db, ds_id: str, **fields) -> bool:
     for k, v in fields.items():
         if k == "password":
             cols.append("encrypted_password = ?")
-            params.append(encrypt_password(v))
+            if v == "" and (fields.get("db_type") or _current_db_type(db, ds_id)) == "mcp":
+                params.append("")  # mcp 无凭据: 空串直存
+            else:
+                params.append(encrypt_password(v))
         elif k in allowed:
             cols.append(f"{k} = ?")
             params.append(int(v) if k in ("port", "is_active", "scan_progress") else v)

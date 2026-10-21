@@ -92,12 +92,14 @@ def _info_to_dict(info) -> dict:
 
 class DatasourceCreate(BaseModel):
     name: str
-    db_type: str = "postgresql"       # mysql | postgresql
+    # mysql | postgresql | mcp(mcp: host=server code 必填,
+    # database=tool_name 可空, port=0, 凭据空串)
+    db_type: str = "postgresql"
     host: str
     port: int = 5432
-    database: str
-    username: str
-    password: str
+    database: str = ""
+    username: str = ""
+    password: str = ""
 
 
 class DatasourceUpdate(BaseModel):
