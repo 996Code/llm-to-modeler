@@ -68,9 +68,11 @@ async def _run_session(cfg, tool: Optional[str], args: Optional[dict]):
     timeout = float(cfg.get("timeout") or 30)
     read_timeout = float(cfg.get("read_timeout") or 300)
     if url.rstrip("/").endswith("/sse"):
+        # sse_client 产出 2 元组(read, write)——与 streamable 版的 3 元组不同,
+        # 无 get_session_id 回调(联动集成测试实测抓出)
         from mcp.client.sse import sse_client
         async with sse_client(url, headers=headers, timeout=timeout,
-                              sse_read_timeout=read_timeout) as (read, write, _):
+                              sse_read_timeout=read_timeout) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 return await _invoke(session, tool, args)
