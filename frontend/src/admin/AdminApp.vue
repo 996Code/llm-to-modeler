@@ -72,7 +72,6 @@
 
 <script setup lang="ts">
 import { computed, onMounted, provide, ref, shallowRef } from 'vue'
-import LLMFormModeler from '../embed'
 import { message } from 'ant-design-vue'
 import type { Component } from 'vue'
 import {
@@ -181,15 +180,6 @@ onMounted(async () => {
   try {
     displaySettings.value = await fetchDisplaySettings()
   } catch { /* 拉取失败保持默认值;面板开关仍可切(切时再落库) */ }
-  // 嵌入模式挂对话窗口:管理端右下角浮窗直接对话测试(同源 iframe,
-  // 走 embed SDK 契约——与外部宿主集成同一条链路,顺带验证嵌入能力)
-  new LLMFormModeler({
-    baseUrl: (import.meta.env.BASE_URL || '/').replace(/\/$/, ''),
-    userId: 'admin',
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem('auth_token') || ''}`,
-    },
-  })
 })
 </script>
 
