@@ -206,8 +206,8 @@ class EchoTool(Tool):
         return ToolResult(reply=f"echo:{state['text']}", summary="ok")
 
 
-@pytest.fixture()
-def mcp_app():
+def _make_app() -> FastAPI:
+    """装配最小网关 app(不启动 manager——401 类测试用不到它)。"""
     from services.platform_settings import PlatformSettingsStore
     save_mcp_settings(PlatformSettingsStore(), {"api_key": "sk-test"})
     app = FastAPI()
@@ -219,9 +219,7 @@ def mcp_app():
     app.state.asset_client = SimpleNamespace()
     from services import mcp_server
     app.mount("/api/mcp", mcp_server.build_mcp_asgi_app(app.state))
-    asyncio.run(mcp_server.startup_mcp(app))
-    yield app
-    asyncio.run(mcp_server.shutdown_mcp())
+    return app
 
 
 def _client_factory(app):
@@ -231,35 +229,48 @@ def _client_factory(app):
     return _f
 
 
-def test_full_roundtrip(mcp_app):
+def test_full_roundtrip():
+    """事件循环纪律:session manager 的 run() 与请求必须同 loop——
+    startup→交互→shutdown 全部包进同一个 asyncio.run。"""
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
+    from services import mcp_server
+    app = _make_app()
+
     async def run():
-        async with streamablehttp_client(
-                MCP_URL, headers={"X-Api-Key": "sk-test"},
-                httpx_client_factory=_client_factory(mcp_app)) as (r, w, _):
-            async with ClientSession(r, w) as s:
-                await s.initialize()
-                tools = await s.list_tools()
-                assert [t.name for t in tools.tools] == ["echo"]
-                assert "回声" in tools.tools[0].description
-                res = await s.call_tool("echo", {"text": "hi"})
-                assert not res.isError
+        await mcp_server.startup_mcp(app)
+        try:
+            async with streamablehttp_client(
+                    MCP_URL, headers={"X-Api-Key": "sk-test"},
+                    httpx_client_factory=_client_factory(app)) as (r, w, _):
+                async with ClientSession(r, w) as s:
+                    await s.initialize()
+                    tools = await s.list_tools()
+                    assert [t.name for t in tools.tools] == ["echo"]
+                    assert "回声" in tools.tools[0].description
+                    res = await s.call_tool("echo", {"text": "hi"})
+                    assert not res.isError
+        finally:
+            await mcp_server.shutdown_mcp()
+
     asyncio.run(run())
 
 
-def test_wrong_key_401(mcp_app):
-    r = httpx.post(MCP_URL, headers={"X-Api-Key": "bad"},
-                   json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                         "params": {"protocolVersion": "2025-06-18",
-                                    "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
-                   transport=httpx.ASGITransport(app=mcp_app))
+def _init_body():
+    return {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                       "clientInfo": {"name": "t", "version": "0"}}}
+
+
+def test_wrong_key_401():
+    r = httpx.post(MCP_URL, headers={"X-Api-Key": "bad"}, json=_init_body(),
+                   transport=httpx.ASGITransport(app=_make_app()))
     assert r.status_code == 401
 
 
-def test_no_key_401(mcp_app):
-    r = httpx.post(MCP_URL, json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
-                   transport=httpx.ASGITransport(app=mcp_app))
+def test_no_key_401():
+    r = httpx.post(MCP_URL, json=_init_body(),
+                   transport=httpx.ASGITransport(app=_make_app()))
     assert r.status_code == 401
 ```
 
@@ -609,47 +620,58 @@ class EchoTool(Tool):
 
 @pytest.fixture()
 def fake_external():
-    """进程内假外部 MCP server(Task 2 同款装配)。"""
+    """假外部 MCP server:真 uvicorn 线程(随机端口)。
+
+    走真网络而非 ASGITransport——sdk client 每次调用 asyncio.run 新建
+    loop,进程内 ASGI 会造成 manager 与请求跨 loop 断链;uvicorn 自带
+    独立 loop + lifespan(startup_mcp 在其内启动),天然隔离。"""
+    import threading
+    import time
+    from contextlib import asynccontextmanager
+    import uvicorn
     save_mcp_settings(PlatformSettingsStore(), {"api_key": "sk-ext"})
-    app = FastAPI()
-    app.state.platform_settings_store = PlatformSettingsStore()
-    app.state.registry = ToolRegistry()
-    app.state.registry.register(EchoTool())
-    app.state.pack_configs = {"demo": {"mcp_tools": ["echo"]}}
-    app.state.llm_client = SimpleNamespace()
-    app.state.asset_client = SimpleNamespace()
     from services import mcp_server
-    app.mount("/api/mcp", mcp_server.build_mcp_asgi_app(app.state))
-    asyncio.run(mcp_server.startup_mcp(app))
-    yield {"url": "http://ext/api/mcp",
+
+    @asynccontextmanager
+    async def _lsp(app):
+        await mcp_server.startup_mcp(app)
+        yield
+        await mcp_server.shutdown_mcp()
+
+    ext = FastAPI(lifespan=_lsp)
+    ext.state.platform_settings_store = PlatformSettingsStore()
+    ext.state.registry = ToolRegistry()
+    ext.state.registry.register(EchoTool())
+    ext.state.pack_configs = {"demo": {"mcp_tools": ["echo"]}}
+    ext.state.llm_client = SimpleNamespace()
+    ext.state.asset_client = SimpleNamespace()
+    ext.mount("/api/mcp", mcp_server.build_mcp_asgi_app(ext.state))
+
+    server = uvicorn.Server(uvicorn.Config(
+        ext, host="127.0.0.1", port=0, log_level="warning", lifespan="on"))
+    threading.Thread(target=server.run, daemon=True).start()
+    for _ in range(200):
+        if server.started:
+            break
+        time.sleep(0.05)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    yield {"url": f"http://127.0.0.1:{port}/api/mcp",
            "headers": {"X-Api-Key": "sk-ext"},
-           "timeout": 5.0, "read_timeout": 10.0}, app
-    asyncio.run(mcp_server.shutdown_mcp())
+           "timeout": 5.0, "read_timeout": 10.0}
+    server.should_exit = True
 
 
-@pytest.fixture()
-def patched_factory(fake_external):
-    cfg, app = fake_external
+def test_list_and_call(fake_external):
     from sdk import mcp_client
-    def _f():
-        return httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://ext", timeout=5)
-    mcp_client._http_factory = _f
-    yield cfg
-    mcp_client._http_factory = None
-
-
-def test_list_and_call(patched_factory):
-    from sdk import mcp_client
-    tools = mcp_client.list_remote_tools(patched_factory)
+    tools = mcp_client.list_remote_tools(fake_external)
     assert [t["name"] for t in tools] == ["echo"]
     mcp_client.register_server_loader(
-        lambda code: patched_factory if code == "demo" else None)
+        lambda code: fake_external if code == "demo" else None)
     out = mcp_client.call_tool("demo", "echo", {"text": "hi"})
     assert out["reply"] == "echo:hi"
 
 
-def test_unknown_code_fails(patched_factory):
+def test_unknown_code_fails():
     from sdk import mcp_client
     mcp_client.register_server_loader(lambda code: None)
     with pytest.raises(Exception) as ei:
@@ -848,36 +870,56 @@ class EchoTool(Tool):
 
 
 @pytest.fixture()
-def client():
+def env():
+    """(TestClient, 外部 server URL):假外部 server 走真 uvicorn 线程
+    (Task 4 同款理由——探测的 asyncio.run 与网关 manager 不共 loop)。"""
+    import threading
+    import time
+    from contextlib import asynccontextmanager
+    import uvicorn
     save_mcp_settings(PlatformSettingsStore(), {"api_key": "sk-ext"})
-    ext = FastAPI()   # 进程内假外部 server
+    from services import mcp_server
+
+    @asynccontextmanager
+    async def _lsp(app):
+        await mcp_server.startup_mcp(app)
+        yield
+        await mcp_server.shutdown_mcp()
+
+    ext = FastAPI(lifespan=_lsp)
     ext.state.platform_settings_store = PlatformSettingsStore()
     ext.state.registry = ToolRegistry()
     ext.state.registry.register(EchoTool())
     ext.state.pack_configs = {"demo": {"mcp_tools": ["echo"]}}
     ext.state.llm_client = SimpleNamespace()
     ext.state.asset_client = SimpleNamespace()
-    from services import mcp_server
     ext.mount("/api/mcp", mcp_server.build_mcp_asgi_app(ext.state))
-    asyncio.run(mcp_server.startup_mcp(ext))
-    from sdk import mcp_client
-    mcp_client._http_factory = lambda: httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=ext), base_url="http://ext", timeout=5)
+
+    server = uvicorn.Server(uvicorn.Config(
+        ext, host="127.0.0.1", port=0, log_level="warning", lifespan="on"))
+    threading.Thread(target=server.run, daemon=True).start()
+    for _ in range(200):
+        if server.started:
+            break
+        time.sleep(0.05)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    url = f"http://127.0.0.1:{port}/api/mcp"
+
     app = FastAPI()
     from api.admin import router
     from services.mcp_registry import McpServerStore
     app.include_router(router)
     app.state.mcp_server_store = McpServerStore()
     with TestClient(app) as c:
-        yield c
-    mcp_client._http_factory = None
-    asyncio.run(mcp_server.shutdown_mcp())
+        yield c, url
+    server.should_exit = True
 
 
-def test_create_probe_and_list(client):
+def test_create_probe_and_list(env):
+    client, url = env
     r = client.post("/api/admin/mcp/servers", json={
         "name": "外部数据", "code": "ext_data",
-        "url": "http://ext/api/mcp", "headers": {"X-Api-Key": "sk-ext"}})
+        "url": url, "headers": {"X-Api-Key": "sk-ext"}})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["status"] == "connected"
@@ -885,25 +927,28 @@ def test_create_probe_and_list(client):
     assert [s["code"] for s in client.get("/api/admin/mcp/servers").json()] == ["ext_data"]
 
 
-def test_bad_url_pending(client):
+def test_bad_url_pending(env):
+    client, _ = env
     r = client.post("/api/admin/mcp/servers", json={
         "name": "坏的", "code": "bad", "url": "http://127.0.0.1:1/mcp", "headers": {}})
     assert r.status_code == 200
     assert r.json()["status"] == "pending"
 
 
-def test_code_unique(client):
+def test_code_unique(env):
+    client, _ = env
     client.post("/api/admin/mcp/servers",
-                json={"name": "a", "code": "dup", "url": "http://x/mcp", "headers": {}})
+                json={"name": "a", "code": "dup", "url": "http://127.0.0.1:1/mcp", "headers": {}})
     r = client.post("/api/admin/mcp/servers",
-                    json={"name": "b", "code": "dup", "url": "http://y/mcp", "headers": {}})
+                    json={"name": "b", "code": "dup", "url": "http://127.0.0.1:2/mcp", "headers": {}})
     assert r.status_code == 409
 
 
-def test_refresh_and_delete(client):
+def test_refresh_and_delete(env):
+    client, url = env
     sid = client.post("/api/admin/mcp/servers", json={
         "name": "外部数据", "code": "ext_data",
-        "url": "http://ext/api/mcp", "headers": {"X-Api-Key": "sk-ext"}}).json()["id"]
+        "url": url, "headers": {"X-Api-Key": "sk-ext"}}).json()["id"]
     assert client.post(f"/api/admin/mcp/servers/{sid}/refresh").status_code == 200
     assert client.delete(f"/api/admin/mcp/servers/{sid}").status_code == 200
     assert client.get("/api/admin/mcp/servers").json() == []
