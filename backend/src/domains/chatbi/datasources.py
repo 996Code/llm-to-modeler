@@ -338,7 +338,14 @@ def check_health(info: DataSourceInfo, timeout_seconds: int = 5) -> dict:
     started = time.monotonic()
     try:
         # 连接超时与探测超时共用(timeout_seconds 即探测预算)
-        if info.db_type == "postgresql":
+        if info.db_type == "mcp":
+            # mcp 探测: list_tools(server code) 成功即健康。
+            # 模块引用形式(非 from ... import 名字绑定)——测试 monkeypatch
+            # 打在 sdk.mcp_client 模块属性上, 名字绑定会让替换失效。
+            from sdk import mcp_client
+            tools = mcp_client.list_tools(info.host)
+            version = f"MCP {info.host}({len(tools)} tools)"
+        elif info.db_type == "postgresql":
             conn = _pg_connect(info, timeout_seconds,
                                connect_timeout=timeout_seconds)
             try:
@@ -360,8 +367,10 @@ def check_health(info: DataSourceInfo, timeout_seconds: int = 5) -> dict:
         return {"healthy": True, "latency_ms": int((time.monotonic() - started) * 1000),
                 "server_version": version}
     except Exception as e:
+        error = (f"MCP server {info.host} 探测失败: {_clean_db_error(e)}"
+                 if info.db_type == "mcp" else _clean_db_error(e))
         return {"healthy": False, "latency_ms": int((time.monotonic() - started) * 1000),
-                "error": _clean_db_error(e)}
+                "error": error}
 
 
 # ── 批量健康巡检(源 datasource_health.check_all_datasources_health 移植) ──
