@@ -22,6 +22,8 @@
   POST   /api/admin/packs/{name}/disable      → 禁用 pack(热生效;最后一个不可禁)
   GET    /api/admin/settings/display          → 平台级显示设置(链路/检索结果显示开关)
   PUT    /api/admin/settings/display          → 保存显示设置(部分更新;用户级只读端点共读)
+  GET    /api/admin/settings/mcp              → MCP 接入设置状态(不回显 key 明文,只报 configured)
+  PUT    /api/admin/settings/mcp              → 保存 MCP API Key(全局单 key;清空即停用对外 MCP 端点)
 
 【热切换链路】
 enable/disable → PackState.set_enabled(落盘 data/pack_state.json)
@@ -106,6 +108,33 @@ async def admin_put_display_settings(request: Request, payload: Dict[str, Any]):
         raise HTTPException(422, detail={"message": "显示设置校验失败", "errors": errors})
     logger.info(f"display settings saved: {merged.keys()}")
     return merged
+
+
+# ── 平台级 MCP 接入设置 ────────────────────────────────────────
+
+from services.platform_settings import (
+    get_platform_settings_store, get_mcp_settings, save_mcp_settings)
+
+
+@router.get("/settings/mcp")
+async def get_mcp(request: Request, _: None = Depends(require_admin)):
+    """MCP 接入设置状态(不回显 key 明文,只报是否已配置)。"""
+    store = get_platform_settings_store(request)  # 懒建,最小测试 app 也可用
+    return {"configured": bool(get_mcp_settings(store)["api_key"])}
+
+
+@router.put("/settings/mcp")
+async def put_mcp(request: Request, _: None = Depends(require_admin)):
+    """保存 MCP API Key(全局单 key;清空即停用对外 MCP 端点)。"""
+    store = get_platform_settings_store(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(400, "请求体必须是 JSON")
+    merged, errors = save_mcp_settings(store, payload or {})
+    if errors:
+        raise HTTPException(422, errors)
+    return {"configured": bool(merged["api_key"])}
 
 
 # ── 概览统计 ──────────────────────────────────────────────────

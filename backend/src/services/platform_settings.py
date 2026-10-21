@@ -3,8 +3,9 @@
 【模块定位】
 平台自身(非插件)的少量全局配置数据层。与管理端"插件设置"
 (services/pack_settings.py,pack 级)区分:这里存的是平台级键值,
-当前唯一消费者是「显示设置」(对话界面的链路/检索结果显示开关,
-管理端配置、独立/嵌入对话页共读)。
+当前消费者:「显示设置」(对话界面的链路/检索结果显示开关,
+管理端配置、独立/嵌入对话页共读)与「MCP 接入设置」
+(对外 MCP 端点的全局单 key)。
 
 【存储形态】
 platform_settings 表(key TEXT PK / value JSON / updated_at),
@@ -79,6 +80,42 @@ def save_display_settings(
     merged = get_display_settings(store)
     merged.update(clean)
     store.set(DISPLAY_KEY, merged)
+    return merged, []
+
+
+# ── MCP 接入设置(mcp 键;对外 MCP 端点的全局单 key) ──
+
+MCP_KEY = "mcp"
+MCP_DEFAULTS: Dict[str, str] = {"api_key": ""}
+
+
+def get_mcp_settings(store: Optional["PlatformSettingsStore"]) -> Dict[str, str]:
+    """读 MCP 设置:损坏/缺失回默认(key 为空串=未启用,fail-closed)。"""
+    saved = store.get(MCP_KEY) if store is not None else None
+    saved = saved if isinstance(saved, dict) else {}
+    key = saved.get("api_key")
+    return {"api_key": key if isinstance(key, str) else MCP_DEFAULTS["api_key"]}
+
+
+def save_mcp_settings(
+    store: "PlatformSettingsStore", payload: Dict[str, Any]
+) -> Tuple[Dict[str, str], List[Dict[str, str]]]:
+    """校验并保存 MCP 设置(只认 api_key 一个键,必须非空字符串可清空)。"""
+    errors: List[Dict[str, str]] = []
+    clean: Dict[str, Any] = {}
+    for key, raw in (payload or {}).items():
+        if key not in MCP_DEFAULTS:
+            errors.append({"field": key, "message": "未知配置项(只支持 api_key)"})
+            continue
+        if not isinstance(raw, str):
+            errors.append({"field": key, "message": "api_key 必须是字符串"})
+            continue
+        clean[key] = raw
+    if errors:
+        return get_mcp_settings(store), errors
+    merged = get_mcp_settings(store)
+    merged.update(clean)
+    store.set(MCP_KEY, merged)
     return merged, []
 
 
