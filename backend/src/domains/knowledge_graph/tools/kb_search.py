@@ -337,6 +337,18 @@ class KbSearchTool(Tool):
             "chunkCount": len(sources.get("chunks") or []),
         }
 
+    def mcp_description(self, app_state) -> str:
+        """对外 MCP 描述:拼上当前知识库清单(外部 AI 一次 list_tools 即知
+        有哪些库可选)。store 不可用时返回 None → 调用方回退默认描述(fail-open)。"""
+        from domains.knowledge_graph import runtime
+        try:
+            names = [k["name"] for k in runtime.get_kg_store(app_state).list_kbs()
+                     if k.get("kind") != "folder"]
+        except Exception:
+            return None
+        libs = "、".join(names) if names else "(暂无知识库)"
+        return f"{self.description}\n\n可选知识库: {libs}"
+
     def summarize_artifact(self, artifact: dict) -> str:
         kb = (artifact or {}).get("kb") or {}
         sub = artifact.get("subgraph") or {}

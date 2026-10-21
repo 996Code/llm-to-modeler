@@ -14,6 +14,9 @@ runtime_contract:
   requires_api: true
   required_task_types: [kg.import_document, kg.induce_schema]
 
+# 对外 MCP 暴露声明(服务层 services/mcp_server.py 消费;默认不暴露)
+mcp_tools: [kb_search]
+
 admin:
   settings: settings.schema.yaml   # 声明式配置页(连接/抽取/检索参数)
   page: knowledge_graph            # 自定义管理页组件 key(前端注册表解析)
