@@ -890,6 +890,37 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
         handle.log(f"收尾描述连边失败(不影响导入结论): {e}",
                    level="warn", error=str(e)[:200])
 
+    # 5.10) 文件名实体化:文件名(含标准号)保证进图谱——LLM 抽取有随机性
+    # (有时抽"JJF 1092-2002"有时不抽),不抽的话标准号在图谱里搜不到。
+    # 文件名去扩展名作为 type=document 实体 + 连接本文档 top 实体。
+    # 向量路不需要:chunks 已带 docName 前缀,标准号语义相似度可命中。
+    try:
+        stem = Path(doc["filename"]).stem  # "JJF1092-2002.pdf" → "JJF1092-2002"
+        existing = graph.find_entities(kb_id, [stem], limit=1)
+        if not existing:
+            from sdk.graph_store import normalize_name as _norm
+            std_norm = _norm(stem)
+            all_ents = graph.list_entities(kb_id)
+            doc_ents = [e for e in all_ents
+                        if doc_id in (e.get("sourceDocs") or [])][:3]
+            entities = [{
+                "name": stem, "normalized_name": std_norm, "type": "document",
+                "description": f"文档「{doc['filename']}」的标准编号(文件名实体)",
+                "aliases": [doc["filename"]], "type_status": "approved",
+                "chunk_id": "",
+            }]
+            relations = [{
+                "source": std_norm, "target": e["normalized"],
+                "type": "相关", "description": f"{stem} 涉及的实体",
+                "evidence": "", "chunk_id": f"{doc_id}:std",
+            } for e in doc_ents if e.get("normalized")]
+            graph.upsert_batch(kb_id, doc_id, entities, relations)
+            handle.log(f"文件名实体: {stem} → 连接 {len(relations)} 个实体",
+                       stem=stem, linked=len(relations))
+    except Exception as e:
+        handle.log(f"文件名实体化失败(不影响导入结论): {e}",
+                   level="warn", error=str(e)[:200])
+
     # 6) D14 摘要块:收尾统计前生成(抽象问法兜底,失败降级不阻断)。
     # 文档行重新查(pending 为空的续跑/全跳过场景不进抽取循环,_doc 未定义)
     _generate_summary_chunk(handle, app_state, store, kb,
