@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import time
 import uuid
@@ -23,6 +24,7 @@ from datetime import datetime, timezone
 from cryptography.fernet import Fernet, InvalidToken
 
 from domains.chatbi.models import CHATBI_DDL, DataSourceInfo
+from sdk.tool import PackInvokeError
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +331,94 @@ def _clean_db_error(e: Exception) -> str:
         text = text.replace(token, "***")
     # psycopg 异常很长,首行通常是核心信息
     return text.splitlines()[0][:300] if text else "执行失败"
+
+
+# ── MCP 执行器(工具调用 JSON → ExecuteResult; ask_data execute 步消费) ──
+
+def execute_mcp_tool(info: DataSourceInfo, tool_call: dict,
+                     max_rows: int = 10000) -> ExecuteResult:
+    """执行 MCP 工具调用并映射为 ExecuteResult(与 execute_readonly 同契约)。
+
+    tool_call: {"tool": str, "args": dict}(也容忍 JSON 字符串——解析失败
+    ok=False)。工具白名单: info.database 非空(=tool_name 限定)时只允许
+    该工具;语义层工具名校验由 ask_data generate 步负责(fail-closed)。
+
+    结果形状映射(mcp_client.call_tool 返回值):
+      dict 含 columns+rows(rows list[list]/list[tuple]) → 直接用(tuple 化)
+      list[dict] → 首行 keys 为 columns、值转 tuple
+      裸 dict(无 columns/rows) → 单条记录(键即列名)
+      list[list] → 无列名 → ok=False(不猜列名)
+      list[标量] / 标量 → 单列 value
+      空 list → 空结果(ok)
+    行数超 max_rows 截断(truncated=True)。PackInvokeError → error=str(e)
+    如实上报(不静默——外部 server 故障对用户可见)。
+    """
+    started = time.monotonic()
+
+    def _fail(msg: str) -> ExecuteResult:
+        duration = int((time.monotonic() - started) * 1000)
+        logger.warning("MCP 工具调用失败(%s, %dms): %s", info.host, duration, msg[:160])
+        return ExecuteResult(False, error=msg, duration_ms=duration)
+
+    # 1. 解析与形状校验(ask_data 传 JSON 字符串; 直调方可传 dict)
+    if isinstance(tool_call, str):
+        try:
+            tool_call = json.loads(tool_call)
+        except (ValueError, TypeError) as e:
+            return _fail(f"工具调用 JSON 解析失败: {e}")
+    if not isinstance(tool_call, dict):
+        return _fail(f"工具调用必须是 JSON 对象, 实为 {type(tool_call).__name__}")
+    tool = tool_call.get("tool")
+    args = tool_call.get("args")
+    if not isinstance(tool, str) or not tool.strip():
+        return _fail(f"工具调用缺少有效 tool 名: {tool!r}")
+    if not isinstance(args, dict):
+        return _fail(f"工具调用 args 必须是 JSON 对象, 实为 {type(args).__name__}")
+    # 2. 限定过滤(info.database=tool_name 时只允许该工具)
+    if (info.database or "").strip() and tool != info.database:
+        return _fail(f"工具 {tool} 不在数据源限定范围内(仅允许 {info.database})")
+
+    # 3. 调 MCP(模块引用形式, 测试 monkeypatch 兼容; 隔离性铁律: 只 import sdk)
+    from sdk import mcp_client
+    try:
+        payload = mcp_client.call_tool(info.host, tool, args)
+    except PackInvokeError as e:
+        return _fail(str(e))
+    except Exception as e:  # 防御: mcp_client 理论上已包装, 兜底不炸管线
+        return _fail(f"MCP 调用失败: {e}")
+
+    # 4. 形状映射 → (columns, rows)
+    if (isinstance(payload, dict)
+            and isinstance(payload.get("columns"), list)
+            and isinstance(payload.get("rows"), list)):
+        columns = [str(c) for c in payload["columns"]]
+        rows = [tuple(r) if isinstance(r, (list, tuple)) else (r,)
+                for r in payload["rows"]]
+    elif isinstance(payload, dict):  # 裸 dict = 单条记录
+        columns = [str(k) for k in payload.keys()]
+        rows = [tuple(payload.values())]
+    elif isinstance(payload, list) and payload and all(
+            isinstance(r, dict) for r in payload):
+        columns = [str(k) for k in payload[0].keys()]
+        rows = [tuple(r.get(c) for c in payload[0].keys()) for r in payload]
+    elif isinstance(payload, list) and payload and all(
+            isinstance(r, (list, tuple)) for r in payload):
+        return _fail("MCP 返回 list[list] 形状但无列名, 无法映射为表格结果"
+                     "(需 columns/rows 或 list[dict])")
+    elif isinstance(payload, list) and not payload:
+        columns, rows = [], []  # 空结果合法
+    elif isinstance(payload, list):  # 标量列表 → 单列多行
+        columns, rows = ["value"], [(v,) for v in payload]
+    else:  # 标量/其他 → 单列单行
+        columns, rows = ["value"], [(payload,)]
+
+    # 5. 截断(与 execute_readonly 同防护)
+    truncated = len(rows) > max_rows
+    if truncated:
+        rows = rows[:max_rows]
+    duration = int((time.monotonic() - started) * 1000)
+    return ExecuteResult(True, columns, rows, len(rows), duration,
+                         truncated=truncated)
 
 
 # ── 健康检查(datasource_health 移植) ──────────────────────────

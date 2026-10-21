@@ -21,6 +21,7 @@ backend/app/api/chat.py 的调用侧状态恢复逻辑。
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -48,6 +49,72 @@ _SQL_SYSTEM_PROMPT = """你是 BI 系统的 SQL 生成器。根据用户问题�
 6. 为每个 SELECT 输出列添加 AS 中文别名: schema 中列名后括号标注了中文名(中文: xxx), 用它做别名。聚合列也要有中文别名, 如 COUNT(*) AS 订单数。别名用双引号包裹, 如 user_id AS "用户ID"。
 
 只返回一条 SQL 语句。"""
+
+# ── MCP 工具调用生成 prompt(mcp 数据源变体; 合成语义层无 JOIN/指标) ──
+# state["sql"] 双语义(控制器裁决): 非 mcp=SQL 文本; mcp=工具调用 JSON 字符串
+# {"tool": ..., "args": {...}}——prev_sql 重放/多轮继承走同一 execute 分支。
+_MCP_SYSTEM_PROMPT = """你是 BI 系统的 MCP 工具调用生成器。数据来自外部 MCP server,
+下方 schema 即全部可调用面(工具=表, 参数=列)。
+
+严格规则 (违反则拒绝):
+1. 只能调用 schema 中列出的工具名, 禁止臆造工具名
+2. 参数只能使用工具清单里列出的参数名, 未列出的参数不要传
+3. 遵守参数类型约束 (string/integer/number/boolean)
+4. 工具无参数时 args 传空对象 {}
+
+只返回一个 JSON 对象: {"tool": "工具名", "args": {"参数名": "值"}}"""
+
+# mcp 自愈变体: 原调用 + 错误文本 → 重新生成(同构回环, 不引入新机制)
+_MCP_HEAL_PROMPT = """你是 BI 系统的 MCP 工具调用修正器。下面这次工具调用执行失败了, 请修正。
+
+严格规则 (与生成时一致):
+1. 只能调用 schema 中列出的工具名, 禁止臆造工具名
+2. 参数只能使用工具清单里列出的参数名, 未列出的参数不要传
+3. 遵守参数类型约束
+
+【schema】{schema_context}
+
+【失败的工具调用】{tool_call}
+【错误信息】{error}
+
+只返回修正后的 JSON 对象: {{"tool": "工具名", "args": {{...}}}}"""
+
+
+def _validate_mcp_tool_call(tool_call, model_names: set) -> str | None:
+    """校验 LLM 产出的工具调用: tool ∈ 合成模型名集合 + args 是 dict。
+
+    返回错误文本(None=通过)。fail-closed: 不过 → state["_error"] 终止。
+    """
+    if not isinstance(tool_call, dict):
+        return (f"工具调用校验失败: 输出必须是 JSON 对象, "
+                f"实为 {type(tool_call).__name__}")
+    tool = tool_call.get("tool")
+    if not isinstance(tool, str) or tool not in model_names:
+        return (f"工具调用校验失败: 工具 {tool!r} 不在语义层工具清单中"
+                f"(可用: {', '.join(sorted(model_names)) or '无'})")
+    if not isinstance(tool_call.get("args"), dict):
+        return "工具调用校验失败: args 必须是 JSON 对象"
+    return None
+
+
+def _heal_mcp_tool_call(llm, tool_call_json: str, error: str,
+                        schema_ctx: str, model_names: set,
+                        conv_id: str | None = None) -> dict | None:
+    """mcp 自愈: 原调用+错误文本 → 重新生成工具调用(轮数由调用方回环控制)。
+
+    错误文本来自 MCP server(PackInvokeError 如实透传), 无 SQL S6 的
+    跨租户泄露面。返回 dict(失败返回 None, 由调用方计错)。"""
+    prompt = _MCP_HEAL_PROMPT.format(
+        schema_context=schema_ctx or "(无)",
+        tool_call=tool_call_json, error=error)
+    try:
+        healed = llm.chat_json(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0, stage="chatbi.heal_mcp", conv_id=conv_id)
+    except Exception as e:
+        logger.warning("工具调用自愈 LLM 调用失败: %s", e)
+        return None
+    return healed if isinstance(healed, dict) else None
 
 # ── 预思考 prompt (T027, 移植自 thinking.py) ─────────────────
 _THINKING_PROMPT = """你是 BI 分析师。在生成 SQL 前, 先分析查询思路。
@@ -482,6 +549,15 @@ class AskDataTool(CompositeTool):
         if not schema_ctx:
             from domains.chatbi.retrieval import build_schema_context
             schema_ctx = build_schema_context(content, state["current_tables"])
+
+        # ── mcp 分支: 生成工具调用 JSON 而非 SQL(独立 prompt/校验) ──
+        # 合成语义层无 relationships/metrics → 跳过 JOIN 路径/指标段;
+        # 白名单列 fail-closed 不适用(无参工具合法, args 可为空)
+        if ds.db_type == "mcp":
+            self._generate_mcp_tool_call(state, ctx, llm, settings, ds,
+                                         content, question, schema_ctx)
+            return
+
         # 白名单列: 无条件取整个语义层的全部列(源 agent.py:296-302 权威注释——
         # 语义层本身是安全边界;命中表只影响 schema_context,限制白名单会
         # 误拒图谱扩展/继承表的正确 JOIN)。retrieve_context 返回的受限集合
@@ -589,6 +665,92 @@ class AskDataTool(CompositeTool):
                           "validation_ok": validation.ok if validation else None,
                           "fewshot_count": state.get("fewshot_count", 0)})
 
+    # ── Step 4b: mcp 变体——生成工具调用 JSON(非 SQL) ──────────────
+    def _generate_mcp_tool_call(self, state, ctx, llm, settings, ds, content,
+                                question, schema_ctx):
+        """mcp 数据源的 generate 步: 产出工具调用 JSON 存 state["sql"]。
+
+        state["sql"] 双语义(控制器裁决): mcp 数据源时为工具调用 JSON 字符串
+        ——prev_sql 重放/多轮继承/switch_chart 走同一 execute 分支天然兼容。
+        注入段沿用 SQL 版(skills/fewshot/预思考/记忆/历史/上轮筛选),
+        跳过 JOIN 路径/指标段(合成语义层无 relationships/metrics)。
+        """
+        sections = []
+        try:
+            from domains.chatbi.skills_loader import load_skills_text
+            skills_text = load_skills_text(ds.db_type)
+            if skills_text:
+                sections.append(f"【业务规则 (Skills)】\n{skills_text}")
+        except Exception as e:
+            logger.warning("Skills 加载失败(跳过): %s", e)
+
+        try:
+            from domains.chatbi import fewshot as fewshot_mod
+            from domains.chatbi import stores as cb_stores
+            examples = fewshot_mod.find_fewshot_examples(
+                question, cb_stores.get_vector(self._app_state),
+                cb_stores.get_embedder(llm), data_source_id=ds.id,
+                top_k=int(settings.get("fewshot_top_k", 3)),
+                db=self._get_db(), conv_id=ctx.conv_id)
+            fewshot_text = fewshot_mod.format_fewshot_prompt(examples)
+            if fewshot_text:
+                sections.append(f"【参考示例】\n{fewshot_text}")
+                state["fewshot_count"] = len(examples)
+        except Exception as e:
+            logger.warning("Few-shot 加载失败(跳过): %s", e)
+
+        if state.get("thinking_hint"):
+            sections.append(f"【预思考提示】\n{state['thinking_hint']}")
+
+        try:
+            from domains.chatbi.memory import recall_text
+            mem_text = recall_text(llm, self._get_db(), question,
+                                   conv_id=ctx.conv_id,
+                                   user_id=ctx.user_id or None,
+                                   data_source_id=ds.id,
+                                   top_k=int(settings.get("memory_recall_count", 5)))
+            if mem_text:
+                sections.append(f"【相关记忆】\n{mem_text}")
+        except Exception as e:
+            logger.warning("记忆召回失败(跳过): %s", e)
+
+        if state.get("history_text"):
+            sections.append(f"【对话历史】\n{state['history_text']}")
+        _sess = ctx.session_state
+        prev_filters = (_sess.get("prev_filters") if _sess else None) or {}
+        if prev_filters:
+            _filter_lines = "\n".join(f"- {k} = {v}" for k, v in prev_filters.items())
+            sections.append(
+                f"【上轮筛选条件】\n{_filter_lines}\n"
+                f"(自动继承供参考; 若用户本轮明确取消或变更某项, 以本轮为准, 勿自动带上)")
+        sections.append(f"【用户问题】{question}\n\n请生成工具调用 JSON:")
+
+        user_content = "\n\n".join(sections)
+        try:
+            tool_call = llm.chat_json(
+                messages=[{"role": "system", "content": _MCP_SYSTEM_PROMPT},
+                          {"role": "user", "content": user_content}],
+                temperature=0.0, stage="chatbi.generate_mcp", conv_id=ctx.conv_id)
+        except Exception as e:
+            logger.warning("工具调用生成 LLM 调用失败: %s", e)
+            state["_error"] = f"AI 服务暂不可用, 请稍后重试 ({e})"
+            return
+
+        # 校验 fail-closed: tool ∈ 合成模型名集合 + args 是 dict
+        # (生成期校验失败无执行错误可循, 不进自愈回环, 直接终止)
+        model_names = {m.name for m in content.models}
+        err = _validate_mcp_tool_call(tool_call, model_names)
+        if err:
+            state["_error"] = err
+            return
+        state["sql"] = json.dumps(tool_call, ensure_ascii=False)
+        # 链路打点: 工具调用全文入链(管理端"本轮链路"可见完整调用)
+        ctx.trace("chatbi.generate_mcp",
+                  title="工具调用生成",
+                  status="ok",
+                  detail={"tool_call": state["sql"],
+                          "fewshot_count": state.get("fewshot_count", 0)})
+
     # ── Step 5: 执行 + 自愈回环(EXECUTE_SQL + SELF_HEAL, ≤max_rounds) ──
     def _step_execute_sql(self, state, ctx):
         if state.get("_need_clarify") or state.get("_result") or state.get("_error"):
@@ -607,6 +769,12 @@ class AskDataTool(CompositeTool):
         timeout = int(settings.get("sql_execution_timeout", 30))
         conn_to = int(settings.get("db_connect_timeout", 5))
         schema_ctx = _schema_ctx(state)
+
+        # ── mcp 分支: state["sql"] 是工具调用 JSON → execute_mcp_tool ──
+        # (同构自愈回环, mcp prompt 变体; 非 mcp 路径零改动)
+        if ds.db_type == "mcp":
+            self._execute_mcp(state, ctx, llm, settings, ds, schema_ctx)
+            return
 
         sql = state["sql"]
         started = time.monotonic()
@@ -674,6 +842,75 @@ class AskDataTool(CompositeTool):
             state["sql"] = sql
             return
         state["sql"] = sql
+        state["execute_result"] = result
+        state["heal_rounds"] = heal_rounds
+        ctx.emit("stage", "execute_sql_done", f"查询成功, 返回 {result.rowcount} 行")
+
+    # ── Step 5b: mcp 变体——解析工具调用 JSON → execute_mcp_tool ──
+    def _execute_mcp(self, state, ctx, llm, settings, ds, schema_ctx):
+        """mcp 数据源的 execute 步: state["sql"] 为工具调用 JSON(双语义,
+        见 _generate_mcp_tool_call)→ execute_mcp_tool; 失败进同构自愈回环
+        (≤max_rounds, mcp prompt 变体: 原调用+错误文本→重新生成)。
+        成功存 state["execute_result"], 后续步骤(check/visualize/finalize)
+        零改动——ExecuteResult 契约不变。"""
+        max_rounds = int(settings.get("sql_self_heal_rounds", 2))
+        max_rows = int(settings.get("sql_max_rows", 10000))
+        model_names = {m.name for m in state["content"].models}
+
+        tool_call_json = state["sql"]
+        started = time.monotonic()
+        # 首版校验已在 generate 步完成(工具∈语义层); 此处直接执行
+        result = datasources.execute_mcp_tool(ds, tool_call_json,
+                                              max_rows=max_rows)
+        last_error = result.error if not result.ok else None
+
+        # 自愈循环(与 SQL 版同构): 执行失败 → mcp 变体 heal → 重校验 + 重执行
+        heal_rounds = 0
+        while last_error is not None and heal_rounds < max_rounds:
+            heal_rounds += 1
+            ctx.emit("stage", "execute_sql", f"自愈中 (第 {heal_rounds} 轮)...")
+            if not state.get("heal_before_sql"):
+                state["heal_before_sql"] = tool_call_json
+            healed = _heal_mcp_tool_call(
+                llm, tool_call_json, last_error, schema_ctx, model_names,
+                conv_id=ctx.conv_id)
+            if not healed:
+                last_error = (f"工具调用自愈失败 ({heal_rounds} 轮): "
+                              f"LLM 未返回有效工具调用")
+                break
+            err = _validate_mcp_tool_call(healed, model_names)
+            if err:
+                last_error = f"{err} (自愈第 {heal_rounds} 轮)"
+                continue
+            tool_call_json = json.dumps(healed, ensure_ascii=False)
+            result = datasources.execute_mcp_tool(ds, tool_call_json,
+                                                  max_rows=max_rows)
+            last_error = result.error if not result.ok else None
+
+        duration = int((time.monotonic() - started) * 1000)
+        state["_execute_duration_ms"] = duration
+        result_detail = {
+            # mcp: "sql" 键即工具调用 JSON(双语义; 制品/链路统一走 state["sql"])
+            "sql": tool_call_json,
+            "rows": (result.rowcount if result else 0),
+            "truncated": bool(result and result.truncated),
+        }
+        if result and result.ok:
+            try:
+                result_detail["columns"] = list(result.columns)[:30]
+                result_detail["sample_rows"] = [list(r) for r in result.rows[:3]]
+            except Exception:
+                pass
+        ctx.trace("chatbi.execute",
+                  title=f"执行查询({ds.name})",
+                  status="ok" if last_error is None else "error",
+                  duration_ms=duration,
+                  detail={"heal_rounds": heal_rounds, **result_detail})
+        if last_error is not None:
+            state["_error"] = f"工具调用失败 (自愈 {heal_rounds} 轮未解决): {last_error}"
+            state["sql"] = tool_call_json
+            return
+        state["sql"] = tool_call_json
         state["execute_result"] = result
         state["heal_rounds"] = heal_rounds
         ctx.emit("stage", "execute_sql_done", f"查询成功, 返回 {result.rowcount} 行")
@@ -801,7 +1038,10 @@ class AskDataTool(CompositeTool):
         # error_for_llm 保留原文供引擎重试判定;summary 走脱敏文案给用户。
         if state.get("_error"):
             raw = state["_error"]
-            is_business = raw.startswith(("SQL 校验失败", "无语义层定义",
+            # "工具调用校验失败"=mcp 分支的生成期校验(对标 "SQL 校验失败"
+            # 业务类; 非 mcp 路径永不产出该前缀, 零影响)
+            is_business = raw.startswith(("SQL 校验失败", "工具调用校验失败",
+                                          "无语义层定义",
                                           "尚未扫描语义层", "尚无可用数据源"))
             user_text = raw if is_business else "查询执行失败, 请稍后重试或调整问法"
             state["_result"] = ToolResult(
