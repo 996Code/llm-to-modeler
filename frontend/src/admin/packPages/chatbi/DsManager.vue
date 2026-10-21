@@ -15,9 +15,20 @@
     <a-table :data-source="datasources" :loading="loadingDs" row-key="id" size="small"
                :pagination="false">
         <a-table-column title="名称" data-index="name" />
-        <a-table-column title="类型" data-index="dbType" width="90" />
+        <a-table-column title="类型" data-index="dbType" width="90">
+          <template #default="{ record }">
+            <a-tag v-if="record.dbType === 'mcp'" color="purple">外部 MCP</a-tag>
+            <template v-else>{{ record.dbType }}</template>
+          </template>
+        </a-table-column>
         <a-table-column title="地址" width="220">
-          <template #default="{ record }">{{ record.host }}:{{ record.port }}/{{ record.database }}</template>
+          <template #default="{ record }">
+            <!-- mcp: host=server code, database=tool 名(空=全部) -->
+            <template v-if="record.dbType === 'mcp'">
+              {{ record.host }}{{ record.database ? `/${record.database}` : ' · 全部工具' }}
+            </template>
+            <template v-else>{{ record.host }}:{{ record.port }}/{{ record.database }}</template>
+          </template>
         </a-table-column>
         <a-table-column title="状态" width="80">
           <template #default="{ record }">
@@ -148,9 +159,25 @@
             <a-select v-model:value="form.db_type">
               <a-select-option value="postgresql">PostgreSQL</a-select-option>
               <a-select-option value="mysql">MySQL</a-select-option>
+              <a-select-option value="mcp">MCP</a-select-option>
             </a-select>
           </a-form-item>
         </div>
+        <!-- mcp: 无连接信息,换成 MCP 服务下拉 + 限定工具(复用一期 listMcpServers,只列 connected) -->
+        <div v-if="form.db_type === 'mcp'" class="form-row">
+          <a-form-item label="MCP 服务" required class="half">
+            <a-select v-model:value="form.mcp_server" :loading="mcpLoading"
+                      placeholder="选择已连接的 MCP 服务">
+              <a-select-option v-for="s in mcpServers" :key="s.code" :value="s.code">
+                {{ s.name }}（{{ s.code }}）
+              </a-select-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="限定工具" class="half">
+            <a-input v-model:value="form.mcp_tool" placeholder="tool 名称,留空=全部工具" />
+          </a-form-item>
+        </div>
+        <template v-else>
         <div class="form-row">
           <a-form-item label="主机" required class="half">
             <a-input v-model:value="form.host" placeholder="localhost" />
@@ -170,6 +197,7 @@
         <a-form-item label="密码" required>
           <a-input-password v-model:value="form.password" />
         </a-form-item>
+        </template>
       </a-form>
     </a-modal>
   </div>
@@ -178,12 +206,12 @@
 <script setup lang="ts">
 // 数据源管理子页:列表/新建/健康检查/扫描轮询/语义层抽屉。
 // 从原 index.vue 拆出;「图谱」按钮 emit 给父级切到图谱 Tab(跨 Tab 联动)。
-import { computed, defineEmits, defineExpose, onMounted, reactive, ref } from 'vue'
+import { computed, defineEmits, defineExpose, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   HeartOutlined, PlusOutlined, QuestionCircleOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
-import { chatbiApi } from '../../api'
+import { chatbiApi, listMcpServers } from '../../api'
 
 const emit = defineEmits<{
   (e: 'open-graph', dsId: string): void
@@ -213,7 +241,25 @@ async function rebuildIndex(record: any) {
 const bulkHealth = ref(false)
 
 const form = reactive({ name: '', db_type: 'postgresql', host: '', port: 5432,
-                        database: '', username: '', password: '' })
+                        database: '', username: '', password: '',
+                        mcp_server: '', mcp_tool: '' })
+
+// ── MCP 服务下拉(复用一期 listMcpServers,只列 connected;懒加载) ──
+const mcpServers = ref<{ code: string; name: string }[]>([])
+const mcpLoading = ref(false)
+
+async function loadMcpServers() {
+  if (mcpServers.value.length || mcpLoading.value) return
+  mcpLoading.value = true
+  try {
+    const items = await listMcpServers()
+    mcpServers.value = items.filter((s) => s.status === 'connected')
+  } catch { /* 静默:下拉为空即无可用服务 */ }
+  finally { mcpLoading.value = false }
+}
+
+watch(showCreate, (open) => { if (open) loadMcpServers() })
+watch(() => form.db_type, (t) => { if (t === 'mcp') loadMcpServers() })
 
 // 图谱 Tab 的数据源下拉选项(父级经 expose 取走)
 const options = computed(() => datasources.value.map((d) => ({ id: d.id, name: d.name })))
@@ -248,16 +294,27 @@ function zhHttpError(status: number | undefined, detail: string): string {
 }
 
 async function create() {
-  if (!form.name.trim() || !form.host.trim() || !form.database.trim()) {
+  if (form.db_type === 'mcp') {
+    if (!form.name.trim() || !form.mcp_server) {
+      message.warning('请填写名称并选择 MCP 服务')
+      return
+    }
+  } else if (!form.name.trim() || !form.host.trim() || !form.database.trim()) {
     message.warning('请填写名称、主机与数据库')
     return
   }
   creating.value = true
   try {
-    await chatbiApi.post('/datasources', form)
+    // mcp 提交体: host=server code, database=tool 名(可空), port=0, 凭据空串
+    const body = form.db_type === 'mcp'
+      ? { name: form.name.trim(), db_type: 'mcp', host: form.mcp_server,
+          database: form.mcp_tool.trim(), port: 0, username: '', password: '' }
+      : { ...form }
+    await chatbiApi.post('/datasources', body)
     message.success('数据源已创建')
     showCreate.value = false
-    Object.assign(form, { name: '', host: '', database: '', username: '', password: '' })
+    Object.assign(form, { name: '', host: '', database: '', username: '', password: '',
+                          mcp_server: '', mcp_tool: '' })
     await loadList()
   } catch (e: any) {
     message.error(errText(e, '创建失败'))
