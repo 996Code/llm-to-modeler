@@ -112,6 +112,16 @@
     <a class="card" href="frontend/frontend-standalone.html"><div class="name">独立模式主界面</div><div class="note">StandaloneLayout 组装、链路追踪弹窗与 JSON diff 面板。</div><span class="tag">workflow</span></a>
   </div>
 
+  <h2>设计文档（md）</h2>
+  <div class="grid">
+    <a class="card" href="chatbi-kg-linkage-idea.md"><div class="name">ChatBI × 知识库 联动构想</div><div class="note">两包不合并代码；智能问数生成 SQL 时把知识库检索结果当背景资料（软依赖/只取 chunks/尊重 ACL），语义层文档反向导入 KG。未立项。</div><span class="tag">idea</span></a>
+    <a class="card" href="mcp-integration-design.md"><div class="name">MCP 双向接入设计</div><div class="note">对外 MCP server（声明制工具生成+全局单 key）+ 插件内消费外部 MCP（注册表+SDK 客户端设施）。</div><span class="tag">design</span></a>
+    <a class="card" href="mcp-phase1-plan.md"><div class="name">MCP 一期实施计划</div><div class="note">7 任务 TDD 分解：单 key / 对外端点 / KG 声明 / SDK 客户端 / 注册表 / 前端面板 / 全量回归。</div><span class="tag">plan</span></a>
+    <a class="card" href="系统架构与学习指南.md"><div class="name">系统架构与学习指南</div><div class="note">三层六边形架构、LangGraph 状态机、SDK 协议层、追问机制与数据库模型全解。</div><span class="tag">guide</span></a>
+    <a class="card" href="嵌入模式总体设计.md"><div class="name">嵌入模式总体设计</div><div class="note">iframe 嵌入宿主、packs 声明制路由、pack_params 透传与数据权限。</div><span class="tag">design</span></a>
+    <a class="card" href="插件开发与嵌入指南.md"><div class="name">插件开发与嵌入指南</div><div class="note">pack.py 装配契约、config.yaml manifest、工具协议与热切换生命周期。</div><span class="tag">guide</span></a>
+  </div>
+
   <footer>
     生成方式：5 个并行代码评审 agent 收集 file:line 证据 → archify 类型化 JSON IR（doc/diagram-src/）→ validate --quality showcase（9 项检查）→ deliver 原子提交 HTML。<br>
     图内快捷键：<code>?</code> 帮助 · <code>/</code> 查找节点 · <code>R</code> 路径追踪 · <code>M</code> 总览 · <code>P</code> 故事模式 · <code>S/T/E</code> 样式/主题/导出。
