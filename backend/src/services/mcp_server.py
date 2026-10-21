@@ -111,13 +111,8 @@ def build_mcp_server(app_state: Any) -> Server:
 def build_mcp_asgi_app(app_state: Any) -> Starlette:
     """无状态 entry:key 校验(fail-closed:未配置 503/错 key 401)后交 session manager。
 
-    路由形态(同 ragflow):子应用内 Route("/mcp")+Mount("/mcp"),由调用方
-    mount 在 "/api" 前缀下,对外 URL 即 /api/mcp。不能用 mount("/api/mcp")
-    +子 Route("/"):Starlette Mount 的匹配正则要求尾斜杠(^/api/mcp/.*$),
-    客户端 POST 恰好打 /api/mcp(无尾斜杠)时请求根本进不了子应用(外层
-    路由器 307 到带斜杠形式,官方 client 不跟随重定向);子侧补 Route("")
-    也不可行(Route 构造断言 path 必须以 / 开头)——mount 到 "/api" 让
-    无尾斜杠的 /api/mcp 在子应用里精确命中 Route("/mcp") 是唯一通路。
+    挂法(挂到网关统一走 mount_mcp,见其 docstring):子应用内
+    Route("/")+Mount("/") 与 ragflow 的 Route("/mcp")+Mount("/mcp") 同构。
     """
     manager_holder: dict = {}
 
@@ -148,14 +143,38 @@ def build_mcp_asgi_app(app_state: Any) -> Starlette:
     manager_holder["manager"] = manager
     setattr(app_state, "_mcp_manager", manager)  # startup_mcp 从这里取
     sub = Starlette(routes=[
-        Route("/mcp", endpoint=entry, methods=["GET", "POST", "DELETE"]),
-        Mount("/mcp", app=entry),
+        Route("/", endpoint=entry, methods=["GET", "POST", "DELETE"]),
+        Mount("/", app=entry),
     ])
     # 子 Starlette 会在 scope 里覆盖 app=self,Entry 内 get_platform_settings_store
     # 走 request.app.state——把网关的 app.state 透传给子应用,读到的才是
     # lifespan 装配好的 platform_settings_store(而不是在子应用上再懒建一个)。
     sub.state = app_state
+    sub._mcp_entry = entry  # mount_mcp 给网关挂无尾斜杠精确 Route 用
     return sub
+
+
+def mount_mcp(app: Any, app_state: Any) -> None:
+    """把 MCP 子应用挂上网关(main lifespan / 测试 fixture 共用同一挂法)。
+
+    两条 /api/mcp 专属路径,缺一不可:
+    - Mount("/api/mcp"):带尾斜杠/子路径形式(/api/mcp/、/api/mcp/x)。
+      Starlette Mount 的匹配正则带尾斜杠(^/api/mcp/.*$),无尾斜杠的
+      POST /api/mcp 根本进不了子应用(外层路由器 307 到带斜杠形式,
+      官方 client 不跟随重定向),所以还需要——
+    - Route("/api/mcp") 精确命中无尾斜杠形式(官方 client 的默认端点拼法)。
+      子侧补 Route("") 不可行(Route 构造断言 path 必须以 / 开头)。
+
+    不用 mount("/api")+子 Route("/mcp") 的原因:pack 热切换
+    (pack_api_mount.commit_routes)会把 pack 路由整体重排到 routes 列表尾,
+    通用 /api 前缀 Mount 会排到 pack 路由之前,遮蔽 /api/packs/*;
+    本挂法的两条路径都是 /api/mcp 专属,与任何排序都不冲突。
+    """
+    sub = build_mcp_asgi_app(app_state)
+    app.mount("/api/mcp", sub)
+    app.router.routes.append(Route(
+        "/api/mcp", endpoint=sub._mcp_entry,
+        methods=["GET", "POST", "DELETE"]))
 
 
 async def startup_mcp(app: Any) -> None:

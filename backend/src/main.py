@@ -179,11 +179,10 @@ async def lifespan(app: FastAPI):
     finalize_assembly(app.state, _summary["_tx"])
 
     # 对外 MCP server(无状态 Streamable HTTP;API Key 由管理端 platform_settings 配)
-    # mount 在 "/api" 前缀(子应用内路由 /mcp):Starlette Mount 的匹配正则带
-    # 尾斜杠要求,mount("/api/mcp") 会让无尾斜杠的 POST /api/mcp 进不了子应用
-    # (外层 307,官方 client 不跟随)——见 services/mcp_server.py 挂法说明
-    from services.mcp_server import build_mcp_asgi_app, startup_mcp, shutdown_mcp
-    app.mount("/api", build_mcp_asgi_app(app.state))
+    # mount_mcp = Mount("/api/mcp") + 无尾斜杠精确 Route——挂法说明见
+    # services/mcp_server.py(两条 /api/mcp 专属路径,不与 pack 热切换重排冲突)
+    from services.mcp_server import mount_mcp, startup_mcp, shutdown_mcp
+    mount_mcp(app, app.state)
     await startup_mcp(app)
 
     # 构建 LangGraph StateGraph（三级节点 + 条件边，见 engine/graph.py）

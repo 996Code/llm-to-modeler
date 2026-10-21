@@ -42,10 +42,9 @@ def _make_app() -> FastAPI:
     app.state.llm_client = SimpleNamespace()
     app.state.asset_client = SimpleNamespace()
     from services import mcp_server
-    # mount 在 "/api"(子应用内路由是 /mcp,对外 URL 即 /api/mcp):
-    # Starlette Mount 匹配正则要求尾斜杠,mount("/api/mcp") 会让无尾斜杠
-    # 的 POST /api/mcp 根本进不了子应用(外层 307,client 不跟随)。
-    app.mount("/api", mcp_server.build_mcp_asgi_app(app.state))
+    # 生产同款挂法(mount_mcp):Mount("/api/mcp") 接尾斜杠/子路径,
+    # 精确 Route("/api/mcp") 接官方 client 默认的无尾斜杠端点。
+    mcp_server.mount_mcp(app, app.state)
     return app
 
 
