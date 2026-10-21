@@ -73,7 +73,14 @@ def _make_ctx(app_state: Any) -> ToolContext:
 
 
 def run_tool(app_state: Any, name: str, args: dict) -> dict:
-    """同步执行一个内部工具并转 MCP 结果 dict(error_for_llm 如实抛出)。"""
+    """同步执行一个内部工具并转 MCP 结果 dict(error_for_llm 如实抛出)。
+
+    fail-closed 暴露契约:只有 pack manifest 声明暴露的工具可调——
+    每次调用现算声明集合(不缓存,禁用 pack 后其工具立即不可调),
+    未声明的注册表工具(如 chatbi ask_data)即使猜到名字也拒绝。
+    """
+    if name not in {t.name for t in iter_exposed_tools(app_state)}:
+        raise RuntimeError(f"tool not found: {name}")
     registry = getattr(app_state, "registry", None)
     tool = registry.get(name) if registry else None
     if tool is None:
@@ -127,7 +134,7 @@ def build_mcp_asgi_app(app_state: Any) -> Starlette:
             if not expected:
                 resp = JSONResponse({"detail": "MCP 未启用:管理端未配置 MCP API Key"},
                                     status_code=503)
-            elif not hmac.compare_digest(key, expected):
+            elif not hmac.compare_digest(key.encode(), expected.encode()):
                 resp = JSONResponse({"detail": "MCP API Key 无效"}, status_code=401)
             else:
                 resp = None

@@ -168,8 +168,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 宿主没有也不该有管理 token
         if path.startswith("/api/open/"):
             return await call_next(request)
-        # 对外 MCP 端点(/api/mcp/*):模块内 X-Api-Key 独自设门(同 /api/open 模式)
-        if path.startswith("/api/mcp"):
+        # 对外 MCP 端点(/api/mcp 与 /api/mcp/*):模块内 X-Api-Key 独自设门
+        # (同 /api/open 模式)。精确前缀带尾斜杠——裸 startswith("/api/mcp")
+        # 会误吞 /api/mcpfoo 之类的无关路径。
+        if path == "/api/mcp" or path.startswith("/api/mcp/"):
             return await call_next(request)
 
         # 校验 token
