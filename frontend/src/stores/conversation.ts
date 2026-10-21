@@ -21,7 +21,7 @@ import type { Conversation, FormConfig, Message } from '../types'
 // 引入 API 层全部导出（* as api → api.xxx 调用），类比 Java 的 @Autowired private ApiService api
 import * as api from '../services/api'
 // HostPort：嵌入模式读取宿主上下文（最新配置 + 服务地址表），注入每次 chat 请求
-import { getHostPort, CONTEXT_KEY_ARTIFACT } from '../composables/hostPort'
+import { getHostPort, CONTEXT_KEY_ARTIFACT, isLightEmbed } from '../composables/hostPort'
 import { classifyError } from '../utils/errorDiag'
 
 /**
@@ -44,17 +44,18 @@ export async function refreshEmbedContext() {
   // 生产宿主不受影响。
   const urlQuery = new URLSearchParams(window.location.search)
   const urlRoles = urlQuery.get('roles')?.trim()
-  const urlIdentity = !!(urlRoles || urlQuery.get('userId'))
-  const hostless = urlQuery.get('hostless') === '1'
 
-  // hostless 或带 URL 身份:跳过宿主握手(无宿主时 getContext 要 10s
+  // 轻嵌入(isLightEmbed):跳过宿主握手(无宿主时 getContext 要 10s
   // 超时×2=20s,每条消息都卡),直接走轻嵌入路径
-  if (hostless || urlIdentity) {
+  if (isLightEmbed()) {
     const packParams = urlRoles ? { knowledge_graph: { user_roles: urlRoles.split(',').map(r => r.trim()).filter(Boolean) } } : undefined
+    // URL packs 声明:?packs=knowledge_graph → 单插件直通(嵌入测试页
+    // 指定只跑知识库插件,欢迎页标题/示例跟随该插件的 display)
+    const urlPacks = urlQuery.get('packs')?.trim()
     return {
       context: { [CONTEXT_KEY_ARTIFACT]: null, revision: null, contextKey: localStorage.getItem('embedded_context_key') || undefined },
       services: undefined,
-      packs: undefined,
+      packs: urlPacks ? urlPacks.split(',').map(p => p.trim()).filter(Boolean) : undefined,
       pack_params: packParams as Record<string, unknown> | undefined,
     }
   }

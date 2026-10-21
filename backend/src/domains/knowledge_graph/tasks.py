@@ -166,6 +166,11 @@ def submit_import(app_state, kb_id: str, doc_id: str, force: bool = False,
     # 由框架延迟重入队,块级 checkpoint 保证只跑剩余部分
     from sdk.pack_api import DuplicateTaskError
     max_retry = max(0, int(_cfg(app_state, "import_max_auto_retry", 3)))
+    # 提交即标 importing:force 重导在队列里可能排几小时,这期间文档状态
+    # 若保持旧值(succeeded),管理端会误以为"已是新内容"——实际图谱还是
+    # 旧版。排队期就亮"导入中",用户一眼知道这份文档还没重导完。
+    if force and doc["importStatus"] == "succeeded":
+        store.update_document(doc_id, import_status="importing", error="")
     try:
         return app_state.task_manager.submit(
             "kg.import_document",

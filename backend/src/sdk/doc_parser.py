@@ -190,6 +190,7 @@ _PAGE_TEXT_SPARSE = 10
 _OCR_INTRA_THREADS = 2
 _OCR_RENDER_SCALE = 2.5  # ~180dpi,中文识别与速度的实测平衡点(上限)
 _OCR_MAX_SIDE = 2000     # 对齐 RapidOCR Global.max_side_len 的内部降采样线
+_OCR_LLM_CONCURRENCY = 3  # llm 引擎页级并发:网络调用无本地资源争抢
 _OCR_ENGINE = None
 _OCR_ENGINE_LOCK = threading.Lock()
 _OCR_INFER_LOCK = threading.Lock()
@@ -257,28 +258,60 @@ def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
     pdf = pypdfium2.PdfDocument(io.BytesIO(data))
     filled = 0
     try:
-        for n, i in enumerate(sparse_pages):
-            page = pdf[i]
-            try:
-                # 渲染+推理整体持锁:位图 ~10MB/页,并行导入时逐页排队,
-                # 内存峰值只有一份;进度回调在锁外,不阻塞下一个任务
-                with _OCR_INFER_LOCK:
-                    img = page.render(scale=_render_scale(page)).to_pil()
-                    ocr_text = _recognize(img)
-                    del img
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"pdf 第 {i + 1} 页 OCR 失败(跳过): {e}")
-                continue
-            finally:
-                page.close()
-            if len(ocr_text) > len(texts[i]):
-                texts[i] = ocr_text
-                filled += 1
-            if on_ocr_progress:
+        if ocr_engine == "llm":
+            # llm 引擎:网络调用,无本地 CPU/内存争抢——页级并发(3 路)
+            # 压缩 OCR 段耗时(14 页从 ~2 分钟压到 ~40 秒);渲染在主线程
+            # 逐页做(pypdfium2 非线程安全),识别并发出去
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=_OCR_LLM_CONCURRENCY) as pool:
+                futures = []
+                for i in sparse_pages:
+                    page = pdf[i]
+                    try:
+                        img = page.render(scale=_render_scale(page)).to_pil()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"pdf 第 {i + 1} 页渲染失败(跳过): {e}")
+                        page.close()
+                        continue
+                    page.close()
+                    futures.append((i, pool.submit(_recognize, img)))
+                for n, (i, fut) in enumerate(futures):
+                    try:
+                        ocr_text = fut.result(timeout=300)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"pdf 第 {i + 1} 页 OCR 失败(跳过): {e}")
+                        continue
+                    if len(ocr_text) > len(texts[i]):
+                        texts[i] = ocr_text
+                        filled += 1
+                    if on_ocr_progress:
+                        try:
+                            on_ocr_progress(n + 1, len(sparse_pages))
+                        except Exception:  # noqa: BLE001
+                            pass
+        else:
+            # rapidocr 引擎:本地 CPU 推理,渲染+推理整体持锁——位图
+            # ~10MB/页,并行导入时逐页排队,内存峰值只有一份
+            for n, i in enumerate(sparse_pages):
+                page = pdf[i]
                 try:
-                    on_ocr_progress(n + 1, len(sparse_pages))
-                except Exception:  # noqa: BLE001
-                    pass
+                    with _OCR_INFER_LOCK:
+                        img = page.render(scale=_render_scale(page)).to_pil()
+                        ocr_text = _recognize(img)
+                        del img
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"pdf 第 {i + 1} 页 OCR 失败(跳过): {e}")
+                    continue
+                finally:
+                    page.close()
+                if len(ocr_text) > len(texts[i]):
+                    texts[i] = ocr_text
+                    filled += 1
+                if on_ocr_progress:
+                    try:
+                        on_ocr_progress(n + 1, len(sparse_pages))
+                    except Exception:  # noqa: BLE001
+                        pass
     finally:
         pdf.close()
     if stats is not None:

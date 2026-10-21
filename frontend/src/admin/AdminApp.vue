@@ -59,7 +59,8 @@
         <CallLogsTab v-else-if="tab === 'calllogs'" />
         <TasksTab v-else-if="tab === 'tasks'" />
         <PacksTab v-else-if="tab === 'packs'" @open-page="openPackPage" @refresh-pages="loadPackPages" />
-        <!-- pack 自定义管理页(v-if 切换:离开即卸载, 图谱类重资源页不留后台实例) -->
+        <!-- pack 自定义管理页(v-if 切换:离开即卸载, 图谱类重资源页不留后台实例);
+             知识库-测试也走此通道(loadPackPages 动态追加,跟随插件启停) -->
         <template v-else-if="packPageMap[tab]">
           <component :is="packPageMap[tab]" />
         </template>
@@ -83,6 +84,7 @@ import ConversationsTab from './components/ConversationsTab.vue'
 import CallLogsTab from './components/CallLogsTab.vue'
 import TasksTab from './components/TasksTab.vue'
 import PacksTab from './components/PacksTab.vue'
+import KbEmbedTest from '../embed-test/EmbedTestApp.vue'
 import { hasPackPage, packPageRegistry } from './packPages/registry'
 import {
   apiErrorMessage, fetchDisplaySettings, fetchPacks, saveDisplaySettings,
@@ -116,6 +118,12 @@ async function loadPackPages() {
       .map((p) => ({ p, key: p.adminPage || '' }))
       .filter(({ p, key }) => p.enabled && key && p.dependency?.status === 'ok' && hasPackPage(key))
       .map(({ p, key }) => ({ pageKey: key, title: p.adminTitle || p.name, component: packPageRegistry[key] }))
+    // 知识库-测试:跟随 knowledge_graph 插件启停(一体)——插件启用且依赖
+    // 正常才亮菜单,禁用即消失;紧跟知识库管理页后面
+    const kg = data.items.find((p) => p.name === 'knowledge_graph')
+    if (kg?.enabled && kg.dependency?.status === 'ok') {
+      packPages.value.push({ pageKey: '__kb_embed_test', title: '知识库-测试', component: KbEmbedTest })
+    }
     if (tab.value.startsWith('pack-page:') && !packPages.value.some((p) => `pack-page:${p.pageKey}` === tab.value)) {
       tab.value = 'packs'
     }

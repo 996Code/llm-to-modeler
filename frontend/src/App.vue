@@ -38,7 +38,7 @@ import { onMounted } from 'vue'
 import { useConversationStore } from './stores/conversation'
 // HostPort 单例：嵌入态为 PostMessageHostPort，独立态为 NullHostPort
 // （INIT 下发的鉴权头由 hostPort 内部写入 forwardHeaders，此处不再经手）
-import { getHostPort } from './composables/hostPort'
+import { getHostPort, isLightEmbed } from './composables/hostPort'
 // 宿主下发的 userId 存这里（供 api.ts 取 X-User-Id）
 import { setUserId } from './composables/userIdentity'
 // 导入两个布局组件（.vue 可省略后缀，构建工具自动解析）
@@ -53,16 +53,15 @@ const store = useConversationStore()
 // 上一会话（继续旧对话走右上角历史抽屉显式载入）。
 onMounted(() => {
   if (store.isEmbedded) {
+    // 轻嵌入(hostless/URL 身份)跳过宿主 INIT——port.init() 要等 3s 超时,
+    // 这 3s 里 ChatPanel 不渲染、欢迎页文案/示例都出不来
+    if (isLightEmbed()) {
+      void store.startNewConversation()
+      return
+    }
     const port = getHostPort()
     port.init().then((r) => {
       if (!r) {
-        // 轻嵌入豁免:?hostless=1 显式声明无宿主是预期形态(如 embed-test
-        // 测试页);或 URL 自带身份(userId/roles)。数据权限链路不依赖画布
-        const q = new URLSearchParams(window.location.search)
-        if (q.get('hostless') || q.get('userId') || q.get('roles')) {
-          void store.startNewConversation()
-          return
-        }
         // 3s 无 INIT（宿主未实现契约/链路断）：显式报错而非静默降级——
         // 横幅告诉用户 AI 无法读写画布，避免"AI 笨"的误解
         store.hostLinkError = '宿主握手失败（3 秒内未收到 INIT）：AI 将无法读写画布，请刷新页面重试'

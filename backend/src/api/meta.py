@@ -11,6 +11,7 @@
   - name / artifact.identity / artifact.display / services / tools
 这些字段在引擎和前端之间是「不透明声明」，领域词不泄漏到协议层。
 """
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -20,16 +21,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/meta", tags=["meta"])
 
 
-def _manifest_for(pack_name: str, cfg: Dict[str, Any], tools: List[Any]) -> Dict[str, Any]:
-    """从 pack 的 config.yaml（cfg）+ 工具注册表（tools）提取对前端有用的声明。"""
+def _manifest_for(pack_name: str, cfg: Dict[str, Any], tools: List[Any],
+                  display_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """从 pack 的 config.yaml（cfg）+ 工具注册表（tools）提取对前端有用的声明。
+
+    display_override: 管理端 DB 覆盖值（PackSettings 的 display 键）——
+    展示配置（欢迎标题/常用问题/标签）是运营口径不是业务逻辑,提取到
+    DB 后管理端改完即生效,不用改 config.yaml 重新部署。DB > manifest。
+    """
     artifact = cfg.get("artifact", {})
     services = cfg.get("services", {})
+    display = artifact.get("display", {})
+    if display_override:
+        display = {**display, **display_override}
     return {
         "name": pack_name,
         "artifact": {
             "type": artifact.get("type", "config"),
             "identity": artifact.get("identity", {}),
-            "display": artifact.get("display", {}),
+            "display": display,
             # 制品卡动作集（pack 声明，前端按此渲染按钮）：view_json/apply/rewind。
             # 不同插件的制品交互不同——如某类制品可能只要 apply 不要
             # view_json/rewind。未声明时前端回退最小集（仅 view_json）。
@@ -81,12 +91,42 @@ async def list_packs(request: Request):
         allowed = request_names if request_names is not None else env_names
 
     result = []
+    # 展示配置 DB 覆盖(PackSettings 的 display 组字段):读一次全量,逐 pack 合并。
+    # resolve_all 返回扁平键(welcome_title/welcome_subtitle/welcome_examples),
+    # 这里收拢成 display 字典——DB 有值的键才覆盖 manifest(空=回落默认)。
+    display_overrides: Dict[str, Dict[str, Any]] = {}
+    settings_store = getattr(request.app.state, "settings_store", None)
+    if settings_store is not None:
+        try:
+            from services.pack_settings import read_settings_schema, resolve_all
+            _DISPLAY_KEYS = ("welcome_title", "welcome_subtitle", "welcome_examples")
+            for pack_name in pack_configs:
+                schema = read_settings_schema(pack_name)
+                if not schema:
+                    continue
+                saved = settings_store.get_values(pack_name)
+                resolved = resolve_all(pack_name, saved=saved, schema=schema)
+                d = {k: resolved[k] for k in _DISPLAY_KEYS
+                     if resolved.get(k) not in (None, "")}
+                # welcome_examples 在设置页是 JSON 字符串(表单单行输入),
+                # display 消费方要数组——就地转换;坏 JSON 丢弃该键回退默认
+                we = d.get("welcome_examples")
+                if isinstance(we, str):
+                    try:
+                        d["welcome_examples"] = json.loads(we)
+                    except (ValueError, TypeError):
+                        d.pop("welcome_examples", None)
+                if d:
+                    display_overrides[pack_name] = d
+        except Exception as e:  # noqa: BLE001  展示覆盖失败回退 manifest,不阻断
+            logger.warning(f"display 覆盖读取失败(回退 manifest): {e}")
     for pack_name, cfg in pack_configs.items():
         if allowed is not None and pack_name not in allowed:
             continue
         # manifest.tools 从空：前端 diff/历史只用 artifact/services，
         # 不需要工具列表——避免维护「工具→pack」反向表
-        result.append(_manifest_for(pack_name, cfg, []))
+        result.append(_manifest_for(pack_name, cfg, [],
+                                    display_override=display_overrides.get(pack_name)))
     return result
 
 

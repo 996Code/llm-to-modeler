@@ -112,7 +112,7 @@ const roleOptions = computed(() =>
   roles.value.map(r => ({ value: r.id, label: r.name && r.name !== r.id ? `${r.name}（${r.id}）` : r.id })))
 
 const frameSrc = computed(() => {
-  const p = new URLSearchParams({ embed: 'true', hostless: '1' })
+  const p = new URLSearchParams({ embed: 'true', hostless: '1', packs: 'knowledge_graph' })
   if (userId.value) p.set('userId', userId.value)
   if (pickedRoles.value.length) p.set('roles', pickedRoles.value.join(','))
   return `/ai-modeler/?${p.toString()}`
@@ -161,7 +161,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.et { max-width: 1180px; margin: 0 auto; padding: 20px; font-size: 13px; color: #1f2937; }
+.et { padding: 16px 20px; font-size: 13px; color: #1f2937; }
 .et-head {
   display: flex; align-items: center; justify-content: space-between;
   margin-bottom: 14px;

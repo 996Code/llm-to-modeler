@@ -21,6 +21,18 @@ import { ref } from 'vue'
 import { setForwardedHeaders } from './forwardHeaders'
 
 // =============================================================================
+// 〇、轻嵌入判定(通用方法)——URL 声明无宿主/自带身份的嵌入形态
+// =============================================================================
+// 轻嵌入 = iframe 嵌了但没有真实宿主实现 HostPort 协议(如 embed-test 测试页)。
+// 判定条件:URL 带 hostless=1(显式声明) / userId / roles(自带身份)。
+// 轻嵌入下 port.init()/getContext() 会等超时(3s/10s)才返回 null——所有
+// 需要"先等宿主握手再做某事"的调用点都应先判 isLightEmbed() 跳过等待。
+export function isLightEmbed(): boolean {
+  const q = new URLSearchParams(window.location.search)
+  return !!(q.get('hostless') || q.get('userId') || q.get('roles'))
+}
+
+// =============================================================================
 // 一、协议类型定义（与宿主共享的 TS 类型，可直接拷贝给宿主侧）
 // =============================================================================
 

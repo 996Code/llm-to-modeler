@@ -158,6 +158,25 @@ groups:
         env: KG_OCR_ENGINE
         help: PDF 无文字层页的识别引擎;llm = 逐页图片走全局 LLM 网关的多模态模型(随 LLM_MODEL 环境变量),识别更全但耗时/费用高于本地 rapidocr
 
+  - key: display
+    title: 展示配置
+    fields:
+      - key: welcome_title
+        type: string
+        label: 欢迎页标题
+        placeholder: 智能助手
+        help: 对话欢迎页的大标题;留空用 manifest 默认值(智能助手)
+      - key: welcome_subtitle
+        type: string
+        label: 欢迎页副标题
+        placeholder: 用自然语言描述你的需求，我来帮你完成
+        help: 欢迎页标题下方的说明文字
+      - key: welcome_examples
+        type: string
+        label: 常用问题(JSON)
+        placeholder: '[{"title":"检定周期","desc":"...","prompt":"...","icon":"search"}]'
+        help: 欢迎页示例卡(JSON 数组,字段 title/desc/prompt/icon);留空用 manifest 默认。改完即生效,无需部署
+
   - key: retrieval
     title: 检索与问答
     fields:

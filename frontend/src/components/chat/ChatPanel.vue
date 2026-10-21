@@ -29,8 +29,8 @@
           <!-- 图标名来自 pack manifest（display.welcome_icon），未知/缺省回退表单无关的默认 -->
           <component :is="welcomeIcon" />
         </div>
-        <h1 class="welcome-title">智能助手</h1>
-        <p class="welcome-subtitle">用自然语言描述你的需求，我来帮你完成</p>
+        <h1 class="welcome-title">{{ packDisplay?.welcome_title || '智能助手' }}</h1>
+        <p class="welcome-subtitle">{{ packDisplay?.welcome_subtitle || '用自然语言描述你的需求，我来帮你完成' }}</p>
         <!-- v-if 守卫：无示例数据（manifest 未就绪/未声明）时不渲染空容器 -->
         <div v-if="examples.length" class="examples">
           <!-- v-for：列表渲染（类比 Java 的 forEach）；:key 是 Vue 复用 DOM 的唯一标识 -->

@@ -12,7 +12,7 @@
 
 // axios：流行的 HTTP 客户端库（类似 Java 的 OkHttp / Apache HttpClient）
 import axios from 'axios'
-import { CONTEXT_KEY_ARTIFACT, getHostPort } from '../composables/hostPort'
+import { CONTEXT_KEY_ARTIFACT, getHostPort, isLightEmbed } from '../composables/hostPort'
 // 仅作为类型使用（import type），编译后不会进入运行时包，类似 Java 的接口引用
 import type { Conversation, SSEResult } from '../types'
 // 引入透传 headers 工具（嵌入模式下携带父系统的鉴权信息）
@@ -213,8 +213,8 @@ export async function getPackManifests(): Promise<PackManifest[]> {
     // 嵌入态先等宿主握手完成再读 packs——ChatPanel 挂载与 App 的 port.init()
     // 并发，若 INIT 未回来 packs 为 null 且 URL 无 packs 时，请求会无过滤
     // 拉到全部启用 pack（BPM/列表示例混进表单弹窗）。init 幂等（共享握手），
-    // 独立态返回 null 不阻塞；握手失败/超时按原回退链走 URL/默认。
-    if (port.connected) {
+    // 独立态返回 null 不阻塞。轻嵌入跳过握手(无宿主要等 3s 超时),packs 走 URL
+    if (port.connected && !isLightEmbed()) {
       await port.init()
     }
     const hostPacks = port.packs
