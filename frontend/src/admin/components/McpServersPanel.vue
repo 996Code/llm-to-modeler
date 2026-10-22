@@ -7,10 +7,11 @@
       </a-tag>
       <a-input-password v-if="keyConfigured" :value="apiKey" size="small"
                         style="width: 260px" readonly />
-      <a-button v-if="keyConfigured" size="small" type="text"
-                title="复制 Key" @click="copyKey">
+      <a-tooltip v-if="keyConfigured" title="复制 Key">
+        <a-button size="small" type="text" @click="copyKey">
         <template #icon><CopyOutlined /></template>
-      </a-button>
+        </a-button>
+      </a-tooltip>
       <a-tooltip :title="keyConfigured ? '刷新 Key(旧 Key 立即失效)' : '生成 Key'">
         <a-button size="small" type="text" :loading="rotatingKey" @click="rotateKey">
           <template #icon><SyncOutlined /></template>
@@ -43,6 +44,7 @@
         <template v-else-if="column.key === 'ops'">
           <a-switch :checked="record.enabled !== false" size="small"
                     :loading="togglingId === record.id"
+                    :disabled="togglingId !== '' && togglingId !== record.id"
                     @change="(v: any) => toggleEnabled(record, v)" />
           <span class="mcp-ops">
             <a-tooltip title="刷新快照(重新探测)">

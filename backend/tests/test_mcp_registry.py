@@ -40,7 +40,7 @@ def env():
     async def _lsp(app):
         await mcp_server.startup_mcp(app)
         yield
-        await mcp_server.shutdown_mcp()
+        await mcp_server.shutdown_mcp(app)
 
     ext = FastAPI(lifespan=_lsp)
     ext.state.platform_settings_store = PlatformSettingsStore()

@@ -185,11 +185,15 @@ async def update_mcp_server(sid: str, request: Request,
         payload = await request.json()
     except Exception:
         raise HTTPException(400, "请求体必须是 JSON")
+    allowed = {"name", "url", "headers", "timeout", "read_timeout"}
+    clean = {k: v for k, v in (payload or {}).items() if k in allowed}
     try:
         return await asyncio.to_thread(
-            _mcp_store(request).update_server, sid, **payload)
+            _mcp_store(request).update_server, sid, **clean)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    except TypeError as e:
+        raise HTTPException(400, f"参数类型错误: {e}")
 
 
 @router.delete("/mcp/servers/{sid}")

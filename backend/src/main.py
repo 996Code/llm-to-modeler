@@ -238,7 +238,7 @@ async def lifespan(app: FastAPI):
         logger.warning("task manager close failed", exc_info=True)
     # 停 MCP session manager(退出其任务组;与 startup 对称,失败不阻断后续收尾)
     try:
-        await shutdown_mcp()
+        await shutdown_mcp(app)
     except Exception:
         logger.warning("mcp shutdown failed", exc_info=True)
     # pack 卸载钩子:释放各插件自持的连接(Neo4j/向量库等)——与热切换

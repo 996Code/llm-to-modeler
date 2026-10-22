@@ -201,6 +201,12 @@ def _build_table_provenance(content, table_names: list) -> list:
     return out
 
 
+# mcp 自愈跨查询熔断器(模块级单例;阈值沿用 sql_self_heal_circuit_breaker 设置,
+# 运行期首次读取在 _step_execute_sql 内按 settings 重配阈值)
+from domains.chatbi.healer import SelfHealCircuitBreaker as _BreakerCls
+_mcp_heal_breaker = _BreakerCls(threshold=3)
+
+
 class AskDataTool(CompositeTool):
     name = "ask_data"
     description = "用自然语言查询业务数据库:自动检索表结构、生成 SQL、执行并生成图表"
@@ -816,6 +822,8 @@ class AskDataTool(CompositeTool):
                                                   timeout_seconds=timeout)
             last_error = result.error if not result.ok else None
 
+        _mcp_heal_breaker.record_success() if last_error is None \
+            else _mcp_heal_breaker.record_failure()
         duration = int((time.monotonic() - started) * 1000)
         state["_execute_duration_ms"] = duration
         # 链路打点(引擎时间线;SQL 全文随 checkpoint 落制品)
@@ -865,6 +873,12 @@ class AskDataTool(CompositeTool):
         last_error = result.error if not result.ok else None
 
         # 自愈循环(与 SQL 版同构): 执行失败 → mcp 变体 heal → 重校验 + 重执行
+        # 跨查询熔断器(独立于 SQL 版实例): 持续故障的外部 server 不再
+        # 每次烧 generate+heal 的 LLM 调用(单查询轮数有界之外的第二道闸)
+        if _mcp_heal_breaker.is_tripped():
+            state["_error"] = (f"工具调用失败: 外部 MCP 服务持续故障"
+                               f"(自愈熔断中,稍后再试): {last_error}")
+            return
         heal_rounds = 0
         while last_error is not None and heal_rounds < max_rounds:
             heal_rounds += 1

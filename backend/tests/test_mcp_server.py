@@ -100,7 +100,7 @@ def test_full_roundtrip():
                     assert not res.isError
         finally:
             await hc.aclose()
-            await mcp_server.shutdown_mcp()
+            await mcp_server.shutdown_mcp(app)
 
     asyncio.run(run())
 
@@ -189,7 +189,7 @@ def test_hidden_tool_not_callable():
                     assert not res2.isError                # 声明了的照常可调
         finally:
             await hc.aclose()
-            await mcp_server.shutdown_mcp()
+            await mcp_server.shutdown_mcp(app)
 
     asyncio.run(run())
 

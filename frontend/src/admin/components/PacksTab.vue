@@ -9,7 +9,7 @@
         </a-radio-button>
         <a-radio-button value="mcp">
           <ApiOutlined /> MCP 服务
-          <span class="pk-tab-count">{{ mcpStats.enabled }}/{{ mcpStats.total }}</span>
+          <span v-if="mcpStats.total" class="pk-tab-count">{{ mcpStats.enabled }}/{{ mcpStats.total }}</span>
         </a-radio-button>
       </a-radio-group>
       <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
@@ -131,8 +131,11 @@ const mcpStats = ref({ total: 0, enabled: 0 })
 onMounted(async () => {
   try {
     const items = await listMcpServers()
-    mcpStats.value = { total: items.length,
-                       enabled: items.filter((s) => s.enabled !== false).length }
+    // 面板 @count 已上报过(快速切 tab 场景)则不回退覆盖
+    if (mcpStats.value.total === 0) {
+      mcpStats.value = { total: items.length,
+                         enabled: items.filter((s) => s.enabled !== false).length }
+    }
   } catch { /* 计数失败不打扰 */ }
 })
 const toggling = ref('')

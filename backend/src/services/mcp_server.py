@@ -27,13 +27,38 @@ from sdk.tool import Tool, ToolContext, ToolResult
 logger = logging.getLogger(__name__)
 
 TOOL_TIMEOUT_S = 60.0
-_session_manager: StreamableHTTPSessionManager | None = None
+# 按 app_state id 键控(多 app 场景各自持有 manager;单 app 生产不受影响)
+_session_managers: dict[int, StreamableHTTPSessionManager] = {}
+_session_cm: dict[int, Any] = {}
 # run() 返回的 async context manager 必须持有同一个实例:manager 的 run()
 # 有单次守卫(第二次调用直接 RuntimeError),shutdown 复用 startup 时
-# 进过的那个 cm 才能正确退出任务组——brief 原稿 shutdown 里再次 run()
-# 会触发 "can only be called once per instance"。
-_session_cm = None
+# 进过的那个 cm 才能正确退出任务组(按 app 键控存于 _session_cm dict)。
 
+
+
+# key 短 TTL 缓存: 轮换 5s 内生效(近即时),DB 抖动不再拖垮整个 MCP 面。
+# 按 app.state 键控——测试并行多 app 时各自缓存互不串味。
+_KEY_TTL_S = 5.0
+_key_cache: dict[int, dict] = {}
+
+
+def _cached_key(request) -> str:
+    import time as _time
+    from services.platform_settings import (
+        get_platform_settings_store, get_mcp_settings)
+    key = id(request.app.state)
+    entry = _key_cache.get(key) or {"value": None, "at": 0.0}
+    now = _time.monotonic()
+    if entry["value"] is None or now - entry["at"] > _KEY_TTL_S:
+        try:
+            entry = {"value": get_mcp_settings(
+                get_platform_settings_store(request))["api_key"], "at": now}
+            _key_cache[key] = entry
+        except Exception:
+            # DB 不可达时用最近一次已知值兜底(冷启动失败=503 如实)
+            if entry["value"] is None:
+                raise
+    return entry["value"]
 
 def iter_exposed_tools(app_state: Any) -> List[Tool]:
     """按各 pack manifest 的 mcp_tools 声明收集要暴露的工具。"""
@@ -131,8 +156,7 @@ def build_mcp_asgi_app(app_state: Any) -> Starlette:
             from services.platform_settings import (
                 get_platform_settings_store, get_mcp_settings)
             key = (request.headers.get("X-Api-Key") or "").strip()
-            expected = get_mcp_settings(
-                get_platform_settings_store(request))["api_key"]
+            expected = _cached_key(request)
             if not expected:
                 resp = JSONResponse({"detail": "MCP 未启用:管理端未配置 MCP API Key"},
                                     status_code=503)
@@ -187,22 +211,28 @@ def mount_mcp(app: Any, app_state: Any) -> None:
 
 
 async def startup_mcp(app: Any) -> None:
-    """启动 session manager(main lifespan / 测试 fixture 各调一次;幂等)。"""
-    global _session_manager, _session_cm
-    if _session_manager is not None:
-        return
+    """启动 session manager(main lifespan / 测试 fixture 各调一次;幂等)。
+
+    按 app.state 键控: 多 app(测试并行/嵌套)各自持有 manager,互不顶替。
+    """
     manager = getattr(app.state, "_mcp_manager", None)
     if manager is None:
         return
+    key = id(app.state)
+    if key in _session_managers:
+        return
     cm = manager.run()
     await cm.__aenter__()
-    _session_manager = manager
-    _session_cm = cm
+    _session_managers[key] = manager
+    _session_cm[key] = cm
 
 
-async def shutdown_mcp() -> None:
-    global _session_manager, _session_cm
-    if _session_manager is not None:
-        await _session_cm.__aexit__(None, None, None)
-        _session_manager = None
-        _session_cm = None
+async def shutdown_mcp(app: Any = None) -> None:
+    """停 app 对应的 manager(不传 app=清全部,兼容旧调用)。"""
+    keys = ([id(app.state)] if app is not None and getattr(app, "state", None) is not None
+            else list(_session_cm))
+    for key in keys:
+        cm = _session_cm.pop(key, None)
+        _session_managers.pop(key, None)
+        if cm is not None:
+            await cm.__aexit__(None, None, None)

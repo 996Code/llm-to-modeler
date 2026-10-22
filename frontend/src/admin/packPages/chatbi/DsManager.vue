@@ -316,8 +316,9 @@ async function create() {
       message.warning('请填写名称并选择 MCP 服务')
       return
     }
-  } else if (!form.name.trim() || !form.host.trim() || !form.database.trim()) {
-    message.warning('请填写名称、主机与数据库')
+  } else if (!form.name.trim() || !form.host.trim() || !form.database.trim()
+             || !form.username.trim() || !form.password) {
+    message.warning('请填写名称、主机、数据库、用户名与密码')
     return
   }
   creating.value = true
