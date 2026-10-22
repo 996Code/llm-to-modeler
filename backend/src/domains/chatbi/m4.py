@@ -367,10 +367,13 @@ async def add_widget(did: str, body: WidgetCreate, request: Request):
         if not dash:
             raise HTTPException(404, "看板不存在")
 
-    # SEC: SQL 校验(只校验不执行)
-    validation = validate_sql(body.query_sql, allowed_columns=set())
-    if not validation.ok:
-        raise HTTPException(400, f"SQL 校验失败: {validation.reason}")
+    # SEC: SQL 校验(只校验不执行);mcp 数据源存工具调用 JSON——
+    # 合法性由 refresh 时的语义层白名单重放把关,此处不拦
+    ds_check = datasources.get_datasource(db, body.datasource_id)
+    if ds_check is None or ds_check.db_type != "mcp":
+        validation = validate_sql(body.query_sql, allowed_columns=set())
+        if not validation.ok:
+            raise HTTPException(400, f"SQL 校验失败: {validation.reason}")
 
     # 自动布局: 按行填充(每行 2 个, 列宽 6 总宽 12)
     with db.connect() as conn:

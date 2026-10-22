@@ -333,7 +333,8 @@ async function create() {
     await chatbiApi.post('/datasources', body)
     message.success('数据源已创建')
     showCreate.value = false
-    Object.assign(form, { name: '', host: '', database: '', username: '', password: '',
+    Object.assign(form, { name: '', db_type: 'postgresql', host: '', port: 5432,
+                          database: '', username: '', password: '',
                           mcp_server: '', mcp_tool: '' })
     await loadList()
   } catch (e: any) {

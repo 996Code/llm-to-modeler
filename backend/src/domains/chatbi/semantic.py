@@ -372,6 +372,7 @@ def synthesize_mcp_content(tools: list[dict]) -> SemanticModelContent:
                 display_name=str(pname),
                 data_type=_MCP_TYPE_MAP.get(
                     (prop or {}).get("type"), "string"),
+                source="auto_inferred",
             )
             for pname, prop in (schema.get("properties") or {}).items()
         ]
