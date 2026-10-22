@@ -85,15 +85,19 @@
         <a-table-column title="操作" width="150">
           <template #default="{ record }">
             <a-tooltip v-if="record.type === 'linkage'" title="linkage 是查询沉淀的结构化数据, 不提供文本编辑">
-              <a-button size="small" type="link" disabled>编辑</a-button>
+              <a-button size="small" type="text" disabled><template #icon><EditOutlined /></template></a-button>
             </a-tooltip>
             <a-tooltip v-else-if="record.type === 'metric_suggestion'" title="系统生成的指标建议——请到语义层页面采纳为指标定义">
-              <a-button size="small" type="link" disabled>编辑</a-button>
+              <a-button size="small" type="text" disabled><template #icon><EditOutlined /></template></a-button>
             </a-tooltip>
-            <a-button v-else size="small" type="link" @click="openEdit(record)">编辑</a-button>
+            <a-tooltip v-else title="编辑">
+              <a-button size="small" type="text" @click="openEdit(record)"><template #icon><EditOutlined /></template></a-button>
+            </a-tooltip>
             <a-popconfirm title="删除该记忆?" ok-text="删除" ok-type="danger"
                           @confirm="removeMem(record)">
-              <a-button size="small" type="link" danger>删除</a-button>
+              <a-tooltip title="删除">
+                <a-button size="small" type="text" danger><template #icon><DeleteOutlined /></template></a-button>
+              </a-tooltip>
             </a-popconfirm>
           </template>
         </a-table-column>
@@ -138,9 +142,7 @@
 // 整理走异步任务(任务中心观测进度), 完成后自动刷新列表。
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import {
-  ForkOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined,
-} from '@ant-design/icons-vue'
+import {DeleteOutlined, EditOutlined, ForkOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined} from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 import { tasksApi } from '../../api'
 

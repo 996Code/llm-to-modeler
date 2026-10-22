@@ -11,9 +11,11 @@
                 title="复制 Key" @click="copyKey">
         <template #icon><CopyOutlined /></template>
       </a-button>
-      <a-button size="small" :loading="rotatingKey" @click="rotateKey">
-        {{ keyConfigured ? '刷新 Key' : '生成 Key' }}
-      </a-button>    </div>
+      <a-tooltip :title="keyConfigured ? '刷新 Key(旧 Key 立即失效)' : '生成 Key'">
+        <a-button size="small" type="text" :loading="rotatingKey" @click="rotateKey">
+          <template #icon><SyncOutlined /></template>
+        </a-button>
+      </a-tooltip>    </div>
 
     <a-table
       :columns="columns"
@@ -111,7 +113,7 @@
 // 与 PacksTab 同容器不新开顶级 tab(spec §5);错误统一走 loadSafely(401/4xx detail toast)。
 import { inject, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
-import { CopyOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, SyncOutlined } from '@ant-design/icons-vue'
 import {
   ApiOutlined, DeleteOutlined, EditOutlined, PlusOutlined,
   QuestionCircleOutlined, ReloadOutlined,

@@ -57,26 +57,45 @@
             <span v-else class="muted">未扫描</span>
           </template>
         </a-table-column>
-        <a-table-column title="操作" width="400">
+        <a-table-column title="操作" width="240">
           <template #default="{ record }">
-            <a-button size="small" type="link" :loading="healthCheckingId === record.id"
-                      @click="health(record)">健康</a-button>
-            <a-button size="small" type="link" @click="showMetrics(record)">指标</a-button>
-            <a-button size="small" type="link" :disabled="record.scanStatus === 'scanning'"
-                      @click="scan(record)">{{ ['done', 'done_with_warning'].includes(record.scanStatus) ? '重新扫描' : '扫描' }}</a-button>
-            <a-button size="small" type="link" @click="viewSemantic(record)"
-                      :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">语义层</a-button>
-            <a-button size="small" type="link" @click="emit('open-graph', record.id)"
-                      :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">图谱</a-button>
+            <a-tooltip title="健康探测">
+              <a-button size="small" type="text" :loading="healthCheckingId === record.id"
+                        @click="health(record)"><template #icon><HeartOutlined /></template></a-button>
+            </a-tooltip>
+            <a-tooltip title="指标">
+              <a-button size="small" type="text" @click="showMetrics(record)"
+                        ><template #icon><ExperimentOutlined /></template></a-button>
+            </a-tooltip>
+            <a-tooltip :title="['done', 'done_with_warning'].includes(record.scanStatus) ? '重新扫描' : '扫描(合成语义层)'">
+              <a-button size="small" type="text" :disabled="record.scanStatus === 'scanning'"
+                        @click="scan(record)"><template #icon><ScanOutlined /></template></a-button>
+            </a-tooltip>
+            <a-tooltip title="语义层">
+              <a-button size="small" type="text" @click="viewSemantic(record)"
+                        :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)"
+                        ><template #icon><ProfileOutlined /></template></a-button>
+            </a-tooltip>
+            <a-tooltip title="图谱">
+              <a-button size="small" type="text" @click="emit('open-graph', record.id)"
+                        :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)"
+                        ><template #icon><PartitionOutlined /></template></a-button>
+            </a-tooltip>
             <a-popconfirm title="强制重建该数据源的语义向量索引?(切换向量后端/检索异常时的兜底)"
                           ok-text="重建" @confirm="rebuildIndex(record)">
-              <a-button size="small" type="link"
-                        :loading="rebuildingId === record.id"
-                        :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)">重建索引</a-button>
+              <a-tooltip title="重建索引">
+                <a-button size="small" type="text"
+                          :loading="rebuildingId === record.id"
+                          :disabled="!['done', 'done_with_warning'].includes(record.scanStatus)"
+                          ><template #icon><DatabaseOutlined /></template></a-button>
+              </a-tooltip>
             </a-popconfirm>
             <a-popconfirm title="删除数据源及其语义层/向量数据?" ok-text="删除" ok-type="danger"
                           @confirm="removeDs(record)">
-              <a-button size="small" type="link" danger>删除</a-button>
+              <a-tooltip title="删除">
+                <a-button size="small" type="text" danger
+                          ><template #icon><DeleteOutlined /></template></a-button>
+              </a-tooltip>
             </a-popconfirm>
           </template>
         </a-table-column>
@@ -208,9 +227,7 @@
 // 从原 index.vue 拆出;「图谱」按钮 emit 给父级切到图谱 Tab(跨 Tab 联动)。
 import { computed, defineEmits, defineExpose, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import {
-  HeartOutlined, PlusOutlined, QuestionCircleOutlined, SyncOutlined,
-} from '@ant-design/icons-vue'
+import { DatabaseOutlined, DeleteOutlined, ExperimentOutlined, HeartOutlined, PartitionOutlined, PlusOutlined, ProfileOutlined, QuestionCircleOutlined, ScanOutlined, SyncOutlined } from '@ant-design/icons-vue'
 import { chatbiApi, listMcpServers } from '../../api'
 
 const emit = defineEmits<{

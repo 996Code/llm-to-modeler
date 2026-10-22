@@ -103,7 +103,9 @@
           <span class="cl-time">{{ fmtTime(record.created_at) }}</span>
         </template>
         <template v-else-if="column.key === 'actions'">
-          <a @click="openDetail(record)">详情</a>
+          <a-tooltip title="调用详情">
+              <a style="cursor: pointer" @click="openDetail(record)"><FileSearchOutlined /></a>
+            </a-tooltip>
         </template>
       </template>
     </a-table>
@@ -202,7 +204,7 @@
 <script setup lang="ts">
 // 审计 & 调用:三视角 Tab(调用明细/按环节统计/审计日志)。
 import { computed, inject, onMounted, reactive, ref, watch } from 'vue'
-import { SearchOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import {FileSearchOutlined, ReloadOutlined, SearchOutlined} from '@ant-design/icons-vue'
 import { CallLogItem, fetchCallLogs, fetchCallStats, fetchAuditLogs, fmtTime, shortId, CallStageItem, AuditEventItem, fetchPacks } from '../api'
 import type { LoadSafely } from './loadSafely'
 import JsonViewer from './JsonViewer.vue'

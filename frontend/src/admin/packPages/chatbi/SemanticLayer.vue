@@ -65,13 +65,19 @@
             <template v-if="editingTable">
               <a-input v-model:value="editForm.tableDisplayName" size="small" style="width: 220px"
                        @pressEnter="saveTableEdit" />
-              <a-button size="small" type="link" @click="saveTableEdit">保存</a-button>
-              <a-button size="small" type="link" @click="editingTable = false">取消</a-button>
+              <a-tooltip title="保存">
+                <a-button size="small" type="text" @click="saveTableEdit"><template #icon><SaveOutlined /></template></a-button>
+              </a-tooltip>
+              <a-tooltip title="取消">
+                <a-button size="small" type="text" @click="editingTable = false"><template #icon><CloseOutlined /></template></a-button>
+              </a-tooltip>
             </template>
             <template v-else>
               <b>{{ selected.display_name }}</b>
               <code class="muted">{{ selected.name }}</code>
-              <a-button size="small" type="link" @click="startTableEdit"><EditOutlined /> 编辑</a-button>
+              <a-tooltip title="编辑表名">
+                <a-button size="small" type="text" @click="startTableEdit"><template #icon><EditOutlined /></template></a-button>
+              </a-tooltip>
             </template>
           </div>
           <a-tag :color="sourceTag(selected.source)">{{ sourceLabel(selected.source) }}</a-tag>
@@ -165,7 +171,9 @@
         <div class="sl-section">
           <div class="sl-section-title">
             指标 ({{ selected.metrics?.length || 0 }})
-            <a-button size="small" type="link" @click="addMetric"><PlusOutlined /> 新增</a-button>
+            <a-tooltip title="新增指标">
+              <a-button size="small" type="text" @click="addMetric"><template #icon><PlusOutlined /></template></a-button>
+            </a-tooltip>
           </div>
           <a-table v-if="selected.metrics?.length" :data-source="selected.metrics" row-key="name"
                    size="small" :pagination="false">
@@ -190,10 +198,14 @@
             </a-table-column>
             <a-table-column title="操作" width="110">
               <template #default="{ record }">
-                <a-button size="small" type="link" @click="editMetric(record)">编辑</a-button>
+                <a-tooltip title="编辑">
+                  <a-button size="small" type="text" @click="editMetric(record)"><template #icon><EditOutlined /></template></a-button>
+                </a-tooltip>
                 <a-popconfirm :title="`删除指标「${record.display_name}」?`" ok-text="删除" ok-type="danger"
                               @confirm="deleteMetric(record)">
-                  <a-button size="small" type="link" danger>删除</a-button>
+                  <a-tooltip title="删除">
+                    <a-button size="small" type="text" danger><template #icon><DeleteOutlined /></template></a-button>
+                  </a-tooltip>
                 </a-popconfirm>
               </template>
             </a-table-column>
@@ -328,10 +340,7 @@
 // 编辑语义 = 整包 PUT(后端 mark_manual_edits 自动打标 manual/1.0, 落新版本)。
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import {
-  DatabaseOutlined, EditOutlined, HistoryOutlined, InfoCircleOutlined,
-  PlusOutlined, ReloadOutlined,
-} from '@ant-design/icons-vue'
+import {CloseOutlined, DatabaseOutlined, DeleteOutlined, EditOutlined, HistoryOutlined, InfoCircleOutlined, PlusOutlined, ReloadOutlined, SaveOutlined} from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 
 const props = defineProps<{

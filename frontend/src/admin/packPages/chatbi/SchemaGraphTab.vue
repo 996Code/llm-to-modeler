@@ -87,7 +87,11 @@
           <div class="kv"><span>置信度</span><code>{{ selectedEdge.confidence }}</code></div>
           <div class="kv"><span>来源</span><code>{{ relSourceLabel(selectedEdge.relSource) }}</code></div>
           <div v-if="mode === 'edit'" style="margin-top:8px;text-align:right">
-            <a-button size="small" danger @click="deleteRelationship(selectedEdge)">删除关系</a-button>
+            <a-popconfirm title="删除该关系?" ok-text="删除" ok-type="danger" @confirm="deleteRelationship(selectedEdge)">
+              <a-tooltip title="删除关系">
+                <a-button size="small" type="text" danger><template #icon><DeleteOutlined /></template></a-button>
+              </a-tooltip>
+            </a-popconfirm>
           </div>
         </div>
       </div>
@@ -161,9 +165,7 @@
 // (to_vis_data: 节点含社区/中心度, 边含 ON/置信度)。
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import {
-  CloseOutlined, FullscreenOutlined, PlusOutlined, ZoomInOutlined, ZoomOutOutlined,
-} from '@ant-design/icons-vue'
+import {CloseOutlined, DeleteOutlined, FullscreenOutlined, PlusOutlined, ZoomInOutlined, ZoomOutOutlined} from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 
 const props = defineProps<{

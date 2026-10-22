@@ -223,7 +223,9 @@
             <a-input v-model:value="row.key" placeholder="键(如 部门)" style="width: 35%" :maxlength="64" />
             <a-input v-model:value="row.value" placeholder="值(如 销售;逗号分隔多值)" style="width: 50%"
                      :maxlength="128" @pressEnter="saveMeta" />
-            <a-button size="small" type="text" danger @click="metaEdit.rows.splice(i, 1)">删</a-button>
+            <a-tooltip title="删除该行">
+                <a-button size="small" type="text" danger @click="metaEdit.rows.splice(i, 1)"><template #icon><DeleteOutlined /></template></a-button>
+              </a-tooltip>
           </div>
           <a-button size="small" type="dashed" block style="margin-top: 8px"
                     @click="metaEdit.rows.push({ key: '', value: '' })">+ 添加</a-button>
