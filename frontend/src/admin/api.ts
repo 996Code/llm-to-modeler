@@ -1014,7 +1014,7 @@ export async function fetchMcpKeyStatus(): Promise<{ configured: boolean; apiKey
   return data
 }
 
-/** 生成/轮换 MCP API Key(旧 key 立即失效)。 */
+/** 生成/轮换 MCP API Key(旧 key 约 5 秒内失效)。 */
 export async function refreshMcpKey(): Promise<{ configured: boolean; apiKey: string }> {
   const { data } = await adminApi.post('/settings/mcp/refresh-key')
   return data

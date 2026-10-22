@@ -12,7 +12,7 @@
         <template #icon><CopyOutlined /></template>
         </a-button>
       </a-tooltip>
-      <a-tooltip :title="keyConfigured ? '刷新 Key(旧 Key 立即失效)' : '生成 Key'">
+      <a-tooltip :title="keyConfigured ? '刷新 Key(旧 Key 约 5 秒内失效)' : '生成 Key'">
         <a-button size="small" type="text" :loading="rotatingKey" @click="rotateKey">
           <template #icon><SyncOutlined /></template>
         </a-button>
@@ -263,7 +263,7 @@ async function rotateKey() {
   if (keyConfigured.value) {
     Modal.confirm({
       title: '刷新接入 Key?',
-      content: '旧 Key 立即失效,已接入的外部工具需改用新 Key(如 self_test 注册的认证头)。',
+      content: '旧 Key 约 5 秒内失效,已接入的外部工具需改用新 Key(如 self_test 注册的认证头)。',
       onOk: doRotate,
     })
   } else {

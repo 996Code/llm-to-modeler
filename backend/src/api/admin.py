@@ -23,7 +23,7 @@
   GET    /api/admin/settings/display          → 平台级显示设置(链路/检索结果显示开关)
   PUT    /api/admin/settings/display          → 保存显示设置(部分更新;用户级只读端点共读)
   GET    /api/admin/settings/mcp              → MCP 接入 key(状态+明文回显,admin 门控)
-  POST   /api/admin/settings/mcp/refresh-key  → 生成/轮换 key(旧 key 立即失效)
+  POST   /api/admin/settings/mcp/refresh-key  → 生成/轮换 key(旧 key 约 5 秒内失效)
   GET    /api/admin/mcp/servers               → 外部 MCP server 注册表(含 status/tools_snapshot)
   POST   /api/admin/mcp/servers               → 注册外部 server(注册即探测;失败 pending 不阻塞)
   PUT    /api/admin/mcp/servers/{id}          → 改配置(改完重探测)
@@ -132,7 +132,7 @@ async def get_mcp(request: Request, _: None = Depends(require_admin)):
 
 @router.post("/settings/mcp/refresh-key")
 async def refresh_mcp_key(request: Request, _: None = Depends(require_admin)):
-    """生成/轮换 MCP 接入 key(旧 key 立即失效;secrets 随机生成,非用户自设)。"""
+    """生成/轮换 MCP 接入 key(旧 key 约 5 秒内失效——校验走 5s TTL 缓存;secrets 随机生成,非用户自设)。"""
     import secrets as _secrets
     store = get_platform_settings_store(request)
     new_key = _secrets.token_urlsafe(24)
