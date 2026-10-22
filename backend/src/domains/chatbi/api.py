@@ -24,7 +24,7 @@ import logging
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from sdk.pack_api import admin_required, user_required
 from sdk.relational_store import PackRelationalDB
@@ -100,6 +100,18 @@ class DatasourceCreate(BaseModel):
     database: str = ""
     username: str = ""
     password: str = ""
+
+    @model_validator(mode="after")
+    def _non_mcp_requires_credentials(self) -> "DatasourceCreate":
+        """终审#2: mcp 放宽三字段可空不得波及非 mcp——非 mcp 保持
+        必填语义(空库名/空密码的 postgresql 会静默落到连接期才失败)。"""
+        if self.db_type != "mcp":
+            missing = [f for f in ("database", "username", "password")
+                       if not (getattr(self, f) or "").strip()]
+            if missing:
+                raise ValueError(f"非 mcp 数据源({self.db_type})必填字段"
+                                 f"缺失或为空: {', '.join(missing)}")
+        return self
 
 
 class DatasourceUpdate(BaseModel):

@@ -289,3 +289,44 @@ class TestRebuildIndexEndpoint:
             db, "未扫库", "postgresql", "localhost", 5432, "x", "u", "p")
         r = c.post(f"/datasources/{info.id}/rebuild-index")
         assert r.status_code == 422
+
+
+class TestDatasourceCreateContract:
+    """终审#2: DatasourceCreate 为 mcp 放宽 database/username/password
+    默认空串——非 mcp 必填语义必须恢复(空库名/空密码的 postgresql 会
+    静默落到连接期才失败, 违反"非 mcp 零变化")。mcp 三字段可空保持。"""
+
+    def test_postgresql_missing_database_422(self, client):
+        """postgresql 缺 database → 422(创建期拒绝, 不静默落库)。"""
+        c, _ = client
+        r = c.post("/datasources", json={
+            "name": "pg缺库名", "db_type": "postgresql", "host": "localhost",
+            "port": 5432, "username": "u", "password": "p"})
+        assert r.status_code == 422, r.text
+
+    def test_postgresql_empty_password_422(self, client):
+        """postgresql 显式空串密码 → 同 422(默认空串不得绕过必填)。"""
+        c, _ = client
+        r = c.post("/datasources", json={
+            "name": "pg空密码", "db_type": "postgresql", "host": "localhost",
+            "port": 5432, "database": "db", "username": "u", "password": ""})
+        assert r.status_code == 422, r.text
+
+    def test_postgresql_full_credentials_200(self, client):
+        """postgresql 三字段齐全 → 正常创建(非 mcp 原契约不变)。"""
+        c, _ = client
+        r = c.post("/datasources", json={
+            "name": "pg正常", "db_type": "postgresql", "host": "localhost",
+            "port": 5432, "database": "db", "username": "u", "password": "p"})
+        assert r.status_code == 200, r.text
+        assert r.json()["dbType"] == "postgresql"
+
+    def test_mcp_empty_three_fields_200(self, client):
+        """mcp 三字段空 → 通过(mcp 契约: database=tool_name 可空, 凭据空串)。"""
+        c, _ = client
+        r = c.post("/datasources", json={
+            "name": "外部mcp", "db_type": "mcp", "host": "srv_a",
+            "port": 0, "database": "", "username": "", "password": ""})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["dbType"] == "mcp" and body["host"] == "srv_a"

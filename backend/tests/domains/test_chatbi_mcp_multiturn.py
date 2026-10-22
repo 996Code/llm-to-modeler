@@ -4,6 +4,9 @@
   switch_chart: prev_sql 为工具调用 JSON 时——跳过 SQL 校验(此前 sqlglot
     必失败 → 误导"上轮 SQL 校验未通过")、走 execute_mcp_tool 重放(此前
     execute_readonly 对 mcp 抛 ValueError)、失败如实报错。
+  S7 等价校验(终审#1): 重放前校验 tool ∈ 当前语义层 model names——
+    不限定工具的 mcp 数据源(database="")下, 过期 session prev_sql
+    可指向 server 上任意工具(含副作用型), 必须拒绝引导重问。
   check 步守卫: mcp 数据源的结果异常(ALL_NULL 等)不进 SQL 自动修正
     (heal_sql 吃 JSON 必产废 SQL → execute_readonly(mcp) 未捕获 ValueError
     炸管线), 直接走 ask 澄清; adjust_hint 自由输入路径同守卫。
@@ -153,6 +156,54 @@ class TestSwitchChartMcp:
         result = tool.execute({"user_input": "换成饼图"}, _ctx(env))
         assert result.error_for_llm and "重新提问" in result.summary
         assert called["n"] == 0
+
+    def test_switch_chart_mcp_tool_outside_semantic_layer_rejected(
+            self, env, monkeypatch):
+        """S7 等价校验(终审#1): prev_sql 指向语义层外的工具 → 拒绝重放。
+
+        场景: 不限定工具的 mcp 数据源(database="")——语义层只收录
+        query_gmv, 但过期 session prev_sql 指向 server 上的另一工具
+        (如副作用型 delete_everything)。语义层可能已变更/持久化数据
+        可能被篡改(与 SQL 路径 S7 同理由), 重放前必须重校验
+        tool ∈ 当前语义层 model names, 不在 → "上轮查询已失效"引导重问。
+        铁证: execute_mcp_tool tripwire 计数为 0(绝未触达执行)。
+        """
+        import domains.chatbi.datasources as ds_mod
+        calls = []
+
+        def tripwire(*a, **kw):
+            calls.append((a, kw))
+            # 若被调用, 让流程可控失败(而非 None 炸 AttributeError)
+            return ExecuteResult(False, error="不应执行: 语义层外工具被重放")
+        monkeypatch.setattr(ds_mod, "execute_mcp_tool", tripwire)
+
+        sess = _sess(env)
+        sess.set("datasource_id", env["ds"].id)
+        sess.set("prev_sql", json.dumps({"tool": "delete_everything",
+                                         "args": {}}))
+        sess.set("prev_chart_config", {"chart_type": "bar"})
+        tool = SwitchChartTool(db=env["db"], settings={})
+        result = tool.execute({"user_input": "换成饼图"}, _ctx(env))
+        assert result.error_for_llm and "重新提问" in result.summary
+        assert calls == []  # tripwire 计数: execute_mcp_tool 未被调用
+
+    def test_switch_chart_mcp_unscanned_semantic_layer_rejected(
+            self, env, monkeypatch):
+        """语义层缺失(未扫描/已清空)时 fail-closed: 空集合不含任何工具 → 拒绝。"""
+        from domains.chatbi import semantic as semantic_mod
+        monkeypatch.setattr(semantic_mod, "load_current_content",
+                            lambda db, ds_id: None)
+        import domains.chatbi.datasources as ds_mod
+        calls = []
+        monkeypatch.setattr(ds_mod, "execute_mcp_tool",
+                            lambda *a, **kw: calls.append(1))
+        sess = _sess(env)
+        sess.set("datasource_id", env["ds"].id)
+        sess.set("prev_sql", json.dumps({"tool": "query_gmv", "args": {}}))
+        tool = SwitchChartTool(db=env["db"], settings={})
+        result = tool.execute({"user_input": "换成饼图"}, _ctx(env))
+        assert result.error_for_llm and "重新提问" in result.summary
+        assert calls == []
 
 
 # ── check 步 mcp 守卫: 结果异常不进 SQL 自动修正 ─────────────────

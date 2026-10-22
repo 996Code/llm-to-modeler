@@ -81,6 +81,25 @@ class SwitchChartTool(Tool):
                 return ToolResult(artifact_type="data",
                                   error_for_llm="上轮查询已损坏, 请重新提问",
                                   summary="上轮工具调用已损坏, 请重新提问, 我会生成新的查询。")
+            # SEC S7 等价校验(终审#1): SQL 路径对 prev_sql 重校验的理由
+            # 同样适用——语义层可能已变更(工具下线)、持久化数据可能被
+            # 篡改; 且不限定工具的 mcp 数据源(database="")下, 过期
+            # session prev_sql 可调用该 server 上任意工具(含副作用型)。
+            # tool ∈ 当前语义层 model names 才放行重放; 语义层缺失
+            # (未扫描/已清空) → 空集合 fail-closed 拒绝。
+            from domains.chatbi import semantic
+            content = semantic.load_current_content(db, ds.id)
+            model_names = ({m.name for m in content.models}
+                           if content and content.models else set())
+            tool = (tool_call.get("tool")
+                    if isinstance(tool_call, dict) else None)
+            if tool not in model_names:
+                logger.warning("switch_chart: mcp prev_sql 工具 %r 不在当前"
+                               "语义层(数据源=%s), 拒绝重放", tool, ds.id)
+                return ToolResult(artifact_type="data",
+                                  error_for_llm="上轮查询已失效, 请重新提问",
+                                  summary="上轮查询已失效(工具已不在当前语义"
+                                          "层), 请重新提问, 我会生成新的查询。")
             ctx.emit("stage", "switch_chart", "正在重跑查询并切换图表...")
             result = datasources.execute_mcp_tool(
                 ds, tool_call,
