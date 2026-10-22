@@ -1,11 +1,21 @@
 <template>
   <div>
-    <!-- 行标题 + 右侧说明入口同一行(说明不再独占一行) -->
-    <div class="pk-toolbar">
-      <span class="pk-toolbar-title">
-        <AppstoreOutlined /> 插件
-        <a-tag v-if="payload" class="pk-toolbar-count">{{ enabledCount }}/{{ payload.items.length }} 启用</a-tag>
-      </span>
+    <!-- 页头 tab:插件(含启用计数) | MCP 服务(注册计数),说明入口在右 -->
+    <div class="pk-tabs-row">
+      <a-tabs v-model:activeKey="innerTab" size="small" class="pk-tabs">
+        <a-tab-pane key="packs">
+          <template #tab>
+            <AppstoreOutlined /> 插件
+            <span class="pk-tab-count">{{ payload ? `${enabledCount}/${payload.items.length}` : '' }}</span>
+          </template>
+        </a-tab-pane>
+        <a-tab-pane key="mcp">
+          <template #tab>
+            <ApiOutlined /> MCP 服务
+            <span v-if="mcpCount" class="pk-tab-count">{{ mcpCount }}</span>
+          </template>
+        </a-tab-pane>
+      </a-tabs>
       <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
         <template #content>
           <div class="pk-help">
@@ -13,14 +23,16 @@
             <div class="pk-help-body">
               启停状态持久化在 <code>{{ payload?.stateFile ?? 'data/pack_state.json' }}</code>(初始来源:{{ sourceLabel }}),重启后保持。
               依赖未配置的插件无法启用——可在插件"设置"里补配连接信息,或配好环境变量后点"重新检测"热加载。
+              MCP 服务 tab 里登记的外部 server 供插件(如智能问数数据源)引用。
             </div>
           </div>
         </template>
-        <a class="pk-help-link" title="插件启停说明">
+        <a class="pk-help-link" title="插件与 MCP 服务说明">
           <QuestionCircleOutlined /> 说明
         </a>
       </a-popover>
     </div>
+    <template v-if="innerTab === 'packs'">
 
     <div class="pk-grid">
       <div v-for="pack in payload?.items ?? []" :key="pack.name" class="pk-card" :class="{ off: !pack.enabled }">
@@ -87,7 +99,11 @@
         </div>
       </div>
     </div>
+
     <a-empty v-if="payload && !payload.items.length" description="未发现任何插件" style="padding: 60px 0" />
+
+    </template>
+    <McpServersPanel v-if="innerTab === 'mcp'" @count="mcpCount = $event" />
 
     <!-- 声明式设置抽屉 -->
     <PackSettingsDrawer v-model:open="settingsOpen" :pack-name="settingsPack" @saved="load" />
@@ -104,6 +120,7 @@ import {
 } from '@ant-design/icons-vue'
 import { AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
 import type { LoadSafely } from './loadSafely'
+import McpServersPanel from './McpServersPanel.vue'
 import PackSettingsDrawer from './PackSettingsDrawer.vue'
 
 const emit = defineEmits<{
@@ -113,6 +130,8 @@ const emit = defineEmits<{
 const loadSafely = inject<LoadSafely>('loadSafely')!
 
 const payload = ref<Awaited<ReturnType<typeof fetchPacks>> | null>(null)
+const innerTab = ref('packs')
+const mcpCount = ref(0)
 const toggling = ref('')
 const rechecking = ref('')
 const settingsOpen = ref(false)
@@ -192,6 +211,13 @@ onMounted(load)
 </script>
 
 <style scoped>
+.pk-tabs-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.pk-tabs :deep(.ant-tabs-nav) { margin: 0 0 0 -12px; }
+.pk-tabs :deep(.ant-tabs-tab) { padding: 6px 12px; font-weight: 500; }
+.pk-tab-count {
+  margin-left: 6px; font-size: 11px; font-weight: 500; color: #2f54eb;
+  background: #f0f5ff; border: 1px solid #d6e4ff; border-radius: 999px; padding: 0 7px;
+}
 /* 行标题(左) + 说明入口(右)同一行; 说明不独占一行 */
 .pk-toolbar {
   display: flex; align-items: center; justify-content: space-between;

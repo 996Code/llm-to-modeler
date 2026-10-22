@@ -1,10 +1,15 @@
 <template>
   <section class="mcp-panel">
-    <div class="pk-toolbar">
-      <span class="pk-toolbar-title">
-        <ApiOutlined /> 外部 MCP 服务
-        <a-tag v-if="servers.length" class="pk-toolbar-count">{{ servers.length }} 个</a-tag>
-      </span>
+    <div class="mcp-key-row">
+      <span class="mcp-key-label">对外接入(外部 AI 工具连 <code>{{ mcpEndpoint }}</code>)</span>
+      <a-tag :color="keyConfigured ? 'green' : 'red'">
+        {{ keyConfigured ? '已启用' : '未配置 Key' }}
+      </a-tag>
+      <a-input-password
+        v-model:value="apiKeyInput" size="small" style="width: 220px"
+        placeholder="设置/更换 MCP API Key"
+      />
+      <a-button size="small" :loading="savingKey" @click="saveKey">保存</a-button>
       <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
         <template #content>
           <div class="pk-help">
@@ -19,18 +24,6 @@
           <QuestionCircleOutlined /> 说明
         </a>
       </a-popover>
-    </div>
-
-    <div class="mcp-key-row">
-      <span class="mcp-key-label">对外接入(外部 AI 工具连 <code>{{ mcpEndpoint }}</code>)</span>
-      <a-tag :color="keyConfigured ? 'green' : 'red'">
-        {{ keyConfigured ? '已启用' : '未配置 Key' }}
-      </a-tag>
-      <a-input-password
-        v-model:value="apiKeyInput" size="small" style="width: 220px"
-        placeholder="设置/更换 MCP API Key"
-      />
-      <a-button size="small" :loading="savingKey" @click="saveKey">保存</a-button>
     </div>
 
     <a-table
@@ -140,6 +133,7 @@ import type { LoadSafely } from './loadSafely'
 const loadSafely = inject<LoadSafely>('loadSafely')!
 
 const servers = ref<McpServer[]>([])
+const emit = defineEmits<{ (e: 'count', n: number): void }>()
 const loading = ref(false)
 const keyConfigured = ref(false)
 // 对外端点带项目前缀(网关剥前缀转后端 /api/mcp;vite base 与生产 nginx 同约定)
@@ -165,6 +159,7 @@ async function load() {
   loading.value = true
   await loadSafely(async () => {
     servers.value = await listMcpServers()
+    emit('count', servers.value.length)
     keyConfigured.value = (await fetchMcpKeyStatus()).configured
   })
   loading.value = false
