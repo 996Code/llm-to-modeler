@@ -107,7 +107,7 @@ class SwitchChartTool(Tool):
             if not result.ok:
                 return ToolResult(artifact_type="data",
                                   error_for_llm=f"重跑查询失败: {result.error}",
-                                  summary="切换图表失败: 查询执行失败")
+                                  summary=f"切换图表失败: {result.error[:120]}")
         else:
             # SEC S7 (对标 agent.py CHART_MODIFY): prev_sql 来自持久化状态,
             # 必须重新校验——即使上轮已校验, 语义层/白名单可能已变更, 且

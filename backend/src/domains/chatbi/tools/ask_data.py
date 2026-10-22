@@ -1047,9 +1047,12 @@ class AskDataTool(CompositeTool):
             raw = state["_error"]
             # "工具调用校验失败"=mcp 分支的生成期校验(对标 "SQL 校验失败"
             # 业务类; 非 mcp 路径永不产出该前缀, 零影响)
+            # "工具调用失败/数据源暂不可用"=mcp 执行/解析错误(含"已停用/
+            # 连接失败/未注册"等原因)——可行动的用户信息,如实透传不脱敏
             is_business = raw.startswith(("SQL 校验失败", "工具调用校验失败",
                                           "无语义层定义",
-                                          "尚未扫描语义层", "尚无可用数据源"))
+                                          "尚未扫描语义层", "尚无可用数据源",
+                                          "工具调用失败", "数据源暂不可用"))
             user_text = raw if is_business else "查询执行失败, 请稍后重试或调整问法"
             state["_result"] = ToolResult(
                 artifact_type="data",
