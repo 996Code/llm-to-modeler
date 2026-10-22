@@ -183,7 +183,7 @@ class TestDataOps:
 
 
 class TestScopeContract:
-    """scope_id 契约入口防御(与 Milvus 实现同款)。"""
+    """scope_id 契约入口防御(与协议约定同款)。"""
 
     @pytest.mark.parametrize("bad", ["我的库", "kb-001", "", "UPPER-UUID"])
     def test_rejects_user_input(self, store, bad):

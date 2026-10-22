@@ -271,7 +271,7 @@ def env(tmp_path, monkeypatch):
     import services.task_manager as tm_mod
     _ = tm_mod  # noqa
 
-    settings = PackSettingsStore(str(tmp_path / "settings.db"))
+    settings = PackSettingsStore()
     settings.save_values("knowledge_graph", {
         "chunk_target_chars": 100, "chunk_overlap_chars": 0, "chunk_max_chars": 300,
         "llm_batch_size": 2, "llm_concurrency": 2, "llm_max_retries": 0,
@@ -285,7 +285,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "get_graph", lambda state: fake_graph)
     monkeypatch.setattr(runtime, "get_vector", lambda state: fake_vector)
 
-    task_store = TaskStore(str(tmp_path / "tasks.db"))
+    task_store = TaskStore()
     manager = TaskManager(task_store, max_workers=2)
     app_state = SimpleNamespace(
         llm_client=llm, settings_store=settings, task_manager=manager,

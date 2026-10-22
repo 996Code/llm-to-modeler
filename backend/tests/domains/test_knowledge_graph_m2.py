@@ -156,7 +156,7 @@ class TestKGStore:
 
     @pytest.fixture()
     def store(self, tmp_path):
-        return KGStore(str(tmp_path / "kg.db"))
+        return KGStore()
 
     def test_kb_crud(self, store):
         kb = store.create_kb("库A", "描述", schema_json={"entity_types": [1]}, schema_template="general")

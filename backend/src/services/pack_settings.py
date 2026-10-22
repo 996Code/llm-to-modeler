@@ -250,11 +250,8 @@ class PackSettingsStore:
     多线程读 / 单线程写,无跨方法事务。
     """
 
-    def __init__(self, db_path: str = "", database_url: Optional[str] = None):
-        # db_path 已废弃(PG-only);保留形参兼容旧调用签名,实参忽略
+    def __init__(self, database_url: Optional[str] = None):
         from services.db import get_pg_engine
-        if db_path:
-            logger.warning("db_path 已废弃(PG-only),实参被忽略——存储由 DATABASE_URL 决定")
         self.db = get_pg_engine(database_url)
         self._lock = threading.Lock()  # 写操作串行化(读走池借还,无需锁)
         self._init_db()

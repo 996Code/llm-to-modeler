@@ -77,11 +77,8 @@ def _row_to_log(row) -> Dict[str, Any]:
 class TaskStore:
     """tasks / task_logs 的 DAO(PostgreSQL,见 services.db)。"""
 
-    def __init__(self, db_path: str = "", database_url: Optional[str] = None):
-        # db_path 已废弃(PG-only);保留形参兼容旧调用签名,实参忽略
+    def __init__(self, database_url: Optional[str] = None):
         from services.db import get_pg_engine
-        if db_path:
-            logger.warning("db_path 已废弃(PG-only),实参被忽略——存储由 DATABASE_URL 决定")
         self.db = get_pg_engine(database_url)
         self._init_db()
         logger.info("TaskStore initialized: postgres")

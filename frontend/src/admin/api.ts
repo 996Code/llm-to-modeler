@@ -264,11 +264,6 @@ export async function fetchConversations(params: {
   return data
 }
 
-export async function fetchConversation(id: string): Promise<AdminConversationDetail> {
-  const { data } = await adminApi.get(`/conversations/${id}`)
-  return data
-}
-
 export async function fetchConversationTrace(id: string): Promise<ConversationTrace> {
   const { data } = await adminApi.get(`/conversations/${id}/trace`)
   return data
@@ -801,11 +796,6 @@ export async function deleteKgKb(id: string): Promise<{ success: boolean; cleanu
   const { data } = await kgApi.delete(`/kbs/${id}`)
   return data
 }
-export async function fetchKgStats(id: string): Promise<Record<string, unknown>> {
-  const { data } = await kgApi.get(`/kbs/${id}/stats`)
-  return data
-}
-
 export async function fetchKgDocuments(kbId: string): Promise<KgDocument[]> {
   const { data } = await kgApi.get(`/kbs/${kbId}/documents`)
   return data.items
@@ -915,11 +905,6 @@ export async function fetchKgGraph(kbId: string, params: { q?: string; types?: s
 }
 export async function expandKgNode(kbId: string, nodeId: string): Promise<KgGraphData> {
   const { data } = await kgApi.get(`/kbs/${kbId}/graph/expand`, { params: { node_id: nodeId } })
-  return data
-}
-
-export async function kgSearch(query: string, kb?: string): Promise<KgSearchResult> {
-  const { data } = await kgApi.post('/search', { query, kb })
   return data
 }
 
@@ -1052,12 +1037,3 @@ export function shortId(id: string | null | undefined): string {
   return id.length > 8 ? `${id.slice(0, 8)}…` : id
 }
 
-/** JSON 美化(请求/响应/明细展示共用);非 JSON 值退化为 String。 */
-export function pretty(data: unknown): string {
-  if (data == null) return '(空)'
-  try {
-    return JSON.stringify(data, null, 2)
-  } catch {
-    return String(data)
-  }
-}

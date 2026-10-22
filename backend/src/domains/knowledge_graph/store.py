@@ -94,13 +94,10 @@ def query_grams(query: str) -> List[str]:
 class KGStore:
     """kg_* 三表的 DAO。"""
 
-    def __init__(self, db_path: str = "", database_url: str = ""):
-        # db_path 已废弃(PG-only);保留形参兼容旧调用签名,实参忽略。
+    def __init__(self, database_url: str = ""):
         # 存储走 SDK 关系型通道(pack 独立 schema + 共享平台池)——
         # pack 不直接 import 平台 services 层(架构方向:api → domains → sdk)
         from sdk.relational_store import PackRelationalDB
-        if db_path:
-            logger.warning("db_path 已废弃(PG-only),实参被忽略——存储由 DATABASE_URL 决定")
         self.db = PackRelationalDB("knowledge_graph", database_url or None)
         self._init_db()
         logger.info("KGStore initialized: postgres(schema=knowledge_graph)")

@@ -29,7 +29,7 @@ from services.task_manager import TaskCancelled, TaskManager
 
 @pytest.fixture()
 def settings_store(tmp_path):
-    return PackSettingsStore(str(tmp_path / "settings.db"))
+    return PackSettingsStore()
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +41,7 @@ def _clear_probe_cache():
 
 @pytest.fixture()
 def task_manager(tmp_path):
-    store = TaskStore(str(tmp_path / "tasks.db"))
+    store = TaskStore()
     manager = TaskManager(store, max_workers=2)
     yield manager
     manager.close()  # 收线程池:防终态后的 error 日志行越过下一测试的清表
@@ -311,7 +311,7 @@ class TestTaskManager:
         assert active["max"] == 1  # 同 key 从未并发
 
     def test_mark_interrupted_on_startup(self, tmp_path):
-        store = TaskStore(str(tmp_path / "t.db"))
+        store = TaskStore()
         pending = store.create_task("x")                      # pending 态
         running = store.create_task("y")
         store.update_task(running["id"], status="running")    # running 态
@@ -766,7 +766,7 @@ def test_task_store_title_updatable(tmp_path):
     "已由成功导入取代"(真实 store 验证,假 manager 单测拦不住白名单)。"""
     from services.task_store import TaskStore
 
-    store = TaskStore(str(tmp_path / "tasks.db"))
+    store = TaskStore()
     task = store.create_task(
         task_type="kg.import_document", title="导入: x", queue_key="q",
         payload={})

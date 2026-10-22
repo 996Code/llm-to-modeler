@@ -254,25 +254,6 @@ export async function sendChatbiFeedback(
 // ── 配置生成（SSE 流式）────────────────────────────────────────
 
 /**
- * 按 (userId, contextKey) 查找最新会话（嵌入模式会话恢复）。
- * 后端未实现时返回 null（Fail-Closed），调用方降级为新会话。
- * @param userId 用户标识
- * @param contextKey 宿主实体标识（如 formCode）
- */
-export async function findLatestConversationByContext(userId: string, contextKey: string): Promise<Conversation | null> {
-  try {
-    const { data } = await api.get('/conversations', {
-      params: { contextKey, latest: 'true' },
-    })
-    // 后端可能返回单对象（最新会话）或数组
-    if (Array.isArray(data)) return data[0] ?? null
-    return data ?? null
-  } catch {
-    return null
-  }
-}
-
-/**
  * SSE 回调集合（监听不同事件类型的钩子）。
  * 用 interface 定义，字段都是可选的（? 前缀，类似 Java Optional / @Nullable）。
  * 调用方只需实现关心的回调，其余保持 undefined 即可。

@@ -195,8 +195,8 @@ def main() -> int:
     from domains.knowledge_graph.store import KGStore
 
     ConversationStore(database_url=url)
-    PackSettingsStore(db_path="", database_url=url)
-    TaskStore(db_path="", database_url=url)
+    PackSettingsStore(database_url=url)
+    TaskStore(database_url=url)
     KGStore(database_url=url)
     print("目标库 schema 已就绪(四 Store DDL 幂等执行)\n")
 
