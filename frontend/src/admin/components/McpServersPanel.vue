@@ -127,7 +127,7 @@ import type { LoadSafely } from './loadSafely'
 const loadSafely = inject<LoadSafely>('loadSafely')!
 
 const servers = ref<McpServer[]>([])
-const emit = defineEmits<{ (e: 'count', n: number): void }>()
+const emit = defineEmits<{ (e: 'count', s: { total: number; enabled: number }): void }>()
 const loading = ref(false)
 const togglingId = ref('')
 const keyConfigured = ref(false)
@@ -154,7 +154,8 @@ async function load() {
   loading.value = true
   await loadSafely(async () => {
     servers.value = await listMcpServers()
-    emit('count', servers.value.length)
+    emit('count', { total: servers.value.length,
+                   enabled: servers.value.filter((s) => s.enabled !== false).length })
     const st = await fetchMcpKeyStatus()
     keyConfigured.value = st.configured
     apiKey.value = st.apiKey || ''

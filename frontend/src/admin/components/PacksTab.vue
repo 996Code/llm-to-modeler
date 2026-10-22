@@ -9,7 +9,7 @@
         </a-radio-button>
         <a-radio-button value="mcp">
           <ApiOutlined /> MCP 服务
-          <span v-if="mcpCount" class="pk-tab-count">{{ mcpCount }}</span>
+          <span class="pk-tab-count">{{ mcpStats.enabled }}/{{ mcpStats.total }}</span>
         </a-radio-button>
       </a-radio-group>
       <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
@@ -99,7 +99,7 @@
     <a-empty v-if="payload && !payload.items.length" description="未发现任何插件" style="padding: 60px 0" />
 
     </template>
-    <McpServersPanel v-if="innerTab === 'mcp'" @count="mcpCount = $event" />
+    <McpServersPanel v-if="innerTab === 'mcp'" @count="mcpStats = $event" />
 
     <!-- 声明式设置抽屉 -->
     <PackSettingsDrawer v-model:open="settingsOpen" :pack-name="settingsPack" @saved="load" />
@@ -127,11 +127,12 @@ const loadSafely = inject<LoadSafely>('loadSafely')!
 
 const payload = ref<Awaited<ReturnType<typeof fetchPacks>> | null>(null)
 const innerTab = ref('packs')
-const mcpCount = ref(0)
+const mcpStats = ref({ total: 0, enabled: 0 })
 onMounted(async () => {
   try {
     const items = await listMcpServers()
-    mcpCount.value = items.length
+    mcpStats.value = { total: items.length,
+                       enabled: items.filter((s) => s.enabled !== false).length }
   } catch { /* 计数失败不打扰 */ }
 })
 const toggling = ref('')
