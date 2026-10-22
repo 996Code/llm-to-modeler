@@ -18,7 +18,7 @@
     </div>
 
     <div class="acl-actions">
-      <a-button type="primary" :loading="saving" @click="save">保存</a-button>
+      <a-button type="primary" :loading="saving" @click="save"><template #icon><SaveOutlined /></template>保存</a-button>
       <a-button :disabled="saving || (!users.length && !roles.length)" @click="clear">
         清空(回到全开放)
       </a-button>
@@ -28,6 +28,7 @@
 </template>
 
 <script setup lang="ts">
+import { SaveOutlined } from '@ant-design/icons-vue'
 // 检索数据权限编辑:每库允许的用户/角色(嵌入模式 ACL)。
 // 候选不做手输——来自宿主同步接口写入的字典(POST /subjects/{type});
 // 保存为全量替换,清空 = 回到全开放。

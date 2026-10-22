@@ -3,7 +3,7 @@
     <div class="ov-toolbar">
       <span class="ov-title">数据概览</span>
       <span v-if="stats?.firstAt" class="ov-range">数据范围 {{ fmtTime(stats.firstAt) }} ~ {{ fmtTime(stats.lastAt) }}</span>
-      <a-button size="small" :loading="loading" @click="load">刷新</a-button>
+      <a-button size="small" :loading="loading" @click="load"><template #icon><ReloadOutlined /></template>刷新</a-button>
     </div>
 
     <div class="ov-grid">
@@ -86,11 +86,7 @@
 <script setup lang="ts">
 // 概览:图标化统计卡片,数据结构与 backend get_admin_stats 对齐。
 import { computed, inject, onMounted, ref } from 'vue'
-import {
-  MessageOutlined, CommentOutlined, RobotOutlined, CloudServerOutlined,
-  AppstoreOutlined, NodeIndexOutlined, DatabaseOutlined,
-  FileSearchOutlined,
-} from '@ant-design/icons-vue'
+import {AppstoreOutlined, CloudServerOutlined, CommentOutlined, DatabaseOutlined, FileSearchOutlined, MessageOutlined, NodeIndexOutlined, ReloadOutlined, RobotOutlined} from '@ant-design/icons-vue'
 import { AdminStats, fetchStats, fmtTime } from '../api'
 import type { LoadSafely } from './loadSafely'
 

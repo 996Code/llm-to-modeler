@@ -160,7 +160,7 @@
             :disabled="!chunksDrawer.payload.summary.failed"
             @click="retryFailedChunks()"
           ><RedoOutlined /> 重试全部失败块</a-button>
-          <a-button size="small" @click="openChunks(chunksDrawer.doc!)">刷新</a-button>
+          <a-button size="small" @click="openChunks(chunksDrawer.doc!)"><template #icon><ReloadOutlined /></template>刷新</a-button>
         </div>
         <a-table
           :columns="chunkColumns" :data-source="chunksDrawer.payload.items"
@@ -280,11 +280,7 @@
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import type { UploadChangeParam } from 'ant-design-vue'
-import {
-  BarChartOutlined, CheckCircleOutlined, CloudUploadOutlined, CloseCircleOutlined, DeleteOutlined,
-  DownloadOutlined, EditOutlined, EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined,
-  RedoOutlined, SettingOutlined, UnorderedListOutlined,
-} from '@ant-design/icons-vue'
+import {BarChartOutlined, CheckCircleOutlined, CloseCircleOutlined, CloudUploadOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined, RedoOutlined, ReloadOutlined, SettingOutlined, UnorderedListOutlined} from '@ant-design/icons-vue'
 import {
   KgChunkParams, KgDocument, TaskItem, batchDeleteKgDocuments, deleteKgDocument,
   downloadKgDocument, fetchKgChunkExtraction, fetchKgChunkText, fetchKgChunks, fetchKgDocuments,

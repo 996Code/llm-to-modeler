@@ -66,7 +66,7 @@
 
         <div class="ps-footer">
           <a-button @click="$emit('update:open', false)">取消</a-button>
-          <a-button type="primary" :loading="saving" @click="save">保存</a-button>
+          <a-button type="primary" :loading="saving" @click="save"><template #icon><SaveOutlined /></template>保存</a-button>
         </div>
       </template>
       <a-empty v-else-if="!loading" description="加载失败或插件未声明配置页" style="padding: 60px 0" />
@@ -75,6 +75,7 @@
 </template>
 
 <script setup lang="ts">
+import { SaveOutlined } from '@ant-design/icons-vue'
 // 插件设置抽屉:settings.schema.yaml 驱动的通用表单(string/int/bool/enum/secret)。
 // secret 掩码哨兵 __SET__ 的语义:显示"已配置"占位,留空提交 = 保持不变。
 import { inject, ref, watch } from 'vue'

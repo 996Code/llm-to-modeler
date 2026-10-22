@@ -14,8 +14,8 @@
         <a-select-option value="">全部类型</a-select-option>
         <a-select-option v-for="t in types" :key="t.type" :value="t.type">{{ typeLabel(t) }}</a-select-option>
       </a-select>
-      <a-button type="primary" @click="search">查询</a-button>
-      <a-button @click="load">刷新</a-button>
+      <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
+      <a-button @click="load"><template #icon><ReloadOutlined /></template>刷新</a-button>
       <a-switch v-model:checked="autoRefresh" checked-children="自动刷新" un-checked-children="暂停" size="small" />
       <span class="tk-count">共 {{ total }} 条</span>
     </div>
@@ -181,10 +181,7 @@
 // 任务中心:任务表格(进度条/状态) + 日志抽屉(SSE 实时 + 断流降级轮询)。
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import {
-  AppstoreOutlined, BarsOutlined, CheckCircleOutlined,
-  CloseCircleOutlined, LoadingOutlined,
-} from '@ant-design/icons-vue'
+import {AppstoreOutlined, BarsOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, ReloadOutlined, SearchOutlined} from '@ant-design/icons-vue'
 import {
   TaskItem, TaskLogItem, TaskStatus, TaskTypeItem,
   cancelTask, fetchTask, fetchTaskLogs, fetchTasks, fetchTaskTypes, fmtTime, streamTaskEvents,

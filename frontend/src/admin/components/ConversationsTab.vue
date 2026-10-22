@@ -14,7 +14,7 @@
       <a-select v-model:value="filterPacks" mode="multiple" allow-clear
         placeholder="按插件筛选" style="min-width: 200px" :options="packOptions"
         @change="search" />
-      <a-button type="primary" @click="search">查询</a-button>
+      <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
       <span class="cv-count">共 {{ total }} 个会话</span>
     </div>
 

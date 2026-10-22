@@ -47,7 +47,7 @@
     <a-empty v-if="currentDashId && !widgets.length"
              description="空看板——从「保存查询」列表或对话中添加组件" style="padding: 60px 0" />
     <a-empty v-if="!dashboards.length" description="暂无看板——新建一个, 再添加组件" style="padding: 60px 0">
-      <a-button type="primary" @click="openCreateDash">新建看板</a-button>
+      <a-button type="primary" @click="openCreateDash"><template #icon><PlusOutlined /></template>新建看板</a-button>
     </a-empty>
 
     <!-- 新建/重命名看板 -->

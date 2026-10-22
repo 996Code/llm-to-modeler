@@ -48,7 +48,7 @@
           </template>
           <a-badge status="processing" text="服务运行中" />
         </a-popover>
-        <a-button size="small" ghost @click="doLogout">退出</a-button>
+        <a-button size="small" ghost @click="doLogout"><template #icon><LogoutOutlined /></template>退出</a-button>
       </div>
     </header>
 
@@ -74,10 +74,7 @@
 import { computed, onMounted, provide, ref, shallowRef } from 'vue'
 import { message } from 'ant-design-vue'
 import type { Component } from 'vue'
-import {
-  ApiOutlined, AppstoreOutlined, CloudServerOutlined, DashboardOutlined,
-  MessageOutlined, PartitionOutlined,
-} from '@ant-design/icons-vue'
+import {ApiOutlined, AppstoreOutlined, CloudServerOutlined, DashboardOutlined, LogoutOutlined, MessageOutlined, PartitionOutlined} from '@ant-design/icons-vue'
 import OverviewTab from './components/OverviewTab.vue'
 import ConversationsTab from './components/ConversationsTab.vue'
 import CallLogsTab from './components/CallLogsTab.vue'

@@ -25,7 +25,7 @@
           @pressEnter="search">
           <template #prefix><SearchOutlined style="color: #bbb" /></template>
         </a-input>
-        <a-button type="primary" @click="search">查询</a-button>
+        <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
         <span class="cl-count">共 {{ total }} 条</span>
       </template>
 
@@ -60,7 +60,7 @@
           <a-select-option value="login">登录</a-select-option>
         </a-select>
         <a-input v-model:value="auditFilterUser" placeholder="按用户过滤" style="width: 150px" allow-clear @pressEnter="loadAudit" />
-        <a-button type="primary" @click="loadAudit">查询</a-button>
+        <a-button type="primary" @click="loadAudit"><template #icon><SearchOutlined /></template>查询</a-button>
         <span class="cl-count">共 {{ auditTotal }} 条</span>
       </template>
     </div>
