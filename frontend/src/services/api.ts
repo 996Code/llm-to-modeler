@@ -47,8 +47,8 @@ function getRequestUserId(): string {
     // 降级：URL 参数 > localStorage > 匿名用户兜底
     return params.get('userId') || localStorage.getItem('userId') || 'anonymous'
   }
-  // 独立模式兜底用户为 admin
-  return params.get('userId') || localStorage.getItem('userId') || 'admin'
+  // 独立模式兜底 anonymous(ACL 归一为无身份,不触发库级过滤)
+  return params.get('userId') || localStorage.getItem('userId') || 'anonymous'
 }
 
 // 注册 axios 请求拦截器：每个请求发出前自动注入 token、X-User-Id 和透传 headers。

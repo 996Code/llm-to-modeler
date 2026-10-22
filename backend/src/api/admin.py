@@ -285,24 +285,6 @@ async def admin_list_conversations(request: Request):
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
-# ── D20 会话软删恢复 ──────────────────────────────────────────
-
-@router.get("/conversations/deleted")
-async def admin_list_deleted_conversations(request: Request):
-    """已软删会话列表(恢复视图,按删除时间倒序)。"""
-    store = request.app.state.conversation_store
-    return {"items": store.list_deleted_conversations(limit=100)}
-
-
-@router.post("/conversations/{conv_id}/restore")
-async def admin_restore_conversation(conv_id: str, request: Request):
-    """恢复软删会话(用户列表立即可见,events/记忆全程未动)。"""
-    store = request.app.state.conversation_store
-    if not store.restore_conversation(conv_id):
-        raise HTTPException(404, "会话不存在或未处于删除态")
-    return {"success": True}
-
-
 @router.get("/conversations/{conv_id}")
 async def admin_get_conversation(conv_id: str, request: Request):
     """查看任意用户的会话详情（含全部消息）。"""

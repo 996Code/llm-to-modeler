@@ -148,31 +148,3 @@ class TestRetrieveTestEndpoint:
         assert vec_logs and vec_logs[0]["request_data"]["topK"] == 1
 
 
-class TestDependencyStatusBackendAware:
-    """向量后端下线后状态口径(Milvus 清理):依赖状态固定探 pg_vector
-    (pgvector 单后端),不再有 backend 分流。"""
-
-    def test_probes_pg_vector_only(self, monkeypatch):
-        from fastapi import FastAPI
-        from fastapi.testclient import TestClient
-        from domains.knowledge_graph.api import router
-        from domains.knowledge_graph import probes as kg_probes
-        import sdk.vector_store as vs_sdk
-
-        called = []
-        # P0-1: pg_vector 探针上提 SDK——monkeypatch 新归属
-        monkeypatch.setattr(vs_sdk, "probe_pg_vector",
-                            lambda s: called.append("pg") or None)
-        app = FastAPI()
-        app.include_router(router, prefix="/api/packs/knowledge_graph")
-        app.state.llm_client = None
-        app.state.settings_store = None
-        r = TestClient(app).get("/api/packs/knowledge_graph/dependency-status")
-        assert r.status_code == 200
-        body = r.json()
-        assert "pg_vector" in body      # 固定键,不再随 env 分流
-        assert called == ["pg"]
-        assert not hasattr(kg_probes, "milvus")      # milvus 探针已删
-        assert not hasattr(kg_probes, "pg_vector")   # P0-1: 探针已上提 SDK
-
-

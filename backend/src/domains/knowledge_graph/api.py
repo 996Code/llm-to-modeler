@@ -18,8 +18,6 @@
   DELETE /kbs/{id}/documents/{doc_id}  删文档(联动清理;导入任务 M3)
   GET    /kbs/{id}/graph               图谱浏览(限量节点+邻接边;过滤 q/types)
   GET    /kbs/{id}/graph/expand        点击节点增量展开(1 跳)
-  GET    /kbs/{id}/stats               库统计(元数据 + 图谱/向量实时数)
-  GET    /dependency-status            Neo4j/向量库探针结果(设置页重检用)
 """
 import asyncio
 import hashlib
@@ -488,14 +486,6 @@ async def create_kb(request: Request, payload: Dict[str, Any]):
     return kb
 
 
-@router.get("/kbs/{kb_id}", dependencies=[Depends(admin_required)])
-async def get_kb(kb_id: str, request: Request):
-    kb = _kb_or_404(request, kb_id)
-    detail = dict(kb)
-    detail["graph"] = _graph(request).counts(kb_id)
-    return detail
-
-
 @router.put("/kbs/{kb_id}", dependencies=[Depends(admin_required)])
 async def update_kb(kb_id: str, request: Request, payload: Dict[str, Any]):
     _kb_or_404(request, kb_id)
@@ -835,34 +825,6 @@ async def expand_graph_node(kb_id: str, request: Request):
     if not node_id:
         raise HTTPException(422, "node_id 不能为空")
     return _graph(request).expand_node(kb_id, node_id)
-
-
-@router.get("/kbs/{kb_id}/stats", dependencies=[Depends(admin_required)])
-async def kb_stats(kb_id: str, request: Request):
-    _kb_or_404(request, kb_id)
-    store = runtime.get_kg_store(request.app.state)
-    kb = store.get_kb(kb_id)
-    stats: Dict[str, Any] = {"documents": len(store.list_documents(kb_id))}
-    try:
-        stats["graph"] = _graph(request).counts(kb_id)
-    except Exception as e:
-        stats["graph"] = {"error": str(e)}
-    if kb and kb.get("vectorEnabled"):
-        try:
-            stats["vectorChunks"] = runtime.get_vector(request.app.state).count(kb_id)
-        except Exception as e:
-            stats["vectorChunks"] = None
-            stats["vectorError"] = str(e)
-    return stats
-
-
-# ── 导入任务发起 ─────────────────────────────────────────────
-
-def _task_manager_or_503(request):
-    manager = getattr(request.app.state, "task_manager", None)
-    if manager is None:
-        raise HTTPException(503, "任务框架未初始化")
-    return manager
 
 
 @router.get("/kbs/{kb_id}/documents/{doc_id}/chunks", dependencies=[Depends(admin_required)])
@@ -1271,25 +1233,3 @@ async def kb_retrieve_test(request: Request, kb_id: str, payload: Dict[str, Any]
 
 # ── 依赖状态(设置页"重新检测"用) ─────────────────────────────
 
-@router.get("/dependency-status", dependencies=[Depends(admin_required)])
-async def dependency_status(request: Request):
-    """对 Neo4j/向量存储各跑一次探针(结果即时,不走缓存)。
-
-    向量探针调 SDK probe_pg_vector(P0-1 上提;本插件不再自持实现);
-    Neo4j 探针为 KG 专属(P2:图模型领域知识留插件)。
-    """
-    from domains.knowledge_graph import probes
-    from sdk.vector_store import probe_pg_vector
-    settings = runtime.settings_reader(request.app.state).all()
-
-    def _run(fn) -> Dict[str, Any]:
-        try:
-            fn(settings)
-            return {"ok": True, "detail": ""}
-        except Exception as e:
-            return {"ok": False, "detail": str(e) or type(e).__name__}
-
-    return {
-        "neo4j": _run(probes.neo4j),
-        "pg_vector": _run(probe_pg_vector),
-    }

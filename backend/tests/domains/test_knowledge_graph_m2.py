@@ -314,15 +314,10 @@ class TestKnowledgeGraphApi:
         assert r.status_code == 200
         kb = r.json()
         assert len(kb["schema"]["entity_types"]) == len(TEMPLATES["product_doc"]["schema"]["entity_types"])
-        # graph 计数在详情端点(GET /kbs/{id})
-        detail = client.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}").json()
-        assert detail["graph"] == {"entities": 0, "relations": 0}
-
         assert client.post("/api/packs/knowledge_graph/kbs",
                            json={"name": "测试库"}).status_code == 409
         assert client.post("/api/packs/knowledge_graph/kbs",
                            json={"name": " "}).status_code == 422
-        assert client.get(f"/api/packs/knowledge_graph/kbs/不存在").status_code == 404
 
         r = client.put(f"/api/packs/knowledge_graph/kbs/{kb['id']}",
                        json={"description": "改", "schema": {"schema_mode": "strict"}})

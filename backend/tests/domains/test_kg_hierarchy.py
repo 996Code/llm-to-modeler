@@ -216,7 +216,9 @@ class TestKbTreeApi:
         r = c.delete(f"{BASE}/kbs/{folder['id']}")
         assert r.status_code == 200, r.text
         assert r.json()["success"] is True
-        assert c.get(f"{BASE}/kbs/{folder['id']}").status_code == 404
+        # GET /kbs/{id} 已删(零调用孤儿路由);删除性改 store 层验证
+        from domains.knowledge_graph import runtime
+        assert runtime.get_kg_store(c.app.state).get_kb(folder["id"]) is None
 
 
 class TestDefaultKb:
