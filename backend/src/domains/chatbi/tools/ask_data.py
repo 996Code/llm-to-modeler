@@ -1052,7 +1052,8 @@ class AskDataTool(CompositeTool):
             is_business = raw.startswith(("SQL 校验失败", "工具调用校验失败",
                                           "无语义层定义",
                                           "尚未扫描语义层", "尚无可用数据源",
-                                          "工具调用失败", "数据源暂不可用"))
+                                          "工具调用失败", "数据源暂不可用",
+                                          "数据源已停用", "数据源不存在"))
             user_text = raw if is_business else "查询执行失败, 请稍后重试或调整问法"
             state["_result"] = ToolResult(
                 artifact_type="data",

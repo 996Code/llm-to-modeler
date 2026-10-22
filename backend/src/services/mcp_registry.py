@@ -95,12 +95,16 @@ class McpServerStore:
             cur = conn.execute("SELECT * FROM mcp_servers WHERE id = ?", (sid,)).fetchone()
             if not cur:
                 raise ValueError("server 不存在")
-            f = {"name": fields.get("name", cur["name"]),
-                 "url": fields.get("url", cur["url"]),
+            def _num(key, cur_val):
+                v = fields.get(key, cur_val)
+                return cur_val if v is None else v
+            f = {"name": fields.get("name") or cur["name"],
+                 "url": fields.get("url") or cur["url"],
                  "headers_json": json.dumps(
-                     fields.get("headers", json.loads(cur["headers_json"] or "{}"))),
-                 "timeout": fields.get("timeout", cur["timeout"]),
-                 "read_timeout": fields.get("read_timeout", cur["read_timeout"])}
+                     fields.get("headers") if isinstance(fields.get("headers"), dict)
+                     else json.loads(cur["headers_json"] or "{}")),
+                 "timeout": _num("timeout", cur["timeout"]),
+                 "read_timeout": _num("read_timeout", cur["read_timeout"])}
             conn.execute(
                 "UPDATE mcp_servers SET name=?,url=?,headers_json=?,timeout=?,"
                 "read_timeout=?,updated_at=? WHERE id=?",
@@ -143,6 +147,10 @@ class McpServerStore:
         except Exception as e:
             logger.warning(f"mcp probe failed({cur['code']}): {e}")
         with self._lock, self.db.connect() as conn:
+            cur = conn.execute(
+                "SELECT id FROM mcp_servers WHERE id = ?", (sid,)).fetchone()
+            if not cur:
+                raise ValueError("server 不存在(探测期间被删除)")
             conn.execute(
                 "UPDATE mcp_servers SET status=?,tools_json=?,updated_at=? WHERE id=?",
                 (status, json.dumps(snapshot, ensure_ascii=False), _now(), sid))

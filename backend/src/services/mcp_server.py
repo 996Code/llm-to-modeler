@@ -86,7 +86,9 @@ def run_tool(app_state: Any, name: str, args: dict) -> dict:
     if tool is None:
         raise RuntimeError(f"tool not found: {name}")
     state = dict(args or {})
-    state.setdefault("pack_params", {})
+    # SEC: pack_params 是宿主/嵌入链路的身份透传通道,外部 MCP 客户端
+    # 不可伪造(kb_search 会从中读 user_roles 做 ACL 判定)——无条件覆盖
+    state["pack_params"] = {}
     err = tool.validate_input(state)
     if err:
         raise RuntimeError(f"输入校验失败: {err}")

@@ -44,3 +44,4 @@ SELECT stage, request_data FROM call_logs ORDER BY created_at DESC LIMIT 5;
 
 - `fake_servers.py` — 三个异构 fake MCP server（low-level SDK 手搭，模拟真实接入方）
 - `run_e2e.py` — 主流程（每步 ✓/✗ + 证据，退出码非 0 on fail）
+- `demo_server.py` — 常驻演示 MCP（固定端口 9770，模拟"外部订单系统"，供管理端/对话页演示）

@@ -361,7 +361,7 @@ def synthesize_mcp_content(tools: list[dict]) -> SemanticModelContent:
     description=工具描述), columns=inputSchema.properties 逐项
     (name=display_name=参数名, data_type=JSON Schema 类型映射)。
     设计从简: 不做 LLM 富化/指标推断/示例问题(工具描述由 server
-    提供,无注释可补);source/confidence 沿用 _Inferred 默认。
+    提供,无注释可补);source 显式标 auto_inferred(机器产物,重扫可覆盖)。
     """
     models: list[Model] = []
     for tool in tools or []:
@@ -383,6 +383,9 @@ def synthesize_mcp_content(tools: list[dict]) -> SemanticModelContent:
             relationships=[],
             metrics=[],
             calculated_fields=[],
+            # 机器合成产物标注 auto 来源(默认 manual 会在 merge 时被当
+            # 人工项保真,覆盖重扫的语义)
+            source="auto_inferred",
         ))
     return SemanticModelContent(version=1, models=models)
 

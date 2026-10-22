@@ -36,7 +36,7 @@ const api = axios.create({
 // 获取当前用户 ID（用于请求头 X-User-Id）。
 // 优先级：嵌入模式下由 hostPort.init() 写入的 userId（宿主下发，防伪造）→
 //         URL 参数 userId → localStorage → 独立模式 admin / 嵌入兜底 anonymous
-function getRequestUserId(): string {
+export function getRequestUserId(): string {
   const hostId = getUserId()
   if (hostId) return hostId
   // window.location.search 是 URL 中 ? 后面的查询串

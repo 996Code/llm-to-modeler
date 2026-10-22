@@ -13,7 +13,7 @@
 ## 2. 第一部分：对外 MCP Server
 
 - 官方 `mcp` SDK（low-level `Server` + `StreamableHTTPSessionManager(stateless=True, json_response=True)`，RAGFlow 同款无状态模式）挂载 `/api/mcp`（依赖 `mcp>=1.28,<1.29` 已在 requirements）。对外访问统一走项目前缀网关：`http://<host>/ai-modeler/api/mcp`（网关剥前缀转后端，与前端/开放 API 同约定；管理页面板按当前 origin 动态展示）。
-- **鉴权：全局单 key**。platform_settings 配一个 `mcp_api_key`（管理端设置页可改），请求头 `X-Api-Key` 校验，不匹配 401。不搞 key 表/签发/吊销——内网够用。
+- **鉴权：全局单 key（订阅系统模式）**。key 由系统生成（`POST /settings/mcp/refresh-key` 一键生成/轮换，旧 key 立即失效），管理端可查看明文（admin 门控）+ 复制；请求头 `X-Api-Key` 校验，不匹配 401、未配置 503。不搞 key 表/签发/吊销体系——内网够用。
 - **工具面：声明制自动生成**。pack 的 `config.yaml` 加 `mcp_tools:` 列表声明对外暴露哪些工具（默认不暴露）。转换器把内部 Tool（name/description/input_schema）自动转成 MCP 工具，零手写。
 - `kb_search` 描述里动态拼上知识库清单（外部 AI 一次 tools/list 就知道有哪些库）。
 - 工具异常如实返回 MCP 协议错误，不做静默降级。
@@ -40,13 +40,15 @@ sdk/mcp_client.py           list_tools(code) / call_tool(code, tool, args) -> di
 | `id` / `name` / `code` | 主键 / 展示名 / 引用标识（`^[a-z0-9_-]{1,24}$` 唯一，插件引用它） |
 | `url` / `headers` | URL 明文 / 认证头 JSON 明文（内网，不加密） |
 | `timeout` / `read_timeout` | 双超时，默认 30 / 300 秒 |
-| `status` | `connected` / `pending` |
+| `status` | `connected` / `pending`（探测态） |
+| `enabled` | 启用/停用（用户意图，与探测态正交；停用后调用层 fail-fast 报"已停用"） |
 | `tools_snapshot` | list_tools 结果 JSON 原样落库（对话链路零实时发现） |
 | `created_at` / `updated_at` | 时间戳 |
 
 ### 3.4 行为约定
 
 - **注册即探测**：保存时连一次 server 拉 list_tools 回填快照；连不上照样保存，status=pending（管理端再试）。
+- **启用/停用**：与插件启停同款语义；停用保留注册与快照，插件调用立即报"已停用"（不发起连接），恢复后免重扫即用。
 - **快照手动刷新**：管理端按钮重拉覆盖。
 - **连接策略**（Dify 验证过的套路）：每次调用临时建连接用完即毁；URL 以 /mcp、/sse 结尾直选传输，否则 SSE 失败回退 streamable HTTP；structuredContent 优先、text 先试 json.loads，统一返回 dict；连不上/超时抛 `ToolError(retryable)` 走引擎既有错误分流。
 

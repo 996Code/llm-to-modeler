@@ -117,6 +117,30 @@ def save_query(db: PackRelationalDB, user_id: str, data_source_id: str,
 
 # ── 保存查询 API ─────────────────────────────────────────────
 
+
+def _replay_saved_query(db, ds, sql_text: str, max_rows: int = 10000):
+    """按数据源类型重放保存的查询(mcp=工具调用 JSON,关系库=SQL)。
+
+    fail-closed 双门(对标 switch_chart mcp 重放):mcp 时先校验 tool 在
+    当前语义层 model names 内(白名单可能已变更),再 execute_mcp_tool。
+    """
+    import json as _json
+    if ds.db_type == "mcp":
+        from domains.chatbi import semantic as _sem, datasources as _ds
+        content = _sem.load_content(db, ds.id)
+        model_names = ({m.name for m in content[0].models}
+                       if content and content[0] is not None else set())
+        try:
+            tool_call = _json.loads(sql_text)
+            tool = tool_call.get("tool") if isinstance(tool_call, dict) else None
+        except (ValueError, TypeError):
+            tool = None
+        if not tool or tool not in model_names:
+            raise HTTPException(422, "上轮工具调用已不在当前语义层, 请重新提问生成新查询")
+        return _ds.execute_mcp_tool(ds, tool_call, max_rows=max_rows)
+    return datasources.execute_readonly(ds, sql_text, max_rows=max_rows)
+
+
 @router.get("/saved-queries", dependencies=[Depends(user_required)])
 async def list_saved_queries(request: Request, limit: int = Query(50, ge=1, le=200)):
     uid = _user_id(request)
@@ -156,19 +180,19 @@ async def run_saved_query(sq_id: str, request: Request):
     from domains.chatbi import semantic as _sem
     from domains.chatbi.retrieval import extract_allowed_columns
     _content = _sem.load_current_content(db, q["data_source_id"])
-    if _content is None:
-        raise HTTPException(422, "该数据源无语义层, 无法校验列白名单, 拒绝执行(fail-closed)")
-    _allowed = extract_allowed_columns(_content)
-    validation = validate_sql(q["sql_text"], allowed_columns=_allowed)
-    if not validation.ok:
-        raise HTTPException(422, f"SQL 校验失败: {validation.reason}")
-
     ds = datasources.get_datasource(db, q["data_source_id"], decrypt=True)
+    if _content is None and (ds is None or ds.db_type != "mcp"):
+        raise HTTPException(422, "该数据源无语义层, 无法校验列白名单, 拒绝执行(fail-closed)")
+    _allowed = extract_allowed_columns(_content) if _content else set()
     if not ds:
         raise HTTPException(404, "数据源不存在")
     if not ds.is_active:
         raise HTTPException(403, "数据源已禁用")
-    result = datasources.execute_readonly(ds, q["sql_text"], max_rows=_CSV_EXPORT_MAX_ROWS)
+    if ds.db_type != "mcp":
+        validation = validate_sql(q["sql_text"], allowed_columns=_allowed)
+        if not validation.ok:
+            raise HTTPException(422, f"SQL 校验失败: {validation.reason}")
+    result = _replay_saved_query(db, ds, q["sql_text"], max_rows=_CSV_EXPORT_MAX_ROWS)
     if not result.ok:
         raise HTTPException(500, f"查询执行失败: {result.error}")
 
@@ -198,20 +222,21 @@ async def export_saved_query_csv(sq_id: str, request: Request):
     from domains.chatbi import semantic as _sem
     from domains.chatbi.retrieval import extract_allowed_columns
     _content = _sem.load_current_content(db, q["data_source_id"])
-    if _content is None:
-        raise HTTPException(422, "该数据源无语义层, 无法校验列白名单, 拒绝导出(fail-closed)")
-    _allowed = extract_allowed_columns(_content)
-    validation = validate_sql(q["sql_text"], allowed_columns=_allowed)
-    if not validation.ok:
-        raise HTTPException(422, f"SQL 校验失败: {validation.reason}")
+    _allowed = extract_allowed_columns(_content) if _content else set()
 
-    # 重跑 SQL
+    # 重跑 SQL(关系库三层校验;mcp 走语义层白名单重放)
     ds = datasources.get_datasource(db, q["data_source_id"], decrypt=True)
     if not ds:
         raise HTTPException(404, "数据源不存在")
     if not ds.is_active:
         raise HTTPException(403, "数据源已禁用, 无法导出")
-    result = datasources.execute_readonly(ds, q["sql_text"], max_rows=_CSV_EXPORT_MAX_ROWS)
+    if ds.db_type != "mcp":
+        if _content is None:
+            raise HTTPException(422, "该数据源无语义层, 无法校验列白名单, 拒绝导出(fail-closed)")
+        validation = validate_sql(q["sql_text"], allowed_columns=_allowed)
+        if not validation.ok:
+            raise HTTPException(422, f"SQL 校验失败: {validation.reason}")
+    result = _replay_saved_query(db, ds, q["sql_text"], max_rows=_CSV_EXPORT_MAX_ROWS)
     if not result.ok:
         raise HTTPException(500, f"查询执行失败: {result.error}")
 

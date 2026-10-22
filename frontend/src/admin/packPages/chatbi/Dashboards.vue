@@ -72,9 +72,10 @@ import 'gridstack/dist/gridstack.min.css'
 import { init as initChart } from '../../../utils/echarts'
 import type { ECharts } from 'echarts/core'
 import { chatbiApi } from '../../api'
+import { getRequestUserId } from '../../../services/api'
 
 function uid(): string {
-  return localStorage.getItem('chatbi_user_id') || 'admin'
+  return getRequestUserId()
 }
 const H = { 'X-User-Id': uid() }
 

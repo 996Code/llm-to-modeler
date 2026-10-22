@@ -38,9 +38,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:18080")
     ap.add_argument("--frontend-origin", default="http://localhost:13081")
-    ap.add_argument("--api-key", default="sk-verify-mcp-1")
+    ap.add_argument("--api-key", default="",
+                  help="对外 MCP key(管理端 MCP 服务页查看/刷新;必填)")
     ap.add_argument("--question", default="查一下各城市订单量对比")
     args = ap.parse_args()
+    if not args.api_key:
+        sys.exit("缺少 --api-key:管理端「插件→MCP 服务」页查看当前 Key")
 
     # ── 1. 起异构 fake servers ─────────────────────────────────
     port_report, srv_report = start_server(build_report_server())

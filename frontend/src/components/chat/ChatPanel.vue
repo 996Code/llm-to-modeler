@@ -410,7 +410,7 @@ import {
 import { Modal, message as antdMessage } from 'ant-design-vue'
 // 单轮 trace 拉取(轮末给消息卡补 LLM 次数/token, 输入框累计对话 token)
 // + chatbi 结果反馈(P2#14 点赞/点踩)
-import { getConversationTrace, sendChatbiFeedback } from '../../services/api'
+import { getConversationTrace, getRequestUserId, sendChatbiFeedback } from '../../services/api'
 // 全局会话 Store（Pinia 单例），类比 @Autowired private ConversationStore store
 import { useConversationStore } from '../../stores/conversation'
 import { copyText } from '../../utils/clipboard'
@@ -622,7 +622,7 @@ function m4Headers(): Record<string, string> {
     'Content-Type': 'application/json',
     'X-Admin-Token': localStorage.getItem('admin_token') || '',
     'Authorization': `Bearer ${localStorage.getItem('auth_token') || ''}`,
-    'X-User-Id': localStorage.getItem('chatbi_user_id') || 'admin',
+    'X-User-Id': getRequestUserId(),
   }
 }
 

@@ -85,12 +85,13 @@ import {
   AppstoreAddOutlined, DownloadOutlined, InfoCircleOutlined, ReloadOutlined,
 } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
+import { getRequestUserId } from '../../../services/api'
 import { exportQueryToExcel } from '../../../utils/exportExcel'
 
 const emit = defineEmits<{ (e: 'add-to-dash', payload: { dashboardId?: string }): void }>()
 
 function uid(): string {
-  return localStorage.getItem('chatbi_user_id') || 'admin'
+  return getRequestUserId()
 }
 function fmtTime(iso: string): string {
   return iso ? iso.replace('T', ' ').slice(0, 16) : ''

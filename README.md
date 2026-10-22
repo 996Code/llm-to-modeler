@@ -427,7 +427,6 @@ parse_info(LLM) → validate_rules(API) → submit(API)
 | 检索可观测 | 三路库调用入 `call_logs`（graph/vector/fulltext 类型）:逐词种子命中、子图召回量+三元组明细+截断水位、向量逐条相似度分数、全文兜底命中明细——会话链路与调用日志页均可查 |
 | 插件 HTTP API | `/api/packs/knowledge_graph/*`:知识库树 CRUD/文档上传/导入/图谱查询/增量展开/检索问答/检索测试/建库向导（分段配置+实时预览,预览与导入同一条切块代码路径）/块编辑（改文本仅重嵌该块向量）/分段重配;`GET /dependency-status` 返回 Neo4j/向量库探针结果（设置页重检用） |
 | 检索数据权限（嵌入模式） | 每库可配置允许检索的**用户/角色**（管理端「数据权限」页签或 `PUT /kbs/{id}/acl`）;不配置=全开放。生效条件:宿主传入用户身份（`X-User-Id`）或角色（chat 走 `pack_params.knowledge_graph.user_roles` 透传,REST `/search` 走 body `roles`）才过滤,未传不过滤;显式指定无权库=403/诚实拒绝,跨库自动过滤。管理端各页不受限。 |
-| 开放 API（D25） | `/api/open/kb/{kb}/documents` POST/PUT/DELETE——宿主/外部系统推数据:API Key 鉴权（管理端签发/吊销,库内只存 SHA-256 哈希）/幂等（同库同内容跳过）/更新强制重导/删除联动清理;`/api/open/` 前缀走平台白名单,由 API Key 独自设门 |
 | 管理页 | 管理端动态 Tab,左右分栏:左侧库树（文件夹/子库层级,建/移/删）+ 右侧详情四子页——文档导入 / G6 图谱浏览（单击详情/双击展开邻居/悬停高亮一阶邻域）/ 本体设置（模板起步/LLM 归纳/类型审核）/ 检索测试（意图/种子命中/子图水位/向量分数可视化） |
 | 依赖门控 | manifest 声明 neo4j/pg_vector 依赖与探针;未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
 

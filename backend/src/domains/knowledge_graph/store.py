@@ -393,18 +393,6 @@ class KGStore:
             )
             return cur.rowcount > 0
 
-    # ── 开放 API Key(D25:宿主推数据) ─────────────────────
-
-    def _open_key_row(row: dict) -> Dict[str, Any]:
-        d = dict(row)
-        return {
-            "id": d["id"], "name": d["name"],
-            "kbId": d.get("kb_id"),
-            "createdAt": d["created_at"],
-            "revokedAt": d.get("revoked_at"),
-            "lastUsedAt": d.get("last_used_at"),
-        }
-
     # ── 检索数据权限 ACL(嵌入模式) ───────────────────────
 
     def set_kb_acl(self, kb_id: str, users: List[str], roles: List[str]) -> None:

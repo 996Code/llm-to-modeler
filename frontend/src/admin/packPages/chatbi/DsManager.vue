@@ -270,7 +270,7 @@ async function loadMcpServers() {
   mcpLoading.value = true
   try {
     const items = await listMcpServers()
-    mcpServers.value = items.filter((s) => s.status === 'connected')
+    mcpServers.value = items.filter((s) => s.status === 'connected' && s.enabled !== false)
   } catch { /* 静默:下拉为空即无可用服务 */ }
   finally { mcpLoading.value = false }
 }

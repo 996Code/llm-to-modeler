@@ -124,6 +124,7 @@ import {
   type McpServer, type McpTool,
   toggleMcpServer,
 } from '../api'
+import { copyText } from '../../utils/clipboard'
 import type { LoadSafely } from './loadSafely'
 
 const loadSafely = inject<LoadSafely>('loadSafely')!
@@ -185,6 +186,10 @@ async function save() {
   let headers: Record<string, string>
   try {
     headers = JSON.parse(form.value.headersText || '{}')
+    if (typeof headers !== 'object' || headers === null || Array.isArray(headers)) {
+      message.error('认证头必须是 JSON 对象(键值对)')
+      return
+    }
   } catch {
     message.error('认证头必须是合法 JSON')
     return
@@ -194,7 +199,7 @@ async function save() {
   await loadSafely(async () => {
     const body = {
       name: form.value.name.trim(), url: form.value.url.trim(), headers,
-      timeout: form.value.timeout, read_timeout: form.value.read_timeout,
+      timeout: form.value.timeout ?? 30, read_timeout: form.value.read_timeout ?? 300,
     }
     const r = editing.value
       ? await updateMcpServer(editing.value.id, body)
@@ -240,13 +245,15 @@ async function refresh(s: McpServer) {
 async function rotateKey() {
   const doRotate = async () => {
     rotatingKey.value = true
+    let ok = false
     try {
       await loadSafely(async () => {
         const st = await refreshMcpKey()
         apiKey.value = st.apiKey
         keyConfigured.value = st.configured
+        ok = true
       })
-      message.success('新 Key 已生成(旧 Key 已失效)')
+      if (ok) message.success('新 Key 已生成(旧 Key 已失效)')
     } finally {
       rotatingKey.value = false
     }
@@ -263,12 +270,9 @@ async function rotateKey() {
 }
 
 async function copyKey() {
-  try {
-    await navigator.clipboard.writeText(apiKey.value)
-    message.success('已复制')
-  } catch {
-    message.warning('复制失败,请手动选择')
-  }
+  const ok = await copyText(apiKey.value)
+  if (ok) message.success('已复制')
+  else message.warning('复制失败,请手动选择')
 }
 
 async function toggleEnabled(rec: McpServer, on: boolean) {

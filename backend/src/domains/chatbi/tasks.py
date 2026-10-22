@@ -766,6 +766,16 @@ def _scan_mcp_datasource(handle, db, info, ds_id, lease, progress,
     # 限定工具过滤(控制器裁决): info.database 非空(=tool_name)时只合成该工具
     if info.database:
         tools = [t for t in tools if t.get("name") == info.database]
+    # fail-closed: 空清单(限定名不存在/server 零工具)拒绝覆盖既有语义层
+    # ——否则 0 个 model 以 done 终态静默清空,对话侧只剩误导性追问
+    if not tools:
+        from sdk.pack_api import PermanentTaskError
+        why = (f"限定工具「{info.database}」不在该 server 工具清单"
+               if info.database else "该 server 工具清单为空")
+        datasources.update_datasource(
+            db, ds_id, scan_status="failed", scan_progress=100,
+            scan_stage=f"扫描失败: {why}", scanned_at=_now_iso())
+        raise PermanentTaskError(f"MCP 扫描中止: {why}(语义层保持原样)")
     progress(60, f"合成语义层({len(tools)} 个工具)")
     content = semantic.synthesize_mcp_content(tools)
     # 写前 fencing + CAS 落库(与关系库分支同机制;租约已互斥同数据源
@@ -803,9 +813,13 @@ def _scan_mcp_datasource(handle, db, info, ds_id, lease, progress,
         logger.warning("MCP 扫描向量索引重建失败(降级, 不阻塞): %s", e)
         index_status = "degraded"
     progress(90, "扫描完成")
+    # 索引降级对齐关系库口径: done_with_warning(不记纯成功——否则检索
+    # 空召回,而 refresh 对 mcp 跳过导致漂移无自愈路径)
+    final_status = "done" if index_status == "ok" else "done_with_warning"
+    stage_note = "" if index_status == "ok" else "(向量索引降级,检索可能受影响——可点重建索引)"
     datasources.update_datasource(
-        db, ds_id, scan_status="done", scan_progress=100,
-        scan_stage=f"完成: {len(content.models)} 个工具",
+        db, ds_id, scan_status=final_status, scan_progress=100,
+        scan_stage=f"完成: {len(content.models)} 个工具{stage_note}",
         scanned_at=_now_iso())
     handle.log(f"MCP 扫描完成: {len(content.models)} 个工具已入库 "
                f"(语义 v{version}, 索引 {index_status} {indexed} 条)")
