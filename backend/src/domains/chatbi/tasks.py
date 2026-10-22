@@ -746,15 +746,17 @@ class IndexRebuildDegraded(RuntimeError):
     """
 
 
-def _scan_mcp_datasource(handle, db, info, ds_id, lease, progress) -> dict:
+def _scan_mcp_datasource(handle, db, info, ds_id, lease, progress,
+                         app_state=None) -> dict:
     """mcp 数据源扫描分支(工具=表/参数=列,设计从简)。
 
     与关系库分支的差异: 无业务库可内省——list_tools 的工具清单即
     "表结构";跳过 _connect_business/内省/LLM 富化/指标推断/示例
-    问题/向量索引重建(工具描述由 server 提供,无注释可补;检索走
-    全表降级路径)。进度回写/租约 fencing/CAS 落库复用既有机制。
-    隔离性: sdk.mcp_client 用模块引用形式(惰性 import,monkeypatch
-    打在模块属性上才生效——datasources.check_health 同款)。
+    问题(工具描述由 server 提供,无注释可补)。向量索引照建(与关系库
+    分支同款 guarded_rebuild,失败降级不阻塞)——空索引会让检索的
+    向量召回为空直接追问。进度回写/租约 fencing/CAS 落库复用既有
+    机制。隔离性: sdk.mcp_client 用模块引用形式(惰性 import,
+    monkeypatch 打在模块属性上才生效——datasources.check_health 同款)。
     """
     from domains.chatbi import datasources, semantic
     from sdk import mcp_client
@@ -783,14 +785,32 @@ def _scan_mcp_datasource(handle, db, info, ds_id, lease, progress) -> dict:
         from sdk.pack_api import PermanentTaskError
         raise PermanentTaskError(
             "语义落库被事务级 fencing 拒绝(租约已失)——中止")
+    # 向量索引重建(与关系库分支尾部同款;失败降级不阻塞)
+    indexed, index_status = 0, "ok"
+    try:
+        if app_state is not None:
+            from domains.chatbi import indexing, stores, runtime
+            llm = runtime.get_llm(app_state)
+            store = stores.get_vector(app_state)
+            embedder = stores.get_embedder(llm)
+            rb = indexing.guarded_rebuild(content, ds_id, store, embedder,
+                                          db=db, expected_version=version,
+                                          lease=lease)
+            if rb is not None and getattr(rb, "error", None):
+                raise RuntimeError(rb.error)
+            indexed = rb.indexed_count
+    except Exception as e:
+        logger.warning("MCP 扫描向量索引重建失败(降级, 不阻塞): %s", e)
+        index_status = "degraded"
     progress(90, "扫描完成")
     datasources.update_datasource(
         db, ds_id, scan_status="done", scan_progress=100,
         scan_stage=f"完成: {len(content.models)} 个工具",
         scanned_at=_now_iso())
-    handle.log(f"MCP 扫描完成: {len(content.models)} 个工具已入库 (语义 v{version})")
-    return {"models": len(content.models), "indexed": 0,
-            "ok": True, "index_rebuild": "skipped",
+    handle.log(f"MCP 扫描完成: {len(content.models)} 个工具已入库 "
+               f"(语义 v{version}, 索引 {index_status} {indexed} 条)")
+    return {"models": len(content.models), "indexed": indexed,
+            "ok": True, "index_rebuild": index_status,
             "datasource_id": ds_id}
 
 
@@ -836,10 +856,12 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                                   scan_progress=0, scan_stage="开始扫描", scan_error="")
     try:
         # mcp 分支: 工具清单即"表结构"——list_tools → 合成 → 落库,
-        # 跳过 _connect_business/内省/LLM 富化/索引重建(设计从简)
+        # 跳过 _connect_business/内省/LLM 富化(设计从简);向量索引照建
+        # ——空索引会让检索向量召回为空直接追问(全表降级只在向量故障
+        # 时触发,e2e 实测抓出)
         if info.db_type == "mcp":
             return _scan_mcp_datasource(handle, db, info, ds_id,
-                                        lease, progress)
+                                        lease, progress, app_state)
         # 十三审 7.1 P0: scan 加 CAS——persist=False + 外层 save 传 expected_version
         # (此前 persist=True 内部 save 不带 expected, 后台扫描可静默覆盖管理员编辑)
         from domains.chatbi.graph_infer import VersionConflictError
