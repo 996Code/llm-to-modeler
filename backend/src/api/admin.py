@@ -22,8 +22,8 @@
   POST   /api/admin/packs/{name}/disable      → 禁用 pack(热生效;最后一个不可禁)
   GET    /api/admin/settings/display          → 平台级显示设置(链路/检索结果显示开关)
   PUT    /api/admin/settings/display          → 保存显示设置(部分更新;用户级只读端点共读)
-  GET    /api/admin/settings/mcp              → MCP 接入设置状态(不回显 key 明文,只报 configured)
-  PUT    /api/admin/settings/mcp              → 保存 MCP API Key(全局单 key;清空即停用对外 MCP 端点)
+  GET    /api/admin/settings/mcp              → MCP 接入 key(状态+明文回显,admin 门控)
+  POST   /api/admin/settings/mcp/refresh-key  → 生成/轮换 key(旧 key 立即失效)
   GET    /api/admin/mcp/servers               → 外部 MCP server 注册表(含 status/tools_snapshot)
   POST   /api/admin/mcp/servers               → 注册外部 server(注册即探测;失败 pending 不阻塞)
   PUT    /api/admin/mcp/servers/{id}          → 改配置(改完重探测)
@@ -124,23 +124,21 @@ from services.platform_settings import (
 
 @router.get("/settings/mcp")
 async def get_mcp(request: Request, _: None = Depends(require_admin)):
-    """MCP 接入设置状态(不回显 key 明文,只报是否已配置)。"""
+    """MCP 接入 key 状态与明文回显(admin 门控;订阅系统模式:系统生成+可刷新)。"""
     store = get_platform_settings_store(request)  # 懒建,最小测试 app 也可用
-    return {"configured": bool(get_mcp_settings(store)["api_key"])}
+    key = get_mcp_settings(store)["api_key"]
+    return {"configured": bool(key), "apiKey": key}
 
 
-@router.put("/settings/mcp")
-async def put_mcp(request: Request, _: None = Depends(require_admin)):
-    """保存 MCP API Key(全局单 key;清空即停用对外 MCP 端点)。"""
+@router.post("/settings/mcp/refresh-key")
+async def refresh_mcp_key(request: Request, _: None = Depends(require_admin)):
+    """生成/轮换 MCP 接入 key(旧 key 立即失效;secrets 随机生成,非用户自设)。"""
+    import secrets as _secrets
     store = get_platform_settings_store(request)
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(400, "请求体必须是 JSON")
-    merged, errors = save_mcp_settings(store, payload or {})
-    if errors:
-        raise HTTPException(422, errors)
-    return {"configured": bool(merged["api_key"])}
+    new_key = _secrets.token_urlsafe(24)
+    save_mcp_settings(store, {"api_key": new_key})
+    logger.info("MCP API key rotated")
+    return {"configured": True, "apiKey": new_key}
 
 
 # ── 外部 MCP server 注册表(mcp_servers CRUD + 探测) ────────────
@@ -206,6 +204,26 @@ async def refresh_mcp_server(sid: str, request: Request,
                              _: None = Depends(require_admin)):
     try:
         return await asyncio.to_thread(_mcp_store(request).apply_probe, sid)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/mcp/servers/{sid}/enable")
+async def enable_mcp_server(sid: str, request: Request,
+                            _: None = Depends(require_admin)):
+    """启用外部 MCP server(与插件启停同款语义)。"""
+    try:
+        return _mcp_store(request).set_enabled(sid, True)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.post("/mcp/servers/{sid}/disable")
+async def disable_mcp_server(sid: str, request: Request,
+                             _: None = Depends(require_admin)):
+    """停用外部 MCP server(保留注册与快照,插件调用即报"已停用")。"""
+    try:
+        return _mcp_store(request).set_enabled(sid, False)
     except ValueError as e:
         raise HTTPException(404, str(e))
 

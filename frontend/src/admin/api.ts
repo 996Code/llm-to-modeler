@@ -974,6 +974,7 @@ export interface McpServer {
   timeout: number
   read_timeout: number
   status: 'connected' | 'pending'
+  enabled: boolean
   tools_snapshot: McpTool[]
   created_at: string
   updated_at?: string
@@ -1010,21 +1011,27 @@ export async function deleteMcpServer(id: string): Promise<void> {
   await adminApi.delete(`/mcp/servers/${id}`)
 }
 
+/** 启用/停用外部 server(停用后插件调用即报"已停用")。 */
+export async function toggleMcpServer(id: string, on: boolean): Promise<McpServer> {
+  const { data } = await adminApi.post(`/mcp/servers/${id}/${on ? 'enable' : 'disable'}`)
+  return data
+}
+
 /** 手动重探测(回写 status + tools_snapshot)。 */
 export async function refreshMcpServer(id: string): Promise<McpServer> {
   const { data } = await adminApi.post(`/mcp/servers/${id}/refresh`)
   return data
 }
 
-/** 对外接入 key 状态(不回显明文,只报 configured)。 */
-export async function fetchMcpKeyStatus(): Promise<{ configured: boolean }> {
+/** 对外接入 key(admin 门控回显明文;订阅系统模式:系统生成+可刷新)。 */
+export async function fetchMcpKeyStatus(): Promise<{ configured: boolean; apiKey: string }> {
   const { data } = await adminApi.get('/settings/mcp')
   return data
 }
 
-/** 保存/清空 MCP API Key(清空即停用对外 MCP 端点)。 */
-export async function saveMcpKey(apiKey: string): Promise<{ configured: boolean }> {
-  const { data } = await adminApi.put('/settings/mcp', { api_key: apiKey })
+/** 生成/轮换 MCP API Key(旧 key 立即失效)。 */
+export async function refreshMcpKey(): Promise<{ configured: boolean; apiKey: string }> {
+  const { data } = await adminApi.post('/settings/mcp/refresh-key')
   return data
 }
 

@@ -43,6 +43,8 @@ def _load_server(code: str) -> Dict[str, Any]:
     cfg = _server_loader(code) if _server_loader else None
     if not cfg:
         raise ToolError(f"未注册的 MCP server: {code}", ToolError.PERMANENT)
+    if cfg.get("enabled") is False:
+        raise ToolError(f"MCP server 已停用: {code}", ToolError.PERMANENT)
     return cfg
 
 

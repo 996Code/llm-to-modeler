@@ -2,20 +2,16 @@
   <div>
     <!-- 页头 tab:插件(含启用计数) | MCP 服务(注册计数),说明入口在右 -->
     <div class="pk-tabs-row">
-      <a-tabs v-model:activeKey="innerTab" size="small" class="pk-tabs">
-        <a-tab-pane key="packs">
-          <template #tab>
-            <AppstoreOutlined /> 插件
-            <span class="pk-tab-count">{{ payload ? `${enabledCount}/${payload.items.length}` : '' }}</span>
-          </template>
-        </a-tab-pane>
-        <a-tab-pane key="mcp">
-          <template #tab>
-            <ApiOutlined /> MCP 服务
-            <span v-if="mcpCount" class="pk-tab-count">{{ mcpCount }}</span>
-          </template>
-        </a-tab-pane>
-      </a-tabs>
+      <a-radio-group v-model:value="innerTab" size="small" button-style="solid">
+        <a-radio-button value="packs">
+          <AppstoreOutlined /> 插件
+          <span class="pk-tab-count">{{ payload ? `${enabledCount}/${payload.items.length}` : '' }}</span>
+        </a-radio-button>
+        <a-radio-button value="mcp">
+          <ApiOutlined /> MCP 服务
+          <span v-if="mcpCount" class="pk-tab-count">{{ mcpCount }}</span>
+        </a-radio-button>
+      </a-radio-group>
       <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
         <template #content>
           <div class="pk-help">
@@ -118,7 +114,7 @@ import {
   AppstoreOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined,
   SyncOutlined, ThunderboltOutlined,
 } from '@ant-design/icons-vue'
-import { AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
+import { listMcpServers, AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
 import type { LoadSafely } from './loadSafely'
 import McpServersPanel from './McpServersPanel.vue'
 import PackSettingsDrawer from './PackSettingsDrawer.vue'
@@ -132,6 +128,12 @@ const loadSafely = inject<LoadSafely>('loadSafely')!
 const payload = ref<Awaited<ReturnType<typeof fetchPacks>> | null>(null)
 const innerTab = ref('packs')
 const mcpCount = ref(0)
+onMounted(async () => {
+  try {
+    const items = await listMcpServers()
+    mcpCount.value = items.length
+  } catch { /* 计数失败不打扰 */ }
+})
 const toggling = ref('')
 const rechecking = ref('')
 const settingsOpen = ref(false)

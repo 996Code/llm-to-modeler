@@ -5,26 +5,15 @@
       <a-tag :color="keyConfigured ? 'green' : 'red'">
         {{ keyConfigured ? '已启用' : '未配置 Key' }}
       </a-tag>
-      <a-input-password
-        v-model:value="apiKeyInput" size="small" style="width: 220px"
-        placeholder="设置/更换 MCP API Key"
-      />
-      <a-button size="small" :loading="savingKey" @click="saveKey">保存</a-button>
-      <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
-        <template #content>
-          <div class="pk-help">
-            <div class="pk-help-title"><ApiOutlined /> 注册的外部 MCP server 供插件引用</div>
-            <div class="pk-help-body">
-              注册即探测:连接成功保存工具快照,失败标记"待连接"不阻塞。
-              对外接入 key 配好后,外部 AI 工具可经 <code>{{ mcpEndpoint }}</code> 调用本平台工具;清空 key 即停用该端点。
-            </div>
-          </div>
-        </template>
-        <a class="pk-help-link" title="MCP 服务说明">
-          <QuestionCircleOutlined /> 说明
-        </a>
-      </a-popover>
-    </div>
+      <a-input-password v-if="keyConfigured" :value="apiKey" size="small"
+                        style="width: 260px" readonly />
+      <a-button v-if="keyConfigured" size="small" type="text"
+                title="复制 Key" @click="copyKey">
+        <template #icon><CopyOutlined /></template>
+      </a-button>
+      <a-button size="small" :loading="rotatingKey" @click="rotateKey">
+        {{ keyConfigured ? '刷新 Key' : '生成 Key' }}
+      </a-button>    </div>
 
     <a-table
       :columns="columns"
@@ -50,6 +39,9 @@
           <a-tag v-else>-</a-tag>
         </template>
         <template v-else-if="column.key === 'ops'">
+          <a-switch :checked="record.enabled !== false" size="small"
+                    :loading="togglingId === record.id"
+                    @change="(v: any) => toggleEnabled(record, v)" />
           <span class="mcp-ops">
             <a-tooltip title="刷新快照(重新探测)">
               <a-button size="small" type="text" :loading="refreshing === record.id" @click="refresh(record)">
@@ -119,14 +111,16 @@
 // 与 PacksTab 同容器不新开顶级 tab(spec §5);错误统一走 loadSafely(401/4xx detail toast)。
 import { inject, onMounted, ref } from 'vue'
 import { message, Modal } from 'ant-design-vue'
+import { CopyOutlined } from '@ant-design/icons-vue'
 import {
   ApiOutlined, DeleteOutlined, EditOutlined, PlusOutlined,
   QuestionCircleOutlined, ReloadOutlined,
 } from '@ant-design/icons-vue'
 import {
   createMcpServer, deleteMcpServer, fetchMcpKeyStatus, listMcpServers,
-  refreshMcpServer, saveMcpKey, updateMcpServer,
+  refreshMcpKey, refreshMcpServer, updateMcpServer,
   type McpServer, type McpTool,
+  toggleMcpServer,
 } from '../api'
 import type { LoadSafely } from './loadSafely'
 
@@ -135,11 +129,12 @@ const loadSafely = inject<LoadSafely>('loadSafely')!
 const servers = ref<McpServer[]>([])
 const emit = defineEmits<{ (e: 'count', n: number): void }>()
 const loading = ref(false)
+const togglingId = ref('')
 const keyConfigured = ref(false)
 // 对外端点带项目前缀(网关剥前缀转后端 /api/mcp;vite base 与生产 nginx 同约定)
 const mcpEndpoint = `${window.location.origin}/ai-modeler/api/mcp`
-const apiKeyInput = ref('')
-const savingKey = ref(false)
+const apiKey = ref('')
+const rotatingKey = ref(false)
 const open = ref(false)
 const saving = ref(false)
 const editing = ref<McpServer | null>(null)
@@ -160,7 +155,9 @@ async function load() {
   await loadSafely(async () => {
     servers.value = await listMcpServers()
     emit('count', servers.value.length)
-    keyConfigured.value = (await fetchMcpKeyStatus()).configured
+    const st = await fetchMcpKeyStatus()
+    keyConfigured.value = st.configured
+    apiKey.value = st.apiKey || ''
   })
   loading.value = false
 }
@@ -236,20 +233,53 @@ async function refresh(s: McpServer) {
   await load()
 }
 
-async function saveKey() {
-  savingKey.value = true
-  let ok = false
-  await loadSafely(async () => {
-    await saveMcpKey(apiKeyInput.value.trim())
-    ok = true
-    message.success(apiKeyInput.value.trim() ? '接入 Key 已保存' : '对外 MCP 端点已停用')
-  })
-  savingKey.value = false
-  if (ok) {
-    apiKeyInput.value = ''
-    await load()
+
+async function rotateKey() {
+  const doRotate = async () => {
+    rotatingKey.value = true
+    try {
+      await loadSafely(async () => {
+        const st = await refreshMcpKey()
+        apiKey.value = st.apiKey
+        keyConfigured.value = st.configured
+      })
+      message.success('新 Key 已生成(旧 Key 已失效)')
+    } finally {
+      rotatingKey.value = false
+    }
+  }
+  if (keyConfigured.value) {
+    Modal.confirm({
+      title: '刷新接入 Key?',
+      content: '旧 Key 立即失效,已接入的外部工具需改用新 Key(如 self_test 注册的认证头)。',
+      onOk: doRotate,
+    })
+  } else {
+    await doRotate()
   }
 }
+
+async function copyKey() {
+  try {
+    await navigator.clipboard.writeText(apiKey.value)
+    message.success('已复制')
+  } catch {
+    message.warning('复制失败,请手动选择')
+  }
+}
+
+async function toggleEnabled(rec: McpServer, on: boolean) {
+  togglingId.value = rec.id
+  try {
+    await loadSafely(async () => {
+      await toggleMcpServer(rec.id, on)
+      await load()
+    })
+  } finally {
+    togglingId.value = ''
+  }
+}
+
 </script>
 
 <style scoped>

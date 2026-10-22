@@ -67,10 +67,14 @@ def env():
     app = FastAPI()
     from api.admin import router
     from services.mcp_registry import McpServerStore
+    from sdk import mcp_client
     app.include_router(router)
     app.state.mcp_server_store = McpServerStore()
+    mcp_client.register_server_loader(
+        lambda code: app.state.mcp_server_store.get_by_code(code))
     with TestClient(app) as c:
         yield c, url
+    mcp_client.register_server_loader(lambda code: None)
     server.should_exit = True
     t.join(timeout=10)  # 等 lifespan shutdown(shutdown_mcp)跑完再放行下一测试
 
@@ -112,3 +116,35 @@ def test_refresh_and_delete(env):
     assert client.post(f"/api/admin/mcp/servers/{sid}/refresh").status_code == 200
     assert client.delete(f"/api/admin/mcp/servers/{sid}").status_code == 200
     assert client.get("/api/admin/mcp/servers").json() == []
+
+
+# ── 启用/停用:enabled 列(默认 True)+启停端点+调用层 fail-fast ──────
+
+
+def test_enable_disable_roundtrip(env):
+    client, url = env
+    sid = client.post("/api/admin/mcp/servers", json={
+        "name": "启停测试", "code": "toggle_me", "url": url,
+        "headers": {"X-Api-Key": "sk-ext"}}).json()["id"]
+    rows = {s["code"]: s for s in client.get("/api/admin/mcp/servers").json()}
+    assert rows["toggle_me"]["enabled"] is True        # 新建默认启用
+
+    r = client.post(f"/api/admin/mcp/servers/{sid}/disable")
+    assert r.status_code == 200 and r.json()["enabled"] is False
+    r = client.post(f"/api/admin/mcp/servers/{sid}/enable")
+    assert r.status_code == 200 and r.json()["enabled"] is True
+
+
+def test_disabled_server_client_rejects(env):
+    """停用的 server:client 调用直接报 permanent(已停用),不发起连接。"""
+    from sdk import mcp_client
+    from sdk.tool import PackInvokeError
+    client, url = env
+    sid = client.post("/api/admin/mcp/servers", json={
+        "name": "启停调用", "code": "off_srv", "url": url,
+        "headers": {"X-Api-Key": "sk-ext"}}).json()["id"]
+    client.post(f"/api/admin/mcp/servers/{sid}/disable")
+    with pytest.raises(PackInvokeError) as ei:
+        mcp_client.call_tool("off_srv", "echo", {})
+    assert ei.value.error_type == "permanent"
+    assert "停用" in str(ei.value)

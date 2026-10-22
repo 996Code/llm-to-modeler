@@ -1,30 +1,38 @@
-"""MCP 全局单 key:平台设置读写 + 管理端端点(GET 不回显明文)。"""
+"""MCP 接入 key(订阅系统模式):GET 回显明文 + refresh-key 生成/轮换。"""
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from services.platform_settings import (
-    PlatformSettingsStore, get_mcp_settings, save_mcp_settings,
-)
 
 
-def test_roundtrip_and_defaults():
-    store = PlatformSettingsStore()
-    assert get_mcp_settings(store) == {"api_key": ""}   # 缺省空
-    merged, errors = save_mcp_settings(store, {"api_key": "sk-mcp-1"})
-    assert errors == [] and merged == {"api_key": "sk-mcp-1"}
-    assert get_mcp_settings(store) == {"api_key": "sk-mcp-1"}
-
-
-def test_reject_non_string():
-    _, errors = save_mcp_settings(PlatformSettingsStore(), {"api_key": 123})
-    assert errors and "字符串" in errors[0]["message"]
-
-
-def test_admin_endpoint_no_plaintext_echo():
+def _client():
     from api.admin import router
     app = FastAPI()
     app.include_router(router)
-    with TestClient(app) as c:
-        c.put("/api/admin/settings/mcp", json={"api_key": "sk-secret"})
-        r = c.get("/api/admin/settings/mcp")
+    return TestClient(app)
+
+
+def test_get_echoes_key():
+    from services.platform_settings import PlatformSettingsStore, save_mcp_settings
+    save_mcp_settings(PlatformSettingsStore(), {"api_key": "sk-echo"})
+    r = _client().get("/api/admin/settings/mcp")
     assert r.status_code == 200
-    assert r.json() == {"configured": True}             # 明文不回显
+    assert r.json() == {"configured": True, "apiKey": "sk-echo"}
+
+
+def test_get_unconfigured():
+    from services.platform_settings import PlatformSettingsStore, save_mcp_settings
+    save_mcp_settings(PlatformSettingsStore(), {"api_key": ""})
+    r = _client().get("/api/admin/settings/mcp")
+    assert r.json() == {"configured": False, "apiKey": ""}
+
+
+def test_refresh_rotates():
+    from services.platform_settings import (
+        PlatformSettingsStore, get_mcp_settings, save_mcp_settings)
+    save_mcp_settings(PlatformSettingsStore(), {"api_key": "sk-old"})
+    r = _client().post("/api/admin/settings/mcp/refresh-key")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["configured"] is True
+    new_key = body["apiKey"]
+    assert new_key and new_key != "sk-old"
+    assert get_mcp_settings(PlatformSettingsStore())["api_key"] == new_key

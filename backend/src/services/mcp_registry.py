@@ -25,10 +25,13 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     read_timeout  REAL NOT NULL DEFAULT 300,
     status        TEXT NOT NULL DEFAULT 'pending',
     tools_json    TEXT NOT NULL DEFAULT '[]',
+    enabled       INTEGER NOT NULL DEFAULT 1,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 )
 """
+# 既有表补列(幂等;CREATE TABLE IF NOT EXISTS 不改已存在表)
+_MIGRATE = "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS enabled INTEGER NOT NULL DEFAULT 1"
 
 
 def _now() -> str:
@@ -45,12 +48,14 @@ class McpServerStore:
         self._lock = threading.Lock()
         with self.db.connect() as conn:
             conn.execute(_DDL)
+            conn.execute(_MIGRATE)
 
     def _row(self, r) -> Dict[str, Any]:
         return {"id": r["id"], "name": r["name"], "code": r["code"], "url": r["url"],
                 "headers": json.loads(r["headers_json"] or "{}"),
                 "timeout": r["timeout"], "read_timeout": r["read_timeout"],
                 "status": r["status"],
+                "enabled": bool(r["enabled"]),
                 "tools_snapshot": json.loads(r["tools_json"] or "[]"),
                 "created_at": r["created_at"], "updated_at": r["updated_at"]}
 
@@ -106,6 +111,20 @@ class McpServerStore:
     def delete_server(self, sid: str) -> None:
         with self._lock, self.db.connect() as conn:
             conn.execute("DELETE FROM mcp_servers WHERE id = ?", (sid,))
+
+    def set_enabled(self, sid: str, enabled: bool) -> dict:
+        """启用/停用(用户意图,与探测态 status 正交;停用后调用层 fail-fast)。"""
+        with self._lock, self.db.connect() as conn:
+            cur = conn.execute(
+                "SELECT id FROM mcp_servers WHERE id = ?", (sid,)).fetchone()
+            if not cur:
+                raise ValueError("server 不存在")
+            conn.execute(
+                "UPDATE mcp_servers SET enabled=?, updated_at=? WHERE id=?",
+                (1 if enabled else 0, _now(), sid))
+            cur = conn.execute(
+                "SELECT * FROM mcp_servers WHERE id = ?", (sid,)).fetchone()
+        return self._row(cur)
 
     def apply_probe(self, sid: str) -> dict:
         """事务外探测回写:成功 connected+快照;失败保持 pending(不抛,如实返回)。"""
