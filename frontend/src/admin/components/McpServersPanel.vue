@@ -258,10 +258,10 @@ async function saveKey() {
 </script>
 
 <style scoped>
-/* 分区标题行与 PacksTab 的 pk-toolbar 同款(分区视觉一致) */
+/* 标题行(独立顶级页形态) */
 .pk-toolbar {
   display: flex; align-items: center; justify-content: space-between;
-  margin: 26px 2px 10px; border-top: 1px solid #eef1f6; padding-top: 18px;
+  margin: 2px 2px 14px;
 }
 .pk-toolbar-title {
   font-size: 14px; font-weight: 600; color: #334155;

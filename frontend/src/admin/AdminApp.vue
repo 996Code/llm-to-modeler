@@ -59,6 +59,8 @@
         <CallLogsTab v-else-if="tab === 'calllogs'" />
         <TasksTab v-else-if="tab === 'tasks'" />
         <PacksTab v-else-if="tab === 'packs'" @open-page="openPackPage" @refresh-pages="loadPackPages" />
+        <!-- 统一登记处:外部 MCP server 注册表 + 对外接入 key(插件消费时引用) -->
+        <McpServersPanel v-else-if="tab === 'mcp'" />
         <!-- pack 自定义管理页(v-if 切换:离开即卸载, 图谱类重资源页不留后台实例);
              知识库-测试也走此通道(loadPackPages 动态追加,跟随插件启停) -->
         <template v-else-if="packPageMap[tab]">
@@ -76,13 +78,14 @@ import { message } from 'ant-design-vue'
 import type { Component } from 'vue'
 import {
   ApiOutlined, AppstoreOutlined, CloudServerOutlined, DashboardOutlined,
-  MessageOutlined, PartitionOutlined,
+  MessageOutlined, PartitionOutlined, ClusterOutlined,
 } from '@ant-design/icons-vue'
 import OverviewTab from './components/OverviewTab.vue'
 import ConversationsTab from './components/ConversationsTab.vue'
 import CallLogsTab from './components/CallLogsTab.vue'
 import TasksTab from './components/TasksTab.vue'
 import PacksTab from './components/PacksTab.vue'
+import McpServersPanel from './components/McpServersPanel.vue'
 import KbEmbedTest from '../embed-test/EmbedTestApp.vue'
 import { hasPackPage, packPageRegistry } from './packPages/registry'
 import {
@@ -99,6 +102,7 @@ const navItems = computed(() => [
   { key: 'calllogs', label: '审计 & 调用', icon: ApiOutlined },
   { key: 'tasks', label: '任务中心', icon: CloudServerOutlined },
   { key: 'packs', label: '插件', icon: AppstoreOutlined },
+  { key: 'mcp', label: 'MCP 服务', icon: ClusterOutlined },
   ...packPages.value.map((p) => ({
     key: `pack-page:${p.pageKey}`, label: p.title, icon: PartitionOutlined })),
 ])

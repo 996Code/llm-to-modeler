@@ -89,9 +89,6 @@
     </div>
     <a-empty v-if="payload && !payload.items.length" description="未发现任何插件" style="padding: 60px 0" />
 
-    <!-- 页底分区:外部 MCP 服务注册表 + 对外接入 key(spec §5 不新开顶级页) -->
-    <McpServersPanel />
-
     <!-- 声明式设置抽屉 -->
     <PackSettingsDrawer v-model:open="settingsOpen" :pack-name="settingsPack" @saved="load" />
   </div>
@@ -107,7 +104,6 @@ import {
 } from '@ant-design/icons-vue'
 import { AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
 import type { LoadSafely } from './loadSafely'
-import McpServersPanel from './McpServersPanel.vue'
 import PackSettingsDrawer from './PackSettingsDrawer.vue'
 
 const emit = defineEmits<{
