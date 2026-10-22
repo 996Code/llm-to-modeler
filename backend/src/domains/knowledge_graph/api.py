@@ -203,37 +203,6 @@ async def kb_tree(request: Request):
     return {"items": runtime.get_kg_store(request.app.state).list_kb_tree()}
 
 
-# ── 开放 API Key 管理(D25:宿主推数据;签发/吊销归管理门) ──
-
-@router.get("/kbs/open-api-keys", dependencies=[Depends(admin_required)])
-async def list_open_api_keys(request: Request):
-    """Key 清单(不含哈希/明文——只有签发时返回一次明文)。"""
-    return {"items": runtime.get_kg_store(request.app.state).list_open_api_keys()}
-
-
-@router.post("/kbs/open-api-keys", dependencies=[Depends(admin_required)])
-async def create_open_api_key(request: Request, payload: Dict[str, Any]):
-    """签发 Key:明文 kgk_ 前缀 + 48 hex,仅本次返回(库内只存 SHA-256)。"""
-    import secrets
-    name = str(payload.get("name") or "").strip() or "未命名"
-    kb_id = str(payload.get("kb_id") or "").strip() or None
-    if kb_id and not runtime.get_kg_store(request.app.state).get_kb(kb_id):
-        raise HTTPException(422, "kb_id 指向的知识库不存在")
-    plaintext = "kgk_" + secrets.token_hex(24)
-    from domains.knowledge_graph.open_api import _hash_key
-    store = runtime.get_kg_store(request.app.state)
-    rec = store.create_open_api_key(name, _hash_key(plaintext), kb_id=kb_id)
-    logger.info(f"open api key issued: {rec['id'][:8]} (name={name})")
-    return {**rec, "key": plaintext}
-
-
-@router.delete("/kbs/open-api-keys/{key_id}", dependencies=[Depends(admin_required)])
-async def revoke_open_api_key(key_id: str, request: Request):
-    store = runtime.get_kg_store(request.app.state)
-    if not store.revoke_open_api_key(key_id):
-        raise HTTPException(404, "Key 不存在或已吊销")
-    logger.info(f"open api key revoked: {key_id[:8]}")
-    return {"success": True}
 
 
 # ── D7 文档元数据(检索过滤维度;管理端维护,检索时下推) ─────

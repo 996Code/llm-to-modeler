@@ -150,17 +150,6 @@ class KGStore:
         )""",
     "CREATE INDEX IF NOT EXISTS idx_kg_chunks_doc ON kg_chunks(doc_id, seq)",
     "CREATE INDEX IF NOT EXISTS idx_kg_chunks_status ON kg_chunks(doc_id, status)",
-    # D25 知识库开放 API:宿主推数据用的 API Key(只存 SHA-256 哈希,
-    # 明文仅签发时返回一次;吊销=软删,审计留痕)
-    """CREATE TABLE IF NOT EXISTS kg_open_api_keys (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        key_hash TEXT NOT NULL UNIQUE,
-        kb_id TEXT,                   -- 绑定库(NULL=全部库);泄漏面收敛
-        created_at TEXT NOT NULL,
-        revoked_at TEXT,
-        last_used_at TEXT
-    )""",
     # 检索数据权限(嵌入模式):每库允许的用户/角色;空=全开放
     """CREATE TABLE IF NOT EXISTS kg_kb_acl (
         id TEXT PRIMARY KEY,
@@ -209,13 +198,6 @@ class KGStore:
                              "ADD COLUMN IF NOT EXISTS chunk_params TEXT")
         except Exception as e:
             logger.warning(f"库级分段参数列迁移失败(不影响启动,下次重试): {e}")
-        # D25 开放 Key 库绑定列:存量表无 kb_id(泄漏面收敛到单库)
-        try:
-            with self._get_conn() as conn:
-                conn.execute("ALTER TABLE kg_open_api_keys "
-                             "ADD COLUMN IF NOT EXISTS kb_id TEXT")
-        except Exception as e:
-            logger.warning(f"开放 Key 绑定列迁移失败(不影响启动,下次重试): {e}")
         # D29 块命中统计:kg_chunks 加 hit_count(被引用即 +1,
         # "哪些知识真被用"的治理数据)。默认 0,旧行迁移自动补。
         try:
@@ -413,53 +395,6 @@ class KGStore:
 
     # ── 开放 API Key(D25:宿主推数据) ─────────────────────
 
-    def create_open_api_key(self, name: str, key_hash: str,
-                             kb_id: Optional[str] = None) -> Dict[str, Any]:
-        key_id = str(uuid.uuid4())
-        now = _now()
-        with self._get_conn() as conn:
-            conn.execute(
-                "INSERT INTO kg_open_api_keys (id, name, key_hash, kb_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?)", (key_id, name, key_hash, kb_id, now))
-        return self.get_open_api_key(key_id)
-
-    def get_open_api_key(self, key_id: str) -> Optional[Dict[str, Any]]:
-        with self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM kg_open_api_keys WHERE id = ?", (key_id,)).fetchone()
-        return self._open_key_row(row) if row else None
-
-    def list_open_api_keys(self) -> List[Dict[str, Any]]:
-        with self._get_conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM kg_open_api_keys ORDER BY created_at DESC").fetchall()
-        return [self._open_key_row(r) for r in rows]
-
-    def revoke_open_api_key(self, key_id: str) -> bool:
-        with self._get_conn() as conn:
-            cur = conn.execute(
-                "UPDATE kg_open_api_keys SET revoked_at = ? WHERE id = ? "
-                "AND revoked_at IS NULL", (_now(), key_id))
-            return cur.rowcount > 0
-
-    def find_open_api_key_by_hash(self, key_hash: str) -> Optional[Dict[str, Any]]:
-        with self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM kg_open_api_keys WHERE key_hash = ?",
-                (key_hash,)).fetchone()
-        return self._open_key_row(row) if row else None
-
-    def touch_open_api_key(self, key_id: str) -> None:
-        """最近使用时间(审计/清理依据;失败不阻断请求)。"""
-        try:
-            with self._get_conn() as conn:
-                conn.execute(
-                    "UPDATE kg_open_api_keys SET last_used_at = ? WHERE id = ?",
-                    (_now(), key_id))
-        except Exception as e:
-            logger.warning(f"open api key touch 失败(不阻断): {e}")
-
-    @staticmethod
     def _open_key_row(row: dict) -> Dict[str, Any]:
         d = dict(row)
         return {

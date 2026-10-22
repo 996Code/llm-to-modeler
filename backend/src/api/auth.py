@@ -163,13 +163,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if path in _AUTH_WHITELIST or path.startswith("/api/auth/"):
             return await call_next(request)
-        # 开放 API 面(D25:/api/open/*):平台不重复设门——该面自带
-        # API Key 鉴权(见 domains/knowledge_graph/open_api.py),外部
-        # 宿主没有也不该有管理 token
-        if path.startswith("/api/open/"):
-            return await call_next(request)
         # 对外 MCP 端点(/api/mcp 与 /api/mcp/*):模块内 X-Api-Key 独自设门
-        # (同 /api/open 模式)。精确前缀带尾斜杠——裸 startswith("/api/mcp")
+        # (前缀放行+模块内独自设门)。精确前缀带尾斜杠——裸 startswith("/api/mcp")
         # 会误吞 /api/mcpfoo 之类的无关路径。
         if path == "/api/mcp" or path.startswith("/api/mcp/"):
             return await call_next(request)

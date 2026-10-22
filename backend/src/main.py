@@ -357,10 +357,6 @@ app.include_router(settings_router)
 app.include_router(admin_router)
 # 任务中心路由（同 admin 口令守门;SSE 实时进度/日志）
 app.include_router(tasks_router)
-# 知识库开放 API(D25:/api/open/kb,宿主推数据;API Key 独自设门,
-# AuthMiddleware 对 /api/open/ 前缀放行——见 api/auth.py 白名单)
-from domains.knowledge_graph.open_api import router as kg_open_router
-app.include_router(kg_open_router, prefix="/api/open")
 
 
 
