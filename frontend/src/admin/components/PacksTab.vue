@@ -111,8 +111,8 @@
 import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  AppstoreOutlined, QuestionCircleOutlined, RightOutlined, SettingOutlined,
-  SyncOutlined, ThunderboltOutlined,
+  ApiOutlined, AppstoreOutlined, QuestionCircleOutlined, RightOutlined,
+  SettingOutlined, SyncOutlined, ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 import { listMcpServers, AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
 import type { LoadSafely } from './loadSafely'
