@@ -66,7 +66,7 @@ sdk/mcp_client.py           list_tools(code) / call_tool(code, tool, args) -> di
 
 ## 5. 分期与出口标准
 
-**一期**：对外 MCP server + mcp_servers 注册表 + sdk/mcp_client.py + 管理端「MCP 服务」页（统一登记处：注册表 CRUD + 对外接入 key；插件消费时引用，如 ChatBI 数据源选 server）。
+**一期**：对外 MCP server + mcp_servers 注册表 + sdk/mcp_client.py + 管理端插件页内「MCP 服务」tab（统一登记处：注册表 CRUD + 对外接入 key，页头双 tab 带计数徽标；插件消费时引用，如 ChatBI 数据源选 server）。
 出口标准：
 1. MCP client 用 key 连 `/api/mcp`：tools/list 可见 kb_search（描述含知识库清单），检索往返成功；
 2. 错 key → 401；
