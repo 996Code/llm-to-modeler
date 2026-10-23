@@ -796,6 +796,15 @@ async def expand_graph_node(kb_id: str, request: Request):
     return _graph(request).expand_node(kb_id, node_id)
 
 
+# ── 导入任务发起 ─────────────────────────────────────────────
+
+def _task_manager_or_503(request):
+    manager = getattr(request.app.state, "task_manager", None)
+    if manager is None:
+        raise HTTPException(503, "任务框架未初始化")
+    return manager
+
+
 @router.get("/kbs/{kb_id}/documents/{doc_id}/chunks", dependencies=[Depends(admin_required)])
 async def list_chunks(kb_id: str, doc_id: str, request: Request):
     """文档块级明细(导入状态可视 + 定向重试的依据)。
