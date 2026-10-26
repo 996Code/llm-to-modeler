@@ -14,6 +14,7 @@
 | ChatBI 受控执行 | `backend/src/domains/chatbi/controlled.py` | 先判业务信封再归一(forbidden 不装成功行) |
 | 演示文档 | 本目录两个 `*-demo.md` | 强检目录条款 + 检定规程(合成资料,不外发当真实依据) |
 | 环境准备 | `setup_demo.py` | 幂等:注册 server/建库/传文档/等导入/建数据源 |
+| 演示前检查 | `check_env.py` | 只读体检:三端口/.env/MCP 注册/两库导入/数据源,全 ✓ 才开演 |
 
 ## 启动顺序
 
