@@ -5,9 +5,11 @@
   → 规则定来源 → 调底层(知识库证据服务 / ChatBI 受控执行) → 组业务回答
 
 架构形状(对齐设计 C1"代码只留通用执行器,场景=配置"):
-- SCENARIOS 场景定义表是唯一事实源:意图描述(提取提示词由表自动拼装)、
-  必填槽位与追问规格、动作绑定(KG 或 数据源+固定工具)、结果卡构建。
-  新增场景 = 加一条表项,执行器与提示词模板零改动。
+- 场景定义的事实源是 DB(assistant_config 表,管理页维护,保存即
+  校验+热生效);本模块的 SCENARIOS 常量降级为出厂默认种子
+  (scenario_config.factory_default_config 转档首启写入)。执行器
+  经 scenario_config.load_scenarios() 取当前生效表——形状与常量
+  同构,新增场景 = 管理页加一条,执行器与提示词模板零改动。
 - 执行器通用:缺槽追问、受控调用、信封分态(查无/拒权=业务通知卡,
   技术或契约故障=平台错误诊断)、记忆回写,全部一套代码。
 - 数据源 env 变量是 assistant_config 表缺位的演示替身(P1 由场景配置
@@ -70,7 +72,7 @@ _PIPELINE_STEPS = [
 ]
 
 
-# ── 场景定义表(唯一事实源;P1 迁 assistant_config,执行器零改动) ──
+# ── 场景定义表(出厂默认;运行时事实源在 DB,见 scenario_config.py) ──
 # required: 缺该槽位时追问(question 支持 {subject} 占位,取 subject_slot
 #   的值包「」,缺省用 subject_default);normalize 对槽位值归一。
 # action.kind=kg: 知识库证据链(见 _run_kg);
@@ -157,6 +159,15 @@ SCENARIOS = {
 }
 
 
+def _current_scenarios() -> dict:
+    """当前生效场景表(DB 优先,异常回退本模块出厂默认)。
+
+    模块级函数(提取/解析/文案)的统一入口;执行器 execute() 也走它。
+    """
+    from domains.metrology_assistant.scenario_config import load_scenarios
+    return load_scenarios()
+
+
 def _make_monotonic_stage(emit_fn, steps):
     """stage 上屏钳成单行道(与 kb_search 同款:回退/未知键不上屏)。"""
     order = {s["key"]: i for i, s in enumerate(steps)}
@@ -174,10 +185,12 @@ def _make_monotonic_stage(emit_fn, steps):
 
 # ── 槽位提取与合并(提示词由场景表拼装) ────────────────────────
 
-def _build_extract_prompt(background: str, user_input: str) -> str:
-    keys = "|".join(list(SCENARIOS) + ["other"])
+def _build_extract_prompt(background: str, user_input: str,
+                          scenarios: dict = None) -> str:
+    table = scenarios if scenarios is not None else _current_scenarios()
+    keys = "|".join(list(table) + ["other"])
     intent_lines = "\n".join(
-        f"  {cfg['intent']} → {key};" for key, cfg in SCENARIOS.items())
+        f"  {cfg['intent']} → {key};" for key, cfg in table.items())
     return f"""你是计量业务客服的槽位提取器。从用户消息提取 JSON(只输出 JSON):
 
 {{"scenario": "{keys}", "instrument": "", "purpose": "", "order_no": ""}}
@@ -195,10 +208,11 @@ def _build_extract_prompt(background: str, user_input: str) -> str:
 
 
 def extract_slots(llm, user_input: str, background: dict,
-                  conv_id: Optional[str]) -> dict:
+                  conv_id: Optional[str], scenarios: dict = None) -> dict:
     """LLM 结构化提取(一次调用出场景+三槽位);失败上抛,不静默猜。"""
     prompt = _build_extract_prompt(
-        json.dumps(background, ensure_ascii=False), user_input)
+        json.dumps(background, ensure_ascii=False), user_input,
+        scenarios=scenarios)
     data = llm.chat_json([{"role": "user", "content": prompt}],
                          temperature=0.0, conv_id=conv_id,
                          stage="assistant.extract")
@@ -209,7 +223,8 @@ def extract_slots(llm, user_input: str, background: dict,
         return str(data.get(key) or "").strip()
 
     scenario = _s("scenario")
-    if scenario not in SCENARIOS:
+    table = scenarios if scenarios is not None else _current_scenarios()
+    if scenario not in table:
         scenario = "other"
     return {"scenario": scenario, "instrument": _s("instrument"),
             "purpose": _s("purpose"), "order_no": _s("order_no").upper()}
@@ -225,14 +240,15 @@ def merge_slots(extracted: dict, mem_slots: dict) -> dict:
     return merged
 
 
-def parse_clarify_answers(answers: dict) -> dict:
+def parse_clarify_answers(answers: dict, scenarios: dict = None) -> dict:
     """追问答案({header: label} 或 {text: 原话})→ 槽位(确定性解析)。
 
     header→槽位映射来自场景表;order_no 按单号正则归一;
     自由文本依次尝试单号/用途关键词,其余归入器具名称。
     """
+    table = scenarios if scenarios is not None else _current_scenarios()
     out = {}
-    for cfg in SCENARIOS.values():
+    for cfg in table.values():
         required = cfg["required"]
         value = answers.get(required["header"])
         if not value:
@@ -359,9 +375,10 @@ _CN_NUM = {2: "两", 3: "三", 4: "四", 5: "五"}
 
 def _unsupported_notice() -> ToolResult:
     """范围外问题的如实答复(文案由场景表拼装,不手写清单)。"""
+    table = _current_scenarios()
     items = ";".join(f"{'①②③④⑤'[i]}{cfg['label']}"
-                     for i, cfg in enumerate(SCENARIOS.values()))
-    count = _CN_NUM.get(len(SCENARIOS), str(len(SCENARIOS)))
+                     for i, cfg in enumerate(table.values()))
+    count = _CN_NUM.get(len(table), str(len(table)))
     text = (f"当前演示版本覆盖{count}类问题:{items}。"
             "请换个问法,或联系业务窗口人工咨询。")
     return _notice("unsupported", "暂不支持此问题", text)
@@ -410,12 +427,19 @@ class MetrologyAssistantTool(Tool):
         mem_slots = dict(mem.get("slots") or {}) if mem else {}
         mem_scenario = str(mem.get("scenario") or "") if mem else ""
         answers = state.get("clarify_answers") or {}
+        # 补答路径只读(旧 flow 或 KV 兜底);新消息路径在提取后统一
+        # ensure(见下方失效传播分支:冲突先关旧再建新)
+        flow = self._load_flow(ctx)
 
         if answers:
-            # 追问恢复:从 pending 上下文确定性续跑(不再烧一次提取)。
-            # 边界(Demo):非 answers 的新消息不清 pending、旧卡补答无
-            # 版本校验——P1 flows 表+CAS 解决(设计 6.1"旧版本卡拒绝")
-            pending = (mem.get("pending") or {}) if mem else {}
+            # 追问恢复:pending 上下文确定性续跑(不再烧一次提取)。
+            # P1(C4):pending 落 flows 表,补答与版本推进原子执行——
+            # 旧版本卡的补答被 CAS 拒绝并如实告知(设计 6.1);DB 不可用
+            # 或无 flow 时回退会话 KV 兜底(读可降级,写须真实)。
+            consumed = self._consume_pending(flow, answers, ctx)
+            if isinstance(consumed, ToolResult):
+                return consumed
+            pending = consumed
             scenario = pending.get("scenario") or mem_scenario or "other"
             merged = merge_slots(parse_clarify_answers(answers),
                                  pending.get("slots") or mem_slots)
@@ -427,14 +451,32 @@ class MetrologyAssistantTool(Tool):
             scenario = (extracted["scenario"] if extracted["scenario"] != "other"
                         else (mem_scenario or "other"))
             merged = merge_slots(extracted, mem_slots)
+            # 失效传播(设计 §6):本轮明确改了条件(与在途 flow 槽位
+            # 冲突)→ 关闭旧 flow。单号/器具/用途变清旧结果引用;
+            # KV 记忆同步清(merge_slots 只并新值,旧 pending 作废)。
+            # 旧 flow 已 cancelled;新条件开新任务(重建 running flow)
+            if flow is not None and self._slots_conflict(flow, extracted):
+                self._invalidate_flow(flow, ctx)
+                if mem:
+                    mem.pop("pending", None)
+            # 新消息路径统一 ensure:无 flow 建之,冲突后重建
+            flow = self._ensure_flow(ctx)
+            # 已确认条件先行持久(设计 §6:条件值入 flow;执行成败
+            # 不改变"用户本轮确认了什么"这一事实,失效传播据此判定)。
+            # 推进后刷新快照——后续 _save_pending/_finish_flow 的 CAS
+            # 基于新 revision,不撞版本
+            flow = self._record_slots(flow, scenario, merged)
 
-        cfg = SCENARIOS.get(scenario)
+        cfg = _current_scenarios().get(scenario)
         if cfg is None:
             return _unsupported_notice()
 
         required = cfg["required"]
         if not merged.get(required["slot"]):
-            # 只追问影响判断的必要条件(设计 13.1 故事 1:不编条件)
+            # 只追问影响判断的必要条件(设计 13.1 故事 1:不编条件)。
+            # 追问问题落 flow(pending_question):关键状态保存成功后
+            # 才对前端发 needsClarification(设计 6.1);KV 兜底同上。
+            self._save_pending(flow, scenario, merged, required, ctx)
             if mem:
                 mem.set("pending", {"scenario": scenario, "slots": merged})
             return self._ask_required(required, merged)
@@ -442,6 +484,162 @@ class MetrologyAssistantTool(Tool):
         if cfg["action"]["kind"] == "kg":
             return self._run_kg(ctx, mem, merged, stage)
         return self._run_chatbi(scenario, cfg, ctx, mem, merged, stage)
+
+    # ── flow 状态(C4:DB 权威,会话 KV 兜底) ──
+
+    @staticmethod
+    def _flow_ctx(ctx: ToolContext):
+        """(conv_id, user_id)——flow 归属键;缺会话上下文返回 None。"""
+        conv_id = getattr(ctx, "conv_id", None)
+        if not conv_id:
+            return None
+        return conv_id, (getattr(ctx, "user_id", None) or "anonymous")
+
+    def _load_flow(self, ctx: ToolContext):
+        """读会话当前 flow(只读);DB 不可用返回 None(兜底路径)。"""
+        keys = self._flow_ctx(ctx)
+        if keys is None:
+            return None
+        try:
+            from domains.metrology_assistant import runtime, store
+            return store.get_flow(runtime.get_pack_db(), keys[0])
+        except Exception:
+            logger.exception("flow 读取失败,回退会话 KV 兜底")
+            return None
+
+    def _record_slots(self, flow, scenario: str, merged: dict):
+        """把本轮已确认条件落进 running flow;返回刷新后的 flow 快照。
+
+        推进失败(版本冲突/DB 故障)返回原快照并留痕——后续写会撞
+        CAS 走各自兜底,不静默串版本。
+        """
+        if flow is None:
+            return None
+        try:
+            from domains.metrology_assistant import runtime, store
+            store.advance_flow(
+                runtime.get_pack_db(), flow["flowId"],
+                flow["flowRevision"], scenario=scenario, slots=merged)
+            return store.get_flow(runtime.get_pack_db(), flow["conversationId"])
+        except Exception:
+            logger.exception("条件落 flow 失败(回退 KV)")
+            return flow
+
+    @staticmethod
+    def _slots_conflict(flow: dict, extracted: dict) -> bool:
+        """在途 flow 槽位与本轮明确提取值冲突(同槽位不同非空值)。"""
+        flow_slots = flow.get("slots") or {}
+        return any(
+            extracted.get(k) and flow_slots.get(k)
+            and str(extracted[k]).strip() != str(flow_slots[k]).strip()
+            for k in ("instrument", "purpose", "order_no"))
+
+    def _invalidate_flow(self, flow: dict, ctx: ToolContext) -> None:
+        """失效传播:关闭在途 flow(结果引用随行作废;失败只记日志)。"""
+        keys = self._flow_ctx(ctx)
+        if keys is None:
+            return
+        try:
+            from domains.metrology_assistant import runtime, store
+            store.close_running_flows(runtime.get_pack_db(), keys[0])
+        except Exception:
+            logger.exception("失效传播关闭 flow 失败(不影响本轮执行)")
+
+    def _ensure_flow(self, ctx: ToolContext):
+        """读或建会话 flow(新消息路径);失败返回 None(KV 兜底)。"""
+        keys = self._flow_ctx(ctx)
+        if keys is None:
+            return None
+        try:
+            from domains.metrology_assistant import runtime, store
+            db = runtime.get_pack_db()
+            flow = store.get_flow(db, keys[0])
+            if flow is not None:
+                return flow
+            # done flow 保留(可加载改条件),新提问建新 running flow
+            store.create_flow(db, keys[0], keys[1], "", {}, None)
+            return store.get_flow(db, keys[0])
+        except Exception:
+            logger.exception("flow 建立失败,回退会话 KV 兜底")
+            return None
+
+    def _consume_pending(self, flow, answers: dict, ctx: ToolContext):
+        """补答消费:pending_question 清除+补答槽位并入+版本推进,
+        三者同一事务原子执行(设计 6.1)。
+
+        返回 pending 槽位 dict(继续执行);旧版本/已消费返回
+        ToolResult(如实告知,不吞);无 flow 返回 KV pending。
+        """
+        mem = getattr(ctx, "session_state", None)
+        if flow is None:
+            return (mem.get("pending") or {}) if mem else {}
+        pending_q = flow.get("pendingQuestion")
+        if not pending_q:
+            # flow 在但待答问题已被消费(另一标签页/刷新前旧卡):
+            # 明确拒绝,不静默当新消息处理(设计 6.1"旧版本卡拒绝")
+            return ToolResult(
+                error_for_llm="该追问已被处理,请基于最新回复继续操作。")
+        base = dict(flow.get("slots") or {})
+        base.update(parse_clarify_answers(answers))
+        try:
+            from domains.metrology_assistant import runtime, store
+            store.advance_flow(
+                runtime.get_pack_db(), flow["flowId"],
+                flow["flowRevision"], slots=base, clear_pending=True)
+        except Exception:
+            logger.exception("pending 消费失败(版本冲突或 DB 故障)")
+            return ToolResult(
+                error_for_llm="该追问已被处理或状态已变化,请重新提问。")
+        return {"scenario": flow.get("scenario") or "", "slots": base}
+
+    def _save_pending(self, flow, scenario: str, merged: dict,
+                      required: dict, ctx: ToolContext) -> None:
+        """缺槽追问落 flow(pending_question);失败只记日志(KV 兜底)。"""
+        if flow is None:
+            return
+        try:
+            from domains.metrology_assistant import runtime, store
+            question = required["question"]
+            subject_slot = required.get("subject_slot")
+            if subject_slot is not None and "{subject}" in question:
+                value = merged.get(subject_slot) or ""
+                subject = f"「{value}」" if value else required.get(
+                    "subject_default", "")
+                question = question.format(subject=subject)
+            store.advance_flow(
+                runtime.get_pack_db(), flow["flowId"],
+                flow["flowRevision"], scenario=scenario, slots=merged,
+                pending_question={
+                    "question": question, "header": required["header"],
+                    "scenario": scenario})
+        except Exception:
+            # 保存失败不阻断追问(KV 兜底);但按设计 6.1,关键状态
+            # 未落库时恢复链路会拒绝——宁可降级追问,不可丢问题
+            logger.exception("pending 追问落 flow 失败(回退 KV)")
+
+    def _finish_flow(self, scenario: str, merged: dict,
+                     ctx: ToolContext) -> None:
+        """成功执行后推进 flow:写终态槽位并标记 done(失败只记日志)。
+
+        flow 保留(done)——完成后仍可加载最后任务改条件(设计 §6);
+        下一次新提问 _ensure_flow 会建新 running flow。
+        """
+        keys = self._flow_ctx(ctx)
+        if keys is None:
+            return
+        try:
+            from domains.metrology_assistant import runtime, store
+            db = runtime.get_pack_db()
+            flow = store.get_flow(db, keys[0])
+            if flow is None:
+                flow_id = store.create_flow(
+                    db, keys[0], keys[1], scenario, merged, None)
+                flow = store.get_flow(db, keys[0])
+            store.advance_flow(
+                db, flow["flowId"], flow["flowRevision"],
+                scenario=scenario, slots=merged, status="done")
+        except Exception:
+            logger.exception("flow 终态推进失败(不影响本轮结果)")
 
     # ── 通用:缺槽追问(规格来自场景表) ──
 
@@ -505,6 +703,7 @@ class MetrologyAssistantTool(Tool):
         if mem:
             mem.set("scenario", scenario)
             mem.set("slots", merged)
+        self._finish_flow(scenario, merged, ctx)
         return card
 
     # ── KG 动作:强检判定(证据检索 + 结构化三态结论) ──
@@ -578,6 +777,7 @@ class MetrologyAssistantTool(Tool):
         if mem:
             mem.set("scenario", "mandatory_check")
             mem.set("slots", merged)
+        self._finish_flow("mandatory_check", merged, ctx)
         return ToolResult(
             artifact=artifact, artifact_type="data", summary=conclusion,
             formatted={"kb": kb_name, "conclusion": conclusion[:40],

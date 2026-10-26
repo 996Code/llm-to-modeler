@@ -840,6 +840,11 @@ class ConversationStore:
             # (历史会话恢复时前端据此重渲染诊断卡,而非裸文本)
             "kind": payload.get("kind"),
             "errorCategory": payload.get("error_category"),
+            # 追问卡回放(设计 6.1 待答恢复):needsClarification +
+            # clarificationQuestions 落 payload——历史加载据此重建
+            # 末条追问卡与 answers 发送通道(前端 isClarifying 同款判定)
+            "needsClarification": payload.get("needsClarification"),
+            "clarificationQuestions": payload.get("clarificationQuestions"),
             "createdAt": row["created_at"],
         }
 

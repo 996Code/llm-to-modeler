@@ -20,6 +20,7 @@
 | [backend/src/domains/README.md](../backend/src/domains/README.md) | 域目录导览 |
 | [backend/src/domains/chatbi/README.md](../backend/src/domains/chatbi/README.md) | ChatBI 插件结构 |
 | [嵌入模式总体设计.md](嵌入模式总体设计.md) | 嵌入模式（IM 聊天窗 + SDK）总体设计 |
+| [共享内核API契约.md](共享内核API契约.md) | 编排插件消费的两个底层薄入口：KG 证据服务 retrieve_evidence + 问数受控执行 execute_controlled（信封分态/错误类型保留/插件间依赖声明） |
 
 ## 第三部分 · 开发与运维手册（doc/agents/）
 

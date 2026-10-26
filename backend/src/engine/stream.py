@@ -421,11 +421,26 @@ async def stream_graph(
                                     })
                                     first_intr_value = first_intr_value or intr_value
                             if first_intr_value is not None:
-                                # 中断场景也落库(把追问问题当作 assistant 消息存下)
-                                _save_conversation(
-                                    conversation_store, conversation_id, user_id,
-                                    user_input, first_intr_value.get("summary", "需要补充信息"),
-                                )
+                                # 中断场景也落库:追问摘要为正文,extra 携带
+                                # needsClarification+questions——历史加载据此
+                                # 重建追问卡与 answers 发送通道(设计 6.1 待答
+                                # 恢复;error-diag 同款 extra 透传机制)。
+                                if conversation_store and conversation_id and user_id:
+                                    try:
+                                        conversation_store.add_message(
+                                            conv_id=conversation_id,
+                                            role="assistant",
+                                            content=first_intr_value.get(
+                                                "summary", "需要补充信息"),
+                                            extra={
+                                                "needsClarification": True,
+                                                "clarificationQuestions":
+                                                    first_intr_value.get(
+                                                        "questions", []),
+                                            })
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"Failed to save clarification: {e}")
             except Exception as e:
                 # 状态查询失败不影响主流程,只记日志
                 logger.warning(f"Failed to check graph state for interrupts: {e}")

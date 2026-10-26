@@ -190,7 +190,8 @@ register_admin_auth(require_admin)
 # 见 sdk.relational_store 的命名空间隔离)。TRUNCATE RESTART IDENTITY 把
 # 自增序列一并归零(task_logs 断线补齐游标、检查点行都回到"全新库"语义),
 # 等价于旧 SQLite 时代每测试一个 tmp 文件。pytest 默认串行执行,无并发竞争。
-_TRUNCATE_SCHEMAS = ("public", "knowledge_graph", "chatbi")
+_TRUNCATE_SCHEMAS = ("public", "knowledge_graph", "chatbi",
+                      "metrology_assistant")
 _TRUNCATE_EXCLUDE = {"checkpoint_migrations"}
 
 
@@ -214,6 +215,9 @@ def _init_schema():
     PlatformSettingsStore()
     TaskStore()
     KGStore()
+    # metrology 场景配置/flow 表(P1;幂等建表,清表依赖其存在)
+    from domains.metrology_assistant import runtime as metro_runtime
+    metro_runtime.get_pack_db()
     # LangGraph checkpoint 三表(PostgresSaver.setup 幂等;清表依赖其存在)
     import psycopg
     from langgraph.checkpoint.postgres import PostgresSaver

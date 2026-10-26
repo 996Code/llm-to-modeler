@@ -23,6 +23,13 @@ domain:
 runtime_contract:
   required_tools: [metrology_assistant]
 
+# P1 管理页:场景与槽位/规则与来源两 tab(packPages/metrology_assistant
+# 目录约定自动挂载);场景配置事实源在 DB(assistant_config 表),
+# 本 YAML 只留插件声明与出厂默认种子。
+admin:
+  page: metrology_assistant
+  title: 计量客服
+
 artifact:
   type: data
   actions: [view_json]
