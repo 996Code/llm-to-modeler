@@ -2,7 +2,8 @@
 
 **LLM 驱动的多插件智能助手引擎** — 通过 LangGraph StateGraph 编排意图识别、工具执行与追问恢复，支持自然语言驱动多种业务能力（表单配置、请假申请、知识图谱检索问答等），Engine 层零领域知识。
 
-> 📖 **新入手必读**：`AGENTS.md` —— 开发协作规约/测试纪律/发布部署/在途状态（AI agent 与开发者通用操作手册）。
+> 📖 **新入手必读**：[doc/README.md](doc/README.md) —— 全项目文档总目录（书的目录指南）。
+> `AGENTS.md` —— AI agent / 开发者操作手册入口（规约/测试/发布/部署索引）。
 > `doc/插件开发与嵌入指南.md` —— 系统全景 / 从零写一个插件（请假为例）/
 > manifest 声明逐项 / 交互模式 / 嵌入契约协议（含完整消息往返举例）/ 增量修改协议 / FAQ。
 > 进阶：`backend/src/domains/ARCHITECTURE.md` —— pack 全部钩子（工具/HTTP API/后台任务/
