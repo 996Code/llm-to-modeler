@@ -109,8 +109,8 @@
                  用户消息保持纯文本插值(防 v-html 注入)。
                  @click 事件委托:[片段N] 徽标是 v-html 注入的纯 DOM,无法逐个
                  绑监听——容器统一接 click,onMdRefClick 按 class 识别徽标 -->
-            <div v-else-if="msg.role === 'assistant'" class="msg-text md-content" v-html="renderMarkdown(msg.content)" @click="onMdRefClick"></div>
-            <div v-else class="msg-text">{{ msg.content }}</div>
+            <div v-else-if="msg.role === 'assistant' && !cardOnlyResult(msg)" class="msg-text md-content" v-html="renderMarkdown(msg.content)" @click="onMdRefClick"></div>
+            <div v-else-if="msg.role !== 'assistant'" class="msg-text">{{ msg.content }}</div>
             
             <!-- ===== 追问卡片：当消息需要用户补充信息时显示 ===== -->
             <!-- v-if 双条件：needsClarification 标记 + 有问题列表 -->
@@ -229,17 +229,16 @@
               v-else-if="msg.dataResult"
               class="data-card"
             >
-              <div class="data-card-header">
+              <div v-if="!resultRenderer(msg)" class="data-card-header">
                 <CheckCircleOutlined class="card-icon data-icon" />
                 <span class="card-title">{{ msg.formattedData?.title || msg.formattedData?.formName || '操作结果' }}</span>
-                <a-tag color="processing" class="card-tag">
-                  已完成
-                </a-tag>
+                <a-tag color="processing" class="card-tag">已完成</a-tag>
               </div>
               <div class="data-card-body">
+                <component v-if="resultRenderer(msg)" :is="resultRenderer(msg)" :artifact="msg.dataResult" :summary="msg.content" :labels="resultLabels(msg.dataResult, packDisplays)" :render-markdown="renderMarkdown" :compact="!sysConfig.showRetrieval" :cited-chunks="kgCitedChunks(msg)" @click="onMdRefClick" />
                 <!-- chatbi 图表卡(ECharts/kpi/table + 命中指标标签) -->
                 <BiChartCard
-                  v-if="msg.formattedData?.chart"
+                  v-else-if="msg.formattedData?.chart"
                   :ref="(el: any) => setBiChartRef(i, el)"
                   :chart="msg.formattedData.chart"
                   :metric-hits="msg.formattedData.metricHits"
@@ -415,6 +414,8 @@ import { getConversationTrace, getRequestUserId, sendChatbiFeedback } from '../.
 import { useConversationStore } from '../../stores/conversation'
 import { copyText } from '../../utils/clipboard'
 import { errorCategoryLabel } from '../../utils/errorDiag'
+import { getResultRenderer as resultRenderer, cardOnlyResult } from '../../plugins/resultRegistry'
+import { resultLabels } from '../../plugins/resultLabels'
 // 仅引入类型（编译期检查，运行时不打包）
 import type { FormConfig, ClarificationQuestion, ClarificationOption } from '../../types'
 // 子组件：输入框
@@ -566,6 +567,7 @@ const sysConfig = useSysConfig()
 // pack 的展示声明（data_labels/data_hidden/welcome_examples）——领域词住 manifest，
 // 本组件只按通用字段渲染。拉取失败回退空（不显示示例卡、key 不翻译）
 const packDisplay = ref<Record<string, any> | null>(null)
+const packDisplays = ref<Record<string, { data_labels?: Record<string, string> }>>({})
 const packArtifactType = ref<string | undefined>(undefined)
 // 制品卡动作集（pack 声明，未声明回退最小集 view_json）——不同插件的制品
 // 交互不同，按钮由声明驱动而非组件硬编码
@@ -576,6 +578,7 @@ onMounted(async () => {
   refreshSysConfig()
   try {
     const manifests = await getPackManifests()
+    packDisplays.value = Object.fromEntries(manifests.map((manifest: any) => [manifest.name, manifest.artifact?.display || {}]))
     // 主交互 pack：优先声明了 artifact.display 的（制品卡标签/动作取自它）
     const primary = manifests.find((m: any) => m.artifact?.display) || manifests[0]
     packDisplay.value = primary?.artifact?.display || null
