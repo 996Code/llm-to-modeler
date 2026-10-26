@@ -60,6 +60,37 @@ class TestKbHierarchy:
         s.move_kb(kb["id"], parent_id=fb["id"])
         assert s.get_kb(kb["id"])["parentId"] == fb["id"]
 
+    def test_depth_cap_create(self):
+        """4 层可建满,第 5 层拒绝(上限含库叶子)。"""
+        s = KGStore()
+        f1 = s.create_kb("一层", kind="folder")
+        f2 = s.create_kb("二层", kind="folder", parent_id=f1["id"])
+        f3 = s.create_kb("三层", kind="folder", parent_id=f2["id"])
+        # 第 4 层:目录或库都可
+        f4 = s.create_kb("四层目录", kind="folder", parent_id=f3["id"])
+        s.create_kb("四层库", parent_id=f3["id"])
+        # 第 5 层拒绝
+        with pytest.raises(ValueError, match="上限"):
+            s.create_kb("五层", kind="folder", parent_id=f4["id"])
+        with pytest.raises(ValueError, match="上限"):
+            s.create_kb("五层库", parent_id=f4["id"])
+
+    def test_depth_cap_move_subtree(self):
+        """移动按整棵子树核算:子树高度+新父深度超上限拒绝。"""
+        s = KGStore()
+        a1 = s.create_kb("甲一", kind="folder")
+        a2 = s.create_kb("甲二", kind="folder", parent_id=a1["id"])
+        a3 = s.create_kb("甲三", kind="folder", parent_id=a2["id"])
+        # 子树 s1>s2 高度 2;移到甲三(深度3)下 → 3+2=5 超限
+        s1 = s.create_kb("乙一", kind="folder")
+        s.create_kb("乙二", kind="folder", parent_id=s1["id"])
+        with pytest.raises(ValueError, match="上限"):
+            s.move_kb(s1["id"], parent_id=a3["id"])
+        # 单节点子树(高度1)移过去 → 深度4,合法
+        s2 = s.create_kb("丙一", kind="folder")
+        assert s.move_kb(s2["id"], parent_id=a3["id"]) is True
+        assert s.get_kb(s2["id"])["parentId"] == a3["id"]
+
     def test_legacy_kb_defaults(self):
         """存量库无 kind/parent_id → kind='kb', parentId=None(兼容)。"""
         s = KGStore()

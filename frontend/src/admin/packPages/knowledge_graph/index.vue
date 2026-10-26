@@ -21,12 +21,20 @@
               :selected-keys="currentKbId ? [currentKbId] : []"
               :tree-data="treeData"
               block-node
+              show-line
               @select="onTreeSelect"
             >
+              <template #switcherIcon="{ expanded, dataRef }">
+                <!-- 图标即开关:folder 图标承担展开/收起(展开=打开的文件夹),
+                     kb 图标静态——一行只有一个图标,不再与标题图标叠加 -->
+                <FolderOpenOutlined v-if="dataRef.raw?.kind === 'folder' && expanded"
+                                    class="kb-node-icon folder" />
+                <FolderOutlined v-else-if="dataRef.raw?.kind === 'folder'"
+                                class="kb-node-icon folder" />
+                <PartitionOutlined v-else class="kb-node-icon kb" />
+              </template>
               <template #title="{ dataRef }">
                 <div class="kb-node">
-                  <FolderOutlined v-if="dataRef.raw.kind === 'folder'" class="kb-node-icon folder" />
-                  <PartitionOutlined v-else class="kb-node-icon kb" />
                   <div class="kb-node-label">
                     <div class="kb-node-name" :title="dataRef.raw.name">{{ dataRef.raw.name }}</div>
                     <div v-if="dataRef.raw.kind === 'kb'" class="kb-node-meta">
@@ -168,12 +176,15 @@
     <KbWizard ref="wizardRef" :templates="templates" :parent-options="parentOptions"
               @created="onWizardCreated" />
 
-    <!-- 新建文件夹弹窗:简单输入(纯分组目录,不存文档) -->
+    <!-- 新建文件夹弹窗:可选父目录(支持多层);纯分组目录,不存文档 -->
     <a-modal v-model:open="folderOpen" title="新建文件夹" :confirm-loading="folderCreating"
              ok-text="创建" cancel-text="取消" @ok="doFolderCreate">
       <a-form layout="vertical" style="margin-top: 8px">
         <a-form-item label="文件夹名称" required>
           <a-input v-model:value="folderName" placeholder="如:法务、产品线" :maxlength="60" />
+        </a-form-item>
+        <a-form-item label="父目录">
+          <a-select v-model:value="folderParentId" :options="parentOptions" />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -209,9 +220,9 @@ import { message } from 'ant-design-vue'
 import type { TreeDataItem } from 'ant-design-vue/es/tree'
 import {
   ApartmentOutlined, DeleteOutlined, EditOutlined, ExperimentOutlined,
-  FileTextOutlined, FolderAddOutlined, FolderOutlined, NodeIndexOutlined,
-  BookOutlined, PartitionOutlined, PlusOutlined, QuestionCircleOutlined, SafetyOutlined,
-  SwapOutlined, SyncOutlined,
+  FileTextOutlined, FolderAddOutlined, FolderOpenOutlined, FolderOutlined,
+  NodeIndexOutlined, BookOutlined, PartitionOutlined, PlusOutlined,
+  QuestionCircleOutlined, SafetyOutlined, SwapOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import {
   KgKnowledgeBase, KgTemplate, KgTreeNode, createKgFolder, deleteKgKb,
@@ -305,13 +316,15 @@ onMounted(async () => {
   })
 })
 
-// ── 新建文件夹(简单输入弹窗) ──────────────────────
+// ── 新建文件夹(可选父目录,支持多层) ──────────────────────
 const folderOpen = ref(false)
 const folderCreating = ref(false)
 const folderName = ref('')
+const folderParentId = ref('')
 
 function openFolderCreate() {
   folderName.value = ''
+  folderParentId.value = ''
   folderOpen.value = true
 }
 
@@ -322,7 +335,7 @@ async function doFolderCreate() {
   }
   folderCreating.value = true
   await loadSafely(async () => {
-    const f = await createKgFolder(folderName.value.trim())
+    const f = await createKgFolder(folderName.value.trim(), folderParentId.value || null)
     message.success(`文件夹「${f.name}」已创建`)
     folderOpen.value = false
     loadKbs()
@@ -410,12 +423,9 @@ async function doDeleteCurrent() {
   if (!currentKb.value) return
   const kb = currentKb.value
   await loadSafely(async () => {
-    const r = await deleteKgKb(kb.id)
-    if (r.cleanupErrors?.length) {
-      message.warning(`已删除,但部分存储清理失败:${r.cleanupErrors.join('; ')}(可重试)`)
-    } else {
-      message.success(`知识库「${kb.name}」已删除`)
-    }
+    // 清理失败时后端 503 且 KB 保留(可重删),错误文案经 loadSafely toast 透出
+    await deleteKgKb(kb.id)
+    message.success(`知识库「${kb.name}」已删除`)
     currentKbId.value = ''
     loadKbs()
   })
@@ -458,6 +468,15 @@ async function doDeleteCurrent() {
   margin-left: 0;
 }
 .kg-side-tree :deep(.ant-tree .ant-tree-switcher) { width: 18px; }
+/* 多层目录:缩进单元收紧(默认 24px 太宽,深层把名字挤没);层级感由
+   show-line 竖向连接线承担(VS Code 文件树式),压缩后仍一眼可辨 */
+.kg-side-tree :deep(.ant-tree .ant-tree-indent-unit) { width: 14px; min-width: 14px; }
+.kg-side-tree :deep(.ant-tree.ant-tree-show-line .ant-tree-switcher) {
+  background: transparent; border: none; width: 18px; line-height: inherit;
+}
+.kg-side-tree :deep(.ant-tree.ant-tree-show-line .ant-tree-indent-unit::before) {
+  border-right-color: #d5dbe3;   /* 连接线淡灰,不抢名字视觉 */
+}
 .kg-side-tip { padding: 16px 4px; text-align: center; color: #94a3b8; font-size: 12.5px; }
 
 /* 树节点:图标 + 名称/统计 + hover 操作 */

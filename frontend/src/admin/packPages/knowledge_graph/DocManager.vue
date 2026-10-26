@@ -301,7 +301,7 @@ const uploading = ref(false)
 const importingAll = ref(false)
 const uploadResults = ref<{ filename: string; ok: boolean; reason?: string }[]>([])
 const taskByDoc = ref<Record<string, TaskItem>>({})
-const maxMb = 20
+const maxMb = 500
 // 切块参数展示值(与后端默认一致;实际以插件设置/库级参数为准)
 const chunkTargetChars = 1200
 const vectorSubChars = 500

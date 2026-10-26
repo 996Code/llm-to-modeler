@@ -22,8 +22,10 @@
 import asyncio
 import hashlib
 import logging
+import os
 import re
 import shutil
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -523,23 +525,26 @@ async def delete_kb(kb_id: str, request: Request):
             raise HTTPException(
                 409, f"库内有正在导入的文档(任务 {task_id[:8]}…),请等任务结束后再删除")
 
-    # 三存储 + 文件联动清理(单点失败不阻断:后续残留可再删一次)
-    errors: List[str] = []
+    # 三存储 + 文件联动清理。图/向量清理失败 → 保留 KB 行并 503:行一删
+    # 重删就 404,清理残料变永久孤儿(线上曾出现 19 实体的孤儿库);
+    # 留行则整链可重试(delete_scope MATCH 幂等/drop_collection IF EXISTS)
     try:
         _graph(request).delete_scope(kb_id)
     except Exception as e:
-        errors.append(f"neo4j: {e}")
+        logger.warning(f"kb delete: neo4j cleanup failed, kb retained: {kb_id} ({e})")
+        raise HTTPException(503, f"图谱清理失败,知识库已保留,可重试删除: {e}")
     try:
         if kb.get("vectorEnabled"):
             runtime.get_vector(request.app.state).drop_collection(kb_id)
     except Exception as e:
-        errors.append(f"vector: {e}")
+        logger.warning(f"kb delete: vector cleanup failed, kb retained: {kb_id} ({e})")
+        raise HTTPException(503, f"向量库清理失败,知识库已保留,可重试删除: {e}")
     doc_dir = runtime.files_root() / kb_id
     if doc_dir.exists():
         shutil.rmtree(doc_dir, ignore_errors=True)
     store.delete_kb(kb_id)
-    logger.info(f"kb deleted: {kb_id} (errors={errors})")
-    return {"success": True, "cleanupErrors": errors}
+    logger.info(f"kb deleted: {kb_id}")
+    return {"success": True, "cleanupErrors": []}
 
 
 # ── 文档管理 ─────────────────────────────────────────────────
@@ -567,61 +572,76 @@ async def upload_documents(
             results.append({"filename": f.filename, "ok": False,
                             "reason": "不支持的格式(仅 md/txt/pdf/docx)"})
             continue
-        # 分块读取 + 上限截断:Content-Length 只做预检(可伪造),真正的
-        # 上限在读取中强制——超限时读到 max+1 即停,GB 级恶意上传不会
-        # 先占满内存再被拒绝
+        # 上限预检(Content-Length 可伪造,真正的上限在流式读取中强制);
+        # 大文件流式直写临时文件——不整载内存(500MB 级上传若全进 bytes,
+        # 2g 容器并发两路即 OOM),hash/大小边写边算
         declared = int(f.size or 0)
         if declared and declared > max_bytes:
             results.append({"filename": f.filename, "ok": False,
                             "reason": f"超过单文件上限 {max_bytes // 1024 // 1024}MB"})
             continue
-        data = b""
+        tmp_dir = runtime.files_root() / "_upload_tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"{uuid.uuid4().hex}.part"
+        hasher = hashlib.sha256()
+        size = 0
         oversized = False
-        while True:
-            part = await f.read(1024 * 1024)
-            if not part:
-                break
-            data += part
-            if len(data) > max_bytes:
-                oversized = True
-                break
-        if oversized:
-            results.append({"filename": f.filename, "ok": False,
-                            "reason": f"超过单文件上限 {max_bytes // 1024 // 1024}MB"})
-            continue
-        if not data:
-            results.append({"filename": f.filename, "ok": False, "reason": "空文件"})
-            continue
-
-        content_hash = hashlib.sha256(data).hexdigest()
-        dup = store.get_document_by_hash(kb_id, content_hash)
-        if dup:
-            results.append({"filename": f.filename, "ok": False,
-                            "reason": f"同内容文件已存在: {dup['filename']}",
-                            "duplicateOf": dup["id"]})
-            continue
-
-        # 解析预检:能解析才收(坏文件当场拒,不进导入队列再炸)。
-        # ocr=False:预检只验坏文件,扫描页 OCR 秒级耗时留给导入任务
-        # (那里结果不丢弃,还能在任务日志里告知用户识别情况)
         try:
-            parse_to_text(filename, data, ocr=False)
-        except Exception as e:
-            results.append({"filename": f.filename, "ok": False,
-                            "reason": f"解析失败: {e}"})
-            continue
+            with tmp_path.open("wb") as out:
+                while True:
+                    part = await f.read(1024 * 1024)
+                    if not part:
+                        break
+                    size += len(part)
+                    if size > max_bytes:
+                        oversized = True
+                        break
+                    hasher.update(part)
+                    out.write(part)
+            if oversized:
+                results.append({"filename": f.filename, "ok": False,
+                                "reason": f"超过单文件上限 {max_bytes // 1024 // 1024}MB"})
+                continue
+            if size == 0:
+                results.append({"filename": f.filename, "ok": False, "reason": "空文件"})
+                continue
 
-        doc = store.create_document(
-            kb_id=kb_id, filename=filename, mime_type=mime_for(filename),
-            size_bytes=len(data), file_path="", content_hash=content_hash,
-        )
-        doc_dir = runtime.files_root() / kb_id
-        doc_dir.mkdir(parents=True, exist_ok=True)
-        file_path = doc_dir / f"{doc['id']}{_ext_of(filename)}"
-        file_path.write_bytes(data)
-        store.update_document(doc["id"], file_path=str(file_path))
-        results.append({"filename": f.filename, "ok": True, "document": doc})
-        logger.info(f"document uploaded: {doc['id']} ({filename}, {len(data)}B)")
+            content_hash = hasher.hexdigest()
+            dup = store.get_document_by_hash(kb_id, content_hash)
+            if dup:
+                results.append({"filename": f.filename, "ok": False,
+                                "reason": f"同内容文件已存在: {dup['filename']}",
+                                "duplicateOf": dup["id"]})
+                continue
+
+            # 解析预检:能解析才收(坏文件当场拒,不进导入队列再炸)。
+            # ocr=False:预检只验坏文件,OCR 秒级耗时留给导入任务。
+            # 大文件跳过预检——pdfplumber 解析的内存开销远超文件本体,
+            # 几百 MB 在小内存容器里会打挂 app 进程;坏文件由导入任务
+            # 兜底报错(任务级失败不伤进程)
+            if size <= 64 * 1024 * 1024:
+                try:
+                    parse_to_text(filename, tmp_path.read_bytes(), ocr=False)
+                except Exception as e:
+                    results.append({"filename": f.filename, "ok": False,
+                                    "reason": f"解析失败: {e}"})
+                    continue
+
+            doc = store.create_document(
+                kb_id=kb_id, filename=filename, mime_type=mime_for(filename),
+                size_bytes=size, file_path="", content_hash=content_hash,
+            )
+            doc_dir = runtime.files_root() / kb_id
+            doc_dir.mkdir(parents=True, exist_ok=True)
+            file_path = doc_dir / f"{doc['id']}{_ext_of(filename)}"
+            os.replace(tmp_path, file_path)
+            tmp_path = None  # 已转正,收尾不再删
+            store.update_document(doc["id"], file_path=str(file_path))
+            results.append({"filename": f.filename, "ok": True, "document": doc})
+            logger.info(f"document uploaded: {doc['id']} ({filename}, {size}B)")
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
     return {"items": results}
 

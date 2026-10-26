@@ -245,6 +245,26 @@ class KGStore:
 
     # ── 知识库 ─────────────────────────────────────────────
 
+    # 目录层级上限(含库叶子):内部/技术依据/子分类/库=4 层足够;更深时
+    # 左侧树在窄侧栏横向挤压,可读性崩——限深防患于源头,常量放开即扩
+    MAX_TREE_DEPTH = 4
+
+    def _kb_depth(self, kb: Dict[str, Any]) -> int:
+        """节点深度(顶层=1):沿 parentId 链上溯计数;断链(父被删)按断点算。"""
+        depth, hop, guard = 1, kb, 0
+        while hop is not None and hop.get("parentId") and guard < 100:
+            hop = self.get_kb(hop.get("parentId"))
+            if hop is None:
+                break
+            depth += 1
+            guard += 1
+        return depth
+
+    def _subtree_height(self, kb_id: str) -> int:
+        """节点子树高度(自身=1):move 时整棵子树一起换深度,须整体校验。"""
+        children = [k for k in self.list_kbs() if k.get("parentId") == kb_id]
+        return 1 + (max(self._subtree_height(c["id"]) for c in children) if children else 0)
+
     def create_kb(
         self,
         name: str,
@@ -263,6 +283,9 @@ class KGStore:
                 raise ValueError(f"父节点不存在: {parent_id}")
             if parent.get("kind") != "folder":
                 raise ValueError("parent 必须是 folder(目录),不能挂在知识库下")
+            if self._kb_depth(parent) >= self.MAX_TREE_DEPTH:
+                raise ValueError(
+                    f"目录层级已达上限({self.MAX_TREE_DEPTH} 层),不能再往下挂")
         kb_id = str(uuid.uuid4())
         now = _now()
         with self._get_conn() as conn:
@@ -319,6 +342,10 @@ class KGStore:
                 pid = hop.get("parentId")
                 hop = self.get_kb(pid) if pid else None
                 guard += 1
+            # 限深:整棵子树跟着挪,新父深度+子树高度不得超上限
+            if self._kb_depth(parent) + self._subtree_height(kb_id) > self.MAX_TREE_DEPTH:
+                raise ValueError(
+                    f"移动后目录层级将超过上限({self.MAX_TREE_DEPTH} 层)")
         with self._get_conn() as conn:
             cur = conn.execute(
                 "UPDATE kg_knowledge_bases SET parent_id = ?, updated_at = ? "
@@ -459,6 +486,13 @@ class KGStore:
             cur = conn.execute("DELETE FROM kg_knowledge_bases WHERE id = ?", (kb_id,))
             conn.execute("DELETE FROM kg_chunks WHERE kb_id = ?", (kb_id,))
             conn.execute("DELETE FROM kg_documents WHERE kb_id = ?", (kb_id,))
+            conn.execute("DELETE FROM kg_kb_acl WHERE kb_id = ?", (kb_id,))
+            # kg_annotations 懒建(annotations.py 首用才建),未建过的库跳过;
+            # to_regclass 走事务级 search_path,只读不中断事务
+            ann_exists = conn.execute(
+                "SELECT to_regclass('kg_annotations') IS NOT NULL AS ok").fetchone()
+            if ann_exists and ann_exists["ok"]:
+                conn.execute("DELETE FROM kg_annotations WHERE kb_id = ?", (kb_id,))
             return cur.rowcount > 0
 
     @staticmethod

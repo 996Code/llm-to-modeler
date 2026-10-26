@@ -227,6 +227,6 @@ groups:
       - key: max_upload_mb
         type: int
         label: 单文件上限(MB)
-        default: 20
+        default: 500
         min: 1
-        max: 200
+        max: 2048

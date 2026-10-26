@@ -340,6 +340,48 @@ class TestKnowledgeGraphApi:
                          files=[("files", ("c.exe", b"MZ", "application/octet-stream"))]).json()["items"]
         assert not r3[0]["ok"] and "格式" in r3[0]["reason"]
 
+    def test_upload_stream_reject_and_no_tmp_left(self, kg_client, monkeypatch, tmp_path):
+        """流式上限:不带声明大小(伪装无 Content-Length)的超限流被拒,
+        且临时 part 文件不残留(收尾清理)。"""
+        import domains.knowledge_graph.runtime as kg_runtime
+        client, _ = kg_client
+        kb = client.post("/api/packs/knowledge_graph/kbs", json={"name": "S"}).json()
+        # 上限压到 1MB,免得真造 20MB 数据
+        monkeypatch.setattr(kg_runtime, "settings_reader",
+                            lambda state: {"max_upload_mb": 1})
+        big = b"x" * (1024 * 1024 + 100)
+        r = client.post(f"/api/packs/knowledge_graph/kbs/{kb['id']}/documents",
+                        files=[("files", ("big.md", big, "text/markdown"))]).json()["items"]
+        assert not r[0]["ok"] and "上限" in r[0]["reason"]
+        tmp_dir = kg_runtime.files_root() / "_upload_tmp"
+        assert not tmp_dir.exists() or not any(tmp_dir.iterdir())
+
+    def test_upload_large_file_skips_parse_preview(self, kg_client, monkeypatch):
+        """>64MB 跳过解析预检(防 pdfplumber 内存打挂进程),照常落库。"""
+        import domains.knowledge_graph.runtime as kg_runtime
+        client, _ = kg_client
+        kb = client.post("/api/packs/knowledge_graph/kbs", json={"name": "L"}).json()
+        monkeypatch.setattr(kg_runtime, "settings_reader",
+                            lambda state: {"max_upload_mb": 500})
+        # 65MB 文本(重复行,md 合法内容);预检若被调用会去解析 65MB——
+        # 用探针断言根本没走到
+        from sdk import doc_parser
+        called = {"n": 0}
+        orig = doc_parser.parse_to_text
+
+        def _spy(*a, **kw):
+            called["n"] += 1
+            return orig(*a, **kw)
+
+        monkeypatch.setattr("domains.knowledge_graph.api.parse_to_text", _spy)
+        big = ("# 大文件行\n" + "内容行 " * 40 + "\n").encode()
+        payload = big * (65 * 1024 * 1024 // len(big) + 1)
+        r = client.post(f"/api/packs/knowledge_graph/kbs/{kb['id']}/documents",
+                        files=[("files", ("large.md", payload, "text/markdown"))]).json()["items"]
+        assert r[0]["ok"], r[0]
+        assert called["n"] == 0  # 预检被跳过
+        assert r[0]["document"]["sizeBytes"] == len(payload)
+
     def test_graph_view_and_expand(self, kg_client):
         client, fake = kg_client
         kb = client.post("/api/packs/knowledge_graph/kbs", json={"name": "G"}).json()
@@ -360,3 +402,90 @@ class TestKnowledgeGraphApi:
         ex = client.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/graph/expand?node_id=n1").json()
         assert [n["id"] for n in ex["nodes"]] == ["n2"]
         assert client.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/graph/expand").status_code == 422
+
+
+class TestKbDeleteCleanup:
+    """删库联动清理——五面零残留 + 清理失败保留 KB 行可重试。
+
+    线上事故背景:kg_annotations/kg_kb_acl 曾不在级联清理里(孤儿行);
+    图/向量清理失败时 KB 行照删,重删 404,图谱残料变永久孤儿。
+    """
+
+    def _mk_kb_with_residue(self, client):
+        """建库 + 直插一条标注(含向量列)与一条 ACL(绕开 embeddings/宿主同步)。"""
+        kb = client.post("/api/packs/knowledge_graph/kbs",
+                         json={"name": "清理验证库"}).json()
+        from domains.knowledge_graph import annotations as kg_annotations
+        from domains.knowledge_graph import runtime
+        store = runtime.get_kg_store(client.app_state_holder)
+        store.set_kb_vector_info(kb["id"], "test-embed", 3, True)
+        kg_annotations._ensure_table(client.app_state_holder, 3)
+        with store._get_conn() as conn:
+            conn.execute(
+                "INSERT INTO kg_annotations (id, kb_id, question, answer, "
+                "question_vec, enabled, source, created_at, updated_at) "
+                "VALUES ('ann1', ?, '标准问题', '标准答案', '[0.1,0.2,0.3]', 1, '', "
+                "'2026-10-26T00:00:00', '2026-10-26T00:00:00')", (kb["id"],))
+            conn.execute(
+                "INSERT INTO kg_kb_acl (id, kb_id, subject_type, subject_id, "
+                "created_at) VALUES ('acl1', ?, 'user', 'u1', "
+                "'2026-10-26T00:00:00')", (kb["id"],))
+        return kb, store
+
+    def _residue_counts(self, store, kb_id):
+        with store._get_conn() as conn:
+            ann = conn.execute(
+                "SELECT count(*) AS n FROM kg_annotations WHERE kb_id = ?",
+                (kb_id,)).fetchone()["n"]
+            acl = conn.execute(
+                "SELECT count(*) AS n FROM kg_kb_acl WHERE kb_id = ?",
+                (kb_id,)).fetchone()["n"]
+        return ann, acl
+
+    def test_delete_cleans_annotations_and_acl(self, kg_client):
+        client, fake = kg_client
+        kb, store = self._mk_kb_with_residue(client)
+        assert self._residue_counts(store, kb["id"]) == (1, 1)
+
+        r = client.delete(f"/api/packs/knowledge_graph/kbs/{kb['id']}")
+        assert r.status_code == 200 and r.json() == {"success": True, "cleanupErrors": []}
+        assert store.get_kb(kb["id"]) is None
+        assert self._residue_counts(store, kb["id"]) == (0, 0)
+        assert kb["id"] not in fake.entities
+
+    def test_delete_kb_neo4j_failure_retains_kb(self, kg_client):
+        client, fake = kg_client
+        kb, store = self._mk_kb_with_residue(client)
+
+        def _boom(kb_id):
+            raise RuntimeError("neo4j down")
+
+        # 实例级遮蔽类方法;不用 monkeypatch——undo 会连 fixture 的
+        # get_graph 补丁一起撤掉,重删就打真 Neo4j 了
+        fake.delete_scope = _boom
+        r = client.delete(f"/api/packs/knowledge_graph/kbs/{kb['id']}")
+        assert r.status_code == 503 and "可重试删除" in r.json()["detail"]
+        # KB 行保留 + 残料保留(整链可重试),而非行删残料永孤
+        assert store.get_kb(kb["id"]) is not None
+        assert self._residue_counts(store, kb["id"]) == (1, 1)
+
+        # 恢复后重删成功,五面全清
+        del fake.delete_scope
+        r = client.delete(f"/api/packs/knowledge_graph/kbs/{kb['id']}")
+        assert r.status_code == 200
+        assert store.get_kb(kb["id"]) is None
+        assert self._residue_counts(store, kb["id"]) == (0, 0)
+
+    def test_delete_kb_vector_failure_retains_kb(self, kg_client, monkeypatch):
+        client, _ = kg_client
+        kb, store = self._mk_kb_with_residue(client)
+
+        class _BrokenVector:
+            def drop_collection(self, scope):
+                raise RuntimeError("pgvector down")
+
+        from domains.knowledge_graph import runtime
+        monkeypatch.setattr(runtime, "get_vector", lambda state: _BrokenVector())
+        r = client.delete(f"/api/packs/knowledge_graph/kbs/{kb['id']}")
+        assert r.status_code == 503 and "可重试删除" in r.json()["detail"]
+        assert store.get_kb(kb["id"]) is not None
