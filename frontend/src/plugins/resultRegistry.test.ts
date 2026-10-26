@@ -16,6 +16,20 @@ describe('plugin result display contract', () => {
     expect(cardOnlyResult(message({ pack: 'knowledge_graph', type: 'kg_search_result' }))).toBe(false)
     expect(cardOnlyResult(message({ pack: 'chatbi', type: 'chart' }))).toBe(false)
   })
+  it('enables KG and BI card-only only for their declared complete artifacts', () => {
+    const kg = { pack: 'knowledge_graph', resultDisplay: 'card', type: 'kg_search_result', answer: '有来源的答案', subgraph: { nodes: [], edges: [] }, sources: { chunks: [] } }
+    const bi = { pack: 'chatbi', resultDisplay: 'card', answer: '查询完成, 返回 1 行', chart_option: { series: [{ type: 'bar', data: [1] }] } }
+    expect(cardOnlyResult(message(kg))).toBe(true)
+    expect(cardOnlyResult(message(bi))).toBe(true)
+    expect(cardOnlyResult(message({ ...kg, resultDisplay: undefined }))).toBe(false)
+    expect(cardOnlyResult(message({ ...bi, resultDisplay: undefined }))).toBe(false)
+    expect(cardOnlyResult(message({ ...bi, pack: 'knowledge_graph' }))).toBe(false)
+    expect(cardOnlyResult(message({ ...kg, pack: 'chatbi' }))).toBe(false)
+  })
+  it('keeps an incomplete BI or KG artifact on the text fallback path', () => {
+    expect(cardOnlyResult(message({ pack: 'knowledge_graph', resultDisplay: 'card', type: 'kg_search_result', answer: '' }))).toBe(false)
+    expect(cardOnlyResult(message({ pack: 'chatbi', resultDisplay: 'card', chart_option: {} }))).toBe(false)
+  })
   it('keeps errors and clarification on their existing rendering paths', () => {
     for (const extra of [{ kind: 'error-diag' }, { needsClarification: true }]) {
       expect(cardOnlyResult({ ...message({ ...progress, resultDisplay: 'card' }), ...extra })).toBe(false)

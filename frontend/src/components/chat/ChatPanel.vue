@@ -235,7 +235,7 @@
                 <a-tag color="processing" class="card-tag">已完成</a-tag>
               </div>
               <div class="data-card-body">
-                <component v-if="resultRenderer(msg)" :is="resultRenderer(msg)" :artifact="msg.dataResult" :summary="msg.content" :labels="resultLabels(msg.dataResult, packDisplays)" :render-markdown="renderMarkdown" :compact="!sysConfig.showRetrieval" :cited-chunks="kgCitedChunks(msg)" @click="onMdRefClick" />
+                <component v-if="resultRenderer(msg)" :is="resultRenderer(msg)" :ref="(el: any) => setBiChartRef(i, el)" :artifact="msg.dataResult" :summary="msg.content" :detail="msg.formattedData" :labels="resultLabels(msg.dataResult, packDisplays)" :render-markdown="renderMarkdown" :compact="!sysConfig.showRetrieval" :cited-chunks="kgCitedChunks(msg)" @click="onMdRefClick" />
                 <!-- chatbi 图表卡(ECharts/kpi/table + 命中指标标签) -->
                 <BiChartCard
                   v-else-if="msg.formattedData?.chart"
@@ -1115,8 +1115,11 @@ function loadConversationTrace(convId: string) {
         m.formattedData.llmCallCount = t.llmCallCount ?? 0
         m.formattedData.promptTokens = t.promptTokens ?? 0
         m.formattedData.completionTokens = t.completionTokens ?? 0
-        // 历史消息无轮末内存值——用 trace 的 wallMs 兜底总耗时
-        if (m.formattedData.totalDurationMs === undefined && t.wallMs != null) {
+        // 历史消息无轮末内存值——用 trace 的 wallMs 兜底总耗时;
+        // 制品已带真实 total_duration_ms(轮末写入)时不注入——预建会话等
+        // 场景首轮 wallMs 会把会话创建起的间隔计入,覆盖真实值
+        if (m.formattedData.totalDurationMs === undefined && t.wallMs != null
+            && !Number.isFinite(Number((m.dataResult as any)?.total_duration_ms))) {
           m.formattedData.totalDurationMs = t.wallMs
         }
       }

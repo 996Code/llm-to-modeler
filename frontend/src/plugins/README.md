@@ -25,10 +25,10 @@ export default {
 
 `resultRegistry.ts` discovers these modules by directory convention. It routes by the artifact's `pack`; it does not inspect business names or infer display policy from a plugin name. The plugin owns its component, field selection, business states, and validation. Shared components remain available for charts, evidence, and safe Markdown rendering.
 
-The result component receives `artifact`, `summary`, manifest `labels`, `renderMarkdown`, `compact`, and `citedChunks`. The supplied Markdown renderer sanitizes HTML. Critical business values and references belong in the artifact, not only in transient formatting fields, so history restores the same result.
+The result component receives `artifact`, `summary`, manifest `labels`, optional `detail`, `renderMarkdown`, `compact`, and `citedChunks`. The supplied Markdown renderer sanitizes HTML. Critical business values and references belong in the artifact, not only in transient formatting fields, so history restores the same result. A component can expose `getChartInstance()` to retain the existing chart-image export capability; plugins without charts need not implement it.
 
 ## Model Output
 
 A plugin owns its prompt, structured business-output schema, and validation. Use the platform's existing `chat_json` capability for model-generated JSON, then validate business types, enums, required fields, and source references in the plugin. Invalid output is an error, not a successful empty card. Structured upstream API records do not need another model call.
 
-Metrology enables card-only output for its answers, progress records, and business notices. Existing knowledge-graph and BI rendering remains compatible; each plugin may adopt this explicit display contract independently.
+Metrology, knowledge-graph search, and BI query results enable card-only output in their respective plugins. Knowledge answers include the complete answer and source references; BI cards include the answer, chart or table, and query diagnostics. Existing artifacts without the declaration retain their original rendering. Each plugin adopts the contract explicitly; the platform does not force card-only by plugin name.

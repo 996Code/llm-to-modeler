@@ -244,14 +244,16 @@ class KbSearchTool(Tool):
                     if hit:
                         hit_kb = k
                         break
-            if hit:
+            if hit and isinstance(hit.get("answer"), str) and hit["answer"].strip():
                 ctx.trace("kb_search.annotation", "标注命中(标准答案短路)", "ok", detail={
                     "kb": hit_kb["name"], "question": hit["question"][:60],
                     "score": hit["score"]})
                 return ToolResult(
-                    reply=hit["answer"],
-                    summary=f"(标准答案){hit['answer'][:100]}",
+                    summary=hit["answer"],
                     artifact={
+                        "pack": "knowledge_graph",
+                        "resultDisplay": "card",
+                        "answer": hit["answer"],
                         "type": "kg_search_result",
                         "kb": {"id": hit_kb["id"], "name": hit_kb["name"]},
                         "annotationHit": True,
@@ -303,9 +305,9 @@ class KbSearchTool(Tool):
             return ToolResult(error_for_llm=f"知识库检索失败: {e}")
 
         sub = result.get("subgraph") or {}
-        # 【ToolResult 三态契约】reply 与 artifact 互斥(引擎 reply 优先):
-        # data 制品的展示文本放 summary —— 气泡显示回答,下方数据卡渲染子图。
-        # 前端摘要字段走 formatted 显式通道(键与 config.yaml data_labels 对齐)
+        # 完整答案随制品持久化;summary 保留给历史与 LLM 上下文。
+        # 仅非空答案声明 card-only,缺失答案仍走既有摘要/图谱展示。
+        answer = result.get("answer")
         artifact = {
             "type": "kg_search_result",
             "kb": result["kb"],
@@ -315,6 +317,8 @@ class KbSearchTool(Tool):
             # KgGraphCard 据此区分"已引用/已召回未引用",徽标点击跳转同源
             "cited_chunks": result.get("cited_chunks") or [],
         }
+        if isinstance(answer, str) and answer.strip():
+            artifact.update(pack="knowledge_graph", resultDisplay="card", answer=answer)
         # 跨库检索附库清单(前端可标注来源库;kb.name 为拼接展示名)
         if result.get("kbs"):
             artifact["kbs"] = result["kbs"]

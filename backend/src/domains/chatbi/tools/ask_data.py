@@ -1096,6 +1096,8 @@ class AskDataTool(CompositeTool):
         persist_warnings = state.setdefault("_persist_warnings", [])
 
         artifact = {
+            "pack": "chatbi",
+            "resultDisplay": "card",
             "sql": state["sql"],
             "columns": result.columns,
             "rows_sample": [list(r) for r in rows_sample],
@@ -1104,6 +1106,9 @@ class AskDataTool(CompositeTool):
             "chart_option": chart.option if chart else None,
             "chart_config": chart.config if chart else None,
             "chart_degraded": chart.degraded if chart else False,
+            "retrieval_degraded": bool(state.get("retrieval_degraded")),
+            "execute_duration_ms": state.get("_execute_duration_ms", 0),
+            "total_duration_ms": state.get("_total_duration_ms", 0),
             "thinking": state.get("thinking") or {},
             "metric_hits": state.get("metric_hits") or [],
             "fewshot_count": state.get("fewshot_count", 0),
@@ -1222,10 +1227,14 @@ class AskDataTool(CompositeTool):
                               for h in state["metric_hits"][:5])
             parts.append(f"命中指标: {names}")
 
+        if result.truncated:
+            parts.append("(已达查询上限, 结果被截断)")
+        artifact["answer"] = "; ".join(parts)
+
         state["_result"] = ToolResult(
             artifact=artifact,
             artifact_type="data",
-            summary="; ".join(parts),
+            summary=artifact["answer"],
             extra={"sql": state["sql"]},
             formatted={
                 "chart": chart.option if chart else None,   # 前端图表卡(ECharts)
@@ -1297,6 +1306,8 @@ class AskDataTool(CompositeTool):
         # 否则前端明细行永远显示"总耗时 0.0s"。
         if result is not None and isinstance(getattr(result, "formatted", None), dict):
             result.formatted["totalDurationMs"] = state["_total_duration_ms"]
+            if isinstance(result.artifact, dict):
+                result.artifact["total_duration_ms"] = state["_total_duration_ms"]
         # ── 查询质量统计(BI 维度可观测, 复核报告 P1) ──
         # 三路径统一采集: ok(正常完成) / error(执行失败) / ask(挂起澄清)。
         # fail-open(record_query 内部吞异常), 统计故障不拖垮查询。
@@ -1360,6 +1371,19 @@ class AskDataTool(CompositeTool):
             "metricHits": artifact.get("metric_hits") or [],
             "datasourceName": artifact.get("datasource_name"),
             "persistWarnings": artifact.get("persist_warnings") or [],
+            "truncated": bool(artifact.get("truncated")),
+            "tables": artifact.get("current_tables") or [],
+            "seedTables": artifact.get("seed_tables") or [],
+            "expandedTables": artifact.get("expanded_tables") or [],
+            "totalDurationMs": artifact.get("total_duration_ms", 0),
+            "executeDurationMs": artifact.get("execute_duration_ms", 0),
+            "healRounds": artifact.get("heal_rounds", 0),
+            "chartDegraded": bool(artifact.get("chart_degraded")),
+            "retrievalDegraded": bool(artifact.get("retrieval_degraded")),
+            "savedQueryId": artifact.get("saved_query_id"),
+            "sql": artifact.get("sql", ""),
+            "datasourceId": artifact.get("datasource_id"),
+            "chartConfig": artifact.get("chart_config"),
         }
 
 

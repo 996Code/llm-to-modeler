@@ -146,15 +146,23 @@ class SwitchChartTool(Tool):
 
         ctx.trace("chatbi.switch_chart", title="切换图表",
                   status="ok", detail={"chart_type": wanted})
+        answer = f"图表已切换为「{wanted}」"
+        if result.rowcount == 0:
+            answer += "; 查询返回 0 行, 不生成图表"
+        if degraded and option is not None:
+            answer += "; (图表为规则推断降级)"
+        if result.truncated:
+            answer += "; (已达查询上限, 结果被截断)"
         return ToolResult(
-            artifact={"sql": prev_sql, "columns": result.columns,
+            artifact={"pack": "chatbi", "resultDisplay": "card", "answer": answer,
+                      "sql": prev_sql, "columns": result.columns,
                       "rows_sample": [list(r) for r in result.rows[:50]],
-                      "rowcount": result.rowcount,
+                      "rowcount": result.rowcount, "truncated": result.truncated,
                       "chart_option": option, "chart_config": config,
                       "chart_degraded": degraded,
                       "datasource_id": ds.id, "datasource_name": ds.name},
             artifact_type="data",
-            summary=f"图表已切换为「{wanted}」",
+            summary=answer,
             extra={"sql": prev_sql},
             formatted={"chart": option, "rowcount": result.rowcount,
                        "datasourceName": ds.name})
