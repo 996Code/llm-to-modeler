@@ -42,6 +42,7 @@ SELECT stage, request_data FROM call_logs ORDER BY created_at DESC LIMIT 5;
 
 ## 文件
 
-- `fake_servers.py` — 三个异构 fake MCP server（low-level SDK 手搭，模拟真实接入方）
+- `fake_servers.py` — 四个异构 fake MCP server（low-level SDK 手搭，模拟真实接入方）：报表数据/SSE 传输/X-Api-Key 鉴权/计量业务平台（`build_metrology_server`，南京院客服 Demo 用）
 - `run_e2e.py` — 主流程（每步 ✓/✗ + 证据，退出码非 0 on fail）
 - `demo_server.py` — 常驻演示 MCP（固定端口 9770，模拟"外部订单系统"，供管理端/对话页演示）
+- `metrology_server.py` — 常驻计量业务平台 MCP（固定端口 9771，南京院客服 Demo：query_progress 进度查询/拒权/查无/超时样例）

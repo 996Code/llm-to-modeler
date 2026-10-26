@@ -1,6 +1,6 @@
 """D32 KG 标注回复—— 标注 CRUD/向量短路/阈值语义/降级/两生效点。
 
-覆盖:upsert 重打向量、命中短路(kb_search 工具 reply+artifact 标注
+覆盖:upsert 重打向量、命中短路(kb_search 工具答案制品标注
 标记)、REST /search 短路、阈值语义(相似但低于 0.90 不短路)、
 启停(禁用的标注不参与匹配)、删除、跨库逐库试、短路层故障降级
 常规检索。
@@ -104,7 +104,7 @@ class TestAnnotationCrud:
 class TestShortCircuit:
 
     def test_kb_search_exact_hit_short_circuits(self, env, scripted_embed):
-        """标注命中:kb_search 直接返回标准答案(reply+artifact 带 annotationHit),
+        """标注命中:kb_search 直接返回标准答案制品(带 annotationHit),
         不走检索(fake graph 种子不会被动用)。"""
         from domains.knowledge_graph import annotations as kg_annotations
         kb = _mk_kb(env, "短路库")
@@ -115,7 +115,10 @@ class TestShortCircuit:
         # 查询与标注同文 → 向量相同 → cosine=1 ≥ 0.90
         tool = KbSearchTool(env.app_state)
         result = tool.execute({"user_input": q}, _ctx(env))
-        assert result.reply == a
+        assert result.reply is None
+        assert result.summary == a
+        assert result.artifact["answer"] == a
+        assert result.artifact["resultDisplay"] == "card"
         assert result.artifact["annotationHit"] is True
         assert result.artifact["kb"]["name"] == "短路库"
 
@@ -171,7 +174,8 @@ class TestShortCircuit:
         kg_annotations.upsert_annotation(env.app_state, kb2["id"], q, "跨库标准答案")
         tool = KbSearchTool(env.app_state)
         result = tool.execute({"user_input": q}, _ctx(env))
-        assert result.reply == "跨库标准答案"
+        assert result.reply is None
+        assert result.artifact["answer"] == "跨库标准答案"
         assert result.artifact["kb"]["name"] == "跨库2"
 
     def test_match_failure_degrades(self, env, monkeypatch):

@@ -19,6 +19,7 @@ import json
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import mcp.types as types
 import uvicorn
@@ -123,6 +124,137 @@ def build_sse_server() -> Starlette:
         Route("/sse", endpoint=handle_sse, methods=["GET"]),
         Mount("/messages/", app=sse.handle_post_message),
     ])
+
+
+# ── 计量业务平台(南京院客服 Demo: 检测进度查询) ────────────────
+
+# 演示主体: 模拟业务平台侧的"当前登录主体"(归属校验用,演示话术要
+# 如实说明这是模拟,不代表真实用户体系)
+METROLOGY_CURRENT_OWNER = "南京精密电子有限公司"
+
+METROLOGY_ORDERS = {
+    "BJ2026": {
+        "owner": METROLOGY_CURRENT_OWNER,
+        "instrument": "数字压力计(0~2.5MPa)",
+        "status": "检测中",
+        "progress": "3/5",
+        "current_step": "压力示值误差检定",
+        "eta": "2026-10-30",
+    },
+    "BJ2027": {
+        "owner": METROLOGY_CURRENT_OWNER,
+        "instrument": "精密压力表(0~1.6MPa)",
+        "status": "已完成",
+        "report_no": "RPT-2026-0888",
+        "finished_at": "2026-10-22",
+        "valid_until": "2027-10-21",
+    },
+    # 拒权样例: 单号存在但属于其他主体 → forbidden(与 not_found 区分)
+    "BJ8888": {
+        "owner": "南京宏远机械制造有限公司",
+        "instrument": "扭矩扳手",
+    },
+}
+# 故障演示样例: 该单号触发 60s 睡眠,超过客户端 30s 超时 → 如实报错
+METROLOGY_TIMEOUT_ORDER = "BJ0000"
+METROLOGY_TIMEOUT_SECONDS = 60
+
+# 器具价目夹具(AI.xlsx 转换,已清洗: 去导出 HTML 标签/尾逗号,数值转 int):
+# 检测费/强检一二级目录(null=不在强检目录)/检校周期/技术规程
+METROLOGY_INSTRUMENTS = json.loads(
+    (Path(__file__).resolve().parent / "metrology_instruments.json")
+    .read_text(encoding="utf-8"))
+
+
+def _envelope(payload: dict) -> tuple:
+    """业务信封双通道返回(结构化信封是 Demo 受控执行的前置约定)。"""
+    return ([types.TextContent(type="text",
+                              text=json.dumps(payload, ensure_ascii=False))],
+            payload)
+
+
+def build_metrology_server() -> Starlette:
+    """"计量业务平台" server: streamable HTTP。
+
+    - query_progress: 委托单检测进度(归属校验),业务信封 ok / forbidden
+      (单存在但不属于当前主体) / not_found(单不存在)——受控执行方先判
+      信封再归一,forbidden 不再被当成成功数据行;
+    - query_instrument: 器具价目(检测费/强检目录/检校周期/技术规程),
+      名称精确→包含两级匹配,可叠加型号过滤;多行命中全返回
+      (如同名器具不同量程价目不同)。
+    """
+    server = Server("e2e-metrology")
+
+    @server.list_tools()
+    async def _list():
+        return [types.Tool(
+            name="query_progress",
+            description="查询委托单检测进度(归属校验: 非本人单据返回 forbidden)",
+            inputSchema={"type": "object",
+                         "properties": {"order_no": {
+                             "type": "string",
+                             "description": "委托单号(BJ 开头,如 BJ2026)"}},
+                         "required": ["order_no"]}),
+                types.Tool(
+                    name="query_instrument",
+                    description="查询器具价目信息: 检测费/强检目录归类/"
+                                "检校周期/技术规程(名称支持模糊匹配)",
+                    inputSchema={"type": "object",
+                                 "properties": {
+                                     "name": {"type": "string",
+                                              "description": "器具名称(必填,"
+                                              "先精确后包含匹配,如 压力/电子秤)"},
+                                     "model": {"type": "string",
+                                               "description": "型号规格过滤"
+                                               "(可选,子串匹配)"}},
+                                 "required": ["name"]})]
+
+    @server.call_tool()
+    async def _call(name: str, args: dict):
+        args = args or {}
+        if name == "query_instrument":
+            qname = str(args.get("name") or "").strip()
+            qmodel = str(args.get("model") or "").strip()
+            if not qname:
+                return _envelope({"status": "invalid_input",
+                                  "message": "缺少器具名称(name)"})
+            hits = [r for r in METROLOGY_INSTRUMENTS
+                    if r["name"] == qname]
+            if not hits:  # 精确未中 → 包含匹配(演示口语"查一下压力")
+                hits = [r for r in METROLOGY_INSTRUMENTS
+                        if qname in r["name"]]
+            if qmodel:
+                hits = [r for r in hits if qmodel in (r.get("model") or "")]
+            if not hits:
+                # 型号过滤清空与名称未命中是两态,文案如实区分
+                msg = (f"未找到器具「{qname}」型号含「{qmodel}」的价目信息"
+                       if qmodel else f"未找到器具「{qname}」的价目信息")
+                return _envelope({"status": "not_found", "message": msg})
+            return _envelope({"status": "ok", "data": hits})
+        if name != "query_progress":
+            raise ValueError(f"tool not found: {name}")
+        order_no = str(args.get("order_no") or "").strip().upper()
+        if order_no == METROLOGY_TIMEOUT_ORDER:
+            # 故障演示: 睡过客户端 read_timeout → 调用方超时如实报错;
+            # 万一客户端 read_timeout 更长真等到了, 也只回 unavailable
+            # 业务信封,绝不回 ok+空 data 冒充成功
+            time.sleep(METROLOGY_TIMEOUT_SECONDS)
+            return _envelope({"status": "unavailable",
+                              "message": "业务平台处理超时(模拟)"})
+        rec = METROLOGY_ORDERS.get(order_no)
+        if rec is None:
+            return _envelope({"status": "not_found",
+                              "message": f"未找到委托单 {order_no}"})
+        if rec["owner"] != METROLOGY_CURRENT_OWNER:
+            return _envelope({"status": "forbidden",
+                              "message": "该委托单不属于当前主体,无权查询"})
+        return _envelope({
+            "status": "ok",
+            "data": {"order_no": order_no, **rec,
+                     "queried_at": time.strftime("%Y-%m-%d %H:%M")},
+        })
+
+    return _streamable_app(server)
 
 
 # ── X-Api-Key 鉴权 server(streamable) ────────────────────────

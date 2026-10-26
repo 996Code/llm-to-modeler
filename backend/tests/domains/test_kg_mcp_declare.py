@@ -6,8 +6,9 @@ from sdk.tool import ToolResult
 
 def test_config_declares_kb_search():
     from pathlib import Path
-    cfg = yaml.safe_load(Path(
-        "src/domains/knowledge_graph/config.yaml").read_text())
+    # 相对测试文件定位,不依赖 pytest 启动 cwd(仓库根/ backend 两种跑法都要绿)
+    cfg_path = Path(__file__).resolve().parents[2] / "src" / "domains" / "knowledge_graph" / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text())
     assert cfg.get("mcp_tools") == ["kb_search"]
 
 

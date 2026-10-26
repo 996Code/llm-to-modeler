@@ -22,6 +22,9 @@
         required: true
         env:
           - SOME_API_KEY
+      知识库插件:                    # 插件间依赖:声明依赖另一个 pack 的启用
+        pack: knowledge_graph        #   (启用判定由调用方注入:装配侧=本次装配
+        required: true               #    集合,管理侧=pack_state;平台零插件名)
 
 【铁律:平台零领域知识】
 本模块不认识 neo4j/pgvector/任何具体设施。探针有两种表达:
@@ -43,7 +46,7 @@ import importlib
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from services.pack_settings import (
     PackSettingsStore,
@@ -53,6 +56,9 @@ from services.pack_settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 插件启用判定函数:pack 名 → 是否启用(由调用方注入;平台不绑定具体存储)
+PackEnabledFn = Callable[[str], bool]
 
 # 状态枚举(前端与管理端共用)
 STATUS_OK = "ok"
@@ -114,16 +120,33 @@ def evaluate_pack_dependency(
     resolved: Dict[str, Any],
     schema: Optional[Dict[str, Any]],
     use_probe: bool,
+    pack_enabled: Optional[PackEnabledFn] = None,
 ) -> Dict[str, Any]:
-    """评估单个依赖:字段存在性 → (可选)连通性探针。
+    """评估单个依赖:插件间依赖(声明 pack:)看启用判定;基础设施依赖
+    走字段存在性 → (可选)连通性探针。
 
     Args:
         resolved: 该 pack 全字段最终值(services.pack_settings.resolve_all)
         schema:   settings.schema.yaml(字段 label / 探针 url_field 用)
+        pack_enabled: 插件间依赖的启用判定(装配侧传"本次装配集合"成员
+            判定,管理侧传 pack_state.is_enabled);None=无法判定,按通过
+            处理并留痕(不因调用方没接状态存储而误伤 fail-closed)。
 
     Returns:
         {"status": ok|missing_dependency|probe_failed, "missing": [...], "detail": str}
     """
+    # ── 插件间依赖:只看被依赖 pack 是否启用(声明驱动,零插件名知识) ──
+    dep_pack = dep.get("pack")
+    if dep_pack:
+        if pack_enabled is None:
+            return {"status": STATUS_OK, "missing": [],
+                    "detail": f"插件 {dep_pack} 启用状态未检查"}
+        if not pack_enabled(str(dep_pack)):
+            return {"status": STATUS_MISSING,
+                    "missing": [f"插件 {dep_pack} 未启用"],
+                    "detail": f"依赖的插件 {dep_pack} 未启用"}
+        return {"status": STATUS_OK, "missing": [], "detail": ""}
+
     fields = _dependency_fields(dep)
     if not fields:
         # 声明了依赖但既无 fields 也无 env:视为声明不完整,按缺失处理
@@ -247,6 +270,7 @@ def evaluate_pack(
     manifest: Dict[str, Any],
     settings_store: Optional[PackSettingsStore] = None,
     use_probe: bool = True,
+    pack_enabled: Optional[PackEnabledFn] = None,
 ) -> Dict[str, Any]:
     """评估一个 pack 的全部依赖(聚合状态)。
 
@@ -273,13 +297,15 @@ def evaluate_pack(
         if dep.get("required") is False:
             # 可选依赖:失败只记录,不阻断加载
             result = evaluate_pack_dependency(
-                pack_name, str(dep_name), dep, resolved, schema, use_probe
+                pack_name, str(dep_name), dep, resolved, schema, use_probe,
+                pack_enabled=pack_enabled,
             )
             result["optional"] = True
             per_dep[str(dep_name)] = result
             continue
         result = evaluate_pack_dependency(
-            pack_name, str(dep_name), dep, resolved, schema, use_probe
+            pack_name, str(dep_name), dep, resolved, schema, use_probe,
+            pack_enabled=pack_enabled,
         )
         per_dep[str(dep_name)] = result
         if result["status"] == STATUS_MISSING:
@@ -302,9 +328,28 @@ def evaluate_packs(
     manifests: Dict[str, Dict[str, Any]],
     settings_store: Optional[PackSettingsStore] = None,
     use_probe: bool = True,
+    pack_enabled: Optional[PackEnabledFn] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """批量评估(管理端插件列表用):{pack_name: evaluate_pack 结果}。"""
     return {
-        name: evaluate_pack(name, cfg or {}, settings_store, use_probe)
+        name: evaluate_pack(name, cfg or {}, settings_store, use_probe,
+                            pack_enabled=pack_enabled)
         for name, cfg in manifests.items()
     }
+
+
+def pack_dependents(target: str, manifests: Dict[str, Dict[str, Any]]) -> List[str]:
+    """反向依赖扫描:哪些 pack 的 manifest 声明了对 target 插件的依赖。
+
+    纯函数、声明驱动(只认 dependencies.*.pack 字段),平台零插件名知识;
+    是否"已启用"由调用方过滤(停用守卫只拦启用中的依赖方)。
+    """
+    result: List[str] = []
+    for name, manifest in manifests.items():
+        if name == target:
+            continue
+        deps = (manifest or {}).get("dependencies") or {}
+        if any(isinstance(d, dict) and d.get("pack") == target
+               for d in deps.values()):
+            result.append(name)
+    return sorted(result)
