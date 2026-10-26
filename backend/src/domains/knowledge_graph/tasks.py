@@ -404,6 +404,12 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             text = parse_to_text(doc["filename"], data, stats=parse_stats,
                                  on_ocr_progress=_ocr_progress,
                                  ocr_engine=ocr_engine, page_ocr=page_ocr)
+            # 解析完立即释放原始字节:后续 LLM 抽取/向量化阶段不再需要它,
+            # 大文件(数百 MB)若一直持有,叠加 embedding 推理会顶爆容器
+            # 内存上限(450MB 实测在向量写入期被 cgroup OOM,靠断点续跑
+            # 才救回来)
+            raw_len = len(data)
+            del data
         except FileNotFoundError:
             raise RuntimeError("原始文件已不存在,请重新上传")
         except ValueError as e:
@@ -415,8 +421,8 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                        ocr_pages=parse_stats["ocrPages"],
                        ocr_filled=parse_stats["ocrFilled"],
                        ocr_engine=ocr_label)
-        handle.log(f"文档解析: {len(data)}B → {len(text)} 字符({doc['filename'].rsplit('.', 1)[-1]} 格式)",
-                   raw_bytes=len(data), text_chars=len(text))
+        handle.log(f"文档解析: {raw_len}B → {len(text)} 字符({doc['filename'].rsplit('.', 1)[-1]} 格式)",
+                   raw_bytes=raw_len, text_chars=len(text))
 
         _cp = chunk_params_for(app_state, kb)
         chunks = chunk_text(
