@@ -299,7 +299,9 @@ def load_all_packs(
         # ── 依赖闸门:import 之前评估 manifest 声明的外部依赖 ──
         # 不满足 → 跳过加载(不 import 模块,连探针都不跑),状态记录给管理端。
         manifest = load_pack_configs(pack_names=[pack_name]).get(pack_name) or {}
-        dep = evaluate_pack(pack_name, manifest, settings_store, use_probe=probe_enabled())
+        dep = evaluate_pack(pack_name, manifest, settings_store, use_probe=probe_enabled(),
+                            # 插件间依赖:本次装配集合即启用集(成员判定)
+                            pack_enabled=lambda n: n in pack_names)
         dependency_status[pack_name] = dep
         if dep["status"] != "ok":
             # 部署显式要求 fail-fast 的 pack 依赖失败时终止；默认可选

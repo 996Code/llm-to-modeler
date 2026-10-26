@@ -50,6 +50,26 @@ describe('metrology result presentation', () => {
     } })
     expect(view?.answer).toContain('检定规程中未检索到扭矩扳手(内部使用)的相关依据')
   })
+  it('renders instrument records with unit formatting and keeps every row', () => {
+    const view = metrologyPresentation({ role: 'assistant', dataResult: {
+      type: 'metrology_instrument', pack: 'metrology_assistant',
+      instruments: [
+        { name: '角膜曲率计', periodMonths: 12, feeYuan: 0, mandatoryL1: '验光仪器', mandatoryL2: '角膜曲率计' },
+        { name: '无线温度记录器', periodMonths: 3, feeYuan: 150 },
+      ],
+    } }, { name: '器具名称', periodMonths: '检校周期', feeYuan: '检测费' })
+    expect(view?.kind).toBe('instrument')
+    expect(view?.records).toHaveLength(2)
+    expect(view?.records?.[0]).toContainEqual({ label: '检校周期', value: '12 个月' })
+    expect(view?.records?.[0]).toContainEqual({ label: '检测费', value: '0 元' })
+    expect(view?.records?.[0]).toContainEqual({ label: '器具名称', value: '角膜曲率计' })
+    expect(view?.records?.[1]).toContainEqual({ label: '检校周期', value: '3 个月' })
+  })
+  it('falls back to text when an instrument artifact has no usable rows', () => {
+    expect(metrologyPresentation({ role: 'assistant', content: '保留摘要', dataResult: {
+      type: 'metrology_instrument', pack: 'metrology_assistant', instruments: [{}, { model: '' }],
+    } }, { name: '器具名称' })).toBeNull()
+  })
   it('renders a refusal as a notice rather than a completed success', () => {
     const view = metrologyPresentation({ role: 'assistant', dataResult: { type: 'metrology_notice', status: 'forbidden', title: '无权查询', message: '请核对单号' } })
     expect(view).toMatchObject({ kind: 'notice', status: 'forbidden', answer: '请核对单号' })

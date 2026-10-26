@@ -565,7 +565,8 @@ def _dependency_status_for(request: Request, name: str, cfg: Dict[str, Any]) -> 
         return cached
     from services.pack_dependency import evaluate_pack
     return evaluate_pack(
-        name, cfg, getattr(request.app.state, "settings_store", None), use_probe=False
+        name, cfg, getattr(request.app.state, "settings_store", None), use_probe=False,
+        pack_enabled=request.app.state.pack_state.is_enabled,
     )
 
 
@@ -685,6 +686,18 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     if not enabled and len(pack_state.enabled_names()) <= 1:
         raise HTTPException(400, "Cannot disable the last enabled pack")
 
+    # 停用守卫(通用反向依赖):已启用的插件声明依赖本插件时拒绝停用,
+    # 避免把依赖方推进"依赖缺失"态——声明来自各 pack manifest,平台零插件名
+    if not enabled:
+        from domains import load_pack_configs
+        from services.pack_dependency import pack_dependents
+        dependents = [p for p in pack_dependents(name, load_pack_configs())
+                      if pack_state.is_enabled(p)]
+        if dependents:
+            raise HTTPException(
+                409, f"无法停用「{name}」:已启用的插件 "
+                     f"{', '.join(dependents)} 声明依赖它,请先停用依赖方")
+
     # 启用守卫:依赖配置缺失的 pack 拒绝启用(fail-closed;
     # 探针失败不在此拦——装配期探针会再判一次,这里只查"配置都没配")
     if enabled:
@@ -692,7 +705,8 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
         from services.pack_dependency import evaluate_pack
         cfg = load_pack_configs(pack_names=[name]).get(name) or {}
         dep = evaluate_pack(
-            name, cfg, getattr(request.app.state, "settings_store", None), use_probe=False
+            name, cfg, getattr(request.app.state, "settings_store", None), use_probe=False,
+            pack_enabled=pack_state.is_enabled,
         )
         if dep["status"] != "ok":
             raise HTTPException(
@@ -973,7 +987,8 @@ async def admin_put_pack_settings(name: str, request: Request, payload: Dict[str
     from domains import load_pack_configs
     from services.pack_dependency import evaluate_pack
     cfg = load_pack_configs(pack_names=[name]).get(name) or {}
-    dep = evaluate_pack(name, cfg, store, use_probe=False)
+    dep = evaluate_pack(name, cfg, store, use_probe=False,
+                        pack_enabled=request.app.state.pack_state.is_enabled)
     return {
         "name": name,
         "schema": schema,
@@ -1004,6 +1019,7 @@ async def admin_recheck_pack(name: str, request: Request):
     dep = evaluate_pack(
         name, cfg, getattr(request.app.state, "settings_store", None),
         use_probe=probe_enabled(),
+        pack_enabled=pack_state.is_enabled,
     )
 
     result: Dict[str, Any] = {"name": name, "dependency": dep, "reloaded": False}

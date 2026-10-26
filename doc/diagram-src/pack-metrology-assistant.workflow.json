@@ -1,0 +1,307 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "metrology_assistant 插件：场景表驱动的薄编排",
+    "output": "../pack-metrology-assistant.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "pipeline",
+        "label": "主链路",
+        "focus": [
+          "extract",
+          "scenario",
+          "clarify",
+          "dispatch",
+          "kg",
+          "chatbi",
+          "cards"
+        ],
+        "note": "一次提问从槽位提取到结构化结果卡的完整路径。"
+      },
+      {
+        "id": "scenarios",
+        "label": "三场景",
+        "focus": [
+          "scenario",
+          "kg",
+          "chatbi",
+          "cards"
+        ],
+        "note": "SCENARIOS 表是唯一事实源：强检判定走 KG，进度/价目走受控执行。"
+      },
+      {
+        "id": "deps",
+        "label": "依赖与守卫",
+        "focus": [
+          "manifest",
+          "depcheck",
+          "chatbi",
+          "kg"
+        ],
+        "note": "manifest 声明插件间依赖，停用被依赖插件时管理端反向拒绝。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "platform",
+      "label": "平台通用机制",
+      "variant": "exception"
+    },
+    {
+      "id": "assistant",
+      "label": "计量客服（薄编排）"
+    },
+    {
+      "id": "kernels",
+      "label": "被依赖插件内核"
+    },
+    {
+      "id": "present",
+      "label": "结构化呈现"
+    }
+  ],
+  "phases": [
+    {
+      "id": "understand",
+      "label": "理解与补槽",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "execute",
+      "label": "执行（场景表分发）",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "present",
+      "label": "结构化呈现",
+      "fromCol": 5,
+      "toCol": 5
+    }
+  ],
+  "mainPath": [
+    "extract",
+    "scenario",
+    "clarify",
+    "dispatch",
+    "kg",
+    "conclusion",
+    "cards"
+  ],
+  "nodes": [
+    {
+      "id": "extract",
+      "lane": "assistant",
+      "col": 0,
+      "type": "cloud",
+      "label": "LLM 槽位提取",
+      "sublabel": "chat_json 单次",
+      "tag": "LLM",
+      "width": 120
+    },
+    {
+      "id": "scenario",
+      "lane": "assistant",
+      "col": 1,
+      "type": "backend",
+      "label": "SCENARIOS 场景表",
+      "sublabel": "唯一事实源",
+      "width": 130
+    },
+    {
+      "id": "clarify",
+      "lane": "assistant",
+      "col": 2,
+      "type": "backend",
+      "label": "缺槽追问",
+      "sublabel": "AskSpec 追问",
+      "width": 130
+    },
+    {
+      "id": "dispatch",
+      "lane": "assistant",
+      "col": 3,
+      "type": "backend",
+      "label": "通用执行器",
+      "sublabel": "按 action.kind 分发",
+      "width": 130
+    },
+    {
+      "id": "kg",
+      "lane": "kernels",
+      "col": 4,
+      "type": "database",
+      "label": "knowledge_graph",
+      "sublabel": "retrieve_evidence",
+      "width": 140
+    },
+    {
+      "id": "chatbi",
+      "lane": "kernels",
+      "col": 3,
+      "type": "database",
+      "label": "chatbi 受控执行",
+      "sublabel": "execute_controlled",
+      "width": 140
+    },
+    {
+      "id": "cards",
+      "lane": "present",
+      "col": 5,
+      "type": "frontend",
+      "label": "结构化结果卡",
+      "sublabel": "artifact.pack+card",
+      "width": 150
+    },
+    {
+      "id": "conclusion",
+      "lane": "kernels",
+      "col": 5,
+      "type": "cloud",
+      "label": "三态结论",
+      "sublabel": "decision 枚举校验",
+      "tag": "LLM",
+      "width": 130
+    },
+    {
+      "id": "manifest",
+      "lane": "platform",
+      "col": 0,
+      "type": "security",
+      "label": "manifest 依赖声明",
+      "sublabel": "dependencies.pack",
+      "width": 130
+    },
+    {
+      "id": "depcheck",
+      "lane": "platform",
+      "col": 1,
+      "type": "security",
+      "label": "依赖检查",
+      "sublabel": "装配闸门+停用守卫",
+      "width": 140
+    },
+    {
+      "id": "envelope",
+      "lane": "kernels",
+      "col": 2,
+      "type": "security",
+      "label": "信封分态",
+      "sublabel": "查无/拒权=卡·故障=error",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "id": "extract-scenario",
+      "from": "extract",
+      "to": "scenario",
+      "variant": "default"
+    },
+    {
+      "id": "scenario-clarify",
+      "from": "scenario",
+      "to": "clarify",
+      "label": "缺必填槽位",
+      "variant": "default"
+    },
+    {
+      "id": "clarify-dispatch",
+      "from": "clarify",
+      "to": "dispatch",
+      "label": "槽位补齐",
+      "variant": "default"
+    },
+    {
+      "id": "dispatch-kg",
+      "from": "dispatch",
+      "to": "kg",
+      "label": "kind=kg（强检判定）",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dispatch-chatbi",
+      "from": "dispatch",
+      "to": "chatbi",
+      "label": "kind=chatbi（进度/价目）",
+      "variant": "emphasis"
+    },
+    {
+      "id": "kg-conclusion",
+      "from": "kg",
+      "to": "conclusion",
+      "label": "证据片段",
+      "variant": "default"
+    },
+    {
+      "id": "conclusion-cards",
+      "from": "conclusion",
+      "to": "cards",
+      "variant": "emphasis"
+    },
+    {
+      "id": "chatbi-cards",
+      "from": "chatbi",
+      "to": "cards",
+      "label": "信封 ok",
+      "variant": "emphasis"
+    },
+    {
+      "id": "envelope-chatbi",
+      "from": "envelope",
+      "to": "chatbi",
+      "label": "先判信封再归一",
+      "variant": "security"
+    },
+    {
+      "id": "manifest-depcheck",
+      "from": "manifest",
+      "to": "depcheck",
+      "label": "声明式·零插件名知识",
+      "variant": "default"
+    },
+    {
+      "id": "depcheck-dispatch",
+      "from": "depcheck",
+      "to": "dispatch",
+      "label": "依赖未满足不装配·停用被拒 409",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "薄编排（assistant.py）",
+      "items": [
+        "SCENARIOS 场景表是唯一事实源：意图描述、必填槽位与追问规格、动作绑定、结果卡构建",
+        "新增场景 = 加一条表项，提取提示词由表自动拼装，执行器零改动（P1 迁 DB 配置）",
+        "一次 chat_json 出场景+器具/用途/委托单号三槽位，追问答案确定性恢复不重烧提取"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "复用内核（不重造）",
+      "items": [
+        "强检判定 → knowledge_graph.retrieve_evidence：按用途选库（强检目录/检定规程）+ 证据片段",
+        "进度/价目 → chatbi.execute_controlled：显式数据源 + 固定工具白名单 + MCP 业务平台（mock）",
+        "三态结论 LLM 结构化输出：decision 枚举 / conclusion 非空 / chunk_refs 整数范围，非法上抛不生成伪结论"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "平台红线",
+      "items": [
+        "平台零业务知识：结果卡按 artifact.pack 分发到插件自管组件，标签按 owner 插件隔离",
+        "信封分态：查无/拒权=业务通知卡；技术或契约故障=error_for_llm 走平台错误诊断，不成功化",
+        "插件间依赖通用机制：manifest dependencies.pack 声明 → 装配闸门 + 停用反向守卫（409 拒绝）"
+      ]
+    }
+  ]
+}

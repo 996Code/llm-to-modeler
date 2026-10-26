@@ -1,13 +1,19 @@
-"""计量智能客服主工具(南京院竞标 Demo 薄编排,临时件)。
+"""计量智能客服主工具(南京院竞标 Demo 薄编排)。
 
-七步管线的薄版(设计文档 0.5.0/C1):
+七步管线(设计文档 0.5.0/C1):
   场景路由 → LLM 槽位提取 → 记忆/追问答案合并 → 必要条件追问(AskSpec)
   → 规则定来源 → 调底层(知识库证据服务 / ChatBI 受控执行) → 组业务回答
 
-临时件边界(Demo 说了算,P1 重构):
-- 不建 flows 表,多轮状态用会话 KV(session_state)轻量承载;
-- 用途→资料库映射、演示单号选项是代码内演示配置,P1 移入 DB+管理页;
-- 进度查询走 mock 业务平台(tools/mcp-e2e/metrology_server.py),
+架构形状(对齐设计 C1"代码只留通用执行器,场景=配置"):
+- SCENARIOS 场景定义表是唯一事实源:意图描述(提取提示词由表自动拼装)、
+  必填槽位与追问规格、动作绑定(KG 或 数据源+固定工具)、结果卡构建。
+  新增场景 = 加一条表项,执行器与提示词模板零改动。
+- 执行器通用:缺槽追问、受控调用、信封分态(查无/拒权=业务通知卡,
+  技术或契约故障=平台错误诊断)、记忆回写,全部一套代码。
+- 数据源 env 变量是 assistant_config 表缺位的演示替身(P1 由场景配置
+  携带 datasource_id,执行器不改);不建 flows 表,多轮状态用会话 KV
+  (P1 边界:旧卡补答无版本校验,设计 6.1)。
+- 进度/价目走 mock 业务平台(tools/mcp-e2e/metrology_server.py),
   拒权/超时为模拟样例——演示话术须如实说明"模拟业务平台"。
 """
 import json
@@ -22,7 +28,7 @@ from sdk.tool import (
 
 logger = logging.getLogger(__name__)
 
-# ── 演示配置(P1 移入 DB,管理页三 tab 维护) ──────────────────
+# ── 演示常量(P1 随场景配置迁 DB,管理页三 tab 维护) ───────────
 
 # 用途 → 资料库映射:强检目录用途(计量法框架)查「强检目录」库,
 # 其余用途查「检定规程」库——"按条件选库"的最小业务分支
@@ -32,6 +38,7 @@ REGULATION_KB = "检定规程"
 
 PURPOSE_HEADER = "器具用途"     # 追问 header(≤12 字,回传 answers 的键)
 ORDER_HEADER = "委托单号"
+INSTRUMENT_HEADER = "器具名称"
 PURPOSE_OPTIONS = [
     AskOption(label="贸易结算", description="贸易结算用(如买卖计价、水电气结算)"),
     AskOption(label="安全防护", description="安全防护用(如锅炉压力监控、安全阀)"),
@@ -42,9 +49,18 @@ DEMO_ORDER_OPTIONS = [
     AskOption(label="BJ2026", description="演示单(检测中)"),
     AskOption(label="BJ2027", description="演示单(已完成)"),
 ]
-PROGRESS_TOOL = "query_progress"
-PROGRESS_DATASOURCE_ENV = "METROLOGY_PROGRESS_DATASOURCE_ID"
 _ORDER_RE = re.compile(r"([A-Z]{2}\d{3,})")
+
+# 数据源绑定的 env 键(部署接口,保持稳定;值=数据源 ID,DB 缺位的演示替身)
+PROGRESS_DATASOURCE_ENV = "METROLOGY_PROGRESS_DATASOURCE_ID"
+INSTRUMENT_DATASOURCE_ENV = "METROLOGY_INSTRUMENT_DATASOURCE_ID"
+
+# 价目记录字段(上游契约)与制品驼峰键映射(与进度卡/前端 data_labels 同风格)
+_INSTRUMENT_FIELDS = ("name", "model", "measure_range", "accuracy", "fee_yuan",
+                      "mandatory_l1", "mandatory_l2", "period_months", "regulation")
+_INSTRUMENT_CAMEL = {"measure_range": "measureRange", "fee_yuan": "feeYuan",
+                     "mandatory_l1": "mandatoryL1", "mandatory_l2": "mandatoryL2",
+                     "period_months": "periodMonths"}
 
 _PIPELINE_STEPS = [
     {"key": "assistant.extract", "label": "识别问题与关键条件"},
@@ -52,6 +68,93 @@ _PIPELINE_STEPS = [
     {"key": "assistant.retrieve", "label": "检索资料/查询业务"},
     {"key": "assistant.answer", "label": "生成业务结论"},
 ]
+
+
+# ── 场景定义表(唯一事实源;P1 迁 assistant_config,执行器零改动) ──
+# required: 缺该槽位时追问(question 支持 {subject} 占位,取 subject_slot
+#   的值包「」,缺省用 subject_default);normalize 对槽位值归一。
+# action.kind=kg: 知识库证据链(见 _run_kg);
+# action.kind=chatbi: 受控执行——env 指向数据源 ID 环境变量(DB 替身),
+#   tool 固定白名单工具,params 是 工具参数←槽位 映射,notices 是
+#   业务状态→通知卡文案模板,card 是结果卡构建函数。
+
+SCENARIOS = {
+    "mandatory_check": {
+        "label": "器具是否强制检定(强检判定,按用途检索依据)",
+        "intent": "问器具是否需要强制检定/属于强检吗",
+        "required": {
+            "slot": "purpose",
+            "header": PURPOSE_HEADER,
+            "question": "{subject}主要用于什么用途?用途决定适用资料(强检目录/检定规程)",
+            "subject_slot": "instrument",
+            "subject_default": "该器具",
+            "options": list(PURPOSE_OPTIONS),
+        },
+        "action": {"kind": "kg"},
+    },
+    "progress": {
+        "label": "委托单检测进度查询",
+        "intent": "问检测进度/委托单/报告状态",
+        "required": {
+            "slot": "order_no",
+            "header": ORDER_HEADER,
+            "question": "请提供委托单号(BJ 开头,可在委托单回执上查看)",
+            "options": list(DEMO_ORDER_OPTIONS),
+            "normalize": "upper",
+        },
+        "action": {
+            "kind": "chatbi",
+            "env": PROGRESS_DATASOURCE_ENV,
+            "ds_name": "计量业务平台",
+            "tool": "query_progress",
+            "params": {"order_no": "order_no"},
+            "stage": "向业务平台查询委托单 {order_no}…",
+            "error_noun": "业务接口",
+            "notices": {
+                "forbidden": {
+                    "title": "无权查询",
+                    "message": "委托单 {order_no} 不属于当前主体,无权查询。"
+                               "请核对单号,或联系业务窗口。",
+                    "order": "{order_no}",
+                },
+                "not_found": {
+                    "title": "未找到委托单",
+                    "message": "未找到委托单 {order_no},请核对单号后重试。",
+                    "order": "{order_no}",
+                },
+            },
+            "card": "_progress_card",
+        },
+    },
+    "instrument_info": {
+        "label": "器具检测费/检校周期/强检归类等价目信息查询",
+        "intent": "问器具的检测费/收费标准/检校周期/校准周期多久/"
+                  "强检目录归类/技术规程号",
+        "required": {
+            "slot": "instrument",
+            "header": INSTRUMENT_HEADER,
+            "question": "请提供要查询的器具名称(如 角膜曲率计/电子秤)",
+            "options": [],
+        },
+        "action": {
+            "kind": "chatbi",
+            "env": INSTRUMENT_DATASOURCE_ENV,
+            "ds_name": "计量器具价目",
+            "tool": "query_instrument",
+            "params": {"name": "instrument"},
+            "stage": "查询器具「{instrument}」的价目信息…",
+            "error_noun": "器具价目",
+            "notices": {
+                "not_found": {
+                    "title": "未找到该器具",
+                    "message": "价目表中未找到「{instrument}」,请核对器具名称"
+                               "后重试,或联系业务窗口确认。",
+                },
+            },
+            "card": "_instrument_card",
+        },
+    },
+}
 
 
 def _make_monotonic_stage(emit_fn, steps):
@@ -69,14 +172,18 @@ def _make_monotonic_stage(emit_fn, steps):
     return _on_stage
 
 
-# ── 槽位提取与合并 ────────────────────────────────────────────
+# ── 槽位提取与合并(提示词由场景表拼装) ────────────────────────
 
-_EXTRACT_PROMPT = """你是计量业务客服的槽位提取器。从用户消息提取 JSON(只输出 JSON):
+def _build_extract_prompt(background: str, user_input: str) -> str:
+    keys = "|".join(list(SCENARIOS) + ["other"])
+    intent_lines = "\n".join(
+        f"  {cfg['intent']} → {key};" for key, cfg in SCENARIOS.items())
+    return f"""你是计量业务客服的槽位提取器。从用户消息提取 JSON(只输出 JSON):
 
-{{"scenario": "mandatory_check|progress|other", "instrument": "", "purpose": "", "order_no": ""}}
+{{"scenario": "{keys}", "instrument": "", "purpose": "", "order_no": ""}}
 
-- scenario: 问器具是否强制检定/检定周期/适用规程 → mandatory_check;
-  问检测进度/委托单/报告状态 → progress;其他 → other
+- scenario:{intent_lines}
+  其他 → other
 - instrument: 器具名称(如 压力表/血压计/电子秤);指代("它/同一台")从会话背景解析
 - purpose: 用途(贸易结算/安全防护/医疗卫生/环境监测/执法鉴定/内部使用/校准等);
   消息与背景都没提 → 空串
@@ -90,9 +197,8 @@ _EXTRACT_PROMPT = """你是计量业务客服的槽位提取器。从用户消�
 def extract_slots(llm, user_input: str, background: dict,
                   conv_id: Optional[str]) -> dict:
     """LLM 结构化提取(一次调用出场景+三槽位);失败上抛,不静默猜。"""
-    prompt = _EXTRACT_PROMPT.format(
-        background=json.dumps(background, ensure_ascii=False),
-        user_input=user_input)
+    prompt = _build_extract_prompt(
+        json.dumps(background, ensure_ascii=False), user_input)
     data = llm.chat_json([{"role": "user", "content": prompt}],
                          temperature=0.0, conv_id=conv_id,
                          stage="assistant.extract")
@@ -103,7 +209,7 @@ def extract_slots(llm, user_input: str, background: dict,
         return str(data.get(key) or "").strip()
 
     scenario = _s("scenario")
-    if scenario not in ("mandatory_check", "progress"):
+    if scenario not in SCENARIOS:
         scenario = "other"
     return {"scenario": scenario, "instrument": _s("instrument"),
             "purpose": _s("purpose"), "order_no": _s("order_no").upper()}
@@ -120,15 +226,23 @@ def merge_slots(extracted: dict, mem_slots: dict) -> dict:
 
 
 def parse_clarify_answers(answers: dict) -> dict:
-    """追问答案({header: label} 或 {text: 原话})→ 槽位(确定性解析)。"""
+    """追问答案({header: label} 或 {text: 原话})→ 槽位(确定性解析)。
+
+    header→槽位映射来自场景表;order_no 按单号正则归一;
+    自由文本依次尝试单号/用途关键词,其余归入器具名称。
+    """
     out = {}
-    purpose = answers.get(PURPOSE_HEADER)
-    if purpose:
-        out["purpose"] = str(purpose).strip()
-    order = answers.get(ORDER_HEADER)
-    if order:
-        m = _ORDER_RE.search(str(order).upper())
-        out["order_no"] = m.group(1) if m else str(order).strip().upper()
+    for cfg in SCENARIOS.values():
+        required = cfg["required"]
+        value = answers.get(required["header"])
+        if not value:
+            continue
+        if required["slot"] == "order_no":
+            m = _ORDER_RE.search(str(value).upper())
+            out["order_no"] = (m.group(1) if m
+                               else str(value).strip().upper())
+        else:
+            out[required["slot"]] = str(value).strip()
     text = answers.get("text")
     if text:
         m = _ORDER_RE.search(str(text).upper())
@@ -139,6 +253,8 @@ def parse_clarify_answers(answers: dict) -> dict:
                 if p in str(text):
                     out["purpose"] = p
                     break
+            else:
+                out.setdefault("instrument", str(text).strip())
     return out
 
 
@@ -238,17 +354,31 @@ def resolve_kb_for_purpose(purpose: str) -> str:
             if purpose in STRONG_INSPECTION_PURPOSES else REGULATION_KB)
 
 
-# ── 主工具 ────────────────────────────────────────────────────
+_CN_NUM = {2: "两", 3: "三", 4: "四", 5: "五"}
+
+
+def _unsupported_notice() -> ToolResult:
+    """范围外问题的如实答复(文案由场景表拼装,不手写清单)。"""
+    items = ";".join(f"{'①②③④⑤'[i]}{cfg['label']}"
+                     for i, cfg in enumerate(SCENARIOS.values()))
+    count = _CN_NUM.get(len(SCENARIOS), str(len(SCENARIOS)))
+    text = (f"当前演示版本覆盖{count}类问题:{items}。"
+            "请换个问法,或联系业务窗口人工咨询。")
+    return _notice("unsupported", "暂不支持此问题", text)
+
+
+# ── 主工具(通用执行器) ───────────────────────────────────────
 
 class MetrologyAssistantTool(Tool):
-    """计量智能客服(强检判定/进度查询)——Demo 薄编排。"""
+    """计量智能客服——场景由 SCENARIOS 表定义,本类只含通用执行逻辑。"""
 
     name = "metrology_assistant"
-    description = ("计量智能客服:回答器具是否强制检定(按用途检索强检目录/"
-                   "检定规程并给出带依据的三态结论)、查询委托单检测进度"
-                   "(经业务平台接口,含归属校验)")
-    when = ("用户咨询计量器具强检/检定周期/适用规程,或查询委托单/订单"
-            "检测进度、报告状态")
+    description = ("计量智能客服:器具是否强制检定的判定问答(按用途限定"
+                   "资料范围,结论带依据引用)、委托单检测进度查询(经业务"
+                   "平台接口,含归属校验)、器具价目信息查询(检测费/检校"
+                   "周期/强检归类/技术规程)")
+    when = ("用户咨询计量器具强检/检测费/检校周期/价目/适用规程,或查询"
+            "委托单/订单检测进度、报告状态")
     state_scope = "metrology_assistant"
 
     def __init__(self, app_state=None):
@@ -298,33 +428,90 @@ class MetrologyAssistantTool(Tool):
                         else (mem_scenario or "other"))
             merged = merge_slots(extracted, mem_slots)
 
-        if scenario == "mandatory_check":
-            return self._mandatory_check(ctx, mem, merged, stage)
-        if scenario == "progress":
-            return self._progress(ctx, mem, merged, stage)
-        text = ("当前演示版本覆盖两类问题:①器具是否强制检定"
-                "(强检判定,按用途检索依据);②委托单检测进度查询。"
-                "请换个问法,或联系业务窗口人工咨询。")
-        return _notice("unsupported", "暂不支持此问题", text)
+        cfg = SCENARIOS.get(scenario)
+        if cfg is None:
+            return _unsupported_notice()
 
-    # ── 场景一:强检判定 ──
-
-    def _mandatory_check(self, ctx: ToolContext, mem, merged: dict,
-                         stage) -> ToolResult:
-        instrument = merged.get("instrument") or ""
-        purpose = merged.get("purpose") or ""
-        if not purpose:
+        required = cfg["required"]
+        if not merged.get(required["slot"]):
             # 只追问影响判断的必要条件(设计 13.1 故事 1:不编条件)
             if mem:
-                mem.set("pending", {"scenario": "mandatory_check",
-                                    "slots": merged})
-            subject = f"「{instrument}」" if instrument else "该器具"
+                mem.set("pending", {"scenario": scenario, "slots": merged})
+            return self._ask_required(required, merged)
+
+        if cfg["action"]["kind"] == "kg":
+            return self._run_kg(ctx, mem, merged, stage)
+        return self._run_chatbi(scenario, cfg, ctx, mem, merged, stage)
+
+    # ── 通用:缺槽追问(规格来自场景表) ──
+
+    @staticmethod
+    def _ask_required(required: dict, merged: dict) -> ToolResult:
+        question = required["question"]
+        subject_slot = required.get("subject_slot")
+        if subject_slot is not None and "{subject}" in question:
+            value = merged.get(subject_slot) or ""
+            subject = f"「{value}」" if value else required.get(
+                "subject_default", "")
+            question = question.format(subject=subject)
+        return ToolResult(
+            ask=AskSpec(questions=[AskQuestion(
+                question=question, header=required["header"],
+                options=list(required["options"]))]),
+            summary=f"需要{required['header']}")
+
+    # ── 通用:受控执行动作(数据源+固定工具,信封分态) ──
+
+    def _run_chatbi(self, scenario: str, cfg: dict, ctx: ToolContext,
+                    mem, merged: dict, stage) -> ToolResult:
+        action = cfg["action"]
+        params = {tool_key: (merged.get(slot_key) or "").strip()
+                  for tool_key, slot_key in action["params"].items()}
+        noun = action["error_noun"]
+
+        ds_id = os.getenv(action["env"], "").strip()
+        if not ds_id:
             return ToolResult(
-                ask=AskSpec(questions=[AskQuestion(
-                    question=f"{subject}主要用于什么用途?用途决定适用资料"
-                            "(强检目录/检定规程)",
-                    header=PURPOSE_HEADER, options=list(PURPOSE_OPTIONS))]),
-                summary="需要确认器具用途")
+                error_for_llm=(f"{noun}查询数据源未配置: 请设置环境变量 "
+                               f"{action['env']} 为「{action['ds_name']}」"
+                               "数据源 ID(Demo 配置项)"))
+
+        stage("assistant.retrieve", action["stage"].format(**merged))
+        from domains.chatbi.controlled import execute_controlled
+        try:
+            result = execute_controlled(self._app_state, ds_id,
+                                        action["tool"], params)
+        except Exception:
+            logger.exception("%s查询失败(params=%s)", noun, params)
+            return ToolResult(
+                error_for_llm=f"{noun}查询失败,已如实上报,请稍后重试。")
+
+        if not result.ok:
+            notice_cfg = action["notices"].get(result.status)
+            if notice_cfg:
+                kwargs = {k: v.format(**merged) for k, v in notice_cfg.items()
+                          if k in ("message", "order")}
+                order = kwargs.pop("order", "")
+                return _notice(result.status, notice_cfg["title"],
+                               kwargs["message"], order)
+            message = result.error.message if result.error else str(result.status)
+            return ToolResult(
+                error_for_llm=f"{noun}查询失败({result.status}): {message}。"
+                              "已如实上报,请稍后重试。")
+
+        card = getattr(self, action["card"])(result, merged, stage)
+        if card.error_for_llm is not None:
+            return card
+        if mem:
+            mem.set("scenario", scenario)
+            mem.set("slots", merged)
+        return card
+
+    # ── KG 动作:强检判定(证据检索 + 结构化三态结论) ──
+
+    def _run_kg(self, ctx: ToolContext, mem, merged: dict, stage) -> ToolResult:
+        instrument = merged.get("instrument") or ""
+        purpose = merged.get("purpose") or ""
 
         kb_name = resolve_kb_for_purpose(purpose)
         stage("assistant.retrieve",
@@ -396,80 +583,56 @@ class MetrologyAssistantTool(Tool):
             formatted={"kb": kb_name, "conclusion": conclusion[:40],
                        "chunkCount": len(chunks)})
 
-    # ── 场景二:进度查询 ──
+    # ── 场景结果卡(制品映射;P1 随场景配置模板化) ──
 
-    def _progress(self, ctx: ToolContext, mem, merged: dict,
-                  stage) -> ToolResult:
-        order_no = (merged.get("order_no") or "").strip().upper()
-        if not order_no:
-            if mem:
-                mem.set("pending", {"scenario": "progress", "slots": merged})
+    def _progress_card(self, result, merged: dict, stage) -> ToolResult:
+        record = (result.data or {}).get("record") or {}
+        if not record.get("order_no"):
+            # 空记录不装成功(信封 ok 但无有效业务数据=契约异常)
             return ToolResult(
-                ask=AskSpec(questions=[AskQuestion(
-                    question="请提供委托单号(BJ 开头,可在委托单回执上查看)",
-                    header=ORDER_HEADER, options=list(DEMO_ORDER_OPTIONS))]),
-                summary="需要委托单号")
+                error_for_llm=f"业务平台未返回委托单 "
+                              f"{merged.get('order_no', '')} 的有效数据,请稍后重试。")
+        stage("assistant.answer", "整理查询结果…")
+        artifact = {
+            "type": "metrology_progress",
+            "pack": "metrology_assistant",
+            "resultDisplay": "card",
+            "orderNo": record.get("order_no"),
+            "instrument": record.get("instrument") or "",
+            "status": record.get("status") or "",
+            "progress": record.get("progress") or "",
+            "currentStep": record.get("current_step") or "",
+            "eta": record.get("eta") or "",
+            "reportNo": record.get("report_no") or "",
+            "finishedAt": record.get("finished_at") or "",
+            "validUntil": record.get("valid_until") or "",
+            "queriedAt": record.get("queried_at") or "",
+            "source": {"datasource": result.source.get("datasource"),
+                       "tool": result.source.get("tool")},
+        }
+        return ToolResult(artifact=artifact, artifact_type="data",
+                          summary=_format_progress_reply(record),
+                          formatted=self.format_result(artifact))
 
-        ds_id = os.getenv(PROGRESS_DATASOURCE_ENV, "").strip()
-        if not ds_id:
+    def _instrument_card(self, result, merged: dict, stage) -> ToolResult:
+        instrument = merged.get("instrument") or ""
+        data = result.data or {}
+        columns = [str(c) for c in (data.get("columns") or [])]
+        records = [dict(zip(columns, row)) for row in (data.get("rows") or [])]
+        records = [r for r in records if r.get("name")]
+        if not records:
             return ToolResult(
-                error_for_llm=("进度查询数据源未配置: 请设置环境变量 "
-                               f"{PROGRESS_DATASOURCE_ENV} 为计量业务平台"
-                               "数据源 ID(Demo 配置项)"))
-
-        stage("assistant.retrieve", f"向业务平台查询委托单 {order_no}…")
-        from domains.chatbi.controlled import execute_controlled
-        try:
-            result = execute_controlled(self._app_state, ds_id, PROGRESS_TOOL,
-                                        {"order_no": order_no})
-        except Exception:
-            logger.exception("业务接口查询失败")
-            return ToolResult(
-                error_for_llm="业务接口查询失败。已如实上报,请稍后重试。")
-
-        if result.ok:
-            record = (result.data or {}).get("record") or {}
-            if not record.get("order_no"):
-                # 空记录不装成功(信封 ok 但无有效业务数据=契约异常)
-                return ToolResult(
-                    error_for_llm=f"业务平台未返回委托单 {order_no} 的有效数据,请稍后重试。")
-            stage("assistant.answer", "整理查询结果…")
-            artifact = {
-                "type": "metrology_progress",
-                "pack": "metrology_assistant",
-                "resultDisplay": "card",
-                "orderNo": record.get("order_no") or order_no,
-                "instrument": record.get("instrument") or "",
-                "status": record.get("status") or "",
-                "progress": record.get("progress") or "",
-                "currentStep": record.get("current_step") or "",
-                "eta": record.get("eta") or "",
-                "reportNo": record.get("report_no") or "",
-                "finishedAt": record.get("finished_at") or "",
-                "validUntil": record.get("valid_until") or "",
-                "queriedAt": record.get("queried_at") or "",
-                "source": {"datasource": result.source.get("datasource"),
-                           "tool": result.source.get("tool")},
-            }
-            if mem:
-                mem.set("scenario", "progress")
-                mem.set("slots", merged)
-            return ToolResult(artifact=artifact, artifact_type="data",
-                              summary=_format_progress_reply(record),
-                              formatted=self.format_result(artifact))
-
-        # 拒权/查无是业务通知;技术或契约故障保留平台错误诊断通道。
-        if result.status == "forbidden":
-            text = (f"委托单 {order_no} 不属于当前主体,无权查询。"
-                    "请核对单号,或联系业务窗口。")
-            return _notice("forbidden", "无权查询", text, order_no)
-        if result.status == "not_found":
-            text = f"未找到委托单 {order_no},请核对单号后重试。"
-            return _notice("not_found", "未找到委托单", text, order_no)
-        message = result.error.message if result.error else str(result.status)
-        return ToolResult(
-            error_for_llm=f"业务接口查询失败({result.status}): {message}。"
-                          "已如实上报,请稍后重试。")
+                error_for_llm=f"价目表未返回「{instrument}」的有效数据,请稍后重试。")
+        stage("assistant.answer", "整理价目信息…")
+        instruments = [{_INSTRUMENT_CAMEL.get(key, key): rec.get(key)
+                        for key in _INSTRUMENT_FIELDS} for rec in records]
+        artifact = {"type": "metrology_instrument",
+                    "pack": "metrology_assistant",
+                    "resultDisplay": "card",
+                    "query": instrument, "instruments": instruments}
+        return ToolResult(artifact=artifact, artifact_type="data",
+                          summary=_format_instrument_reply(instruments),
+                          formatted=self.format_result(artifact))
 
     def format_result(self, artifact: dict) -> dict:
         art = artifact or {}
@@ -477,9 +640,33 @@ class MetrologyAssistantTool(Tool):
             return {k: art[k] for k in
                     ("orderNo", "status", "progress", "eta", "reportNo",
                      "queriedAt") if art.get(k)}
+        if art.get("type") == "metrology_instrument":
+            first = (art.get("instruments") or [{}])[0]
+            return {k: first[k] for k in ("name", "feeYuan", "periodMonths",
+                                          "mandatoryL1") if first.get(k) is not None}
         return {"kb": (art.get("kb") or {}).get("name") or "",
                 "chunkCount": len(((art.get("sources") or {}).get("chunks"))
                                   or [])}
+
+
+def _format_instrument_reply(instruments: list) -> str:
+    """价目记录 → 确定性摘要(驼峰键;多行同名记录逐条列出,不丢行)。"""
+    parts = []
+    for rec in instruments:
+        name = rec.get("name") or "该器具"
+        bits = []
+        if rec.get("periodMonths") is not None:
+            bits.append(f"检校周期 {rec['periodMonths']} 个月")
+        if rec.get("feeYuan") is not None:
+            bits.append(f"检测费 {rec['feeYuan']} 元")
+        if rec.get("mandatoryL1"):
+            catalog = rec["mandatoryL1"] + (
+                f"/{rec['mandatoryL2']}" if rec.get("mandatoryL2") else "")
+            bits.append(f"强检目录 {catalog}")
+        if rec.get("regulation"):
+            bits.append(f"技术规程 {rec['regulation']}")
+        parts.append(f"{name}: " + ";".join(bits) if bits else f"{name}: 暂无价目信息")
+    return "\n".join(parts)
 
 
 def _format_progress_reply(record: dict) -> str:

@@ -440,7 +440,8 @@ def test_other_scenario_honest_scope(tool):
     ctx = FakeCtx(FakeLLM(extract={"scenario": "other", "instrument": "",
                                    "purpose": "", "order_no": ""}))
     r = _run(tool, ctx, "今天天气怎么样")
-    assert "两类问题" in r.artifact["message"]
+    assert "三类问题" in r.artifact["message"]
+    assert "价目信息" in r.artifact["message"]
     assert r.reply is None
     assert r.artifact_type == "data"
     assert r.artifact == {"type": "metrology_notice", "status": "unsupported",
@@ -466,7 +467,7 @@ def test_progress_execution_exception_returns_safe_error(tool, monkeypatch, capl
     ctx = FakeCtx(FakeLLM(extract={"scenario": "progress", "order_no": "BJ2026"}))
     r = _run(tool, ctx, "查 BJ2026")
     assert r.artifact is None
-    assert r.error_for_llm == "业务接口查询失败。已如实上报,请稍后重试。"
+    assert r.error_for_llm == "业务接口查询失败,已如实上报,请稍后重试。"
     assert "secret" not in str(r.model_dump())
     assert any(record.name == mta.__name__ and record.exc_info for record in caplog.records)
 
@@ -622,3 +623,91 @@ def test_router_direct_no_llm_call():
     assert router.route("随便问点什么", None, history="",
                         llm_client=BoomLLM(), conv_id="c1") \
         == ("metrology_assistant", 1.0)
+
+
+# ── 场景三: 器具信息查询(价目/周期/强检归类, 走 query_instrument) ──
+
+_KERATOMETER_ROWS = {"columns": ["name", "model", "measure_range", "accuracy",
+                                 "fee_yuan", "mandatory_l1", "mandatory_l2",
+                                 "period_months", "regulation"],
+                     "rows": [["角膜曲率计", None, "半径(6.5~9.4)mm", None, 0,
+                               "验光仪器", "角膜曲率计", 12, None]]}
+
+
+def test_instrument_info_card(tool, monkeypatch):
+    monkeypatch.setenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", "ds-fee")
+    monkeypatch.setattr(
+        "domains.chatbi.controlled.execute_controlled",
+        lambda *a, **kw: ControlledResult(
+            ok=True, status="ok", data=_KERATOMETER_ROWS, source={}))
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "instrument_info",
+                                   "instrument": "角膜曲率计", "purpose": "",
+                                   "order_no": ""}))
+    r = _run(tool, ctx, "角膜曲率计的检测校准周期是多久")
+    art = r.artifact
+    assert art["type"] == "metrology_instrument"
+    assert art["pack"] == "metrology_assistant"
+    assert art["resultDisplay"] == "card"
+    rec = art["instruments"][0]
+    assert rec["name"] == "角膜曲率计" and rec["periodMonths"] == 12
+    assert "12" in r.summary and "角膜曲率计" in r.summary
+
+
+def test_instrument_info_multi_row_keeps_all(tool, monkeypatch):
+    monkeypatch.setenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", "ds-fee")
+    monkeypatch.setattr(
+        "domains.chatbi.controlled.execute_controlled",
+        lambda *a, **kw: ControlledResult(
+            ok=True, status="ok", data={"columns": ["name", "period_months"],
+                                        "rows": [["无线温度记录器", 3], ["无线温度记录器", 12]]},
+            source={}))
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "instrument_info",
+                                   "instrument": "无线温度记录器", "purpose": "",
+                                   "order_no": ""}))
+    r = _run(tool, ctx, "无线温度记录器多久校准一次")
+    assert len(r.artifact["instruments"]) == 2
+
+
+def test_instrument_info_not_found_notice(tool, monkeypatch):
+    monkeypatch.setenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", "ds-fee")
+    monkeypatch.setattr(
+        "domains.chatbi.controlled.execute_controlled",
+        lambda *a, **kw: ControlledResult(
+            ok=False, status="not_found",
+            error=type("E", (), {"message": "未找到"})(), source={}))
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "instrument_info",
+                                   "instrument": "光速引擎", "purpose": "",
+                                   "order_no": ""}))
+    r = _run(tool, ctx, "光速引擎的检测费")
+    assert r.artifact["type"] == "metrology_notice"
+    assert r.artifact["status"] == "not_found"
+
+
+def test_instrument_info_missing_name_asks(tool):
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "instrument_info",
+                                   "instrument": "", "purpose": "", "order_no": ""}))
+    r = _run(tool, ctx, "检测费多少钱")
+    assert r.ask is not None
+
+
+def test_instrument_info_unconfigured(tool, monkeypatch):
+    monkeypatch.delenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", raising=False)
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "instrument_info",
+                                   "instrument": "电子秤", "purpose": "", "order_no": ""}))
+    r = _run(tool, ctx, "电子秤检测费")
+    assert r.error_for_llm is not None
+    assert "METROLOGY_INSTRUMENT_DATASOURCE_ID" in r.error_for_llm
+
+
+def test_instrument_info_transport_failure_is_error(tool, monkeypatch):
+    monkeypatch.setenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", "ds-fee")
+    monkeypatch.setattr(
+        "domains.chatbi.controlled.execute_controlled",
+        lambda *a, **kw: ControlledResult(
+            ok=False, status="unavailable",
+            error=type("E", (), {"message": "timeout"})(), source={}))
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "instrument_info",
+                                   "instrument": "电子秤", "purpose": "", "order_no": ""}))
+    r = _run(tool, ctx, "电子秤检测费")
+    assert r.error_for_llm is not None
+    assert r.artifact is None
