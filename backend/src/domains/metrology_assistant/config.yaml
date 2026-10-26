@@ -1,0 +1,38 @@
+# 计量智能客服插件 manifest(南京院竞标 Demo 薄编排,临时件)
+# 演示范围: 强检判定问答(器具+用途→依据+三态结论) + 检测进度查询
+# (委托单号→MCP 业务平台);工程化(P1)后场景/槽位/规则移入 DB 配置。
+
+domain:
+  description: >
+    计量智能客服:器具是否强制检定的判定问答(按用途限定资料范围,
+    结论带依据引用)与委托单检测进度查询(经业务平台接口,含归属校验)
+  compact_focus: 已确认的器具/用途/委托单号、命中的资料库与业务结论
+
+runtime_contract:
+  required_tools: [metrology_assistant]
+
+artifact:
+  type: data
+  actions: [view_json]
+  display:
+    data_hidden:
+      - type
+    data_labels:
+      kb: 知识库
+      conclusion: 结论
+      chunkCount: 命中片段
+      orderNo: 委托单号
+      instrument: 器具
+      status: 状态
+      progress: 进度
+      currentStep: 当前环节
+      eta: 预计完成
+      reportNo: 报告号
+      finishedAt: 完成时间
+      validUntil: 有效期至
+      queriedAt: 查询时间
+    welcome_icon: search
+    welcome_examples:
+      - {title: 强检判定, desc: 器具+用途,是否强制检定, prompt: 压力表用于贸易结算,需要强制检定吗？, icon: search}
+      - {title: 进度查询, desc: 委托单检测进度, prompt: 帮我查一下委托单 BJ2026 的检测进度, icon: file-text}
+      - {title: 检定周期, desc: 非强检器具的检定周期, prompt: 我们内部校准用的压力表多久检定一次？, icon: apartment}
