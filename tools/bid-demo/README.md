@@ -8,7 +8,7 @@
 
 | 件 | 位置 | 说明 |
 |---|---|---|
-| 计量假 server | `../mcp-e2e/metrology_server.py` | 端口 9771,query_progress;BJ2026/BJ2027 正常、BJ8888 拒权、BJ9000 查无、BJ0000 超时 |
+| 计量假 server | `../mcp-e2e/metrology_server.py` | 端口 9771;query_progress:BJ2026/BJ2027 正常、BJ8888 拒权、BJ9000 查无、BJ0000 超时;query_instrument:24 条器具价目(检测费/强检目录/检校周期/技术规程,夹具 `../mcp-e2e/metrology_instruments.json`,名称模糊匹配+型号过滤) |
 | 客服插件 | `backend/src/domains/metrology_assistant/` | 薄编排临时件:槽位提取→追问→选库→KG 证据/ChatBI 受控执行→组结论 |
 | KG 证据服务 | `backend/src/domains/knowledge_graph/service.py` | 显式库+范围→hybrid_retrieve→仅返回依据 |
 | ChatBI 受控执行 | `backend/src/domains/chatbi/controlled.py` | 先判业务信封再归一(forbidden 不装成功行) |
@@ -38,7 +38,8 @@ PYTHONPATH=src .venv/bin/python -m uvicorn main:app --port 18080
 ## 演示口径(如实)
 
 - 资料/订单均为演示测试数据;业务平台是 mock MCP server,真实联调在
-  工程化(P1)后进行。
+  工程化(P1)后进行。价目夹具(metrology_instruments.json)源自院方
+  提供的价目表(AI.xlsx 转换清洗),测试用途,不外发当正式收费依据。
 - 拒权/超时是模拟样例,演示"如实区分"而不是"全部成功"。
 - 单号夹具:BJ2026(检测中)、BJ2027(已完成,换单演示)、BJ8888(他主体)、
   BJ9000(不存在)、BJ0000(触发超时,约 30s 后报错)。

@@ -8,10 +8,11 @@
   2. 后端 /api/health 正常(默认 18080)
   3. 前端 /ai-modeler/ 可访问(默认 13081)
   4. .env 已配 METROLOGY_PROGRESS_DATASOURCE_ID(读取顺序同 main.py:项目根优先)
-  5. MCP server code=metrology:connected+enabled,快照含 query_progress,
-     timeout 已调短(超时演示靠注册表 timeout,默认 300s 会拖满)
+  5. MCP server code=metrology:connected+enabled,快照含 query_progress/
+     query_instrument,timeout 已调短(超时演示靠注册表 timeout,默认 300s 会拖满)
   6. 知识库「强检目录」「检定规程」存在,且各有文档导入 succeeded
-  7. .env 指向的数据源存在且 active/dbType=mcp/host=metrology/限定 query_progress
+  7. .env 指向的进度数据源存在且 active/mcp/metrology/限定 query_progress;
+     价目数据源「计量器具价目」存在且限定 query_instrument
 
 用法: cd backend && .venv/bin/python ../tools/bid-demo/check_env.py \
           [--base http://localhost:18080] [--mock-port 9771] \
@@ -30,6 +31,8 @@ REGULATION_KB = "检定规程"
 DS_ENV_KEY = "METROLOGY_PROGRESS_DATASOURCE_ID"
 SERVER_CODE = "metrology"
 PROGRESS_TOOL = "query_progress"
+INSTRUMENT_TOOL = "query_instrument"
+FEE_DS_NAME = "计量器具价目"
 
 _failed = 0
 
@@ -114,7 +117,8 @@ def main() -> int:
                server.get("status") == "connected" and server.get("enabled"),
                f"status={server.get('status')} enabled={server.get('enabled')}")
             tools = [t.get("name") for t in (server.get("tools_snapshot") or [])]
-            ok(f"  快照含 {PROGRESS_TOOL}", PROGRESS_TOOL in tools, f"工具: {tools}")
+            for need in (PROGRESS_TOOL, INSTRUMENT_TOOL):
+                ok(f"  快照含 {need}", need in tools, f"工具: {tools}")
             ok("  timeout 已调短(≤10s,超时演示依赖)",
                float(server.get("timeout") or 0) <= 10.0,
                f"timeout={server.get('timeout')}s")
@@ -141,11 +145,11 @@ def main() -> int:
     except Exception as e:
         ok("知识库检查", False, str(e)[:120])
 
-    # 7. 数据源与 .env 一致
+    # 7. 数据源与 .env 一致 + 价目数据源
     try:
         dss = client.get(f"{args.base}/api/packs/chatbi/datasources", timeout=5).json()
-        ds = next((d for d in (dss.get("items") or dss)
-                   if d.get("id") == ds_id), None)
+        items = dss.get("items") or dss
+        ds = next((d for d in items if d.get("id") == ds_id), None)
         if ok("数据源存在(.env 指向)", ds is not None,
               ds.get("name") if ds else f"id={ds_id}"):
             ok("  active+MCP+metrology+限定工具",
@@ -154,6 +158,13 @@ def main() -> int:
                and ds.get("database") == PROGRESS_TOOL,
                f"{ds.get('dbType')}/{ds.get('host')}/{ds.get('database')}"
                f"/{'active' if ds.get('isActive') else 'inactive'}")
+        fee = next((d for d in items if d.get("name") == FEE_DS_NAME), None)
+        if ok(f"价目数据源「{FEE_DS_NAME}」存在", fee is not None,
+              hint="重跑 tools/bid-demo/setup_demo.py"):
+            ok("  限定 query_instrument",
+               fee.get("database") == INSTRUMENT_TOOL,
+               f"{fee.get('database')}/"
+               f"{'active' if fee.get('isActive') else 'inactive'}")
     except Exception as e:
         ok("数据源检查", False, str(e)[:120])
 

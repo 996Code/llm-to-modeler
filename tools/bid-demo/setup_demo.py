@@ -5,12 +5,14 @@
   1. 计量假 server 在跑:  cd backend && .venv/bin/python ../tools/mcp-e2e/metrology_server.py
   2. 后端 dev server 在跑(默认 http://localhost:18080, .env 已配 LLM/DATABASE_URL)
 
-做五件事:
-  1. 注册 MCP server code=metrology(已注册则复用,校验 query_progress 在快照)
+做六件事:
+  1. 注册 MCP server code=metrology(已注册则复用,校验 query_progress/
+     query_instrument 在快照)
   2. 建知识库「强检目录」「检定规程」(已存在则复用)
   3. 上传两份演示文档(同库同内容查重跳过;上传即导入)
   4. 等导入完成(importStatus=succeeded;导入走真实 LLM 抽取)
-  5. 建 ChatBI mcp 数据源「计量业务平台」(已存在则复用)
+  5. 建 ChatBI mcp 数据源「计量业务平台」(限定 query_progress,已存在复用)
+  6. 建 ChatBI mcp 数据源「计量器具价目」(限定 query_instrument,已存在复用)
 
 用法: cd backend && .venv/bin/python ../tools/bid-demo/setup_demo.py \
           [--base http://localhost:18080] [--server-url http://127.0.0.1:9771/mcp]
@@ -28,8 +30,12 @@ import requests
 HERE = Path(__file__).resolve().parent
 CATALOG_KB = "强检目录"
 REGULATION_KB = "检定规程"
-DS_NAME = "计量业务平台"
 SERVER_CODE = "metrology"
+# 数据源: (名称, 限定工具)——"场景→datasource+固定工具"绑定的最小形态
+DATASOURCES = [
+    ("计量业务平台", "query_progress"),
+    ("计量器具价目", "query_instrument"),
+]
 DOCS = [
     (CATALOG_KB, "强制检定工作计量器具实施目录(演示版).md",
      HERE / "mandatory-inspection-catalog-demo.md"),
@@ -77,8 +83,8 @@ def main() -> int:
         all_ok &= ok(f"MCP server {SERVER_CODE} 已注册(复用)",
                      server.get("status") == "connected")
     tools = [t.get("name") for t in (server.get("tools_snapshot") or [])]
-    all_ok &= ok("快照含 query_progress", "query_progress" in tools,
-                 f"工具: {tools}")
+    for need in ("query_progress", "query_instrument"):
+        all_ok &= ok(f"快照含 {need}", need in tools, f"工具: {tools}")
 
     # 2. 知识库
     kb_ids = {}
@@ -145,22 +151,27 @@ def main() -> int:
         all_ok &= ok(f"导入完成: {upload_name}", status == "succeeded", status)
 
     # 5. ChatBI mcp 数据源(host=server code, database=限定工具名)
+    ds_ids = {}
     dss = client.get(f"{args.base}/api/packs/chatbi/datasources").json()
-    ds = next((d for d in (dss.get("items") or dss) if d.get("name") == DS_NAME),
-              None)
-    if ds is None:
-        r = client.post(f"{args.base}/api/packs/chatbi/datasources", json={
-            "name": DS_NAME, "db_type": "mcp", "host": SERVER_CODE, "port": 0,
-            "database": "query_progress", "username": "", "password": ""})
-        ds = r.json()
-        all_ok &= ok("建数据源「计量业务平台」", r.status_code == 200 and ds.get("id"))
-    else:
-        ok(f"数据源「{DS_NAME}」已存在(复用)", True, ds.get("id"))
+    for name, tool in DATASOURCES:
+        ds = next((d for d in (dss.get("items") or dss) if d.get("name") == name),
+                  None)
+        if ds is None:
+            r = client.post(f"{args.base}/api/packs/chatbi/datasources", json={
+                "name": name, "db_type": "mcp", "host": SERVER_CODE, "port": 0,
+                "database": tool, "username": "", "password": ""})
+            ds = r.json()
+            all_ok &= ok(f"建数据源「{name}」",
+                         r.status_code == 200 and ds.get("id"))
+        else:
+            ok(f"数据源「{name}」已存在(复用)", True, ds["id"])
+        ds_ids[name] = (ds or {}).get("id")
 
     print()
-    if all_ok and ds and ds.get("id"):
+    if all_ok and ds_ids.get("计量业务平台"):
         print("Demo 环境就绪。下一步:")
-        print(f"  1. .env 加 METROLOGY_PROGRESS_DATASOURCE_ID={ds['id']}"
+        print(f"  1. .env 加 METROLOGY_PROGRESS_DATASOURCE_ID="
+              f"{ds_ids['计量业务平台']}"
               " 并重启后端(或启动前 export)")
         print("  2. 前端聊天页 URL 加 ?packs=metrology_assistant")
         return 0
