@@ -248,11 +248,10 @@ class MetrologyAssistantTool(Tool):
             return self._mandatory_check(ctx, mem, merged, stage)
         if scenario == "progress":
             return self._progress(ctx, mem, merged, stage)
-        return ToolResult(
-            reply=("当前演示版本覆盖两类问题:①器具是否强制检定"
-                   "(强检判定,按用途检索依据);②委托单检测进度查询。"
-                   "请换个问法,或联系业务窗口人工咨询。"),
-            summary="超出演示范围")
+        text = ("当前演示版本覆盖两类问题:①器具是否强制检定"
+                "(强检判定,按用途检索依据);②委托单检测进度查询。"
+                "请换个问法,或联系业务窗口人工咨询。")
+        return ToolResult(reply=text, summary=text)
 
     # ── 场景一:强检判定 ──
 
@@ -389,15 +388,15 @@ class MetrologyAssistantTool(Tool):
                               formatted=self.format_result(artifact))
 
         # 业务状态如实区分(13.1 故事 4/5:拒权/查无不是故障,故障不装查无)
+        # summary 放完整用户话术:general 回复链路前端展示的是 summary
+        # (conversation.ts general 分支),reply/summary 需同口径
         if result.status == "forbidden":
-            return ToolResult(
-                reply=f"委托单 {order_no} 不属于当前主体,无权查询。"
-                      "请核对单号,或联系业务窗口。",
-                summary=f"委托单 {order_no} 无权限(归属校验)")
+            text = (f"委托单 {order_no} 不属于当前主体,无权查询。"
+                    "请核对单号,或联系业务窗口。")
+            return ToolResult(reply=text, summary=text)
         if result.status == "not_found":
-            return ToolResult(
-                reply=f"未找到委托单 {order_no},请核对单号后重试。",
-                summary=f"委托单 {order_no} 不存在")
+            text = f"未找到委托单 {order_no},请核对单号后重试。"
+            return ToolResult(reply=text, summary=text)
         message = result.error.message if result.error else str(result.status)
         return ToolResult(
             error_for_llm=f"业务接口查询失败({result.status}): {message}。"

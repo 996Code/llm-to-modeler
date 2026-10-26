@@ -19,11 +19,13 @@
           [--frontend http://localhost:13081]
 """
 import argparse
+import os
 import socket
 import sys
 from pathlib import Path
 
 import requests
+from dotenv import dotenv_values
 
 HERE = Path(__file__).resolve().parent
 CATALOG_KB = "强检目录"
@@ -57,16 +59,17 @@ def _port_listening(port: int) -> bool:
 
 
 def _read_env_var(key: str) -> str:
-    """与 main.py 同序:项目根 .env 优先,backend/.env 兜底。"""
+    """与 main.py 的 load_dotenv 语义对齐(override=False):
+    真实环境变量优先于 .env;文件选择同序(项目根优先,backend/.env 兜底);
+    dotenv_values 处理重复键(后者生效)与行内注释。"""
+    val = os.environ.get(key)
+    if val:
+        return val.strip()
     root_env = HERE.parent.parent / ".env"
     env_path = root_env if root_env.exists() else HERE.parent.parent / "backend" / ".env"
     if not env_path.exists():
         return ""
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line.startswith(f"{key}="):
-            return line.split("=", 1)[1].strip().strip("'\"")
-    return ""
+    return str(dotenv_values(env_path).get(key) or "").strip()
 
 
 def main() -> int:
@@ -119,9 +122,15 @@ def main() -> int:
             tools = [t.get("name") for t in (server.get("tools_snapshot") or [])]
             for need in (PROGRESS_TOOL, INSTRUMENT_TOOL):
                 ok(f"  快照含 {need}", need in tools, f"工具: {tools}")
-            ok("  timeout 已调短(≤10s,超时演示依赖)",
-               float(server.get("timeout") or 0) <= 10.0,
-               f"timeout={server.get('timeout')}s")
+            t = float(server.get("timeout") or 0)
+            rt = float(server.get("read_timeout") or 0)
+            # BJ0000 超时演示靠 read_timeout 截断(默认 300s 会拖满 32s+);
+            # 两个都要 >0 且 ≤10(mcp_client 把 0 当默认 30 用)
+            ok("  timeout/read_timeout 已调短(1~10s,超时演示依赖)",
+               0 < t <= 10.0 and 0 < rt <= 10.0,
+               f"timeout={t:g}s read_timeout={rt:g}s",
+               hint='PUT /api/admin/mcp/servers/<该server的id> '
+                    '{"timeout": 10, "read_timeout": 10} 或重跑 setup_demo.py')
     except Exception as e:
         ok(f"MCP server {SERVER_CODE} 检查", False, str(e)[:120])
 
@@ -161,10 +170,12 @@ def main() -> int:
         fee = next((d for d in items if d.get("name") == FEE_DS_NAME), None)
         if ok(f"价目数据源「{FEE_DS_NAME}」存在", fee is not None,
               hint="重跑 tools/bid-demo/setup_demo.py"):
-            ok("  限定 query_instrument",
-               fee.get("database") == INSTRUMENT_TOOL,
-               f"{fee.get('database')}/"
-               f"{'active' if fee.get('isActive') else 'inactive'}")
+            ok("  active+MCP+metrology+限定工具",
+               fee.get("isActive") and fee.get("dbType") == "mcp"
+               and fee.get("host") == SERVER_CODE
+               and fee.get("database") == INSTRUMENT_TOOL,
+               f"{fee.get('dbType')}/{fee.get('host')}/{fee.get('database')}"
+               f"/{'active' if fee.get('isActive') else 'inactive'}")
     except Exception as e:
         ok("数据源检查", False, str(e)[:120])
 

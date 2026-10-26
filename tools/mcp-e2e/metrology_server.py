@@ -6,7 +6,7 @@
   BJ2027  正常(已完成, 报告号 RPT-2026-0888)——换单演示
   BJ8888  forbidden(单存在但不属于当前主体)——拒权演示
   BJ9000  not_found(单不存在)——查无演示
-  BJ0000  60s 睡眠 → 客户端 30s 超时——故障如实报错演示
+  BJ0000  60s 睡眠 → 注册表 read_timeout(10s)截断——故障如实报错演示
 
 工具 query_instrument(器具价目,业务信封返回):
   夹具 metrology_instruments.json(24 条,源自院方提供的价目表):

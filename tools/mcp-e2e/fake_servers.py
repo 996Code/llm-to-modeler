@@ -226,8 +226,10 @@ def build_metrology_server() -> Starlette:
             if qmodel:
                 hits = [r for r in hits if qmodel in (r.get("model") or "")]
             if not hits:
-                return _envelope({"status": "not_found",
-                                  "message": f"未找到器具「{qname}」的价目信息"})
+                # 型号过滤清空与名称未命中是两态,文案如实区分
+                msg = (f"未找到器具「{qname}」型号含「{qmodel}」的价目信息"
+                       if qmodel else f"未找到器具「{qname}」的价目信息")
+                return _envelope({"status": "not_found", "message": msg})
             return _envelope({"status": "ok", "data": hits})
         if name != "query_progress":
             raise ValueError(f"tool not found: {name}")

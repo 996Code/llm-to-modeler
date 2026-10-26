@@ -240,6 +240,8 @@ def test_progress_forbidden_reply(tool, monkeypatch):
     r = _run(tool, ctx, "查 BJ8888")
     assert "不属于当前主体" in r.reply
     assert "无权查询" in r.reply
+    # general 回复链路前端展示 summary(conversation.ts),reply/summary 必须同口径
+    assert r.summary == r.reply
 
 
 def test_progress_not_found_reply(tool, monkeypatch):
@@ -253,6 +255,8 @@ def test_progress_not_found_reply(tool, monkeypatch):
                                    "purpose": "", "order_no": "BJ9000"}))
     r = _run(tool, ctx, "BJ9000 什么进度了")
     assert "未找到委托单 BJ9000" in r.reply
+    assert "请核对单号后重试" in r.summary
+    assert r.summary == r.reply
 
 
 def test_progress_timeout_reports_error_not_empty(tool, monkeypatch):

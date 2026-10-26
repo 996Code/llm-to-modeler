@@ -68,20 +68,36 @@ def main() -> int:
     client = requests.Session()
     all_ok = True
 
-    # 1. MCP server 注册(复用 or 新建)
+    # 1. MCP server 注册(复用 or 新建;超时演示依赖 timeout/read_timeout=10s,
+    #    注册默认 30/300 会让 BJ0000 拖到 32s+——干净机器必配)
     servers = client.get(f"{args.base}/api/admin/mcp/servers").json()
     items = servers if isinstance(servers, list) else (servers.get("items") or [])
     server = next((s for s in items if s.get("code") == SERVER_CODE), None)
     if server is None:
         r = client.post(f"{args.base}/api/admin/mcp/servers", json={
             "name": "计量业务平台(演示)", "code": SERVER_CODE,
-            "url": args.server_url, "headers": {}})
+            "url": args.server_url, "headers": {},
+            "timeout": 10, "read_timeout": 10})
         server = r.json()
         all_ok &= ok(f"注册 MCP server {SERVER_CODE}",
                      r.status_code == 200 and server.get("status") == "connected")
     else:
         all_ok &= ok(f"MCP server {SERVER_CODE} 已注册(复用)",
                      server.get("status") == "connected")
+    if server and (float(server.get("timeout") or 0) > 10
+                   or float(server.get("read_timeout") or 0) > 10):
+        server = client.put(
+            f"{args.base}/api/admin/mcp/servers/{server['id']}",
+            json={"timeout": 10, "read_timeout": 10}).json()
+        all_ok &= ok("timeout/read_timeout 对齐 10s(超时演示依赖)",
+                     float(server.get("timeout") or 0) <= 10
+                     and float(server.get("read_timeout") or 0) <= 10,
+                     f"timeout={server.get('timeout')}s "
+                     f"read_timeout={server.get('read_timeout')}s")
+    else:
+        ok("timeout/read_timeout 已是 10s 级", True,
+           f"timeout={server.get('timeout')}s "
+           f"read_timeout={server.get('read_timeout')}s")
     tools = [t.get("name") for t in (server.get("tools_snapshot") or [])]
     for need in ("query_progress", "query_instrument"):
         all_ok &= ok(f"快照含 {need}", need in tools, f"工具: {tools}")
