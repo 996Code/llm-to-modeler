@@ -81,6 +81,7 @@ import CallLogsTab from './components/CallLogsTab.vue'
 import TasksTab from './components/TasksTab.vue'
 import PacksTab from './components/PacksTab.vue'
 import KbEmbedTest from '../embed-test/EmbedTestApp.vue'
+import MetrologyTestApp from '../embed-test/MetrologyTestApp.vue'
 import { hasPackPage, packPageRegistry } from './packPages/registry'
 import {
   apiErrorMessage, fetchDisplaySettings, fetchPacks, saveDisplaySettings,
@@ -119,6 +120,11 @@ async function loadPackPages() {
     const kg = data.items.find((p) => p.name === 'knowledge_graph')
     if (kg?.enabled && kg.dependency?.status === 'ok') {
       packPages.value.push({ pageKey: '__kb_embed_test', title: '知识库-测试', component: KbEmbedTest })
+    }
+    // 智能客服-测试:同款跟随 metrology_assistant 插件启停
+    const metro = data.items.find((p) => p.name === 'metrology_assistant')
+    if (metro?.enabled && metro.dependency?.status === 'ok') {
+      packPages.value.push({ pageKey: '__metrology_test', title: '智能客服-测试', component: MetrologyTestApp })
     }
     if (tab.value.startsWith('pack-page:') && !packPages.value.some((p) => `pack-page:${p.pageKey}` === tab.value)) {
       tab.value = 'packs'
@@ -331,5 +337,15 @@ onMounted(async () => {
   color: #c9cdd4;
   font-size: 12px;
   padding: 16px 0 8px;
+}
+@media (max-width: 700px) {
+  .shell-header { height: auto; padding: 10px 12px; gap: 10px; flex-wrap: wrap; }
+  .top-nav { order: 3; flex-basis: 100%; }
+  .shell-brand { min-width: 0; flex: 1; }
+  .shell-title { font-size: 12px; }
+  .shell-actions { gap: 8px; }
+  .shell-actions :deep(.ant-badge) { display: none; }
+  .shell-main { padding: 10px 8px; }
+  .page-card { padding: 8px; }
 }
 </style>

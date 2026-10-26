@@ -302,3 +302,17 @@ def test_other_scenario_honest_scope(tool):
                                    "purpose": "", "order_no": ""}))
     r = _run(tool, ctx, "今天天气怎么样")
     assert "两类问题" in r.reply
+
+
+def test_router_direct_no_llm_call():
+    """确定性路由:单主工具直达,零路由 LLM(设计 5.1 层2/§9)。"""
+    from domains.metrology_assistant import pack as mpack
+
+    class BoomLLM:
+        def chat_json(self, *a, **kw):
+            raise AssertionError("路由不应调用 LLM")
+
+    router = mpack.create_router(mpack.create_registry(None))
+    assert router.route("随便问点什么", None, history="",
+                        llm_client=BoomLLM(), conv_id="c1") \
+        == ("metrology_assistant", 1.0)

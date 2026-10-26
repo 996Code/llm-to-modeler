@@ -10,7 +10,12 @@
 
 信封约定:上游返回 dict 且含已知 status 值(ok/forbidden/not_found/
 invalid_input/unavailable/error)即业务信封;非信封按表格形状归一
-(columns/rows、list[dict]、裸 dict 单条记录)。
+(columns/rows、list[dict]、裸 dict 单条记录)。信封形状但状态枚举
+未知 = 契约错误(invalid_input),不交给模型补齐(设计 4.4/13.2)。
+
+Demo 薄版边界(P1 补,设计 17-C):身份注入(ctx 按约定覆盖身份字段)
+与原始 inputSchema 验参未做——当前仅参数形状校验 + MCP 层 required
+拦截,深度验参靠编排方确定性槽位解析暂代。
 """
 import time
 from dataclasses import dataclass, field
@@ -99,7 +104,14 @@ def execute_controlled(app_state, datasource_id: str, tool: str,
     if not isinstance(args, dict):
         return _err("invalid_input", "调用参数必须是 JSON 对象", started)
 
-    info = datasources.get_datasource(get_pack_db(), datasource_id, decrypt=True)
+    # 数据源加载失败(PG 不可达等)→ unavailable,不把内部异常原文
+    # (可能含连接串)发给用户(设计 7.5);MCP 传输只用 server code,
+    # 不需要解密密码(decrypt=False)
+    try:
+        info = datasources.get_datasource(get_pack_db(), datasource_id,
+                                          decrypt=False)
+    except Exception:
+        return _err("unavailable", "数据源服务暂不可用,请稍后重试", started)
     source = {"datasource": (info.name if info else datasource_id), "tool": tool}
     if info is None:
         return _err("invalid_input", f"数据源不存在: {datasource_id}", started, source)
@@ -153,6 +165,15 @@ def execute_controlled(app_state, datasource_id: str, tool: str,
         return _err(status, message, started, source)
 
     # ── 非信封:表格形状归一 ──
+    # 信封形状(带 message/data 载荷键)但状态枚举未知 = 契约错误,
+    # 不当成功记录、不交给模型补齐(设计 4.4 步 3/4,13.2 P1 必测项)。
+    # 纯记录恰含普通 status 字段(不带载荷键)不受影响。
+    if isinstance(payload, dict) and isinstance(payload.get("status"), str) \
+            and payload["status"] not in ENVELOPE_STATUS \
+            and ("data" in payload or "message" in payload):
+        return _err("invalid_input",
+                    f"上游返回未知业务状态 {payload['status']!r}(返回契约不符)",
+                    started, source)
     normalized = _normalize_tabular(payload)
     if normalized is None:
         return _err("invalid_input", "上游返回格式不符合声明的表格契约",

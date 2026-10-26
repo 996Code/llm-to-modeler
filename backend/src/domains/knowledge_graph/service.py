@@ -6,7 +6,8 @@
   2. 元数据白名单(空集=零结果,不回退全库);
   3. 返回依据(chunks/subgraph/诊断),不生成答案——业务结论归调用方。
 
-Demo 薄版:单库+单组元数据过滤;P1 扩展为 kb_filters 列表与文本预算。
+Demo 薄版:单库+单组元数据过滤;库级鉴权 Demo 免(anonymous 身份),
+按库授权与 kb_filters 列表/文本预算随 P1 补(设计 4.2/C2)。
 """
 from typing import Any, Dict, Optional
 

@@ -139,3 +139,14 @@ def test_datasource_missing(wiring, monkeypatch):
                         lambda db, ds_id, decrypt=False: None)
     r = controlled.execute_controlled(None, "nope", "query_progress", {})
     assert r.ok is False and r.status == "invalid_input"
+
+
+def test_unknown_envelope_status_is_contract_error(wiring):
+    """信封形状但未知状态枚举 → invalid_input 契约错误,不当成功记录
+    (设计 4.4 步3/4;13.2 P1 必测项)。"""
+    wiring.payload = {"status": "processing", "message": "处理中"}
+    r = controlled.execute_controlled(None, "ds-1", "query_progress",
+                                      {"order_no": "BJ2026"})
+    assert r.ok is False
+    assert r.status == "invalid_input"
+    assert "processing" in r.error.message
