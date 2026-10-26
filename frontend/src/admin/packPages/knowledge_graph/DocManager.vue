@@ -49,7 +49,7 @@
         <CloudUploadOutlined /> 导入全部未处理文档
       </a-button>
       <a-button size="small" @click="openChunkConfig"><SettingOutlined /> 分段配置</a-button>
-      <span class="dm-tip">导入 = 后台任务:解析(扫描件自动 OCR)→ 切块 → LLM 抽取实体关系 → Neo4j 图谱 + PG 向量;任务中心可查日志</span>
+      <span class="dm-tip">上传成功即自动发起导入(后台任务):解析(扫描件自动 OCR)→ 切块 → LLM 抽取实体关系 → Neo4j 图谱 + PG 向量;任务中心可查日志</span>
     </div>
 
     <!-- D33 分段重配(已有库):调参与预览同向导;保存为库级参数,重导入生效 -->
@@ -299,7 +299,7 @@ const docs = ref<KgDocument[]>([])
 const loading = ref(false)
 const uploading = ref(false)
 const importingAll = ref(false)
-const uploadResults = ref<{ filename: string; ok: boolean; reason?: string }[]>([])
+const uploadResults = ref<{ filename: string; ok: boolean; reason?: string; document?: KgDocument }[]>([])
 const taskByDoc = ref<Record<string, TaskItem>>({})
 const maxMb = 500
 // 切块参数展示值(与后端默认一致;实际以插件设置/库级参数为准)
@@ -439,8 +439,21 @@ async function onFilesPicked(info: UploadChangeParam) {
   try {
     await loadSafely(async () => {
       uploadResults.value = await uploadKgDocuments(props.kbId, files)
-      const okCount = uploadResults.value.filter((r) => r.ok).length
-      if (okCount) message.success(`${okCount} 个文件上传成功`)
+      const okItems = uploadResults.value.filter(
+        (r): r is { filename: string; ok: boolean; document: KgDocument } =>
+          Boolean(r.ok && r.document?.id))
+      if (okItems.length) {
+        // 上传即导入:成功落库的文档直接提交后台导入任务,不再要求
+        // 用户手动点"导入"(两步割裂,曾出现估时弹框吓退用户零任务)
+        const tasks = await Promise.all(
+          okItems.map((r) => importKgDocument(props.kbId, r.document.id, false)))
+        tasks.forEach((t) => {
+          const docId = (t.payload as { doc_id?: string } | null)?.doc_id
+          if (docId) taskByDoc.value[docId] = t
+        })
+        message.success(
+          `${okItems.length} 个文件已上传,导入任务已提交(后台处理,进度见任务中心)`)
+      }
     })
   } finally {
     uploading.value = false
@@ -460,7 +473,9 @@ function importEstimate(doc: KgDocument): { chunks: number; etaMin: number; etaT
   // sizeBytes 对中文 UTF-8 ≈ 3 字节/字;已切块的用真实块数
   const estChars = doc.chunkCount ? doc.chunkCount * 1200 : Math.ceil((doc.sizeBytes || 0) / 3)
   const chunks = Math.max(1, Math.ceil(estChars / 1200))
-  const etaMin = Math.round(chunks * 45 / 2) // 批内并发 2
+  // 45s/块 ÷ 批内并发 2 ÷ 60 → 分钟(此前漏除 60,把秒当分钟,87KB 文档
+  // 被估成"9.4 小时"吓得用户取消导入)
+  const etaMin = Math.round(chunks * 45 / 2 / 60)
   const etaText = etaMin >= 60 ? `${(etaMin / 60).toFixed(1)} 小时` : `${etaMax(etaMin, 1)} 分钟`
   return { chunks, etaMin, etaText }
 }
