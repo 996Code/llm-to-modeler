@@ -28,7 +28,6 @@ cd "$WORKDIR"
 IMAGE_NAME="${IMAGE_NAME:-llm-modeler}"
 GIT_TAG="$(git rev-parse --short HEAD)-$(date '+%m%d%H%M')"
 PLATFORM="linux/amd64"
-NODE_IMAGE="node:20-alpine"
 PY_IMAGE_AMD64="python:3.12-slim-amd64"   # 本地 amd64 别名(避免动 arm64 缓存)
 
 log()  { printf '\033[32m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
@@ -42,29 +41,10 @@ ensure_amd64() {
     && docker tag python:3.12-slim "$PY_IMAGE_AMD64"
 }
 ensure_amd64
-docker image inspect "$NODE_IMAGE" >/dev/null 2>&1 || docker pull "$NODE_IMAGE"
 
-# ── ① 前端(容器内 pnpm;产物平台无关) ────────────────────────────────
-log "① 构建前端(pnpm)..."
-mkdir -p frontend/dist
-find frontend/src \( -name '*.js' -o -name '*.js.map' \) -delete
-# ⚠ 宿主 frontend/node_modules 是 darwin 二进制,容器内复用会缺
-# linux 平台包(rollup-linux-*-musl MODULE_NOT_FOUND)——node_modules
-# 用命名卷影挂载,容器有自己的 linux 依赖,宿主开发环境不受影响。
-docker run --rm -v "$PWD/frontend:/app" \
-  -v llm_pnpm_store:/root/.pnpm-store \
-  -v llm_frontend_node_modules:/app/node_modules \
-  --memory 6g -w /app \
-  -e CI=true \
-  -e npm_config_registry=https://registry.npmmirror.com \
-  "$NODE_IMAGE" sh -c "
-    npm config set registry https://registry.npmmirror.com &&
-    npm install -g pnpm@9 &&
-    pnpm config set store-dir /root/.pnpm-store &&
-    pnpm config set registry https://registry.npmmirror.com &&
-    pnpm install --frozen-lockfile &&
-    pnpm run build
-  " 2>&1 | tail -3
+# ── ① 前端(宿主机直接构建:本机即 pnpm 开发环境,产物平台无关) ──────
+log "① 构建前端(宿主 pnpm build → dist)..."
+( cd frontend && pnpm run build ) 2>&1 | tail -3
 [ -f frontend/dist/index.html ] || { err "前端构建失败"; exit 1; }
 
 # ── ②a 后端依赖(amd64 容器 pip -t;缓存命中跳过) ─────────────────────
