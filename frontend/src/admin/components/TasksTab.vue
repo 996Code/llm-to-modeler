@@ -10,14 +10,19 @@
         <a-select-option value="cancelled">已取消</a-select-option>
         <a-select-option value="interrupted">已中断</a-select-option>
       </a-select>
-      <a-select v-if="types.length" v-model:value="filterType" style="width: 220px" @change="search">
-        <a-select-option value="">全部类型</a-select-option>
-        <a-select-option v-for="t in types" :key="t.type" :value="t.type">{{ typeLabel(t) }}</a-select-option>
+      <a-select v-model:value="filterPack" style="width: 180px" @change="search">
+        <a-select-option value="">全部插件</a-select-option>
+        <a-select-option value="system">系统</a-select-option>
+        <a-select-option v-for="p in packs" :key="p" :value="p">{{ p }}</a-select-option>
       </a-select>
+      <a-input-search
+        v-model:value="filterTitle" placeholder="标题搜索" style="width: 200px"
+        allow-clear @search="search" @clear="search" />
       <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
       <a-button @click="load"><template #icon><ReloadOutlined /></template>刷新</a-button>
       <a-switch v-model:checked="autoRefresh" checked-children="自动刷新" un-checked-children="暂停" size="small" />
-      <span class="tk-count">共 {{ total }} 条</span>
+      <span class="tk-count">共 {{ total }} 条{{ lastDays ? `（近 ${lastDays} 天）` : '' }}</span>
+      <a-switch v-model:checked="recentOnly" checked-children="近7天" un-checked-children="全部" size="small" @change="search" />
     </div>
 
     <a-table
@@ -30,8 +35,8 @@
       @change="onTableChange"
     >
       <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'taskType'">
-          <a-tag color="geekblue">{{ record.taskType }}</a-tag>
+        <template v-if="column.key === 'packName'">
+          <a-tag>{{ record.packName || '系统' }}</a-tag>
         </template>
         <template v-else-if="column.key === 'title'">
           <div class="tk-title" :title="record.title">{{ record.title || record.taskType }}</div>
@@ -183,8 +188,8 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, 
 import { message } from 'ant-design-vue'
 import {AppstoreOutlined, BarsOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, ReloadOutlined, SearchOutlined} from '@ant-design/icons-vue'
 import {
-  TaskItem, TaskLogItem, TaskStatus, TaskTypeItem,
-  cancelTask, fetchTask, fetchTaskLogs, fetchTasks, fetchTaskTypes, fmtTime, streamTaskEvents,
+  TaskItem, TaskLogItem, TaskStatus,
+  cancelTask, fetchTask, fetchTaskLogs, fetchPacks, fetchTasks, fmtTime, streamTaskEvents,
 } from '../api'
 import type { LoadSafely } from './loadSafely'
 
@@ -194,8 +199,13 @@ const rows = ref<TaskItem[]>([])
 const total = ref(0)
 const loading = ref(false)
 const filterStatus = ref('')
-const filterType = ref('')
-const types = ref<TaskTypeItem[]>([])
+const filterPack = ref('')
+const filterTitle = ref('')
+// 默认只看近 7 天(任务表会被导入批次刷大,全量计数对日常排查是噪音;
+// 关掉开关看全量历史)
+const recentOnly = ref(true)
+const lastDays = computed(() => (recentOnly.value ? 7 : 0))
+const packs = ref<string[]>([])
 const autoRefresh = ref(true)
 
 const page = reactive({ current: 1, pageSize: 20 })
@@ -210,7 +220,6 @@ const pagination = computed(() => ({
 
 const columns = [
   { title: '时间', key: 'createdAt', width: 165 },
-  { title: '类型', key: 'taskType', width: 190 },
   { title: '标题', key: 'title', ellipsis: true },
   { title: '插件', key: 'packName', width: 140 },
   { title: '状态', key: 'status', width: 90 },
@@ -232,10 +241,6 @@ function statusColor(s: TaskStatus): string {
 function statusLabel(s: TaskStatus): string {
   return _statusLabel[s] ?? String(s)
 }
-function typeLabel(t: TaskTypeItem): string {
-  return t.packName ? `${t.type} (${t.packName})` : t.type
-}
-
 // ── 列表 ──────────────────────────────────────────────
 
 let listSeq = 0   // 请求序号守卫:5s 自动刷新与手动翻页并发时,晚到的旧页响应不得覆盖新页
@@ -248,7 +253,9 @@ async function load() {
       limit: page.pageSize,
       offset: (page.current - 1) * page.pageSize,
       status: filterStatus.value || undefined,
-      type: filterType.value || undefined,
+      pack: filterPack.value || undefined,
+      title: filterTitle.value.trim() || undefined,
+      days: lastDays.value || undefined,
     })
     if (seq !== listSeq) return   // 已有更新请求在途/完成,丢弃本次过期结果
     rows.value = data.items
@@ -282,7 +289,10 @@ function onTableChange(pag: { current?: number; pageSize?: number }) {
 let timer: number | undefined
 onMounted(async () => {
   await loadSafely(async () => {
-    types.value = (await fetchTaskTypes()).items
+    // 插件筛选项:已启用插件(系统选项固定在首位,由模板写死)
+    packs.value = ((await fetchPacks()).items || [])
+      .filter((p: { enabled?: boolean }) => p.enabled)
+      .map((p: { name: string }) => p.name)
   })
   load()
   // 5s 自动刷新(开关可暂停;有运行中任务时体验良好,列表查询本身轻量)

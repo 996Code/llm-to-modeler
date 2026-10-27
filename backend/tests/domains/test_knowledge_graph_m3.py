@@ -357,6 +357,46 @@ def test_startup_auto_resumes_interrupted_imports(monkeypatch, env):
     assert "已重新入队续跑" in closed[0][1]["title"]
 
 
+def test_startup_recovery_heals_orphan_docs_after_crash(monkeypatch, env):
+    """孤儿文档自愈(2026-10-27 事故回归):旧实现先关旧行再重提,恢复
+    中途进程重启 → 730 行已标"已重新入队"却从未入队,cancelled 行无人
+    回头,文档成孤儿。新实现以文档表为真相源:uploaded 超宽限且无活
+    任务的文档一律重排——无论任务行处于什么状态。"""
+    kb = env.store.create_kb("孤儿自愈库")
+    # 事故现场复刻:文档 uploaded(宽限已过——手工改创建时间),任务行
+    # 早已被上一轮崩溃前标注为 cancelled(谎称已重新入队)
+    orphan = env.store.create_document(kb["id"], "orphan.md", "text/markdown",
+                                       3, "", "hash-orphan-crash")
+    from datetime import datetime, timedelta, timezone
+    old_ts = (datetime.now(timezone.utc)
+              - timedelta(hours=2)).isoformat()
+    with env.store._get_conn() as conn:
+        conn.execute(
+            "UPDATE kg_documents SET created_at = ? WHERE id = ?",
+            (old_ts, orphan["id"]))
+    # 宽限期内的新上传:有活任务在跑,不能被误重排(重复入队)
+    fresh = env.store.create_document(kb["id"], "fresh.md", "text/markdown",
+                                      3, "", "hash-fresh-active")
+
+    monkeypatch.setattr(tasks, "_app_state", env.app_state)
+    manager = SimpleNamespace(store=SimpleNamespace(
+        list_tasks=lambda status, task_type, limit:
+            ([], 0) if status == "interrupted"
+            else ([{"payload": {"doc_id": fresh["id"]}}], 1),  # fresh 有活任务
+        update_task=lambda task_id, **fields: True))
+    monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
+    submitted = []
+    monkeypatch.setattr(tasks, "submit_import",
+                        lambda state, kb_id, doc_id, force=False:
+                        submitted.append((kb_id, doc_id)) or {"id": "t-new"})
+
+    assert tasks._recover_stale_importing(manager) is True
+    # 孤儿被重排(任务行 cancelled 也不影响——文档表是真相源)
+    assert submitted == [(kb["id"], orphan["id"])]
+    # 宽限期内的新上传不误伤(活任务已覆盖)
+    assert fresh["id"] not in [d for _, d in submitted]
+
+
 def test_startup_recovery_skips_succeeded_interrupted(monkeypatch, env):
     """历史 interrupted 分流:文档已 succeeded → 不重放(防任务中心刷满幂等
     空转记录),关闭标注"已由成功导入取代";文档已删 → 关闭"文档已删除"。"""

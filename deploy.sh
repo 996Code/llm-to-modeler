@@ -92,6 +92,15 @@ command -v docker >/dev/null || { err "docker 未安装"; exit 1; }
 docker info >/dev/null 2>&1 || { err "docker daemon 未运行"; exit 1; }
 [ -f .env ] || { err "缺少 .env（后端 LLM/上游配置）"; exit 1; }
 
+# ── SKIP_BUILD 模式:镜像已在本地(由开发机 build 后 docker save|load 推入)──
+# 99.22 内存/磁盘受限场景:重构建(pnpm/pip/docker build)全在开发机做,
+# 本脚本只做 ④ compose 切换 + ⑤ 四层健康验证/回滚。
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+  : "${IMAGE_TAG:?SKIP_BUILD=1 需要 IMAGE_TAG(已 load 的镜像 tag)}"
+  GIT_TAG="$IMAGE_TAG"
+  log "SKIP_BUILD=1:跳过拉码/构建,直接切换到 ${IMAGE_NAME}:${GIT_TAG}"
+else
+
 # ── ① 拉码 ──────────────────────────────────────────────────────────────
 if [ "$SKIP_PULL" -eq 0 ] && [ -d .git ]; then
   log "① 拉取代码（${GIT_REMOTE}/${GIT_BRANCH}）..."
@@ -251,29 +260,98 @@ log "③ 打镜像 ${IMAGE_NAME}:${GIT_TAG}（纯 COPY,仓库根上下文）..."
 rm -rf backend/dist && cp -R frontend/dist backend/dist
 # Dockerfile 路径以仓库根为基准（COPY backend/... deploy/single/...）
 docker build -f deploy/single/Dockerfile -t "${IMAGE_NAME}:${GIT_TAG}" -t "${IMAGE_NAME}:latest" .
+fi
 
 # ── ④ compose 切换容器（记录旧 TAG 供回滚）────────────────────────────
-OLD_TAG=$(dc ps --format '{{.Image}}' 2>/dev/null | sed 's/.*://' || true)
+# 只取 app 服务的镜像 tag(栈内多服务,{{.Image}} 多行直接拼接会得到
+# 跨行垃圾 TAG——真实事故:回滚 dc up 报 invalid reference format)
+OLD_TAG=$(dc ps --format '{{.Service}} {{.Image}}' 2>/dev/null \
+  | awk '$1=="app"{print $2}' | sed 's/.*://' || true)
 log "④ compose 切换（旧：${OLD_TAG:-无} → 新：${GIT_TAG}）..."
 TAG="$GIT_TAG" HOST_PORT="$HOST_PORT" dc up -d
 
-# ── ⑤ 健康验证（失败自动回滚旧 TAG）────────────────────────────────────
-log "⑤ 健康探测（最长 ${HEALTH_TIMEOUT}s）..."
-elapsed=0
-until curl -sf --max-time 3 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/health" | grep -q '"status": *"healthy"'; do
-  sleep 2; elapsed=$((elapsed + 2))
-  if [ "$elapsed" -ge "$HEALTH_TIMEOUT" ]; then
-    err "健康探测超时。最近日志："
-    dc logs --tail 25 >&2 || true
-    if [ -n "$OLD_TAG" ]; then
-      err "回滚到 ${OLD_TAG}..."
-      TAG="$OLD_TAG" HOST_PORT="$HOST_PORT" dc up -d
-      log "已回滚"
+# ── ⑤ 健康验证（四层探测,失败自动回滚旧 TAG）─────────────────────────
+# 分层:基础设施(pg/neo4j,compose healthcheck 收敛) → mock 业务平台
+# (metrology-mcp,compose healthcheck 收敛) → 应用(app,两层:容器
+# healthcheck 收敛 + 宿主端口端到端 curl——后者穿过 nginx 反代,是
+# 用户真实路径)。探测用 docker inspect 而非重复实现检查逻辑:compose
+# 文件里的 healthcheck 是唯一事实源,这里只等它收敛。
+# 容器经 dc ps -q <service> 按 compose 服务名解析——各部署点的
+# container_name 可能不同(本地 llm-modeler-* / 99.22 llm-modeler-kg-*),
+# 服务名(postgres/neo4j/metrology-mcp/app)才是稳定标识。
+svc_container() {  # $1=compose 服务名 → 容器 ID(空=未起)
+  dc ps -q "$1" 2>/dev/null | head -1
+}
+wait_container_healthy() {  # $1=compose 服务名;超时用全局 HEALTH_TIMEOUT
+  local service="$1" cid waited=0 status
+  while :; do
+    cid=$(svc_container "$service")
+    if [ -n "$cid" ]; then
+      status=$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo missing)
+      [ "$status" = "healthy" ] && return 0
+    else
+      status=not_running
     fi
-    exit 1
+    sleep 3; waited=$((waited + 3))
+    if [ "$waited" -ge "$HEALTH_TIMEOUT" ]; then
+      err "服务 ${service} 健康探测超时（状态: ${status}）。最近日志："
+      dc logs --tail 15 "$service" >&2 || true
+      return 1
+    fi
+  done
+}
+
+rollback_to_old_tag() {  # 回滚 = 旧 TAG 重新 up(app 与 metrology-mcp 同镜像同切换)
+  if [ -n "${OLD_TAG:-}" ]; then
+    err "回滚到 ${OLD_TAG}..."
+    TAG="$OLD_TAG" HOST_PORT="$HOST_PORT" dc up -d
+    log "已回滚"
   fi
-done
-log "   健康就绪 ✓（${elapsed}s）"
+}
+
+log "⑤ 健康探测（pg → neo4j → metrology-mcp → app,各最长 ${HEALTH_TIMEOUT}s）..."
+DEPLOY_FAILED=0
+
+# ⑤a PostgreSQL(平台存储+pgvector):pg_isready 健康检查收敛
+log "   [1/4] postgres..."
+wait_container_healthy postgres || DEPLOY_FAILED=1
+
+# ⑤b Neo4j(KG 图谱):HTTP :7474 健康检查收敛
+if [ "$DEPLOY_FAILED" -eq 0 ]; then
+  log "   [2/4] neo4j..."
+  wait_container_healthy neo4j || DEPLOY_FAILED=1
+fi
+
+# ⑤c mock 计量业务平台(客服 Demo):/mcp 端点可达(200/406 均算活——
+#    streamable HTTP 对无协议头 GET 返回 406 是协商拒绝,证明服务在)
+if [ "$DEPLOY_FAILED" -eq 0 ]; then
+  log "   [3/4] metrology-mcp..."
+  wait_container_healthy metrology-mcp || DEPLOY_FAILED=1
+fi
+
+# ⑤d 应用:容器 healthcheck(容器内 curl)+ 宿主端口端到端(穿 nginx)
+if [ "$DEPLOY_FAILED" -eq 0 ]; then
+  log "   [4/4] app（容器健康 + 端到端 ${HOST_PORT}）..."
+  if wait_container_healthy app; then
+    elapsed=0
+    until curl -sf --max-time 3 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/health" | grep -q '"status": *"healthy"'; do
+      sleep 2; elapsed=$((elapsed + 2))
+      if [ "$elapsed" -ge "$HEALTH_TIMEOUT" ]; then
+        err "app 端到端探测超时。最近日志："
+        dc logs --tail 25 >&2 || true
+        DEPLOY_FAILED=1; break
+      fi
+    done
+  else
+    DEPLOY_FAILED=1
+  fi
+fi
+
+if [ "$DEPLOY_FAILED" -ne 0 ]; then
+  rollback_to_old_tag
+  exit 1
+fi
+log "   全栈健康就绪 ✓（postgres / neo4j / metrology-mcp / app）"
 
 log "发布完成："
 log "   前端入口  http://<主机>:${HOST_PORT}/ai-modeler/（网关同前缀反代）"

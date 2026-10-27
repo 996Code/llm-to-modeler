@@ -87,6 +87,7 @@ doc/private/
 
 # deploy.sh 预构建产物（容器内生成，勿提交）
 backend/.deps/
+backend/.deps.amd64/
 backend/debs/
 backend/dist/
 frontend/dist/

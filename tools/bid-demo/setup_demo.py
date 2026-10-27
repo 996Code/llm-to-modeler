@@ -170,7 +170,8 @@ def main() -> int:
     ds_ids = {}
     dss = client.get(f"{args.base}/api/packs/chatbi/datasources").json()
     for name, tool in DATASOURCES:
-        ds = next((d for d in (dss.get("items") or dss) if d.get("name") == name),
+        # 空列表是 falsy,不能 `or dss`(会迭代 dict 的字符串键炸 .get)
+        ds = next((d for d in (dss.get("items") or []) if d.get("name") == name),
                   None)
         if ds is None:
             r = client.post(f"{args.base}/api/packs/chatbi/datasources", json={

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""南京院客服 Demo 常驻 MCP server(固定端口 9771)——模拟"计量业务平台"。
+"""南京院客服 Demo 常驻 MCP server(默认 9771)——模拟"计量业务平台"。
 
 工具 query_progress(业务信封返回):
   BJ2026  正常(检测中, 3/5, 预计 2026-10-30)
@@ -14,9 +14,15 @@
   名称精确→包含匹配,可叠加型号过滤;"压力"命中多行、"无线温度记录器"
   同名两行(不同量程不同价)可做多行与过滤测试样例。
 
-用法: cd backend && .venv/bin/python ../tools/mcp-e2e/metrology_server.py
-停止: lsof -ti :9771 | xargs kill
+用法(本机开发): cd backend && .venv/bin/python ../tools/mcp-e2e/metrology_server.py
+容器部署(compose metrology-mcp 服务): 复用 app 镜像,command 覆盖为
+  python /app/mcp-e2e/metrology_server.py,经 METROLOGY_MCP_HOST=0.0.0.0
+  监听容器网络(同 compose 网络内 app 经服务名访问);
+  注册表 URL 相应配 http://metrology-mcp:9771/mcp。
+地址可配: METROLOGY_MCP_HOST(默认 127.0.0.1)/METROLOGY_MCP_PORT(默认 9771)。
+停止(本机): lsof -ti :9771 | xargs kill
 """
+import os
 import sys
 from pathlib import Path
 
@@ -27,9 +33,11 @@ import uvicorn
 from fake_servers import build_metrology_server
 
 if __name__ == "__main__":
-    print("计量业务平台 MCP server: http://127.0.0.1:9771/mcp "
+    host = os.getenv("METROLOGY_MCP_HOST", "127.0.0.1")
+    port = int(os.getenv("METROLOGY_MCP_PORT", "9771"))
+    print(f"计量业务平台 MCP server: http://{host}:{port}/mcp "
           "(工具: query_progress / query_instrument)")
     print("单号夹具: BJ2026/BJ2027 正常, BJ8888 拒权, BJ9000 不存在, BJ0000 超时")
     print("价目夹具: 24 条器具(检测费/强检目录/周期/规程), 名称模糊匹配")
-    uvicorn.run(build_metrology_server(), host="127.0.0.1", port=9771,
+    uvicorn.run(build_metrology_server(), host=host, port=port,
                 log_level="warning")

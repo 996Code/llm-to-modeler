@@ -72,11 +72,21 @@ _SYSTEM_TABLES = frozenset({
     "checkpoints", "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations",
 })
 
-# 内省时排除的 schema:PG 系统 schema + 平台插件 pack schema(一体机/测试环境下
-# 业务库与平台库同机时,插件元数据表不是业务表)。MySQL 侧另有系统库名单。
-_PG_EXCLUDED_SCHEMAS = ("pg_catalog", "information_schema", "chatbi", "knowledge_graph")
-_MYSQL_EXCLUDED_SCHEMAS = ("information_schema", "mysql", "performance_schema", "sys",
-                           "chatbi", "knowledge_graph")
+# 内省时排除的 schema:PG 系统 schema 基础名单 + 平台插件 pack schema。
+# 插件名单动态推导(见 _pack_schemas):2026-10-27 真实事故——metrology
+# 插件建了 schema 没人记得来这里加,扫描把插件表当业务表灌进语义层,
+# 挤掉真业务表的示例问题配额。硬编码逐插件维护必然复发,改为装配期
+# 从 pack 清单推导,新增插件零改动。MySQL 侧另有系统库名单。
+_PG_EXCLUDED_BASE = ("pg_catalog", "information_schema")
+
+
+def _pack_schemas() -> list[str]:
+    """装配期全部 pack 名(pack schema 与 pack 同名);失败退空清单。"""
+    try:
+        from domains import load_pack_configs  # 懒加载,装配后调用无循环
+        return list(load_pack_configs().keys())
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _now() -> str:
@@ -152,7 +162,8 @@ def _pg_introspect(conn) -> dict:
         "SELECT nspname FROM pg_catalog.pg_namespace "
         "WHERE nspname <> 'information_schema' "
         "AND substr(nspname, 1, 3) <> 'pg_' "
-        "AND nspname <> ALL(%s)", (list(_PG_EXCLUDED_SCHEMAS),)).fetchall()]
+        "AND nspname <> ALL(%s)",
+        (list(_PG_EXCLUDED_BASE) + _pack_schemas(),)).fetchall()]
     result = {"tables": {}, "primary_keys": set(), "foreign_keys": []}
     if not schemas:
         return result
