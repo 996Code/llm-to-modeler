@@ -198,6 +198,7 @@ def _dry_run_once(scenarios: dict, llm, body: "DryRunBody") -> dict:
     else:
         result["action"] = {
             "kind": "chatbi", "tool": action["tool"],
+            "datasource_id": str(action.get("datasource_id") or ""),
             "datasource_env": action["env"],
             "datasource_name": action.get("ds_name", ""),
             "params": {k: merged.get(v, "") for k, v in
@@ -228,15 +229,20 @@ async def dry_run(body: DryRunBody, request: Request) -> dict:
 
     if (body.execute and not out.get("missing")
             and out.get("action", {}).get("kind") == "chatbi"):
+        import asyncio
         import os
         from domains.chatbi.controlled import execute_controlled
-        ds_id = os.getenv(out["action"]["datasource_env"], "").strip()
+        # 显式 datasource_id 优先(能力导入后的绑定形态);env 是缺省
+        ds_id = (out["action"].get("datasource_id")
+                 or os.getenv(out["action"]["datasource_env"], "")).strip()
         if not ds_id:
             out["executed"] = {"ok": False, "error": "数据源未配置(env 缺失)"}
         else:
-            r = execute_controlled(request.app.state, ds_id,
-                                   out["action"]["tool"],
-                                   out["action"]["params"])
+            # execute_controlled → mcp_client 是同步实现(asyncio.run);
+            # 本路由在事件循环线程上,须抛到工作线程跑,否则嵌套 run 报错
+            r = await asyncio.to_thread(
+                execute_controlled, request.app.state, ds_id,
+                out["action"]["tool"], out["action"]["params"])
             out["executed"] = {
                 "ok": r.ok, "status": r.status,
                 "error": r.error.message if r.error else None,

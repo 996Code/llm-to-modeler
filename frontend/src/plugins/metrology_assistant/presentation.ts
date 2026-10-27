@@ -1,11 +1,14 @@
 export interface MetrologyView {
-  kind: 'knowledge' | 'progress' | 'notice' | 'instrument'
+  kind: 'knowledge' | 'progress' | 'notice' | 'instrument' | 'table'
   title: string
   answer?: string
   decision?: string
   status?: string
   fields?: { label: string; value: string }[]
   records?: { label: string; value: string }[][]
+  columns?: string[]
+  rows?: string[][]
+  rowTotal?: number
 }
 
 const INSTRUMENT_KEYS = ['name', 'model', 'measureRange', 'accuracy', 'feeYuan',
@@ -33,6 +36,14 @@ export function metrologyPresentation(msg: any, labels: Record<string, string> =
   }
   if (art.type === 'metrology_notice' && typeof art.message === 'string' && art.message.trim()) {
     return { kind: 'notice', title: art.title || '业务提示', status: art.status, answer: art.message }
+  }
+  // 通用表格卡(能力导入的缺省卡): columns/rows 直出,超 20 行折叠提示
+  if (art.type === 'metrology_table' && Array.isArray(art.columns) && art.columns.length) {
+    const rows = (Array.isArray(art.rows) ? art.rows : []).slice(0, 20)
+      .map((row: any[]) => (Array.isArray(row) ? row : [row]).map((cell: any) =>
+        cell === null || cell === undefined ? '' : String(cell)))
+    const total = typeof art.rowTotal === 'number' ? art.rowTotal : rows.length
+    return { kind: 'table', title: '查询结果', columns: art.columns.map(String), rows, rowTotal: total }
   }
   if (art.type === 'metrology_instrument' && Array.isArray(art.instruments)) {
     // 同名多行(不同量程不同价)逐条成卡,不丢行;无可用字段则回落文字摘要

@@ -236,6 +236,41 @@ def test_dry_run_draft_config_diff(client, monkeypatch):
     assert "请提供委托单号" in again.json()["will_ask"]["question"]
 
 
+def test_dry_run_execute_prefers_explicit_datasource_id(client, monkeypatch):
+    """真实执行:显式 datasource_id 优先于 env 缺省(能力导入的绑定形态)。
+
+    env 未配置时,显式绑定仍能执行——env 只是部署层缺省,不是唯一来源
+    (此前 dry-run 只读 env,导入场景勾真实执行必报"数据源未配置")。
+    """
+    from domains.chatbi import controlled as bi_controlled
+
+    calls = {}
+
+    def _fake_exec(app_state, ds_id, tool, params):
+        calls["ds_id"] = ds_id
+        return bi_controlled.ControlledResult(ok=True, status="ok",
+                                              data={"columns": [], "rows": []})
+
+    monkeypatch.setattr(bi_controlled, "execute_controlled", _fake_exec)
+    monkeypatch.delenv("METROLOGY_PROGRESS_DATASOURCE_ID", raising=False)
+
+    current = client.get("/api/packs/metrology_assistant/config").json()
+    content = current["content"]
+    content["scenarios"]["progress"]["action"]["datasource_id"] = "ds-explicit"
+    client.put("/api/packs/metrology_assistant/config", json={
+        "content": content, "expected_revision": current["revision"],
+        "comment": "显式绑定"})
+
+    resp = _dry(monkeypatch, client, {
+        "text": "查 BJ2026 进度", "execute": True,
+        "_extract": {"scenario": "progress", "instrument": "",
+                     "purpose": "", "order_no": "BJ2026"}})
+    body = resp.json()
+    assert body["action"]["datasource_id"] == "ds-explicit"
+    assert body["executed"]["ok"] is True
+    assert calls["ds_id"] == "ds-explicit"
+
+
 # ── MCP 能力导入(平台件+客服形状适配)──────────────────────
 
 def test_translator_and_diff():

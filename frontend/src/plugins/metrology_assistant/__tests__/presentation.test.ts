@@ -74,6 +74,31 @@ describe('metrology result presentation', () => {
     const view = metrologyPresentation({ role: 'assistant', dataResult: { type: 'metrology_notice', status: 'forbidden', title: '无权查询', message: '请核对单号' } })
     expect(view).toMatchObject({ kind: 'notice', status: 'forbidden', answer: '请核对单号' })
   })
+  it('renders generic table artifacts (capability-import default card) as a table view', () => {
+    const view = metrologyPresentation({ role: 'assistant', dataResult: {
+      type: 'metrology_table', pack: 'metrology_assistant', resultDisplay: 'card',
+      columns: ['order_no', 'slot'], rows: [['BJ2026', '09:30'], ['BJ2027', '14:00']],
+      rowTotal: 2, source: { datasource: '计量业务平台(通用)', tool: 'query_appointment' },
+    } })
+    expect(view?.kind).toBe('table')
+    expect(view?.columns).toEqual(['order_no', 'slot'])
+    expect(view?.rows).toEqual([['BJ2026', '09:30'], ['BJ2027', '14:00']])
+    expect(view?.rowTotal).toBe(2)
+    expect(JSON.stringify(view)).not.toContain('query_appointment')
+  })
+  it('caps generic table rows at 20 and reports the true total', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => [`BJ${i}`, '09:00'])
+    const view = metrologyPresentation({ role: 'assistant', dataResult: {
+      type: 'metrology_table', columns: ['order_no', 'slot'], rows, rowTotal: 30,
+    } })
+    expect(view?.rows).toHaveLength(20)
+    expect(view?.rowTotal).toBe(30)
+  })
+  it('falls back to text when a table artifact has no columns', () => {
+    expect(metrologyPresentation({ role: 'assistant', content: '保留摘要', dataResult: {
+      type: 'metrology_table', columns: [], rows: [],
+    } })).toBeNull()
+  })
 })
 
 describe('场景变体知识卡(批次3)', () => {

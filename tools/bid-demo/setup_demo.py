@@ -99,7 +99,8 @@ def main() -> int:
            f"timeout={server.get('timeout')}s "
            f"read_timeout={server.get('read_timeout')}s")
     tools = [t.get("name") for t in (server.get("tools_snapshot") or [])]
-    for need in ("query_progress", "query_instrument"):
+    for need in ("query_progress", "query_instrument",
+                 "query_appointment", "query_certificate", "query_report"):
         all_ok &= ok(f"快照含 {need}", need in tools, f"工具: {tools}")
 
     # 2. 知识库
