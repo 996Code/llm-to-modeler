@@ -263,15 +263,26 @@ TAG="$GIT_TAG" HOST_PORT="$HOST_PORT" dc up -d
 # healthcheck 收敛 + 宿主端口端到端 curl——后者穿过 nginx 反代,是
 # 用户真实路径)。探测用 docker inspect 而非重复实现检查逻辑:compose
 # 文件里的 healthcheck 是唯一事实源,这里只等它收敛。
-wait_container_healthy() {  # $1=容器名;超时用全局 HEALTH_TIMEOUT
-  local name="$1" waited=0 status
+# 容器经 dc ps -q <service> 按 compose 服务名解析——各部署点的
+# container_name 可能不同(本地 llm-modeler-* / 99.22 llm-modeler-kg-*),
+# 服务名(postgres/neo4j/metrology-mcp/app)才是稳定标识。
+svc_container() {  # $1=compose 服务名 → 容器 ID(空=未起)
+  dc ps -q "$1" 2>/dev/null | head -1
+}
+wait_container_healthy() {  # $1=compose 服务名;超时用全局 HEALTH_TIMEOUT
+  local service="$1" cid waited=0 status
   while :; do
-    status=$(docker inspect -f '{{.State.Health.Status}}' "$name" 2>/dev/null || echo missing)
-    [ "$status" = "healthy" ] && return 0
+    cid=$(svc_container "$service")
+    if [ -n "$cid" ]; then
+      status=$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo missing)
+      [ "$status" = "healthy" ] && return 0
+    else
+      status=not_running
+    fi
     sleep 3; waited=$((waited + 3))
     if [ "$waited" -ge "$HEALTH_TIMEOUT" ]; then
-      err "容器 ${name} 健康探测超时（状态: ${status}）。最近日志："
-      docker logs "$name" --tail 15 >&2 || true
+      err "服务 ${service} 健康探测超时（状态: ${status}）。最近日志："
+      dc logs --tail 15 "$service" >&2 || true
       return 1
     fi
   done
@@ -290,25 +301,25 @@ DEPLOY_FAILED=0
 
 # ⑤a PostgreSQL(平台存储+pgvector):pg_isready 健康检查收敛
 log "   [1/4] postgres..."
-wait_container_healthy llm-modeler-postgres || DEPLOY_FAILED=1
+wait_container_healthy postgres || DEPLOY_FAILED=1
 
 # ⑤b Neo4j(KG 图谱):HTTP :7474 健康检查收敛
 if [ "$DEPLOY_FAILED" -eq 0 ]; then
   log "   [2/4] neo4j..."
-  wait_container_healthy llm-modeler-neo4j || DEPLOY_FAILED=1
+  wait_container_healthy neo4j || DEPLOY_FAILED=1
 fi
 
 # ⑤c mock 计量业务平台(客服 Demo):/mcp 端点可达(200/406 均算活——
 #    streamable HTTP 对无协议头 GET 返回 406 是协商拒绝,证明服务在)
 if [ "$DEPLOY_FAILED" -eq 0 ]; then
   log "   [3/4] metrology-mcp..."
-  wait_container_healthy llm-modeler-metrology-mcp || DEPLOY_FAILED=1
+  wait_container_healthy metrology-mcp || DEPLOY_FAILED=1
 fi
 
 # ⑤d 应用:容器 healthcheck(容器内 curl)+ 宿主端口端到端(穿 nginx)
 if [ "$DEPLOY_FAILED" -eq 0 ]; then
   log "   [4/4] app（容器健康 + 端到端 ${HOST_PORT}）..."
-  if wait_container_healthy llm-modeler; then
+  if wait_container_healthy app; then
     elapsed=0
     until curl -sf --max-time 3 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/health" | grep -q '"status": *"healthy"'; do
       sleep 2; elapsed=$((elapsed + 2))
