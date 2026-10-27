@@ -40,7 +40,15 @@ def _conn():
     return get_pg_engine().connect()
 
 
+_table_ready = False
+
+
 def _ensure_table(conn) -> None:
+    """幂等建表(进程内只跑一次——DDL 每次执行会取锁,导入高并发下
+    成千上万次 LLM 调用各跑一遍 CREATE TABLE 会自相竞争)。"""
+    global _table_ready
+    if _table_ready:
+        return
     conn.execute("""
         CREATE TABLE IF NOT EXISTS llm_providers (
             scope TEXT PRIMARY KEY,
@@ -49,6 +57,7 @@ def _ensure_table(conn) -> None:
             updated_by TEXT,
             updated_at TEXT NOT NULL
         )""")
+    _table_ready = True
 
 
 def _now() -> str:
