@@ -125,9 +125,7 @@ def draft_scenario(server_code: str, tool: str) -> Dict[str, Any]:
     required: Dict[str, Any] = {
         "slot": main["name"],
         "header": header,
-        "question": (f"请提供{header}"
-                     + (f"(如 {main['description'][:20]})"
-                        if main["description"] else "")),
+        "question": _ask_question(header, main["description"]),
         "options": [],
         "extract_hint": (f"{main['name']}: "
                          + (main["description"] or "本轮明确提到的值")
@@ -271,6 +269,19 @@ def auto_scenarios(table: dict) -> Dict[str, dict]:
     return out
 
 
+def _ask_question(header: str, description: str) -> str:
+    """主槽位追问文案:请提供{header}(如 示例)。描述与 header 同头时
+    去重(映射后 header="器具类别"、description="器具类别(如 …"会叠词)。"""
+    example = (description or "").strip()
+    if header and example.startswith(header):
+        trimmed = example[len(header):].lstrip("（(，, ：: ")
+        if trimmed:
+            example = trimmed
+    if not example:
+        return f"请提供{header}"
+    return f"请提供{header}(如 {example[:20]})"
+
+
 def _synthesize_auto(server_code: str, decl: dict, slots: list) -> dict:
     """工具声明 → 场景行(与 draft_scenario 同构,但零人工介入)。
 
@@ -283,9 +294,7 @@ def _synthesize_auto(server_code: str, decl: dict, slots: list) -> dict:
     required: Dict[str, Any] = {
         "slot": main["name"],
         "header": header,
-        "question": (f"请提供{header}"
-                     + (f"(如 {main['description'][:20]})"
-                        if main["description"] else "")),
+        "question": _ask_question(header, main["description"]),
         "options": [],
         "extract_hint": (f"{main['name']}: "
                          + (main["description"] or "本轮明确提到的值")
