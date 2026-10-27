@@ -92,6 +92,15 @@ command -v docker >/dev/null || { err "docker 未安装"; exit 1; }
 docker info >/dev/null 2>&1 || { err "docker daemon 未运行"; exit 1; }
 [ -f .env ] || { err "缺少 .env（后端 LLM/上游配置）"; exit 1; }
 
+# ── SKIP_BUILD 模式:镜像已在本地(由开发机 build 后 docker save|load 推入)──
+# 99.22 内存/磁盘受限场景:重构建(pnpm/pip/docker build)全在开发机做,
+# 本脚本只做 ④ compose 切换 + ⑤ 四层健康验证/回滚。
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+  : "${IMAGE_TAG:?SKIP_BUILD=1 需要 IMAGE_TAG(已 load 的镜像 tag)}"
+  GIT_TAG="$IMAGE_TAG"
+  log "SKIP_BUILD=1:跳过拉码/构建,直接切换到 ${IMAGE_NAME}:${GIT_TAG}"
+else
+
 # ── ① 拉码 ──────────────────────────────────────────────────────────────
 if [ "$SKIP_PULL" -eq 0 ] && [ -d .git ]; then
   log "① 拉取代码（${GIT_REMOTE}/${GIT_BRANCH}）..."
@@ -251,6 +260,7 @@ log "③ 打镜像 ${IMAGE_NAME}:${GIT_TAG}（纯 COPY,仓库根上下文）..."
 rm -rf backend/dist && cp -R frontend/dist backend/dist
 # Dockerfile 路径以仓库根为基准（COPY backend/... deploy/single/...）
 docker build -f deploy/single/Dockerfile -t "${IMAGE_NAME}:${GIT_TAG}" -t "${IMAGE_NAME}:latest" .
+fi
 
 # ── ④ compose 切换容器（记录旧 TAG 供回滚）────────────────────────────
 # 只取 app 服务的镜像 tag(栈内多服务,{{.Image}} 多行直接拼接会得到
