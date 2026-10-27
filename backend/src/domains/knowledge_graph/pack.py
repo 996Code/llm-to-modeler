@@ -29,6 +29,17 @@ def create_registry(app_state=None) -> ToolRegistry:
     return registry
 
 
+class KnowledgeQuestionRouter:
+    """知识问答入口的意图解析由检索管线负责,不重复做工具分类。"""
+
+    def route(self, user_input, artifact, history="", llm_client=None, conv_id=None):
+        return "kb_search", 1.0
+
+
+def create_router(registry):
+    return KnowledgeQuestionRouter()
+
+
 def create_api_router():
     """插件自有 HTTP API(路由表定义见 domains/knowledge_graph/api.py)。"""
     from domains.knowledge_graph.api import router

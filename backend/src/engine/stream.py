@@ -228,7 +228,7 @@ async def stream_graph(
     # 用于在线程(同步)和异步之间传递结果:
     #   - last_result:   最后一次工具产出的结果数据
     #   - had_interrupt: 是否发生了 interrupt(决定是否落库"已答复"结果)
-    result_holder = {"last_result": None, "had_interrupt": False}
+    result_holder = {"last_result": None, "had_interrupt": False, "failed": False}
 
     async def execute():
         """后台任务:在线程池跑 graph,推 SSE,处理中断,落库。"""
@@ -370,13 +370,30 @@ async def stream_graph(
 
                 _hb_task = asyncio.run_coroutine_threadsafe(_heartbeat(), loop)
                 try:
+                    if answers or resume_pending:
+                        snapshot = graph.get_state(config)
+                        previous = snapshot.values if snapshot else {}
+                        requested = packs or previous.get("packs") or []
+                        if requested:
+                            original = previous.get("packs") or requested
+                            available = [p for p in requested
+                                         if p in original and p in _nodes._pack_routers]
+                            pending_tool = previous.get("tool_name", "")
+                            owner = _nodes._tool_owner(pending_tool) if pending_tool else ""
+                            selected = previous.get("selected_pack")
+                            if (not available
+                                    or (pending_tool and owner not in available)
+                                    or (selected and selected not in available)
+                                    or (pending_tool and selected and owner != selected)):
+                                raise ValueError("挂起任务不属于当前允许的插件范围,请重新提问")
                     for chunk in graph.stream(input_data, config):
                         _process_chunk(chunk)
                 except Exception as e:
+                    result_holder["failed"] = True
                     logger.exception(f"Graph execution failed: {e}")
                     # 异常也要回传给前端,不能吞掉
                     loop.call_soon_threadsafe(
-                        lambda: asyncio.ensure_future(sm.emit_error(str(e)))
+                        lambda message=str(e): asyncio.ensure_future(sm.emit_error(message))
                     )
                 finally:
                     # 先设停止标记再 cancel：协程若正卡在 sleep 会被直接取消，
@@ -392,6 +409,9 @@ async def stream_graph(
             # 关键:把同步函数丢进默认线程池执行,await 等它跑完
             # 类比 Java:CompletableFuture.supplyAsync(worker, executor).join()
             await loop.run_in_executor(None, _run_graph)
+            if result_holder["failed"]:
+                await sm.emit_done()
+                return
 
             # ── 检查是否有 interrupt 未处理 ──
             # graph.stream 遇到 interrupt 会停下(不抛异常),需要主动查状态

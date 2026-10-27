@@ -217,17 +217,29 @@ def classify_intent_node(state: GraphState) -> dict:
                 name, intent_confidence = route_result, None
             # 名字校验（LLM 可能编造不存在的工具）；"需要画布但画布空"的
             # 防线在 pack 路由（前置铁律）与工具自身 validate_input，引擎不再重复
-            if name and _registry.get(name):
+            if name and _registry.get(name) and _tool_in_pack(name, pack_name):
                 tool_name = name
         except Exception as e:
             # pack 路由失败：记 warning 不崩，走兜底（与旧意图 LLM 失败同策略）
             logger.warning(f"pack[{pack_name}] router failed: {e}")
 
-    # 兜底:没选到工具时用 fallback
-    # 类比 Java：try-catch 兜底默认值，保证流程不中断
+    # 显式插件范围内,兜底也必须属于已选插件。
     if not tool_name:
-        tool_name = _get_fallback_tool_name()  # 通常兜底到闲聊类工具
-        intent_reason = "fallback"  # 标记为兜底，便于日志区分
+        tool_name = _get_fallback_tool_name(
+            [pack_name] if state.get("packs") else None)
+        intent_reason = "fallback"
+        intent_confidence = None
+        if tool_name:
+            owner = _tool_owner(tool_name)
+            if owner:
+                pack_name = owner
+                bind_pack_name(pack_name)
+    if not tool_name:
+        message = ("指定的插件当前不可用,请检查插件是否已启用"
+                   if state.get("packs") and not pack_name
+                   else "当前插件范围内没有匹配的处理工具,请换个说法或切换插件")
+        sse_events.append({"type": "result", "data": {
+            "error": True, "message": message, "summary": message}})
 
     # 路由观测日志：一次 INFO 看全"画布上下文到没到 + 选了什么工具"。
     # 背景：曾出现"画布明明已有制品却走了新建工具生成全新 key"的事故，
@@ -247,9 +259,9 @@ def classify_intent_node(state: GraphState) -> dict:
     _append_trace(state, {
         "stage": "intent_route",
         "title": "意图路由",
-        "status": "ok",
-        "detail": {
-            "pack": pack_name,
+            "status": "ok" if tool_name else "error",
+            "detail": {
+                "pack": pack_name,
             "tool": tool_name,
             "reason": intent_reason,
             "fallback": intent_reason == "fallback",
@@ -267,9 +279,11 @@ def classify_intent_node(state: GraphState) -> dict:
             user_input, conversation_id=conversation_id)
 
     return {
-        "tool_name": tool_name,  # 选中的工具名（路由依据）
+        "tool_name": tool_name,
+        "selected_pack": pack_name,
         "intent_reason": intent_reason,  # 选择理由（日志用）
-        "intent_confidence": intent_confidence,  # 路由自评确信度(0-1/None)
+        "intent_confidence": intent_confidence,
+        "intent_confirmed": False,
         "conversation_title": conversation_title,  # 首轮标题(随 result 落库)
         # tool_state：透传给工具的内部状态，Graph 不读结构
         # 类比 Java：把 request-scoped 数据放进 ThreadLocal 传给下游 service
@@ -324,9 +338,11 @@ def check_confidence_node(state: GraphState) -> dict:
         "message": "对您的意图不是很有把握, 请确认...",
     }]
     user_input = state.get("user_input", "")
+    candidate = _registry.get(tool_name) if _registry else None
+    direction = getattr(candidate, "description", "") or tool_name
     interrupt_value = {
         "questions": [{
-            "question": f"我理解您想「{user_input}」, 但把握不大, 请确认意图方向:",
+            "question": f"您希望按「{direction}」处理这个问题吗？",
             "header": "意图确认",
             "options": [
                 {"label": "就按这个意思", "description": f"继续执行 {tool_name}"},
@@ -345,7 +361,7 @@ def check_confidence_node(state: GraphState) -> dict:
         choice = str(answer.get("意图确认") or answer.get("text") or "")
     elif isinstance(answer, str):
         choice = answer
-    if "换个说法" in choice:
+    if choice != "就按这个意思":
         # 用户要重述:清空 tool_name,让 classify 重新识别(需要 rerun 路由)
         return {
             "tool_name": "",
@@ -353,7 +369,7 @@ def check_confidence_node(state: GraphState) -> dict:
             "intent_confidence": None,
             "sse_events": sse_events,
         }
-    # 默认(就按这个意思 / 空 / 未知):保持原工具
+    # 用户明确确认:保持原工具,执行节点仍校验插件范围。
     return {
         "intent_confirmed": True,
         "sse_events": sse_events,
@@ -459,6 +475,21 @@ def execute_tool_node(state: GraphState) -> dict:
             ).model_dump(),
             "sse_events": [],
         }
+
+    declared = state.get("packs") or []
+    owner = _tool_owner(tool_name) if _pack_routers else ""
+    selected = state.get("selected_pack")
+    if ((declared and (owner not in declared or owner not in _pack_routers))
+            or (selected and owner != selected)):
+        return {
+            "tool_result": ToolResult(
+                error_for_llm="所选工具不属于当前允许的插件范围,请重新提问",
+                summary="插件范围校验失败").model_dump(),
+            "sse_events": [],
+        }
+    if owner:
+        from sdk.call_context import bind_pack_name
+        bind_pack_name(owner)
 
     # 构建 SSE emit 回调
     # 两条通道（互斥，避免重复推送）：
@@ -898,7 +929,7 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None,
         单域窗口（表单/列表/流程设计器各自只装一个 pack）与弹窗强契约
         场景（脚本弹框必须 100% 命中工具）由此 100% 命中。
       * 声明集多个 → LLM 仅在子集内路由（候选收窄，误路由面变小）。
-      * 未声明/声明集全未装配 → 维持全量 LLM 语义路由。
+      * 未声明 → 全量 LLM 语义路由；声明集全部不可用 → 返回空,不扩大范围。
       引擎零领域知识：不写死 pack 名、不嗅探消息内容。
     - 单 pack 部署：直通（零 LLM）。
 
@@ -908,6 +939,9 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None,
     # 声明集与已装配 pack 取交集（拼错/未启用的声明过滤掉；重复项去重
     # —— ['a','a'] 去重后是单成员，应直通而非误走 LLM 多候选路径）
     subset = [p for p in dict.fromkeys(packs or []) if p in _pack_routers]
+    if packs and not subset:
+        logger.warning("route: declared packs unavailable, refusing global routing")
+        return ""
     if subset:
         if len(subset) == 1:
             logger.info(f"route: packs subset (single) -> pack '{subset[0]}'")
@@ -948,8 +982,7 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None,
     fallback = next((n for n, d in pack_domains.items()
                      if d.get("fallback") and n in _pack_routers
                      and (not subset or n in subset)),
-                    next(iter(subset)) if subset
-                    else next(iter(_pack_routers)))
+                    "")
 
     # entries 拼接放表达式外：f-string 表达式内含反斜杠是 PEP 701（3.12+）特性，
     # 3.11 及以下会 SyntaxError 且报错位置隐蔽——保持 3.11 兼容
@@ -983,36 +1016,29 @@ def _route_pack(user_input: str, history: str = "", conv_id: str = None,
 
 
 
-def _get_fallback_tool_name() -> str:
-    """获取工具级兜底工具名（声明驱动）。
+def _tool_owner(name: str) -> str:
+    owner = _registry.pack_for(name)
+    if isinstance(owner, str) and owner:
+        return owner
+    # 兼容尚未登记归属的旧装配方,仅使用其明确的局部工具表。
+    for pack, router in _pack_routers.items():
+        registry = getattr(router, "_registry", None)
+        if registry is not None and any(t.name == name for t in registry.all()):
+            return pack
+    return ""
 
-    优先级：pack manifest 声明 fallback_tool → 声明 fallback=true 的
-    pack 里的第一个工具 → 全局第一个工具。
-    此前兜底工具名硬编码——多 pack 部署下任何 pack 的路由失败都会跨域
-    兜到固定 pack 的闲聊工具（审计①发现）。
-    """
-    # 优先级 1：pack 声明的 fallback_tool（manifest domain.fallback_tool）
-    for cfg in (_pack_configs or {}).values():
-        name = (cfg.get("domain") or {}).get("fallback_tool")
-        if name and _registry.get(name):
+
+def _tool_in_pack(name: str, pack: str) -> bool:
+    return bool(pack) and _tool_owner(name) == pack
+
+
+def _get_fallback_tool_name(packs: Optional[list] = None) -> str:
+    """只使用插件明确声明的兜底,不依赖工具注册顺序。"""
+    for pack, cfg in (_pack_configs or {}).items():
+        if pack not in _pack_routers or (packs is not None and pack not in packs):
+            continue
+        domain = cfg.get("domain") or {}
+        name = domain.get("fallback_tool")
+        if name and _registry.get(name) and _tool_in_pack(name, pack):
             return name
-    # 优先级 2：声明 fallback=true 的 pack 的第一个工具
-    # （_registry 是 DefaultPackRouter 构造注入的成员；裸 Protocol 实现的
-    # 自定义路由可能没有——防御性 getattr 跳过，不让兜底路径炸请求）
-    for pack_name, cfg in (_pack_configs or {}).items():
-        if not (cfg.get("domain") or {}).get("fallback"):
-            continue
-        router = _pack_routers.get(pack_name)
-        pack_registry = getattr(router, "_registry", None) if router else None
-        if pack_registry is None:
-            continue
-        pack_tool_names = {t.name for t in pack_registry.all()}
-        for tool in _registry.all():
-            if tool.name in pack_tool_names:
-                return tool.name
-    # 优先级 3：全局第一个工具（聊胜于无；工具自身 validate_input 会再挡）
-    tools = _registry.all()
-    if not tools:
-        logger.warning("兜底工具解析:注册表为空,本次请求走 end")
-        return ""
-    return tools[0].name
+    return ""

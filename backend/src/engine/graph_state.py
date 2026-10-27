@@ -121,6 +121,7 @@ class GraphState(TypedDict, total=False):
     # ── 意图识别(classify_intent 节点写) ──
     # 选中的工具名;条件边 route_by_tool 据此决定走 execute_tool 还是 END
     tool_name: str
+    selected_pack: str
     # LLM 给出的判断理由;落日志/审计用,帮助排查“为什么走错工具”
     intent_reason: str
     # pack 路由自评的确信度(0-1;None=未声明)。引擎只透传不判定,

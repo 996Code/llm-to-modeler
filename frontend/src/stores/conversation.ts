@@ -18,7 +18,8 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 // 仅导入类型（编译期检查，运行时不打包）
 import type { Conversation, FormConfig, Message } from '../types'
-// 引入 API 层全部导出（* as api → api.xxx 调用），类比 Java 的 @Autowired private ApiService api
+// 统一消费普通发送、追问恢复与继续生成返回的结果契约
+import { applyConversationResult } from './conversationResult'
 import * as api from '../services/api'
 // HostPort：嵌入模式读取宿主上下文（最新配置 + 服务地址表），注入每次 chat 请求
 import { getHostPort, CONTEXT_KEY_ARTIFACT, isLightEmbed } from '../composables/hostPort'
@@ -346,117 +347,27 @@ export const useConversationStore = defineStore('conversation', () => {
           // 接收后端发送的 pipeline 定义
           pipelineSteps.value = steps
         },
-        // 收到最终结果回调：这里按优先级分流（决定 UI 渲染哪种卡片）
-        onResult: (result) => {
-          // 懒创建采纳:首条消息不带 id 发出的会话在此拿到后端回传的新 id,
-          // 采纳后后续轮次/刷新/恢复都基于它(见 startNewConversation 注释)。
-          // 守卫前置(审查 null 边界):从会话 A 切到新会话后,A 的结果不得
-          // 把 A 的 id 采纳成新会话的 id
-          if (isStale()) return   // 已切走:结果已落库,不串扰新会话界面
-          if (result.conversationId && !currentConversation.value) {
-            currentConversation.value = { id: result.conversationId } as Conversation
-            loadConversations()  // 刷侧边栏,让新会话出现(不 await,不阻塞渲染)
-          }
-          // onResult 分流顺序(由后端 ToolResult 三态决定):
-          // 0. error — 执行失败/前置校验拦截(error_for_llm 通道),显示错误提示
-          // 1. general  — 闲聊(reply 通道),显示纯文本
-          // 2. needsClarification — 追问(ask 通道),显示问题卡片
-          // 3. artifactType='data' — 数据结果(非配置),显示 data-card
-          //    必须在 config 检查之前:artifactType 是后端设置的显式判别式
-          // 4. result.config — 配置结果(默认),显示 config-card + 应用按钮
-          if (result.error) {
-            // 工具执行失败/被前置校验拦截:显示诊断卡(P2#15——失败可定位
-            // 环节+可查链路+可重试,不再是一行裸文本),不静默——用户必须
-            // 知道这轮为什么没有产出
-            messages.value.push({
-              role: 'assistant',
-              content: `⚠️ ${result.summary || result.message || '执行失败'}`,
-              kind: 'error-diag',
-              errorCategory: classifyError(
-                `${result.error || ''} ${result.summary || ''} ${result.message || ''}`),
-            })
-          }
-          // 闲聊
-          else if (result.intent === 'general') {
-            // 闲聊：只塞一条纯文本助手消息
-            messages.value.push({
-              role: 'assistant',
-              content: result.summary,
-            })
-          }
-          // 追问
-          else if (result.needsClarification && result.questions) {
-            messages.value.push({
-              role: 'assistant',
-              content: result.summary,
-              needsClarification: true,
-              clarificationQuestions: result.questions,
-            })
-          }
-          // 数据结果 (artifact_type=data, 非配置类插件)
-          // 必须在 config 检查之前:artifactType 是后端设置的显式判别式,
-          // 而 result.config 只是隐式存在,优先级应低于显式判别式
-          else if (result.artifactType === 'data') {
-            // 从结果中抽取格式化字段（如有），放到 formattedData 供 UI 展示
-            const formattedData: Record<string, any> = {}
-            if (result.fieldCount !== undefined) formattedData.fieldCount = result.fieldCount
-            if (result.formName !== undefined) formattedData.formName = result.formName
-            if (result.title !== undefined) formattedData.title = result.title
-            // chatbi 图表卡(formatted 平铺: ECharts option + 命中指标 + 元信息)
-            if (result.chart !== undefined) formattedData.chart = result.chart
-            if (result.metricHits !== undefined) formattedData.metricHits = result.metricHits
-            if (result.rowcount !== undefined) formattedData.rowcount = result.rowcount
-            if (result.datasourceName !== undefined) formattedData.datasourceName = result.datasourceName
-            // 对话内明细(对标原系统 step_durations/self_heal_rounds)
-            if (result.totalDurationMs !== undefined) formattedData.totalDurationMs = result.totalDurationMs
-            if (result.healRounds !== undefined) formattedData.healRounds = result.healRounds
-            if (result.executeDurationMs !== undefined) formattedData.executeDurationMs = result.executeDurationMs
-            if (result.chartDegraded !== undefined) formattedData.chartDegraded = result.chartDegraded
-            if (result.persistWarnings?.length) formattedData.persistWarnings = result.persistWarnings
-            if (result.retrievalDegraded !== undefined) formattedData.retrievalDegraded = result.retrievalDegraded
-            if (result.truncated !== undefined) formattedData.truncated = result.truncated
-            if (result.tables !== undefined) formattedData.tables = result.tables
-            // M4: 保存查询定位(加到看板/导出 CSV 直接引用本条)
-            if (result.savedQueryId !== undefined) formattedData.savedQueryId = result.savedQueryId
-            if (result.sql !== undefined) formattedData.sql = result.sql
-            if (result.datasourceId !== undefined) formattedData.datasourceId = result.datasourceId
-            if (result.chartConfig !== undefined) formattedData.chartConfig = result.chartConfig
-            messages.value.push({
-              role: 'assistant',
-              content: result.summary,
-              dataResult: result.data || {},
-              // 仅在确实有格式化字段时才挂上，避免空对象
-              formattedData: Object.keys(formattedData).length > 0 ? formattedData : undefined,
-            })
-          }
-          // 配置生成/修改成功 (artifact_type=config, 默认)
-          else if (result.config) {
-            // 独立模式兜底：无宿主基线时，上一份产出就是 diff 基线
-            if (baselineConfig.value == null && currentConfig.value != null) {
-              baselineConfig.value = JSON.parse(JSON.stringify(currentConfig.value))
+          // 统一消费结果契约：普通发送与恢复路径共用同一套分流和字段映射
+          onResult: (result) => {
+            // 懒创建采纳:首条消息不带 id 发出的会话在此拿到后端回传的新 id,
+            // 采纳后后续轮次/刷新/恢复都基于它(见 startNewConversation 注释)。
+            if (isStale()) return
+            if (result.conversationId && !currentConversation.value) {
+              currentConversation.value = { id: result.conversationId } as Conversation
+              loadConversations()
             }
-            // 更新当前配置（侧边 JSON 面板会同步刷新）
-            currentConfig.value = result.config
-            // 提取 formatted 字段(由后端 tool.format_result() 钩子提供)
-            const formattedData: Record<string, any> = {}
-            if (result.fieldCount !== undefined) formattedData.fieldCount = result.fieldCount
-            if (result.formName !== undefined) formattedData.formName = result.formName
-            if (result.formCode !== undefined) formattedData.formCode = result.formCode
-            if (result.title !== undefined) formattedData.title = result.title
-            if (result.valid !== undefined) formattedData.valid = result.valid
-            messages.value.push({
-              role: 'assistant',
-              content: result.summary,
-              configSnapshot: result.config,
-              formattedData: Object.keys(formattedData).length > 0 ? formattedData : undefined,
-            })
-          }
-          // 收到结果即清空阶段提示
-          stageMessage.value = ''
-          currentStage.value = ''
-          // 异步刷新侧边会话列表（标题可能更新）
-          loadConversations()
-        },
+            const resultState = {
+              messages: messages.value,
+              currentConfig: currentConfig.value,
+              baselineConfig: baselineConfig.value,
+            }
+            applyConversationResult(result, resultState)
+            currentConfig.value = resultState.currentConfig
+            baselineConfig.value = resultState.baselineConfig
+            stageMessage.value = ''
+            currentStage.value = ''
+            loadConversations()
+          },
         // 出错回调：插入诊断卡消息(P2#15——失败可定位环节+可查链路+可重试,
         // 不再是一行裸文本;分类从错误文本关键词推断,兜底"未知环节")
         onError: (err) => {
@@ -516,11 +427,14 @@ export const useConversationStore = defineStore('conversation', () => {
         },
         onResult: (result) => {
           if (isStale()) return
-          messages.value.push({
-            role: 'assistant',
-            content: result.summary || (result as any).reply || '',
-            dataResult: (result as any).kg ? result : undefined,
-          })
+          const resultState = {
+            messages: messages.value,
+            currentConfig: currentConfig.value,
+            baselineConfig: baselineConfig.value,
+          }
+          applyConversationResult(result, resultState)
+          currentConfig.value = resultState.currentConfig
+          baselineConfig.value = resultState.baselineConfig
           stageMessage.value = ''
           currentStage.value = ''
           // 续答完成:清挂起标记(会话末尾不再悬空)

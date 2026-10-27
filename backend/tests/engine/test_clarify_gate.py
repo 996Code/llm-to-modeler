@@ -145,12 +145,15 @@ def graph_bundle(tmp_path, monkeypatch, _restore_nodes):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "ckpt-test.db"))
     tool = _ProbeTool()
     registry = ToolRegistry()
-    registry.register(tool)
+    registry.register(tool, pack_name="probe")
+    class ProbeRouter:
+        def route(self, *args, **kwargs):
+            return "probe_tool", 1.0
     llm = MagicMock()
     graph = build_graph(
         registry=registry, llm_client=llm, asset_client=MagicMock(),
         conversation=None, prompt_loader=None,
-        pack_routers={}, pack_configs={},
+        pack_routers={"probe": ProbeRouter()}, pack_configs={},
     )
     yield graph, tool, llm
     graph._conn.close()

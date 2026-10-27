@@ -81,6 +81,85 @@ def test_request_context_recorded_with_services():
     assert detail["resume_answers"] is False
 
 
+def test_resume_rechecks_current_request_scope():
+    from types import SimpleNamespace
+
+    class PendingGraph(_FakeGraph):
+        ran = False
+
+        def get_state(self, config):
+            return SimpleNamespace(values={"packs": ["alpha"], "tool_name": "beta_tool"}, tasks=[])
+
+        def stream(self, input_data, config):
+            self.ran = True
+            return iter([])
+
+    graph = PendingGraph()
+
+    async def consume():
+        return [event async for event in stream_graph(
+            graph=graph, user_input="确认", conversation_id="scope-resume",
+            user_id="qa", answers={"意图确认": "就按这个意思"}, packs=["alpha"],
+        )]
+
+    events = asyncio.run(consume())
+    assert graph.ran is False
+    assert any("error" in event for event in events)
+
+
+def test_unselected_route_checkpoint_can_continue(monkeypatch):
+    from types import SimpleNamespace
+    from engine import nodes
+    monkeypatch.setattr(nodes, "_pack_routers", {"alpha": object()})
+    from sdk.registry import ToolRegistry
+    monkeypatch.setattr(nodes, "_registry", ToolRegistry())
+
+    class RoutingGraph(_FakeGraph):
+        ran = False
+
+        def get_state(self, config):
+            return SimpleNamespace(values={"packs": ["alpha"], "tool_name": ""},
+                                   next=("classify_intent",), tasks=[])
+
+        def stream(self, input_data, config):
+            self.ran = True
+            return iter([])
+
+    graph = RoutingGraph()
+
+    async def consume():
+        return [event async for event in stream_graph(
+            graph=graph, user_input="", conversation_id="route-pending",
+            user_id="qa", resume_pending=True, packs=["alpha"],
+        )]
+
+    asyncio.run(consume())
+    assert graph.ran is True
+
+
+def test_scope_rejection_does_not_reemit_old_questions(monkeypatch):
+    from engine import nodes
+    from sdk.registry import ToolRegistry
+    monkeypatch.setattr(nodes, "_registry", ToolRegistry())
+    from types import SimpleNamespace
+    old = SimpleNamespace(interrupts=[SimpleNamespace(value={
+        "questions": [{"question": "old question"}], "summary": "old"})])
+
+    class OldGraph(_FakeGraph):
+        def get_state(self, config):
+            return SimpleNamespace(values={"packs": ["alpha"], "tool_name": "alpha_tool"}, tasks=[old])
+
+    async def consume():
+        return [event async for event in stream_graph(
+            graph=OldGraph(), user_input="确认", conversation_id="old-scope",
+            user_id="qa", answers={"text": "yes"}, packs=["missing"],
+        )]
+
+    events = asyncio.run(consume())
+    assert any("error" in event for event in events)
+    assert not any("needsClarification" in event for event in events)
+
+
 def test_request_context_standalone_empty_services():
     """独立形态:services 为空也照样打点——空表正是「无上游地址可用」的证据。"""
     store = _drive(services=None, forward_headers=None, context_artifact=None)

@@ -40,6 +40,10 @@ class TestFallbackPriority:
         registry = MagicMock()
         registry.all.return_value = tools
         registry.get = lambda n: next((t for t in tools if t.name == n), None)
+        registry.pack_for = lambda n: next((p for p, cfg in configs.items()
+                                          if cfg.get("domain", {}).get("fallback_tool") == n), None)
+        if routers is None:
+            routers = {p: MagicMock() for p in configs}
         nodes.configure(registry=registry, llm_client=None, asset_client=None,
                         conversation=None, prompt_loader=None,
                         pack_routers=routers or {}, pack_configs=configs)
@@ -57,7 +61,7 @@ class TestFallbackPriority:
         self._configure(nodes, [_stub_tool("real_a")],
                         {"p1": {"domain": {"fallback": True, "fallback_tool": "ghost"}}})
         # 声明的 ghost 不存在 → 落到优先级 3（全局首个）
-        assert nodes._get_fallback_tool_name() == "real_a"
+        assert nodes._get_fallback_tool_name() == ""
 
     def test_priority2_fallback_pack_first_tool(self, _setup_nodes):
         """未声明 fallback_tool 但声明 fallback=true → 该 pack 首个工具。"""
@@ -70,13 +74,13 @@ class TestFallbackPriority:
             {"pA": {"domain": {}}, "pB": {"domain": {"fallback": True}}},
             routers={"pB": router},
         )
-        assert nodes._get_fallback_tool_name() == "pack_b_tool"
+        assert nodes._get_fallback_tool_name() == ""
 
     def test_priority3_global_first(self, _setup_nodes):
         """无任何声明 → 全局第一个工具。"""
         nodes = _setup_nodes
         self._configure(nodes, [_stub_tool("first"), _stub_tool("second")], {})
-        assert nodes._get_fallback_tool_name() == "first"
+        assert nodes._get_fallback_tool_name() == ""
 
 
 class TestLeaveConfirmGate:

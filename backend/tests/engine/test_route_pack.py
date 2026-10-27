@@ -72,14 +72,13 @@ class TestPacksSubsetRouting:
         assert pack == "njmind_form"  # 过滤后只剩 1 个 → 直通
         llm.chat_json.assert_not_called()
 
-    def test_subset_all_unassembled_falls_back_to_full(self):
-        """声明集全部未装配 → 等于无有效声明，回全量 LLM。"""
+    def test_subset_all_unassembled_is_unavailable(self):
+        """显式范围不可用时不放宽到全局。"""
         llm = MagicMock()
-        llm.chat_json.return_value = {"pack": "njmind_form"}
         _configure_multi_pack(llm)
         pack = nodes._route_pack("x", packs=["ghost_a", "ghost_b"])
-        assert pack == "njmind_form"
-        llm.chat_json.assert_called_once()
+        assert pack == ""
+        llm.chat_json.assert_not_called()
 
     def test_classify_node_passes_packs_from_state(self):
         """classify_intent_node 从 state 读 packs 声明传给 _route_pack。"""
@@ -91,6 +90,8 @@ class TestPacksSubsetRouting:
             "compressed_history": "",
             "conversation_id": "",
         }
+        nodes._pack_routers["njmind_form"].route.return_value = ("chosen", 1.0)
+        nodes._registry.pack_for.return_value = "njmind_form"
         result = nodes.classify_intent_node(state)
         assert "njmind_form" in result.get("intent_reason", "")
         llm.chat_json.assert_not_called()
@@ -104,7 +105,7 @@ class TestAuditMinorHardening:
         _configure_multi_pack(llm)
         pack = nodes._route_pack("加一列显示金额", packs=["njmind_list", "njmind_bpm"])
         # njmind_form 越界被拒 → fallback：子集内无 fallback 声明 → 取子集第一个
-        assert pack == "njmind_list"
+        assert pack == ""
 
     def test_llm_hallucinated_name_falls_to_subset_fallback(self):
         """LLM 编造不存在的 pack 名 → 拒绝，落子集内 fallback。"""
@@ -112,7 +113,7 @@ class TestAuditMinorHardening:
         llm.chat_json.return_value = {"pack": "made_up_pack"}
         _configure_multi_pack(llm)
         pack = nodes._route_pack("x", packs=["njmind_list", "njmind_bpm"])
-        assert pack == "njmind_list"
+        assert pack == ""
 
     def test_duplicate_packs_deduped_to_single_direct(self):
         """声明集含重复项（如 ['a','a']）→ 去重后单成员直通，零 LLM。"""

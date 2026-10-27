@@ -50,8 +50,16 @@ class ToolRegistry:
         # 等价于 Java 的 Map<String, Tool>。实例属性在 __init__ 里初始化,
         # 相当于 Java 字段在构造器中赋值。
         self._tools: dict[str, Tool] = {}
+        self._packs: dict[str, str] = {}
 
-    def register(self, tool: Tool) -> None:
+    def bind_pack(self, pack_name: str) -> None:
+        """插件装配时为局部注册表登记归属。"""
+        self._packs.update({name: pack_name for name in self._tools})
+
+    def pack_for(self, name: str) -> Optional[str]:
+        return self._packs.get(name)
+
+    def register(self, tool: Tool, pack_name: Optional[str] = None) -> None:
         """注册一个工具到注册表。
 
         Args:
@@ -69,6 +77,8 @@ class ToolRegistry:
                 f"重复注册工具名 {name!r}; pack 工具名必须全局唯一")
         # 以工具的 name 属性作为唯一 key,类似 Java 的 map.put(tool.getName(), tool)
         self._tools[name] = tool
+        if pack_name:
+            self._packs[name] = pack_name
 
     def all(self) -> list[Tool]:
         """返回所有已注册工具的列表(副本)。

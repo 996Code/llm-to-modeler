@@ -169,7 +169,19 @@ START → classify_intent (LLM 选工具, 从 registry 动态生成 prompt)
   └─ route_after_result ──→ rerun (追问恢复后重跑) / done (结束)
 ```
 
-### 2.2 追问恢复机制 (LangGraph 原生 interrupt)
+### 2.2 路由范围与意图确认
+
+- 请求声明 `packs` 时,插件选择、工具选择、兜底与最终执行均受该范围约束；
+  声明的插件全部不可用时返回错误,不扩大到全局插件。
+- 工具归属在插件装配时登记。插件路由只能返回本插件工具；执行与断点恢复
+  再次校验归属,不以模型输出或用户确认替代范围校验。
+- 工具兜底只采用插件明确声明的 `domain.fallback_tool`,不取全局首个工具。
+  无匹配直接说明当前范围无法处理；合法候选低置信度才请求确认,展示处理方向。
+  确认仅对当前轮有效,且只接受明确同意。
+- 知识库插件直接进入 `kb_search`,问题理解由知识检索管线负责；向量检索不变。
+- 首次回答、追问恢复和继续生成统一消费结果信封,数据制品与引用卡一致保留。
+
+### 2.3 追问恢复机制 (LangGraph 原生 interrupt)
 
 ```
 用户: "帮我创建一个请假申请表"
@@ -207,7 +219,7 @@ execute_tool → CreateFormTool.execute()
            └─ ToolResult(artifact=form_config) → handle_result → END
 ```
 
-### 2.3 GraphState 定义
+### 2.4 GraphState 定义
 
 ```python
 class GraphState(TypedDict, total=False):

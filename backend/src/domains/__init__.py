@@ -194,6 +194,7 @@ def load_pack(pack_name: str, app_state: Any = None) -> Tuple[ToolRegistry, Opti
 
         # 按签名兼容单参/无参工厂；工厂内部异常不应被误判为签名问题。
         registry = _call_factory(module.create_registry, app_state)
+        registry.bind_pack(pack_name)
 
         # 调用 create_prompt_loader(如果存在)— 返回 None 表示不需要自定义 prompt。
         # 这是可选契约,所以先 hasattr 判定再调用,缺失时给 None 默认值。
@@ -336,7 +337,7 @@ def load_all_packs(
                 pack_seen_names.add(tool_name)
                 pack_tool_names.append(tool_name)
             for tool in pack_tool_instances:
-                merged_registry.register(tool)
+                merged_registry.register(tool, pack_name=pack_name)
                 logger.debug(f"注册工具: {tool.name} (来自 {pack_name})")
             pack_routers[pack_name] = router
             pack_tools[pack_name] = pack_tool_names
