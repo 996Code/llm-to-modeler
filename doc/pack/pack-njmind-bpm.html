@@ -5596,6 +5596,19 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <li>&bull; enhance_asset_client 钩子注入 pack 专有 transport，main.py 零改动（pack.py:35-43）</li>
         </ul>
       </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>流程链逻辑要点</h3>
+        </div>
+        <ul>
+          <li>&bull; 七步管线走查:LLM 解析→字段/网关补全→候选模板筛选→结构化组装→单一重造回显(改即重造,不做增量 patch——避免半新半旧)</li>
+          <li>&bull; 结构化确认门:组装结果以结构化 JSON 呈现给用户确认,确认前不落 Flowable;取消即全弃</li>
+          <li>&bull; Flowable 权威校验:生成结果交 Flowable 引擎校验(唯一权威),校验失败带定位回炉重造而非硬塞</li>
+          <li>&bull; 上下文注入:宿主表单/已有流程经 host_ctx 带入,新配置在其基础上演进</li>
+        </ul>
+      </div>
     </div>
 
   </div>

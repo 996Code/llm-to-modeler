@@ -5571,6 +5571,18 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <li>&bull; AssetClient 未实现时降级本地编号（演示桩场景）</li>
         </ul>
       </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot amber"></div>
+          <h3>范例逻辑要点</h3>
+        </div>
+        <ul>
+          <li>&bull; 四步管线:LLM 解析请假字段→上游 HR 系统校验(假期余额/日期合法性)→用户确认门槛→提交</li>
+          <li>&bull; fail-closed 提交:上游校验不过或用户未确认,绝不发提交请求——宁可多问一轮不代用户决定</li>
+          <li>&bull; 本插件是插件开发教学范例(见 插件开发与嵌入指南.md),最小但齐全:manifest/装配/工具/确认门</li>
+        </ul>
+      </div>
     </div>
 
   </div>

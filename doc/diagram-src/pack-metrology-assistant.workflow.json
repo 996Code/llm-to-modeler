@@ -103,7 +103,7 @@
       "label": "LLM 槽位提取",
       "sublabel": "chat_json 单次",
       "tag": "LLM",
-      "width": 120
+      "width": 110
     },
     {
       "id": "scenario",
@@ -112,7 +112,7 @@
       "type": "backend",
       "label": "SCENARIOS 场景表",
       "sublabel": "唯一事实源",
-      "width": 130
+      "width": 125
     },
     {
       "id": "clarify",
@@ -121,7 +121,7 @@
       "type": "backend",
       "label": "缺槽追问",
       "sublabel": "AskSpec 追问",
-      "width": 130
+      "width": 125
     },
     {
       "id": "dispatch",
@@ -130,7 +130,7 @@
       "type": "backend",
       "label": "通用执行器",
       "sublabel": "按 action.kind 分发",
-      "width": 130
+      "width": 125
     },
     {
       "id": "kg",
@@ -139,7 +139,7 @@
       "type": "database",
       "label": "knowledge_graph",
       "sublabel": "retrieve_evidence",
-      "width": 140
+      "width": 130
     },
     {
       "id": "chatbi",
@@ -148,7 +148,7 @@
       "type": "database",
       "label": "chatbi 受控执行",
       "sublabel": "execute_controlled",
-      "width": 140
+      "width": 130
     },
     {
       "id": "cards",
@@ -157,7 +157,7 @@
       "type": "frontend",
       "label": "结构化结果卡",
       "sublabel": "artifact.pack+card",
-      "width": 150
+      "width": 140
     },
     {
       "id": "conclusion",
@@ -167,7 +167,7 @@
       "label": "三态结论",
       "sublabel": "decision 枚举校验",
       "tag": "LLM",
-      "width": 130
+      "width": 120
     },
     {
       "id": "manifest",
@@ -175,8 +175,8 @@
       "col": 0,
       "type": "security",
       "label": "manifest 依赖声明",
-      "sublabel": "dependencies.pack",
-      "width": 130
+      "sublabel": "依赖声明",
+      "width": 110
     },
     {
       "id": "depcheck",
@@ -185,7 +185,7 @@
       "type": "security",
       "label": "依赖检查",
       "sublabel": "装配闸门+停用守卫",
-      "width": 140
+      "width": 130
     },
     {
       "id": "envelope",
@@ -194,7 +194,25 @@
       "type": "security",
       "label": "信封分态",
       "sublabel": "查无/拒权=卡·故障=error",
-      "width": 140
+      "width": 130
+    },
+    {
+      "id": "cfgdb",
+      "lane": "platform",
+      "col": 2,
+      "type": "database",
+      "label": "assistant_config",
+      "sublabel": "场景配置 CAS",
+      "width": 120
+    },
+    {
+      "id": "flows",
+      "lane": "assistant",
+      "col": 4,
+      "type": "backend",
+      "label": "flows 状态机",
+      "sublabel": "CAS 原子消费",
+      "width": 120
     }
   ],
   "edges": [
@@ -263,7 +281,7 @@
       "id": "manifest-depcheck",
       "from": "manifest",
       "to": "depcheck",
-      "label": "声明式·零插件名知识",
+      "label": "声明式",
       "variant": "default"
     },
     {
@@ -273,6 +291,20 @@
       "label": "依赖未满足不装配·停用被拒 409",
       "variant": "security",
       "role": "error"
+    },
+    {
+      "id": "cfgdb-scenario",
+      "from": "cfgdb",
+      "to": "scenario",
+      "label": "读表·热生效",
+      "variant": "dashed"
+    },
+    {
+      "id": "dispatch-flows",
+      "from": "dispatch",
+      "to": "flows",
+      "label": "CAS 推进",
+      "variant": "default"
     }
   ],
   "cards": [
@@ -301,6 +333,16 @@
         "平台零业务知识：结果卡按 artifact.pack 分发到插件自管组件，标签按 owner 插件隔离",
         "信封分态：查无/拒权=业务通知卡；技术或契约故障=error_for_llm 走平台错误诊断，不成功化",
         "插件间依赖通用机制：manifest dependencies.pack 声明 → 装配闸门 + 停用反向守卫（409 拒绝）"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "配置与状态（P1 工程化）",
+      "items": [
+        "场景配置唯一事实源在 assistant_config 表(manage 两 tab 维护):revision CAS 整档保存,冲突 409;保存即失效缓存,下一次对话读到新配置",
+        "flows 表是跨轮权威:缺槽追问落 pending_question,补答与版本推进同事务原子消费——旧版本卡的补答被 CAS 拒绝并如实告知",
+        "失效传播:本轮明确改单号/器具/用途与在途 flow 冲突 → 旧 flow 置 cancelled(旧结果作废),新条件开新任务",
+        "刷新/重启恢复:追问随消息落库(needsClarification+questions),历史加载重建追问卡与 answers 通道"
       ]
     }
   ]

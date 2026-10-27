@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="LLM Form Modeler 业务链路交互式图索引：37 张架构/工作流/时序/数据流/状态机图，基于代码评审证据由 archify 生成。">
+<meta name="description" content="LLM Form Modeler 业务链路交互式图索引：45 张架构/工作流/时序/数据流/状态机图，基于代码评审证据由 archify 生成。">
 <title>LLM Form Modeler · 业务链路图索引</title>
 <style>
   :root { --bg: #f6f7f9; --card: #ffffff; --ink: #1a2233; --sub: #5a6478; --line: #e3e7ee; --accent: #2563eb; }
@@ -16,13 +16,19 @@
   h1 { font-size: 26px; margin-bottom: 6px; }
   .desc { color: var(--sub); font-size: 14px; margin-bottom: 32px; line-height: 1.7; }
   .desc code { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 12px; }
-  h2 { font-size: 15px; color: var(--sub); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin: 28px 0 12px; }
+  h2 { font-size: 15px; color: var(--sub); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin: 34px 0 12px; }
+  h2 .en { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 12px; margin-left: 8px; }
+  h3 { font-size: 14px; margin: 18px 0 8px; color: var(--ink); }
+  h3 .en { color: var(--sub); font-weight: 400; font-size: 12px; font-family: ui-monospace, monospace; margin-left: 8px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
   a.card { display: block; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; text-decoration: none; color: var(--ink); transition: border-color .15s, transform .15s; }
   a.card:hover { border-color: var(--accent); transform: translateY(-1px); }
   .card .name { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+  .card .name .en { font-weight: 400; font-size: 12px; font-family: ui-monospace, monospace; color: var(--sub); margin-left: 6px; }
   .card .note { color: var(--sub); font-size: 13px; line-height: 1.6; }
   .card .tag { display: inline-block; font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 999px; padding: 0 8px; margin-top: 8px; }
+  .toc { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; margin-bottom: 8px; font-size: 13px; color: var(--sub); line-height: 2; }
+  .toc a { color: var(--accent); text-decoration: none; margin-right: 14px; white-space: nowrap; }
   footer { margin-top: 40px; color: var(--sub); font-size: 12px; line-height: 1.8; border-top: 1px solid var(--line); padding-top: 16px; }
 </style>
 </head>
@@ -30,17 +36,32 @@
 <main class="wrap">
   <h1>LLM Form Modeler · 业务链路图</h1>
   <p class="desc">
-    全部 37 张交互式链路图由 <a href="https://github.com/tt-a1i/archify" target="_blank">archify</a> 基于代码评审证据生成（showcase 质量档，9 项工件检查全通过）。
+    全部 45 张交互式链路图由 <a href="https://github.com/tt-a1i/archify" target="_blank">archify</a> 基于代码评审证据生成（showcase 质量档，9 项工件检查全通过）。
     每张图支持主题切换、缩放、节点检索（<code>/</code>）、路径追踪（<code>R</code>）、故事模式（<code>P</code>）。
-    JSON 源文件在 <code>doc/diagram-src/</code>，可用 archify 迭代更新；HTML 按域分目录（engine / sdk / platform / chatbi / pack / frontend），本页为总入口。
+    JSON 源文件在 <code>doc/diagram-src/</code>，可用 archify 迭代更新。阅读路径：<b>总览 → 平台底座 → 引擎 → SDK 协议 → 前端 → 业务插件 → 设计文档 → 外部研究</b>。
   </p>
+  <nav class="toc">
+    <a href="#overview">总览</a><a href="#platform">平台层</a><a href="#engine">Engine 层</a><a href="#sdk">SDK 层</a><a href="#frontend">前端</a><a href="#plugins">业务插件</a><a href="#design">设计与指南</a><a href="#research">外部研究</a>
+  </nav>
 
-  <h2>总览</h2>
+  <h2 id="overview">总览</h2>
   <div class="grid">
-    <a class="card" href="system-architecture.html"><div class="name">系统总架构（三层六边形）</div><div class="note">前端 / Engine / SDK / 插件域 / 存储与外部依赖的全景组件图。</div><span class="tag">architecture</span></a>
+    <a class="card" href="system-architecture.html"><div class="name">系统总架构（三层六边形）</div><div class="note">前端 / Engine / SDK / 插件域 / 存储与外部依赖的全景组件图，理解全系统的起点。</div><span class="tag">architecture</span></a>
   </div>
 
-  <h2>Engine 层</h2>
+  <h2 id="platform">平台层 <span class="en">运行底座：装配 / 治理 / 可观测</span></h2>
+  <div class="grid">
+    <a class="card" href="platform/platform-startup-assembly.html"><div class="name">启动装配链</div><div class="note">lifespan 流水线、插件发现与 Prepare / Commit / Finalize 三段装配事务。</div><span class="tag">workflow</span></a>
+    <a class="card" href="platform/platform-pack-lifecycle.html"><div class="name">插件生命周期状态机</div><div class="note">toggle 事务四阶段、快照回滚、degraded 守卫与多副本 fail-closed。</div><span class="tag">lifecycle</span></a>
+    <a class="card" href="platform/platform-llm-client.html"><div class="name">LLM 客户端治理</div><div class="note">RPM/TPM 限速、Qwen3 回退、chat_json 两级降级与 429 全局退避。</div><span class="tag">workflow</span></a>
+    <a class="card" href="platform/platform-upstream.html"><div class="name">上游适配链</div><div class="note">AssetClient 抽象、services 表请求级地址解析与假 200 识别。</div><span class="tag">workflow</span></a>
+    <a class="card" href="platform/platform-session-auth.html"><div class="name">会话与认证链</div><div class="note">Token 签发、X-User-Id 三级降级多租户隔离与越权防护。</div><span class="tag">sequence</span></a>
+    <a class="card" href="platform/platform-task-center.html"><div class="name">通用任务中心</div><div class="note">线程池 + queue_key 串行 + 协作式取消 + 自动续跑 + SSE 事件流。</div><span class="tag">workflow</span></a>
+    <a class="card" href="platform/platform-observability.html"><div class="name">可观测性数据流</div><div class="note">call_logs 埋点、trace 链路视图合并与日志脱敏六条正则。</div><span class="tag">dataflow</span></a>
+    <a class="card" href="platform/platform-admin-console.html"><div class="name">平台管理端</div><div class="note">admin 门禁、pack 启停热装配事务、调用日志与跨用户会话审计。</div><span class="tag">workflow</span></a>
+  </div>
+
+  <h2 id="engine">Engine 层 <span class="en">编排引擎：不认识任何业务</span></h2>
   <div class="grid">
     <a class="card" href="engine/engine-request-lifecycle.html"><div class="name">请求生命周期</div><div class="note">POST /api/config/chat 到 SSE 返回：工作线程、thread-local 绑定、心跳与落库。</div><span class="tag">sequence</span></a>
     <a class="card" href="engine/engine-core-graph.html"><div class="name">LangGraph 核心链</div><div class="note">classify_intent → check_confidence → execute_tool → handle_result 四节点编排与 rerun 回环。</div><span class="tag">workflow</span></a>
@@ -49,52 +70,80 @@
     <a class="card" href="engine/engine-prompt-loader.html"><div class="name">Prompt 装配链</div><div class="note">Jinja2 模板加载、section 缓存与 override→主模板→append 四级装配。</div><span class="tag">workflow</span></a>
   </div>
 
-  <h2>SDK 层</h2>
+  <h2 id="sdk">SDK 层 <span class="en">插件协议与存储设施</span></h2>
   <div class="grid">
     <a class="card" href="sdk/sdk-tool-protocol.html"><div class="name">工具协议</div><div class="note">validate → preflight → execute 钩子链、run_pipeline 管线与 ToolResult 四态分流。</div><span class="tag">workflow</span></a>
     <a class="card" href="sdk/sdk-storage.html"><div class="name">存储设施</div><div class="note">Neo4j / pgvector / 文档解析与命名空间隔离契约（前缀登记 + scope 签发）。</div><span class="tag">architecture</span></a>
   </div>
 
-  <h2>平台层</h2>
+  <h2 id="frontend">前端 <span class="en">独立模式 / 嵌入模式 / SSE 渲染</span></h2>
   <div class="grid">
-    <a class="card" href="platform/platform-startup-assembly.html"><div class="name">启动装配链</div><div class="note">lifespan 流水线、插件发现与 Prepare / Commit / Finalize 三段装配事务。</div><span class="tag">workflow</span></a>
-    <a class="card" href="platform/platform-pack-lifecycle.html"><div class="name">插件生命周期状态机</div><div class="note">toggle 事务四阶段、快照回滚、degraded 守卫与多副本 fail-closed。</div><span class="tag">lifecycle</span></a>
-    <a class="card" href="platform/platform-observability.html"><div class="name">可观测性数据流</div><div class="note">call_logs 埋点、trace 链路视图合并与日志脱敏六条正则。</div><span class="tag">dataflow</span></a>
-    <a class="card" href="platform/platform-llm-client.html"><div class="name">LLM 客户端治理</div><div class="note">RPM/TPM 限速、Qwen3 回退、chat_json 两级降级与 429 全局退避。</div><span class="tag">workflow</span></a>
-    <a class="card" href="platform/platform-upstream.html"><div class="name">上游适配链</div><div class="note">AssetClient 抽象、services 表请求级地址解析与假 200 识别。</div><span class="tag">workflow</span></a>
-    <a class="card" href="platform/platform-session-auth.html"><div class="name">会话与认证链</div><div class="note">Token 签发、X-User-Id 三级降级多租户隔离与越权防护。</div><span class="tag">sequence</span></a>
-    <a class="card" href="platform/platform-task-center.html"><div class="name">通用任务中心</div><div class="note">线程池 + queue_key 串行 + 协作式取消 + 自动续跑 + SSE 事件流。</div><span class="tag">workflow</span></a>
-    <a class="card" href="platform/platform-admin-console.html"><div class="name">平台管理端</div><div class="note">admin 门禁、pack 启停热装配事务、调用日志与跨用户会话审计。</div><span class="tag">workflow</span></a>
+    <a class="card" href="frontend/frontend-sse-render.html"><div class="name">SSE 渲染链</div><div class="note">fetch 流解析、result 五路分流到四类卡片与追问 answers 回传。</div><span class="tag">sequence</span></a>
+    <a class="card" href="frontend/frontend-embed-chain.html"><div class="name">嵌入模式契约</div><div class="note">宿主与 iframe 的 postMessage 往返：READY → INIT → GET_CONTEXT → APPLY。</div><span class="tag">sequence</span></a>
+    <a class="card" href="frontend/frontend-standalone.html"><div class="name">独立模式主界面</div><div class="note">StandaloneLayout 组装、链路追踪弹窗与 JSON diff 面板。</div><span class="tag">workflow</span></a>
   </div>
 
-  <h2>ChatBI 插件</h2>
+  <h2 id="plugins">业务插件 <span class="en">按插件分组：总览 + 详细链</span></h2>
+
+  <h3>知识库 <span class="en">knowledge_graph</span></h3>
+  <div class="grid">
+    <a class="card" href="pack/pack-knowledge-graph.html"><div class="name">插件总览</div><div class="note">导入与检索双链总览：文档如何变成图谱与向量，问题如何带引用回答。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/kg-import-chain.html"><div class="name">导入链（详细）</div><div class="note">幂等任务、批内并行抽取、四类校验、断点续跑与收尾五步。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/kg-retrieval-chain.html"><div class="name">检索链（详细）</div><div class="note">知识库六级优先级、混合检索（图谱+向量+全文兜底三路）与引用回答。</div><span class="tag">workflow</span></a>
+  </div>
+
+  <h3>智能问数 <span class="en">chatbi</span></h3>
   <div class="grid">
     <a class="card" href="chatbi/chatbi-query-chain.html"><div class="name">ask_data 七步管线</div><div class="note">数据源解析 → 检索 → 思路 → SQL → 执行 → 校验 → 图表，含澄清与自愈出口。</div><span class="tag">workflow</span></a>
     <a class="card" href="chatbi/chatbi-schema-retrieval.html"><div class="name">Schema 检索与图谱扩展</div><div class="note">bge-m3 向量召回、LLM 精筛、SchemaGraph 邻居扩展与 JOIN 预计算。</div><span class="tag">workflow</span></a>
-    <a class="card" href="chatbi/chatbi-scan-chain.html"><div class="name">数据源扫描链</div><div class="note">RunLease 租约互斥、连库内省、LLM 富化、CAS 落库与向量重建。</div><span class="tag">workflow</span></a>
+    <a class="card" href="chatbi/chatbi-scan-chain.html"><div class="name">数据源扫描链</div><div class="note">RunLease 租约互斥、连库内省（动态排除插件 schema）、LLM 富化、CAS 落库与向量重建。</div><span class="tag">workflow</span></a>
+    <a class="card" href="chatbi/chatbi-multi-turn.html"><div class="name">多轮对话链</div><div class="note">澄清往返、prev_* 上下文继承与 switch_chart 图表切换。</div><span class="tag">workflow</span></a>
     <a class="card" href="chatbi/chatbi-feedback-loop.html"><div class="name">反馈闭环</div><div class="note">指标反哺、fewshot 学习、记忆整理与图谱置信度演化。</div><span class="tag">workflow</span></a>
     <a class="card" href="chatbi/chatbi-scheduler.html"><div class="name">调度器</div><div class="note">30s tick 四任务、健康自治（3 败停用/恢复激活）与多副本租约治理。</div><span class="tag">workflow</span></a>
     <a class="card" href="chatbi/chatbi-security.html"><div class="name">安全纵深</div><div class="note">SQL 三层校验（AST/黑名单/白名单列）、READ ONLY 执行纵深与泄漏防线。</div><span class="tag">workflow</span></a>
-    <a class="card" href="chatbi/chatbi-multi-turn.html"><div class="name">多轮对话链</div><div class="note">澄清往返、prev_* 上下文继承与 switch_chart 图表切换。</div><span class="tag">workflow</span></a>
     <a class="card" href="chatbi/chatbi-admin.html"><div class="name">管理端</div><div class="note">admin_required 门禁、五大 API 分域、语义层版本乐观锁与 m4 看板。</div><span class="tag">workflow</span></a>
   </div>
 
-  <h2>业务插件</h2>
+  <h3>表单配置 <span class="en">njmind_form</span></h3>
   <div class="grid">
-    <a class="card" href="pack/pack-leave-application.html"><div class="name">leave_application</div><div class="note">submit_leave 四步管线：LLM 解析、上游校验、确认门槛与 fail-closed 提交。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/pack-knowledge-graph.html"><div class="name">knowledge_graph 总览</div><div class="note">导入与检索双链总览。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/kg-import-chain.html"><div class="name">kg 导入链（详细）</div><div class="note">幂等任务、批内并行抽取、四类校验、断点续跑与收尾五步。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/kg-retrieval-chain.html"><div class="name">kg 检索链（详细）</div><div class="note">知识库六级优先级、混合检索（图谱+向量+全文兜底三路）与引用回答。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/pack-njmind-form.html"><div class="name">njmind_form 总览</div><div class="note">生成、修改与脚本生成（JS/SQL）三链总览。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/form-create-chain.html"><div class="name">form 生成链（详细）</div><div class="note">六步管线、字段追问、模板 fail-closed 与双层修复回环。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/form-modify-chain.html"><div class="name">form 修改链（详细）</div><div class="note">两相式 ops 指令集、确定性合并与三条全量升格路径。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/form-aux-chain.html"><div class="name">form 辅助工具链</div><div class="note">图片识别生成表单（多模态）、克隆、查询与闲聊兜底。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/pack-njmind-bpm.html"><div class="name">njmind_bpm 总览</div><div class="note">流程配置 AI：七步管线、单一重造回显、结构化确认门与 Flowable 权威校验。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/pack-njmind-list.html"><div class="name">njmind_list 总览</div><div class="note">列表页配置 AI：六步管线、SQL 过滤子管线（跨 pack 复用契约层）、数据源确认门。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/pack-metrology-assistant.html"><div class="name">metrology_assistant 总览</div><div class="note">计量智能客服：SCENARIOS 场景表驱动薄编排，复用 kg/chatbi 内核，manifest 声明插件间依赖。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/pack-njmind-form.html"><div class="name">插件总览</div><div class="note">生成、修改与脚本生成（JS/SQL）三链总览。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/form-create-chain.html"><div class="name">生成链（详细）</div><div class="note">六步管线、字段追问、模板 fail-closed 与双层修复回环。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/form-modify-chain.html"><div class="name">修改链（详细）</div><div class="note">两相式 ops 指令集、确定性合并与三条全量升格路径。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/form-aux-chain.html"><div class="name">辅助工具链</div><div class="note">图片识别生成表单（多模态）、克隆、查询与闲聊兜底。</div><span class="tag">workflow</span></a>
   </div>
 
-  <h2>RAGFlow 项目学习</h2>
+  <h3>流程配置 <span class="en">njmind_bpm</span></h3>
+  <div class="grid">
+    <a class="card" href="pack/pack-njmind-bpm.html"><div class="name">插件总览</div><div class="note">流程配置 AI：七步管线、单一重造回显、结构化确认门与 Flowable 权威校验。</div><span class="tag">workflow</span></a>
+  </div>
+
+  <h3>列表页配置 <span class="en">njmind_list</span></h3>
+  <div class="grid">
+    <a class="card" href="pack/pack-njmind-list.html"><div class="name">插件总览</div><div class="note">列表页配置 AI：六步管线、SQL 过滤子管线（跨 pack 复用契约层）、数据源确认门。</div><span class="tag">workflow</span></a>
+  </div>
+
+  <h3>计量智能客服 <span class="en">metrology_assistant</span></h3>
+  <div class="grid">
+    <a class="card" href="pack/pack-metrology-assistant.html"><div class="name">插件总览</div><div class="note">SCENARIOS 场景表驱动薄编排：强检判定走知识库证据、进度/价目走问数受控执行；flows 状态机（CAS 推进/追问落库回放/失效传播）与 manifest 插件间依赖。</div><span class="tag">workflow</span></a>
+  </div>
+
+  <h3>请假申请 <span class="en">leave_application（插件开发教学范例）</span></h3>
+  <div class="grid">
+    <a class="card" href="pack/pack-leave-application.html"><div class="name">插件总览</div><div class="note">submit_leave 四步管线：LLM 解析、上游校验、确认门槛与 fail-closed 提交。</div><span class="tag">workflow</span></a>
+  </div>
+
+  <h2 id="design">设计与指南 <span class="en">Markdown 文档</span></h2>
+  <div class="grid">
+    <a class="card" href="插件开发与嵌入指南.md"><div class="name">插件开发与嵌入指南</div><div class="note">pack.py 装配契约、config.yaml manifest、工具协议与热切换生命周期。</div><span class="tag">guide</span></a>
+    <a class="card" href="共享内核API契约.md"><div class="name">共享内核 API 契约</div><div class="note">编排插件消费的两个底层薄入口：KG 证据服务 retrieve_evidence + 问数受控执行 execute_controlled。</div><span class="tag">design</span></a>
+    <a class="card" href="系统架构与学习指南.md"><div class="name">系统架构与学习指南</div><div class="note">三层六边形架构、LangGraph 状态机、SDK 协议层、追问机制与数据库模型全解。</div><span class="tag">guide</span></a>
+    <a class="card" href="嵌入模式总体设计.md"><div class="name">嵌入模式总体设计</div><div class="note">iframe 嵌入宿主、packs 声明制路由、pack_params 透传与数据权限。</div><span class="tag">design</span></a>
+    <a class="card" href="mcp-integration-design.md"><div class="name">MCP 双向接入设计</div><div class="note">对外 MCP server（声明制工具生成+全局单 key）+ 插件内消费外部 MCP（注册表+SDK 客户端设施）。</div><span class="tag">design</span></a>
+    <a class="card" href="mcp-phase1-plan.md"><div class="name">MCP 一期实施计划</div><div class="note">7 任务 TDD 分解：单 key / 对外端点 / KG 声明 / SDK 客户端 / 注册表 / 前端面板 / 全量回归。</div><span class="tag">plan</span></a>
+    <a class="card" href="chatbi-kg-linkage-idea.md"><div class="name">ChatBI × 知识库 联动构想</div><div class="note">两包不合并代码；智能问数生成 SQL 时把知识库检索结果当背景资料。未立项。</div><span class="tag">idea</span></a>
+  </div>
+
+  <h2 id="research">外部研究 <span class="en">RAGFlow 对标学习</span></h2>
   <div class="grid">
     <a class="card" href="RAGFlow项目学习/index.html"><div class="name">学习总览（12 角度笔记+蓝图）</div><div class="note">五轮 18 维度对标 RAGFlow v0.27.2：7 张链路图、12 个角度 MD、升级蓝图与避坑清单。</div><span class="tag">index</span></a>
     <a class="card" href="RAGFlow项目学习/图/ragflow-system.html"><div class="name">RAGFlow 组件架构</div><div class="note">API/执行器分离、Redis Streams 任务、三存储分工与可插拔检索引擎（v0.27.2）。</div><span class="tag">architecture</span></a>
@@ -106,25 +155,8 @@
     <a class="card" href="RAGFlow项目学习/图/ragflow-memory.html"><div class="name">会话记忆数据流</div><div class="note">三类记忆 LLM 抽取、双轨存储（MySQL 元数据+索引本体）、FIFO 遗忘。</div><span class="tag">dataflow</span></a>
   </div>
 
-  <h2>前端</h2>
-  <div class="grid">
-    <a class="card" href="frontend/frontend-sse-render.html"><div class="name">SSE 渲染链</div><div class="note">fetch 流解析、result 五路分流到四类卡片与追问 answers 回传。</div><span class="tag">sequence</span></a>
-    <a class="card" href="frontend/frontend-embed-chain.html"><div class="name">嵌入模式契约</div><div class="note">宿主与 iframe 的 postMessage 往返：READY → INIT → GET_CONTEXT → APPLY。</div><span class="tag">sequence</span></a>
-    <a class="card" href="frontend/frontend-standalone.html"><div class="name">独立模式主界面</div><div class="note">StandaloneLayout 组装、链路追踪弹窗与 JSON diff 面板。</div><span class="tag">workflow</span></a>
-  </div>
-
-  <h2>设计文档（md）</h2>
-  <div class="grid">
-    <a class="card" href="chatbi-kg-linkage-idea.md"><div class="name">ChatBI × 知识库 联动构想</div><div class="note">两包不合并代码；智能问数生成 SQL 时把知识库检索结果当背景资料（软依赖/只取 chunks/尊重 ACL），语义层文档反向导入 KG。未立项。</div><span class="tag">idea</span></a>
-    <a class="card" href="mcp-integration-design.md"><div class="name">MCP 双向接入设计</div><div class="note">对外 MCP server（声明制工具生成+全局单 key）+ 插件内消费外部 MCP（注册表+SDK 客户端设施）。</div><span class="tag">design</span></a>
-    <a class="card" href="mcp-phase1-plan.md"><div class="name">MCP 一期实施计划</div><div class="note">7 任务 TDD 分解：单 key / 对外端点 / KG 声明 / SDK 客户端 / 注册表 / 前端面板 / 全量回归。</div><span class="tag">plan</span></a>
-    <a class="card" href="系统架构与学习指南.md"><div class="name">系统架构与学习指南</div><div class="note">三层六边形架构、LangGraph 状态机、SDK 协议层、追问机制与数据库模型全解。</div><span class="tag">guide</span></a>
-    <a class="card" href="嵌入模式总体设计.md"><div class="name">嵌入模式总体设计</div><div class="note">iframe 嵌入宿主、packs 声明制路由、pack_params 透传与数据权限。</div><span class="tag">design</span></a>
-    <a class="card" href="插件开发与嵌入指南.md"><div class="name">插件开发与嵌入指南</div><div class="note">pack.py 装配契约、config.yaml manifest、工具协议与热切换生命周期。</div><span class="tag">guide</span></a>
-  </div>
-
   <footer>
-    生成方式：5 个并行代码评审 agent 收集 file:line 证据 → archify 类型化 JSON IR（doc/diagram-src/）→ validate --quality showcase（9 项检查）→ deliver 原子提交 HTML。<br>
+    生成方式：并行代码评审 agent 收集 file:line 证据 → archify 类型化 JSON IR（doc/diagram-src/）→ validate --quality showcase（9 项检查）→ deliver 原子提交 HTML。<br>
     图内快捷键：<code>?</code> 帮助 · <code>/</code> 查找节点 · <code>R</code> 路径追踪 · <code>M</code> 总览 · <code>P</code> 故事模式 · <code>S/T/E</code> 样式/主题/导出。
   </footer>
 </main>

@@ -15,7 +15,8 @@
           "parse",
           "extract",
           "batch",
-          "finish"
+          "finish",
+          "evidence"
         ],
         "note": "文档解析到图谱落库的后台任务。"
       },
@@ -176,6 +177,15 @@
       "label": "四类校验",
       "sublabel": "本体/别名/悬空/端点",
       "width": 140
+    },
+    {
+      "id": "evidence",
+      "lane": "search",
+      "col": 2,
+      "type": "security",
+      "label": "受控证据服务",
+      "sublabel": "retrieve_evidence",
+      "width": 130
     }
   ],
   "edges": [
@@ -238,6 +248,13 @@
       "from": "hybrid",
       "to": "answer",
       "variant": "emphasis"
+    },
+    {
+      "id": "evidence-hybrid",
+      "from": "evidence",
+      "to": "hybrid",
+      "label": "显式库+白名单",
+      "variant": "emphasis"
     }
   ],
   "cards": [
@@ -266,6 +283,15 @@
         "四类校验：本体过滤 / 别名独占性 / 悬空关系 / 端点类型",
         "连续失败达阈值熔断，任务标 failed 可续跑",
         "每次检索落 call_logs，含逐词命中与截断水位"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "受控证据入口（面向编排插件）",
+      "items": [
+        "retrieve_evidence:显式知识库(不存在即拒,不猜全库)+元数据白名单(空集=零结果,不回退全库)",
+        "只返回依据(chunks/子图/诊断),不生成答案——三态业务结论归编排方(metrology 消费)",
+        "与 /search、kb_search 的分工:那些是终端用户入口(答案生成/标注短路/选库记忆),本入口面向编排方"
       ]
     }
   ]
