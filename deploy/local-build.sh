@@ -28,7 +28,7 @@ cd "$WORKDIR"
 IMAGE_NAME="${IMAGE_NAME:-llm-modeler}"
 GIT_TAG="$(git rev-parse --short HEAD)-$(date '+%m%d%H%M')"
 PLATFORM="linux/amd64"
-PY_IMAGE_AMD64="python:3.12-slim-amd64"   # 本地 amd64 别名(避免动 arm64 缓存)
+PY_IMAGE_AMD64="python:3.12-slim-bookworm-amd64"   # 钉 bookworm+amd64(与服务器缓存底座一致)
 
 log()  { printf '\033[32m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
 err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
@@ -36,9 +36,9 @@ err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2;
 # ── ⓪ amd64 基础镜像自检(缺则拉;Mac 上用别名单独存 amd64 版) ─────────
 ensure_amd64() {
   docker image inspect "$PY_IMAGE_AMD64" >/dev/null 2>&1 && return 0
-  log "⓪ 拉 python:3.12-slim(linux/amd64)..."
-  docker pull --platform "$PLATFORM" python:3.12-slim \
-    && docker tag python:3.12-slim "$PY_IMAGE_AMD64"
+  log "⓪ 拉 python:3.12-slim-bookworm(linux/amd64)..."
+  docker pull --platform "$PLATFORM" python:3.12-slim-bookworm \
+    && docker tag python:3.12-slim-bookworm "$PY_IMAGE_AMD64"
 }
 ensure_amd64
 
@@ -70,10 +70,19 @@ else
 fi
 
 # ── ②b nginx deb(amd64 容器 apt --download-only) ────────────────────
-log "②b nginx deb(amd64)..."
+log "②b nginx deb..."
+# 优先复用服务器上已验证的 deb(上一版镜像就是它们构建的);本地没有则
+# scp 拉取——避开 apt(新底座 trixie 与 bookworm 源不兼容,国内源也救不了
+# 套件错位)
 if [ "${FORCE_DEBS:-0}" != "1" ] \
    && [ "$(ls backend/debs/*.deb 2>/dev/null | wc -l)" -ge 2 ]; then
   log "   debs 缓存命中"
+elif ssh "$SERVER" "test -d $SREPO/backend/debs"; then
+  log "   从服务器拉取已验证 deb..."
+  mkdir -p backend/debs
+  scp -q "$SERVER:$SREPO/backend/debs/*.deb" backend/debs/
+  [ "$(ls backend/debs/*.deb 2>/dev/null | wc -l)" -ge 2 ] \
+    || { err "服务器 deb 拉取失败"; exit 1; }
 else
   rm -rf backend/debs && mkdir -p backend/debs
   ok=0
