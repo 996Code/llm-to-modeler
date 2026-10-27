@@ -36,6 +36,69 @@ _STATUS_CLASSIFICATION = {
 }
 
 
+# ── inputSchema 验参(P1/设计 4.3:完整 Schema 校验,不过不发) ──────
+# 覆盖 object 一层的 required/type/enum + 嵌套 object 的 required/type;
+# 不解析远程 $ref(拒绝联网解析,设计 7.5);未知类型关键字宽松放行
+# (JSON Schema 开放集,只做契约确定性校验,不做全实现)。
+
+_JSON_TYPE_MAP = {
+    "string": str, "number": (int, float), "integer": int,
+    "boolean": bool, "object": dict, "array": list,
+}
+
+
+def _schema_type_ok(value, t: str) -> bool:
+    """JSON Schema 类型判定(bool 是 int 子类,显式排除)。"""
+    if t == "string":
+        return isinstance(value, str)
+    if t == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if t == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if t == "boolean":
+        return isinstance(value, bool)
+    if t == "object":
+        return isinstance(value, dict)
+    if t == "array":
+        return isinstance(value, list)
+    return True  # 未知类型关键字:JSON Schema 开放集,不拦
+
+
+def _is_empty(v) -> bool:
+    if isinstance(v, str):
+        return not v.strip()
+    return v is None or (isinstance(v, (list, dict)) and len(v) == 0)
+
+
+def validate_against_schema(args: dict, schema) -> Optional[str]:
+    """按工具 inputSchema 验参;返回用户可读错误(None=通过)。
+
+    schema=None/非 dict = 无 Schema 可验(放行——MCP 层仍会拦 required;
+    注册表快照缺失时宁可放行到传输层也不猜)。远程 $ref 不解析(设计 7.5)。
+    """
+    if not isinstance(schema, dict):
+        return None
+    props = schema.get("properties") or {}
+    for name in schema.get("required") or []:
+        if _is_empty(args.get(name)):
+            return f"缺少必填参数 {name}"
+    for name, value in args.items():
+        p = props.get(name)
+        if not isinstance(p, dict) or value is None:
+            continue  # Schema 未声明的不拦(扩展宽容)
+        t = p.get("type")
+        if isinstance(t, str) and not _schema_type_ok(value, t):
+            return f"参数 {name} 需要 {t} 类型"
+        enum = p.get("enum")
+        if isinstance(enum, list) and enum and value not in enum:
+            return f"参数 {name} 的值必须是: {'、'.join(map(str, enum))}"
+        if isinstance(value, dict) and isinstance(p.get("properties"), dict):
+            nested = validate_against_schema(value, p)
+            if nested:
+                return nested
+    return None
+
+
 @dataclass
 class ControlledError:
     code: str            # forbidden/not_found/invalid_input/unavailable/credential/transport
@@ -128,6 +191,20 @@ def execute_controlled(app_state, datasource_id: str, tool: str,
         return _err("invalid_input",
                     f"工具 {tool} 不在数据源限定范围内(仅允许 {info.database})",
                     started, source)
+    # inputSchema 验参(P1/设计 4.3):注册表快照里的原始 Schema——
+    # required/type/enum/嵌套,不过不发请求(此前仅形状校验+MCP 层
+    # required 拦截,深度校验靠编排方暂代)
+    try:
+        from services.mcp_registry import McpServerStore
+        server = McpServerStore().get_by_code(info.host)
+        tool_schema = next(
+            (t.get("inputSchema") for t in (server or {}).get("tools_snapshot")
+             or [] if t.get("name") == tool), None)
+    except Exception:  # noqa: BLE001
+        tool_schema = None  # 注册表不可读:放行到传输层,不在此猜
+    schema_err = validate_against_schema(args, tool_schema)
+    if schema_err:
+        return _err("invalid_input", schema_err, started, source)
 
     # ── SDK 调用(隔离性铁律: 只 import sdk;错误类型保留) ──
     from sdk import mcp_client

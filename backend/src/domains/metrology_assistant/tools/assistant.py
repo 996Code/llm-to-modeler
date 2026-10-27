@@ -91,6 +91,9 @@ SCENARIOS = {
             "subject_slot": "instrument",
             "subject_default": "该器具",
             "options": list(PURPOSE_OPTIONS),
+            "slot_type": "enum",
+            "enum_options": list(STRONG_INSPECTION_PURPOSES)
+                            + ["内部使用", "校准"],
         },
         "action": {"kind": "kg"},
     },
@@ -228,6 +231,92 @@ def extract_slots(llm, user_input: str, background: dict,
         scenario = "other"
     return {"scenario": scenario, "instrument": _s("instrument"),
             "purpose": _s("purpose"), "order_no": _s("order_no").upper()}
+
+
+# ── 槽位类型系统(P1/设计 §9 Tab1):text/enum/number/date 归一与校验 ──
+
+_SLOT_TYPES = ("text", "enum", "number", "date")
+
+
+def normalize_slot(value, slot_type: str = "text",
+                   enum_options=None):
+    """按槽位类型归一/校验一个槽位值。
+
+    返回 (归一值, None) 或 (None, 错误提示)——错误提示给用户(格式
+    指引),不给模型猜。归一值统一为字符串(与既有槽位流一致):
+      text   strip
+      enum   精确命中选项;否则唯一包含/前缀命中归一到选项;多命中/零命中报错
+      number float 可解析(去逗号/全角数字归一半角);不可解析报错
+      date   YYYY-MM-DD / YYYY/M/D / YYYY年M月D日 → ISO(YYYY-MM-DD)
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None, None  # 空值交给缺槽追问,不是类型错误
+    st = slot_type if slot_type in _SLOT_TYPES else "text"
+    if st == "text":
+        return raw, None
+    if st == "enum":
+        options = [str(o) for o in (enum_options or [])]
+        if not options:
+            return raw, None  # 未配置选项=不约束
+        if raw in options:
+            return raw, None
+        hits = [o for o in options if raw in o or o in raw]
+        if len(hits) == 1:
+            return hits[0], None
+        return None, f"请从以下选项中选择: {'、'.join(options)}"
+    if st == "number":
+        cleaned = raw.translate(str.maketrans("０１２３４５６７８９，", "0123456789,")).replace(",", "")
+        try:
+            float(cleaned)
+            return cleaned, None
+        except ValueError:
+            return None, "请提供数字(如 12 或 3.5)"
+    if st == "date":
+        import re as _re
+        m = _re.match(r"^(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})日?$", raw)
+        if m:
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                import datetime as _dt
+                _dt.date(y, mo, d)
+                return f"{y:04d}-{mo:02d}-{d:02d}", None
+            except ValueError:
+                return None, "日期不存在,请检查(格式: 2026-10-01)"
+        return None, "请提供日期(格式: 2026-10-01)"
+    return raw, None
+
+
+def _slot_format_hint(slot_type: str) -> str:
+    """类型提示后缀(归一失败追问时拼在问题后)。"""
+    return {"enum": "", "number": "(请填数字)", "date": "(格式 2026-10-01)"}.get(slot_type, "")
+
+
+def normalize_required_slot(required: dict, merged: dict):
+    """对场景必填槽位做类型归一;失败返回 (None, 追问文案) 触发重问。
+
+    只约束 required 槽位(类型定义随场景配置;非必填槽位保持自由文本)。
+    归一成功就地更新 merged。
+    """
+    slot = required["slot"]
+    value = merged.get(slot)
+    if not value:
+        return merged, None
+    norm, err = normalize_slot(
+        value, required.get("slot_type", "text"),
+        required.get("enum_options"))
+    if err is None:
+        if norm is not None:
+            merged[slot] = norm
+        return merged, None
+    merged[slot] = ""  # 坏值清空 → 走缺槽追问,不把非法值带给动作
+    question = required["question"]
+    hint = _slot_format_hint(required.get("slot_type", "text"))
+    if hint:
+        question = f"{question}{hint}"
+    else:
+        question = f"{question}({err})"
+    return merged, question
 
 
 def merge_slots(extracted: dict, mem_slots: dict) -> dict:
@@ -445,6 +534,17 @@ class MetrologyAssistantTool(Tool):
                                  pending.get("slots") or mem_slots)
             if mem:
                 mem.pop("pending", None)
+            # 补答同样过类型归一(坏值重问;场景表可能中途改了类型)
+            _cfg0 = _current_scenarios().get(scenario)
+            if _cfg0 is not None:
+                merged, _rq = normalize_required_slot(
+                    _cfg0["required"], merged)
+                if _rq is not None:
+                    return ToolResult(
+                        ask=AskSpec(questions=[AskQuestion(
+                            question=_rq, header=_cfg0["required"]["header"],
+                            options=list(_cfg0["required"]["options"]))]),
+                        summary="补答格式不符")
         else:
             extracted = extract_slots(ctx.llm_client, user_input, mem_slots,
                                       getattr(ctx, "conv_id", None))
@@ -472,6 +572,17 @@ class MetrologyAssistantTool(Tool):
             return _unsupported_notice()
 
         required = cfg["required"]
+        # 槽位类型归一(P1:enum 唯一命中/数字/日期校验)——坏值清空并
+        # 带格式提示追问,不把非法值带进动作(不交给模型猜)
+        merged, reask_question = normalize_required_slot(required, merged)
+        if reask_question is not None:
+            if mem:
+                mem.set("pending", {"scenario": scenario, "slots": merged})
+            return ToolResult(
+                ask=AskSpec(questions=[AskQuestion(
+                    question=reask_question, header=required["header"],
+                    options=list(required["options"]))]),
+                summary=f"需要{required['header']}(格式不符)")
         if not merged.get(required["slot"]):
             # 只追问影响判断的必要条件(设计 13.1 故事 1:不编条件)。
             # 追问问题落 flow(pending_question):关键状态保存成功后
@@ -579,6 +690,15 @@ class MetrologyAssistantTool(Tool):
             # 明确拒绝,不静默当新消息处理(设计 6.1"旧版本卡拒绝")
             return ToolResult(
                 error_for_llm="该追问已被处理,请基于最新回复继续操作。")
+        # 恢复前身份门(设计 6.1 完整版/P1 收口):flow 有归属主体时,
+        # 补答主体必须一致——换身份不得借旧卡重放他人的追问与槽位;
+        # 不一致拒绝恢复并要求重新提问(拒恢复+重查)
+        flow_user = str(flow.get("userId") or "")
+        current_user = str(getattr(ctx, "user_id", None) or "anonymous")
+        if flow_user and flow_user != current_user:
+            return ToolResult(
+                error_for_llm="当前身份与该追问的归属不一致,已拒绝恢复;"
+                              "请重新提问。")
         base = dict(flow.get("slots") or {})
         base.update(parse_clarify_answers(answers))
         try:

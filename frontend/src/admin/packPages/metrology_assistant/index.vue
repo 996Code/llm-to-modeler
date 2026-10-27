@@ -64,6 +64,22 @@
                 <span>追问文案({subject}=器具名占位)</span>
                 <textarea v-model="currentScenario.required.question" rows="2" @input="dirty = true" />
               </label>
+              <div class="field-grid">
+                <label class="field">
+                  <span>槽位类型(提取/补答按此校验归一)</span>
+                  <select v-model="currentScenario.required.slot_type" @change="dirty = true">
+                    <option value="text">text(自由文本)</option>
+                    <option value="enum">enum(选项白名单)</option>
+                    <option value="number">number(数字)</option>
+                    <option value="date">date(日期 YYYY-MM-DD)</option>
+                  </select>
+                </label>
+                <label v-if="currentScenario.required.slot_type === 'enum'" class="field">
+                  <span>enum 白名单(每行一项;模糊唯一命中会归一到选项)</span>
+                  <textarea :value="enumText(currentScenario)" rows="3"
+                            @input="setEnum(currentScenario, $event); dirty = true" />
+                </label>
+              </div>
               <label class="field">
                 <span>追问选项(label, description;每行一项)</span>
                 <textarea
@@ -240,6 +256,13 @@ async function rollback(toRevision: number) {
 }
 
 // 选项/参数/通知:JSON 文本 ↔ 结构(表单友好;非法 JSON 保存时由后端校验兜底)
+function enumText(cfg: MetrologyScenario): string {
+  return (cfg.required as any).enum_options?.join('\n') || ''
+}
+function setEnum(cfg: MetrologyScenario, ev: Event) {
+  const text = (ev.target as HTMLTextAreaElement).value
+  ;(cfg.required as any).enum_options = text.split('\n').map((l) => l.trim()).filter(Boolean)
+}
 function optionsText(cfg: MetrologyScenario): string {
   return (cfg.required.options || []).map((o) => `${o.label}, ${o.description || ''}`).join('\n')
 }

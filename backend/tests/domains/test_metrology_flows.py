@@ -184,3 +184,75 @@ def test_no_conv_id_falls_back_to_kv():
     assert ctx.session_state.get("pending")["scenario"] == "progress"
     # flow 表无记录
     assert store.get_flow(_db(), "conv-flow") is None
+
+
+# ── 槽位类型系统(P1)──────────────────────────────────────────
+
+def test_slot_type_enum_normalizes_and_rejects():
+    """enum:精确/唯一包含命中归一到选项;零命中带选项提示重问。"""
+    norm, err = mta.normalize_slot("贸易", "enum",
+                                   ["贸易结算", "安全防护"])
+    assert (norm, err) == ("贸易结算", None)
+    norm, err = mta.normalize_slot("医疗", "enum", ["医疗卫生"])
+    assert (norm, err) == ("医疗卫生", None)
+    norm, err = mta.normalize_slot("监控", "enum", ["安全防护", "环境监测"])
+    assert norm is None and "选项" in err
+    # 未配置选项 = 不约束
+    norm, err = mta.normalize_slot("任意", "enum", [])
+    assert (norm, err) == ("任意", None)
+
+
+def test_slot_type_number_and_date():
+    """number:全角/逗号容错解析;date:三格式归一 ISO,坏值报格式。"""
+    norm, err = mta.normalize_slot("１２，３４５", "number")
+    assert (norm, err) == ("12345", None)
+    norm, err = mta.normalize_slot("十二", "number")
+    assert norm is None and "数字" in err
+    norm, err = mta.normalize_slot("2026年10月1日", "date")
+    assert (norm, err) == ("2026-10-01", None)
+    norm, err = mta.normalize_slot("2026/10/1", "date")
+    assert (norm, err) == ("2026-10-01", None)
+    norm, err = mta.normalize_slot("十月一号", "date")
+    assert norm is None and "格式" in err
+    norm, err = mta.normalize_slot("2026-02-30", "date")
+    assert norm is None and "不存在" in err
+
+
+def test_bad_required_slot_reasks_with_hint(monkeypatch):
+    """必填槽位类型不符:清空坏值,追问带格式提示(不交给模型猜)。"""
+    tool = mta.MetrologyAssistantTool(app_state=object())
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "progress",
+                                   "instrument": "", "purpose": "",
+                                   "order_no": "BJ 二零二六"}))
+    # order_no 是 text 槽位——借 number 场景测:直接单测 normalize_required_slot
+    required = {"slot": "days", "header": "天数", "question": "要查几天?",
+                "options": [], "slot_type": "number"}
+    merged = {"days": "约三个"}
+    out, reask = mta.normalize_required_slot(required, merged)
+    assert out["days"] == "" and reask and "数字" in reask
+    # 合法数字归一后继续
+    out2, reask2 = mta.normalize_required_slot(
+        required, {"days": " ７ "})
+    assert (out2["days"], reask2) == ("7", None)
+
+
+def test_identity_gate_rejects_cross_user_resume():
+    """恢复前身份门(设计 6.1):flow 归属他人时,补答被拒+要求重问。"""
+    tool = mta.MetrologyAssistantTool(app_state=object())
+    ctx = FakeCtx(FakeLLM(extract={}))  # conv-flow, anonymous
+    _ask_flow(tool, ctx)                # flow 归属 anonymous, pending 在
+
+    # 换身份(模拟另一用户拿到旧卡/换账号后补答)
+    ctx.user_id = "user-b"
+    ctx.llm_client = FakeLLM(extract={})
+    result = tool.execute(
+        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026"}}, ctx)
+    assert result.error_for_llm is not None
+    assert "不一致" in result.error_for_llm
+    # flow 未被消费(pending 仍在,归属人自己仍可答)
+    flow = store.get_flow(_db(), "conv-flow")
+    assert flow["pendingQuestion"] is not None
+    ctx.user_id = "anonymous"
+    r2 = tool.execute(
+        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026"}}, ctx)
+    assert r2.error_for_llm is not None and "不一致" not in r2.error_for_llm

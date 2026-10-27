@@ -150,3 +150,54 @@ def test_unknown_envelope_status_is_contract_error(wiring):
     assert r.ok is False
     assert r.status == "invalid_input"
     assert "processing" in r.error.message
+
+
+# ── inputSchema 验参(P1/设计 4.3:完整 Schema 校验,不过不发) ──────
+
+from domains.chatbi.controlled import validate_against_schema
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "order_no": {"type": "string", "description": "单号"},
+        "count": {"type": "integer"},
+        "state": {"type": "string", "enum": ["open", "done"]},
+        "filter": {"type": "object", "properties": {"kb": {"type": "string"}},
+                   "required": ["kb"]},
+    },
+    "required": ["order_no"],
+}
+
+
+def test_schema_pass_and_required():
+    assert validate_against_schema({"order_no": "BJ1"}, SCHEMA) is None
+    assert "缺少必填参数" in validate_against_schema({"count": 1}, SCHEMA)
+    assert "缺少必填参数" in validate_against_schema({"order_no": " "}, SCHEMA)
+
+
+def test_schema_type_and_enum():
+    assert "integer" in validate_against_schema(
+        {"order_no": "a", "count": 1.5}, SCHEMA)
+    assert validate_against_schema(
+        {"order_no": "a", "count": 3}, SCHEMA) is None
+    # bool 不是 integer(Python 子类陷阱)
+    assert "integer" in validate_against_schema(
+        {"order_no": "a", "count": True}, SCHEMA)
+    assert "必须是" in validate_against_schema(
+        {"order_no": "a", "state": "paused"}, SCHEMA)
+    assert validate_against_schema(
+        {"order_no": "a", "state": "open"}, SCHEMA) is None
+
+
+def test_schema_nested_required():
+    err = validate_against_schema(
+        {"order_no": "a", "filter": {"other": 1}}, SCHEMA)
+    assert "缺少必填参数 kb" in err
+    assert validate_against_schema(
+        {"order_no": "a", "filter": {"kb": "x"}}, SCHEMA) is None
+
+
+def test_schema_none_passes_and_unknown_props_ignored():
+    assert validate_against_schema({"x": 1}, None) is None
+    assert validate_against_schema(
+        {"order_no": "a", "undeclared": object()}, SCHEMA) is None

@@ -18,6 +18,8 @@ export interface MetrologyScenario {
     subject_slot?: string
     subject_default?: string
     normalize?: string
+    slot_type?: 'text' | 'enum' | 'number' | 'date'
+    enum_options?: string[]
   }
   action: {
     kind: 'kg' | 'chatbi'
