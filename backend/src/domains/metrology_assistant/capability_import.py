@@ -277,6 +277,9 @@ def _ask_question(header: str, description: str) -> str:
         trimmed = example[len(header):].lstrip("（(，, ：: ")
         if trimmed:
             example = trimmed
+    # 描述以"如 …"举例开头时,与外层"(如 …)"格式叠字
+    if example.startswith("如 ") or example.startswith("如："):
+        example = example[1:].lstrip(" ：:")
     if not example:
         return f"请提供{header}"
     return f"请提供{header}(如 {example[:20]})"
