@@ -1,5 +1,11 @@
 # =============================================================================
-# llm-to-modeler 完整部署栈（单容器 app + Neo4j + PostgreSQL(含 pgvector 向量)）
+# llm-to-modeler 完整部署栈（全中间件一站编排）
+#   app            一体容器（nginx 静态/反代 + uvicorn API）
+#   metrology-mcp  mock 计量业务平台（南京院客服 Demo；复用 app 镜像，
+#                  command 覆盖——不想要该服务时注释掉整个块即可，
+#                  app 不依赖它存活，仅客服插件的进度/价目场景受影响）
+#   neo4j          图谱（KG 插件依赖）
+#   postgres       PostgreSQL 16 + pgvector（平台存储 + 向量，同库）
 # 向量存储默认且仅走 PG(pgvector)——VECTOR_BACKEND=milvus 后端已随
 # Milvus 下线移除,如需恢复见 git 历史本文件的 milvus 服务块。
 #
@@ -7,6 +13,13 @@
 # 声明式管理：启停/替换/日志/数据卷。版本经 TAG 环境变量切换：
 #   TAG=a84e26a docker compose up -d
 # （deploy.sh 已自动带 TAG；手工操作时缺省 latest）
+#
+# 每个服务都带 healthcheck（deploy.sh ⑤ 段另有发布期主动探测+回滚）：
+#   postgres  pg_isready          app 依赖(service_healthy)
+#   neo4j     HTTP :7474 探活     app 依赖(service_healthy)
+#   app       /ai-modeler/api/health
+#   metrology-mcp  /mcp 端点可达（streamable HTTP 对普通 GET 返回
+#                406=协议协商拒绝——这正是"服务活着"的证据,200/406 均算健康）
 #
 # 日常命令：
 #   docker compose ps              # 状态
@@ -57,12 +70,41 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      # mock 业务平台只服务客服 Demo 场景——不作为 app 启动门槛
+      # (service_started:异步拉起,不阻塞也不拖垮主服务)
+      metrology-mcp:
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/ai-modeler/api/health | grep -q '\\\"status\\\": *\\\"healthy\\\"'"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ── mock 计量业务平台（南京院客服 Demo 的 MCP server）─────────────────
+  # 复用 app 镜像(deps 里已有 mcp SDK),command 覆盖为只跑 MCP server。
+  # 不映射宿主端口:仅 compose 内网可达(app 经服务名 http://metrology-mcp:9771/mcp
+  # 连接;注册表/数据源配置用该 URL)——mock 数据不暴露到宿主网络。
+  # 内存护栏:纯 Python + 24 条 JSON 夹具,128m 足够(实测 ~40MB)。
+  metrology-mcp:
+    image: llm-modeler:${TAG:-latest}
+    container_name: llm-modeler-metrology-mcp
+    restart: unless-stopped
+    command: ["python", "/app/mcp-e2e/metrology_server.py"]
+    mem_limit: ${MCP_MEM_LIMIT:-128m}
+    mem_reservation: 32m
+    environment:
+      - TZ=Asia/Shanghai
+      - METROLOGY_MCP_HOST=0.0.0.0
+      - METROLOGY_MCP_PORT=9771
+    healthcheck:
+      # streamable HTTP MCP 端点对无协议头的普通 GET 返回 406(协商拒绝)
+      # ——curl -f 会把 4xx 当失败,这里显式取状态码,200/406 均判活
+      test: ["CMD-SHELL", "code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9771/mcp); [ \"$$code\" = 200 ] || [ \"$$code\" = 406 ]"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ── Neo4j 图谱（社区版） ──
   neo4j:

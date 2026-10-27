@@ -27,6 +27,9 @@ WORKDIR /app
 COPY backend/.deps/ /app/deps/
 # 后端源码
 COPY backend/src/ /app/src/
+# mock 业务平台 MCP server（南京院客服 Demo；compose 的 metrology-mcp
+# 服务复用本镜像，command 覆盖运行——mcp SDK 已在 deps 里，零额外依赖）
+COPY tools/mcp-e2e/ /app/mcp-e2e/
 # 前端构建产物（平铺 dist；nginx root 直指）
 COPY backend/dist/ /usr/share/nginx/html/ai-modeler/
 

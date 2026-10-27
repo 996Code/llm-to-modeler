@@ -257,23 +257,77 @@ OLD_TAG=$(dc ps --format '{{.Image}}' 2>/dev/null | sed 's/.*://' || true)
 log "④ compose 切换（旧：${OLD_TAG:-无} → 新：${GIT_TAG}）..."
 TAG="$GIT_TAG" HOST_PORT="$HOST_PORT" dc up -d
 
-# ── ⑤ 健康验证（失败自动回滚旧 TAG）────────────────────────────────────
-log "⑤ 健康探测（最长 ${HEALTH_TIMEOUT}s）..."
-elapsed=0
-until curl -sf --max-time 3 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/health" | grep -q '"status": *"healthy"'; do
-  sleep 2; elapsed=$((elapsed + 2))
-  if [ "$elapsed" -ge "$HEALTH_TIMEOUT" ]; then
-    err "健康探测超时。最近日志："
-    dc logs --tail 25 >&2 || true
-    if [ -n "$OLD_TAG" ]; then
-      err "回滚到 ${OLD_TAG}..."
-      TAG="$OLD_TAG" HOST_PORT="$HOST_PORT" dc up -d
-      log "已回滚"
+# ── ⑤ 健康验证（四层探测,失败自动回滚旧 TAG）─────────────────────────
+# 分层:基础设施(pg/neo4j,compose healthcheck 收敛) → mock 业务平台
+# (metrology-mcp,compose healthcheck 收敛) → 应用(app,两层:容器
+# healthcheck 收敛 + 宿主端口端到端 curl——后者穿过 nginx 反代,是
+# 用户真实路径)。探测用 docker inspect 而非重复实现检查逻辑:compose
+# 文件里的 healthcheck 是唯一事实源,这里只等它收敛。
+wait_container_healthy() {  # $1=容器名;超时用全局 HEALTH_TIMEOUT
+  local name="$1" waited=0 status
+  while :; do
+    status=$(docker inspect -f '{{.State.Health.Status}}' "$name" 2>/dev/null || echo missing)
+    [ "$status" = "healthy" ] && return 0
+    sleep 3; waited=$((waited + 3))
+    if [ "$waited" -ge "$HEALTH_TIMEOUT" ]; then
+      err "容器 ${name} 健康探测超时（状态: ${status}）。最近日志："
+      docker logs "$name" --tail 15 >&2 || true
+      return 1
     fi
-    exit 1
+  done
+}
+
+rollback_to_old_tag() {  # 回滚 = 旧 TAG 重新 up(app 与 metrology-mcp 同镜像同切换)
+  if [ -n "${OLD_TAG:-}" ]; then
+    err "回滚到 ${OLD_TAG}..."
+    TAG="$OLD_TAG" HOST_PORT="$HOST_PORT" dc up -d
+    log "已回滚"
   fi
-done
-log "   健康就绪 ✓（${elapsed}s）"
+}
+
+log "⑤ 健康探测（pg → neo4j → metrology-mcp → app,各最长 ${HEALTH_TIMEOUT}s）..."
+DEPLOY_FAILED=0
+
+# ⑤a PostgreSQL(平台存储+pgvector):pg_isready 健康检查收敛
+log "   [1/4] postgres..."
+wait_container_healthy llm-modeler-postgres || DEPLOY_FAILED=1
+
+# ⑤b Neo4j(KG 图谱):HTTP :7474 健康检查收敛
+if [ "$DEPLOY_FAILED" -eq 0 ]; then
+  log "   [2/4] neo4j..."
+  wait_container_healthy llm-modeler-neo4j || DEPLOY_FAILED=1
+fi
+
+# ⑤c mock 计量业务平台(客服 Demo):/mcp 端点可达(200/406 均算活——
+#    streamable HTTP 对无协议头 GET 返回 406 是协商拒绝,证明服务在)
+if [ "$DEPLOY_FAILED" -eq 0 ]; then
+  log "   [3/4] metrology-mcp..."
+  wait_container_healthy llm-modeler-metrology-mcp || DEPLOY_FAILED=1
+fi
+
+# ⑤d 应用:容器 healthcheck(容器内 curl)+ 宿主端口端到端(穿 nginx)
+if [ "$DEPLOY_FAILED" -eq 0 ]; then
+  log "   [4/4] app（容器健康 + 端到端 ${HOST_PORT}）..."
+  if wait_container_healthy llm-modeler; then
+    elapsed=0
+    until curl -sf --max-time 3 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/health" | grep -q '"status": *"healthy"'; do
+      sleep 2; elapsed=$((elapsed + 2))
+      if [ "$elapsed" -ge "$HEALTH_TIMEOUT" ]; then
+        err "app 端到端探测超时。最近日志："
+        dc logs --tail 25 >&2 || true
+        DEPLOY_FAILED=1; break
+      fi
+    done
+  else
+    DEPLOY_FAILED=1
+  fi
+fi
+
+if [ "$DEPLOY_FAILED" -ne 0 ]; then
+  rollback_to_old_tag
+  exit 1
+fi
+log "   全栈健康就绪 ✓（postgres / neo4j / metrology-mcp / app）"
 
 log "发布完成："
 log "   前端入口  http://<主机>:${HOST_PORT}/ai-modeler/（网关同前缀反代）"
