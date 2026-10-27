@@ -242,3 +242,36 @@ def test_api_put_conflict_and_keep_key(api):
     cfg = store.load_providers()
     assert cfg["primary"]["api_key"] == "sk-p"
     assert cfg["primary"]["base_url"] == "http://new/v1"
+
+
+# ── PII 脱敏前置(设计 7.3:先于 call_logs 记录)────────────────
+
+def test_redact_pii_high_confidence():
+    from llm.client import redact_pii
+    out = redact_pii("手机 13812345678 身份证 11010519491231002X 信用码 91330100MA27X8YT4K")
+    assert "13812345678" not in out and "138******78" in out
+    assert "11010519491231002X" not in out
+    assert "91330100MA27X8YT4K" not in out
+
+
+def test_redact_pii_no_false_positive():
+    from llm.client import redact_pii
+    # 18位纯数字+X 尾(单号)不脱;普通 11 位起始非 1[3-9] 不脱
+    assert redact_pii("单号 12345678901234567X") == "单号 12345678901234567X"
+    assert redact_pii("编号 23812345678") == "编号 23812345678"
+    # 校验位不合法的 18 位数字串不脱
+    assert "98765432100123456X" in redact_pii("号 98765432100123456X")
+
+
+def test_messages_log_persists_redacted(monkeypatch):
+    """落库点:messages 与响应 content 均过脱敏(设计 7.3 落库侧)。"""
+    from llm import client as llm_client
+
+    msgs = [{"role": "user", "content": "我的手机 13812345678"}]
+    out = llm_client._sanitize_messages_for_log(msgs)
+    assert "13812345678" not in out[0]["content"]
+    monkeypatch.delenv("LLM_LOG_PII_REDACT", raising=False)
+    # 开关关 = 原文(调试)
+    monkeypatch.setenv("LLM_LOG_PII_REDACT", "0")
+    out2 = llm_client._sanitize_messages_for_log(msgs)
+    assert "13812345678" in out2[0]["content"]

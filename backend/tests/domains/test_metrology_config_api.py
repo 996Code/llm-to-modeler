@@ -174,3 +174,62 @@ def test_executor_uses_db_scenario_table(client, monkeypatch):
     result = tool.execute({"user_input": "查一下进度"}, ctx)
     assert result.ask is not None
     assert "请给出单号(新)" in result.ask.questions[0].question
+
+
+# ── Tab3 联调预演(设计 §9)───────────────────────────────────
+
+class _NoAskLLM:
+    """预演用 LLM:固定提取结果。"""
+    def __init__(self, extract):
+        self._e = extract
+    def chat_json(self, messages, temperature=0.0, conv_id=None, stage=None):
+        return dict(self._e)
+
+
+def _dry(monkeypatch, client, payload):
+    from domains.metrology_assistant import config_api
+    _orig = config_api._dry_run_once
+    extract = payload.pop("_extract", {
+        "scenario": "progress", "instrument": "",
+        "purpose": "", "order_no": ""})
+    monkeypatch.setattr(config_api, "_dry_run_once",
+                        lambda sc, llm, b: _orig(sc, _NoAskLLM(extract), b))
+    return client.post("/api/packs/metrology_assistant/config/dry-run",
+                       json=payload)
+
+
+def test_dry_run_missing_slot_shows_will_ask(client, monkeypatch):
+    """缺单号:预演展示命中场景+缺口+将追问的原文(不发业务调用)。"""
+    resp = _dry(monkeypatch, client, {"text": "查一下进度"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["scenario"] == "progress"
+    assert "will_ask" in body and "请提供委托单号" in body["will_ask"]["question"]
+    assert "action" not in body
+
+
+def test_dry_run_complete_shows_action(client, monkeypatch):
+    """槽位齐:展示将调用的数据源+工具+参数;不执行(execute=False)。"""
+    resp = _dry(monkeypatch, client, {
+        "text": "查 BJ2026 进度",
+        "_extract": {"scenario": "progress", "instrument": "",
+                     "purpose": "", "order_no": "BJ2026"}})
+    body = resp.json()
+    assert body["missing"] is False
+    assert body["action"]["kind"] == "chatbi"
+    assert body["action"]["tool"] == "query_progress"
+    assert body["action"]["params"] == {"order_no": "BJ2026"}
+    assert "executed" not in body  # 未勾真实执行
+
+
+def test_dry_run_draft_config_diff(client, monkeypatch):
+    """草案配置:改追问文案后按草案求值(未保存不影响当前配置)。"""
+    current = client.get("/api/packs/metrology_assistant/config").json()
+    draft = current["content"]
+    draft["scenarios"]["progress"]["required"]["question"] = "草案版文案?"
+    resp = _dry(monkeypatch, client,
+                {"text": "查一下进度", "config": draft})
+    assert "草案版文案?" in resp.json()["will_ask"]["question"]
+    # 当前配置未变(草案不落库)
+    again = _dry(monkeypatch, client, {"text": "查一下进度"})
+    assert "请提供委托单号" in again.json()["will_ask"]["question"]

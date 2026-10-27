@@ -106,3 +106,111 @@ async def rollback(body: RollbackBody, request: Request) -> dict:
         comment=body.comment)
     runtime.invalidate_config_cache()
     return {"revision": new_rev}
+
+
+class DryRunBody(BaseModel):
+    """联调预演(设计 §9 Tab3):一句话走提取+求值,不落库不写 flow。"""
+    text: str
+    answers: dict = {}          # 可选:模拟补答(如 {"委托单号": "BJ2026"})
+    config: dict | None = None  # 可选:草案配置(保存前差异对比用)
+    execute: bool = False       # 真实执行复选:槽位齐时真的调底层 API
+
+
+def _dry_run_once(scenarios: dict, llm, body: "DryRunBody") -> dict:
+    """对一份场景表跑一次预演;返回命中/槽位/缺口/将问/将调。"""
+    from domains.metrology_assistant.tools import assistant as mta
+
+    answers = body.answers or {}
+    if answers:
+        slots = mta.parse_clarify_answers(answers, scenarios)
+        scenario = next((k for k, c in scenarios.items()
+                         if c["required"]["slot"] in slots), None)
+        merged = mta.merge_slots(slots, {})
+    else:
+        extracted = mta.extract_slots(llm, body.text, {}, None, scenarios)
+        scenario = extracted["scenario"]
+        merged = mta.merge_slots(extracted, {})
+
+    result: dict = {"input": body.text, "scenario": scenario or None}
+    if scenario is None or scenario not in scenarios:
+        result["missing"] = True
+        result["note"] = "未命中场景(将答复暂不支持)"
+        return result
+    cfg = scenarios[scenario]
+    required = cfg["required"]
+    merged, reask = mta.normalize_required_slot(required, merged)
+    slot_label = required.get("header", required["slot"])
+    result["slots"] = {k: v for k, v in merged.items() if v}
+    if reask is not None:
+        result["will_ask"] = {"question": reask, "header": required["header"],
+                              "options": [o.get("label") if isinstance(o, dict) else o
+                                          for o in (required.get("options") or [])]}
+        result["note"] = f"槽位类型校验未过({slot_label})"
+        return result
+    if not merged.get(required["slot"]):
+        question = required["question"]
+        subject_slot = required.get("subject_slot")
+        if subject_slot is not None and "{subject}" in question:
+            value = merged.get(subject_slot) or ""
+            subject = f"「{value}」" if value else required.get(
+                "subject_default", "")
+            question = question.format(subject=subject)
+        result["will_ask"] = {"question": question,
+                              "header": required["header"],
+                              "options": [o.get("label") if isinstance(o, dict) else o
+                                          for o in (required.get("options") or [])]}
+        result["note"] = f"缺少必填槽位 {slot_label}"
+        return result
+    action = cfg["action"]
+    if action["kind"] == "kg":
+        result["action"] = {"kind": "kg",
+                            "kb": mta.resolve_kb_for_purpose(
+                                merged.get("purpose") or "")}
+    else:
+        result["action"] = {
+            "kind": "chatbi", "tool": action["tool"],
+            "datasource_env": action["env"],
+            "datasource_name": action.get("ds_name", ""),
+            "params": {k: merged.get(v, "") for k, v in
+                       (action.get("params") or {}).items()}}
+    result["missing"] = False
+    return result
+
+
+@router.post("/config/dry-run", dependencies=[Depends(admin_required)])
+async def dry_run(body: DryRunBody, request: Request) -> dict:
+    """联调预演:提取+求值(只读);execute=True 且槽位齐时真实调底层。
+
+    config 传入草案配置时按草案求值(不落库)——前端对同一句话各跑一次
+    当前配置与草案即可得到差异对比;预演永不写 flow/任务。
+    """
+    try:
+        if body.config is not None:
+            validated = validate_config(body.config)
+            scenarios = validated["scenarios"]
+        else:
+            from domains.metrology_assistant.scenario_config import load_scenarios
+            scenarios = load_scenarios()
+    except ConfigValidationError as e:
+        raise HTTPException(400, f"草案配置校验失败: {e}")
+
+    llm = getattr(request.app.state, "llm_client", None)
+    out = _dry_run_once(scenarios, llm, body)
+
+    if (body.execute and not out.get("missing")
+            and out.get("action", {}).get("kind") == "chatbi"):
+        import os
+        from domains.chatbi.controlled import execute_controlled
+        ds_id = os.getenv(out["action"]["datasource_env"], "").strip()
+        if not ds_id:
+            out["executed"] = {"ok": False, "error": "数据源未配置(env 缺失)"}
+        else:
+            r = execute_controlled(request.app.state, ds_id,
+                                   out["action"]["tool"],
+                                   out["action"]["params"])
+            out["executed"] = {
+                "ok": r.ok, "status": r.status,
+                "error": r.error.message if r.error else None,
+                "rows": len((r.data or {}).get("rows") or [])
+                        if isinstance(r.data, dict) else None}
+    return out

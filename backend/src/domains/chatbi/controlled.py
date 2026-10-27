@@ -150,50 +150,25 @@ def _normalize_tabular(payload: Any) -> Optional[dict]:
                 "rows": [(r,) for r in payload]}
     if isinstance(payload, dict):
         return {"record": dict(payload)}
+    if isinstance(payload, (int, float, bool, str)):
+        return {"columns": ["value"], "rows": [(payload,)]}
     return None
 
 
-def execute_controlled(app_state, datasource_id: str, tool: str,
-                       args: dict) -> ControlledResult:
-    """受控执行:验源验参 → SDK 调用 → 先判信封 → 仅成功数据归一。
 
-    失败如实返回 ControlledResult(ok=False),不静默、不冒充成功;
-    前置校验失败时不发 MCP 请求。
+
+def _invoke_mcp_core(info, tool: str, args: dict, started: float,
+                     source: Optional[dict] = None) -> "ControlledResult":
+    """共享执行内核:Schema 验参 → SDK 传输 → 信封判定 → 归一。
+
+    execute_controlled(客服受控入口)与 datasources.execute_mcp_tool
+    (ask_data/switch_chart 交互入口)都走这里——设计 4.4"原 ask_data
+    生成候选调用后也走同一执行内核,交互副作用留在外层":传输/信封/
+    验参只有一份实现,信封不再被当成功数据行(此前 execute_mcp_tool
+    的真实缺口)。
     """
-    started = time.monotonic()
-    from domains.chatbi import datasources
-    from domains.chatbi.runtime import get_pack_db
-
-    if not isinstance(args, dict):
-        return _err("invalid_input", "调用参数必须是 JSON 对象", started)
-
-    # 数据源加载失败(PG 不可达等)→ unavailable,不把内部异常原文
-    # (可能含连接串)发给用户(设计 7.5);MCP 传输只用 server code,
-    # 不需要解密密码(decrypt=False)
-    try:
-        info = datasources.get_datasource(get_pack_db(), datasource_id,
-                                          decrypt=False)
-    except Exception:
-        return _err("unavailable", "数据源服务暂不可用,请稍后重试", started)
-    source = {"datasource": (info.name if info else datasource_id), "tool": tool}
-    if info is None:
-        return _err("invalid_input", f"数据源不存在: {datasource_id}", started, source)
-    if not info.is_active:
-        return _err("unavailable", f"数据源已停用: {info.name}", started, source)
-    if info.db_type != "mcp":
-        return _err("invalid_input",
-                    f"受控执行仅支持 MCP 数据源, {info.name} 是 {info.db_type}",
-                    started, source)
-    if not isinstance(tool, str) or not tool.strip():
-        return _err("invalid_input", "缺少固定工具名", started, source)
-    # 工具白名单: info.database(=tool_name 限定)非空时只允许该工具
-    if (info.database or "").strip() and tool != info.database:
-        return _err("invalid_input",
-                    f"工具 {tool} 不在数据源限定范围内(仅允许 {info.database})",
-                    started, source)
     # inputSchema 验参(P1/设计 4.3):注册表快照里的原始 Schema——
-    # required/type/enum/嵌套,不过不发请求(此前仅形状校验+MCP 层
-    # required 拦截,深度校验靠编排方暂代)
+    # required/type/enum/嵌套,不过不发请求
     try:
         from services.mcp_registry import McpServerStore
         server = McpServerStore().get_by_code(info.host)
@@ -238,9 +213,9 @@ def execute_controlled(app_state, datasource_id: str, tool: str,
             return ControlledResult(ok=True, status="ok", data=normalized,
                                     duration_ms=int((time.monotonic() - started) * 1000),
                                     source=source)
+
         message = str(payload.get("message") or f"业务平台返回 {status}")
         return _err(status, message, started, source)
-
     # ── 非信封:表格形状归一 ──
     # 信封形状(带 message/data 载荷键)但状态枚举未知 = 契约错误,
     # 不当成功记录、不交给模型补齐(设计 4.4 步 3/4,13.2 P1 必测项)。
@@ -253,8 +228,50 @@ def execute_controlled(app_state, datasource_id: str, tool: str,
                     started, source)
     normalized = _normalize_tabular(payload)
     if normalized is None:
-        return _err("invalid_input", "上游返回格式不符合声明的表格契约",
+        return _err("invalid_input",
+                    "上游返回格式不符合表格契约(无列名数组不猜列名)",
                     started, source)
     return ControlledResult(ok=True, status="ok", data=normalized,
                             duration_ms=int((time.monotonic() - started) * 1000),
                             source=source)
+
+
+def execute_controlled(app_state, datasource_id: str, tool: str,
+                       args: dict) -> ControlledResult:
+    """受控执行:验源验参 → SDK 调用 → 先判信封 → 仅成功数据归一。
+
+    失败如实返回 ControlledResult(ok=False),不静默、不冒充成功;
+    前置校验失败时不发 MCP 请求。
+    """
+    started = time.monotonic()
+    from domains.chatbi import datasources
+    from domains.chatbi.runtime import get_pack_db
+
+    if not isinstance(args, dict):
+        return _err("invalid_input", "调用参数必须是 JSON 对象", started)
+
+    # 数据源加载失败(PG 不可达等)→ unavailable,不把内部异常原文
+    # (可能含连接串)发给用户(设计 7.5);MCP 传输只用 server code,
+    # 不需要解密密码(decrypt=False)
+    try:
+        info = datasources.get_datasource(get_pack_db(), datasource_id,
+                                          decrypt=False)
+    except Exception:
+        return _err("unavailable", "数据源服务暂不可用,请稍后重试", started)
+    source = {"datasource": (info.name if info else datasource_id), "tool": tool}
+    if info is None:
+        return _err("invalid_input", f"数据源不存在: {datasource_id}", started, source)
+    if not info.is_active:
+        return _err("unavailable", f"数据源已停用: {info.name}", started, source)
+    if info.db_type != "mcp":
+        return _err("invalid_input",
+                    f"受控执行仅支持 MCP 数据源, {info.name} 是 {info.db_type}",
+                    started, source)
+    if not isinstance(tool, str) or not tool.strip():
+        return _err("invalid_input", "缺少固定工具名", started, source)
+    # 工具白名单: info.database(=tool_name 限定)非空时只允许该工具
+    if (info.database or "").strip() and tool != info.database:
+        return _err("invalid_input",
+                    f"工具 {tool} 不在数据源限定范围内(仅允许 {info.database})",
+                    started, source)
+    return _invoke_mcp_core(info, tool, args, started, source)

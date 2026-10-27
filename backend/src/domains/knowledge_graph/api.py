@@ -698,8 +698,22 @@ async def batch_delete_documents(kb_id: str, request: Request,
 # kbId+docId 双定位 + 文件根边界防御不变
 @router.get("/kbs/{kb_id}/documents/{doc_id}/download")
 async def download_document(kb_id: str, doc_id: str, request: Request):
-    """下载已上传的原始文件(存储名=doc_id+扩展名,下载名=原始文件名)。"""
+    """下载已上传的原始文件(存储名=doc_id+扩展名,下载名=原始文件名)。
+
+    来源 ID 不是授权令牌(设计 7.2):每次下载重验当前用户对库的访问
+    权——此前知道 doc_id 即可下任意库文件(旁路)。无 admin 后门:开放
+    模式"人人皆 admin"会吞掉整个 ACL;ACL 判定语义(无身份/无 ACL=
+    放行)已保证开放部署可用,受限库对不在白名单的身份一律拒绝
+    (管理员把自己加进白名单即可)。
+    """
     _kb_or_404(request, kb_id)
+    from domains.knowledge_graph import acl as kg_acl
+    user, roles = kg_acl.request_identity(
+        request.headers.get("X-User-Id"),
+        request.headers.get("X-User-Roles"))
+    if not kg_acl.kb_allowed(
+            runtime.get_kg_store(request.app.state), kb_id, user, roles):
+        raise HTTPException(403, "无该知识库的访问权限")
     store = runtime.get_kg_store(request.app.state)
     doc = store.get_document(doc_id)
     if not doc or doc["kbId"] != kb_id:

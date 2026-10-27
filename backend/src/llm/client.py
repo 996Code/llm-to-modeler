@@ -37,33 +37,95 @@ from openai import OpenAI
 from pydantic import BaseModel
 
 
-def _sanitize_messages_for_log(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """日志用的消息清洗:多模态图片转占位符,其余原样(浅拷贝,不动调用方)。
+_RE_MOBILE = __import__("re").compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
+_RE_IDCARD = __import__("re").compile(r"(?<![0-9Xx])(\d{17}[0-9Xx])(?![0-9Xx])")
+_RE_USCC = __import__("re").compile(
+    r"(?<![0-9A-Z])([0-9A-HJ-NPQRTUWXY]{2}\d{6}[0-9A-HJ-NPQRTUWXY]{10})(?![0-9A-Z])")
 
-    图片 content 是 data URL base64(单张可达数 MB),入库会撑爆 call_logs
-    且对追溯无意义——prompt 的"文字部分"才是排查依据。占位符保留长度信息,
-    便于判断"是不是传了张巨图导致慢/超限"。
+
+def _mask(text: str, keep_head: int = 3, keep_tail: int = 2) -> str:
+    if len(text) <= keep_head + keep_tail:
+        return "*" * len(text)
+    return (text[:keep_head] + "*" * (len(text) - keep_head - keep_tail)
+            + text[-keep_tail:])
+
+
+def _idcard_checksum_ok(idcard: str) -> bool:
+    """GB 11643 校验位验证——18 位数字串很多是单号,只脱真身份证。"""
+    if len(idcard) != 18:
+        return False
+    try:
+        body = [int(c) for c in idcard[:17]]
+    except ValueError:
+        return False
+    weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+    check = "10X98765432"[sum(w * n for w, n in zip(weights, body)) % 11]
+    return check == idcard[-1].upper()
+
+
+def redact_pii(text: str) -> str:
+    """高置信 PII 脱敏(手机/身份证[校验位验证]/统一社会信用代码)。
+
+    设计 7.3:脱敏先于 call_logs 记录;LLM_LOG_PII_REDACT=0 可关(调试
+    用,默认开)。姓名等无法高置信识别的类别不做正则硬脱(误伤正文
+    比漏脱更伤),由业务审核后按清单补充。
     """
-    sanitized = []
+    if not text:
+        return text
+
+    def _mob(m):
+        return _mask(m.group(1))
+
+    def _idc(m):
+        t = m.group(1)
+        return _mask(t) if _idcard_checksum_ok(t) else t
+
+    def _uscc(m):
+        t = m.group(1)
+        # 保守判别:至少 2 个大写字母才按信用代码脱——纯数字+尾缀 X 的
+        # 单号不误伤(GB 32100 校验位算法未实现,宁漏勿误;业务审核后
+        # 可换成精确校验)
+        import re as _re
+        return _mask(t) if len(_re.findall(r"[A-Z]", t)) >= 2 else t
+    text = _RE_MOBILE.sub(_mob, text)
+    text = _RE_IDCARD.sub(_idc, text)
+    text = _RE_USCC.sub(_uscc, text)
+    return text
+
+
+def _redact_for_log(text: str) -> str:
+    """落库前统一口径:开关开 → redact_pii。"""
+    import os as _os
+    if _os.getenv("LLM_LOG_PII_REDACT", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return text
+    return redact_pii(text)
+
+
+def _sanitize_messages_for_log(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """messages 落库前的统一处理:图片占位 + PII 脱敏(先于 call_logs)。"""
+    out = []
     for m in messages:
-        content = m.get("content")
-        if not isinstance(content, list):
-            sanitized.append(m)  # 纯文本消息:原样(引用共享,append-only 场景安全)
-            continue
-        parts = []
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "image_url":
-                url = (part.get("image_url") or {}).get("url") or ""
-                part = {
-                    **part,
-                    "image_url": {
-                        **(part.get("image_url") or {}),
-                        "url": f"<image data omitted: {len(url)} chars>",
-                    },
-                }
-            parts.append(part)
-        sanitized.append({**m, "content": parts})
-    return sanitized
+        c = m.get("content")
+        if isinstance(c, str):
+            out.append({**m, "content": _redact_for_log(c)})
+        elif isinstance(c, list):
+            # 多模态:图片转占位符,文本段脱敏
+            parts = []
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    url = ((part.get("image_url") or {}).get("url") or "")
+                    parts.append({"type": "image_url", "image_url": {
+                        "url": f"<image data omitted: {len(url)} chars>"}})
+                elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                    parts.append({**part, "text": _redact_for_log(part["text"])})
+                else:
+                    parts.append(part)
+            out.append({**m, "content": parts})
+        else:
+            out.append(m)
+    return out
+
 
 logger = logging.getLogger(__name__)
 
@@ -611,7 +673,7 @@ class LLMClient:
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
                 # 完整入库开关:开=完整内容(全链路追溯);关=截断 500 字(旧默认)
-                "content": result if self._log_full else result[:500],
+                "content": _redact_for_log(result) if self._log_full else _redact_for_log(result[:500]),
                 "finish_reason": choice.finish_reason,  # stop=正常结束, length=截断
                 # model_dump() 是 Pydantic 转 dict，类比 Jackson 序列化对象为 Map
                 "usage": response.usage.model_dump() if response.usage else None,  # token 用量
@@ -782,7 +844,7 @@ class LLMClient:
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
                 # 完整入库开关:开=完整解析结果(全链路追溯);关=截断 500 字
-                "content": str(result) if self._log_full else str(result)[:500],
+                "content": _redact_for_log(str(result)) if self._log_full else _redact_for_log(str(result)[:500]),
                 "finish_reason": response.choices[0].finish_reason,
                 "usage": response.usage.model_dump() if response.usage else None,
             }

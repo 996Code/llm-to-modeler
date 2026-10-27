@@ -147,6 +147,32 @@
           </div>
         </div>
       </a-tab-pane>
+      <a-tab-pane key="dryrun">
+        <template #tab><ExperimentOutlined /> 联调预演</template>
+        <div class="dryrun">
+          <div class="dryrun-bar">
+            <input v-model="dry.text" class="dryrun-input" placeholder="输入一句话,如: 查一下 BJ2026 的进度" />
+            <label class="dryrun-check"><input type="checkbox" v-model="dry.execute" /> 真实执行</label>
+            <a-button type="primary" size="small" :loading="dry.loading" @click="runDry('current')">运行预演</a-button>
+            <a-button size="small" :disabled="!dirty" @click="runDry('diff')">对比草案与当前</a-button>
+          </div>
+          <div v-if="dry.current" class="dryrun-grid">
+            <div class="dryrun-col">
+              <div class="dryrun-col-title">{{ dry.diff ? '当前生效配置' : '预演结果' }}</div>
+              <pre class="dryrun-pre">{{ fmtDry(dry.current) }}</pre>
+            </div>
+            <div v-if="dry.diff" class="dryrun-col">
+              <div class="dryrun-col-title">未保存的草案</div>
+              <pre class="dryrun-pre" :class="{ changed: fmtDry(dry.draft) !== fmtDry(dry.current) }">{{ fmtDry(dry.draft) }}</pre>
+            </div>
+          </div>
+          <div v-if="dry.error" class="dryrun-error">{{ dry.error }}</div>
+          <div class="dryrun-note">
+            预演只读(提取+求值,展示命中场景/已识别槽位/缺口/将追问的原文/将调用的数据源与工具);
+            勾选「真实执行」且槽位齐时对问数受控执行跑一次真实调用。预演永不写对话/任务。
+          </div>
+        </div>
+      </a-tab-pane>
     </a-tabs>
 
     <div class="metro-admin-foot">
@@ -192,9 +218,9 @@
 // 计量客服管理页 —— 场景配置两 tab 编排壳:
 //   场景与槽位(意图/追问文案/选项) + 规则与来源(动作绑定/通知文案)。
 // 保存语义:整档提交 + revision 乐观锁(409 提示刷新)+ 历史留痕 + 回滚。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { ApiOutlined, ProfileOutlined } from '@ant-design/icons-vue'
+import { ApiOutlined, ExperimentOutlined, ProfileOutlined } from '@ant-design/icons-vue'
 import { metrologyApi, type MetrologyConfig, type MetrologyHistoryItem, type MetrologyScenario } from '../../metrologyApi'
 
 const tab = ref('scenarios')
@@ -263,6 +289,53 @@ function setEnum(cfg: MetrologyScenario, ev: Event) {
   const text = (ev.target as HTMLTextAreaElement).value
   ;(cfg.required as any).enum_options = text.split('\n').map((l) => l.trim()).filter(Boolean)
 }
+// ── Tab3 联调预演(设计 §9):一句话走提取+求值;草案差异对比 ──
+const dry = reactive({
+  text: '', execute: false, loading: false,
+  current: null as any, draft: null as any, diff: false, error: '',
+})
+
+function fmtDry(r: any): string {
+  if (!r) return ''
+  const lines: string[] = [`输入: ${r.input}`, `命中场景: ${r.scenario ?? '—'}`]
+  if (r.slots && Object.keys(r.slots).length)
+    lines.push(`已识别槽位: ${Object.entries(r.slots).map(([k, v]) => `${k}=${v}`).join(' ')}`)
+  if (r.will_ask) lines.push(`将追问(${r.will_ask.header}): ${r.will_ask.question}`)
+  if (r.action) {
+    const a = r.action
+    lines.push(a.kind === 'kg'
+      ? `将调用: 知识库证据检索 → 「${a.kb}」`
+      : `将调用: ${a.datasource_name} · ${a.tool}(${JSON.stringify(a.params)})`)
+  }
+  if (r.note) lines.push(`说明: ${r.note}`)
+  if (r.executed) lines.push(r.executed.ok
+    ? `真实执行: ok(${r.executed.rows ?? '?'} 行)`
+    : `真实执行: 失败(${r.executed.error || r.executed.status})`)
+  return lines.join('\n')
+}
+
+async function runDry(mode: 'current' | 'diff') {
+  if (!dry.text.trim()) { dry.error = '请输入一句话'; return }
+  dry.loading = true
+  dry.error = ''
+  dry.diff = mode === 'diff'
+  try {
+    const base = { text: dry.text, execute: dry.execute }
+    const { data } = await metrologyApi.post('/config/dry-run',
+      mode === 'diff' ? { ...base, config: { scenarios: draft.value.scenarios } } : base)
+    dry.current = data
+    if (mode === 'diff') {
+      const { data: d } = await metrologyApi.post('/config/dry-run', base)
+      dry.draft = dry.current
+      dry.current = d  // 左=当前,右=草案
+    }
+  } catch (e: any) {
+    dry.error = e?.response?.data?.detail || e?.message || '预演失败'
+  } finally {
+    dry.loading = false
+  }
+}
+
 function optionsText(cfg: MetrologyScenario): string {
   return (cfg.required.options || []).map((o) => `${o.label}, ${o.description || ''}`).join('\n')
 }
@@ -320,4 +393,14 @@ onMounted(async () => {
 .slot-box legend { font-size: 12px; color: #7a8491; padding: 0 6px; }
 .kg-hint { margin-top: 8px; }
 .hist-tag { margin-left: 8px; }
+.dryrun { display: flex; flex-direction: column; gap: 12px; }
+.dryrun-bar { display: flex; align-items: center; gap: 12px; }
+.dryrun-input { flex: 1; max-width: 460px; border: 1px solid #d9dde3; border-radius: 6px; padding: 7px 10px; font-size: 13px; }
+.dryrun-check { font-size: 12px; color: #4a5568; display: flex; align-items: center; gap: 4px; }
+.dryrun-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.dryrun-col-title { font-size: 12px; color: #7a8491; margin-bottom: 6px; }
+.dryrun-pre { background: #f6f7f9; border: 1px solid #edf0f3; border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.9; white-space: pre-wrap; }
+.dryrun-pre.changed { border-color: #faad14; background: #fffbe6; }
+.dryrun-error { color: #d4380d; font-size: 12px; }
+.dryrun-note { color: #9aa4b2; font-size: 12px; line-height: 1.8; }
 </style>

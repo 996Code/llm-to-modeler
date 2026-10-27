@@ -378,41 +378,30 @@ def execute_mcp_tool(info: DataSourceInfo, tool_call: dict,
     if (info.database or "").strip() and tool != info.database:
         return _fail(f"工具 {tool} 不在数据源限定范围内(仅允许 {info.database})")
 
-    # 3. 调 MCP(模块引用形式, 测试 monkeypatch 兼容; 隔离性铁律: 只 import sdk)
-    from sdk import mcp_client
-    try:
-        payload = mcp_client.call_tool(info.host, tool, args)
-    except PackInvokeError as e:
-        return _fail(str(e))
-    except Exception as e:  # 防御: mcp_client 理论上已包装, 兜底不炸管线
-        return _fail(f"MCP 调用失败: {e}")
-
-    # 4. 形状映射 → (columns, rows)
-    if (isinstance(payload, dict)
-            and isinstance(payload.get("columns"), list)
-            and isinstance(payload.get("rows"), list)):
-        columns = [str(c) for c in payload["columns"]]
+    # 3. 委托共享执行内核(P2/设计 4.4:传输+信封判定+inputSchema 验参
+    # 一处实现——此前 {status: forbidden} 会被当成功数据行,现按业务
+    # 状态如实分类;ask_data/switch_chart 的自愈回环等交互副作用在外层不变)
+    from domains.chatbi.controlled import _invoke_mcp_core
+    core = _invoke_mcp_core(info, tool, args, started, source=None)
+    duration = int((time.monotonic() - started) * 1000)
+    if not core.ok:
+        msg = core.error.message if core.error else core.status
+        logger.warning("MCP 工具调用失败(%s, %dms): %s",
+                       info.host, duration, msg[:160])
+        return ExecuteResult(False, error=msg, duration_ms=duration)
+    data = core.data or {}
+    if "columns" in data and "rows" in data:
+        columns = [str(c) for c in data["columns"]]
         rows = [tuple(r) if isinstance(r, (list, tuple)) else (r,)
-                for r in payload["rows"]]
-    elif isinstance(payload, dict):  # 裸 dict = 单条记录
-        columns = [str(k) for k in payload.keys()]
-        rows = [tuple(payload.values())]
-    elif isinstance(payload, list) and payload and all(
-            isinstance(r, dict) for r in payload):
-        columns = [str(k) for k in payload[0].keys()]
-        rows = [tuple(r.get(c) for c in payload[0].keys()) for r in payload]
-    elif isinstance(payload, list) and payload and all(
-            isinstance(r, (list, tuple)) for r in payload):
-        return _fail("MCP 返回 list[list] 形状但无列名, 无法映射为表格结果"
-                     "(需 columns/rows 或 list[dict])")
-    elif isinstance(payload, list) and not payload:
-        columns, rows = [], []  # 空结果合法
-    elif isinstance(payload, list):  # 标量列表 → 单列多行
-        columns, rows = ["value"], [(v,) for v in payload]
-    else:  # 标量/其他 → 单列单行
-        columns, rows = ["value"], [(payload,)]
+                for r in data["rows"]]
+    elif "record" in data and isinstance(data["record"], dict):
+        columns = [str(k) for k in data["record"].keys()]
+        rows = [tuple(data["record"].get(c) for c in columns)]
+    else:  # 内核契约兜底(理论不可达:_normalize_tabular 只出这两种形状)
+        return ExecuteResult(False, error="上游返回格式不符合表格契约",
+                             duration_ms=duration)
 
-    # 5. 截断(与 execute_readonly 同防护)
+    # 4. 截断(行数上限;映射与信封判定已由共享内核完成)
     truncated = len(rows) > max_rows
     if truncated:
         rows = rows[:max_rows]
