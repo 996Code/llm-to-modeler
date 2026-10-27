@@ -1,0 +1,370 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "计量智能客服：一次提问的端到端链路",
+    "output": "../pack/metrology-service-chain.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "end2end",
+        "label": "端到端主链",
+        "focus": [
+          "fe_init",
+          "chat_api",
+          "classify",
+          "execute",
+          "slots",
+          "dispatch",
+          "kernels",
+          "result",
+          "render"
+        ],
+        "note": "一次提问从前端发送到结果卡渲染的完整路径（强检判定场景）。"
+      },
+      {
+        "id": "clarify",
+        "label": "追问闭环",
+        "focus": [
+          "slots",
+          "ask",
+          "resume",
+          "kernels"
+        ],
+        "note": "缺必填槽位时 interrupt 挂起，answers 恢复后从 pending 确定性续跑动作。"
+      },
+      {
+        "id": "kernel",
+        "label": "底层双内核",
+        "focus": [
+          "dispatch",
+          "kernels",
+          "result"
+        ],
+        "note": "强检判定走 KG 证据检索+三态结论；进度/价目走 ChatBI 受控执行（MCP 业务平台）。"
+      },
+      {
+        "id": "observe",
+        "label": "落库与观测",
+        "focus": [
+          "chat_api",
+          "persist",
+          "execute",
+          "result"
+        ],
+        "note": "事件流、调用日志、checkpoint、链路追踪的写入时机。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "fe",
+      "label": "前端（嵌入侧栏）"
+    },
+    {
+      "id": "api",
+      "label": "对话入口 / SSE"
+    },
+    {
+      "id": "graph",
+      "label": "LangGraph 引擎"
+    },
+    {
+      "id": "plugin",
+      "label": "计量客服插件"
+    },
+    {
+      "id": "kernel",
+      "label": "底层内核"
+    },
+    {
+      "id": "side",
+      "label": "持久化 / 追问",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "intake",
+      "label": "入口与意图",
+      "fromCol": 0,
+      "toCol": 2
+    },
+    {
+      "id": "pipeline",
+      "label": "客服管线",
+      "fromCol": 3,
+      "toCol": 4,
+      "variant": "emphasis"
+    },
+    {
+      "id": "answer",
+      "label": "执行与呈现",
+      "fromCol": 5,
+      "toCol": 5
+    }
+  ],
+  "mainPath": [
+    "fe_init",
+    "chat_api",
+    "classify",
+    "execute",
+    "slots",
+    "dispatch",
+    "kernels",
+    "result",
+    "render"
+  ],
+  "nodes": [
+    {
+      "id": "fe_init",
+      "lane": "fe",
+      "col": 0,
+      "type": "frontend",
+      "label": "嵌入侧栏发送",
+      "sublabel": "INIT/URL packs 声明",
+      "width": 130
+    },
+    {
+      "id": "chat_api",
+      "lane": "api",
+      "col": 1,
+      "type": "backend",
+      "label": "POST /api/config/chat",
+      "sublabel": "历史+压缩+透传头",
+      "width": 155
+    },
+    {
+      "id": "classify",
+      "lane": "graph",
+      "col": 2,
+      "type": "backend",
+      "label": "classify_intent",
+      "sublabel": "packs 直通·确定性路由",
+      "tag": "LLM",
+      "width": 160
+    },
+    {
+      "id": "execute",
+      "lane": "graph",
+      "col": 3,
+      "type": "backend",
+      "label": "execute_tool",
+      "sublabel": "preflight+ToolContext",
+      "width": 150
+    },
+    {
+      "id": "slots",
+      "lane": "plugin",
+      "col": 3,
+      "type": "cloud",
+      "label": "槽位提取与合并",
+      "sublabel": "一次 LLM 场景+三槽位",
+      "tag": "LLM",
+      "width": 150
+    },
+    {
+      "id": "dispatch",
+      "lane": "plugin",
+      "col": 4,
+      "type": "backend",
+      "label": "场景表分发",
+      "sublabel": "SCENARIOS 唯一事实源",
+      "width": 150
+    },
+    {
+      "id": "kernels",
+      "lane": "kernel",
+      "col": 5,
+      "type": "database",
+      "label": "双内核执行",
+      "sublabel": "KG 检索+三态结论·ChatBI→MCP",
+      "width": 185
+    },
+    {
+      "id": "result",
+      "lane": "api",
+      "col": 5,
+      "type": "messagebus",
+      "label": "handle_result→SSE",
+      "sublabel": "四态分流 result/done",
+      "width": 145
+    },
+    {
+      "id": "render",
+      "lane": "fe",
+      "col": 5,
+      "type": "frontend",
+      "label": "结果卡渲染",
+      "sublabel": "ResultCard 按 artifact",
+      "width": 135
+    },
+    {
+      "id": "ask",
+      "lane": "side",
+      "col": 4,
+      "type": "security",
+      "label": "缺槽追问挂起",
+      "sublabel": "interrupt·needsClarification",
+      "width": 155
+    },
+    {
+      "id": "resume",
+      "lane": "side",
+      "col": 5,
+      "type": "security",
+      "label": "answers 恢复重跑",
+      "sublabel": "Command(resume)·pending 续跑",
+      "width": 160
+    },
+    {
+      "id": "persist",
+      "lane": "side",
+      "col": 1,
+      "type": "database",
+      "label": "落库与观测",
+      "sublabel": "events·call_logs·checkpoint·trace",
+      "width": 175
+    }
+  ],
+  "edges": [
+    {
+      "id": "fe-chat",
+      "from": "fe_init",
+      "to": "chat_api",
+      "label": "SSE 请求",
+      "variant": "emphasis"
+    },
+    {
+      "id": "chat-classify",
+      "from": "chat_api",
+      "to": "classify",
+      "label": "装配初始 state",
+      "variant": "default"
+    },
+    {
+      "id": "classify-execute",
+      "from": "classify",
+      "to": "execute",
+      "label": "confidence=1.0 放行",
+      "variant": "emphasis"
+    },
+    {
+      "id": "execute-slots",
+      "from": "execute",
+      "to": "slots",
+      "label": "execute(tool_state, ctx)",
+      "variant": "default"
+    },
+    {
+      "id": "slots-dispatch",
+      "from": "slots",
+      "to": "dispatch",
+      "label": "槽位齐备",
+      "variant": "default"
+    },
+    {
+      "id": "dispatch-kernels",
+      "from": "dispatch",
+      "to": "kernels",
+      "label": "场景动作执行",
+      "variant": "emphasis"
+    },
+    {
+      "id": "kernels-result",
+      "from": "kernels",
+      "to": "result",
+      "label": "artifact(data)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "result-render",
+      "from": "result",
+      "to": "render",
+      "label": "SSE result 事件",
+      "variant": "default"
+    },
+    {
+      "id": "slots-ask",
+      "from": "slots",
+      "to": "ask",
+      "label": "缺必填槽位",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "ask-resume",
+      "from": "ask",
+      "to": "resume",
+      "label": "前端 answers",
+      "variant": "security"
+    },
+    {
+      "id": "resume-kernels",
+      "from": "resume",
+      "to": "kernels",
+      "label": "续跑不重烧提取",
+      "variant": "security",
+      "role": "return"
+    },
+    {
+      "id": "chat-persist",
+      "from": "chat_api",
+      "to": "persist",
+      "label": "全程落库",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "链路总览",
+      "items": [
+        "对外地址 /ai-modeler/api/config/chat（网关剥前缀）：系统唯一对话端点，SSE 流式返回",
+        "前端以 iframe 嵌入（?embed=true&hostless=1&packs=metrology_assistant），INIT/URL 的 packs 声明一路透传到每条 chat 消息（stores/conversation.ts）",
+        "引擎四节点图（engine/graph.py:142-195）：classify_intent → check_confidence → execute_tool → clarify_gate → handle_result，PostgresSaver 按 thread_id=会话ID 存 checkpoint",
+        "客服插件路由零 LLM：packs 声明只剩一个 → 一级直通（nodes.py:_route_pack）；MetrologyDirectRouter 确定性返回 (metrology_assistant, 1.0)（pack.py:16-26）"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "入口装配（api/config.py:202）",
+      "items": [
+        "加载会话配置（宿主 context 优先、会话库兜底）与历史（超窗口 70% 触发异步压缩）",
+        "提取透传请求头（x-/authorization/enterprise 前缀白名单）供插件调上游单点登录",
+        "stream_graph（engine/stream.py:93）：懒建会话、user 消息即时落库、工作线程跑图、15s SSE 心跳、图异常转 error+done 不断连"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "客服七步管线（assistant.py:401 execute）",
+      "items": [
+        "一次 chat_json 同时出场景+器具/用途/委托单号三槽位（extract_slots:197），失败上抛不静默猜",
+        "记忆/追问答案合并：本轮明确值优先，会话 KV（SessionStateHandle）只补空缺（merge_slots:218）",
+        "缺必填槽位 → AskSpec 追问（用途四选项/委托单号夹具），经引擎 clarify_gate interrupt 挂起；answers 恢复从 pending 确定性续跑，不再烧提取",
+        "SCENARIOS 场景表（assistant.py:81）是唯一事实源：强检判定/进度查询/价目查询三场景 + 范围外如实答复通知卡"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "双内核（复用不重造）",
+      "items": [
+        "强检判定：用途→选库（强检目录/检定规程，resolve_kb_for_purpose:351）→ KG 混合检索图谱+向量（kg/service.py:15）→ 三态结论 mandatory/not_mandatory/uncertain，依据必须带 chunk_refs 引用，非法上抛不生成伪结论（compose_conclusion:298）",
+        "进度/价目：env 绑定数据源 ID → execute_controlled 验源验参（仅 MCP 型+工具白名单）→ 信封判定先于形状归一（chatbi/controlled.py:93）",
+        "MCP 业务平台为 mock（tools/mcp-e2e/metrology_server.py，9771）：BJ2026/2027 正常、BJ8888 拒权、BJ9000 查无、BJ0000 超时——演示话术须如实说明模拟",
+        "信封分态：查无/拒权=业务通知卡；技术或契约故障=error_for_llm 如实报错，不成功化（LLM 失败不静默降级红线）"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "落库与观测",
+      "items": [
+        "会话 = append-only 事件流（ConversationStore）：user/assistant/tool_result/checkpoint/ask/trace 七类事件，重放重建视图（engine/conversation.py:60）",
+        "LLM 调用日志按会话+环节（route_pack/assistant.extract/conclude）写 call_logs，管理端链路视图按轮时间线展示",
+        "追问现场随 checkpoint（PostgresSaver）+ask 事件双保险，刷新/重启后历史加载可恢复追问卡（pendingResume 续答端点 /chat/resume）",
+        "Demo 边界：场景配置在代码 SCENARIOS 表、多轮状态用会话 KV（P1 迁 assistant_config 表+flows 状态机）"
+      ]
+    }
+  ]
+}
