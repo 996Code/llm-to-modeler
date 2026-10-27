@@ -90,7 +90,10 @@ services:
     image: llm-modeler:${TAG:-latest}
     container_name: llm-modeler-metrology-mcp
     restart: unless-stopped
-    command: ["python", "/app/mcp-e2e/metrology_server.py"]
+    # ⚠ 镜像 ENTRYPOINT 是 /app/start.sh(起后端主应用)——command 只能
+    # 覆盖 CMD 不覆盖 ENTRYPOINT,必须用 entrypoint 覆盖进程(真实事故:
+    # command 覆盖下 MCP 容器跑成后端,因无 DATABASE_URL 崩溃)
+    entrypoint: ["python", "/app/mcp-e2e/metrology_server.py"]
     mem_limit: ${MCP_MEM_LIMIT:-128m}
     mem_reservation: 32m
     environment:

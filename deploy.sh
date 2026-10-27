@@ -253,7 +253,10 @@ rm -rf backend/dist && cp -R frontend/dist backend/dist
 docker build -f deploy/single/Dockerfile -t "${IMAGE_NAME}:${GIT_TAG}" -t "${IMAGE_NAME}:latest" .
 
 # ── ④ compose 切换容器（记录旧 TAG 供回滚）────────────────────────────
-OLD_TAG=$(dc ps --format '{{.Image}}' 2>/dev/null | sed 's/.*://' || true)
+# 只取 app 服务的镜像 tag(栈内多服务,{{.Image}} 多行直接拼接会得到
+# 跨行垃圾 TAG——真实事故:回滚 dc up 报 invalid reference format)
+OLD_TAG=$(dc ps --format '{{.Service}} {{.Image}}' 2>/dev/null \
+  | awk '$1=="app"{print $2}' | sed 's/.*://' || true)
 log "④ compose 切换（旧：${OLD_TAG:-无} → 新：${GIT_TAG}）..."
 TAG="$GIT_TAG" HOST_PORT="$HOST_PORT" dc up -d
 
