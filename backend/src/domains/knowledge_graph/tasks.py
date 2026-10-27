@@ -433,11 +433,16 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             raise RuntimeError(f"文档解析失败: {e}")
         # 扫描页 OCR 情况让用户可见(任务中心日志;引擎随行——换引擎可感知)
         if parse_stats.get("ocrPages"):
-            handle.log(f"检测到 {parse_stats['ocrPages']} 页无文字层(扫描件),"
-                       f"{ocr_label} 识别成功 {parse_stats['ocrFilled']} 页",
+            handle.log(f"检测到 {parse_stats['ocrPages']} 页需 OCR 复核,"
+                       f"{ocr_label} 补充文本 {parse_stats['ocrFilled']} 页",
                        ocr_pages=parse_stats["ocrPages"],
                        ocr_filled=parse_stats["ocrFilled"],
                        ocr_engine=ocr_label)
+        # 坏字体映射产生的垃圾字符已剥离(控制符/孤立代理对,不剥离会炸 PG 写入)
+        if parse_stats.get("ctrlStripped"):
+            handle.log(f"清理无法入库的文本码点 {parse_stats['ctrlStripped']} 个"
+                       "(可能影响公式符号,请核对原文)",
+                       ctrl_stripped=parse_stats["ctrlStripped"])
         handle.log(f"文档解析: {raw_len}B → {len(text)} 字符({doc['filename'].rsplit('.', 1)[-1]} 格式)",
                    raw_bytes=raw_len, text_chars=len(text))
 

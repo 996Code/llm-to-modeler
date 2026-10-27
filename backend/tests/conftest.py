@@ -15,10 +15,13 @@
   5. 每个测试前 TRUNCATE 全部业务表(等价于旧 SQLite 时代的
      "每个 tmp 文件一个新库"隔离语义;pytest 串行执行下安全)
 
-快速起测试库(本地):
-  docker run -d --name pg-test -p 5433:5432 \\
-      -e POSTGRES_PASSWORD=dev -e POSTGRES_USER=llm postgres:16-alpine
-  export TEST_DATABASE_URL=postgresql://llm:dev@localhost:5433/llm_modeler_test
+快速起测试库(本地,用常驻 chatbi-postgres 建独立测试库+vector 扩展;
+不要另起纯 postgres 镜像——无 vector 扩展,向量用例会整片失败):
+  docker exec chatbi-postgres psql -U root -d postgres \\
+      -c "CREATE DATABASE llm_modeler_test_run"
+  docker exec chatbi-postgres psql -U root -d llm_modeler_test_run \\
+      -c "CREATE EXTENSION IF NOT EXISTS vector"
+  export TEST_DATABASE_URL=postgresql://root:root@localhost:5432/llm_modeler_test_run
 """
 import os
 import sys
@@ -48,11 +51,14 @@ def _resolve_test_url() -> str:
         pass
     pytest.exit(
         "未配置 TEST_DATABASE_URL:测试需要专用的 PostgreSQL 测试库"
-        "(会被清表,绝不指向业务库)。本地快速起库:\n"
-        "  docker run -d --name pg-test -p 5433:5432 "
-        "-e POSTGRES_PASSWORD=dev -e POSTGRES_USER=llm postgres:16-alpine\n"
-        "  export TEST_DATABASE_URL=postgresql://llm:dev@localhost:5433/llm_modeler_test\n"
-        "也可写入 backend/.env(.gitignore 已覆盖)。详见 .env.example 存储段。",
+        "(会被清表,绝不指向业务库)。本地约定:直接用常驻的 chatbi-postgres"
+        "(pgvector 镜像,root:root@localhost:5432)建测试库,名字必须含 test:\n"
+        "  docker exec chatbi-postgres psql -U root -d postgres -c "
+        "'CREATE DATABASE llm_modeler_test_run'\n"
+        "  docker exec chatbi-postgres psql -U root -d llm_modeler_test_run -c "
+        "'CREATE EXTENSION IF NOT EXISTS vector'\n"
+        "  export TEST_DATABASE_URL=postgresql://root:root@localhost:5432/llm_modeler_test_run\n"
+        "也可写入 backend/.env 或项目根 .env(.gitignore 已覆盖)。详见 .env.example 存储段。",
         returncode=4,
     )
 
@@ -215,6 +221,9 @@ def _init_schema():
     PlatformSettingsStore()
     TaskStore()
     KGStore()
+    from sdk.relational_store import PackRelationalDB
+    from domains.chatbi.runtime import _init_pack_schema
+    _init_pack_schema(PackRelationalDB("chatbi"))
     # LangGraph checkpoint 三表(PostgresSaver.setup 幂等;清表依赖其存在)
     import psycopg
     from langgraph.checkpoint.postgres import PostgresSaver

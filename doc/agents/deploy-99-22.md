@@ -30,24 +30,64 @@
 4. 验收：`curl http://127.0.0.1:19090/ai-modeler/api/packs/metrology_assistant/test/env`
    应显示两库 ok + 数据源 ok + mcp ok
 
-## 部署命令
+## 部署命令（本地打镜像，服务器免构建）
+
+服务器 19G 内存（可用 ~3G）/磁盘紧张，在其上跑构建既慢又与导入队列抢资源——
+构建全在开发机（Mac）上做，服务器只收镜像直接切换：
 
 ```bash
-cd <干净worktree>   # 见 branch-and-release.md 的出包纪律
-rsync -az --delete --exclude-from=deploy/rsync-exclude.txt -e ssh ./ root@192.168.99.22:/njmind/deploy/middle/llm-modeler-kg/repo/
-ssh root@192.168.99.22 'cd /njmind/deploy/middle/llm-modeler-kg/repo && bash deploy.sh --skip-pull'
+cd <干净worktree>   # 出包纪律见 branch-and-release.md；不带主工作区在途文件
+bash deploy/local-build.sh
 ```
 
-- **deploy.sh 守卫**：导入队列有 running/pending 时拒绝构建。FORCE_DEPLOY=1 强制——仅限导入处于 LLM 抽取期（CPU 低）时用；重启后任务框架断点续跑自动接上（实测可靠，96 块进度无损）。
+脚本一键串完（细节见其头部注释）：
+
+1. 前端 `pnpm build`（宿主机；JS 产物平台无关）
+2. 后端依赖 pip -t + nginx deb（**amd64 容器**——Mac 是 ARM，装出的
+   arm64 二进制在 x86 服务器不可用；requirements sha 与 deb 有本地缓存，命中跳过）
+3. `docker buildx --platform linux/amd64` 打镜像（tag = `<git短哈希>-<月日时分>`）
+4. `docker save | gzip | ssh docker load` 推镜像到服务器并打 `latest` 标签
+5. 最小同步 `deploy.sh`（服务器不留源码树，产物全在镜像里）
+6. 服务器 `SKIP_BUILD=1 IMAGE_TAG=<tag> bash deploy.sh` 仅切换 `app`/`metrology-mcp`
+   （`up -d --no-deps`），不重建 PostgreSQL/Neo4j；四层健康验证失败则回滚业务容器
+7. 健康验证通过后自动删除本次本地镜像标签；服务器副本保留用于回滚
+
+CPU 配置需在服务器 compose 的业务服务中声明 `cpus: ${APP_CPU_LIMIT:-4}` /
+`cpus: ${MCP_CPU_LIMIT:-0.5}`；首次增加时只修改这两段，不覆盖服务器专有的
+容器名、端口、数据卷和中间件配置。
+
+- **deploy.sh 守卫**：导入队列有 running/pending 时拒绝切换。FORCE_DEPLOY=1 强制——仅限导入处于 LLM 抽取期（CPU 低）时用；重启后任务框架断点续跑自动接上（实测可靠，96 块进度无损）。
 - **deploy.sh ⑤ 健康验证（四层,失败自动回滚旧 TAG）**：postgres（pg_isready 收敛）→
   neo4j（HTTP :7474 收敛）→ metrology-mcp（/mcp 200/406 收敛）→ app（容器健康 +
   宿主端口端到端 curl 穿 nginx）。探测等 compose healthcheck 收敛（`docker inspect
   State.Health.Status`），检查逻辑单一事实源在 compose 文件
 - 回滚：`bash deploy.sh --rollback`（次新镜像；app 与 metrology-mcp 同镜像同切换）。
+- **收尾清理（本地）**：部署验证通过后删本地构建镜像（服务器已 `docker load`
+  副本，回滚用服务器上的）：`docker rmi llm-modeler:<tag> llm-modeler:latest-local`。
+  `.deps.amd64`/`debs` 构建缓存保留（requirements 未变时下次构建直接跳过）。
+- embedding 模型不打进镜像（服务器 data/models 已有，compose 卷挂载）。
+
+## 本地跑全量测试（约定）
+
+- 测试库**直接用本机常驻的 chatbi-postgres 容器**（`pgvector/pgvector:pg16` 镜像，
+  root:root@localhost:5432）里建独立测试库（名字必须含 `test` 过 conftest 安全闸）：
+  `docker exec chatbi-postgres psql -U root -d llm_modeler_test_run -c "CREATE EXTENSION IF NOT EXISTS vector;"`
+- 项目根 `.env` 已配 `TEST_DATABASE_URL=postgresql://root:root@localhost:5432/llm_modeler_test_run`
+  （conftest 兜底自动读）；worktree 里跑测试需把根 `.env` 拷到 worktree 根。
+- 已有测试库被其他会话占用时，在同一个常驻 PG 容器中另建名字含 `test` 的
+  隔离数据库，用 `TEST_DATABASE_URL` 显式指定；不终止其他会话或清它的库。
+- 新建的隔离测试库先使用现有 `domains.chatbi.runtime._init_pack_schema` 完成
+  ChatBI 启动迁移，避免旧 DDL 缺 `scope_id`/统计表产生假失败；全量测试同时设置
+  `SOAK_DATABASE_URL` 为同一隔离测试库，监控脚本才能检查本轮数据。
+- 只清理本次创建的临时容器/镜像，不删除常驻 PG 镜像，不做全局 prune。
+- **不要**另起 `postgres:xx-alpine` 测试容器——没有 vector 扩展，向量/标注类用例
+  会整片失败；也不要与其他套件并行跑同一测试库（租约/并发用例互相踩）。
 
 ## 内存红线与大文件
 
 - app 容器 **2g 上限**，宿主机 19G/可用仅 ~2.8G，**不要加内存**。
+- **CPU 同限**：compose `cpus` 已设 app=4 / metrology-mcp=0.5（宿主 10 核与他人共享，
+  防 OCR/embedding 推理吃满全部核；经 `.env` 的 `APP_CPU_LIMIT`/`MCP_CPU_LIMIT` 调整）。
 - 大文件（数百 MB）导入曾把原始字节全程持有 + bge-m3 叠加顶爆 cgroup（450MB 实测 OOM）；现行代码解析完即 `del data`。
 - 上传走流式落盘（不整载内存）；>64MB 跳过解析预检（坏文件由导入任务兜底报错）。
 - 单文件上传上限 **500MB**（schema `max_upload_mb`，nginx `client_max_body_size 520m`）。

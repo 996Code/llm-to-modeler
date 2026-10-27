@@ -2467,7 +2467,7 @@ class TestBuildPartitionIsolation:
                                build_id=f"42-t7-{_uuid.uuid4().hex[:6]}")
         from sdk.relational_store import PackRelationalDB
         db = PackRelationalDB('chatbi',
-                              database_url='postgresql://root:root@localhost:5432/llm_modeler_test_run')
+                              database_url=_os.environ["TEST_DATABASE_URL"])
         snap = sm.snapshot(db)
         assert snap["build_events_1h"].get("published", 0) >= 10
         v = sm._verdict(snap, {})
@@ -4183,8 +4183,7 @@ class TestEventWriteFailureObservable:
         from sdk.relational_store import PackRelationalDB
         db = PackRelationalDB(
             'chatbi',
-            database_url='postgresql://root:root@localhost:5432/'
-                          'llm_modeler_test_run')
+            database_url=_os.environ["TEST_DATABASE_URL"])
         snap = sm.snapshot(db)
         assert snap.get("build_event_failures") is not None, (
             "monitor 未采集事件失败计数")
@@ -4215,8 +4214,7 @@ class TestEventWriteFailureObservable:
         from sdk.relational_store import PackRelationalDB
         db = PackRelationalDB(
             'chatbi',
-            database_url='postgresql://root:root@localhost:5432/'
-                          'llm_modeler_test_run')
+            database_url=_os.environ["TEST_DATABASE_URL"])
         snap = sm.snapshot(db)
         # 只验证该信号本身不产生 FAIL(其它信号由各自测试覆盖)
         assert snap.get("build_event_failures") == 0, (

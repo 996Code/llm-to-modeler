@@ -14,7 +14,11 @@ OCR 兜底(pypdfium2+rapidocr)同为可选依赖,未安装时保持纯文字层�
 【安全边界】
 - 扩展名白名单(ALLOWED_EXTENSIONS)+ 解析失败抛 ValueError(调用方
   上传预检当场拒绝);
-- _decode_text 对 UTF-16/乱码做探测拒收,不让垃圾文本流入下游。
+- _decode_text 对 UTF-16/乱码做探测拒收,不让垃圾文本流入下游;
+- 出口统一剥离 C0 控制字符与孤立代理对:坏字体映射会把字形映到
+  控制码点或只吐出 UTF-16 代理对的一半(JJF 京 3024-2023 实测:
+  均值符号 X̄ 被提取成 X\x00,另有孤立 \\ud835)——前者 PG 拒收,
+  后者无法 UTF-8 编码,进库/进 LLM/进检索全是祸患。
 """
 import io
 import logging
@@ -33,6 +37,23 @@ MIME_BY_EXT = {
     ".txt": "text/plain", ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
+
+# 分页符和垂直制表符保留为分隔空白,避免相邻正文粘连。
+_CTRL_RE = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
+_TEXT_SEPARATORS = str.maketrans({"\x0b": "\n", "\x0c": "\n"})
+
+# UTF-16 代理对区间:坏 CMap 常只吐出代理对的一半(孤立代理)——无法
+# UTF-8 编码,psycopg 写入时直接抛 UnicodeEncodeError
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+# 文字层垃圾占比超过该值的页视为"文字层不可信",交 OCR 从图像重识别;
+# 低于它只剥离坏字符保留文字层——整页重 OCR 等于拿 99% 的好文本去赌
+# 识别质量(实测坏字体映射页密度仅 0.4%,全文档 5700 字符只有 4 个)
+_CTRL_GARBAGE_RATIO = 0.02
+
+# 短文字层页的扫描件判定:单张图片对象覆盖版面比例达到该值才算
+# "整页图"(扫描页/位图图表页);向量图与普通排版页不含这种对象
+_SCAN_IMAGE_COVERAGE = 0.6
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+")
 
@@ -87,7 +108,8 @@ def parse_to_text(filename: str, data: bytes, *, ocr: bool = True,
         ocr: PDF 无文字层页是否走 OCR 兜底。上传预检传 False——预检只
             验坏文件,OCR 秒级耗时留给导入任务(结果不丢弃,也不阻塞上传)。
         stats: 可选出参字典,调用方传入后填充 pages/ocrPages/ocrFilled/
-            ocrEngine(任务日志据此告知用户扫描页识别情况与所用引擎)。
+            ocrEngine/ctrlStripped(任务日志据此告知用户扫描页识别情况、
+            所用引擎与垃圾字符清洗量)。
         on_ocr_progress: 可选回调 (done, total),OCR 每完成一页调用一次
             (任务层用它刷新进度,让用户看到 OCR 在动而不是"卡死")。
         ocr_engine: 扫描页识别引擎。rapidocr(默认,本地 PP-OCR)/llm
@@ -112,7 +134,40 @@ def parse_to_text(filename: str, data: bytes, *, ocr: bool = True,
 
 
 def _nfkc(text: str) -> str:
-    return unicodedata.normalize("NFKC", text)
+    """出口统一归一化:代理对修复 → NFKC → C0 剥离。
+
+    不变量:出口文本可安全 UTF-8 编码且不含 C0 控制符。代理对修复放在
+    NFKC 前——配对合并出的星面字符(数学斜体 𝑋)随后被 NFKC 折叠为
+    ASCII 等价(X),下游检索按字面可命中。
+    """
+    if _SURROGATE_RE.search(text):
+        text = _fix_surrogates(text)[0]
+    return _CTRL_RE.sub("", unicodedata.normalize("NFKC", text)).translate(_TEXT_SEPARATORS)
+
+
+def _fix_surrogates(text: str):
+    """修复坏 CMap 吐出的 UTF-16 代理对:相邻高低配对合并为真实字符,
+    孤立的(另一半丢失)剔除。
+
+    Returns: (修复后文本, 剔除的孤立代理数)。
+    """
+    out = []
+    dropped = 0
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ("\ud800" <= ch <= "\udbff" and i + 1 < n
+                and "\udc00" <= text[i + 1] <= "\udfff"):
+            out.append(chr(0x10000 + ((ord(ch) - 0xD800) << 10)
+                           + (ord(text[i + 1]) - 0xDC00)))
+            i += 2
+        elif "\ud800" <= ch <= "\udfff":
+            dropped += 1
+            i += 1
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out), dropped
 
 
 def _decode_text(data: bytes) -> str:
@@ -156,30 +211,104 @@ def _parse_pdf(data: bytes, ocr: bool = True, stats: Dict[str, int] = None,
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
     texts = []
+    ctrl_stripped = 0        # 全文档剥离的垃圾字符数(stats 留痕给任务日志)
+    garbage: List[int] = []  # 文字层垃圾占比高的页 → OCR 从图像重识别
     for i, page in enumerate(reader.pages):
         try:
             text = (page.extract_text() or "").strip()
         except Exception as e:  # 单页损坏不整体失败
             logger.warning(f"pdf 第 {i + 1} 页解析失败(跳过): {e}")
             text = ""
+        n_ctrl = len(_CTRL_RE.findall(text))
+        if n_ctrl:
+            ctrl_stripped += n_ctrl
+            if n_ctrl / max(len(text), 1) > _CTRL_GARBAGE_RATIO:
+                garbage.append(i)
+            text = _CTRL_RE.sub("", text)
+        if _SURROGATE_RE.search(text):
+            text, dropped = _fix_surrogates(text)
+            ctrl_stripped += dropped
         texts.append(text)
-    # 无文字层的页(扫描件/文字转曲线防拷贝)走 OCR 兜底
+    # OCR 候选:①无/近无文字层的页——空页直接候选(无可失去);非空短页
+    # 先结构复核(_filter_scan_pages),纯短文本页(章末空白/整页图表的
+    # 短图注)文字层可信,不再误送 OCR;②文字层垃圾页(并集去重)
     sparse = [i for i, t in enumerate(texts) if len(t) < _PAGE_TEXT_SPARSE]
     if sparse and ocr:
-        texts = _ocr_fill_pages(data, texts, sparse, stats=stats,
+        sparse = _filter_scan_pages(data, texts, sparse)
+    candidates = sorted(set(sparse) | set(garbage))
+    if candidates and ocr:
+        texts = _ocr_fill_pages(data, texts, candidates, stats=stats,
                                 on_ocr_progress=on_ocr_progress,
                                 ocr_engine=ocr_engine, page_ocr=page_ocr)
     if stats is not None:
         stats["pages"] = len(texts)
-        stats["ocrPages"] = len(sparse) if ocr else 0
+        stats["ocrPages"] = len(candidates) if ocr else 0
         stats["ocrFilled"] = stats.get("ocrFilled", 0)
-        if sparse and ocr:
+        if candidates and ocr:
             stats["ocrEngine"] = ocr_engine
+        if ctrl_stripped:
+            stats["ctrlStripped"] = ctrl_stripped
+    _warn_watermark_scan(texts, ocr, stats)
     return "\n\n".join(t for t in texts if t)
 
 
-# 一页文字层低于此字符数视为"无文字"(扫描页常带 0~几个水印字符)
+# 一页文字层低于此字符数视为"疑似无文字层"(空页直接 OCR;非空短页
+# 需结构证据——整页大图覆盖——才 OCR,见 _filter_scan_pages)
 _PAGE_TEXT_SPARSE = 10
+
+
+def _filter_scan_pages(data: bytes, texts: List[str],
+                       sparse: List[int]) -> List[int]:
+    """短文字层页结构复核:保留"空文字层"与"整页大图覆盖"两种候选。
+
+    判据用结构证据(图片对象在版面上的覆盖矩形,对象遍历不解码位图),
+    不再用"字符少"一概而论——章末空白页/整页图表短图注是合法稀疏页,
+    误送 OCR 会把图内刻度、装饰线识别成文本,反噬原本正确的好图注。
+    pypdfium2 不可用时维持全候选(与 OCR 依赖缺失的降级路径一致)。
+    """
+    try:
+        import pypdfium2
+        from pypdfium2.raw import FPDF_PAGEOBJ_IMAGE
+    except ImportError:
+        return sparse
+    kept: List[int] = []
+    pdf = pypdfium2.PdfDocument(io.BytesIO(data))
+    try:
+        for i in sparse:
+            if not texts[i]:
+                kept.append(i)  # 空文字层:无可失去,必候选
+                continue
+            page = pdf[i]
+            try:
+                w, h = page.get_size()
+                covered = 0.0
+                for obj in page.get_objects():
+                    if obj.type == FPDF_PAGEOBJ_IMAGE:
+                        l, b, r, t = obj.get_bounds()
+                        covered = max(covered, (r - l) * (t - b))
+                if w * h > 0 and covered / (w * h) >= _SCAN_IMAGE_COVERAGE:
+                    kept.append(i)
+            finally:
+                page.close()
+    finally:
+        pdf.close()
+    return kept
+
+
+def _warn_watermark_scan(texts: List[str], ocr: bool,
+                         stats: Dict[str, int]) -> None:
+    """文档级盲区告警:整册扫描件若每页都带水印文字层,页级结构检查
+    判不出"有字但全是水印"——按页字符中位数兜底提醒,只告警不阻断。"""
+    if not ocr or stats is None or len(texts) < 4:
+        return
+    lens = sorted(len(t) for t in texts if t)
+    if not lens or stats.get("ocrFilled"):
+        return
+    if lens[len(lens) // 2] < _PAGE_TEXT_SPARSE * 2:
+        logger.warning(
+            f"pdf 共 {len(texts)} 页,文字层页字符中位数仅 "
+            f"{lens[len(lens) // 2]} 且 OCR 无补充——疑似整册扫描件"
+            "(文字层只有水印),导入内容可能不完整")
 
 # ── OCR 资源治理(单例 + 线程/并发封顶) ─────────────────────
 # RapidOCR 默认 intra_op_num_threads=-1:det/cls/rec 三个 ONNX session 每个
@@ -218,7 +347,8 @@ def _render_scale(page) -> float:
 def _ocr_fill_pages(data: bytes, texts: List[str], sparse_pages: List[int],
                     stats: Dict[str, int] = None, on_ocr_progress=None,
                     ocr_engine: str = "rapidocr", page_ocr=None) -> List[str]:
-    """扫描页 OCR 兜底:文字层缺失的页渲染成图 → 识别。
+    """OCR 兜底:候选页(空文字层/整页大图的短文字层/文字层垃圾页)
+    渲染成图 → 识别。
 
     ocr_engine: rapidocr(默认,本地 PP-OCR)/ llm(调用方注入的 page_ocr
     回调——任务层接多模态大模型;SDK 零领域知识,只认回调本身)。

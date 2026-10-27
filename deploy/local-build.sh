@@ -25,6 +25,10 @@ SREPO="${SREPO:-/njmind/deploy/middle/llm-modeler-kg/repo}"
 
 WORKDIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$WORKDIR"
+if [ -n "$(git status --porcelain)" ]; then
+  printf '出包需要干净 worktree,请先提交当前改动\n' >&2
+  exit 1
+fi
 IMAGE_NAME="${IMAGE_NAME:-llm-modeler}"
 GIT_TAG="$(git rev-parse --short HEAD)-$(date '+%m%d%H%M')"
 PLATFORM="linux/amd64"
@@ -123,6 +127,9 @@ rsync -az -e ssh deploy.sh "$SERVER:$SREPO/deploy.sh"
 
 # ── ⑥ 服务器切换(SKIP_BUILD:只 ④⑤ 段——compose up+四层健康验证+回滚) ──
 log "⑥ 服务器切换(SKIP_BUILD=1 IMAGE_TAG=${GIT_TAG})..."
-ssh "$SERVER" "cd $SREPO && SKIP_BUILD=1 IMAGE_TAG=${GIT_TAG} bash deploy.sh"
+ssh "$SERVER" "cd $SREPO && FORCE_DEPLOY=${FORCE_DEPLOY:-0} SKIP_BUILD=1 IMAGE_TAG=${GIT_TAG} bash deploy.sh"
+
+log "⑦ 清理本次本地构建镜像(服务器副本保留用于回滚)..."
+docker image rm "${IMAGE_NAME}:latest-local" "${IMAGE_NAME}:${GIT_TAG}"
 
 log "完成: ${IMAGE_NAME}:${GIT_TAG} @ ${SERVER}"

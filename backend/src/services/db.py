@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
@@ -57,6 +58,36 @@ def require_database_url() -> str:
     return url
 
 
+# UTF-16 代理对:孤立代理无法 UTF-8 编码,psycopg 写入时抛
+# UnicodeEncodeError——与 NUL 同源的坏字体映射产物,边界一并兜底
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+
+def _pg_clean_params(value: Any) -> Any:
+    """PG text 不接受 NUL(0x00);孤立代理对无法 UTF-8 编码。
+
+    递归清洗 str 参数里的这两类坏字符。上游解析层(doc_parser 出口)
+    已统一清洗——这里是数据库边界最后一道闸,让任意生产者(用户标注/
+    LLM 抽取输出/元数据)都不可能触发库级错误。bytes 与 psycopg 包装
+    类型原样放行。
+    """
+    if isinstance(value, str):
+        if "\x00" in value:
+            logger.warning("PG 文本参数包含 NUL,已清理不可存储码点")
+            value = value.replace("\x00", "")
+        if _SURROGATE_RE.search(value):
+            logger.warning("PG 文本参数包含 UTF-16 代理码点,已合并配对并替换孤立码点")
+            value = value.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
+        return value
+    if isinstance(value, list):
+        return [_pg_clean_params(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_pg_clean_params(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _pg_clean_params(v) for k, v in value.items()}
+    return value
+
+
 class _PgConnProxy:
     """psycopg 连接的轻代理:execute/executemany 时翻译占位符,其余透传。
 
@@ -71,6 +102,8 @@ class _PgConnProxy:
       字面 ``?`` 静默改成 ``%s`` 造成数据损坏)。
     - SQL 文本里不允许内联含 ``%`` 的文本(LIKE 模式等必须走参数绑定,
       psycopg 带参执行会扫描 SQL 里的 ``%``)。
+    - str 参数统一过 ``_pg_clean_params`` 剥 NUL 与孤立代理对——
+      PG text/UTF-8 编码不接受它们,这是全平台写入的最后一道闸。
     """
 
     __slots__ = ("_conn",)
@@ -81,13 +114,15 @@ class _PgConnProxy:
     def execute(self, sql: str, params: Optional[Any] = None) -> Any:
         if params is None:
             return self._conn.execute(sql)
-        return self._conn.execute(sql.replace("?", "%s"), params)
+        return self._conn.execute(sql.replace("?", "%s"),
+                                  _pg_clean_params(params))
 
     def executemany(self, sql: str, params_seq: Any, **kwargs: Any) -> Any:
         # sqlite3.Connection.executemany 存在而 psycopg3.Connection 没有
         # (那是 Cursor 的方法)——KGStore.replace_chunks 等批量路径依赖它
         with self._conn.cursor() as cur:
-            return cur.executemany(sql.replace("?", "%s"), params_seq, **kwargs)
+            return cur.executemany(sql.replace("?", "%s"),
+                                   _pg_clean_params(params_seq), **kwargs)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._conn, name)

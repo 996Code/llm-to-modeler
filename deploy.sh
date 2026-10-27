@@ -51,6 +51,13 @@ err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2;
 cd "$WORKDIR"
 
 dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
+switch_services() {
+  if [ "${SKIP_BUILD:-0}" = "1" ]; then
+    dc up -d --no-deps app metrology-mcp
+  else
+    dc up -d
+  fi
+}
 
 # ── 子命令 ──────────────────────────────────────────────────────────────
 case "${1:-}" in
@@ -268,7 +275,7 @@ fi
 OLD_TAG=$(dc ps --format '{{.Service}} {{.Image}}' 2>/dev/null \
   | awk '$1=="app"{print $2}' | sed 's/.*://' || true)
 log "④ compose 切换（旧：${OLD_TAG:-无} → 新：${GIT_TAG}）..."
-TAG="$GIT_TAG" HOST_PORT="$HOST_PORT" dc up -d
+TAG="$GIT_TAG" HOST_PORT="$HOST_PORT" switch_services
 
 # ── ⑤ 健康验证（四层探测,失败自动回滚旧 TAG）─────────────────────────
 # 分层:基础设施(pg/neo4j,compose healthcheck 收敛) → mock 业务平台
@@ -304,7 +311,7 @@ wait_container_healthy() {  # $1=compose 服务名;超时用全局 HEALTH_TIMEOU
 rollback_to_old_tag() {  # 回滚 = 旧 TAG 重新 up(app 与 metrology-mcp 同镜像同切换)
   if [ -n "${OLD_TAG:-}" ]; then
     err "回滚到 ${OLD_TAG}..."
-    TAG="$OLD_TAG" HOST_PORT="$HOST_PORT" dc up -d
+    TAG="$OLD_TAG" HOST_PORT="$HOST_PORT" switch_services
     log "已回滚"
   fi
 }

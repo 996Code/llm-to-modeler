@@ -72,15 +72,17 @@ class TestPdfParse:
         assert "Hello text layer" in text
         assert not called
 
-    def test_sparse_text_triggers_ocr_path(self, monkeypatch):
-        """文字层低于阈值(扫描页水印)的页进入 OCR 兜底路径。"""
+    def test_sparse_text_page_structural_gate(self, monkeypatch):
+        """短文字层页不再一律 OCR:结构复核后,无大图覆盖的纯短文本页
+        (章末空白/短图注)被信任;大图覆盖与空文字层的候选路径见
+        test_doc_parser_pdf_garbage.py。"""
         captured = {}
         def fake_fill(data, texts, sparse, **kwargs):
             captured["sparse"] = sparse
             return texts
         monkeypatch.setattr(doc_parser, "_ocr_fill_pages", fake_fill)
         parse_to_text("doc.pdf", _minimal_text_pdf("Hi"))
-        assert captured["sparse"] == [0]
+        assert "sparse" not in captured   # 未进 OCR 兜底
 
     def test_ocr_deps_missing_degrades(self, monkeypatch):
         """OCR 依赖缺失:不抛异常,保持原文字层(空)返回。"""

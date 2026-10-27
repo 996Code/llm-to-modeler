@@ -38,6 +38,9 @@ services:
     # 默认 8g:足以容纳原 16 段批的推理峰值 4.5G+ 底座 1.2G≈5.7G 的最坏组合;配合 af23336(批 4 段,峰值 ~1.9G)则常态只用 1/4,余量充足。经 .env 的 APP_MEM_LIMIT 调整。
     mem_limit: ${APP_MEM_LIMIT:-8g}
     mem_reservation: ${APP_MEM_RESERVATION:-1g}
+    # CPU 护栏:宿主机与他人共享,不限核时 OCR/embedding 推理可吃满
+    # 全部核挤压同机服务;默认 4 核(宿主 10 核),经 .env 的 APP_CPU_LIMIT 调整
+    cpus: ${APP_CPU_LIMIT:-4}
     ports:
       - "${HOST_PORT:-19090}:80"
     env_file:
@@ -96,6 +99,7 @@ services:
     entrypoint: ["python", "/app/mcp-e2e/metrology_server.py"]
     mem_limit: ${MCP_MEM_LIMIT:-128m}
     mem_reservation: 32m
+    cpus: ${MCP_CPU_LIMIT:-0.5}
     environment:
       - TZ=Asia/Shanghai
       - METROLOGY_MCP_HOST=0.0.0.0
