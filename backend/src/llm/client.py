@@ -421,6 +421,39 @@ class LLMClient:
                 ), f.get("price_in"), f.get("price_out")))
         return chain
 
+    # 网关 max_tokens 上限自描述(如 dashscope: Range of max_tokens
+    # should be [1, 131072])——400 时解析上限截参重试,不硬编码网关差异
+    _MAX_TOKENS_RANGE_RE = re.compile(
+        r"max_tokens[^\[]{0,40}\[\s*(\d+)\s*,\s*(\d+)\s*\]")
+
+    def _retry_with_clamped_max_tokens(self, client, error: Exception,
+                                       create_kwargs: dict):
+        """400 且错误文案带 max_tokens 合法区间:截到上限同端点重试一次。
+
+        成功返回 (response, 新 kwargs);不适用/重试仍失败返回 None
+        (沿用原 400 走既有失败处理——参数类错误本就不切备用)。
+        背景:构造器默认 max_tokens=200000 给足推理模型,但网关各异
+        (996code/qwen3.7 上限 131072),首个真实调用才发现——线上
+        dry-run 500 实证(3.110)。
+        """
+        try:
+            m = self._MAX_TOKENS_RANGE_RE.search(str(error))
+            if not m:
+                return None
+            upper = int(m.group(2))
+            current = int(create_kwargs.get("max_tokens") or 0)
+            if upper <= 0 or upper >= current:
+                return None
+            kwargs2 = {**create_kwargs, "max_tokens": upper}
+            response = client.chat.completions.create(**kwargs2)
+            logger.warning(
+                "max_tokens=%d 超网关上限(合法区间 [%s, %d]),已截到 %d "
+                "重试成功——后续同端点调用沿用截断值仅本次生效",
+                current, m.group(1), upper, upper)
+            return response, kwargs2
+        except Exception:  # noqa: BLE001
+            return None
+
     def _completion_with_fallback(self, create_kwargs: dict, conv_id, stage,
                                   fail_payload):
         """带主备切换的 chat.completions.create(设计 8.6)。
@@ -464,32 +497,38 @@ class LLMClient:
             try:
                 response = client.chat.completions.create(**create_kwargs)
             except Exception as e:  # noqa: BLE001
-                last_exc = e
-                if is_rate_limit_error(e):
-                    get_rate_limiter().on_rate_limited()
-                # 失败尝试留痕(role+实际模型标注,切换链路可追溯)
-                self._log_call(
-                    endpoint=endpoint,
-                    request_data={**(fail_payload() if callable(fail_payload) else {}),
-                                  "provider": role,
-                                  "model": create_kwargs.get("model")},
-                    response_data=None,
-                    status_code=429 if is_rate_limit_error(e) else 500,
-                    duration_ms=0,
-                    error_message=str(e),
-                    conv_id=conv_id, stage=stage)
-                can_switch = (idx < len(chain) - 1
-                              and self._switchable_error(e))
-                if can_switch:
-                    logger.warning(
-                        "LLM %s 端点失败(%s: %s), 同参数切备用",
-                        role, type(e).__name__, str(e)[:120])
-                    continue
-                try:
-                    e._llm_logged = True  # 已在上方留痕,外层 except 勿重复记
-                except AttributeError:
-                    pass
-                raise
+                # 网关 max_tokens 上限自适应:400 带合法区间时截参重试一次
+                clamped = self._retry_with_clamped_max_tokens(
+                    client, e, create_kwargs)
+                if clamped is not None:
+                    response, create_kwargs = clamped
+                else:
+                    last_exc = e
+                    if is_rate_limit_error(e):
+                        get_rate_limiter().on_rate_limited()
+                    # 失败尝试留痕(role+实际模型标注,切换链路可追溯)
+                    self._log_call(
+                        endpoint=endpoint,
+                        request_data={**(fail_payload() if callable(fail_payload) else {}),
+                                      "provider": role,
+                                      "model": create_kwargs.get("model")},
+                        response_data=None,
+                        status_code=429 if is_rate_limit_error(e) else 500,
+                        duration_ms=0,
+                        error_message=str(e),
+                        conv_id=conv_id, stage=stage)
+                    can_switch = (idx < len(chain) - 1
+                                  and self._switchable_error(e))
+                    if can_switch:
+                        logger.warning(
+                            "LLM %s 端点失败(%s: %s), 同参数切备用",
+                            role, type(e).__name__, str(e)[:120])
+                        continue
+                    try:
+                        e._llm_logged = True  # 已在上方留痕,外层 except 勿重复记
+                    except AttributeError:
+                        pass
+                    raise
             usage = response.usage.model_dump() if response.usage else None
             cost_yuan = None
             if usage and (price_in or price_out):

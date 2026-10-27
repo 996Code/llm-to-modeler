@@ -208,6 +208,46 @@ def test_unconfigured_chain_empty_and_gate(monkeypatch):
         client.chat([{"role": "user", "content": "q"}])
 
 
+def test_max_tokens_clamped_on_gateway_400(monkeypatch):
+    """400 且文案带 max_tokens 合法区间 → 截到上限同端点重试成功。
+
+    背景(3.110 实证):构造器默认 max_tokens=200000,996code/qwen3.7
+    上限 131072——首个真实调用 400,此前直接冒泡成 dry-run 500。
+    """
+    _save_default()
+    seen: list = []
+
+    def _err_400(**kw):
+        seen.append(kw.get("max_tokens"))
+        raise _status_err(
+            400, "Error code: 400 - Range of max_tokens should be [1, 131072]")
+
+    def _ok(**kw):
+        seen.append(kw.get("max_tokens"))
+        return _ok_response()
+
+    queue = [_err_400, _ok]
+    # 显式 max_tokens=200000:测试环境 .env 可能设 LLM_MAX_TOKENS,
+    # 受污染时首请求即未超限,clamp 分支走不到
+    from llm.client import LLMConfig
+    client = LLMClient(
+        config=LLMConfig(base_url="http://x/v1", api_key="k",
+                         max_tokens=200000),
+        conversation_store=_FakeStore())
+
+    def fake_client_for(cfg):
+        class _C:
+            def __init__(self):
+                self.chat = SimpleNamespace()
+                self.chat.completions = SimpleNamespace()
+                self.chat.completions.create = lambda **kw: queue.pop(0)(**kw)
+        return _C()
+
+    monkeypatch.setattr(client, "_client_for", fake_client_for)
+    assert client.chat([{"role": "user", "content": "q"}]) == "hi"
+    assert len(seen) == 2 and seen[0] > 131072 and seen[1] == 131072
+
+
 # ── 管理 API ─────────────────────────────────────────────────
 
 @pytest.fixture()
