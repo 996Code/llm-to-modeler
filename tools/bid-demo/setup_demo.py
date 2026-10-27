@@ -5,7 +5,10 @@
   1. 计量假 server 在跑:  cd backend && .venv/bin/python ../tools/mcp-e2e/metrology_server.py
   2. 后端 dev server 在跑(默认 http://localhost:18080, .env 已配 LLM/DATABASE_URL)
 
-做六件事:
+做七件事:
+  0. 确保 LLM 供应商已配置(供应商页已配则复用;未配且 env 有
+     LLM_BASE_URL/LLM_API_KEY/LLM_MODEL 时经管理 API 种入 DB——
+     一次性引导,运行时只认 DB;两边都没有则报错退出)
   1. 注册 MCP server code=metrology(已注册则复用,校验 query_progress/
      query_instrument 在快照)
   2. 建知识库「强检目录」「检定规程」(已存在则复用)
@@ -76,6 +79,36 @@ def main() -> int:
         token = r.json()["token"]
         client.headers["Authorization"] = f"Bearer {token}"
         print("✓ JWT 换取成功(鉴权模式)")
+    # 0. LLM 供应商(DB 唯一事实源):已配置复用;未配置且 env 可引导则
+    #    经管理 API 种入(导入/对话全走 DB 配置,后续改配置在管理页);
+    #    两边都没有 → 明确报错退出,不让 LLM 抽取在半路晦涩失败
+    import os
+    providers = client.get(f"{args.base}/api/admin/llm-providers").json()
+    if providers.get("configured"):
+        all_ok &= ok("LLM 供应商已配置(复用)",
+                     bool((providers.get("primary") or {}).get("base_url")),
+                     f"primary → {(providers.get('primary') or {}).get('base_url')}")
+    else:
+        env_base = os.getenv("LLM_BASE_URL", "").strip()
+        env_key = os.getenv("LLM_API_KEY", "").strip()
+        env_model = os.getenv("LLM_MODEL", "").strip()
+        if not env_base or not env_model:
+            print("✗ LLM 供应商未配置:请在管理端「插件管理 → 模型供应商」"
+                  "维护主端点(base_url/api_key/model),或设置 "
+                  "LLM_BASE_URL/LLM_API_KEY/LLM_MODEL 环境变量后重跑本脚本"
+                  "(将自动经 API 种入)")
+            return 2
+        r = client.put(f"{args.base}/api/admin/llm-providers", json={
+            "primary": {"base_url": env_base, "api_key": env_key,
+                        "model": env_model, "enabled": True},
+            "expected_revision": providers.get("revision", 0),
+        })
+        all_ok &= ok("LLM 供应商经 API 种入 DB(env 引导,一次性)",
+                     r.status_code == 200,
+                     f"{env_base} · {env_model}" if r.status_code == 200
+                     else r.text[:200])
+        if r.status_code != 200:
+            return 2
     all_ok = True
 
     # 1. MCP server 注册(复用 or 新建;超时演示依赖 timeout/read_timeout=10s,

@@ -16,6 +16,15 @@ import pytest
 from llm.client import LLMClient
 
 
+@pytest.fixture(autouse=True)
+def _providers_state():
+    """DB 供应商链状态隔离(本文件种入的行不泄漏到其他测试)。"""
+    from services import llm_providers as _providers
+    _providers.reset_runtime_cache_for_tests()
+    yield
+    _providers.reset_runtime_cache_for_tests()
+
+
 def _bare_client() -> LLMClient:
     """绕过 __init__ 的网络配置,只测参数注入。"""
 
@@ -30,6 +39,13 @@ def _bare_client() -> LLMClient:
     client.config = _Cfg()
     client._log_full = False
     client._conversation_store = None
+    # 端点链只认 DB 供应商:先清再种(同一测试内多次 _bare_client 也幂等),
+    # 链解析命中 _client_for 复用的 self.client(即测试 patch 的 MagicMock)
+    from services import llm_providers as _providers
+    _providers.reset_runtime_cache_for_tests()
+    _providers.save_providers({
+        "primary": {"base_url": "http://test", "api_key": "k",
+                    "model": "qwen3.8-max"}}, 0, "test")
     return client
 
 
@@ -67,18 +83,15 @@ def test_chat_qwen3_注入extra_body():
 
 def test_chat_非qwen3_无extra_body():
     client = _bare_client()
-
-    class _Cfg2(_bare_client().config.__class__):
-        model = "deepseek-chat"
-
-    client.config = _Cfg2()
     client.client = MagicMock()
     resp = MagicMock()
     resp.choices = [MagicMock()]
     resp.choices[0].message.content = "ok"
     client.client.chat.completions.create.return_value = resp
 
-    client.chat([{"role": "user", "content": "hi"}])
+    # 显式传非 qwen3 模型(模型优先级:显式传参 > DB 角色 > 构造器默认,
+    # 仅改 config.model 不再覆盖供应商页配置的端点模型)
+    client.chat([{"role": "user", "content": "hi"}], model="deepseek-chat")
 
     assert "extra_body" not in client.client.chat.completions.create.call_args.kwargs
 

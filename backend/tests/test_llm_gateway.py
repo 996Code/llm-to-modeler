@@ -166,6 +166,20 @@ class TestEmbedCache:
 
 class TestChatCache:
 
+    @pytest.fixture(autouse=True)
+    def _seed_providers(self):
+        """端点链只认 DB 供应商:种入与构造器默认同参的一行(链解析
+        命中测试 patch 的构造器客户端),进出清不泄漏。"""
+        from services import llm_providers as _providers
+        from llm.client import LLMConfig
+        _providers.reset_runtime_cache_for_tests()
+        d = LLMConfig()
+        _providers.save_providers({
+            "primary": {"base_url": d.base_url, "api_key": d.api_key,
+                        "model": d.model}}, 0, "test")
+        yield
+        _providers.reset_runtime_cache_for_tests()
+
     def test_disabled_by_default(self, monkeypatch):
         """默认关:两次同参 chat 都出站。"""
         monkeypatch.delenv("LLM_CACHE_ENABLED", raising=False)

@@ -340,6 +340,9 @@ async function loadGraph() {
     await render()
   } catch {
     graphData.value = null
+    // 失败/未扫描也要清画布: render() 开头 destroy() 后因无节点提前
+    // 返回——否则切换数据源时旧画布实例残留,显示"无数据"但节点还在
+    await render()
   } finally {
     loading.value = false
   }

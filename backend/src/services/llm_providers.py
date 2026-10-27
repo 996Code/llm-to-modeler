@@ -186,11 +186,13 @@ def resolve_active() -> Dict[str, Any]:
                 if c and c.get("enabled", True):
                     active[role] = c
             if "primary" not in active:
-                return {}  # 未配置/主角色停用 → 调用方回退 env 默认
+                # 未配置/主角色停用 → 空配置(调用方 llm/client 前置闸
+                # 报错引导去管理页配置——不回退 env,单一事实源)
+                return {}
             _cached = (rev, active)
             return active
         except Exception:  # noqa: BLE001
-            logger.exception("llm_providers 解析失败,回退 env 默认")
+            logger.exception("llm_providers 解析失败,沿用上次缓存(无缓存视为未配置)")
             return {} if _cached is None else _cached[1]
 
 

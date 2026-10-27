@@ -58,7 +58,6 @@
         <ConversationsTab v-else-if="tab === 'conversations'" />
         <CallLogsTab v-else-if="tab === 'calllogs'" />
         <TasksTab v-else-if="tab === 'tasks'" />
-        <LlmProviders v-else-if="tab === 'llm-providers'" />
         <PacksTab v-else-if="tab === 'packs'" @open-page="openPackPage" @refresh-pages="loadPackPages" />
         <!-- pack 自定义管理页(v-if 切换:离开即卸载, 图谱类重资源页不留后台实例);
              知识库-测试也走此通道(loadPackPages 动态追加,跟随插件启停) -->
@@ -75,12 +74,11 @@
 import { computed, onMounted, provide, ref, shallowRef } from 'vue'
 import { message } from 'ant-design-vue'
 import type { Component } from 'vue'
-import {ApiOutlined, AppstoreOutlined, CloudOutlined, CloudServerOutlined, DashboardOutlined, LogoutOutlined, MessageOutlined, PartitionOutlined} from '@ant-design/icons-vue'
+import {ApiOutlined, AppstoreOutlined, CloudServerOutlined, DashboardOutlined, LogoutOutlined, MessageOutlined, PartitionOutlined} from '@ant-design/icons-vue'
 import OverviewTab from './components/OverviewTab.vue'
 import ConversationsTab from './components/ConversationsTab.vue'
 import CallLogsTab from './components/CallLogsTab.vue'
 import TasksTab from './components/TasksTab.vue'
-import LlmProviders from './components/LlmProviders.vue'
 import PacksTab from './components/PacksTab.vue'
 import KbEmbedTest from '../embed-test/EmbedTestApp.vue'
 import MetrologyTestApp from '../embed-test/MetrologyTestApp.vue'
@@ -92,13 +90,13 @@ import {
 
 const tab = ref('overview')
 
-// 一级导航:固定五项 + pack 动态页(智能问数/知识库…)
+// 一级导航:固定四项 + pack 动态页(智能问数/知识库…);
+// 模型供应商并入「插件」页 tab(与 MCP 服务同款多 tab 形态)
 const navItems = computed(() => [
   { key: 'overview', label: '概览', icon: DashboardOutlined },
   { key: 'conversations', label: '会话', icon: MessageOutlined },
   { key: 'calllogs', label: '审计 & 调用', icon: ApiOutlined },
   { key: 'tasks', label: '任务中心', icon: CloudServerOutlined },
-  { key: 'llm-providers', label: '模型供应商', icon: CloudOutlined },
   { key: 'packs', label: '插件', icon: AppstoreOutlined },
   ...packPages.value.map((p) => ({
     key: `pack-page:${p.pageKey}`, label: p.title, icon: PartitionOutlined })),

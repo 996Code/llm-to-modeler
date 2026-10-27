@@ -7,8 +7,10 @@
       <div>
         <div class="metro-admin-title">计量智能客服 · 场景配置</div>
         <div class="metro-admin-sub">
-          场景/槽位/规则/来源的唯一事实源在数据库——改场景是管理页操作,不是改代码;
+          场景/槽位/规则/数据源绑定都在这页维护——<b>新增或调整场景不需要改后台代码</b>:
+          MCP 上新工具用「能力接入」一键起草,或点「+ 新增」手工建;
           保存即校验+热生效(下一次对话读到新配置)。
+          只有全新结果卡样式需要开发(通用表格卡 <code>_table_card</code> 可覆盖大多数工具)。
         </div>
       </div>
       <div class="metro-admin-meta">
@@ -24,6 +26,10 @@
         <template #tab><ProfileOutlined /> 场景与槽位</template>
         <div class="metro-tab-body">
           <div class="scenario-list">
+            <div class="scenario-list-head">
+              <span>场景({{ scenarioKeys.length }})</span>
+              <a-button size="small" type="primary" ghost @click="addScenario">+ 新增</a-button>
+            </div>
             <div
               v-for="(cfg, key) in draft.scenarios" :key="key"
               class="scenario-item" :class="{ active: currentKey === key }"
@@ -90,6 +96,28 @@
             </fieldset>
           </div>
         </div>
+
+        <!-- MCP 能力接入:场景的"新增"入口(起草=MCP 工具声明翻译成场景草稿) -->
+        <div class="cap-panel">
+          <div class="cap-head">
+            <strong>MCP 能力接入</strong>
+            <a-badge v-if="newTools" :count="newTools" title="快照新增、尚未接入的工具" />
+            <a-button size="small" @click="loadInventory" :loading="capLoading">刷新清单</a-button>
+          </div>
+          <div class="cap-note">业务平台 MCP 上线新工具 → 此处出现待接入;点「起草」自动翻译声明为场景草稿(落在本页编辑器,润色话术后走整档保存生效)。声明是外部输入,接入永远人工确认。</div>
+          <div v-for="srv in cap.servers" :key="srv.code" class="cap-server">
+            <div class="cap-server-name">{{ srv.code }}</div>
+            <div v-for="t in srv.tools" :key="t.name" class="cap-tool" :class="{ imported: t.imported, fresh: !t.imported }">
+              <span class="cap-tool-name">{{ t.name }}</span>
+              <span class="cap-tool-desc">{{ t.description || '(无描述)' }}</span>
+              <a-tag v-if="t.imported" color="green">已接入</a-tag>
+              <a-tag v-else color="orange">新</a-tag>
+              <a-button v-if="t.draftable" size="small" type="primary" ghost
+                        :loading="drafting === t.name" @click="draftCapability(srv.code, t.name)">起草</a-button>
+            </div>
+          </div>
+          <div v-if="capError" class="cap-error">{{ capError }}</div>
+        </div>
       </a-tab-pane>
 
       <a-tab-pane key="actions">
@@ -101,40 +129,46 @@
                 <span>动作类型</span>
                 <select v-model="currentScenario.action.kind" @change="dirty = true">
                   <option value="kg">kg(知识库证据检索)</option>
-                  <option value="chatbi">chatbi(问数受控执行)</option>
+                  <option value="chatbi">chatbi(问数受控查询)</option>
                 </select>
               </label>
-              <template v-if="currentScenario.action.kind === 'chatbi'">
-                <label class="field">
-                  <span>数据源 env 变量</span>
-                  <input v-model="currentScenario.action.env" @input="dirty = true" />
-                </label>
-                <label class="field">
-                  <span>数据源显示名</span>
-                  <input v-model="currentScenario.action.ds_name" @input="dirty = true" />
-                </label>
-              </template>
+              <label v-if="currentScenario.action.kind === 'chatbi'" class="field">
+                <span>数据源(智能问数已登记的,选中即绑定)</span>
+                <select :value="currentScenario.action.datasource_id || ''"
+                        @change="pickDatasource(currentScenario, $event); dirty = true">
+                  <option value="">{{ dsBindingHint(currentScenario) }}</option>
+                  <option v-for="d in datasources" :key="d.id" :value="d.id">
+                    {{ d.name }}{{ dsOptionSuffix(d) }}
+                  </option>
+                </select>
+              </label>
             </div>
             <template v-if="currentScenario.action.kind === 'chatbi'">
               <div class="field-grid">
                 <label class="field">
-                  <span>固定工具(白名单)</span>
-                  <input v-model="currentScenario.action.tool" @input="dirty = true" />
+                  <span>调用工具{{ serverTools(currentScenario).length ? '' : '(数据源 server 的工具名)' }}</span>
+                  <select v-if="serverTools(currentScenario).length"
+                          v-model="currentScenario.action.tool" @change="dirty = true">
+                    <option v-for="t in serverTools(currentScenario)" :key="t" :value="t">{{ t }}</option>
+                    <option v-if="currentScenario.action.tool && !serverTools(currentScenario).includes(currentScenario.action.tool)"
+                            :value="currentScenario.action.tool">{{ currentScenario.action.tool }}(当前)</option>
+                  </select>
+                  <input v-else v-model="currentScenario.action.tool" placeholder="如 query_progress" @input="dirty = true" />
                 </label>
                 <label class="field">
-                  <span>结果卡构建器</span>
+                  <span>结果卡样式(通用表格卡免开发;专用卡需后端构建器)</span>
                   <input :value="currentScenario.action.card" disabled />
                 </label>
               </div>
               <label class="field">
-                <span>工具参数 ← 槽位映射(JSON:工具参数名→槽位 key)</span>
+                <span>工具参数 ← 槽位映射(JSON:工具参数名 → 槽位 key,如 {"order_no": "order_no"})</span>
                 <textarea
                   :value="paramsText(currentScenario)"
                   rows="2" @input="setParams(currentScenario, $event); dirty = true"
                 />
               </label>
               <label class="field">
-                <span>业务状态通知文案(JSON:status→{title, message})</span>
+                <span>业务状态通知文案(JSON:status → {title, message};常用键 not_found/forbidden/timeout)</span>
                 <textarea
                   :value="noticesText(currentScenario)"
                   rows="4" @input="setNotices(currentScenario, $event); dirty = true"
@@ -142,29 +176,8 @@
               </label>
             </template>
             <a-alert v-else type="info" show-icon class="kg-hint">
-              <template #message>kg 动作:按用途选库(强检目录/检定规程)→ 证据检索 → 三态结论;来源绑定由知识库侧维护,此处无数据源参数。</template>
+              <template #message>kg 动作 = 知识库证据检索(强检判定):按用途自动选库 → 检索 → 三态结论。知识来源(用哪个库)在知识库侧维护,这里无需配数据源;要接业务查询/MCP 工具,切到 chatbi 并选数据源。</template>
             </a-alert>
-
-            <div class="cap-panel">
-              <div class="cap-head">
-                <strong>MCP 能力接入</strong>
-                <a-badge v-if="newTools" :count="newTools" title="快照新增、尚未接入的工具" />
-                <a-button size="small" @click="loadInventory" :loading="capLoading">刷新清单</a-button>
-              </div>
-              <div class="cap-note">业务平台 MCP 上线新工具 → 此处出现待接入;点「起草」自动翻译声明为场景草稿(落在本页编辑器,润色话术后走整档保存生效)。声明是外部输入,接入永远人工确认。</div>
-              <div v-for="srv in cap.servers" :key="srv.code" class="cap-server">
-                <div class="cap-server-name">{{ srv.code }}</div>
-                <div v-for="t in srv.tools" :key="t.name" class="cap-tool" :class="{ imported: t.imported, fresh: !t.imported }">
-                  <span class="cap-tool-name">{{ t.name }}</span>
-                  <span class="cap-tool-desc">{{ t.description || '(无描述)' }}</span>
-                  <a-tag v-if="t.imported" color="green">已接入</a-tag>
-                  <a-tag v-else color="orange">新</a-tag>
-                  <a-button v-if="t.draftable" size="small" type="primary" ghost
-                            :loading="drafting === t.name" @click="draftCapability(srv.code, t.name)">起草</a-button>
-                </div>
-              </div>
-              <div v-if="capError" class="cap-error">{{ capError }}</div>
-            </div>
           </div>
         </div>
       </a-tab-pane>
@@ -191,6 +204,7 @@
           <div class="dryrun-note">
             预演只读(提取+求值,展示命中场景/已识别槽位/缺口/将追问的原文/将调用的数据源与工具);
             勾选「真实执行」且槽位齐时对问数受控执行跑一次真实调用。预演永不写对话/任务。
+            与「智能客服-测试」菜单的分工:测试菜单验证已生效配置;本页预演面向<b>未保存的草案</b>(可左右对比当前),是保存前最后一道验证。
           </div>
         </div>
       </a-tab-pane>
@@ -242,6 +256,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { ApiOutlined, ExperimentOutlined, ProfileOutlined } from '@ant-design/icons-vue'
+import { chatbiApi } from '../../api'
 import { metrologyApi, type MetrologyConfig, type MetrologyHistoryItem, type MetrologyScenario } from '../../metrologyApi'
 
 const tab = ref('scenarios')
@@ -317,6 +332,71 @@ const capError = ref('')
 const drafting = ref('')
 const newTools = computed(() =>
   cap.servers.reduce((n, s) => n + s.tools.filter((t) => !t.imported).length, 0))
+
+// ── ChatBI 数据源下拉(动作绑定写显式 datasource_id;env 只是出厂缺省)──
+interface ChatbiDs { id: string; name: string; dbType: string; host: string; database?: string }
+const datasources = ref<ChatbiDs[]>([])
+
+async function loadDatasources() {
+  try {
+    const { data } = await chatbiApi.get('/datasources')
+    datasources.value = data.items || []
+  } catch { /* 拉不到时下拉退化为提示文案;保存校验兜底 */ }
+}
+
+function dsOptionSuffix(d: ChatbiDs): string {
+  return d.dbType === 'mcp' ? `（${d.host}${d.database ? ':' + d.database : ''}）` : ''
+}
+
+function dsBindingHint(cfg: MetrologyScenario): string {
+  if (cfg.action.datasource_id) return ''
+  return cfg.action.env
+    ? `未显式绑定——缺省走环境变量 ${cfg.action.env}(建议改为显式绑定)`
+    : '未绑定(保存前需选择一个)'
+}
+
+function pickDatasource(cfg: MetrologyScenario, ev: Event) {
+  const id = (ev.target as HTMLSelectElement).value
+  const d = datasources.value.find((x) => x.id === id)
+  cfg.action.datasource_id = id
+  if (d) {
+    cfg.action.ds_name = d.name
+    // mcp 数据源建源时限定过工具(database 字段)——带出为默认工具
+    if (d.dbType === 'mcp' && d.database && !cfg.action.tool) cfg.action.tool = d.database
+  }
+}
+
+function serverTools(cfg: MetrologyScenario): string[] {
+  // 绑定的是 mcp 数据源时,用能力清单(server code → tools)把工具变下拉
+  const d = datasources.value.find((x) => x.id === cfg.action.datasource_id)
+  if (!d || d.dbType !== 'mcp') return []
+  const srv = cap.servers.find((s) => s.code === d.host)
+  return srv ? srv.tools.map((t) => t.name) : []
+}
+
+// 手工新增场景:chatbi 模板(通用表格卡 _table_card,不需要后端开发);
+// 数据源/工具/参数映射选好前保存会被校验拦下(报错即指引)
+function addScenario() {
+  let key = 'custom_1'
+  let n = 2
+  while (draft.value.scenarios[key]) key = `custom_${n++}`
+  draft.value.scenarios[key] = {
+    label: '新场景',
+    intent: '描述这类问题的典型问法(供意图识别)',
+    required: {
+      slot: 'keyword', header: '关键词', question: '请提供要查的关键词:',
+      options: [], slot_type: 'text',
+    },
+    action: {
+      kind: 'chatbi', datasource_id: '', env: '', ds_name: '',
+      tool: '', params: {}, stage: '查询中…', error_noun: '业务',
+      notices: {}, card: '_table_card',
+    },
+  }
+  currentKey.value = key
+  tab.value = 'scenarios'
+  dirty.value = true
+}
 
 async function loadInventory() {
   capLoading.value = true
@@ -427,6 +507,7 @@ onMounted(async () => {
   await reload()
   await loadHistory()
   loadInventory()
+  loadDatasources()
 })
 </script>
 
@@ -439,6 +520,7 @@ onMounted(async () => {
 .save-error { color: #d4380d; font-size: 12px; }
 .metro-tab-body { display: flex; gap: 16px; min-height: 380px; }
 .scenario-list { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
+.scenario-list-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #7a8491; padding: 0 2px; }
 .scenario-item { border: 1px solid #edf0f3; border-radius: 8px; padding: 10px 12px; cursor: pointer; transition: all .15s; }
 .scenario-item:hover { border-color: #91caff; }
 .scenario-item.active { border-color: #1677ff; background: #f0f7ff; }

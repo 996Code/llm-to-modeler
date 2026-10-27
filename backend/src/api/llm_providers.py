@@ -94,7 +94,13 @@ async def probe_providers() -> dict:
     try:
         from llm.client import LLMClient
         client = LLMClient()
-        for role, cfg, _, _ in client._resolve_endpoints():
+        chain = client._resolve_endpoints()
+        if not chain:
+            # 未配置也要给出可行动结果(而非空列表让前端白屏)
+            results.append({"role": "primary", "ok": False,
+                            "base_url": "",
+                            "error": "未配置——填写主端点并保存后再探测"})
+        for role, cfg, _, _ in chain:
             t0 = time.time()
             try:
                 c = client._client_for(cfg)

@@ -68,12 +68,16 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_FILE_MAX_BYTES = int(os.getenv("LOG_FILE_MAX_BYTES", str(50 * 1024 * 1024)))  # 50MB
 LOG_RETENTION = int(os.getenv("LOG_RETENTION", "5"))
 
-# 控制台/文件统一格式（含脱敏后的真实消息；进程+线程便于排查并发请求）
+# 控制台/文件统一格式（含脱敏后的真实消息；进程+线程便于排查并发请求）。
+# {exception} 占位符必带:loguru 自定义 format 不含它时 traceback 整个被
+# 吞掉——ERROR 行只剩一行消息,线上排障"日志是空的"(3.110 真实事故:
+# Tool execution failed 后无堆栈,靠本地复现才定位到圈号越界)
 _FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
     "<level>{level: <8}</level> | "
     "<cyan>{process}</cyan>:<cyan>{thread.name}</cyan> | "
-    "<magenta>{name}</magenta> | <level>{message}</level>"
+    "<magenta>{name}</magenta> | <level>{message}</level>\n"
+    "{exception}"
 )
 
 # 状态：防止 pytest/热重载时重复配置（多次 setup_logging 只配一次）
@@ -107,8 +111,12 @@ def _capture_stdlib_logging() -> None:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
-            # getMessage() 此时拿到的是脱敏后的最终文本
-            logger.log(level, record.getMessage())
+            # getMessage() 此时拿到的是脱敏后的最终文本;exc_info 透传给
+            # loguru({exception} 占位符渲染堆栈)——不透传时 stdlib 侧的
+            # logger.exception 只有消息没有 traceback(线上排障盲区的
+            # 另一半根因)
+            logger.opt(exception=record.exc_info).log(
+                level, record.getMessage())
 
     logging.getLogger().handlers = [_InterceptHandler()]
     # 标准库 root 默认 WARNING，会把 INFO 的 access 日志在 logger 层拦掉；

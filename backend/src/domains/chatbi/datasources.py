@@ -471,8 +471,24 @@ def check_all_health(db, max_failures: int = HEALTH_MAX_FAILURES) -> dict:
     for row in list_datasources(db, active_only=False):
         summary["checked"] += 1
         # 解密密码再探测: list_datasources 不带 decrypt, password_plain 为空,
-        # 直接 ping 必失败 → 15 分钟内所有数据源被误停用(真实事故)
-        info = get_datasource(db, row.id, decrypt=True) or row
+        # 直接 ping 必失败 → 15 分钟内所有数据源被误停用(真实事故)。
+        # 单源解密失败(密钥轮换后旧密文)只标记该源 unhealthy,不拖垮
+        # 整轮巡检——巡检是逐源独立的,一个坏源 500 掉全部观测不可接受
+        try:
+            info = get_datasource(db, row.id, decrypt=True) or row
+        except Exception as e:  # noqa: BLE001
+            logger.warning("数据源 %s 密码解密失败(密钥不匹配或密文损坏), "
+                           "标记 unhealthy: %s", row.name, e)
+            summary["unhealthy"] += 1
+            _health_fail_counts[row.id] = _health_fail_counts.get(row.id, 0) + 1
+            if (_health_fail_counts[row.id] >= max_failures
+                    and row.is_active):
+                update_datasource(db, row.id, is_active=False)
+                summary["newly_deactivated"] += 1
+            summary["items"].append({
+                "id": row.id, "name": row.name, "healthy": False,
+                "error": "密码解密失败(密钥不匹配或密文损坏),请编辑数据源重存密码"})
+            continue
         result = check_health(info)
         ds_id = info.id
         if result.get("healthy"):

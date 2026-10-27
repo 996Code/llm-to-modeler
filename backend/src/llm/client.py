@@ -172,19 +172,25 @@ class LLMClient:
     """
 
     async def probe(self) -> tuple[str, str]:
-        """LLM 网关连通性探活(P1-4: 探测逻辑归 client 单一实现)。
+        """LLM 供应商连通性探活(P1-4: 探测逻辑归 client 单一实现)。
 
         Returns: (status, detail)。status ∈ ok/fail/unconfigured。
-        GET {base}/models(3s 超时)——插件健康面板/依赖检测复用,
-        不再各自手拼 HTTP。
+        探测对象 =「模型供应商」页当前生效的主端点(DB 唯一事实源,
+        未配置即报 unconfigured 引导去配置);GET {base}/models
+        (3s 超时)——插件健康面板/依赖检测复用,不再各自手拼 HTTP。
         """
-        cfg = self.config
-        base = getattr(cfg, "base_url", "") or ""
+        chain = self._resolve_endpoints()
+        if not chain:
+            return ("unconfigured",
+                    "供应商页未配置主端点——请在管理端「插件管理 → "
+                    "模型供应商」维护")
+        cfg = chain[0][1]
+        base = (getattr(cfg, "base_url", "") or "").strip()
         api_key = getattr(cfg, "api_key", "") or ""
-        model = getattr(cfg, "model", "") or ""
+        model = (getattr(cfg, "model", "") or "").strip()
         detail = f"model={model}"
         if not base:
-            return "unconfigured", "未配置 base_url"
+            return "unconfigured", "供应商页主端点缺 base_url"
         try:
             import httpx
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -267,13 +273,6 @@ class LLMClient:
         self._chat_cache = EmbedCache(
             max_entries=int(os.getenv("EMBED_CACHE_MAX", "4096")))
 
-        if not config.api_key:
-            # 没配 api_key 时只 warning 不抛异常：本地模型（LM Studio）常无需 key
-            # 真正调用失败时由 SDK 抛错，这里给开发者一个提前提示
-            logger.warning(
-                "LLM_API_KEY not set — LLM calls will fail until configured."
-            )
-
         # OpenAI SDK 客户端，兼容所有 OpenAI 兼容 API
         # 类比 Java 的 OkHttpClient 单例，全程复用底层连接
         # api_key 为空时给占位字符串：OpenAI SDK 要求非空，本地模型不校验
@@ -305,10 +304,11 @@ class LLMClient:
             f"max_tokens={config.max_tokens}"
         )
 
-        # ── 主备切换(C8/设计 8.6):DB 供应商配置优先,env 为默认主端点 ──
+        # ── 主备切换(C8/设计 8.6):DB 供应商配置是端点唯一来源 ──
         # 每个端点一个 OpenAI 客户端(缓存复用,同款 httpx 保活参数);
         # 生效配置经 services.llm_providers.resolve_active() 热读
-        # (revision 比对缓存),DB 未配置/故障时回退 env 默认单端点。
+        # (revision 比对缓存)。未配置不回退 env——chat 出站前置闸
+        # 直接报错引导去「插件管理 → 模型供应商」配置。
         self._endpoint_clients: Dict[Any, Any] = {self._ep_key(config): self.client}
         self._ep_http: Optional[Any] = None  # 惰性持有的共享 httpx Client
 
@@ -375,38 +375,50 @@ class LLMClient:
         text = type(e).__name__.lower()
         return any(k in text for k in ("connect", "timeout"))
 
+    @staticmethod
+    def _cfg_with(base: "LLMConfig", **updates) -> "LLMConfig":
+        """端点配置派生:pydantic 走 model_copy;测试替身(普通类,
+        如 __new__ 构造的裸客户端)退化为 SimpleNamespace 重建——
+        链解析对配置对象不做 pydantic 假设。"""
+        if hasattr(base, "model_copy"):
+            return base.model_copy(update=updates)
+        from types import SimpleNamespace
+        fields = {k: getattr(base, k, None) for k in (
+            "base_url", "api_key", "model", "temperature",
+            "max_tokens", "timeout")}
+        fields.update(updates)
+        return SimpleNamespace(**fields)  # type: ignore[return-value]
+
     def _resolve_endpoints(self) -> list:
-        """当前生效端点链:[primary, fallback?](DB 优先,回退 env)。
+        """当前生效端点链:[primary, fallback?](DB「模型供应商」唯一来源)。
 
         返回 [(role, LLMConfig, price_in, price_out)];role ∈ primary/
-        fallback/env。DB primary 的 base_url/model 覆盖 env;fallback
-        仅当已配置且 enabled。
+        fallback。未配置返回 [](调用方前置闸报错引导去配置页)——
+        刻意不回退 .env:供应商页是唯一维护入口,env 只管温度/超时等
+        非端点参数(两套事实源并存=「先 env 后 DB」的排查复杂度,
+        用户明确裁决去掉)。
         """
-        chain: list = []
         try:
             from services.llm_providers import resolve_active
             active = resolve_active()
         except Exception:  # noqa: BLE001
             active = {}
         base = self.config
-        if active.get("primary"):
-            p = active["primary"]
-            primary = base.model_copy(update={
-                "base_url": p["base_url"],
-                "api_key": p.get("api_key") or "",
-                "model": p.get("model") or base.model,
-            })
-            chain.append(("primary", primary,
-                          p.get("price_in"), p.get("price_out")))
+        chain: list = []
+        p = active.get("primary")
+        if p:
+            chain.append(("primary", self._cfg_with(base,
+                base_url=p["base_url"],
+                api_key=p.get("api_key") or "",
+                model=p.get("model") or base.model,
+            ), p.get("price_in"), p.get("price_out")))
             f = active.get("fallback")
             if f:
-                chain.append(("fallback", base.model_copy(update={
-                    "base_url": f["base_url"],
-                    "api_key": f.get("api_key") or "",
-                    "model": f.get("model") or base.model,
-                }), f.get("price_in"), f.get("price_out")))
-            return chain
-        chain.append(("env", base, None, None))
+                chain.append(("fallback", self._cfg_with(base,
+                    base_url=f["base_url"],
+                    api_key=f.get("api_key") or "",
+                    model=f.get("model") or base.model,
+                ), f.get("price_in"), f.get("price_out")))
         return chain
 
     def _completion_with_fallback(self, create_kwargs: dict, conv_id, stage,
@@ -421,20 +433,46 @@ class LLMClient:
         见 _llm_logged 标记不再重复记)。
         """
         chain = self._resolve_endpoints()
+        # 未配置前置闸(唯一出站口,chat/chat_json 全覆盖):DB 供应商页
+        # 没配主端点 = 链为空——给用户可行动的报错(去哪配),不让
+        # OpenAI SDK 的 "Connection error" / "api_key client" 之类
+        # 晦涩错误漏到对话层
+        if not chain or not (getattr(chain[0][1], "base_url", "") or "").strip():
+            raise RuntimeError(
+                "LLM 供应商未配置:请在管理端「插件管理 → 模型供应商」"
+                "维护主端点(base_url/api_key/model)并保存,保存即热生效;"
+                "配置完成前的对话与抽取请求无法处理。")
         last_exc: Optional[Exception] = None
         for idx, (role, cfg, price_in, price_out) in enumerate(chain):
             client = self._client_for(cfg)
             endpoint = f"{cfg.base_url}/chat/completions"
+            # 模型随端点:调用方未显式指定模型时,用该角色自己的 model
+            # (供应商页配置)——页面配置的模型才是该端点真正服务的模型,
+            # 构造器默认(config.model,env)只对未填 model 的角色兜底。
+            # 避免"DB 端点 + env 删除后的默认模型名"组合打到网关不
+            # 存在的通道(线上 503 model_not_found 实证)。
+            # 显式 model 传参(批量抽取换便宜模型)仍然最高优先。
+            role_model = (getattr(cfg, "model", "") or "").strip()
+            if not (create_kwargs.get("model") or "").strip():
+                # 显式传参 > 角色模型(供应商页配置)> 构造器兜底
+                create_kwargs = {**create_kwargs,
+                                  "model": role_model or self.config.model}
+            # qwen3 关思考随最终模型判定(模型可能到端点解析才确定,
+            # 调用方基于显式传参的预注入与此处幂等——同值覆盖无害)
+            create_kwargs.update(self._thinking_off_kwargs(
+                create_kwargs.get("model")))
             try:
                 response = client.chat.completions.create(**create_kwargs)
             except Exception as e:  # noqa: BLE001
                 last_exc = e
                 if is_rate_limit_error(e):
                     get_rate_limiter().on_rate_limited()
-                # 失败尝试留痕(role 标注,切换链路可追溯)
+                # 失败尝试留痕(role+实际模型标注,切换链路可追溯)
                 self._log_call(
                     endpoint=endpoint,
-                    request_data={**(fail_payload() if callable(fail_payload) else {}), "provider": role},
+                    request_data={**(fail_payload() if callable(fail_payload) else {}),
+                                  "provider": role,
+                                  "model": create_kwargs.get("model")},
                     response_data=None,
                     status_code=429 if is_rate_limit_error(e) else 500,
                     duration_ms=0,
@@ -459,11 +497,16 @@ class LLMClient:
                     (usage.get("prompt_tokens", 0) * (price_in or 0)
                      + usage.get("completion_tokens", 0) * (price_out or 0))
                     / 1000.0, 6)
-            meta = {"provider": role, **({"switched": True} if idx > 0 else {})}
+            # 实际发出的模型(显式传参或角色解析)入 meta——成功日志据此
+            # 记录真实模型(request_data 快照在解析前构造,可能仍是 None)
+            meta = {"provider": role,
+                    "model": create_kwargs.get("model"),
+                    **({"switched": True} if idx > 0 else {})}
             if cost_yuan is not None:
                 meta["costYuan"] = cost_yuan
             return response, {"endpoint": endpoint, "role": role, "meta": meta}
-        raise last_exc  # pragma: no cover(空链不可达:env 兜底恒在)
+        # 不可达:空链已被前置闸拦截,非空链循环内必 return/raise
+        raise last_exc  # pragma: no cover
 
     def close(self):
         """关闭底层客户端（OpenAI SDK + rerank httpx，释放连接池与 socket）。
@@ -609,7 +652,9 @@ class LLMClient:
             for m in messages)) + 200
         _rate_wait = get_rate_limiter().acquire(_est)
         # 单次调用级模型覆盖(None = 配置默认)
-        use_model = model or self.config.model
+        # 未显式指定时留 None:由 _completion_with_fallback 按端点
+        # 解析模型(供应商页配置;未填的角色回落构造器默认)
+        use_model = model or None
         # 构造请求参数快照（用于日志）：参数为 None 时回落到配置默认值
         # 类比 Java：Optional.ofNullable(temperature).orElse(config.temperature)
         request_data = {
@@ -687,13 +732,15 @@ class LLMClient:
             self._log_call(
                 endpoint=_pv["endpoint"],
                 # LLM_LOG_FULL=1(默认):完整 messages 入库(图片转占位符)——
-                # 管理端链路视图可直接回放当时的 prompt;关闭时只记数量/体积
+                # 管理端链路视图可直接回放当时的 prompt;关闭时只记数量/体积。
+                # meta 放最后:model/provider 等以实际发送为准(request_data
+                # 快照里的 model 在端点解析前构造,未显式指定时是 None)
                 request_data={
                     "messages_count": len(messages),
                     "messages_chars": messages_chars,
-                    **_pv["meta"],
                     **{k: v for k, v in request_data.items() if k != "messages"},
                     **({"messages": _sanitize_messages_for_log(messages)} if self._log_full else {}),
+                    **_pv["meta"],
                 },
                 response_data=response_data,
                 status_code=200,
@@ -797,7 +844,9 @@ class LLMClient:
             for m in guided_messages)) + 200
         _rate_wait = get_rate_limiter().acquire(_est)
         # 单次调用级模型覆盖(None = 配置默认)
-        use_model = model or self.config.model
+        # 未显式指定时留 None:由 _completion_with_fallback 按端点
+        # 解析模型(供应商页配置;未填的角色回落构造器默认)
+        use_model = model or None
         request_data = {
             "model": use_model,
             "messages": guided_messages,
@@ -853,9 +902,10 @@ class LLMClient:
                 request_data={
                     "messages_count": len(guided_messages),
                     "messages_chars": sum(len(m.get("content") or "") for m in guided_messages),
-                    **_pv["meta"],
                     **{k: v for k, v in request_data.items() if k != "messages"},
                     **({"messages": _sanitize_messages_for_log(guided_messages)} if self._log_full else {}),
+                    # meta 最后:实际发送的 model/provider 覆盖解析前快照
+                    **_pv["meta"],
                 },
                 response_data=response_data,
                 status_code=200,

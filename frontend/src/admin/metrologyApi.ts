@@ -23,6 +23,8 @@ export interface MetrologyScenario {
   }
   action: {
     kind: 'kg' | 'chatbi'
+    /** 显式绑定的 ChatBI 数据源 ID(优先于 env;能力起草/管理页下拉写入) */
+    datasource_id?: string
     env?: string
     ds_name?: string
     tool?: string

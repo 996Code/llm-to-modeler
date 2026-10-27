@@ -2,11 +2,12 @@
   <!-- 平台 LLM 供应商维护(C8/设计 8.6):主/备两组表单,revision CAS,
        密钥不回显(留空=沿用),切换策略只读,可选连通性探测。 -->
   <div class="lp">
-    <div class="lp-head">
+    <div class="lp-head" :class="{ 'lp-head-embedded': embedded }">
       <div>
-        <div class="lp-title">模型供应商</div>
+        <div v-if="!embedded" class="lp-title">模型供应商</div>
         <div class="lp-sub">
-          DB 唯一事实源,保存即热生效(下一次 LLM 调用读到新配置)。
+          对话/抽取调用的<b>唯一配置入口</b>,保存即热生效(下一次 LLM 调用读到新配置)——
+          <b>未配置时对话请求会直接报错提示</b>,不回退 .env。
           主端点<b>连接类失败/超时/5xx</b>时同参数自动切备用;
           <b>身份(401)/参数(400)/限流(429)不切</b>——换端点不解决问题。
           每次调用的 call_logs 记 provider=primary/fallback 与成本(单价已配时)。
@@ -73,9 +74,12 @@
 <script setup lang="ts">
 // 模型供应商维护(C8):GET 掩码(has_key)→ 表单;PUT 留空 key=沿用旧值;
 // revision CAS(409 提示刷新);探测只读不改配置。
+// embedded: 嵌入插件管理页 tab 时收敛大标题(tab 已有上下文)
 import { onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { adminApi } from '../api'
+
+defineProps<{ embedded?: boolean }>()
 
 interface Role {
   base_url: string; api_key: string; model: string

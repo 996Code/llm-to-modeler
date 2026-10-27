@@ -58,8 +58,23 @@ def store(tmp_path):
     return ConversationStore(str(tmp_path / "llm_log.db"))
 
 
+@pytest.fixture(autouse=True)
+def _providers_state():
+    """DB 供应商链状态隔离:进出均清(本文件种入的行不泄漏到其他测试)。"""
+    from services import llm_providers as _providers
+    _providers.reset_runtime_cache_for_tests()
+    yield
+    _providers.reset_runtime_cache_for_tests()
+
+
 def _make_client(store, monkeypatch, log_full):
     monkeypatch.setenv("LLM_LOG_FULL", log_full)
+    # 端点链只认 DB 供应商配置——种入与构造器同参的一行,链解析命中
+    # 构造器客户端(即测试 patch 的 client.client),模型默认值也一致
+    from services import llm_providers as _providers
+    _providers.save_providers({
+        "primary": {"base_url": "http://x/v1", "api_key": "k",
+                    "model": LLMConfig().model}}, 0, "test")
     client = LLMClient(config=LLMConfig(base_url="http://x/v1", api_key="k"), conversation_store=store)
     return client
 

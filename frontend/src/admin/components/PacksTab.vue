@@ -1,6 +1,6 @@
 <template>
   <div>
-    <!-- 页头 tab:插件(含启用计数) | MCP 服务(注册计数),说明入口在右 -->
+    <!-- 页头 tab:插件 | MCP 服务 | 模型供应商,说明入口在右 -->
     <div class="pk-tabs-row">
       <a-radio-group v-model:value="innerTab" size="small" button-style="solid">
         <a-radio-button value="packs">
@@ -11,6 +11,9 @@
           <ApiOutlined /> MCP 服务
           <span v-if="mcpStats.total" class="pk-tab-count">{{ mcpStats.enabled }}/{{ mcpStats.total }}</span>
         </a-radio-button>
+        <a-radio-button value="llm">
+          <CloudOutlined /> 模型供应商
+        </a-radio-button>
       </a-radio-group>
       <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
         <template #content>
@@ -20,6 +23,7 @@
               启停状态持久化在 <code>{{ payload?.stateFile ?? 'data/pack_state.json' }}</code>(初始来源:{{ sourceLabel }}),重启后保持。
               依赖未配置的插件无法启用——可在插件"设置"里补配连接信息,或配好环境变量后点"重新检测"热加载。
               MCP 服务 tab 里登记的外部 server 供插件(如智能问数数据源)引用。
+              模型供应商 tab 维护对话/抽取调用的主备端点——是 LLM 的唯一配置入口,保存即热生效;未配置时对话请求会直接报错提示(不回退 .env)。
             </div>
           </div>
         </template>
@@ -100,6 +104,7 @@
 
     </template>
     <McpServersPanel v-if="innerTab === 'mcp'" @count="mcpStats = $event" />
+    <LlmProviders v-else-if="innerTab === 'llm'" :embedded="true" />
 
     <!-- 声明式设置抽屉 -->
     <PackSettingsDrawer v-model:open="settingsOpen" :pack-name="settingsPack" @saved="load" />
@@ -111,11 +116,12 @@
 import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
-  ApiOutlined, AppstoreOutlined, QuestionCircleOutlined, RightOutlined,
-  SettingOutlined, SyncOutlined, ThunderboltOutlined,
+  ApiOutlined, AppstoreOutlined, CloudOutlined, QuestionCircleOutlined,
+  RightOutlined, SettingOutlined, SyncOutlined, ThunderboltOutlined,
 } from '@ant-design/icons-vue'
 import { listMcpServers, AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
 import type { LoadSafely } from './loadSafely'
+import LlmProviders from './LlmProviders.vue'
 import McpServersPanel from './McpServersPanel.vue'
 import PackSettingsDrawer from './PackSettingsDrawer.vue'
 

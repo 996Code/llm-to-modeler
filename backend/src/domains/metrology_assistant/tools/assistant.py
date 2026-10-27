@@ -637,8 +637,12 @@ _CN_NUM = {2: "两", 3: "三", 4: "四", 5: "五"}
 def _unsupported_notice() -> ToolResult:
     """范围外问题的如实答复(文案由场景表拼装,不手写清单)。"""
     table = _current_scenarios()
-    items = ";".join(f"{'①②③④⑤'[i]}{cfg['label']}"
-                     for i, cfg in enumerate(table.values()))
+    # 序号随场景数增长: ①-⑩ 内置,超出回退数字编号(能力导入让场景
+    # 数量开放,固定 5 个圈号会越界——线上 8 场景时真实炸过)
+    _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
+    items = ";".join(
+        f"{_CIRCLED[i] if i < len(_CIRCLED) else i + 1}{cfg['label']}"
+        for i, cfg in enumerate(table.values()))
     count = _CN_NUM.get(len(table), str(len(table)))
     text = (f"当前演示版本覆盖{count}类问题:{items}。"
             "请换个问法,或联系业务窗口人工咨询。")

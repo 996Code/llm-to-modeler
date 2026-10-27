@@ -235,7 +235,11 @@ async def health_check_all(request: Request):
                            .get("health_check_max_failures", 3))
     except Exception:
         max_failures = 3
-    return ds_mod.check_all_health(get_pack_db(), max_failures=max_failures)
+    # mcp 探测走 sdk.mcp_client(同步实现,内部 asyncio.run)——本路由在
+    # 事件循环线程,直接调会嵌套 run 报错(dry-run 同款坑),抛工作线程
+    import asyncio
+    return await asyncio.to_thread(
+        ds_mod.check_all_health, get_pack_db(), max_failures=max_failures)
 
 
 @router.post("/datasources/{ds_id}/health", dependencies=[Depends(admin_required)])
@@ -243,7 +247,8 @@ async def datasource_health(ds_id: str):
     info = datasources.get_datasource(_db(), ds_id, decrypt=True)
     if not info:
         raise HTTPException(404, "数据源不存在")
-    return datasources.check_health(info)
+    import asyncio
+    return await asyncio.to_thread(datasources.check_health, info)
 
 
 @router.post("/datasources/{ds_id}/scan", dependencies=[Depends(admin_required)])

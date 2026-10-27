@@ -199,13 +199,13 @@ def test_cost_recorded_from_price(monkeypatch):
     assert abs(ok_call["request_data"]["costYuan"] - 0.02) < 1e-9
 
 
-def test_env_fallback_when_unconfigured(monkeypatch):
-    """未配置供应商 → 端点链回退 env(env 单端点,不切)。"""
+def test_unconfigured_chain_empty_and_gate(monkeypatch):
+    """未配置供应商 → 端点链为空(不回退 env);chat 前置闸给可行动报错。"""
     monkeypatch.setenv("LLM_BASE_URL", "http://env-default/v1")
     client = LLMClient(config=None, conversation_store=_FakeStore())
-    chain = client._resolve_endpoints()
-    assert [(r, c.base_url) for r, c, _, _ in chain] == [
-        ("env", "http://env-default/v1")]
+    assert client._resolve_endpoints() == []
+    with pytest.raises(RuntimeError, match="模型供应商"):
+        client.chat([{"role": "user", "content": "q"}])
 
 
 # ── 管理 API ─────────────────────────────────────────────────
