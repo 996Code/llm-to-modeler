@@ -214,7 +214,13 @@ class TaskStore:
         if task_type:
             clauses.append("task_type = ?"); params.append(task_type)
         if pack_name:
-            clauses.append("pack_name = ?"); params.append(pack_name)
+            if pack_name == "system":
+                # 系统归属:平台自身提交的任务(无插件)pack_name 为空,
+                # 平台层显式提交的约定写 "system"——两种都归"系统"筛选项
+                clauses.append(
+                    "(pack_name IS NULL OR pack_name = '' OR pack_name = 'system')")
+            else:
+                clauses.append("pack_name = ?"); params.append(pack_name)
         if title:
             clauses.append("title LIKE ?"); params.append(f"%{title}%")
         if days and days > 0:

@@ -455,6 +455,27 @@ class TestDegradation:
         assert content.sample_questions
         assert any("订单总金额" in q for q in content.sample_questions)
 
+    def test_introspect_excludes_pack_schemas_dynamically(self, env):
+        """内省排除清单动态推导(2026-10-27 事故回归):pack schema 不进业务表清单。
+
+        metrology_assistant 建库后无人记得改 _PG_EXCLUDED_SCHEMAS 硬编码名单,
+        扫描把插件元数据表(assistant_config 等)当业务表灌进语义层,挤掉真
+        业务表的示例问题配额。修复后排除清单=系统 schema+装配期 pack 名,
+        新增插件零改动。"""
+        from domains.chatbi import semantic
+
+        conn = semantic._connect_business(env.connect_info)
+        try:
+            result = semantic._pg_introspect(conn)
+        finally:
+            conn.close()
+        tables = set(result["tables"])
+        # 只见 public 业务表;任何 pack schema 的表(含 metrology 的
+        # assistant_*、chatbi/kg 的自有表)都不在
+        assert {"biz_orders", "biz_users"} <= tables
+        assert not any(t.startswith("assistant_") for t in tables), tables
+        assert not any(t.startswith(("kg_", "chatbi_")) for t in tables), tables
+
     def test_sample_questions_hardcoded_fallback(self, env):
         """极端兜底: 无业务表(规则也无法生成) → 3 条硬编码通用问题。"""
         from domains.chatbi import semantic
