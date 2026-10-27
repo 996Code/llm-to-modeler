@@ -21,7 +21,7 @@ task_logs ≈ STEP_EXECUTION 的日志表。同 ConversationStore 一样每次�
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -199,8 +199,15 @@ class TaskStore:
         pack_name: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        title: Optional[str] = None,
+        days: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """分页查询(任务中心列表;过滤条件拼装参数化防注入)。"""
+        """分页查询(任务中心列表;过滤条件拼装参数化防注入)。
+
+        title: 标题模糊匹配(含匹配,参数绑定 % 通配不在 SQL 模板里——
+            代理只认 %s 系占位符,字面 % 会炸)。
+        days: 只看最近 N 天(created_at 同为 UTC ISO 文本,字典序可比)。
+        """
         clauses, params = [], []
         if status:
             clauses.append("status = ?"); params.append(status)
@@ -208,6 +215,12 @@ class TaskStore:
             clauses.append("task_type = ?"); params.append(task_type)
         if pack_name:
             clauses.append("pack_name = ?"); params.append(pack_name)
+        if title:
+            clauses.append("title LIKE ?"); params.append(f"%{title}%")
+        if days and days > 0:
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(days=days)).isoformat()
+            clauses.append("created_at >= ?"); params.append(cutoff)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._get_conn() as conn:
             total = conn.execute(

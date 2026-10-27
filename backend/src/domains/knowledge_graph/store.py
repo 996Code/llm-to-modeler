@@ -21,7 +21,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -624,6 +624,29 @@ class KGStore:
             active = set(active_doc_ids)
             return [{"id": r["id"], "kbId": r["kb_id"]}
                     for r in stale_rows if r["id"] not in active]
+
+
+    def list_orphan_import_docs(self, active_doc_ids,
+                                grace_seconds: int = 300) -> List[Dict[str, Any]]:
+        """启动恢复兜底:无活任务支撑的待导文档(文档表为真相源)。
+
+        覆盖两类孤儿:
+          - uploaded 且超过宽限期(刚上传、任务提交在途的不误伤——
+            热切换重装配时上传可与恢复并发);
+          - 因重启中断收敛为 failed 的(error 前缀是 recover_importing_docs
+            的固定标记;业务性失败不在此列,不会被重排)。
+        调用方仍需按 active_doc_ids 过滤一遍(双保险)。
+        """
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(seconds=grace_seconds)).isoformat()
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT id, kb_id FROM kg_documents
+                   WHERE (import_status = 'uploaded' AND created_at < ?)
+                      OR (import_status = 'failed' AND error LIKE ?)""",
+                (cutoff, "服务重启导致导入中断%")).fetchall()
+        return [{"id": r["id"], "kbId": r["kb_id"]}
+                for r in rows if r["id"] not in active_doc_ids]
 
     def document_file_path(self, doc_id: str) -> Optional[str]:
         with self._get_conn() as conn:

@@ -46,9 +46,11 @@ async def list_tasks(request: Request):
     status = (request.query_params.get("status") or "").strip() or None
     task_type = (request.query_params.get("type") or "").strip() or None
     pack_name = (request.query_params.get("pack") or "").strip() or None
+    title = (request.query_params.get("title") or "").strip() or None
+    days = _int_param(request, "days", 0)   # >0 = 只看最近 N 天
     items, total = manager.store.list_tasks(
         status=status, task_type=task_type, pack_name=pack_name,
-        limit=limit, offset=offset,
+        limit=limit, offset=offset, title=title, days=days or None,
     )
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 

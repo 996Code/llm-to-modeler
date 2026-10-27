@@ -14,10 +14,14 @@
         <a-select-option value="">全部类型</a-select-option>
         <a-select-option v-for="t in types" :key="t.type" :value="t.type">{{ typeLabel(t) }}</a-select-option>
       </a-select>
+      <a-input-search
+        v-model:value="filterTitle" placeholder="标题搜索" style="width: 200px"
+        allow-clear @search="search" @clear="search" />
       <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
       <a-button @click="load"><template #icon><ReloadOutlined /></template>刷新</a-button>
       <a-switch v-model:checked="autoRefresh" checked-children="自动刷新" un-checked-children="暂停" size="small" />
-      <span class="tk-count">共 {{ total }} 条</span>
+      <span class="tk-count">共 {{ total }} 条{{ lastDays ? `（近 ${lastDays} 天）` : '' }}</span>
+      <a-switch v-model:checked="recentOnly" checked-children="近7天" un-checked-children="全部" size="small" @change="search" />
     </div>
 
     <a-table
@@ -195,6 +199,11 @@ const total = ref(0)
 const loading = ref(false)
 const filterStatus = ref('')
 const filterType = ref('')
+const filterTitle = ref('')
+// 默认只看近 7 天(任务表会被导入批次刷大,全量计数对日常排查是噪音;
+// 关掉开关看全量历史)
+const recentOnly = ref(true)
+const lastDays = computed(() => (recentOnly.value ? 7 : 0))
 const types = ref<TaskTypeItem[]>([])
 const autoRefresh = ref(true)
 
@@ -249,6 +258,8 @@ async function load() {
       offset: (page.current - 1) * page.pageSize,
       status: filterStatus.value || undefined,
       type: filterType.value || undefined,
+      title: filterTitle.value.trim() || undefined,
+      days: lastDays.value || undefined,
     })
     if (seq !== listSeq) return   // 已有更新请求在途/完成,丢弃本次过期结果
     rows.value = data.items

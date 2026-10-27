@@ -462,6 +462,10 @@ export async function fetchTasks(params: {
   status?: string
   type?: string
   pack?: string
+  /** 标题模糊搜索(后端 LIKE 含匹配) */
+  title?: string
+  /** 只看最近 N 天(0/缺省=不限) */
+  days?: number
 }): Promise<Paged<TaskItem>> {
   const { data } = await tasksApi.get('', { params })
   return data

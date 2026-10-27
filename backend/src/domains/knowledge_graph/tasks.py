@@ -97,10 +97,29 @@ def _recover_stale_importing(manager) -> bool:
         # ① importing 中断(跑了一半):收敛为 failed 并自动重提
         stale = store.recover_importing_docs(active_doc_ids)
         resubmit = {d["id"]: d["kbId"] for d in stale}
-        # ② interrupted 任务(pending 期被打断,文档还是 uploaded 从未开跑):
-        #    不重提就永远没人导。历史中断行按文档当前状态分流——已 succeeded
-        #    的不重放(重放只是幂等空转,还会把任务中心刷满空记录),关闭并
-        #    标注"已由成功导入取代";待续跑的重新入队,旧行同步关闭防残留
+        # ② 文档驱动兜底(2026-10-27 事故):uploaded 超宽限/因重启中断收敛
+        #    failed 的文档,无活任务一律重排。不依赖任务行——此前实现先关
+        #    旧行再重提,恢复中途进程重启(真实事故:两次)导致 730 行已标
+        #    "已重新入队续跑"却从未入队,cancelled 行无人在意,文档成孤儿。
+        #    以文档表为真相源后,任何崩溃时序下次启动自愈。
+        try:
+            orphans = store.list_orphan_import_docs(active_doc_ids)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"孤儿文档扫描失败(跳过兜底,旧机制仍生效): {e}")
+            orphans = []
+        for d in orphans:
+            resubmit.setdefault(d["id"], d["kbId"])
+        # ③ 先重提、后关旧行(顺序即真相:旧行标注"已重新入队"只能发生在
+        #    新任务真实存在之后;中途崩溃时旧行保持 interrupted,下次自愈)
+        queued = set()
+        for doc_id, kb_id in resubmit.items():
+            try:
+                submit_import(_app_state, kb_id, doc_id, force=False)
+                queued.add(doc_id)
+            except Exception as e:  # noqa: BLE001
+                # 入队失败(如文档已删/重复任务):文档保持 failed,人工仍可重排
+                logger.warning(f"中断文档重提失败(doc={doc_id}): {e}")
+        # ④ 关闭 interrupted 旧行,注记与实际状态一致(不说谎)
         interrupted, _ = manager.store.list_tasks(
             status="interrupted", task_type="kg.import_document", limit=1000)
         for t in interrupted:
@@ -113,12 +132,18 @@ def _recover_stale_importing(manager) -> bool:
                 note = "(文档已删除)"
             elif doc.get("importStatus") == "succeeded":
                 note = "(已由成功导入取代)"
-            elif kb_id:
-                if doc_id not in resubmit:
-                    resubmit[doc_id] = kb_id
-                note = "(已重新入队续跑)"
             else:
-                continue  # 文档在但缺 kb_id 的残行:留置待人工
+                # 行驱动补提:排队期被打断的文档(可能刚上传,在 ② 宽限期内,
+                # 兜底扫不覆盖——任务行就是它的重提信号)。此刻真实提交,
+                # 成功才标"已重新入队",失败如实标注,旧行统一关闭防残留
+                if doc_id not in queued:
+                    try:
+                        submit_import(_app_state, kb_id, doc_id, force=False)
+                        queued.add(doc_id)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"中断文档重提失败(doc={doc_id}): {e}")
+                note = ("(已重新入队续跑)" if doc_id in queued
+                        else "(重提未成,待下次启动自愈)")
             # 逐行隔离:单行更新失败(如列白名单拒收)不中断整轮扫描
             try:
                 manager.store.update_task(
@@ -126,16 +151,8 @@ def _recover_stale_importing(manager) -> bool:
                     title=f"{t.get('title') or ''}{note}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"中断任务关闭标注失败(task={t.get('id')}): {e}")
-        resubmitted = 0
-        for doc_id, kb_id in resubmit.items():
-            try:
-                submit_import(_app_state, kb_id, doc_id, force=False)
-                resubmitted += 1
-            except Exception as e:  # noqa: BLE001
-                # 入队失败(如文档已删/重复任务):文档保持 failed,人工仍可重排
-                logger.warning(f"中断文档自动续跑入队失败(doc={doc_id}): {e}")
         if resubmit:
-            logger.info(f"启动自动续跑: {len(resubmit)} 个中断导入,重新入队 {resubmitted} 个")
+            logger.info(f"启动自动续跑: {len(resubmit)} 个待导文档,重新入队 {len(queued)} 个")
         return True
     except Exception:
         logger.exception("启动收敛 importing 文档失败(不影响服务启动)")
