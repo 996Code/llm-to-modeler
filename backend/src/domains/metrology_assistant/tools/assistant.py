@@ -94,8 +94,18 @@ SCENARIOS = {
             "slot_type": "enum",
             "enum_options": list(STRONG_INSPECTION_PURPOSES)
                             + ["内部使用", "校准"],
+            "extract_hint": "purpose: 用途(贸易结算/安全防护/医疗卫生/环境监测/"
+                            "执法鉴定/内部使用/校准等);消息与背景都没提 → 空串",
         },
-        "action": {"kind": "kg"},
+        "action": {
+            "kind": "kg",
+            # 用途→资料库路由(原代码常量搬进表;管理页 Tab2 可改)
+            "kb_rules": [{
+                "slot": "purpose",
+                "in": list(STRONG_INSPECTION_PURPOSES),
+                "kb": MANDATORY_CHECK_KB,
+            }],
+        },
     },
     "progress": {
         "label": "委托单检测进度查询",
@@ -106,6 +116,7 @@ SCENARIOS = {
             "question": "请提供委托单号(BJ 开头,可在委托单回执上查看)",
             "options": list(DEMO_ORDER_OPTIONS),
             "normalize": "upper",
+            "extract_hint": "order_no: 委托单号(如 BJ2026);没有 → 空串",
         },
         "action": {
             "kind": "chatbi",
@@ -133,12 +144,14 @@ SCENARIOS = {
     },
     "turnaround": {
         "label": "器具检测耗时/工作日咨询",
-        "intent": "问检测要多久/多少个工作日/多长时间出报告",
+        "intent": "问送检后要多久出结果/多少个工作日/多长时间出报告出证"
+                  "(问的是'这一次检测的耗时',不是'多久检一次')",
         "required": {
             "slot": "instrument",
             "header": INSTRUMENT_HEADER,
             "question": "请提供要咨询的器具名称(如 压力表/角膜曲率计)",
             "options": [],
+            "extract_hint": "instrument: 器具名称;指代(\"它/同一台\")从会话背景解析",
         },
         "action": {"kind": "kg", "kb": REGULATION_KB,
                    "conclusion": "turnaround"},
@@ -151,19 +164,22 @@ SCENARIOS = {
             "header": INSTRUMENT_HEADER,
             "question": "请提供要查询资质能力的器具名称",
             "options": [],
+            "extract_hint": "instrument: 器具名称;指代(\"它/同一台\")从会话背景解析",
         },
         "action": {"kind": "kg", "kb": REGULATION_KB,
                    "conclusion": "qualification"},
     },
     "instrument_info": {
         "label": "器具检测费/检校周期/强检归类等价目信息查询",
-        "intent": "问器具的检测费/收费标准/检校周期/校准周期多久/"
-                  "强检目录归类/技术规程号",
+        "intent": "问器具的检测费/收费标准/检校周期(多久检一次/复检"
+                  "时间间隔,不是单次耗时)/强检目录归类/技术规程号",
         "required": {
             "slot": "instrument",
             "header": INSTRUMENT_HEADER,
             "question": "请提供要查询的器具名称(如 角膜曲率计/电子秤)",
             "options": [],
+            "extract_hint": "instrument: 器具名称(如 压力表/血压计/电子秤);"
+                            "指代(\"它/同一台\")从会话背景解析",
         },
         "action": {
             "kind": "chatbi",
@@ -212,22 +228,49 @@ def _make_monotonic_stage(emit_fn, steps):
 
 # ── 槽位提取与合并(提示词由场景表拼装) ────────────────────────
 
+def _scenario_slots(table: dict) -> list:
+    """场景表声明的全部槽位(首见序去重)——提取器只认表里的槽位,
+    新场景加新槽位零代码(提示词/合并/解析全由表驱动)。"""
+    ordered, seen = [], set()
+    for cfg in table.values():
+        slot = (cfg.get("required") or {}).get("slot")
+        if slot and slot not in seen:
+            seen.add(slot)
+            ordered.append(slot)
+    return ordered
+
+
 def _build_extract_prompt(background: str, user_input: str,
                           scenarios: dict = None) -> str:
     table = scenarios if scenarios is not None else _current_scenarios()
     keys = "|".join(list(table) + ["other"])
     intent_lines = "\n".join(
         f"  {cfg['intent']} → {key};" for key, cfg in table.items())
+    slots = _scenario_slots(table)
+    slot_json = ", ".join(f'"{name}": ""' for name in slots)
+    # 每槽位提示语:表内 extract_hint 优先;enum 槽位补合法值清单
+    hint_lines = []
+    for cfg in table.values():
+        req = cfg.get("required") or {}
+        slot = req.get("slot")
+        if not slot:
+            continue
+        hint = req.get("extract_hint")
+        if not hint:
+            if req.get("slot_type") == "enum" and req.get("enum_options"):
+                hint = (f"{slot}: 值取以下之一 → "
+                        f"{'/'.join(req['enum_options'])};没提 → 空串")
+            else:
+                hint = f"{slot}: 本轮明确提到的值;没提 → 空串"
+        hint_lines.append(f"- {hint}")
+    slot_hints = "\n".join(dict.fromkeys(hint_lines))
     return f"""你是计量业务客服的槽位提取器。从用户消息提取 JSON(只输出 JSON):
 
-{{"scenario": "{keys}", "instrument": "", "purpose": "", "order_no": ""}}
+{{"scenario": "{keys}"{", " + slot_json if slots else ""}}}
 
 - scenario:{intent_lines}
   其他 → other
-- instrument: 器具名称(如 压力表/血压计/电子秤);指代("它/同一台")从会话背景解析
-- purpose: 用途(贸易结算/安全防护/医疗卫生/环境监测/执法鉴定/内部使用/校准等);
-  消息与背景都没提 → 空串
-- order_no: 委托单号(如 BJ2026);没有 → 空串
+{slot_hints}
 - 本轮消息明确提到的值优先于背景值(用户改条件以新值为准)
 
 会话背景(可能为空): {background}
@@ -253,13 +296,18 @@ def extract_slots(llm, user_input: str, background: dict,
     table = scenarios if scenarios is not None else _current_scenarios()
     if scenario not in table:
         scenario = "other"
-    return {"scenario": scenario, "instrument": _s("instrument"),
-            "purpose": _s("purpose"), "order_no": _s("order_no").upper()}
+    # 槽位集合由场景表决定(零硬编码);order_no 保留大写归一(单号语义)
+    out = {"scenario": scenario}
+    for slot in _scenario_slots(table):
+        out[slot] = _s(slot)
+    if "order_no" in out:
+        out["order_no"] = out["order_no"].upper()
+    return out
 
 
 # ── 槽位类型系统(P1/设计 §9 Tab1):text/enum/number/date 归一与校验 ──
 
-_SLOT_TYPES = ("text", "enum", "number", "date")
+_SLOT_TYPES = ("text", "enum", "number", "date", "list")
 
 
 def normalize_slot(value, slot_type: str = "text",
@@ -308,12 +356,26 @@ def normalize_slot(value, slot_type: str = "text",
             except ValueError:
                 return None, "日期不存在,请检查(格式: 2026-10-01)"
         return None, "请提供日期(格式: 2026-10-01)"
+    if st == "list":
+        # 多值槽位:逗号/顿号/分号(含全角)分隔,去空去重保序,顿号连接。
+        # 槽位流仍是字符串(与 flows/记忆一致);动作参数按需自行 split。
+        import re as _re
+        items = [t.strip() for t in _re.split("[,\uff0c、;\uff1b]", raw) if t.strip()]
+        if not items:
+            return None, "请提供至少一项(多项用顿号分隔)"
+        seen, ordered = set(), []
+        for t in items:
+            if t not in seen:
+                seen.add(t)
+                ordered.append(t)
+        return "、".join(ordered), None
     return raw, None
 
 
 def _slot_format_hint(slot_type: str) -> str:
     """类型提示后缀(归一失败追问时拼在问题后)。"""
-    return {"enum": "", "number": "(请填数字)", "date": "(格式 2026-10-01)"}.get(slot_type, "")
+    return {"enum": "", "number": "(请填数字)", "date": "(格式 2026-10-01)",
+            "list": "(多项用顿号分隔)"}.get(slot_type, "")
 
 
 def normalize_required_slot(required: dict, merged: dict):
@@ -344,12 +406,17 @@ def normalize_required_slot(required: dict, merged: dict):
 
 
 def merge_slots(extracted: dict, mem_slots: dict) -> dict:
-    """本轮明确值优先,记忆只补空缺(改条件以新值为准,不串旧值)。"""
-    merged = {k: str(mem_slots.get(k) or "").strip()
-              for k in ("instrument", "purpose", "order_no")}
-    for k in merged:
-        if extracted.get(k):
-            merged[k] = extracted[k]
+    """本轮明确值优先,记忆只补空缺(改条件以新值为准,不串旧值)。
+
+    槽位集合 = 提取结果 ∪ 记忆(不再限定固定三键;场景表新槽位直通)。
+    """
+    merged = {k: str(v).strip() for k, v in (mem_slots or {}).items()
+              if str(v).strip()}
+    for k, v in (extracted or {}).items():
+        if k == "scenario" or not isinstance(v, str):
+            continue
+        if v.strip():
+            merged[k] = v.strip()
     return merged
 
 
@@ -543,9 +610,25 @@ def _notice(status: str, title: str, message: str, order_no: str = "") -> ToolRe
 
 
 def resolve_kb_for_purpose(purpose: str) -> str:
-    """用途→资料库(演示业务分支;空/未知用途查规程库)。"""
+    """用途→资料库(出厂默认;场景表 kb_rules 可覆盖,代码零业务分支)。"""
     return (MANDATORY_CHECK_KB
             if purpose in STRONG_INSPECTION_PURPOSES else REGULATION_KB)
+
+
+def _kb_from_rules(action: dict, merged: dict) -> Optional[str]:
+    """场景表 kb_rules 路由:[{slot, in: [值...], kb}] 依次匹配先中先用。
+
+    规则来自配置(管理页 Tab2 维护);空/不匹配返回 None 走下一级。
+    """
+    for rule in action.get("kb_rules") or []:
+        slot = str(rule.get("slot") or "")
+        values = rule.get("in") or []
+        value = str(merged.get(slot) or "").strip()
+        if slot and value and value in [str(v) for v in values]:
+            kb = str(rule.get("kb") or "").strip()
+            if kb:
+                return kb
+    return None
 
 
 _CN_NUM = {2: "两", 3: "三", 4: "四", 5: "五"}
@@ -876,12 +959,15 @@ class MetrologyAssistantTool(Tool):
                   for tool_key, slot_key in action["params"].items()}
         noun = action["error_noun"]
 
-        ds_id = os.getenv(action["env"], "").strip()
+        # 数据源绑定(设计 §8.1:动作绑定含 datasource_id 入库):场景表
+        # 显式 ID 优先;env 是部署层缺省(服务器 .env 换绑定不再需要改库)
+        ds_id = str(action.get("datasource_id") or "").strip() \
+            or os.getenv(action["env"], "").strip()
         if not ds_id:
             return ToolResult(
-                error_for_llm=(f"{noun}查询数据源未配置: 请设置环境变量 "
-                               f"{action['env']} 为「{action['ds_name']}」"
-                               "数据源 ID(Demo 配置项)"))
+                error_for_llm=(f"{noun}查询数据源未配置: 请在场景配置绑定"
+                               f"数据源,或设置环境变量 {action['env']} 为"
+                               f"「{action['ds_name']}」数据源 ID(缺省)"))
 
         stage("assistant.retrieve", action["stage"].format(**merged))
         from domains.chatbi.controlled import execute_controlled
@@ -922,8 +1008,11 @@ class MetrologyAssistantTool(Tool):
         instrument = merged.get("instrument") or ""
         purpose = merged.get("purpose") or ""
         action = cfg["action"]
-        # 显式库绑定(场景表)优先;强检判定沿用按用途选库的业务分支
-        kb_name = action.get("kb") or resolve_kb_for_purpose(purpose)
+        # 选库规则(全部可配置,代码只查表):显式 kb → kb_rules 按槽位值
+        # 路由(如用途→库) → resolve_kb_for_purpose 出厂默认(mandatory
+        # 场景未配规则时的兼容分支)
+        kb_name = action.get("kb") or _kb_from_rules(action, merged) \
+            or resolve_kb_for_purpose(purpose)
         conclusion_kind = action.get("conclusion", "mandatory")
         stage("assistant.retrieve",
               f"用途「{purpose}」→ 检索「{kb_name}」资料…")

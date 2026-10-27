@@ -119,6 +119,19 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
                     f"场景 {key} params 必须是非空槽位映射")
             if not action.get("card"):
                 raise ConfigValidationError(f"场景 {key} 缺少结果卡构建器 card")
+            # 数据源绑定(设计 §8.1):显式 datasource_id 或 env 缺省至少其一
+            ds_id = str(action.get("datasource_id") or "").strip()
+            if not ds_id and not str(action.get("env") or "").strip():
+                raise ConfigValidationError(
+                    f"场景 {key} chatbi 动作需绑定 datasource_id 或 env 缺省")
+        # kg 选库规则形状:[{slot, in[], kb}](可选)
+        for i, rule in enumerate(action.get("kb_rules") or []):
+            if (not isinstance(rule, dict)
+                    or not rule.get("slot") or not rule.get("kb")
+                    or not isinstance(rule.get("in"), list) or not rule["in"]):
+                raise ConfigValidationError(
+                    f"场景 {key} kb_rules[{i}] 必须是 "
+                    "{slot, in: [值...], kb} 结构")
     return config
 
 

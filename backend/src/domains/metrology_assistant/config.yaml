@@ -63,4 +63,6 @@ artifact:
     welcome_examples:
       - {title: 强检判定, desc: 器具+用途,是否强制检定, prompt: 压力表用于贸易结算,需要强制检定吗？, icon: search}
       - {title: 进度查询, desc: 委托单检测进度, prompt: 帮我查一下委托单 BJ2026 的检测进度, icon: file-text}
+      - {title: 检测耗时, desc: 多少个工作日, prompt: 压力表送检大概要几个工作日？, icon: clock-circle}
+      - {title: 资质能力, desc: 能不能检, prompt: 你们能检角膜曲率计吗？, icon: safety-certificate}
       - {title: 器具价目, desc: 检测费·检校周期, prompt: 角膜曲率计的检定周期是多久？, icon: file-text}

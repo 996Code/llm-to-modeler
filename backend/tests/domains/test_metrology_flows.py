@@ -300,3 +300,79 @@ def test_kg_scenarios_use_explicit_kb_from_table():
     assert table["qualification"]["action"]["conclusion"] == "qualification"
     # mandatory_check 无显式 kb:沿用按用途选库分支
     assert "kb" not in table["mandatory_check"]["action"]
+
+
+def test_slot_type_list():
+    """list 槽位:多分隔符解析+去重保序+顿号连接;空值报提示。"""
+    norm, err = mta.normalize_slot("压力表、血压计，电子秤;压力表", "list")
+    assert (norm, err) == ("压力表、血压计、电子秤", None)
+    norm, err = mta.normalize_slot("单一器具", "list")
+    assert (norm, err) == ("单一器具", None)
+    norm, err = mta.normalize_slot("、、,", "list")
+    assert norm is None and "顿号" in err
+
+
+# ── 编排去硬编码:动态槽位/datasource_id/kb_rules ──────────────
+
+def test_dynamic_slot_extraction_from_scenario_table():
+    """新场景新槽位(表声明即生效):提取提示词含该槽位,merge/归一直通。"""
+    table = {
+        "booking": {
+            "label": "预约送检", "intent": "预约送检时间",
+            "required": {"slot": "date", "header": "预约日期",
+                         "question": "哪天送检?",
+                         "options": [], "slot_type": "date",
+                         "extract_hint": "date: 预约日期(格式 2026-10-01)"},
+            "action": {"kind": "kg"},
+        },
+    }
+    prompt = mta._build_extract_prompt("{}", "10月1号来", scenarios=table)
+    assert '"date": ""' in prompt and "预约日期" in prompt
+    got = mta.extract_slots(
+        type("L", (), {"chat_json": lambda self, m, **k: {
+            "scenario": "booking", "date": "2026年10月1日"}})(),
+        "10月1号来", {}, "c", scenarios=table)
+    assert got["date"] == "2026年10月1日"
+    merged = mta.merge_slots(got, {})
+    norm, err = mta.normalize_slot(merged["date"], "date")
+    assert (norm, err) == ("2026-10-01", None)
+
+
+def test_datasource_id_in_table_overrides_env(monkeypatch):
+    """数据源绑定入库(设计 §8.1):场景表 datasource_id 优先,env 只是缺省。"""
+    import os
+    from domains.chatbi.controlled import ControlledResult
+    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-env")
+    captured = {}
+
+    def fake_exec(app_state, ds_id, tool, args):
+        captured["ds_id"] = ds_id
+        return ControlledResult(ok=False, status="not_found",
+                                error=None)
+
+    monkeypatch.setattr("domains.chatbi.controlled.execute_controlled",
+                        fake_exec)
+    table = dict(mta.SCENARIOS)
+    table["progress"] = {
+        **table["progress"],
+        "action": {**table["progress"]["action"],
+                   "datasource_id": "ds-from-table"}}
+    tool = mta.MetrologyAssistantTool(app_state=object())
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "progress",
+                                   "instrument": "", "purpose": "",
+                                   "order_no": "BJ2026"}))
+    monkeypatch.setattr(mta, "_current_scenarios", lambda: table)
+    tool.execute({"user_input": "查 BJ2026"}, ctx)
+    assert captured["ds_id"] == "ds-from-table"
+
+
+def test_kb_rules_route_by_slot_value():
+    """选库规则入表:kb_rules 按槽位值路由,先中先用;不匹配走下一级。"""
+    action = {"kb_rules": [
+        {"slot": "purpose", "in": ["贸易结算", "安全防护"], "kb": "强检目录"},
+        {"slot": "purpose", "in": ["内部使用"], "kb": "内部指引"},
+    ]}
+    assert mta._kb_from_rules(action, {"purpose": "安全防护"}) == "强检目录"
+    assert mta._kb_from_rules(action, {"purpose": "内部使用"}) == "内部指引"
+    assert mta._kb_from_rules(action, {"purpose": "医疗卫生"}) is None
+    assert mta._kb_from_rules(action, {}) is None
