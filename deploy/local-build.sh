@@ -10,7 +10,7 @@
 #      x86 服务器上不可用)
 #   ③ docker buildx --platform linux/amd64 打镜像
 #   ④ docker save | gzip | ssh docker load(局域网传 ~300MB 压缩件)
-#   ⑤ rsync 代码(deploy.sh/tools;compose/.env 服务器自有,rsync 排除)
+#   ⑤ 最小同步 deploy.sh(镜像直启:服务器无源码树)
 #   ⑥ 服务器上 SKIP_BUILD=1 IMAGE_TAG=<tag> bash deploy.sh(④⑤ 切换+健康验证)
 #
 # embedding 模型不打进镜像(服务器 data/models 已有,compose 卷挂载)。
@@ -116,11 +116,10 @@ log "④ 推镜像到 ${SERVER}(save|gzip|ssh load)..."
 docker save "${IMAGE_NAME}:${GIT_TAG}" | gzip \
   | ssh "$SERVER" "gunzip | docker load && docker tag ${IMAGE_NAME}:${GIT_TAG} ${IMAGE_NAME}:latest"
 
-# ── ⑤ rsync 代码(compose/.env 排除,服务器自有) ──────────────────────
-log "⑤ rsync 代码..."
-rsync -az --delete --exclude-from=deploy/rsync-exclude.txt -e ssh ./ "$SERVER:$SREPO/"
-# 本地 .deps.amd64 不该进服务器(它有自己的缓存体系);dist 是构建产物同样跳过
-ssh "$SERVER" "rm -rf $SREPO/backend/.deps.amd64"
+# ── ⑤ 最小同步(镜像直启:服务器只留 deploy.sh/compose/.env/data,
+#    不再推源码树——2026-10-27 起服务器已清理 1.7G 源码,产物全在镜像)──
+log "⑤ 同步 deploy.sh..."
+rsync -az -e ssh deploy.sh "$SERVER:$SREPO/deploy.sh"
 
 # ── ⑥ 服务器切换(SKIP_BUILD:只 ④⑤ 段——compose up+四层健康验证+回滚) ──
 log "⑥ 服务器切换(SKIP_BUILD=1 IMAGE_TAG=${GIT_TAG})..."
