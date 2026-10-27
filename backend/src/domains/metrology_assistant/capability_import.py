@@ -411,7 +411,8 @@ _ZH: Dict[str, str] = {
     "date": "日期", "kb": "知识库", "model": "型号", "type": "类型",
     "code": "编号", "id": "编号", "amount": "数量", "period": "周期",
     "keyword": "关键词", "status": "状态", "title": "标题",
-    "customer": "客户", "phone": "手机号",
+    "customer": "客户", "phone": "手机号", "category": "器具类别",
+    "report_no": "报告号", "state": "状态",
 }
 
 
