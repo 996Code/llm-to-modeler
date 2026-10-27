@@ -201,3 +201,30 @@ def test_schema_none_passes_and_unknown_props_ignored():
     assert validate_against_schema({"x": 1}, None) is None
     assert validate_against_schema(
         {"order_no": "a", "undeclared": object()}, SCHEMA) is None
+
+
+def test_snapshot_missing_tool_reports_refresh(wiring, monkeypatch):
+    """快照一致性(设计 0.5.1 降级版):server 在册但快照无此工具 →
+    明确报错提示刷新,不模糊失败在传输层。"""
+    class _FakeStore:
+        def get_by_code(self, code):
+            # 快照已刷新:query_progress 已下线,只剩 query_instrument
+            return {"code": code, "tools_snapshot": [
+                {"name": "query_instrument",
+                 "inputSchema": {"type": "object",
+                                 "properties": {"name": {"type": "string"}},
+                                 "required": ["name"]}}]}
+
+    monkeypatch.setattr("services.mcp_registry.McpServerStore", _FakeStore)
+    # 白名单放行(数据源限定=query_progress)但快照已无它 → 报错刷新
+    r = controlled.execute_controlled(None, "ds-1", "query_progress",
+                                      {"order_no": "BJ1"})
+    # 换无白名单数据源验"快照内工具正常走"
+    wiring.info = _info(database="")
+    assert r.ok is False and r.status == "invalid_input"
+    assert "快照" in r.error.message and "query_instrument" in r.error.message
+    # 快照内工具正常走(按快照 schema 验参)
+    wiring.payload = {"columns": ["a"], "rows": [["b"]]}
+    r2 = controlled.execute_controlled(None, "ds-1", "query_instrument",
+                                       {"name": "压力表"})
+    assert r2.ok is True

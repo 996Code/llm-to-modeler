@@ -30,7 +30,7 @@ class FakeMem:
 
 
 class FakeLLM:
-    """按 stage 返回槽位或结构化强检结果。"""
+    """按 stage 返回槽位或结构化结论。"""
 
     def __init__(self, extract=None, conclusion=None):
         self._extract = extract or {}
@@ -149,7 +149,7 @@ def test_format_progress_reply():
     _answer(refs=[1.0]), _answer(refs=["1"]),
 ])
 def test_compose_conclusion_rejects_invalid_result(invalid):
-    with pytest.raises(ValueError, match="强检结果"):
+    with pytest.raises(ValueError, match="结论"):
         mta.compose_conclusion(FakeLLM(conclusion=invalid), "压力表", "贸易结算",
                                [{"text": "目录"}], "c1")
 
@@ -158,7 +158,7 @@ def test_compose_conclusion_rejects_invalid_result(invalid):
 def test_compose_conclusion_requires_all_fields(missing):
     result = _answer()
     result.pop(missing)
-    with pytest.raises(ValueError, match="强检结果"):
+    with pytest.raises(ValueError, match="结论"):
         mta.compose_conclusion(FakeLLM(conclusion=result), "压力表", "贸易结算",
                                [{"text": "目录"}], "c1")
 
@@ -440,7 +440,7 @@ def test_other_scenario_honest_scope(tool):
     ctx = FakeCtx(FakeLLM(extract={"scenario": "other", "instrument": "",
                                    "purpose": "", "order_no": ""}))
     r = _run(tool, ctx, "今天天气怎么样")
-    assert "三类问题" in r.artifact["message"]
+    assert "五类问题" in r.artifact["message"]
     assert "价目信息" in r.artifact["message"]
     assert r.reply is None
     assert r.artifact_type == "data"
@@ -496,7 +496,7 @@ def test_invalid_conclusion_propagates_without_artifact(tool, monkeypatch):
         lambda *a, **kw: {"chunks": [{"text": "目录"}]})
     ctx = FakeCtx(FakeLLM(extract={"scenario": "mandatory_check", "purpose": "贸易结算"},
                           conclusion=_answer(refs=[2])))
-    with pytest.raises(ValueError, match="强检结果"):
+    with pytest.raises(ValueError, match="结论"):
         _run(tool, ctx, "要强检吗")
     assert ctx.session_state.get("scenario") is None
 

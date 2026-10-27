@@ -172,9 +172,20 @@ def _invoke_mcp_core(info, tool: str, args: dict, started: float,
     try:
         from services.mcp_registry import McpServerStore
         server = McpServerStore().get_by_code(info.host)
+        snapshot = (server or {}).get("tools_snapshot") or []
         tool_schema = next(
-            (t.get("inputSchema") for t in (server or {}).get("tools_snapshot")
-             or [] if t.get("name") == tool), None)
+            (t.get("inputSchema") for t in snapshot
+             if t.get("name") == tool), None)
+        # 快照一致性(设计 0.5.1 降级版:不匹配即报错刷新):server 在册
+        # 但快照里没有该工具 = 快照过期(工具已下线/改名)——明确报错
+        # 并提示刷新,不让调用模糊失败在传输层
+        if server and tool_schema is None and snapshot:
+            known = [t.get("name") for t in snapshot]
+            return _err("invalid_input",
+                        f"工具 {tool} 不在该 MCP 服务当前快照"
+                        f"(现有: {', '.join(known[:8])})——"
+                        "请刷新数据源/语义层快照后重试",
+                        started, source)
     except Exception:  # noqa: BLE001
         tool_schema = None  # 注册表不可读:放行到传输层,不在此猜
     schema_err = validate_against_schema(args, tool_schema)

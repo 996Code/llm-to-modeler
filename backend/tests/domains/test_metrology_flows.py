@@ -256,3 +256,47 @@ def test_identity_gate_rejects_cross_user_resume():
     r2 = tool.execute(
         {"user_input": "", "clarify_answers": {"委托单号": "BJ2026"}}, ctx)
     assert r2.error_for_llm is not None and "不一致" not in r2.error_for_llm
+
+
+# ── 批次3:检测耗时/资质能力场景(设计 §11.3,表驱动 kg 变体) ──────
+
+def test_turnaround_and_qualification_route_and_conclude(monkeypatch):
+    """新场景路由命中 + 结论变体枚举(answered/supported)校验通过。"""
+    tool = mta.MetrologyAssistantTool(app_state=object())
+    # 检测耗时:缺器具名 → 追问
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "turnaround",
+                                   "instrument": "", "purpose": "",
+                                   "order_no": ""}))
+    r = tool.execute({"user_input": "检个压力表要多久"}, ctx)
+    assert r.ask is not None and "器具名称" in r.ask.questions[0].question
+
+    # 变体结论契约:turnaround 的 answered 枚举合法
+    ok_answer = {"decision": "answered", "conclusion": "约 5 个工作日",
+                 "evidence": [{"text": "规程载明", "chunk_refs": [1]}],
+                 "suggestion": "以受理为准"}
+    assert mta._validate_conclusion(
+        ok_answer, [object()], ("answered", "uncertain")) is ok_answer
+    # mandatory 枚举在 turnaround 语境下非法
+    try:
+        mta._validate_conclusion(
+            {**ok_answer, "decision": "mandatory"}, [object()],
+            ("answered", "uncertain"))
+        raise AssertionError("应拒绝")
+    except ValueError:
+        pass
+    # qualification 枚举
+    q_answer = {"decision": "supported", "conclusion": "在承接范围",
+                "evidence": [{"text": "资质表", "chunk_refs": [1]}],
+                "suggestion": "可送检"}
+    assert mta._validate_conclusion(
+        q_answer, [object()], ("supported", "not_supported", "uncertain"))
+
+
+def test_kg_scenarios_use_explicit_kb_from_table():
+    """场景表显式 kb 绑定:turnaround/qualification 查检定规程库。"""
+    table = mta._current_scenarios()
+    assert table["turnaround"]["action"]["kb"] == mta.REGULATION_KB
+    assert table["turnaround"]["action"]["conclusion"] == "turnaround"
+    assert table["qualification"]["action"]["conclusion"] == "qualification"
+    # mandatory_check 无显式 kb:沿用按用途选库分支
+    assert "kb" not in table["mandatory_check"]["action"]

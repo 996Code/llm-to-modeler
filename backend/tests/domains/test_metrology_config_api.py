@@ -47,7 +47,8 @@ def test_get_config_seeds_factory_default(client):
     assert body["revision"] == 0
     assert body["factory"] is True
     assert set(body["content"]["scenarios"]) == {
-        "mandatory_check", "progress", "instrument_info"}
+        "mandatory_check", "progress", "instrument_info",
+        "turnaround", "qualification"}
 
 
 def test_save_config_cas_and_conflict(client):

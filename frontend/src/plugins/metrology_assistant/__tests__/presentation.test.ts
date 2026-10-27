@@ -19,7 +19,7 @@ describe('metrology result presentation', () => {
     const view = metrologyPresentation({ role: 'assistant', content: '重复摘要', dataResult: {
       pack: 'metrology_assistant', type: 'kg_search_result', answer, sources: { chunks: [{}] },
     } })
-    expect(view?.decision).toBe('mandatory')
+    expect(view?.decision).toBe('属于强制检定')
     expect(view?.answer).toContain('[片段:1]')
     expect(view?.answer).not.toContain('重复摘要')
   })
@@ -73,5 +73,36 @@ describe('metrology result presentation', () => {
   it('renders a refusal as a notice rather than a completed success', () => {
     const view = metrologyPresentation({ role: 'assistant', dataResult: { type: 'metrology_notice', status: 'forbidden', title: '无权查询', message: '请核对单号' } })
     expect(view).toMatchObject({ kind: 'notice', status: 'forbidden', answer: '请核对单号' })
+  })
+})
+
+describe('场景变体知识卡(批次3)', () => {
+  const base = (over: Record<string, any> = {}) => ({
+    role: 'assistant', content: '摘要',
+    dataResult: {
+      type: 'kg_search_result', pack: 'metrology_assistant',
+      scenario: '检测耗时/工作日咨询', answer_kind: 'turnaround',
+      resultDisplay: 'card',
+      answer: { decision: 'answered', conclusion: '约 5 个工作日',
+                evidence: [{ text: '规程', chunk_refs: [1] }],
+                suggestion: '以受理为准' },
+      subgraph: { nodes: [], edges: [] }, sources: { chunks: [{}] },
+      cited_chunks: [1], ...over,
+    },
+  })
+  it('answered 决策渲染已答复卡,标题取场景名', () => {
+    const v = metrologyPresentation(base(), {})
+    expect(v?.kind).toBe('knowledge')
+    expect(v?.title).toContain('检测耗时')
+    expect(v?.decision).toBe('已答复')
+    expect(v?.answer).toContain('约 5 个工作日')
+  })
+  it('qualification 三态标签映射', () => {
+    const v = metrologyPresentation(base({
+      scenario: '资质能力范围咨询(能否检测某器具)',
+      answer: { decision: 'not_supported', conclusion: '不在范围',
+                evidence: [{ text: 'x', chunk_refs: [1] }], suggestion: 's' },
+    }), {})
+    expect(v?.decision).toBe('不在承接范围')
   })
 })

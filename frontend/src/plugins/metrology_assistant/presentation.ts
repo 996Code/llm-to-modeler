@@ -41,17 +41,25 @@ export function metrologyPresentation(msg: any, labels: Record<string, string> =
       .filter((fields: { label: string; value: string }[]) => fields.length)
     return records.length ? { kind: 'instrument', title: '器具价目信息', records } : null
   }
-  if (art.type !== 'kg_search_result' || (art.pack !== 'metrology_assistant' && art.scenario !== '强检判定')) return null
+  // pack 协议前的历史制品无 pack 字段,但有 scenario 标识同样放行
+  if (art.type !== 'kg_search_result'
+      || (art.pack !== 'metrology_assistant' && !art.scenario)) return null
   const answer = art.answer
   if (answer && typeof answer === 'object' && typeof answer.conclusion === 'string' && Array.isArray(answer.evidence)) {
     const evidence = answer.evidence.map((item: any) => {
       const refs = Array.isArray(item.chunk_refs) ? item.chunk_refs.filter((n: any) => Number.isInteger(n) && n > 0 && n <= (art.sources?.chunks?.length || 0)) : []
       return `${item.text || ''} ${refs.map((n: number) => `[片段:${n}]`).join(' ')}`.trim()
     }).filter(Boolean)
-    return { kind: 'knowledge', title: '强检判定', decision: answer.decision,
+    const DECISION_LABELS: Record<string, string> = {
+      mandatory: '属于强制检定', not_mandatory: '不属于强制检定',
+      answered: '已答复', supported: '具备资质', not_supported: '不在承接范围',
+      uncertain: '无法确定',
+    }
+    return { kind: 'knowledge', title: art.scenario || '知识问答',
+      decision: DECISION_LABELS[answer.decision] || answer.decision,
       answer: [answer.conclusion, evidence.length ? `**依据**\n\n${evidence.map((text: string) => `- ${text}`).join('\n')}` : (answer.evidence_gap ? `**依据缺口**\n\n${answer.evidence_gap}` : ''),
         answer.suggestion ? `**建议**\n\n${answer.suggestion}` : ''].filter(Boolean).join('\n\n') }
   }
   const legacy = typeof answer === 'string' && answer.trim() ? answer : msg.content
-  return typeof legacy === 'string' && legacy.trim() ? { kind: 'knowledge', title: '强检判定', answer: legacy } : null
+  return typeof legacy === 'string' && legacy.trim() ? { kind: 'knowledge', title: art.scenario || '知识问答', answer: legacy } : null
 }
