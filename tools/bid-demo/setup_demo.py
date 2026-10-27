@@ -64,8 +64,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://localhost:18080")
     ap.add_argument("--server-url", default="http://127.0.0.1:9771/mcp")
+    # JWT 模式服务器(配置了 ADMIN_TOKEN 的部署,如 3.110)用 secret 换
+    # Bearer token;开放模式(未配置)留空直连
+    ap.add_argument("--secret", default="")
     args = ap.parse_args()
     client = requests.Session()
+    if args.secret:
+        r = client.post(f"{args.base}/api/auth/token",
+                        json={"secret": args.secret})
+        r.raise_for_status()
+        token = r.json()["token"]
+        client.headers["Authorization"] = f"Bearer {token}"
+        print("✓ JWT 换取成功(鉴权模式)")
     all_ok = True
 
     # 1. MCP server 注册(复用 or 新建;超时演示依赖 timeout/read_timeout=10s,
