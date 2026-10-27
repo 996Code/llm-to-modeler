@@ -53,6 +53,7 @@ from api.health import router as health_router
 from api.meta import router as meta_router
 from api.settings import router as settings_router
 from api.tasks import router as tasks_router
+from api.llm_providers import router as llm_providers_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
 from llm.client import LLMClient
 # 会话存储：PostgreSQL(append-only 事件流;DATABASE_URL 必填,见 services.db)
@@ -357,6 +358,8 @@ app.include_router(settings_router)
 app.include_router(admin_router)
 # 任务中心路由（同 admin 口令守门;SSE 实时进度/日志）
 app.include_router(tasks_router)
+# LLM 供应商管理(设计 8.6/C8:主备在线维护;同 admin 口令守门)
+app.include_router(llm_providers_router)
 
 
 
