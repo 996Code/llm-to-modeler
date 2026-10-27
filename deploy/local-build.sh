@@ -28,7 +28,7 @@ cd "$WORKDIR"
 IMAGE_NAME="${IMAGE_NAME:-llm-modeler}"
 GIT_TAG="$(git rev-parse --short HEAD)-$(date '+%m%d%H%M')"
 PLATFORM="linux/amd64"
-PY_IMAGE_AMD64="python:3.12-slim-bookworm-amd64"   # 钉 bookworm+amd64(与服务器缓存底座一致)
+PY_IMAGE_AMD64="python:3.12-slim-trixie-amd64"   # 钉 trixie+amd64(显式钉套件,防上游悄悄换版)
 
 log()  { printf '\033[32m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
 err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
@@ -36,9 +36,9 @@ err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2;
 # ── ⓪ amd64 基础镜像自检(缺则拉;Mac 上用别名单独存 amd64 版) ─────────
 ensure_amd64() {
   docker image inspect "$PY_IMAGE_AMD64" >/dev/null 2>&1 && return 0
-  log "⓪ 拉 python:3.12-slim-bookworm(linux/amd64)..."
-  docker pull --platform "$PLATFORM" python:3.12-slim-bookworm \
-    && docker tag python:3.12-slim-bookworm "$PY_IMAGE_AMD64"
+  log "⓪ 拉 python:3.12-slim-trixie(linux/amd64)..."
+  docker pull --platform "$PLATFORM" python:3.12-slim-trixie \
+    && docker tag python:3.12-slim-trixie "$PY_IMAGE_AMD64"
 }
 ensure_amd64
 
@@ -89,8 +89,10 @@ else
   for attempt in 1 2 3; do
     docker run --rm --platform "$PLATFORM" -v "$PWD/backend:/app" -w /app \
       "$PY_IMAGE_AMD64" sh -c "
-        echo 'deb https://mirrors.aliyun.com/debian/ bookworm main' > /etc/apt/sources.list &&
-        echo 'deb https://mirrors.aliyun.com/debian/ bookworm-updates main' >> /etc/apt/sources.list &&
+        suite=. \$\$(. /etc/os-release && echo \'\$VERSION_CODENAME) &&
+        rm -f /etc/apt/sources.list.d/*.sources &&
+        echo \"deb https://mirrors.aliyun.com/debian/ \$suite main\" > /etc/apt/sources.list &&
+        echo \"deb https://mirrors.aliyun.com/debian/ \$suite-updates main\" >> /etc/apt/sources.list &&
         apt-get update -qq &&
         apt-get install -y --download-only --no-install-recommends nginx curl >/dev/null &&
         cp /var/cache/apt/archives/*.deb /app/debs/

@@ -15,7 +15,7 @@
 # nginx 伺服静态（/ai-modeler/）+ 反代 API（/ai-modeler/api → 127.0.0.1:8000，
 # SSE 关缓冲）；任一进程退出容器退出，由 docker restart 策略拉起。
 # =============================================================================
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-trixie
 
 # nginx 及依赖 deb（宿主侧 docker run apt-get --download-only 预下载）
 COPY backend/debs/ /tmp/debs/
