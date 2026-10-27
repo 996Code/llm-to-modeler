@@ -711,3 +711,117 @@ def test_instrument_info_transport_failure_is_error(tool, monkeypatch):
     r = _run(tool, ctx, "电子秤检测费")
     assert r.error_for_llm is not None
     assert r.artifact is None
+
+
+# ── 自动路由(注册即识别):未编排 MCP 工具零配置可用 ──────────────
+
+_FRESH_AUTO = {
+    "label": "查询最新活动",
+    "intent": "问查询最新活动相关问题",
+    "required": {"slot": "keyword", "header": "关键词",
+                 "question": "请提供关键词:", "options": []},
+    "action": {"kind": "chatbi", "server": "metrology",
+               "datasource_id": "", "env": "", "tool": "query_fresh",
+               "params": {"keyword": "keyword", "note": "note"},
+               "stage": "调用 query_fresh 查询…",
+               "error_noun": "活动", "notices": {},
+               "card": "_table_card"},
+    "_auto": True,
+}
+
+
+def test_runtime_scenarios_merges_auto_and_table_wins(monkeypatch):
+    """运行时表 = 场景表 ∪ 自动合成;同 key 场景表(润色)优先。"""
+    from domains.metrology_assistant import capability_import as ci
+    monkeypatch.setattr(ci, "auto_scenarios",
+                        lambda table: {"query_fresh": _FRESH_AUTO})
+    merged = mta._runtime_scenarios()
+    assert "query_fresh" in merged and "progress" in merged
+    # 同 key(场景表已有 progress):自动合成不得覆盖润色
+    monkeypatch.setattr(ci, "auto_scenarios",
+                        lambda table: {"progress": {"label": "AUTO"}})
+    assert mta._runtime_scenarios()["progress"]["label"] != "AUTO"
+
+
+def test_auto_scenarios_skips_edited_and_unexecutable(monkeypatch):
+    """合成规则:场景表已编排的工具(action.tool 判定)不合成;无
+    数据源可执行的工具跳过;有源工具产出可执行的同构场景行。"""
+    from types import SimpleNamespace as _NS
+    from domains.metrology_assistant import capability_import as ci
+    from domains.chatbi import datasources as bi_ds
+    from domains.chatbi import runtime as bi_runtime
+
+    from datetime import datetime as _dt, timezone as _tz
+    _fresh = _dt.now(_tz.utc).isoformat()
+    monkeypatch.setattr(ci, "_servers_rows", lambda: [
+        {"id": "sid-1", "code": "metrology", "enabled": True,
+         "updated_at": _fresh, "tools_snapshot": [
+            {"name": "query_progress", "inputSchema": {
+                "properties": {"order_no": {"type": "string"}},
+                "required": ["order_no"]}},   # 已编排(场景表 action.tool)
+            {"name": "query_fresh", "description": "查询最新活动",
+             "inputSchema": {"properties": {"keyword": {"type": "string",
+                                              "description": "关键词"}},
+                             "required": ["keyword"]}},
+         ]},
+        {"id": "sid-2", "code": "lonely", "enabled": True,
+         "updated_at": _fresh, "tools_snapshot": [
+            {"name": "query_orphan", "inputSchema": {
+                "properties": {"x": {"type": "string"}}, "required": ["x"]}},
+         ]},
+    ])
+    fake_info = _NS(id="ds-9", host="metrology", db_type="mcp",
+                    database="", is_active=True)
+    monkeypatch.setattr(bi_ds, "list_datasources",
+                        lambda db, active_only=False: [fake_info])
+    monkeypatch.setattr(bi_runtime, "get_pack_db", lambda: object())
+
+    table = mta._current_scenarios()
+    auto = ci.auto_scenarios(table)
+    assert "query_progress" not in auto    # 润色优先,不重复
+    assert "query_orphan" not in auto      # 无数据源可执行 → 跳过
+    fresh = auto["query_fresh"]
+    assert fresh["action"]["server"] == "metrology"
+    assert fresh["required"]["slot"] == "keyword"
+    assert fresh["required"]["question"].startswith("请提供关键词")
+    assert fresh["action"]["card"] == "_table_card"
+    assert fresh["_auto"] is True
+
+
+def test_auto_tool_asks_then_executes_with_runtime_ds(tool, monkeypatch):
+    """未编排工具全链路:缺槽通用追问 → 补答 → 执行期按 server+tool
+    解析数据源;未提到的参数不传出站(空串过滤)。"""
+    from domains.metrology_assistant import capability_import as ci
+    monkeypatch.setattr(ci, "auto_scenarios",
+                        lambda table: {"query_fresh": _FRESH_AUTO})
+    monkeypatch.setattr(ci, "resolve_datasource_for_tool",
+                        lambda server, t: "ds-9" if t == "query_fresh" else None)
+
+    def fake_exec(app, ds_id, tool, params):
+        if ds_id == "ds-9" and tool == "query_fresh":
+            assert params == {"keyword": "K"}, f"空参数必须过滤: {params}"
+            return ControlledResult(
+                ok=True, status="ok",
+                data={"columns": ["keyword", "title"],
+                      "rows": [["K", "十月检定活动"]]},
+                source={"datasource": "计量业务平台(通用)",
+                        "tool": "query_fresh"})
+        return ControlledResult(
+            ok=False, status="invalid_input",
+            error=ControlledError(code="invalid_input",
+                                  message=f"unexpected {ds_id}/{tool}",
+                                  error_type="permanent", retryable=False))
+    monkeypatch.setattr("domains.chatbi.controlled.execute_controlled",
+                        fake_exec)
+
+    # ① 缺槽 → 通用追问(合成场景的 header/文案)
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "query_fresh", "keyword": ""}))
+    r = _run(tool, ctx, "帮我查下最新活动")
+    assert r.ask is not None and r.ask.questions[0].header == "关键词"
+
+    # ② 补答 → 执行期解析数据源 → 通用表格卡
+    r2 = _run(tool, ctx, "K", clarify={"关键词": "K"})
+    assert r2.artifact is not None
+    assert r2.artifact["type"] == "metrology_table"
+    assert r2.artifact["rows"] == [["K", "十月检定活动"]]
+    assert r2.artifact["source"]["tool"] == "query_fresh"

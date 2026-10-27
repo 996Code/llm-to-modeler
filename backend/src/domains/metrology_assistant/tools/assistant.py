@@ -211,6 +211,26 @@ def _current_scenarios() -> dict:
     return load_scenarios()
 
 
+def _runtime_scenarios() -> dict:
+    """运行时生效场景 = 场景表(人工润色) ∪ 未编排 MCP 工具的自动合成。
+
+    自动路由(注册即识别):每轮从 MCP 注册表快照现合成未绑定工具的
+    场景行,新工具上线无需起草/刷新/发布;提取提示词/路由/追问/执行
+    全消费本表,机器零分支。同 key 时场景表(润色)优先——人工只做
+    增强(定制追问文案/通知/专用卡),不做接入门槛。
+    """
+    table = _current_scenarios()
+    try:
+        from domains.metrology_assistant.capability_import import auto_scenarios
+        auto = auto_scenarios(table)
+    except Exception:  # noqa: BLE001
+        logger.exception("自动场景合成失败,本轮仅用已编排场景")
+        return table
+    if not auto:
+        return table
+    return {**auto, **table}
+
+
 def _make_monotonic_stage(emit_fn, steps):
     """stage 上屏钳成单行道(与 kb_search 同款:回退/未知键不上屏)。"""
     order = {s["key"]: i for i, s in enumerate(steps)}
@@ -242,7 +262,7 @@ def _scenario_slots(table: dict) -> list:
 
 def _build_extract_prompt(background: str, user_input: str,
                           scenarios: dict = None) -> str:
-    table = scenarios if scenarios is not None else _current_scenarios()
+    table = scenarios if scenarios is not None else _runtime_scenarios()
     keys = "|".join(list(table) + ["other"])
     intent_lines = "\n".join(
         f"  {cfg['intent']} → {key};" for key, cfg in table.items())
@@ -293,7 +313,7 @@ def extract_slots(llm, user_input: str, background: dict,
         return str(data.get(key) or "").strip()
 
     scenario = _s("scenario")
-    table = scenarios if scenarios is not None else _current_scenarios()
+    table = scenarios if scenarios is not None else _runtime_scenarios()
     if scenario not in table:
         scenario = "other"
     # 槽位集合由场景表决定(零硬编码);order_no 保留大写归一(单号语义)
@@ -426,7 +446,7 @@ def parse_clarify_answers(answers: dict, scenarios: dict = None) -> dict:
     header→槽位映射来自场景表;order_no 按单号正则归一;
     自由文本依次尝试单号/用途关键词,其余归入器具名称。
     """
-    table = scenarios if scenarios is not None else _current_scenarios()
+    table = scenarios if scenarios is not None else _runtime_scenarios()
     out = {}
     for cfg in table.values():
         required = cfg["required"]
@@ -636,7 +656,7 @@ _CN_NUM = {2: "两", 3: "三", 4: "四", 5: "五"}
 
 def _unsupported_notice() -> ToolResult:
     """范围外问题的如实答复(文案由场景表拼装,不手写清单)。"""
-    table = _current_scenarios()
+    table = _runtime_scenarios()
     # 序号随场景数增长: ①-⑩ 内置,超出回退数字编号(能力导入让场景
     # 数量开放,固定 5 个圈号会越界——线上 8 场景时真实炸过)
     _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
@@ -644,7 +664,7 @@ def _unsupported_notice() -> ToolResult:
         f"{_CIRCLED[i] if i < len(_CIRCLED) else i + 1}{cfg['label']}"
         for i, cfg in enumerate(table.values()))
     count = _CN_NUM.get(len(table), str(len(table)))
-    text = (f"当前演示版本覆盖{count}类问题:{items}。"
+    text = (f"当前可咨询{count}类问题:{items}。"
             "请换个问法,或联系业务窗口人工咨询。")
     return _notice("unsupported", "暂不支持此问题", text)
 
@@ -655,12 +675,12 @@ class MetrologyAssistantTool(Tool):
     """计量智能客服——场景由 SCENARIOS 表定义,本类只含通用执行逻辑。"""
 
     name = "metrology_assistant"
-    description = ("计量智能客服:器具是否强制检定的判定问答(按用途限定"
-                   "资料范围,结论带依据引用)、委托单检测进度查询(经业务"
-                   "平台接口,含归属校验)、器具价目信息查询(检测费/检校"
-                   "周期/强检归类/技术规程)")
+    description = ("计量智能客服:器具强检判定(按用途检索知识库依据,结论"
+                   "带引用)、委托单进度/报告/证书/预约/价目等业务查询——"
+                   "业务平台 MCP 注册的工具自动接入路由(新工具免配置),"
+                   "含归属校验")
     when = ("用户咨询计量器具强检/检测费/检校周期/价目/适用规程,或查询"
-            "委托单/订单检测进度、报告状态")
+            "委托单/订单检测进度、报告状态等业务平台提供的能力")
     state_scope = "metrology_assistant"
 
     def __init__(self, app_state=None):
@@ -711,7 +731,7 @@ class MetrologyAssistantTool(Tool):
             if mem:
                 mem.pop("pending", None)
             # 补答同样过类型归一(坏值重问;场景表可能中途改了类型)
-            _cfg0 = _current_scenarios().get(scenario)
+            _cfg0 = _runtime_scenarios().get(scenario)
             if _cfg0 is not None:
                 merged, _rq = normalize_required_slot(
                     _cfg0["required"], merged)
@@ -743,7 +763,7 @@ class MetrologyAssistantTool(Tool):
             # 基于新 revision,不撞版本
             flow = self._record_slots(flow, scenario, merged)
 
-        cfg = _current_scenarios().get(scenario)
+        cfg = _runtime_scenarios().get(scenario)
         if cfg is None:
             return _unsupported_notice()
 
@@ -959,19 +979,35 @@ class MetrologyAssistantTool(Tool):
     def _run_chatbi(self, scenario: str, cfg: dict, ctx: ToolContext,
                     mem, merged: dict, stage) -> ToolResult:
         action = cfg["action"]
+        # 未提到的参数不传出站(空串对 number/enum 验参必拒;"没提"的
+        # 语义就是不传)——多参数工具只带已确认的条件,其余走工具默认
         params = {tool_key: (merged.get(slot_key) or "").strip()
-                  for tool_key, slot_key in action["params"].items()}
+                  for tool_key, slot_key in action["params"].items()
+                  if (merged.get(slot_key) or "").strip()}
         noun = action["error_noun"]
 
-        # 数据源绑定(设计 §8.1:动作绑定含 datasource_id 入库):场景表
-        # 显式 ID 优先;env 是部署层缺省(服务器 .env 换绑定不再需要改库)
+        # 数据源绑定三级解析:场景表显式 ID → env 部署缺省 → 自动场景
+        # 按 server+tool 执行期解析(固定工具源优先)。前两级是润色
+        # 场景的既有语义;第三级让注册的 MCP 工具零配置可执行——数据
+        # 源接入/更换后下一轮对话即生效
         ds_id = str(action.get("datasource_id") or "").strip() \
-            or os.getenv(action["env"], "").strip()
+            or os.getenv(action.get("env") or "", "").strip()
         if not ds_id:
+            server = str(action.get("server") or "").strip()
+            if server:
+                from domains.metrology_assistant.capability_import import (
+                    resolve_datasource_for_tool)
+                ds_id = resolve_datasource_for_tool(
+                    server, action["tool"]) or ""
+        if not ds_id:
+            if action.get("env"):
+                return ToolResult(
+                    error_for_llm=(f"{noun}查询数据源未配置: 请在场景配置绑定"
+                                   f"数据源,或设置环境变量 {action['env']} 为"
+                                   f"「{action.get('ds_name') or ''}」数据源 ID(缺省)"))
             return ToolResult(
-                error_for_llm=(f"{noun}查询数据源未配置: 请在场景配置绑定"
-                               f"数据源,或设置环境变量 {action['env']} 为"
-                               f"「{action['ds_name']}」数据源 ID(缺省)"))
+                error_for_llm=(f"{noun}查询数据源未配置: 请在智能问数的"
+                               f"数据源页接入对应 MCP 服务后重试"))
 
         stage("assistant.retrieve", action["stage"].format(**merged))
         from domains.chatbi.controlled import execute_controlled
@@ -1075,7 +1111,7 @@ class MetrologyAssistantTool(Tool):
                 } for c in chunks],
             },
             "cited_chunks": cited,
-            "scenario": _current_scenarios().get(
+            "scenario": _runtime_scenarios().get(
                 scenario, {}).get("label", "知识问答"),
             "answer_kind": conclusion_kind,
             "instrument": instrument,

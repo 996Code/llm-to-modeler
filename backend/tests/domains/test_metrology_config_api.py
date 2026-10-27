@@ -330,3 +330,52 @@ def test_capability_inventory_and_draft(client, monkeypatch):
     r404 = client.post("/api/packs/metrology_assistant/config/capability-import/draft",
                        json={"server": "metrology", "tool": "nope"})
     assert r404.status_code == 400
+
+
+def test_routing_overview_states(client, monkeypatch):
+    """路由总览三态:polished(场景表命中)/auto(可执行)/blocked(无源)。"""
+    from datetime import datetime as _dt, timezone as _tz
+    from domains.metrology_assistant import capability_import as ci
+    from domains.chatbi import datasources as bi_ds
+    from domains.chatbi import runtime as bi_runtime
+    from types import SimpleNamespace as _NS
+
+    _fresh = _dt.now(_tz.utc).isoformat()
+    monkeypatch.setattr(ci, "_servers_rows", lambda: [
+        {"id": "s1", "code": "metrology", "enabled": True,
+         "updated_at": _fresh, "tools_snapshot": [
+            # progress 已被出厂场景表编排 → polished
+            {"name": "query_progress", "description": "查进度",
+             "inputSchema": {"properties": {"order_no": {"type": "string"}},
+                             "required": ["order_no"]}},
+            # 未编排且有通用源可执行 → auto
+            {"name": "query_fresh", "description": "查询最新活动",
+             "inputSchema": {"properties": {"keyword": {"type": "string"}},
+                             "required": ["keyword"]}},
+         ]},
+        {"id": "s2", "code": "lonely", "enabled": True,
+         "updated_at": _fresh, "tools_snapshot": [
+            # 未编排且无数据源 → blocked
+            {"name": "query_orphan", "description": "孤儿",
+             "inputSchema": {"properties": {"x": {"type": "string"}},
+                             "required": ["x"]}},
+         ]},
+    ])
+    fake = _NS(id="ds-9", host="metrology", db_type="mcp",
+               database="", is_active=True)
+    monkeypatch.setattr(bi_ds, "list_datasources",
+                        lambda db, active_only=False: [fake])
+    monkeypatch.setattr(bi_runtime, "get_pack_db", lambda: object())
+
+    resp = client.get("/api/packs/metrology_assistant/config/routing")
+    assert resp.status_code == 200
+    caps = {c["tool"]: c for c in resp.json()["capabilities"]}
+    assert caps["query_progress"]["status"] == "polished"
+    assert caps["query_progress"]["scenario_key"] == "progress"
+    assert caps["query_fresh"]["status"] == "auto"
+    assert caps["query_fresh"]["ask"]["slot"] == "keyword"
+    assert caps["query_orphan"]["status"] == "blocked"
+    assert "数据源" in caps["query_orphan"]["blocked_reason"]
+    # kg 能力(出厂强检场景)也在总览里
+    kg = [c for c in resp.json()["capabilities"] if c["kind"] == "kg"]
+    assert kg and kg[0]["scenario_key"] == "mandatory_check"

@@ -316,22 +316,33 @@ watch(() => props.datasources, (list) => {
 })
 
 // 挂载时兜底: props 已有值但 watch 未触发的场景
-// (dsId 非空 → 直接选中; datasources 非空且未选中 → 选第一个)
+// (dsId 非空 → 直接选中; datasources 非空且未选中 → 选第一个)。
+// 注意 line176 的 ref 初始化会直接吃掉 props.dsId——行内「图谱」按钮
+// 进入时挂载即同值,onMounted 的赋值不再触发 watch(dsId),此前该路径
+// 从不发请求(线上"点进去图谱不加载"根因)——挂载末尾必须主动加载一次
 onMounted(() => {
   if (props.dsId) {
     dsId.value = props.dsId
-  } else if (props.datasources?.length) {
+  } else if (!dsId.value && props.datasources?.length) {
     dsId.value = props.datasources[0].id
   }
+  if (dsId.value) loadGraph()
 })
 
+// 同目标去重(onMounted 与 watch(dsId) 可能连发两次)+ 过期响应丢弃
+// (快速切换数据源时,旧源的响应不得覆盖新选中的空态/图)
+let inflightDs = ''
+
 async function loadGraph() {
-  if (!dsId.value) return
+  const target = dsId.value
+  if (!target || target === inflightDs) return
+  inflightDs = target
   loading.value = true
   selectedNode.value = null
   selectedEdge.value = null
   try {
-    const { data } = await chatbiApi.get(`/datasources/${dsId.value}/graph`)
+    const { data } = await chatbiApi.get(`/datasources/${target}/graph`)
+    if (dsId.value !== target) return  // 已切走,丢弃过期响应
     graphData.value = data
     semanticVersion.value = data.semanticVersion ?? null  // 十一审 7.3
     // 等容器真正可见(切 Tab 首次挂载时 v-if 已保证, 但 keep 场景/首帧
@@ -339,12 +350,16 @@ async function loadGraph() {
     await nextFrame()
     await render()
   } catch {
+    if (dsId.value !== target) return
     graphData.value = null
     // 失败/未扫描也要清画布: render() 开头 destroy() 后因无节点提前
     // 返回——否则切换数据源时旧画布实例残留,显示"无数据"但节点还在
     await render()
   } finally {
-    loading.value = false
+    if (dsId.value === target) {
+      loading.value = false
+      inflightDs = ''
+    }
   }
 }
 

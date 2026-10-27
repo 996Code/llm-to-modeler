@@ -77,6 +77,18 @@ async def put_config(body: ConfigSaveBody, request: Request) -> dict:
     return {"revision": new_rev}
 
 
+@router.get("/config/routing", dependencies=[Depends(admin_required)])
+async def routing_overview_ep() -> dict:
+    """自动路由总览(管理页主视图):能力三态(polished/auto/blocked)
+    + 数据源解析 + 主槽位追问预览;顺带触发过期快照的后台刷新。"""
+    from domains.metrology_assistant.capability_import import routing_overview
+    try:
+        return routing_overview()
+    except Exception as e:  # noqa: BLE001
+        logger.exception("路由总览读取失败")
+        raise HTTPException(500, f"路由总览读取失败: {e}")
+
+
 @router.get("/config/history", dependencies=[Depends(admin_required)])
 async def get_history(limit: int = 20) -> dict:
     return {"items": store.list_config_history(_db(), limit=limit)}
@@ -199,8 +211,10 @@ def _dry_run_once(scenarios: dict, llm, body: "DryRunBody") -> dict:
         result["action"] = {
             "kind": "chatbi", "tool": action["tool"],
             "datasource_id": str(action.get("datasource_id") or ""),
-            "datasource_env": action["env"],
+            "datasource_env": action.get("env") or "",
             "datasource_name": action.get("ds_name", ""),
+            "server": str(action.get("server") or ""),
+            "auto": bool(cfg.get("_auto")),
             "params": {k: merged.get(v, "") for k, v in
                        (action.get("params") or {}).items()}}
     result["missing"] = False
@@ -219,8 +233,11 @@ async def dry_run(body: DryRunBody, request: Request) -> dict:
             validated = validate_config(body.config)
             scenarios = validated["scenarios"]
         else:
-            from domains.metrology_assistant.scenario_config import load_scenarios
-            scenarios = load_scenarios()
+            # 当前生效 = 场景表 ∪ 未编排 MCP 工具的自动合成(与对话
+            # 链路同口径——预演能看到的路由面与线上真实一致)
+            from domains.metrology_assistant.tools.assistant import (
+                _runtime_scenarios)
+            scenarios = _runtime_scenarios()
     except ConfigValidationError as e:
         raise HTTPException(400, f"草案配置校验失败: {e}")
 
@@ -232,9 +249,16 @@ async def dry_run(body: DryRunBody, request: Request) -> dict:
         import asyncio
         import os
         from domains.chatbi.controlled import execute_controlled
-        # 显式 datasource_id 优先(能力导入后的绑定形态);env 是缺省
+        # 显式 datasource_id 优先(能力导入后的绑定形态);env 是缺省;
+        # 自动场景按 server+tool 执行期解析(与对话链路同口径)
         ds_id = (out["action"].get("datasource_id")
-                 or os.getenv(out["action"]["datasource_env"], "")).strip()
+                 or os.getenv(out["action"].get("datasource_env") or "",
+                              "")).strip()
+        if not ds_id and out["action"].get("server"):
+            from domains.metrology_assistant.capability_import import (
+                resolve_datasource_for_tool)
+            ds_id = resolve_datasource_for_tool(
+                out["action"]["server"], out["action"]["tool"]) or ""
         if not ds_id:
             out["executed"] = {"ok": False, "error": "数据源未配置(env 缺失)"}
         else:

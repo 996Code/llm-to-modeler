@@ -207,6 +207,15 @@ METROLOGY_REPORTS = {
     "RPT-2025-1204": {"owner": "南京宏远机械制造有限公司", "rows": []},
 }
 
+# 工作量统计夹具(自动路由演示用:该工具默认不编排,验证"上新接口
+# 零配置自动接入"——注册快照刷新后对话即可用)
+METROLOGY_WORKLOAD = [
+    {"category": "压力仪表", "orders": 46, "units": 128},
+    {"category": "电学仪器", "orders": 38, "units": 96},
+    {"category": "长度量具", "orders": 52, "units": 143},
+    {"category": "温度仪表", "orders": 21, "units": 47},
+]
+
 # 器具价目夹具(AI.xlsx 转换,已清洗: 去导出 HTML 标签/尾逗号,数值转 int):
 # 检测费/强检一二级目录(null=不在强检目录)/检校周期/技术规程
 METROLOGY_INSTRUMENTS = json.loads(
@@ -286,7 +295,17 @@ def build_metrology_server() -> Starlette:
                                      "type": "string",
                                      "description": "报告号(RPT 开头,如 "
                                      "RPT-2026-0888)"}},
-                                 "required": ["report_no"]})]
+                                 "required": ["report_no"]}),
+                types.Tool(
+                    name="query_workload",
+                    description="统计各器具类别的检测工作量(本月委托单数"
+                                "与检测台件数;类别可模糊过滤)",
+                    inputSchema={"type": "object",
+                                 "properties": {"category": {
+                                     "type": "string",
+                                     "description": "器具类别(如 压力/电学/"
+                                     "长度;答\"全部\"统计所有类别)"}},
+                                 "required": []})]
 
     @server.call_tool()
     async def _call(name: str, args: dict):
@@ -345,6 +364,16 @@ def build_metrology_server() -> Starlette:
                 return _envelope({"status": "forbidden",
                                   "message": "该报告不属于当前主体,无权查询"})
             return _envelope({"status": "ok", "data": rec["rows"]})
+        if name == "query_workload":
+            category = str(args.get("category") or "").strip()
+            rows = [r for r in METROLOGY_WORKLOAD
+                    if not category or category in r["category"]
+                    or category == "全部"]
+            if not rows:
+                return _envelope({
+                    "status": "not_found",
+                    "message": f"没有类别含「{category}」的工作量数据"})
+            return _envelope({"status": "ok", "data": rows})
         if name != "query_progress":
             raise ValueError(f"tool not found: {name}")
         order_no = str(args.get("order_no") or "").strip().upper()

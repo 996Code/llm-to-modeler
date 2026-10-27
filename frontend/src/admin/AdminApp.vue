@@ -54,10 +54,28 @@
 
     <main class="shell-main">
       <div class="page-card">
-        <OverviewTab v-if="tab === 'overview'" />
-        <ConversationsTab v-else-if="tab === 'conversations'" />
-        <CallLogsTab v-else-if="tab === 'calllogs'" />
-        <TasksTab v-else-if="tab === 'tasks'" />
+        <!-- 合并组 1: 概览 + 审计&调用(顶层菜单瘦身的二级 tab,插件页同款形态) -->
+        <div v-if="tab === 'insights'" class="merged-tabs">
+          <div class="merged-tabs-row">
+            <a-radio-group v-model:value="insightsTab" size="small" button-style="solid">
+              <a-radio-button value="overview"><DashboardOutlined /> 概览</a-radio-button>
+              <a-radio-button value="calllogs"><ApiOutlined /> 审计 & 调用</a-radio-button>
+            </a-radio-group>
+          </div>
+          <OverviewTab v-if="insightsTab === 'overview'" />
+          <CallLogsTab v-else />
+        </div>
+        <!-- 合并组 2: 会话 + 任务中心 -->
+        <div v-else-if="tab === 'convo'" class="merged-tabs">
+          <div class="merged-tabs-row">
+            <a-radio-group v-model:value="convoTab" size="small" button-style="solid">
+              <a-radio-button value="conversations"><MessageOutlined /> 会话</a-radio-button>
+              <a-radio-button value="tasks"><CloudServerOutlined /> 任务中心</a-radio-button>
+            </a-radio-group>
+          </div>
+          <ConversationsTab v-if="convoTab === 'conversations'" />
+          <TasksTab v-else />
+        </div>
         <PacksTab v-else-if="tab === 'packs'" @open-page="openPackPage" @refresh-pages="loadPackPages" />
         <!-- pack 自定义管理页(v-if 切换:离开即卸载, 图谱类重资源页不留后台实例);
              知识库-测试也走此通道(loadPackPages 动态追加,跟随插件启停) -->
@@ -88,15 +106,15 @@ import {
   UnauthorizedError,
 } from './api'
 
-const tab = ref('overview')
+const tab = ref('insights')
+const insightsTab = ref('overview')   // 概览 & 审计 组内 tab
+const convoTab = ref('conversations') // 会话 & 任务 组内 tab
 
-// 一级导航:固定四项 + pack 动态页(智能问数/知识库…);
-// 模型供应商并入「插件」页 tab(与 MCP 服务同款多 tab 形态)
+// 一级导航:固定三项(概览&审计 / 会话&任务 / 插件) + pack 动态页——
+// 顶层菜单瘦身:模型供应商并入「插件」,概览+审计、会话+任务各自合并
 const navItems = computed(() => [
-  { key: 'overview', label: '概览', icon: DashboardOutlined },
-  { key: 'conversations', label: '会话', icon: MessageOutlined },
-  { key: 'calllogs', label: '审计 & 调用', icon: ApiOutlined },
-  { key: 'tasks', label: '任务中心', icon: CloudServerOutlined },
+  { key: 'insights', label: '概览 & 审计', icon: DashboardOutlined },
+  { key: 'convo', label: '会话 & 任务', icon: MessageOutlined },
   { key: 'packs', label: '插件', icon: AppstoreOutlined },
   ...packPages.value.map((p) => ({
     key: `pack-page:${p.pageKey}`, label: p.title, icon: PartitionOutlined })),
@@ -188,6 +206,8 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.merged-tabs { display: flex; flex-direction: column; gap: 14px; }
+.merged-tabs-row { display: flex; }
 .shell {
   min-height: 100vh;
   background: #f0f2f5;

@@ -1,16 +1,17 @@
 <template>
-  <!-- 计量客服管理页:场景与槽位 / 规则与来源 两个平级 Tab(设计 §9 Tab1/Tab2)。
-       DB 唯一事实源:整档加载 → 表单编辑 → 整档保存(revision CAS)。
-       Tab3 联调预演按设计 0.5.1 后移 P2,本页不占位。 -->
+  <!-- 计量客服管理页(自动路由版):
+       Tab1 能力路由(实时总览:每个能力 自动/已润色/未接入 + 一键润色)
+       Tab2 润色场景(可选的话术/规则覆盖;整档保存 revision CAS)
+       Tab3 联调预演(草案 vs 当前对比)。
+       路由本身全自动——本页只做可见性与可选润色,不做接入门槛。 -->
   <div class="metro-admin">
     <div class="metro-admin-head">
       <div>
-        <div class="metro-admin-title">计量智能客服 · 场景配置</div>
+        <div class="metro-admin-title">计量智能客服 · 能力路由</div>
         <div class="metro-admin-sub">
-          场景/槽位/规则/数据源绑定都在这页维护——<b>新增或调整场景不需要改后台代码</b>:
-          MCP 上新工具用「能力接入」一键起草,或点「+ 新增」手工建;
-          保存即校验+热生效(下一次对话读到新配置)。
-          只有全新结果卡样式需要开发(通用表格卡 <code>_table_card</code> 可覆盖大多数工具)。
+          <b>路由已自动化</b>:业务平台 MCP 注册的工具自动接入对话(每轮现算,上新接口零配置零发布);
+          知识库/问数类问题由引擎自动分流。「润色」是可选项——为某个工具定制追问话术/状态通知/专用卡,
+          不润色也照常路由执行。
         </div>
       </div>
       <div class="metro-admin-meta">
@@ -22,12 +23,80 @@
     </div>
 
     <a-tabs v-model:activeKey="tab" size="large" class="flat-tabs">
+      <!-- ── Tab1 能力路由:实时总览 ── -->
+      <a-tab-pane key="routing">
+        <template #tab><ApiOutlined /> 能力路由</template>
+        <div class="routing">
+          <div class="routing-bar">
+            <span v-if="routingSummary" class="routing-summary">{{ routingSummary }}</span>
+            <a-button size="small" :loading="routingLoading" @click="loadRouting">刷新</a-button>
+          </div>
+          <a-table
+            :data-source="routing" row-key="tool" size="small"
+            :pagination="false" :loading="routingLoading"
+          >
+            <a-table-column title="能力" key="label">
+              <template #default="{ record }">
+                <div class="cap-title">
+                  {{ record.label || record.tool }}
+                  <a-tag v-if="record.kind === 'kg'" class="cap-kind">知识库</a-tag>
+                </div>
+                <div class="cap-desc">{{ record.description || '(无描述)' }}</div>
+              </template>
+            </a-table-column>
+            <a-table-column title="路由" key="status" :width="110">
+              <template #default="{ record }">
+                <a-tag v-if="record.status === 'polished'" color="green">已润色</a-tag>
+                <a-tag v-else-if="record.status === 'auto'" color="blue">自动</a-tag>
+                <a-tooltip v-else :title="record.blocked_reason">
+                  <a-tag color="red">未接入</a-tag>
+                </a-tooltip>
+              </template>
+            </a-table-column>
+            <a-table-column title="数据源/执行" key="ds" :width="180">
+              <template #default="{ record }">
+                <span v-if="record.kind === 'kg'">知识库证据检索</span>
+                <span v-else-if="record.status === 'blocked'" class="cap-dim">—</span>
+                <span v-else-if="record.datasource?.datasource_id" class="cap-mono">
+                  {{ record.datasource.datasource_id.slice(0, 8) }}{{ record.status === 'auto' ? '(执行期解析)' : '' }}
+                </span>
+                <span v-else-if="record.datasource?.env" class="cap-mono">env:{{ record.datasource.env }}</span>
+                <span v-else class="cap-dim">—</span>
+              </template>
+            </a-table-column>
+            <a-table-column title="缺槽时追问" key="ask">
+              <template #default="{ record }">
+                <span v-if="record.ask?.question" :title="record.ask.question">
+                  [{{ record.ask.header }}] {{ record.ask.question }}
+                </span>
+                <span v-else class="cap-dim">—</span>
+              </template>
+            </a-table-column>
+            <a-table-column title="操作" key="ops" :width="170">
+              <template #default="{ record }">
+                <a-space size="small">
+                  <a-button v-if="record.status === 'polished'" size="small"
+                            @click="currentKey = record.scenario_key; tab = 'scenarios'">编辑</a-button>
+                  <a-button v-if="record.status === 'auto' && record.kind === 'chatbi'" size="small"
+                            type="primary" ghost :loading="polishing === record.tool"
+                            @click="polishTool(record)">润色</a-button>
+                  <a-button v-if="record.status !== 'blocked'" size="small"
+                            @click="tryInDry(record)">试一句</a-button>
+                </a-space>
+              </template>
+            </a-table-column>
+          </a-table>
+          <div v-if="routingError" class="cap-error">{{ routingError }}</div>
+        </div>
+      </a-tab-pane>
+
+      <!-- ── Tab2 润色场景:可选覆盖的话术+规则 ── -->
       <a-tab-pane key="scenarios">
-        <template #tab><ProfileOutlined /> 场景与槽位</template>
+        <template #tab><ProfileOutlined /> 润色场景</template>
         <div class="metro-tab-body">
           <div class="scenario-list">
             <div class="scenario-list-head">
-              <span>场景({{ scenarioKeys.length }})</span>
+              <span>已润色({{ scenarioKeys.length }})</span>
               <a-button size="small" type="primary" ghost @click="addScenario">+ 新增</a-button>
             </div>
             <div
@@ -94,93 +163,69 @@
                 />
               </label>
             </fieldset>
-          </div>
-        </div>
 
-        <!-- MCP 能力接入:场景的"新增"入口(起草=MCP 工具声明翻译成场景草稿) -->
-        <div class="cap-panel">
-          <div class="cap-head">
-            <strong>MCP 能力接入</strong>
-            <a-badge v-if="newTools" :count="newTools" title="快照新增、尚未接入的工具" />
-            <a-button size="small" @click="loadInventory" :loading="capLoading">刷新清单</a-button>
-          </div>
-          <div class="cap-note">业务平台 MCP 上线新工具 → 此处出现待接入;点「起草」自动翻译声明为场景草稿(落在本页编辑器,润色话术后走整档保存生效)。声明是外部输入,接入永远人工确认。</div>
-          <div v-for="srv in cap.servers" :key="srv.code" class="cap-server">
-            <div class="cap-server-name">{{ srv.code }}</div>
-            <div v-for="t in srv.tools" :key="t.name" class="cap-tool" :class="{ imported: t.imported, fresh: !t.imported }">
-              <span class="cap-tool-name">{{ t.name }}</span>
-              <span class="cap-tool-desc">{{ t.description || '(无描述)' }}</span>
-              <a-tag v-if="t.imported" color="green">已接入</a-tag>
-              <a-tag v-else color="orange">新</a-tag>
-              <a-button v-if="t.draftable" size="small" type="primary" ghost
-                        :loading="drafting === t.name" @click="draftCapability(srv.code, t.name)">起草</a-button>
-            </div>
-          </div>
-          <div v-if="capError" class="cap-error">{{ capError }}</div>
-        </div>
-      </a-tab-pane>
-
-      <a-tab-pane key="actions">
-        <template #tab><ApiOutlined /> 规则与来源</template>
-        <div class="metro-tab-body">
-          <div v-if="currentScenario" class="scenario-editor">
-            <div class="field-grid">
-              <label class="field">
-                <span>动作类型</span>
-                <select v-model="currentScenario.action.kind" @change="dirty = true">
-                  <option value="kg">kg(知识库证据检索)</option>
-                  <option value="chatbi">chatbi(问数受控查询)</option>
-                </select>
-              </label>
-              <label v-if="currentScenario.action.kind === 'chatbi'" class="field">
-                <span>数据源(智能问数已登记的,选中即绑定)</span>
-                <select :value="currentScenario.action.datasource_id || ''"
-                        @change="pickDatasource(currentScenario, $event); dirty = true">
-                  <option value="">{{ dsBindingHint(currentScenario) }}</option>
-                  <option v-for="d in datasources" :key="d.id" :value="d.id">
-                    {{ d.name }}{{ dsOptionSuffix(d) }}
-                  </option>
-                </select>
-              </label>
-            </div>
-            <template v-if="currentScenario.action.kind === 'chatbi'">
+            <fieldset class="slot-box">
+              <legend>执行规则(数据源/工具/结果呈现)</legend>
               <div class="field-grid">
                 <label class="field">
-                  <span>调用工具{{ serverTools(currentScenario).length ? '' : '(数据源 server 的工具名)' }}</span>
-                  <select v-if="serverTools(currentScenario).length"
-                          v-model="currentScenario.action.tool" @change="dirty = true">
-                    <option v-for="t in serverTools(currentScenario)" :key="t" :value="t">{{ t }}</option>
-                    <option v-if="currentScenario.action.tool && !serverTools(currentScenario).includes(currentScenario.action.tool)"
-                            :value="currentScenario.action.tool">{{ currentScenario.action.tool }}(当前)</option>
+                  <span>动作类型</span>
+                  <select v-model="currentScenario.action.kind" @change="dirty = true">
+                    <option value="kg">kg(知识库证据检索)</option>
+                    <option value="chatbi">chatbi(问数受控查询)</option>
                   </select>
-                  <input v-else v-model="currentScenario.action.tool" placeholder="如 query_progress" @input="dirty = true" />
                 </label>
-                <label class="field">
-                  <span>结果卡样式(通用表格卡免开发;专用卡需后端构建器)</span>
-                  <input :value="currentScenario.action.card" disabled />
+                <label v-if="currentScenario.action.kind === 'chatbi'" class="field">
+                  <span>数据源(智能问数已登记的,选中即绑定)</span>
+                  <select :value="currentScenario.action.datasource_id || ''"
+                          @change="pickDatasource(currentScenario, $event); dirty = true">
+                    <option value="">{{ dsBindingHint(currentScenario) }}</option>
+                    <option v-for="d in datasources" :key="d.id" :value="d.id">
+                      {{ d.name }}{{ dsOptionSuffix(d) }}
+                    </option>
+                  </select>
                 </label>
               </div>
-              <label class="field">
-                <span>工具参数 ← 槽位映射(JSON:工具参数名 → 槽位 key,如 {"order_no": "order_no"})</span>
-                <textarea
-                  :value="paramsText(currentScenario)"
-                  rows="2" @input="setParams(currentScenario, $event); dirty = true"
-                />
-              </label>
-              <label class="field">
-                <span>业务状态通知文案(JSON:status → {title, message};常用键 not_found/forbidden/timeout)</span>
-                <textarea
-                  :value="noticesText(currentScenario)"
-                  rows="4" @input="setNotices(currentScenario, $event); dirty = true"
-                />
-              </label>
-            </template>
-            <a-alert v-else type="info" show-icon class="kg-hint">
-              <template #message>kg 动作 = 知识库证据检索(强检判定):按用途自动选库 → 检索 → 三态结论。知识来源(用哪个库)在知识库侧维护,这里无需配数据源;要接业务查询/MCP 工具,切到 chatbi 并选数据源。</template>
-            </a-alert>
+              <template v-if="currentScenario.action.kind === 'chatbi'">
+                <div class="field-grid">
+                  <label class="field">
+                    <span>调用工具{{ serverTools(currentScenario).length ? '' : '(数据源 server 的工具名)' }}</span>
+                    <select v-if="serverTools(currentScenario).length"
+                            v-model="currentScenario.action.tool" @change="dirty = true">
+                      <option v-for="t in serverTools(currentScenario)" :key="t" :value="t">{{ t }}</option>
+                      <option v-if="currentScenario.action.tool && !serverTools(currentScenario).includes(currentScenario.action.tool)"
+                              :value="currentScenario.action.tool">{{ currentScenario.action.tool }}(当前)</option>
+                    </select>
+                    <input v-else v-model="currentScenario.action.tool" placeholder="如 query_progress" @input="dirty = true" />
+                  </label>
+                  <label class="field">
+                    <span>结果卡样式(通用表格卡免开发;专用卡需后端构建器)</span>
+                    <input :value="currentScenario.action.card" disabled />
+                  </label>
+                </div>
+                <label class="field">
+                  <span>工具参数 ← 槽位映射(JSON:工具参数名 → 槽位 key,如 {"order_no": "order_no"})</span>
+                  <textarea
+                    :value="paramsText(currentScenario)"
+                    rows="2" @input="setParams(currentScenario, $event); dirty = true"
+                  />
+                </label>
+                <label class="field">
+                  <span>业务状态通知文案(JSON:status → {title, message};常用键 not_found/forbidden/timeout)</span>
+                  <textarea
+                    :value="noticesText(currentScenario)"
+                    rows="4" @input="setNotices(currentScenario, $event); dirty = true"
+                  />
+                </label>
+              </template>
+              <a-alert v-else type="info" show-icon>
+                <template #message>kg 动作 = 知识库证据检索(强检判定):按用途自动选库 → 检索 → 三态结论。知识来源(用哪个库)在知识库侧维护,这里无需配数据源;要接业务查询/MCP 工具,切到 chatbi 并选数据源。</template>
+              </a-alert>
+            </fieldset>
           </div>
         </div>
       </a-tab-pane>
+
+      <!-- ── Tab3 联调预演 ── -->
       <a-tab-pane key="dryrun">
         <template #tab><ExperimentOutlined /> 联调预演</template>
         <div class="dryrun">
@@ -250,8 +295,8 @@
 </template>
 
 <script setup lang="ts">
-// 计量客服管理页 —— 场景配置两 tab 编排壳:
-//   场景与槽位(意图/追问文案/选项) + 规则与来源(动作绑定/通知文案)。
+// 计量客服管理页(自动路由版) —— 三 tab 编排壳:
+//   能力路由(/config/routing 实时总览) + 润色场景(话术+规则合一编辑) + 联调预演。
 // 保存语义:整档提交 + revision 乐观锁(409 提示刷新)+ 历史留痕 + 回滚。
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
@@ -259,7 +304,7 @@ import { ApiOutlined, ExperimentOutlined, ProfileOutlined } from '@ant-design/ic
 import { chatbiApi } from '../../api'
 import { metrologyApi, type MetrologyConfig, type MetrologyHistoryItem, type MetrologyScenario } from '../../metrologyApi'
 
-const tab = ref('scenarios')
+const tab = ref('routing')
 const currentKey = ref('')
 const config = ref<MetrologyConfig>({ revision: 0, factory: true, content: { scenarios: {} } })
 const draft = ref<{ scenarios: Record<string, MetrologyScenario> }>({ scenarios: {} })
@@ -271,6 +316,77 @@ const history = ref<MetrologyHistoryItem[]>([])
 
 const currentScenario = computed(() => draft.value.scenarios[currentKey.value])
 const scenarioKeys = computed(() => Object.keys(draft.value.scenarios))
+
+// ── Tab1 能力路由(/config/routing:自动/已润色/未接入) ──
+interface RoutingCap {
+  kind: 'chatbi' | 'kg'
+  tool: string | null
+  server: string | null
+  description: string
+  status: 'auto' | 'polished' | 'blocked'
+  blocked_reason?: string
+  scenario_key: string | null
+  label?: string
+  datasource?: { datasource_id: string; env: string; server: string } | null
+  ask?: { slot: string; header: string; question: string } | null
+}
+const routing = ref<RoutingCap[]>([])
+const routingLoading = ref(false)
+const routingError = ref('')
+const polishing = ref('')
+
+const routingSummary = computed(() => {
+  if (!routing.value.length) return ''
+  const auto = routing.value.filter((r) => r.status === 'auto').length
+  const polished = routing.value.filter((r) => r.status === 'polished').length
+  const blocked = routing.value.filter((r) => r.status === 'blocked').length
+  const parts = [`${routing.value.length} 个能力`]
+  if (auto) parts.push(`${auto} 自动`)
+  if (polished) parts.push(`${polished} 已润色`)
+  if (blocked) parts.push(`${blocked} 未接入`)
+  return parts.join(' · ')
+})
+
+async function loadRouting() {
+  routingLoading.value = true
+  routingError.value = ''
+  try {
+    const { data } = await metrologyApi.get('/config/routing')
+    routing.value = data.capabilities || []
+  } catch (e: any) {
+    routingError.value = e?.response?.data?.detail || '路由总览读取失败'
+  } finally {
+    routingLoading.value = false
+  }
+}
+
+// 润色 = 从工具的自动配置起草(不是空白模板),落进编辑器改话术后整档保存
+async function polishTool(row: RoutingCap) {
+  polishing.value = row.tool || ''
+  routingError.value = ''
+  try {
+    const { data } = await metrologyApi.post('/config/capability-import/draft',
+      { server: row.server, tool: row.tool })
+    let key = data.key
+    let n = 2
+    while (draft.value.scenarios[key]) key = `${data.key}_${n++}`
+    draft.value.scenarios[key] = data.scenario
+    currentKey.value = key
+    tab.value = 'scenarios'
+    dirty.value = true
+  } catch (e: any) {
+    routingError.value = e?.response?.data?.detail || '润色起草失败'
+  } finally {
+    polishing.value = ''
+  }
+}
+
+function tryInDry(row: RoutingCap) {
+  dry.text = row.ask?.question
+    ? row.ask.question.replace(/^请提供[^(如]*/, '').slice(0, 40)
+    : ''
+  tab.value = 'dryrun'
+}
 
 async function reload() {
   const { data } = await metrologyApi.get<MetrologyConfig>('/config')
@@ -292,6 +408,7 @@ async function save() {
     })
     message.success(`已保存 revision ${data.revision},下一次对话生效`)
     await reload()
+    await loadRouting()
   } catch (e: any) {
     if (e?.response?.status === 409) saveError.value = '配置已被他人修改(409),请点「放弃修改」后重试'
     else if (e?.response?.status === 400) saveError.value = `校验失败: ${e.response.data?.detail || ''}`
@@ -312,6 +429,7 @@ async function rollback(toRevision: number) {
     message.success(`已回滚(新 revision ${data.revision})`)
     await reload()
     await loadHistory()
+    await loadRouting()
   } catch (e: any) {
     message.error(e?.response?.data?.detail || '回滚失败')
   }
@@ -325,15 +443,8 @@ function setEnum(cfg: MetrologyScenario, ev: Event) {
   const text = (ev.target as HTMLTextAreaElement).value
   ;(cfg.required as any).enum_options = text.split('\n').map((l) => l.trim()).filter(Boolean)
 }
-// ── MCP 能力接入(平台件翻译 + 本插件形状适配)──
-const cap = reactive<{ servers: { code: string; tools: { name: string; description: string; imported: boolean; draftable: boolean }[] }[] }>({ servers: [] })
-const capLoading = ref(false)
-const capError = ref('')
-const drafting = ref('')
-const newTools = computed(() =>
-  cap.servers.reduce((n, s) => n + s.tools.filter((t) => !t.imported).length, 0))
 
-// ── ChatBI 数据源下拉(动作绑定写显式 datasource_id;env 只是出厂缺省)──
+// ── ChatBI 数据源下拉(动作绑定写显式 datasource_id;env 只是出厂缺省) ──
 interface ChatbiDs { id: string; name: string; dbType: string; host: string; database?: string }
 const datasources = ref<ChatbiDs[]>([])
 
@@ -367,15 +478,17 @@ function pickDatasource(cfg: MetrologyScenario, ev: Event) {
 }
 
 function serverTools(cfg: MetrologyScenario): string[] {
-  // 绑定的是 mcp 数据源时,用能力清单(server code → tools)把工具变下拉
+  // 绑定 mcp 数据源时,用能力路由表(server → tools)把工具变下拉
   const d = datasources.value.find((x) => x.id === cfg.action.datasource_id)
   if (!d || d.dbType !== 'mcp') return []
-  const srv = cap.servers.find((s) => s.code === d.host)
-  return srv ? srv.tools.map((t) => t.name) : []
+  const names = routing.value
+    .filter((r) => r.kind === 'chatbi' && r.server === d.host)
+    .map((r) => r.tool || '')
+    .filter(Boolean)
+  return names
 }
 
-// 手工新增场景:chatbi 模板(通用表格卡 _table_card,不需要后端开发);
-// 数据源/工具/参数映射选好前保存会被校验拦下(报错即指引)
+// 手工新增润色场景:chatbi 模板(通用表格卡);工具/参数选好前保存会被校验拦下
 function addScenario() {
   let key = 'custom_1'
   let n = 2
@@ -398,40 +511,7 @@ function addScenario() {
   dirty.value = true
 }
 
-async function loadInventory() {
-  capLoading.value = true
-  capError.value = ''
-  try {
-    const { data } = await metrologyApi.get('/config/capability-import')
-    cap.servers = data.servers || []
-  } catch (e: any) {
-    capError.value = e?.response?.data?.detail || '清单读取失败'
-  } finally {
-    capLoading.value = false
-  }
-}
-
-async function draftCapability(server: string, tool: string) {
-  drafting.value = tool
-  capError.value = ''
-  try {
-    const { data } = await metrologyApi.post('/config/capability-import/draft', { server, tool })
-    // 草稿进编辑器(键冲突自动加后缀),跳 Tab1 润色;保存仍走整档 CAS
-    let key = data.key
-    let n = 2
-    while (draft.value.scenarios[key]) key = `${data.key}_${n++}`
-    draft.value.scenarios[key] = data.scenario
-    currentKey.value = key
-    tab.value = 'scenarios'
-    dirty.value = true
-  } catch (e: any) {
-    capError.value = e?.response?.data?.detail || '起草失败'
-  } finally {
-    drafting.value = ''
-  }
-}
-
-// ── Tab3 联调预演(设计 §9):一句话走提取+求值;草案差异对比 ──
+// ── Tab3 联调预演:一句话走提取+求值;草案差异对比 ──
 const dry = reactive({
   text: '', execute: false, loading: false,
   current: null as any, draft: null as any, diff: false, error: '',
@@ -447,7 +527,9 @@ function fmtDry(r: any): string {
     const a = r.action
     lines.push(a.kind === 'kg'
       ? `将调用: 知识库证据检索 → 「${a.kb}」`
-      : `将调用: ${a.datasource_name} · ${a.tool}(${JSON.stringify(a.params)})`)
+      : a.auto
+        ? `将调用: ${a.server}:${a.tool}(自动路由,执行期解析数据源)(${JSON.stringify(a.params)})`
+        : `将调用: ${a.datasource_name} · ${a.tool}(${JSON.stringify(a.params)})`)
   }
   if (r.note) lines.push(`说明: ${r.note}`)
   if (r.executed) lines.push(r.executed.ok
@@ -506,7 +588,7 @@ function setNotices(cfg: MetrologyScenario, ev: Event) {
 onMounted(async () => {
   await reload()
   await loadHistory()
-  loadInventory()
+  loadRouting()
   loadDatasources()
 })
 </script>
@@ -518,6 +600,15 @@ onMounted(async () => {
 .metro-admin-sub { color: #7a8491; font-size: 12px; margin-top: 4px; max-width: 640px; }
 .metro-admin-foot { display: flex; align-items: center; gap: 12px; padding-top: 6px; border-top: 1px solid #edf0f3; }
 .save-error { color: #d4380d; font-size: 12px; }
+.routing { display: flex; flex-direction: column; gap: 10px; }
+.routing-bar { display: flex; align-items: center; gap: 12px; }
+.routing-summary { color: #4a5568; font-size: 12px; }
+.cap-title { font-size: 13px; font-weight: 500; }
+.cap-kind { margin-left: 6px; }
+.cap-desc { color: #9aa4b2; font-size: 12px; margin-top: 2px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cap-mono { font-family: monospace; font-size: 12px; }
+.cap-dim { color: #c0c6cf; }
+.cap-error { color: #d4380d; font-size: 12px; }
 .metro-tab-body { display: flex; gap: 16px; min-height: 380px; }
 .scenario-list { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
 .scenario-list-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #7a8491; padding: 0 2px; }
@@ -536,16 +627,6 @@ onMounted(async () => {
 .field textarea { resize: vertical; font-family: inherit; }
 .slot-box { border: 1px solid #edf0f3; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
 .slot-box legend { font-size: 12px; color: #7a8491; padding: 0 6px; }
-.kg-hint { margin-top: 8px; }
-.cap-panel { border: 1px dashed #d9dde3; border-radius: 8px; padding: 12px; margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
-.cap-head { display: flex; align-items: center; gap: 10px; }
-.cap-note { color: #9aa4b2; font-size: 12px; line-height: 1.7; }
-.cap-server-name { font-family: monospace; font-size: 12px; color: #1677ff; margin-top: 4px; }
-.cap-tool { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #f0f2f5; }
-.cap-tool:last-child { border-bottom: 0; }
-.cap-tool-name { font-family: monospace; min-width: 150px; }
-.cap-tool-desc { color: #7a8491; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cap-error { color: #d4380d; font-size: 12px; }
 .hist-tag { margin-left: 8px; }
 .dryrun { display: flex; flex-direction: column; gap: 12px; }
 .dryrun-bar { display: flex; align-items: center; gap: 12px; }
