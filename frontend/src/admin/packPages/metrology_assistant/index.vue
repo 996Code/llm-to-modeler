@@ -32,7 +32,7 @@
             <a-button size="small" :loading="routingLoading" @click="loadRouting">刷新</a-button>
           </div>
           <a-table
-            :data-source="routing" row-key="tool" size="small"
+            :data-source="routing" :row-key="(r: any) => r.tool || r.scenario_key || r.label" size="small"
             :pagination="false" :loading="routingLoading"
           >
             <a-table-column title="能力" key="label">
