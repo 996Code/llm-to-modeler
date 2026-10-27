@@ -48,8 +48,14 @@ docker image inspect "$NODE_IMAGE" >/dev/null 2>&1 || docker pull "$NODE_IMAGE"
 log "① 构建前端(pnpm)..."
 mkdir -p frontend/dist
 find frontend/src \( -name '*.js' -o -name '*.js.map' \) -delete
-docker run --rm -v "$PWD/frontend:/app" -v llm_pnpm_store:/root/.pnpm-store \
+# ⚠ 宿主 frontend/node_modules 是 darwin 二进制,容器内复用会缺
+# linux 平台包(rollup-linux-*-musl MODULE_NOT_FOUND)——node_modules
+# 用命名卷影挂载,容器有自己的 linux 依赖,宿主开发环境不受影响。
+docker run --rm -v "$PWD/frontend:/app" \
+  -v llm_pnpm_store:/root/.pnpm-store \
+  -v llm_frontend_node_modules:/app/node_modules \
   --memory 6g -w /app \
+  -e CI=true \
   -e npm_config_registry=https://registry.npmmirror.com \
   "$NODE_IMAGE" sh -c "
     npm config set registry https://registry.npmmirror.com &&
