@@ -441,14 +441,48 @@ async def stream_graph(
                                     })
                                     first_intr_value = first_intr_value or intr_value
                             if first_intr_value is not None:
-                                # 中断场景也落库(把追问问题当作 assistant 消息存下)
-                                _save_conversation(
-                                    conversation_store, conversation_id, user_id,
-                                    user_input, first_intr_value.get("summary", "需要补充信息"),
-                                )
+                                # 中断场景也落库:追问摘要为正文,extra 携带
+                                # needsClarification+questions——历史加载据此
+                                # 重建追问卡与 answers 发送通道(设计 6.1 待答
+                                # 恢复;error-diag 同款 extra 透传机制)。
+                                if conversation_store and conversation_id and user_id:
+                                    try:
+                                        conversation_store.add_message(
+                                            conv_id=conversation_id,
+                                            role="assistant",
+                                            content=first_intr_value.get(
+                                                "summary", "需要补充信息"),
+                                            extra={
+                                                "needsClarification": True,
+                                                "clarificationQuestions":
+                                                    first_intr_value.get(
+                                                        "questions", []),
+                                            })
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"Failed to save clarification: {e}")
             except Exception as e:
                 # 状态查询失败不影响主流程,只记日志
                 logger.warning(f"Failed to check graph state for interrupts: {e}")
+
+            # 追问恢复的"无挂起可恢复"守卫:answers 请求但图已无挂起 task
+            # (追问已被另一入口消费/会话已收尾)——LangGraph 对终态
+            # checkpoint 的 Command(resume) 直接空转结束,不重放任何节点。
+            # 不补这一条,前端旧追问卡重复提交只会收到 done,静默失败;
+            # 补上后用户得到明确反馈(与 metrology 侧"该追问已被处理"
+            # 同语义,这里是引擎层的兜底——插件侧 flow 版本门管并发窗口)。
+            if (answers and not result_holder["had_interrupt"]
+                    and result_holder["last_result"] is None):
+                await sm.emit_error(
+                    "该追问已被处理或已失效,请基于最新回复继续操作。")
+                if conversation_store and conversation_id and user_id:
+                    try:
+                        conversation_store.add_message(
+                            conv_id=conversation_id, role="assistant",
+                            content="该追问已被处理或已失效,请基于最新回复继续操作。",
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to save stale-answer notice: {e}")
 
             # 保存正常结果的对话(只有非中断、且确实有结果时才存)
             if result_holder["last_result"] and not result_holder["had_interrupt"]:

@@ -37,33 +37,95 @@ from openai import OpenAI
 from pydantic import BaseModel
 
 
-def _sanitize_messages_for_log(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """日志用的消息清洗:多模态图片转占位符,其余原样(浅拷贝,不动调用方)。
+_RE_MOBILE = __import__("re").compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
+_RE_IDCARD = __import__("re").compile(r"(?<![0-9Xx])(\d{17}[0-9Xx])(?![0-9Xx])")
+_RE_USCC = __import__("re").compile(
+    r"(?<![0-9A-Z])([0-9A-HJ-NPQRTUWXY]{2}\d{6}[0-9A-HJ-NPQRTUWXY]{10})(?![0-9A-Z])")
 
-    图片 content 是 data URL base64(单张可达数 MB),入库会撑爆 call_logs
-    且对追溯无意义——prompt 的"文字部分"才是排查依据。占位符保留长度信息,
-    便于判断"是不是传了张巨图导致慢/超限"。
+
+def _mask(text: str, keep_head: int = 3, keep_tail: int = 2) -> str:
+    if len(text) <= keep_head + keep_tail:
+        return "*" * len(text)
+    return (text[:keep_head] + "*" * (len(text) - keep_head - keep_tail)
+            + text[-keep_tail:])
+
+
+def _idcard_checksum_ok(idcard: str) -> bool:
+    """GB 11643 校验位验证——18 位数字串很多是单号,只脱真身份证。"""
+    if len(idcard) != 18:
+        return False
+    try:
+        body = [int(c) for c in idcard[:17]]
+    except ValueError:
+        return False
+    weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2]
+    check = "10X98765432"[sum(w * n for w, n in zip(weights, body)) % 11]
+    return check == idcard[-1].upper()
+
+
+def redact_pii(text: str) -> str:
+    """高置信 PII 脱敏(手机/身份证[校验位验证]/统一社会信用代码)。
+
+    设计 7.3:脱敏先于 call_logs 记录;LLM_LOG_PII_REDACT=0 可关(调试
+    用,默认开)。姓名等无法高置信识别的类别不做正则硬脱(误伤正文
+    比漏脱更伤),由业务审核后按清单补充。
     """
-    sanitized = []
+    if not text:
+        return text
+
+    def _mob(m):
+        return _mask(m.group(1))
+
+    def _idc(m):
+        t = m.group(1)
+        return _mask(t) if _idcard_checksum_ok(t) else t
+
+    def _uscc(m):
+        t = m.group(1)
+        # 保守判别:至少 2 个大写字母才按信用代码脱——纯数字+尾缀 X 的
+        # 单号不误伤(GB 32100 校验位算法未实现,宁漏勿误;业务审核后
+        # 可换成精确校验)
+        import re as _re
+        return _mask(t) if len(_re.findall(r"[A-Z]", t)) >= 2 else t
+    text = _RE_MOBILE.sub(_mob, text)
+    text = _RE_IDCARD.sub(_idc, text)
+    text = _RE_USCC.sub(_uscc, text)
+    return text
+
+
+def _redact_for_log(text: str) -> str:
+    """落库前统一口径:开关开 → redact_pii。"""
+    import os as _os
+    if _os.getenv("LLM_LOG_PII_REDACT", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return text
+    return redact_pii(text)
+
+
+def _sanitize_messages_for_log(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """messages 落库前的统一处理:图片占位 + PII 脱敏(先于 call_logs)。"""
+    out = []
     for m in messages:
-        content = m.get("content")
-        if not isinstance(content, list):
-            sanitized.append(m)  # 纯文本消息:原样(引用共享,append-only 场景安全)
-            continue
-        parts = []
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "image_url":
-                url = (part.get("image_url") or {}).get("url") or ""
-                part = {
-                    **part,
-                    "image_url": {
-                        **(part.get("image_url") or {}),
-                        "url": f"<image data omitted: {len(url)} chars>",
-                    },
-                }
-            parts.append(part)
-        sanitized.append({**m, "content": parts})
-    return sanitized
+        c = m.get("content")
+        if isinstance(c, str):
+            out.append({**m, "content": _redact_for_log(c)})
+        elif isinstance(c, list):
+            # 多模态:图片转占位符,文本段脱敏
+            parts = []
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    url = ((part.get("image_url") or {}).get("url") or "")
+                    parts.append({"type": "image_url", "image_url": {
+                        "url": f"<image data omitted: {len(url)} chars>"}})
+                elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                    parts.append({**part, "text": _redact_for_log(part["text"])})
+                else:
+                    parts.append(part)
+            out.append({**m, "content": parts})
+        else:
+            out.append(m)
+    return out
+
 
 logger = logging.getLogger(__name__)
 
@@ -243,6 +305,166 @@ class LLMClient:
             f"max_tokens={config.max_tokens}"
         )
 
+        # ── 主备切换(C8/设计 8.6):DB 供应商配置优先,env 为默认主端点 ──
+        # 每个端点一个 OpenAI 客户端(缓存复用,同款 httpx 保活参数);
+        # 生效配置经 services.llm_providers.resolve_active() 热读
+        # (revision 比对缓存),DB 未配置/故障时回退 env 默认单端点。
+        self._endpoint_clients: Dict[Any, Any] = {self._ep_key(config): self.client}
+        self._ep_http: Optional[Any] = None  # 惰性持有的共享 httpx Client
+
+    # ── 主备切换(C8)────────────────────────────────────────────
+
+    @staticmethod
+    def _ep_key(cfg: "LLMConfig") -> tuple:
+        # getattr 兜底:测试替身常以 SimpleNamespace 模拟配置,未必带全字段
+        return (cfg.base_url, cfg.api_key or "", getattr(cfg, "timeout", None))
+
+    def _client_for(self, cfg: "LLMConfig"):
+        """按端点配置取缓存的 OpenAI 客户端(没有则同款参数现建)。
+
+        env 默认端点直接复用构造器的 self.client(含保活参数与测试
+        替身);缓存字典惰性初始化(测试常用 __new__ 造裸对象)。
+        """
+        default = getattr(self, "client", None)
+        base_cfg = getattr(self, "config", None)
+        if (default is not None and base_cfg is not None
+                and self._ep_key(cfg) == self._ep_key(base_cfg)):
+            return default
+        cache = getattr(self, "_endpoint_clients", None)
+        if cache is None:
+            cache = {}
+            self._endpoint_clients = cache
+        key = self._ep_key(cfg)
+        client = cache.get(key)
+        if client is not None:
+            return client
+        import httpx as _httpx
+        client = OpenAI(
+            base_url=cfg.base_url,
+            api_key=cfg.api_key or "placeholder-key",
+            timeout=getattr(cfg, "timeout", 300),
+            max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
+            http_client=_httpx.Client(
+                timeout=getattr(cfg, "timeout", 300),
+                limits=_httpx.Limits(
+                    max_connections=20, max_keepalive_connections=4,
+                    keepalive_expiry=30.0),
+                transport=_httpx.HTTPTransport(retries=1),
+            ),
+        )
+        cache[key] = client
+        return client
+
+    @staticmethod
+    def _switchable_error(e: Exception) -> bool:
+        """连接类/服务端故障才切备用(设计 8.6)。
+
+        身份(401/403)/参数(400/404/422)/限流(429)不切——换端点既不
+        解决也掩盖问题;连接失败/超时/5xx/408 视为端点不健康,切备用。
+        """
+        try:
+            from openai import APIConnectionError, APIStatusError
+            if isinstance(e, APIConnectionError):
+                return True
+            if isinstance(e, APIStatusError):
+                code = getattr(e, "status_code", None) or 0
+                return code >= 500 or code == 408
+        except ImportError:
+            pass
+        # SDK 未分类/网络栈直抛:连接类关键词兜底(保守——未知错误不切)
+        text = type(e).__name__.lower()
+        return any(k in text for k in ("connect", "timeout"))
+
+    def _resolve_endpoints(self) -> list:
+        """当前生效端点链:[primary, fallback?](DB 优先,回退 env)。
+
+        返回 [(role, LLMConfig, price_in, price_out)];role ∈ primary/
+        fallback/env。DB primary 的 base_url/model 覆盖 env;fallback
+        仅当已配置且 enabled。
+        """
+        chain: list = []
+        try:
+            from services.llm_providers import resolve_active
+            active = resolve_active()
+        except Exception:  # noqa: BLE001
+            active = {}
+        base = self.config
+        if active.get("primary"):
+            p = active["primary"]
+            primary = base.model_copy(update={
+                "base_url": p["base_url"],
+                "api_key": p.get("api_key") or "",
+                "model": p.get("model") or base.model,
+            })
+            chain.append(("primary", primary,
+                          p.get("price_in"), p.get("price_out")))
+            f = active.get("fallback")
+            if f:
+                chain.append(("fallback", base.model_copy(update={
+                    "base_url": f["base_url"],
+                    "api_key": f.get("api_key") or "",
+                    "model": f.get("model") or base.model,
+                }), f.get("price_in"), f.get("price_out")))
+            return chain
+        chain.append(("env", base, None, None))
+        return chain
+
+    def _completion_with_fallback(self, create_kwargs: dict, conv_id, stage,
+                                  fail_payload):
+        """带主备切换的 chat.completions.create(设计 8.6)。
+
+        成功返回 (response, provider_meta);provider_meta 含 role/成本,
+        供调用方并入调用日志。切换前的失败尝试逐次留痕——fail_payload()
+        由调用方提供(与各自成功路径同构的完整 request_data,含
+        _log_full 时的 messages),helper 只追加 provider 标注;最终仍
+        失败时把最后一个异常原样上抛(既有降级语义不变,外层 except
+        见 _llm_logged 标记不再重复记)。
+        """
+        chain = self._resolve_endpoints()
+        last_exc: Optional[Exception] = None
+        for idx, (role, cfg, price_in, price_out) in enumerate(chain):
+            client = self._client_for(cfg)
+            endpoint = f"{cfg.base_url}/chat/completions"
+            try:
+                response = client.chat.completions.create(**create_kwargs)
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
+                if is_rate_limit_error(e):
+                    get_rate_limiter().on_rate_limited()
+                # 失败尝试留痕(role 标注,切换链路可追溯)
+                self._log_call(
+                    endpoint=endpoint,
+                    request_data={**(fail_payload() if callable(fail_payload) else {}), "provider": role},
+                    response_data=None,
+                    status_code=429 if is_rate_limit_error(e) else 500,
+                    duration_ms=0,
+                    error_message=str(e),
+                    conv_id=conv_id, stage=stage)
+                can_switch = (idx < len(chain) - 1
+                              and self._switchable_error(e))
+                if can_switch:
+                    logger.warning(
+                        "LLM %s 端点失败(%s: %s), 同参数切备用",
+                        role, type(e).__name__, str(e)[:120])
+                    continue
+                try:
+                    e._llm_logged = True  # 已在上方留痕,外层 except 勿重复记
+                except AttributeError:
+                    pass
+                raise
+            usage = response.usage.model_dump() if response.usage else None
+            cost_yuan = None
+            if usage and (price_in or price_out):
+                cost_yuan = round(
+                    (usage.get("prompt_tokens", 0) * (price_in or 0)
+                     + usage.get("completion_tokens", 0) * (price_out or 0))
+                    / 1000.0, 6)
+            meta = {"provider": role, **({"switched": True} if idx > 0 else {})}
+            if cost_yuan is not None:
+                meta["costYuan"] = cost_yuan
+            return response, {"endpoint": endpoint, "role": role, "meta": meta}
+        raise last_exc  # pragma: no cover(空链不可达:env 兜底恒在)
+
     def close(self):
         """关闭底层客户端（OpenAI SDK + rerank httpx，释放连接池与 socket）。
 
@@ -398,15 +620,24 @@ class LLMClient:
         }
 
         try:
-            # 调 OpenAI 兼容 API，类比 Java openai-java 的 service.createChatCompletion()
-            # qwen3 系默认关思考(_thinking_off_kwargs):开思考的抽取类
-            # 长生成会顶爆非流式总时长超时(线上导入卡死根因,见其 docstring)
-            response = self.client.chat.completions.create(
-                model=use_model,
-                messages=messages,
-                temperature=self.config.temperature if temperature is None else temperature,
-                max_tokens=self.config.max_tokens if max_tokens is None else max_tokens,
-                **self._thinking_off_kwargs(use_model),
+            # 调 OpenAI 兼容 API(C8 主备链:DB 供应商配置优先,连接类
+            # 失败同参数切备用;身份/参数/限流错误不切)
+            def _fail_payload():
+                return {
+                    "messages_count": len(messages),
+                    "messages_chars": sum(len(m.get("content") or "") for m in messages),
+                    **{k: v for k, v in request_data.items() if k != "messages"},
+                    **({"messages": _sanitize_messages_for_log(messages)} if self._log_full else {}),
+                }
+            response, _pv = self._completion_with_fallback(
+                {
+                    "model": use_model,
+                    "messages": messages,
+                    "temperature": self.config.temperature if temperature is None else temperature,
+                    "max_tokens": self.config.max_tokens if max_tokens is None else max_tokens,
+                    **self._thinking_off_kwargs(use_model),
+                },
+                conv_id=conv_id, stage=stage, fail_payload=_fail_payload,
             )
 
             # choices[0]：取第一个候选回复（n=1 时只有一个），类比 Java response.getChoices().get(0)
@@ -442,7 +673,7 @@ class LLMClient:
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
                 # 完整入库开关:开=完整内容(全链路追溯);关=截断 500 字(旧默认)
-                "content": result if self._log_full else result[:500],
+                "content": _redact_for_log(result) if self._log_full else _redact_for_log(result[:500]),
                 "finish_reason": choice.finish_reason,  # stop=正常结束, length=截断
                 # model_dump() 是 Pydantic 转 dict，类比 Jackson 序列化对象为 Map
                 "usage": response.usage.model_dump() if response.usage else None,  # token 用量
@@ -454,12 +685,13 @@ class LLMClient:
                 len(m.get("content") or "") for m in messages
             )
             self._log_call(
-                endpoint=endpoint,
+                endpoint=_pv["endpoint"],
                 # LLM_LOG_FULL=1(默认):完整 messages 入库(图片转占位符)——
                 # 管理端链路视图可直接回放当时的 prompt;关闭时只记数量/体积
                 request_data={
                     "messages_count": len(messages),
                     "messages_chars": messages_chars,
+                    **_pv["meta"],
                     **{k: v for k, v in request_data.items() if k != "messages"},
                     **({"messages": _sanitize_messages_for_log(messages)} if self._log_full else {}),
                 },
@@ -478,26 +710,29 @@ class LLMClient:
             return result
 
         except Exception as e:
-            if is_rate_limit_error(e):
+            if is_rate_limit_error(e) and not getattr(e, "_llm_logged", False):
                 # 429 限流:登记全局退避窗口(后续所有 LLM 调用统一等待),
-                # 错误标记 rate_limit 供上层区分(不算业务失败,不烧熔断)
+                # 错误标记 rate_limit 供上层区分(不算业务失败,不烧熔断)。
+                # 主备链 helper 已登记过的不重复(窗口不叠加)
                 get_rate_limiter().on_rate_limited()
-            # 记录失败日志(完整模式下带上 prompt——失败排查最需要的就是当时发了什么)
-            duration_ms = int((time.time() - start_time) * 1000)
-            self._log_call(
-                endpoint=endpoint,
-                request_data={
-                    "messages_count": len(messages),
-                    "messages_chars": sum(len(m.get("content") or "") for m in messages),
-                    **{k: v for k, v in request_data.items() if k != "messages"},
-                    **({"messages": _sanitize_messages_for_log(messages)} if self._log_full else {}),
-                },
-                status_code=429 if is_rate_limit_error(e) else 500,
-                duration_ms=duration_ms,
-                error_message=str(e),
-                conv_id=conv_id,
-                stage=stage,
-            )
+            # 记录失败日志(完整模式下带上 prompt——失败排查最需要的就是当时发了什么);
+            # 主备切换 helper 已逐次留痕的失败(provider 标注)不在此重复记
+            if not getattr(e, "_llm_logged", False):
+                duration_ms = int((time.time() - start_time) * 1000)
+                self._log_call(
+                    endpoint=endpoint,
+                    request_data={
+                        "messages_count": len(messages),
+                        "messages_chars": sum(len(m.get("content") or "") for m in messages),
+                        **{k: v for k, v in request_data.items() if k != "messages"},
+                        **({"messages": _sanitize_messages_for_log(messages)} if self._log_full else {}),
+                    },
+                    status_code=429 if is_rate_limit_error(e) else 500,
+                    duration_ms=duration_ms,
+                    error_message=str(e),
+                    conv_id=conv_id,
+                    stage=stage,
+                )
             logger.error(f"LLM chat failed: {e}")
             raise  # 重新抛出，让上层决定降级策略（不在此吞异常）
 
@@ -588,7 +823,16 @@ class LLMClient:
             # JSON,却把非流式总时长顶爆超时(线上导入卡死根因)
             create_kwargs.update(self._thinking_off_kwargs(use_model))
 
-            response = self.client.chat.completions.create(**create_kwargs)  # ** 展开字典为关键字参数
+            def _fail_payload():
+                return {
+                    "messages_count": len(guided_messages),
+                    "messages_chars": sum(len(m.get("content") or "") for m in guided_messages),
+                    **{k: v for k, v in request_data.items() if k != "messages"},
+                    **({"messages": _sanitize_messages_for_log(guided_messages)} if self._log_full else {}),
+                }
+            response, _pv = self._completion_with_fallback(
+                create_kwargs, conv_id=conv_id, stage=stage,
+                fail_payload=_fail_payload)
             result = self._extract_json(response)  # 提取并解析 JSON，可能抛异常
             # 成功清退避闸门;usage 校准(chat_json 的估算含追加的 JSON
             # 指令与 est 一致,校准口径统一)
@@ -600,15 +844,16 @@ class LLMClient:
             duration_ms = int((time.time() - start_time) * 1000)
             response_data = {
                 # 完整入库开关:开=完整解析结果(全链路追溯);关=截断 500 字
-                "content": str(result) if self._log_full else str(result)[:500],
+                "content": _redact_for_log(str(result)) if self._log_full else _redact_for_log(str(result)[:500]),
                 "finish_reason": response.choices[0].finish_reason,
                 "usage": response.usage.model_dump() if response.usage else None,
             }
             self._log_call(
-                endpoint=endpoint,
+                endpoint=_pv["endpoint"],
                 request_data={
                     "messages_count": len(guided_messages),
                     "messages_chars": sum(len(m.get("content") or "") for m in guided_messages),
+                    **_pv["meta"],
                     **{k: v for k, v in request_data.items() if k != "messages"},
                     **({"messages": _sanitize_messages_for_log(guided_messages)} if self._log_full else {}),
                 },
@@ -624,7 +869,8 @@ class LLMClient:
             # 429 限流要登记退避(全局闸门);其他异常(json_object 不支持/
             # 解析失败)是预期内降级,静默走纯文本路径
             if is_rate_limit_error(_e):
-                get_rate_limiter().on_rate_limited()
+                if not getattr(_e, "_llm_logged", False):
+                    get_rate_limiter().on_rate_limited()
                 raise  # 限流不降级——纯文本路径同样会撞限,直接上抛让上层等退避
             # 直连失败落一条 warn 观测(不计入正式调用日志的成功流;排查
             # "为什么每次 chat_json 都两倍请求"的第一现场),然后降级

@@ -99,7 +99,8 @@ def main() -> int:
            f"timeout={server.get('timeout')}s "
            f"read_timeout={server.get('read_timeout')}s")
     tools = [t.get("name") for t in (server.get("tools_snapshot") or [])]
-    for need in ("query_progress", "query_instrument"):
+    for need in ("query_progress", "query_instrument",
+                 "query_appointment", "query_certificate", "query_report"):
         all_ok &= ok(f"快照含 {need}", need in tools, f"工具: {tools}")
 
     # 2. 知识库
@@ -112,9 +113,16 @@ def main() -> int:
                             json={"name": name, "description": desc,
                                   "template": "general"})
             kb = r.json()
-            all_ok &= ok(f"建知识库「{name}」", r.status_code == 200 and kb.get("id"))
-        else:
-            ok(f"知识库「{name}」已存在(复用)", True, kb["id"])
+            if r.status_code != 200 and "已存在" in str(kb.get("detail") or ""):
+                # 列表读在服务重启/热装配窗口短暂空,POST 真实冲突;
+                # 重新列表拿权威 id,幂等脚本不因瞬时读视图失真而中断
+                kb = find_kb(client, args.base, name) or {}
+                all_ok &= ok(f"知识库「{name}」已存在(并发复用)",
+                             bool(kb.get("id")), str(kb.get("id") or ""))
+            else:
+                all_ok &= ok(f"建知识库「{name}」", r.status_code == 200 and kb.get("id"))
+        if not kb.get("id"):
+            raise RuntimeError(f"知识库「{name}」创建/查找失败: {kb}")
         kb_ids[name] = kb["id"]
 
     # 3. 上传文档(上传即导入;同内容查重跳过)
@@ -178,11 +186,20 @@ def main() -> int:
                 "name": name, "db_type": "mcp", "host": SERVER_CODE, "port": 0,
                 "database": tool, "username": "", "password": ""})
             ds = r.json()
-            all_ok &= ok(f"建数据源「{name}」",
-                         r.status_code == 200 and ds.get("id"))
+            if r.status_code != 200 and "已存在" in str(ds.get("detail") or ""):
+                dss2 = client.get(f"{args.base}/api/packs/chatbi/datasources").json()
+                ds = next((d for d in (dss2.get("items") or [])
+                           if d.get("name") == name), {})
+                all_ok &= ok(f"数据源「{name}」已存在(并发复用)",
+                             bool(ds.get("id")), str(ds.get("id") or ""))
+            else:
+                all_ok &= ok(f"建数据源「{name}」",
+                             r.status_code == 200 and ds.get("id"))
         else:
             ok(f"数据源「{name}」已存在(复用)", True, ds["id"])
-        ds_ids[name] = (ds or {}).get("id")
+        if not ds.get("id"):
+            raise RuntimeError(f"数据源「{name}」创建/查找失败: {ds}")
+        ds_ids[name] = ds["id"]
 
     print()
     if all_ok and ds_ids.get("计量业务平台"):

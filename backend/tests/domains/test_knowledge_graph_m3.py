@@ -1828,3 +1828,35 @@ class TestDeleteDocumentGraphSlim:
         assert r["orphanEntities"] == 1
         names = {n["name"] for n in env.graph.list_entities("孤儿库")}
         assert "独苗" not in names
+
+
+def test_download_rechecks_user_acl(env, monkeypatch):
+    """引用下载出口当前用户重验(设计 7.2):知道 doc_id 不等于授权。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from domains.knowledge_graph import api as kg_api
+
+    kb = env.store.create_kb("下载重验库")
+    env.store.set_kb_acl(kb["id"], users=["alice"], roles=[])
+    doc = env.store.create_document(
+        kb["id"], "secret.pdf", "application/pdf", 1, "/no.pdf", "h-dl")
+    monkeypatch.setattr("domains.knowledge_graph.runtime.get_kg_store",
+                        lambda state: env.store)
+    app = FastAPI()
+    app.include_router(kg_api.router)
+    client = TestClient(app)
+
+    # 有身份但不在白名单 → 403(此前知道 id 就能下,旁路)
+    r = client.get(f"/kbs/{kb['id']}/documents/{doc['id']}/download",
+                   headers={"X-User-Id": "bob"})
+    assert r.status_code == 403
+    # 白名单用户放行(文件本身不存在 → 404 文件层,不是 403 权限层)
+    r2 = client.get(f"/kbs/{kb['id']}/documents/{doc['id']}/download",
+                    headers={"X-User-Id": "alice"})
+    assert r2.status_code == 404
+    assert "原始文件" in r2.json()["detail"]
+    # 无 admin 后门:admin 身份不在白名单同样拒(设计 7.2 无后门;
+    # 管理员需要时把自己加进 ACL)
+    r3 = client.get(f"/kbs/{kb['id']}/documents/{doc['id']}/download",
+                    headers={"X-User-Id": "admin"})
+    assert r3.status_code == 403

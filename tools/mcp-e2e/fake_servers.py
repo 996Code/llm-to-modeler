@@ -159,6 +159,54 @@ METROLOGY_ORDERS = {
 METROLOGY_TIMEOUT_ORDER = "BJ0000"
 METROLOGY_TIMEOUT_SECONDS = 60
 
+# 预约夹具(按日期查当日预约送检单;date 参数走 date 槽位归一链路)
+METROLOGY_APPOINTMENTS = {
+    "2026-10-26": [
+        {"order_no": "BJ2026", "instrument": "数字压力计(0~2.5MPa)",
+         "slot": "09:30", "window": "上午", "counter": "3号窗口"},
+        {"order_no": "BJ2027", "instrument": "精密压力表(0~1.6MPa)",
+         "slot": "14:00", "window": "下午", "counter": "5号窗口"},
+        {"order_no": "BJ2028", "instrument": "电子台秤(30kg)",
+         "slot": "10:15", "window": "上午", "counter": "3号窗口"},
+    ],
+    "2026-10-27": [
+        {"order_no": "BJ2029", "instrument": "角膜曲率计",
+         "slot": "09:00", "window": "上午", "counter": "2号窗口"},
+    ],
+}
+
+# 证书夹具(按状态查证书;state 参数带 enum 白名单,走 enum 槽位链路)
+METROLOGY_CERTIFICATES = [
+    {"report_no": "RPT-2026-0888", "order_no": "BJ2027",
+     "instrument": "精密压力表(0~1.6MPa)", "state": "有效",
+     "issued_at": "2026-10-22", "valid_until": "2027-10-21"},
+    {"report_no": "RPT-2026-0901", "order_no": "BJ2028",
+     "instrument": "电子台秤(30kg)", "state": "有效",
+     "issued_at": "2026-10-25", "valid_until": "2027-10-24"},
+    {"report_no": "RPT-2025-1204", "order_no": "BJ2025",
+     "instrument": "扭矩扳手", "state": "已过期",
+     "issued_at": "2025-10-15", "valid_until": "2026-10-14"},
+    {"report_no": "RPT-2026-0712", "order_no": "BJ2024",
+     "instrument": "无线温度记录器", "state": "待领取",
+     "issued_at": "2026-10-18", "valid_until": "2027-10-17"},
+]
+
+# 报告进度夹具(按报告号查;多行返回 + 拒权样例,走通用表格卡链路)
+METROLOGY_REPORTS = {
+    "RPT-2026-0888": {"owner": METROLOGY_CURRENT_OWNER, "rows": [
+        {"report_no": "RPT-2026-0888", "order_no": "BJ2027",
+         "instrument": "精密压力表(0~1.6MPa)", "state": "已归档",
+         "archived_at": "2026-10-23", "keeper": "档案室B区"},
+    ]},
+    "RPT-2026-0901": {"owner": METROLOGY_CURRENT_OWNER, "rows": [
+        {"report_no": "RPT-2026-0901", "order_no": "BJ2028",
+         "instrument": "电子台秤(30kg)", "state": "在检定中",
+         "archived_at": "", "keeper": "检测二科"},
+    ]},
+    # 拒权样例: 报告存在但属于其他主体 → forbidden(通用卡链路的拒权分态)
+    "RPT-2025-1204": {"owner": "南京宏远机械制造有限公司", "rows": []},
+}
+
 # 器具价目夹具(AI.xlsx 转换,已清洗: 去导出 HTML 标签/尾逗号,数值转 int):
 # 检测费/强检一二级目录(null=不在强检目录)/检校周期/技术规程
 METROLOGY_INSTRUMENTS = json.loads(
@@ -181,7 +229,10 @@ def build_metrology_server() -> Starlette:
       信封再归一,forbidden 不再被当成成功数据行;
     - query_instrument: 器具价目(检测费/强检目录/检校周期/技术规程),
       名称精确→包含两级匹配,可叠加型号过滤;多行命中全返回
-      (如同名器具不同量程价目不同)。
+      (如同名器具不同量程价目不同);
+    - query_appointment: 按日期查当日预约送检单(date 槽位链路);
+    - query_certificate: 按状态查证书清单(state 带 enum 白名单);
+    - query_report: 按报告号查报告进度(拒权分态 + 通用表格卡)。
     """
     server = Server("e2e-metrology")
 
@@ -207,7 +258,35 @@ def build_metrology_server() -> Starlette:
                                      "model": {"type": "string",
                                                "description": "型号规格过滤"
                                                "(可选,子串匹配)"}},
-                                 "required": ["name"]})]
+                                 "required": ["name"]}),
+                types.Tool(
+                    name="query_appointment",
+                    description="查询某日期的预约送检单(当天各时段预约的"
+                                "器具与受理窗口)",
+                    inputSchema={"type": "object",
+                                 "properties": {"date": {
+                                     "type": "string",
+                                     "description": "查询日期(格式 "
+                                     "2026-10-26)"}},
+                                 "required": ["date"]}),
+                types.Tool(
+                    name="query_certificate",
+                    description="按状态查询证书清单(有效/已过期/待领取)",
+                    inputSchema={"type": "object",
+                                 "properties": {"state": {
+                                     "type": "string",
+                                     "enum": ["有效", "已过期", "待领取"],
+                                     "description": "证书状态(必选)"}},
+                                 "required": ["state"]}),
+                types.Tool(
+                    name="query_report",
+                    description="按报告号查询报告进度与归档去向(归属校验)",
+                    inputSchema={"type": "object",
+                                 "properties": {"report_no": {
+                                     "type": "string",
+                                     "description": "报告号(RPT 开头,如 "
+                                     "RPT-2026-0888)"}},
+                                 "required": ["report_no"]})]
 
     @server.call_tool()
     async def _call(name: str, args: dict):
@@ -231,6 +310,41 @@ def build_metrology_server() -> Starlette:
                        if qmodel else f"未找到器具「{qname}」的价目信息")
                 return _envelope({"status": "not_found", "message": msg})
             return _envelope({"status": "ok", "data": hits})
+        if name == "query_appointment":
+            date = str(args.get("date") or "").strip()
+            if not date:
+                return _envelope({"status": "invalid_input",
+                                  "message": "缺少查询日期(date)"})
+            rows = METROLOGY_APPOINTMENTS.get(date)
+            if not rows:
+                return _envelope({
+                    "status": "not_found",
+                    "message": f"{date} 当日没有预约送检单"})
+            return _envelope({"status": "ok", "data": rows})
+        if name == "query_certificate":
+            state = str(args.get("state") or "").strip()
+            if not state:
+                return _envelope({"status": "invalid_input",
+                                  "message": "缺少证书状态(state)"})
+            rows = [r for r in METROLOGY_CERTIFICATES if r["state"] == state]
+            if not rows:
+                return _envelope({
+                    "status": "not_found",
+                    "message": f"没有状态为「{state}」的证书"})
+            return _envelope({"status": "ok", "data": rows})
+        if name == "query_report":
+            report_no = str(args.get("report_no") or "").strip().upper()
+            if not report_no:
+                return _envelope({"status": "invalid_input",
+                                  "message": "缺少报告号(report_no)"})
+            rec = METROLOGY_REPORTS.get(report_no)
+            if rec is None:
+                return _envelope({"status": "not_found",
+                                  "message": f"未找到报告 {report_no}"})
+            if rec["owner"] != METROLOGY_CURRENT_OWNER:
+                return _envelope({"status": "forbidden",
+                                  "message": "该报告不属于当前主体,无权查询"})
+            return _envelope({"status": "ok", "data": rec["rows"]})
         if name != "query_progress":
             raise ValueError(f"tool not found: {name}")
         order_no = str(args.get("order_no") or "").strip().upper()

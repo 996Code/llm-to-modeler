@@ -38,6 +38,15 @@ def create_router(registry=None):
 
 
 def create_api_router():
-    """插件自有 HTTP API(测试页数据面;挂 /api/packs/metrology_assistant)。"""
-    from domains.metrology_assistant.api import router
-    return router
+    """插件自有 HTTP API(挂 /api/packs/metrology_assistant)。
+
+    测试页数据面(api.py)+ 场景配置管理面(config_api.py, P1 管理页
+    两 tab 的保存语义:revision CAS/历史/回滚)。
+    """
+    from fastapi import APIRouter
+    from domains.metrology_assistant.api import router as test_router
+    from domains.metrology_assistant.config_api import router as config_router
+    combined = APIRouter()
+    combined.include_router(test_router)
+    combined.include_router(config_router)
+    return combined

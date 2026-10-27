@@ -150,3 +150,81 @@ def test_unknown_envelope_status_is_contract_error(wiring):
     assert r.ok is False
     assert r.status == "invalid_input"
     assert "processing" in r.error.message
+
+
+# ── inputSchema 验参(P1/设计 4.3:完整 Schema 校验,不过不发) ──────
+
+from domains.chatbi.controlled import validate_against_schema
+
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "order_no": {"type": "string", "description": "单号"},
+        "count": {"type": "integer"},
+        "state": {"type": "string", "enum": ["open", "done"]},
+        "filter": {"type": "object", "properties": {"kb": {"type": "string"}},
+                   "required": ["kb"]},
+    },
+    "required": ["order_no"],
+}
+
+
+def test_schema_pass_and_required():
+    assert validate_against_schema({"order_no": "BJ1"}, SCHEMA) is None
+    assert "缺少必填参数" in validate_against_schema({"count": 1}, SCHEMA)
+    assert "缺少必填参数" in validate_against_schema({"order_no": " "}, SCHEMA)
+
+
+def test_schema_type_and_enum():
+    assert "integer" in validate_against_schema(
+        {"order_no": "a", "count": 1.5}, SCHEMA)
+    assert validate_against_schema(
+        {"order_no": "a", "count": 3}, SCHEMA) is None
+    # bool 不是 integer(Python 子类陷阱)
+    assert "integer" in validate_against_schema(
+        {"order_no": "a", "count": True}, SCHEMA)
+    assert "必须是" in validate_against_schema(
+        {"order_no": "a", "state": "paused"}, SCHEMA)
+    assert validate_against_schema(
+        {"order_no": "a", "state": "open"}, SCHEMA) is None
+
+
+def test_schema_nested_required():
+    err = validate_against_schema(
+        {"order_no": "a", "filter": {"other": 1}}, SCHEMA)
+    assert "缺少必填参数 kb" in err
+    assert validate_against_schema(
+        {"order_no": "a", "filter": {"kb": "x"}}, SCHEMA) is None
+
+
+def test_schema_none_passes_and_unknown_props_ignored():
+    assert validate_against_schema({"x": 1}, None) is None
+    assert validate_against_schema(
+        {"order_no": "a", "undeclared": object()}, SCHEMA) is None
+
+
+def test_snapshot_missing_tool_reports_refresh(wiring, monkeypatch):
+    """快照一致性(设计 0.5.1 降级版):server 在册但快照无此工具 →
+    明确报错提示刷新,不模糊失败在传输层。"""
+    class _FakeStore:
+        def get_by_code(self, code):
+            # 快照已刷新:query_progress 已下线,只剩 query_instrument
+            return {"code": code, "tools_snapshot": [
+                {"name": "query_instrument",
+                 "inputSchema": {"type": "object",
+                                 "properties": {"name": {"type": "string"}},
+                                 "required": ["name"]}}]}
+
+    monkeypatch.setattr("services.mcp_registry.McpServerStore", _FakeStore)
+    # 白名单放行(数据源限定=query_progress)但快照已无它 → 报错刷新
+    r = controlled.execute_controlled(None, "ds-1", "query_progress",
+                                      {"order_no": "BJ1"})
+    # 换无白名单数据源验"快照内工具正常走"
+    wiring.info = _info(database="")
+    assert r.ok is False and r.status == "invalid_input"
+    assert "快照" in r.error.message and "query_instrument" in r.error.message
+    # 快照内工具正常走(按快照 schema 验参)
+    wiring.payload = {"columns": ["a"], "rows": [["b"]]}
+    r2 = controlled.execute_controlled(None, "ds-1", "query_instrument",
+                                       {"name": "压力表"})
+    assert r2.ok is True

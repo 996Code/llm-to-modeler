@@ -19,7 +19,7 @@ describe('metrology result presentation', () => {
     const view = metrologyPresentation({ role: 'assistant', content: '重复摘要', dataResult: {
       pack: 'metrology_assistant', type: 'kg_search_result', answer, sources: { chunks: [{}] },
     } })
-    expect(view?.decision).toBe('mandatory')
+    expect(view?.decision).toBe('属于强制检定')
     expect(view?.answer).toContain('[片段:1]')
     expect(view?.answer).not.toContain('重复摘要')
   })
@@ -73,5 +73,61 @@ describe('metrology result presentation', () => {
   it('renders a refusal as a notice rather than a completed success', () => {
     const view = metrologyPresentation({ role: 'assistant', dataResult: { type: 'metrology_notice', status: 'forbidden', title: '无权查询', message: '请核对单号' } })
     expect(view).toMatchObject({ kind: 'notice', status: 'forbidden', answer: '请核对单号' })
+  })
+  it('renders generic table artifacts (capability-import default card) as a table view', () => {
+    const view = metrologyPresentation({ role: 'assistant', dataResult: {
+      type: 'metrology_table', pack: 'metrology_assistant', resultDisplay: 'card',
+      columns: ['order_no', 'slot'], rows: [['BJ2026', '09:30'], ['BJ2027', '14:00']],
+      rowTotal: 2, source: { datasource: '计量业务平台(通用)', tool: 'query_appointment' },
+    } })
+    expect(view?.kind).toBe('table')
+    expect(view?.columns).toEqual(['order_no', 'slot'])
+    expect(view?.rows).toEqual([['BJ2026', '09:30'], ['BJ2027', '14:00']])
+    expect(view?.rowTotal).toBe(2)
+    expect(JSON.stringify(view)).not.toContain('query_appointment')
+  })
+  it('caps generic table rows at 20 and reports the true total', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => [`BJ${i}`, '09:00'])
+    const view = metrologyPresentation({ role: 'assistant', dataResult: {
+      type: 'metrology_table', columns: ['order_no', 'slot'], rows, rowTotal: 30,
+    } })
+    expect(view?.rows).toHaveLength(20)
+    expect(view?.rowTotal).toBe(30)
+  })
+  it('falls back to text when a table artifact has no columns', () => {
+    expect(metrologyPresentation({ role: 'assistant', content: '保留摘要', dataResult: {
+      type: 'metrology_table', columns: [], rows: [],
+    } })).toBeNull()
+  })
+})
+
+describe('场景变体知识卡(批次3)', () => {
+  const base = (over: Record<string, any> = {}) => ({
+    role: 'assistant', content: '摘要',
+    dataResult: {
+      type: 'kg_search_result', pack: 'metrology_assistant',
+      scenario: '检测耗时/工作日咨询', answer_kind: 'turnaround',
+      resultDisplay: 'card',
+      answer: { decision: 'answered', conclusion: '约 5 个工作日',
+                evidence: [{ text: '规程', chunk_refs: [1] }],
+                suggestion: '以受理为准' },
+      subgraph: { nodes: [], edges: [] }, sources: { chunks: [{}] },
+      cited_chunks: [1], ...over,
+    },
+  })
+  it('answered 决策渲染已答复卡,标题取场景名', () => {
+    const v = metrologyPresentation(base(), {})
+    expect(v?.kind).toBe('knowledge')
+    expect(v?.title).toContain('检测耗时')
+    expect(v?.decision).toBe('已答复')
+    expect(v?.answer).toContain('约 5 个工作日')
+  })
+  it('qualification 三态标签映射', () => {
+    const v = metrologyPresentation(base({
+      scenario: '资质能力范围咨询(能否检测某器具)',
+      answer: { decision: 'not_supported', conclusion: '不在范围',
+                evidence: [{ text: 'x', chunk_refs: [1] }], suggestion: 's' },
+    }), {})
+    expect(v?.decision).toBe('不在承接范围')
   })
 })

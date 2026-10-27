@@ -36,6 +36,69 @@ _STATUS_CLASSIFICATION = {
 }
 
 
+# ── inputSchema 验参(P1/设计 4.3:完整 Schema 校验,不过不发) ──────
+# 覆盖 object 一层的 required/type/enum + 嵌套 object 的 required/type;
+# 不解析远程 $ref(拒绝联网解析,设计 7.5);未知类型关键字宽松放行
+# (JSON Schema 开放集,只做契约确定性校验,不做全实现)。
+
+_JSON_TYPE_MAP = {
+    "string": str, "number": (int, float), "integer": int,
+    "boolean": bool, "object": dict, "array": list,
+}
+
+
+def _schema_type_ok(value, t: str) -> bool:
+    """JSON Schema 类型判定(bool 是 int 子类,显式排除)。"""
+    if t == "string":
+        return isinstance(value, str)
+    if t == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if t == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if t == "boolean":
+        return isinstance(value, bool)
+    if t == "object":
+        return isinstance(value, dict)
+    if t == "array":
+        return isinstance(value, list)
+    return True  # 未知类型关键字:JSON Schema 开放集,不拦
+
+
+def _is_empty(v) -> bool:
+    if isinstance(v, str):
+        return not v.strip()
+    return v is None or (isinstance(v, (list, dict)) and len(v) == 0)
+
+
+def validate_against_schema(args: dict, schema) -> Optional[str]:
+    """按工具 inputSchema 验参;返回用户可读错误(None=通过)。
+
+    schema=None/非 dict = 无 Schema 可验(放行——MCP 层仍会拦 required;
+    注册表快照缺失时宁可放行到传输层也不猜)。远程 $ref 不解析(设计 7.5)。
+    """
+    if not isinstance(schema, dict):
+        return None
+    props = schema.get("properties") or {}
+    for name in schema.get("required") or []:
+        if _is_empty(args.get(name)):
+            return f"缺少必填参数 {name}"
+    for name, value in args.items():
+        p = props.get(name)
+        if not isinstance(p, dict) or value is None:
+            continue  # Schema 未声明的不拦(扩展宽容)
+        t = p.get("type")
+        if isinstance(t, str) and not _schema_type_ok(value, t):
+            return f"参数 {name} 需要 {t} 类型"
+        enum = p.get("enum")
+        if isinstance(enum, list) and enum and value not in enum:
+            return f"参数 {name} 的值必须是: {'、'.join(map(str, enum))}"
+        if isinstance(value, dict) and isinstance(p.get("properties"), dict):
+            nested = validate_against_schema(value, p)
+            if nested:
+                return nested
+    return None
+
+
 @dataclass
 class ControlledError:
     code: str            # forbidden/not_found/invalid_input/unavailable/credential/transport
@@ -87,7 +150,101 @@ def _normalize_tabular(payload: Any) -> Optional[dict]:
                 "rows": [(r,) for r in payload]}
     if isinstance(payload, dict):
         return {"record": dict(payload)}
+    if isinstance(payload, (int, float, bool, str)):
+        return {"columns": ["value"], "rows": [(payload,)]}
     return None
+
+
+
+
+def _invoke_mcp_core(info, tool: str, args: dict, started: float,
+                     source: Optional[dict] = None) -> "ControlledResult":
+    """共享执行内核:Schema 验参 → SDK 传输 → 信封判定 → 归一。
+
+    execute_controlled(客服受控入口)与 datasources.execute_mcp_tool
+    (ask_data/switch_chart 交互入口)都走这里——设计 4.4"原 ask_data
+    生成候选调用后也走同一执行内核,交互副作用留在外层":传输/信封/
+    验参只有一份实现,信封不再被当成功数据行(此前 execute_mcp_tool
+    的真实缺口)。
+    """
+    # inputSchema 验参(P1/设计 4.3):注册表快照里的原始 Schema——
+    # required/type/enum/嵌套,不过不发请求
+    try:
+        from services.mcp_registry import McpServerStore
+        server = McpServerStore().get_by_code(info.host)
+        snapshot = (server or {}).get("tools_snapshot") or []
+        tool_schema = next(
+            (t.get("inputSchema") for t in snapshot
+             if t.get("name") == tool), None)
+        # 快照一致性(设计 0.5.1 降级版:不匹配即报错刷新):server 在册
+        # 但快照里没有该工具 = 快照过期(工具已下线/改名)——明确报错
+        # 并提示刷新,不让调用模糊失败在传输层
+        if server and tool_schema is None and snapshot:
+            known = [t.get("name") for t in snapshot]
+            return _err("invalid_input",
+                        f"工具 {tool} 不在该 MCP 服务当前快照"
+                        f"(现有: {', '.join(known[:8])})——"
+                        "请刷新数据源/语义层快照后重试",
+                        started, source)
+    except Exception:  # noqa: BLE001
+        tool_schema = None  # 注册表不可读:放行到传输层,不在此猜
+    schema_err = validate_against_schema(args, tool_schema)
+    if schema_err:
+        return _err("invalid_input", schema_err, started, source)
+
+    # ── SDK 调用(隔离性铁律: 只 import sdk;错误类型保留) ──
+    from sdk import mcp_client
+    try:
+        payload = mcp_client.call_tool(info.host, tool, args)
+    except PackInvokeError as e:
+        status = {"credential": "credential",
+                  "retryable": "unavailable"}.get(e.error_type, "transport")
+        return ControlledResult(
+            ok=False, status=status,
+            error=ControlledError(
+                code=status, message=e.message[:300],
+                error_type=e.error_type,
+                retryable=(e.error_type == "retryable")),
+            duration_ms=int((time.monotonic() - started) * 1000),
+            source=source)
+    except Exception as e:  # 兜底: mcp_client 理论上已包装
+        return _err("transport", f"MCP 调用失败: {e}", started, source)
+
+    # ── 信封判定(先于任何形状归一) ──
+    # 信封 = status 为已知值 且 带 data/message 载荷键——纯记录恰好含
+    # status 字段(如订单状态列)不被误判;ok 配 data,其余配 message
+    if isinstance(payload, dict) and payload.get("status") in ENVELOPE_STATUS \
+            and ("data" in payload or "message" in payload):
+        status = str(payload["status"])
+        if status == "ok":
+            normalized = _normalize_tabular(payload.get("data"))
+            if normalized is None:
+                return _err("invalid_input",
+                            "业务信封 ok 但 data 格式不符合契约", started, source)
+            return ControlledResult(ok=True, status="ok", data=normalized,
+                                    duration_ms=int((time.monotonic() - started) * 1000),
+                                    source=source)
+
+        message = str(payload.get("message") or f"业务平台返回 {status}")
+        return _err(status, message, started, source)
+    # ── 非信封:表格形状归一 ──
+    # 信封形状(带 message/data 载荷键)但状态枚举未知 = 契约错误,
+    # 不当成功记录、不交给模型补齐(设计 4.4 步 3/4,13.2 P1 必测项)。
+    # 纯记录恰含普通 status 字段(不带载荷键)不受影响。
+    if isinstance(payload, dict) and isinstance(payload.get("status"), str) \
+            and payload["status"] not in ENVELOPE_STATUS \
+            and ("data" in payload or "message" in payload):
+        return _err("invalid_input",
+                    f"上游返回未知业务状态 {payload['status']!r}(返回契约不符)",
+                    started, source)
+    normalized = _normalize_tabular(payload)
+    if normalized is None:
+        return _err("invalid_input",
+                    "上游返回格式不符合表格契约(无列名数组不猜列名)",
+                    started, source)
+    return ControlledResult(ok=True, status="ok", data=normalized,
+                            duration_ms=int((time.monotonic() - started) * 1000),
+                            source=source)
 
 
 def execute_controlled(app_state, datasource_id: str, tool: str,
@@ -128,56 +285,4 @@ def execute_controlled(app_state, datasource_id: str, tool: str,
         return _err("invalid_input",
                     f"工具 {tool} 不在数据源限定范围内(仅允许 {info.database})",
                     started, source)
-
-    # ── SDK 调用(隔离性铁律: 只 import sdk;错误类型保留) ──
-    from sdk import mcp_client
-    try:
-        payload = mcp_client.call_tool(info.host, tool, args)
-    except PackInvokeError as e:
-        status = {"credential": "credential",
-                  "retryable": "unavailable"}.get(e.error_type, "transport")
-        return ControlledResult(
-            ok=False, status=status,
-            error=ControlledError(
-                code=status, message=e.message[:300],
-                error_type=e.error_type,
-                retryable=(e.error_type == "retryable")),
-            duration_ms=int((time.monotonic() - started) * 1000),
-            source=source)
-    except Exception as e:  # 兜底: mcp_client 理论上已包装
-        return _err("transport", f"MCP 调用失败: {e}", started, source)
-
-    # ── 信封判定(先于任何形状归一) ──
-    # 信封 = status 为已知值 且 带 data/message 载荷键——纯记录恰好含
-    # status 字段(如订单状态列)不被误判;ok 配 data,其余配 message
-    if isinstance(payload, dict) and payload.get("status") in ENVELOPE_STATUS \
-            and ("data" in payload or "message" in payload):
-        status = str(payload["status"])
-        if status == "ok":
-            normalized = _normalize_tabular(payload.get("data"))
-            if normalized is None:
-                return _err("invalid_input",
-                            "业务信封 ok 但 data 格式不符合契约", started, source)
-            return ControlledResult(ok=True, status="ok", data=normalized,
-                                    duration_ms=int((time.monotonic() - started) * 1000),
-                                    source=source)
-        message = str(payload.get("message") or f"业务平台返回 {status}")
-        return _err(status, message, started, source)
-
-    # ── 非信封:表格形状归一 ──
-    # 信封形状(带 message/data 载荷键)但状态枚举未知 = 契约错误,
-    # 不当成功记录、不交给模型补齐(设计 4.4 步 3/4,13.2 P1 必测项)。
-    # 纯记录恰含普通 status 字段(不带载荷键)不受影响。
-    if isinstance(payload, dict) and isinstance(payload.get("status"), str) \
-            and payload["status"] not in ENVELOPE_STATUS \
-            and ("data" in payload or "message" in payload):
-        return _err("invalid_input",
-                    f"上游返回未知业务状态 {payload['status']!r}(返回契约不符)",
-                    started, source)
-    normalized = _normalize_tabular(payload)
-    if normalized is None:
-        return _err("invalid_input", "上游返回格式不符合声明的表格契约",
-                    started, source)
-    return ControlledResult(ok=True, status="ok", data=normalized,
-                            duration_ms=int((time.monotonic() - started) * 1000),
-                            source=source)
+    return _invoke_mcp_core(info, tool, args, started, source)

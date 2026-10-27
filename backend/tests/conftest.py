@@ -221,6 +221,10 @@ def _init_schema():
     PlatformSettingsStore()
     TaskStore()
     KGStore()
+    # metrology 场景配置/flow 表(P1;幂等建表,清表依赖其存在)
+    from domains.metrology_assistant import runtime as metro_runtime
+    metro_runtime.get_pack_db()
+    # chatbi 语义层/事件表(main 478754d: 测试库 schema 初始化补齐)
     from sdk.relational_store import PackRelationalDB
     from domains.chatbi.runtime import _init_pack_schema
     _init_pack_schema(PackRelationalDB("chatbi"))
