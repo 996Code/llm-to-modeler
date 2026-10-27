@@ -110,7 +110,11 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
             raise ConfigValidationError(
                 f"场景 {key} action.kind 必须是 {'/'.join(_ACTION_KINDS)}")
         if action["kind"] == "chatbi":
+            # 数据源绑定二者其一(设计 §8.1):显式 datasource_id 或 env 缺省
+            _has_ds = bool(str(action.get("datasource_id") or "").strip())
             for field in ("env", "tool", "params", "stage", "error_noun"):
+                if field == "env" and _has_ds:
+                    continue  # 显式绑定时 env 可空
                 if not action.get(field):
                     raise ConfigValidationError(
                         f"场景 {key} chatbi 动作缺少 {field}")
@@ -119,9 +123,7 @@ def validate_config(config: Dict[str, Any]) -> Dict[str, Any]:
                     f"场景 {key} params 必须是非空槽位映射")
             if not action.get("card"):
                 raise ConfigValidationError(f"场景 {key} 缺少结果卡构建器 card")
-            # 数据源绑定(设计 §8.1):显式 datasource_id 或 env 缺省至少其一
-            ds_id = str(action.get("datasource_id") or "").strip()
-            if not ds_id and not str(action.get("env") or "").strip():
+            if not _has_ds and not str(action.get("env") or "").strip():
                 raise ConfigValidationError(
                     f"场景 {key} chatbi 动作需绑定 datasource_id 或 env 缺省")
         # kg 选库规则形状:[{slot, in[], kb}](可选)

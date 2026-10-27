@@ -144,6 +144,27 @@
             <a-alert v-else type="info" show-icon class="kg-hint">
               <template #message>kg 动作:按用途选库(强检目录/检定规程)→ 证据检索 → 三态结论;来源绑定由知识库侧维护,此处无数据源参数。</template>
             </a-alert>
+
+            <div class="cap-panel">
+              <div class="cap-head">
+                <strong>MCP 能力接入</strong>
+                <a-badge v-if="newTools" :count="newTools" title="快照新增、尚未接入的工具" />
+                <a-button size="small" @click="loadInventory" :loading="capLoading">刷新清单</a-button>
+              </div>
+              <div class="cap-note">业务平台 MCP 上线新工具 → 此处出现待接入;点「起草」自动翻译声明为场景草稿(落在本页编辑器,润色话术后走整档保存生效)。声明是外部输入,接入永远人工确认。</div>
+              <div v-for="srv in cap.servers" :key="srv.code" class="cap-server">
+                <div class="cap-server-name">{{ srv.code }}</div>
+                <div v-for="t in srv.tools" :key="t.name" class="cap-tool" :class="{ imported: t.imported, fresh: !t.imported }">
+                  <span class="cap-tool-name">{{ t.name }}</span>
+                  <span class="cap-tool-desc">{{ t.description || '(无描述)' }}</span>
+                  <a-tag v-if="t.imported" color="green">已接入</a-tag>
+                  <a-tag v-else color="orange">新</a-tag>
+                  <a-button v-if="t.draftable" size="small" type="primary" ghost
+                            :loading="drafting === t.name" @click="draftCapability(srv.code, t.name)">起草</a-button>
+                </div>
+              </div>
+              <div v-if="capError" class="cap-error">{{ capError }}</div>
+            </div>
           </div>
         </div>
       </a-tab-pane>
@@ -289,6 +310,47 @@ function setEnum(cfg: MetrologyScenario, ev: Event) {
   const text = (ev.target as HTMLTextAreaElement).value
   ;(cfg.required as any).enum_options = text.split('\n').map((l) => l.trim()).filter(Boolean)
 }
+// ── MCP 能力接入(平台件翻译 + 本插件形状适配)──
+const cap = reactive<{ servers: { code: string; tools: { name: string; description: string; imported: boolean; draftable: boolean }[] }[] }>({ servers: [] })
+const capLoading = ref(false)
+const capError = ref('')
+const drafting = ref('')
+const newTools = computed(() =>
+  cap.servers.reduce((n, s) => n + s.tools.filter((t) => !t.imported).length, 0))
+
+async function loadInventory() {
+  capLoading.value = true
+  capError.value = ''
+  try {
+    const { data } = await metrologyApi.get('/config/capability-import')
+    cap.servers = data.servers || []
+  } catch (e: any) {
+    capError.value = e?.response?.data?.detail || '清单读取失败'
+  } finally {
+    capLoading.value = false
+  }
+}
+
+async function draftCapability(server: string, tool: string) {
+  drafting.value = tool
+  capError.value = ''
+  try {
+    const { data } = await metrologyApi.post('/config/capability-import/draft', { server, tool })
+    // 草稿进编辑器(键冲突自动加后缀),跳 Tab1 润色;保存仍走整档 CAS
+    let key = data.key
+    let n = 2
+    while (draft.value.scenarios[key]) key = `${data.key}_${n++}`
+    draft.value.scenarios[key] = data.scenario
+    currentKey.value = key
+    tab.value = 'scenarios'
+    dirty.value = true
+  } catch (e: any) {
+    capError.value = e?.response?.data?.detail || '起草失败'
+  } finally {
+    drafting.value = ''
+  }
+}
+
 // ── Tab3 联调预演(设计 §9):一句话走提取+求值;草案差异对比 ──
 const dry = reactive({
   text: '', execute: false, loading: false,
@@ -364,6 +426,7 @@ function setNotices(cfg: MetrologyScenario, ev: Event) {
 onMounted(async () => {
   await reload()
   await loadHistory()
+  loadInventory()
 })
 </script>
 
@@ -392,6 +455,15 @@ onMounted(async () => {
 .slot-box { border: 1px solid #edf0f3; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
 .slot-box legend { font-size: 12px; color: #7a8491; padding: 0 6px; }
 .kg-hint { margin-top: 8px; }
+.cap-panel { border: 1px dashed #d9dde3; border-radius: 8px; padding: 12px; margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+.cap-head { display: flex; align-items: center; gap: 10px; }
+.cap-note { color: #9aa4b2; font-size: 12px; line-height: 1.7; }
+.cap-server-name { font-family: monospace; font-size: 12px; color: #1677ff; margin-top: 4px; }
+.cap-tool { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #f0f2f5; }
+.cap-tool:last-child { border-bottom: 0; }
+.cap-tool-name { font-family: monospace; min-width: 150px; }
+.cap-tool-desc { color: #7a8491; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cap-error { color: #d4380d; font-size: 12px; }
 .hist-tag { margin-left: 8px; }
 .dryrun { display: flex; flex-direction: column; gap: 12px; }
 .dryrun-bar { display: flex; align-items: center; gap: 12px; }

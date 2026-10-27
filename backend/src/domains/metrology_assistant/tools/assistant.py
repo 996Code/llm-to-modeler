@@ -1137,6 +1137,39 @@ class MetrologyAssistantTool(Tool):
                           summary=_format_instrument_reply(instruments),
                           formatted=self.format_result(artifact))
 
+    def _table_card(self, result, merged: dict, stage) -> ToolResult:
+        """通用表格结果卡(能力导入的默认卡):columns/rows 直出。
+
+        专用卡(progress/instrument)字段语义由业务定义;新导入的
+        MCP 工具结果形状未知,通用表格是安全缺省——人工润色时可以
+        再为高频工具写专用卡(action.card 指回专用构建器)。
+        """
+        data = result.data or {}
+        columns = [str(c) for c in (data.get("columns") or [])]
+        rows = data.get("rows") or []
+        if not columns and isinstance(data.get("record"), dict):
+            columns = [str(k) for k in data["record"].keys()]
+            rows = [tuple(data["record"].get(c) for c in columns)]
+        if not columns:
+            return ToolResult(
+                error_for_llm="业务接口未返回表格数据(通用卡无法呈现),"
+                              "请为该工具配置专用结果卡。")
+        stage("assistant.answer", "整理查询结果…")
+        cells = [[("" if v is None else str(v)) for v in
+                  (row if isinstance(row, (list, tuple)) else (row,))]
+                 for row in rows[:50]]
+        artifact = {"type": "metrology_table", "pack": "metrology_assistant",
+                    "resultDisplay": "card",
+                    "columns": columns, "rows": cells,
+                    "rowTotal": len(rows),
+                    "source": {"datasource": result.source.get("datasource"),
+                               "tool": result.source.get("tool")}}
+        head = ";".join(f"{c}={cells[0][i]}" for i, c in enumerate(columns)
+                        if i < 4) if cells else "无数据行"
+        summary = f"共 {len(rows)} 行;首行: {head}"
+        return ToolResult(artifact=artifact, artifact_type="data",
+                          summary=summary, formatted=self.format_result(artifact))
+
     def format_result(self, artifact: dict) -> dict:
         art = artifact or {}
         if art.get("type") == "metrology_progress":
@@ -1147,6 +1180,9 @@ class MetrologyAssistantTool(Tool):
             first = (art.get("instruments") or [{}])[0]
             return {k: first[k] for k in ("name", "feeYuan", "periodMonths",
                                           "mandatoryL1") if first.get(k) is not None}
+        if art.get("type") == "metrology_table":
+            return {"columns": art.get("columns") or [],
+                    "rowTotal": art.get("rowTotal") or 0}
         return {"kb": (art.get("kb") or {}).get("name") or "",
                 "chunkCount": len(((art.get("sources") or {}).get("chunks"))
                                   or [])}

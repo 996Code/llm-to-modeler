@@ -234,3 +234,64 @@ def test_dry_run_draft_config_diff(client, monkeypatch):
     # 当前配置未变(草案不落库)
     again = _dry(monkeypatch, client, {"text": "查一下进度"})
     assert "请提供委托单号" in again.json()["will_ask"]["question"]
+
+
+# ── MCP 能力导入(平台件+客服形状适配)──────────────────────
+
+def test_translator_and_diff():
+    from sdk.mcp_draft import translate_input_schema, capability_diff
+    out = translate_input_schema({"properties": {
+        "name": {"type": "string"},
+        "count": {"type": "integer"},
+        "state": {"type": "string", "enum": ["a", "b"]},
+    }, "required": ["name"]})
+    assert out["required_slot"] == "name"
+    by = {s["name"]: s for s in out["slots"]}
+    assert by["count"]["slot_type"] == "number"
+    assert by["state"]["slot_type"] == "enum" and by["state"]["enum_options"] == ["a", "b"]
+    d = capability_diff({"srv": ["a", "b"]}, [("srv", "b"), ("srv", "gone")])
+    assert d["new"] == [("srv", "a")] and d["stale"] == [("srv", "gone")]
+
+
+def test_capability_inventory_and_draft(client, monkeypatch):
+    """库存 diff 标新工具;起草产出可保存的场景形状(校验器过)。"""
+    import json as _json
+    from domains.metrology_assistant import capability_import as ci
+    from domains.chatbi import datasources as bi_ds
+    from types import SimpleNamespace as _NS
+
+    monkeypatch.setattr(ci, "_snapshots", lambda: {"metrology": [
+        {"name": "query_progress", "inputSchema": {"properties": {
+            "order_no": {"type": "string", "description": "委托单号"}},
+            "required": ["order_no"]}},
+        {"name": "query_fresh", "inputSchema": {"properties": {
+            "instrument": {"type": "string"}}, "required": ["instrument"]}},
+    ]})
+    fake_info = _NS(id="ds-1", host="metrology", db_type="mcp",
+                    database="query_fresh", is_active=True)
+    monkeypatch.setattr(bi_ds, "list_datasources",
+                        lambda db, active_only=False: [fake_info])
+    from domains.chatbi import runtime as bi_runtime
+    monkeypatch.setattr(bi_runtime, "get_pack_db", lambda: object())
+
+    inv = client.get("/api/packs/metrology_assistant/config/capability-import").json()
+    tools = {t["name"]: t for t in inv["servers"][0]["tools"]}
+    assert tools["query_fresh"]["imported"] is False
+    assert ("metrology", "query_fresh") in [tuple(x) for x in inv["diff"]["new"]]
+
+    r = client.post("/api/packs/metrology_assistant/config/capability-import/draft",
+                    json={"server": "metrology", "tool": "query_fresh"})
+    assert r.status_code == 200
+    draft = r.json()
+    sc = draft["scenario"]
+    assert sc["required"]["slot"] == "instrument"
+    assert sc["action"]["tool"] == "query_fresh"
+    assert sc["action"]["datasource_id"] == "ds-1"
+    assert sc["action"]["card"] == "_table_card"
+    # 草稿能过配置校验(可整档保存)
+    from domains.metrology_assistant.scenario_config import validate_config
+    validate_config({"scenarios": {draft["key"]: sc}})
+    # 快照没有的工具 → 400
+    r404 = client.post("/api/packs/metrology_assistant/config/capability-import/draft",
+                       json={"server": "metrology", "tool": "nope"})
+    assert r404.status_code == 400

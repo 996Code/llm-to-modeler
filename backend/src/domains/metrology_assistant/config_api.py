@@ -108,6 +108,35 @@ async def rollback(body: RollbackBody, request: Request) -> dict:
     return {"revision": new_rev}
 
 
+class CapabilityDraftBody(BaseModel):
+    """MCP 能力导入:按 (server, tool) 起草场景(不落库)。"""
+    server: str
+    tool: str
+
+
+@router.get("/config/capability-import",
+            dependencies=[Depends(admin_required)])
+async def capability_inventory() -> dict:
+    """能力库存 + 发现 diff(管理页向导数据面;只读)。"""
+    from domains.metrology_assistant.capability_import import inventory
+    try:
+        return inventory()
+    except Exception:  # noqa: BLE001
+        logger.exception("能力库存读取失败")
+        raise HTTPException(500, "MCP 注册表读取失败,请查看服务日志")
+
+
+@router.post("/config/capability-import/draft",
+             dependencies=[Depends(admin_required)])
+async def capability_draft(body: CapabilityDraftBody) -> dict:
+    """MCP 工具声明 → 场景草稿(不落库;前端插入编辑器走整档保存)。"""
+    from domains.metrology_assistant.capability_import import draft_scenario
+    try:
+        return draft_scenario(body.server, body.tool)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 class DryRunBody(BaseModel):
     """联调预演(设计 §9 Tab3):一句话走提取+求值,不落库不写 flow。"""
     text: str
