@@ -361,8 +361,8 @@ def test_routing_overview_states(client, monkeypatch):
                              "required": ["x"]}},
          ]},
     ])
-    fake = _NS(id="ds-9", host="metrology", db_type="mcp",
-               database="", is_active=True)
+    fake = _NS(id="ds-9", name="计量业务平台(通用)", host="metrology",
+               db_type="mcp", database="", is_active=True)
     monkeypatch.setattr(bi_ds, "list_datasources",
                         lambda db, active_only=False: [fake])
     monkeypatch.setattr(bi_runtime, "get_pack_db", lambda: object())
@@ -374,6 +374,7 @@ def test_routing_overview_states(client, monkeypatch):
     assert caps["query_progress"]["scenario_key"] == "progress"
     assert caps["query_fresh"]["status"] == "auto"
     assert caps["query_fresh"]["ask"]["slot"] == "keyword"
+    assert caps["query_fresh"]["datasource"]["datasource_name"] == "计量业务平台(通用)"
     assert caps["query_orphan"]["status"] == "blocked"
     assert "数据源" in caps["query_orphan"]["blocked_reason"]
     # kg 能力(出厂强检场景)也在总览里

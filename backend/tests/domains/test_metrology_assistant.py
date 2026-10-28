@@ -592,23 +592,74 @@ def test_real_engine_routes_failure_and_notice(tool, monkeypatch, status):
         assert "secret" not in str(payload)
 
 
-@pytest.mark.parametrize("phase", ["preflight", "retrieve"])
-def test_unexpected_knowledge_service_exception_is_safe(tool, monkeypatch, caplog, phase):
+def test_unexpected_knowledge_service_exception_is_safe(tool, monkeypatch, caplog):
     def fail(*a, **kw):
         raise RuntimeError("password=secret /internal/path")
 
     ctx = FakeCtx(FakeLLM(extract={"scenario": "mandatory_check", "purpose": "贸易结算"}))
-    if phase == "preflight":
-        monkeypatch.setattr("domains.knowledge_graph.runtime.get_kg_store", fail)
-        result = tool.preflight({}, ctx)
-        assert result.error_for_llm == "知识库服务暂不可用,请稍后重试。"
-    else:
-        monkeypatch.setattr("domains.knowledge_graph.service.retrieve_evidence", fail)
-        result = _run(tool, ctx, "要强检吗")
-        assert result.error_for_llm == "知识库检索失败,请稍后重试。"
+    monkeypatch.setattr("domains.knowledge_graph.service.retrieve_evidence", fail)
+    result = _run(tool, ctx, "要强检吗")
+    assert result.error_for_llm == "知识库检索失败,请稍后重试。"
     assert result.artifact is None
     assert "secret" not in str(result.model_dump())
     assert any(record.name == mta.__name__ and record.exc_info for record in caplog.records)
+
+
+def test_preflight_only_checks_assembly(tool, monkeypatch):
+    """自动路由后本域承载 MCP 工具查询:preflight 不再硬卡知识库
+    (Neo4j 故障不应挡住 workload 类问题);kg 故障在执行层如实报错
+    (上一测试锁死);未装配仍前置拦截。"""
+
+    def fail(*a, **kw):
+        raise RuntimeError("neo4j down")
+
+    monkeypatch.setattr("domains.knowledge_graph.runtime.get_kg_store", fail)
+    assert tool.preflight({}, FakeCtx(FakeLLM())) is None
+    unmounted = mta.MetrologyAssistantTool(app_state=None)
+    r = unmounted.preflight({}, FakeCtx(FakeLLM()))
+    assert r is not None and "未正确装配" in r.error_for_llm
+
+
+def test_auto_optional_param_extracted_and_sent(tool, monkeypatch):
+    """多参数自动工具:可选参数进提取提示(_param_hints),用户说到
+    才随请求出站,没说不出站(回归锁:此前可选参数永不可提取)。"""
+    from domains.metrology_assistant import capability_import as ci
+    auto = {"query_rich": {
+        "label": "富查询", "intent": "问富查询相关问题",
+        "required": {"slot": "name", "header": "名称",
+                     "question": "请提供名称:", "options": []},
+        "action": {"kind": "chatbi", "server": "metrology",
+                   "datasource_id": "", "env": "", "tool": "query_rich",
+                   "params": {"name": "name", "model": "model"},
+                   "stage": "调用 query_rich 查询…", "error_noun": "富查询",
+                   "notices": {}, "card": "_table_card"},
+        "_param_hints": {"model": "型号规格过滤"},
+        "_auto": True}}
+    monkeypatch.setattr(ci, "auto_scenarios", lambda table: auto)
+    monkeypatch.setattr(ci, "resolve_datasource_for_tool",
+                        lambda server, t: "ds-9")
+    seen = {}
+
+    def fake_exec(app, ds_id, tool_name, params):
+        seen.clear()
+        seen.update(params)
+        return ControlledResult(
+            ok=True, status="ok",
+            data={"columns": ["name"], "rows": [["压力表"]]},
+            source={"datasource": "通用源", "tool": "query_rich"})
+    monkeypatch.setattr("domains.chatbi.controlled.execute_controlled",
+                        fake_exec)
+
+    ctx = FakeCtx(FakeLLM(extract={"scenario": "query_rich",
+                                   "name": "压力表", "model": "0.4级"}))
+    r = _run(tool, ctx, "查一下 0.4级 的压力表")
+    assert r.artifact["type"] == "metrology_table"
+    assert seen == {"name": "压力表", "model": "0.4级"}
+
+    ctx2 = FakeCtx(FakeLLM(extract={"scenario": "query_rich",
+                                    "name": "压力表", "model": ""}))
+    _run(tool, ctx2, "查压力表")
+    assert seen == {"name": "压力表"}
 
 
 def test_router_direct_no_llm_call():

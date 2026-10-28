@@ -250,13 +250,21 @@ def _make_monotonic_stage(emit_fn, steps):
 
 def _scenario_slots(table: dict) -> list:
     """场景表声明的全部槽位(首见序去重)——提取器只认表里的槽位,
-    新场景加新槽位零代码(提示词/合并/解析全由表驱动)。"""
+    新场景加新槽位零代码(提示词/合并/解析全由表驱动)。
+
+    自动场景(_param_hints)的非主参数也入列——否则多参数工具的
+    可选参数永远提取不到,执行期恒被空参过滤掉。
+    """
     ordered, seen = [], set()
     for cfg in table.values():
-        slot = (cfg.get("required") or {}).get("slot")
-        if slot and slot not in seen:
-            seen.add(slot)
-            ordered.append(slot)
+        req = (cfg.get("required") or {}).get("slot")
+        if req and req not in seen:
+            seen.add(req)
+            ordered.append(req)
+        for slot in (cfg.get("_param_hints") or {}):
+            if slot not in seen:
+                seen.add(slot)
+                ordered.append(slot)
     return ordered
 
 
@@ -283,6 +291,12 @@ def _build_extract_prompt(background: str, user_input: str,
             else:
                 hint = f"{slot}: 本轮明确提到的值;没提 → 空串"
         hint_lines.append(f"- {hint}")
+        # 自动场景的非主参数(schema 可选参数):一并给提取提示,
+        # 用户说到的可选条件才能随请求出站
+        for p_slot, p_hint in (cfg.get("_param_hints") or {}).items():
+            hint_lines.append(f"- {p_slot}: "
+                              + (p_hint or "本轮明确提到的值")
+                              + ";没提 → 空串")
     slot_hints = "\n".join(dict.fromkeys(hint_lines))
     return f"""你是计量业务客服的槽位提取器。从用户消息提取 JSON(只输出 JSON):
 
@@ -657,13 +671,19 @@ _CN_NUM = {2: "两", 3: "三", 4: "四", 5: "五"}
 def _unsupported_notice() -> ToolResult:
     """范围外问题的如实答复(文案由场景表拼装,不手写清单)。"""
     table = _runtime_scenarios()
-    # 序号随场景数增长: ①-⑩ 内置,超出回退数字编号(能力导入让场景
-    # 数量开放,固定 5 个圈号会越界——线上 8 场景时真实炸过)
+    # 序号随场景数增长: ①-⑩ 内置,超出回退数字编号;清单封顶 10 项
+    # (自动路由让能力数开放,几十个工具全列出来反而是噪音)
     _CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
-    items = ";".join(
-        f"{_CIRCLED[i] if i < len(_CIRCLED) else i + 1}{cfg['label']}"
-        for i, cfg in enumerate(table.values()))
-    count = _CN_NUM.get(len(table), str(len(table)))
+    labels = [cfg['label'] for cfg in table.values()]
+    if len(labels) > len(_CIRCLED):
+        items = ";".join(
+            f"{_CIRCLED[i]}{label}" for i, label in enumerate(labels[:10]))
+        items += f";…等共 {len(labels)} 类"
+        count = str(len(labels))
+    else:
+        items = ";".join(f"{_CIRCLED[i]}{label}"
+                         for i, label in enumerate(labels))
+        count = _CN_NUM.get(len(labels), str(len(labels)))
     text = (f"当前可咨询{count}类问题:{items}。"
             "请换个问法,或联系业务窗口人工咨询。")
     return _notice("unsupported", "暂不支持此问题", text)
@@ -690,14 +710,11 @@ class MetrologyAssistantTool(Tool):
         return {"type": "object", "properties": {}}
 
     def preflight(self, state: dict, ctx: ToolContext) -> Optional[ToolResult]:
+        """只做装配检查——知识库可用性不再前置硬卡(自动路由后本域
+        也承载 MCP 工具查询,Neo4j 故障不应挡住它们);kg 动作在
+        _run_kg 内已有安全兜底(异常→如实报错,不编结果)。"""
         if not self._app_state:
             return ToolResult(error_for_llm="计量客服插件未正确装配(app_state 未注入)")
-        try:
-            from domains.knowledge_graph import runtime
-            runtime.get_kg_store(self._app_state).list_kbs()
-        except Exception:
-            logger.exception("知识库前置检查失败")
-            return ToolResult(error_for_llm="知识库服务暂不可用,请稍后重试。")
         return None
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
@@ -708,6 +725,11 @@ class MetrologyAssistantTool(Tool):
         stage = _make_monotonic_stage(
             lambda key, message: ctx.emit("stage", key, message), _PIPELINE_STEPS)
         stage("assistant.extract", "识别问题类型与关键条件…")
+
+        # 本轮统一一份路由表(提取/补答归一/路由同视图)——现算含自动
+        # 合成层,快照 TTL 刷新若落在两次现算之间会出现"提取命中而
+        # 路由查无"的期差;单份快照也把每轮的重复 DB 读砍掉 2/3
+        table = _runtime_scenarios()
 
         mem_slots = dict(mem.get("slots") or {}) if mem else {}
         mem_scenario = str(mem.get("scenario") or "") if mem else ""
@@ -726,12 +748,12 @@ class MetrologyAssistantTool(Tool):
                 return consumed
             pending = consumed
             scenario = pending.get("scenario") or mem_scenario or "other"
-            merged = merge_slots(parse_clarify_answers(answers),
+            merged = merge_slots(parse_clarify_answers(answers, table),
                                  pending.get("slots") or mem_slots)
             if mem:
                 mem.pop("pending", None)
             # 补答同样过类型归一(坏值重问;场景表可能中途改了类型)
-            _cfg0 = _runtime_scenarios().get(scenario)
+            _cfg0 = table.get(scenario)
             if _cfg0 is not None:
                 merged, _rq = normalize_required_slot(
                     _cfg0["required"], merged)
@@ -743,7 +765,7 @@ class MetrologyAssistantTool(Tool):
                         summary="补答格式不符")
         else:
             extracted = extract_slots(ctx.llm_client, user_input, mem_slots,
-                                      getattr(ctx, "conv_id", None))
+                                      getattr(ctx, "conv_id", None), table)
             scenario = (extracted["scenario"] if extracted["scenario"] != "other"
                         else (mem_scenario or "other"))
             merged = merge_slots(extracted, mem_slots)
@@ -763,7 +785,7 @@ class MetrologyAssistantTool(Tool):
             # 基于新 revision,不撞版本
             flow = self._record_slots(flow, scenario, merged)
 
-        cfg = _runtime_scenarios().get(scenario)
+        cfg = table.get(scenario)
         if cfg is None:
             return _unsupported_notice()
 

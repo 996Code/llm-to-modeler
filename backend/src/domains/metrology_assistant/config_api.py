@@ -232,6 +232,14 @@ async def dry_run(body: DryRunBody, request: Request) -> dict:
         if body.config is not None:
             validated = validate_config(body.config)
             scenarios = validated["scenarios"]
+            # 草案求值也要并上自动层:保存只改润色集,自动路由不受
+            # 影响——否则草案侧对自动工具误报"未命中"(对比结论失真)
+            from domains.metrology_assistant.capability_import import (
+                auto_scenarios)
+            try:
+                scenarios = {**auto_scenarios(scenarios), **scenarios}
+            except Exception:  # noqa: BLE001
+                logger.exception("草案求值并自动层失败,按纯草案求值")
         else:
             # 当前生效 = 场景表 ∪ 未编排 MCP 工具的自动合成(与对话
             # 链路同口径——预演能看到的路由面与线上真实一致)

@@ -152,14 +152,19 @@ def draft_scenario(server_code: str, tool: str) -> Dict[str, Any]:
         "notices": {},
         "card": "_table_card",
     }
+    # 非主参数的提取提示随草案入库(_param_hints):润色保存后可选
+    # 参数仍可提取——否则回到"多参数工具只带主参数出站"的旧缺口
+    scenario = {
+        "label": f"{desc}(MCP 导入草稿)",
+        "intent": f"问{desc}相关问题(草稿,请润色为面向用户的意图描述)",
+        "required": required,
+        "action": action,
+        "_param_hints": {s["name"]: s["description"]
+                         for s in slots if s["name"] != main["name"]},
+    }
     return {
         "key": tool,
-        "scenario": {
-            "label": f"{desc}(MCP 导入草稿)",
-            "intent": f"问{desc}相关问题(草稿,请润色为面向用户的意图描述)",
-            "required": required,
-            "action": action,
-        },
+        "scenario": scenario,
         # 其余参数槽位(非主槽位)一并列出供人工在文案中引导
         "extra_slots": [s["name"] for s in slots if s["name"] != main["name"]],
     }
@@ -322,6 +327,10 @@ def _synthesize_auto(server_code: str, decl: dict, slots: list) -> dict:
             "notices": {},
             "card": "_table_card",
         },
+        # 非主参数(schema 可选参数)的提取提示——提取提示词据此把
+        # 用户说到的可选条件一并带出,执行期未提到的仍不传出站
+        "_param_hints": {s["name"]: s["description"]
+                         for s in slots if s["name"] != main["name"]},
         "_auto": True,
     }
 
@@ -346,6 +355,16 @@ def routing_overview() -> Dict[str, Any]:
         if action.get("kind") == "chatbi" and action.get("tool"):
             polish_by_tool[str(action["tool"])] = key
 
+    # 数据源 id→名称(总览展示用,读一次全表)
+    ds_names: Dict[str, str] = {}
+    try:
+        from domains.chatbi import datasources as _bi_ds, runtime as _bi_rt
+        for info in _bi_ds.list_datasources(_bi_rt.get_pack_db(),
+                                            active_only=True):
+            ds_names[info.id] = info.name
+    except Exception:  # noqa: BLE001
+        logger.exception("路由总览:数据源名称读取失败(降级显示 id)")
+
     caps: List[dict] = []
     for s in rows:
         code = s["code"]
@@ -366,6 +385,8 @@ def routing_overview() -> Dict[str, Any]:
                     "label": cfg.get("label") or name,
                     "datasource": {
                         "datasource_id": str(action.get("datasource_id") or ""),
+                        "datasource_name": ds_names.get(
+                            str(action.get("datasource_id") or ""), ""),
                         "env": str(action.get("env") or ""),
                         "server": str(action.get("server") or "")},
                     "ask": {"slot": req.get("slot"),
@@ -393,8 +414,9 @@ def routing_overview() -> Dict[str, Any]:
                 "description": desc or synth["label"],
                 "status": "auto", "scenario_key": None,
                 "label": synth["label"],
-                "datasource": {"datasource_id": ds, "env": "",
-                               "server": code},
+                "datasource": {"datasource_id": ds,
+                               "datasource_name": ds_names.get(ds, ""),
+                               "env": "", "server": code},
                 "ask": {"slot": synth["required"]["slot"],
                         "header": synth["required"]["header"],
                         "question": synth["required"]["question"]},

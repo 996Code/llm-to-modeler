@@ -53,10 +53,15 @@
                 </a-tooltip>
               </template>
             </a-table-column>
-            <a-table-column title="数据源/执行" key="ds" :width="180">
+            <a-table-column title="数据源/执行" key="ds" :width="200">
               <template #default="{ record }">
                 <span v-if="record.kind === 'kg'">知识库证据检索</span>
-                <span v-else-if="record.status === 'blocked'" class="cap-dim">—</span>
+                <span v-else-if="record.status === 'blocked'" class="cap-blocked">
+                  {{ record.blocked_reason || '暂不可执行' }}
+                </span>
+                <span v-else-if="record.datasource?.datasource_name">
+                  {{ record.datasource.datasource_name }}{{ record.status === 'auto' ? '(执行期解析)' : '' }}
+                </span>
                 <span v-else-if="record.datasource?.datasource_id" class="cap-mono">
                   {{ record.datasource.datasource_id.slice(0, 8) }}{{ record.status === 'auto' ? '(执行期解析)' : '' }}
                 </span>
@@ -382,9 +387,10 @@ async function polishTool(row: RoutingCap) {
 }
 
 function tryInDry(row: RoutingCap) {
-  dry.text = row.ask?.question
-    ? row.ask.question.replace(/^请提供[^(如]*/, '').slice(0, 40)
-    : ''
+  // 不做猜测式预填(追问文案里的示例截出来往往不成句)——切到预演
+  // 让用户自己输入,placeholder 已有示例
+  dry.text = ''
+  dry.error = ''
   tab.value = 'dryrun'
 }
 
@@ -608,6 +614,7 @@ onMounted(async () => {
 .cap-desc { color: #9aa4b2; font-size: 12px; margin-top: 2px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cap-mono { font-family: monospace; font-size: 12px; }
 .cap-dim { color: #c0c6cf; }
+.cap-blocked { color: #d4380d; font-size: 12px; }
 .cap-error { color: #d4380d; font-size: 12px; }
 .metro-tab-body { display: flex; gap: 16px; min-height: 380px; }
 .scenario-list { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px; }
