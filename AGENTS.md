@@ -14,6 +14,6 @@
 
 - 测试：`cd backend && .venv/bin/python -m pytest tests/ -q`（必须 .venv；需本机 Docker）
 - 前端：`cd frontend && npx vue-tsc --noEmit`；本地起服 `bash start_dev.sh --backend-only` + `npm run dev`(13080)
-- 推送：**双远程一起推**（origin GitHub + njmind 内网）；修复双落 feat/bid-demo + main
+- 推送：**双远程一起推**（origin GitHub + njmind 内网）；分支策略（2026-10-27 起）：GitHub 与本地**只保留 main** 直接提交，不再开 feat 分支
 - 部署：[doc/agents/deploy-99-22.md](doc/agents/deploy-99-22.md)（99.22，干净 worktree 出包，导入运行中不部署）
 - 红线：28080 不动；共享宿主机不加内存；不碰用户在途未提交文件；凭证不入库
