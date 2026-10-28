@@ -48,8 +48,9 @@
 }
 
 /* 表体按视口动态限高(翻页不用长滚找分页器);高度随分辨率自适应,
-   头部/工具栏占地大时表格自动矮下去。分页器 sticky 贴视口底常驻。 */
-.shell .ant-table-content {
+   头部/工具栏占地大时表格自动矮下去。分页器 sticky 贴视口底常驻。
+   不加 .shell 前缀:弹窗/抽屉里的表格传送门挂在 body 下,在 .shell 外。 */
+.ant-table-content {
   max-height: calc(100dvh - 300px);
   overflow: auto;
 }
