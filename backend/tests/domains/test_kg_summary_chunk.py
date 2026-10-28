@@ -125,3 +125,53 @@ class TestSummaryChunk:
         rows = [c for c in env.store.list_chunks(doc["id"], include_summary=True)
                 if c["seq"] == -1]
         assert len(rows) == 1 and rows[0]["text"] == "第二版摘要"
+
+
+class TestLlmTextSanitize:
+    """LLM 输出脏字符清洗——外部库 4 文档导入失败实录(NUL 拒收/代理对
+    编码炸),入库前统一剔除;文档文本侧 _nfkc 已覆盖,这里是 LLM 侧补口。"""
+
+    def test_摘要_脏字符剔除(self, import_env):
+        env, _, llm = import_env
+
+        class _DirtyLLM(_SummaryLLM):
+            def chat(self, messages, **kw):
+                if kw.get("stage") == "kg.summary":
+                    return "本文档规定了\x00劳动用工\ud835基本制度。"
+                return super().chat(messages, **kw)
+
+        env.app_state.llm_client = _DirtyLLM()
+        kb, doc = _mk_doc(env.store, "脏摘要库")
+        handle = _RecordingHandle({"kb_id": kb["id"], "doc_id": doc["id"]})
+        ok = kg_tasks._generate_summary_chunk(
+            handle, env.app_state, env.store, kb,
+            env.store.get_document(doc["id"]),
+            env.store.list_chunks(doc["id"]), "conv-d")
+        assert ok is True
+        rows = [c for c in env.store.list_chunks(doc["id"], include_summary=True)
+                if c["seq"] == -1]
+        assert rows and rows[0]["text"] == "本文档规定了劳动用工基本制度。"
+
+    def test_抽取规范化_脏字符剔除(self):
+        from domains.knowledge_graph.tasks import _normalize_extraction
+        ents, rels = _normalize_extraction({
+            "entities": [
+                {"name": "示\x00值误差", "type": "con\ud835cept",
+                 "description": "测量\ud835示值与真值\x00之差",
+                 "aliases": ["示\ud835值差", ""]},
+            ],
+            "relations": [
+                {"source": "示\x00值误差", "target": "校准\ud835",
+                 "type": "属于", "description": "误差\ud835分类",
+                 "evidence": "第4章\x00"},
+            ],
+        })
+        e = ents[0]
+        assert e["name"] == "示值误差" and "concept" == e["type"]
+        assert "\x00" not in e["description"] and "\ud835" not in e["description"]
+        assert e["aliases"] == ["示值差"]
+        r = rels[0]
+        assert r["source"] == "示值误差"
+        assert r["target"] == "校准"
+        for v in (r["description"], r["evidence"]):
+            assert "\x00" not in v and "\ud835" not in v

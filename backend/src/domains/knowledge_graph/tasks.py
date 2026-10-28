@@ -34,6 +34,15 @@ from sdk.pack_api import task_conv_id
 
 logger = logging.getLogger(__name__)
 
+# LLM 输出偶发 \u0000 或孤立代理对(json 转义还原成裸字符)——PG text 拒
+# NUL、psycopg 编码拒代理对,导入直接失败(外部库 4 文档实录)。入库前剔除。
+_DIRTY_CHARS_RE = re.compile(r"[\x00\ud800-\udfff]")
+
+
+def _clean_llm_text(s: str) -> str:
+    return _DIRTY_CHARS_RE.sub("", s)
+
+
 # 进度权重:解析切块 2% / 向量准备 10% / 抽取批 88%
 _W_PARSE, _W_VECTOR, _W_EXTRACT = 2, 10, 88
 
@@ -1022,9 +1031,9 @@ def _generate_summary_chunk(handle, app_state, store, kb: Dict, doc: Dict,
             f"请用 200 字以内概括这份文档的主题和主要内容,直接输出概括,"
             f"不要任何前缀说明:\n\n{text}"
         )
-        summary = app_state.llm_client.chat(
+        summary = _clean_llm_text(app_state.llm_client.chat(
             [{"role": "user", "content": prompt}],
-            temperature=0.2, conv_id=conv_id, stage="kg.summary").strip()
+            temperature=0.2, conv_id=conv_id, stage="kg.summary").strip())
         if not summary:
             return False
         chunk_id = store.upsert_summary_chunk(doc["id"], kb["id"], summary)
@@ -1378,7 +1387,7 @@ def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
             break
         if not isinstance(e, dict):
             continue
-        name = str(e.get("name") or "").strip()
+        name = _clean_llm_text(str(e.get("name") or "")).strip()
         if not name or len(name) > 120:
             continue
         normalized = normalize_name(name)
@@ -1387,10 +1396,10 @@ def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
         seen.add(normalized)
         entities.append({
             "name": name, "normalized_name": normalized,
-            "type": str(e.get("type") or "concept").strip()[:60] or "concept",
-            "description": str(e.get("description") or "").strip()[:500],
-            "aliases": [str(a).strip()[:120] for a in (e.get("aliases") or [])
-                        if str(a).strip()][:10],
+            "type": _clean_llm_text(str(e.get("type") or "concept")).strip()[:60] or "concept",
+            "description": _clean_llm_text(str(e.get("description") or "")).strip()[:500],
+            "aliases": [_clean_llm_text(str(a)).strip()[:120] for a in (e.get("aliases") or [])
+                        if _clean_llm_text(str(a)).strip()][:10],
             "chunk_id": "",
         })
 
@@ -1400,15 +1409,15 @@ def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
             break
         if not isinstance(r, dict):
             continue
-        source = normalize_name(str(r.get("source") or ""))
-        target = normalize_name(str(r.get("target") or ""))
-        rtype = str(r.get("type") or "").strip()[:60]
+        source = normalize_name(_clean_llm_text(str(r.get("source") or "")))
+        target = normalize_name(_clean_llm_text(str(r.get("target") or "")))
+        rtype = _clean_llm_text(str(r.get("type") or "")).strip()[:60]
         if not source or not target or not rtype or source == target:
             continue
         relations.append({
             "source": source, "target": target, "type": rtype,
-            "description": str(r.get("description") or "").strip()[:500],
-            "evidence": str(r.get("evidence") or "").strip()[:500],
+            "description": _clean_llm_text(str(r.get("description") or "")).strip()[:500],
+            "evidence": _clean_llm_text(str(r.get("evidence") or "")).strip()[:500],
             "chunk_id": "",
         })
     return entities, relations
