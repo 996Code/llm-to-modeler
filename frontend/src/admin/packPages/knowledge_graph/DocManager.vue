@@ -64,6 +64,15 @@
       <a-button size="small" @click="loadUsage">
         <BarChartOutlined /> 使用统计
       </a-button>
+      <!-- 状态筛选:文档表是解析状态真相源(任务页只反映任务执行记录,
+           中断自动重排的任务是 pending/cancelled 而非 failed) -->
+      <a-select v-model:value="statusFilter" size="small" style="width: 150px"
+                @change="onStatusFilterChange">
+        <a-select-option value="">全部状态 ({{ docs.length }})</a-select-option>
+        <a-select-option v-for="(meta, s) in STATUS" :key="s" :value="s">
+          {{ meta.label }} ({{ statusCounts[s] || 0 }})
+        </a-select-option>
+      </a-select>
       <span class="dm-tip">上传成功后自动导入，可在任务中心查看进度</span>
     </div>
 
@@ -77,7 +86,7 @@
 
     <!-- 文档表 -->
     <a-table
-      :columns="columns" :data-source="docs" :loading="loading" row-key="id"
+      :columns="columns" :data-source="filteredDocs" :loading="loading" row-key="id"
       :row-selection="{ selectedRowKeys: selectedIds, onChange: (k: string[]) => selectedIds = k }"
       size="small" :scroll="{ x: 1100 }" :pagination="{ pageSize: 20, showTotal: (t: number) => `共 ${t} 条` }"
     >
@@ -403,6 +412,20 @@ const STATUS: Record<string, { color: string; label: string }> = {
 }
 const statusColor = (s: string) => STATUS[s]?.color || 'default'
 const statusLabel = (s: string) => STATUS[s]?.label || s
+
+// ── 状态筛选(本地过滤;文档列表全量拉回,千级无压力) ──
+const statusFilter = ref('')
+const statusCounts = computed(() => {
+  const c: Record<string, number> = {}
+  for (const d of docs.value) c[d.importStatus] = (c[d.importStatus] || 0) + 1
+  return c
+})
+const filteredDocs = computed(() =>
+  statusFilter.value ? docs.value.filter((d) => d.importStatus === statusFilter.value) : docs.value)
+function onStatusFilterChange() {
+  // 清空勾选:勾选里可能混着被筛掉的行,保留会导致"批量删除(N)"与可见行对不上
+  selectedIds.value = []
+}
 const isFinal = (t: TaskItem) => ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(t.status)
 
 function fmtSize(bytes: number): string {

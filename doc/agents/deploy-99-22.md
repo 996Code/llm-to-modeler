@@ -15,6 +15,13 @@
 - 凭证（root SSH / Neo4j 密码）在服务器 `.env` 与运维备忘，**不入库**
 - 红线：**28080（别人的部署）绝对不动**；1Panel PG(5432) 是共享生产库
 
+## metrology-mcp / equipment-mcp（mock 业务平台）
+
+- **equipment-mcp（10-28 新增,第二业务域）**：同款复用 app 镜像
+  （`command: python /app/mcp-e2e/equipment_server.py`，9772 仅 compose 内网），
+  注册表 code=equipment、数据源「设备管理平台(通用)」host=equipment 绑定；
+  服务器 compose 已含该服务（docker-compose.yml.bak-1028 为加它之前的备份）。
+
 ## metrology-mcp（mock 计量业务平台）
 
 - **复用 app 镜像**（`command: python /app/mcp-e2e/metrology_server.py`）——mcp SDK
