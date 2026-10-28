@@ -54,9 +54,13 @@ async def test_env(request: Request, legacy_demo: bool = False) -> dict:
     for scenario in table.values():
         req = scenario.get('required') or {}
         if '单号' in str(req.get('header') or ''):
-            fixtures.extend({'order': o.get('label'), 'desc': o.get('description') or ''}
-                            for o in (req.get('options') or [])
-                            if isinstance(o, dict) and o.get('label'))
+            # options 经装载 _rehydrate 复原为 AskOption 对象——dict/对象双形状兼容
+            for o in (req.get('options') or []):
+                label = o.get('label') if isinstance(o, dict) else getattr(o, 'label', None)
+                desc = (o.get('description') if isinstance(o, dict)
+                        else getattr(o, 'description', '')) or ''
+                if label:
+                    fixtures.append({'order': label, 'desc': desc})
     fixtures += [
         {'order': 'BJ8888', 'desc': '他主体单(拒权)'},
         {'order': 'BJ9000', 'desc': '不存在(查无)'},
