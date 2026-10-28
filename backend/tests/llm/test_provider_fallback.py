@@ -1,10 +1,10 @@
 """C8 模型供应商主备切换(设计 8.6)——存储语义+切换语义+留痕。
 
 覆盖:
-  - llm_providers 存储:revision CAS/校验/留空 key 沿用旧值/启停解析
+  - llm_providers 存储:直存(无 CAS)/校验/留空 key 沿用旧值/启停解析
   - LLMClient 端点链:DB 配置覆盖 env;连接类失败同参数切备用;
     身份(401)/限流(429)/未知错误不切;provider+成本进调用日志
-  - 管理 API:GET 掩码(has_key)/PUT 409/400/probe
+  - 管理 API:GET 掩码(has_key)/PUT 直存与校验
 
 openai 异常构造:httpx.Request/Response 最小替身(openai SDK 的
 APIStatusError 需要 response.request)。
@@ -51,7 +51,7 @@ def _save_default(probe_calls=None):
                     "model": "m-primary", "price_in": 0.01, "price_out": 0.02},
         "fallback": {"base_url": "http://fallback.test/v1", "api_key": "sk-f",
                      "model": "m-fallback"},
-    }, 0, "test")
+    }, "test")
 
 
 def _client_with_creates(monkeypatch, results_by_url):
@@ -100,33 +100,48 @@ def _ok_response(content="hi", pt=10, ct=5):
 
 # ── 存储 ─────────────────────────────────────────────────────
 
-def test_store_cas_and_keep_key():
+def test_store_direct_save_and_keep_key():
+    """直存(无 CAS):revision 自增;留空 key 沿用旧值。"""
     _save_default()
     assert store.current_revision() == 1
-    # CAS 冲突
-    with pytest.raises(store.ProviderConflictError):
-        store.save_providers({"primary": {"base_url": "http://a/v1",
-                                          "model": "m"}}, 0, "x")
+    assert store.resolve_active()["primary"]["model"] == "m-primary"
+    store.save_providers({"primary": {"base_url": "http://a/v1",
+                                      "model": "m"}}, "x")
+    assert store.current_revision() == 2
+    assert store.resolve_active()["primary"]["model"] == "m"
+    with store._conn() as conn:
+        row = conn.execute(
+            "SELECT updated_by FROM llm_providers WHERE scope = ?",
+            (store.SCOPE,)).fetchone()
+    assert row["updated_by"] == "x"
     # 留空 key 沿用旧值
     store.save_providers({
         "primary": {"base_url": "http://primary2/v1", "api_key": "",
                     "model": "m2", "_existing_key": "sk-p"},
         "fallback": {"base_url": "http://f2/v1", "api_key": "",
-                     "model": "mf", "_existing_key": "sk-f"}}, 1, "t")
+                     "model": "mf", "_existing_key": "sk-f"}}, "t")
     cfg = store.load_providers()
     assert cfg["primary"]["api_key"] == "sk-p"
     assert cfg["fallback"]["api_key"] == "sk-f"
+    assert cfg["_revision"] == 3
+
+
+def test_store_rejects_revision_argument():
+    content = {"primary": {"base_url": "http://a/v1", "model": "m"}}
+    with pytest.raises(TypeError):
+        store.save_providers(content, "test", 0)
+    assert store.current_revision() == 0
 
 
 def test_store_validation_and_disabled():
     with pytest.raises(store.ProviderConfigError):
-        store.save_providers({"primary": {"model": "m"}}, 0, "x")
+        store.save_providers({"primary": {"model": "m"}}, "x")
     with pytest.raises(store.ProviderConfigError):
-        store.save_providers({"primary": {"base_url": "http://a/v1"}}, 0, "x")
+        store.save_providers({"primary": {"base_url": "http://a/v1"}}, "x")
     store.save_providers({
         "primary": {"base_url": "http://a/v1", "model": "m", "enabled": True},
         "fallback": {"base_url": "http://b/v1", "model": "m",
-                     "enabled": False}}, 0, "t")
+                     "enabled": False}}, "t")
     active = store.resolve_active()
     assert list(active) == ["primary"]  # 停用的 fallback 不参与
 
@@ -267,21 +282,33 @@ def test_api_get_masks_key(api):
     assert resp["primary"]["has_key"] is True
 
 
-def test_api_put_conflict_and_keep_key(api):
+def test_api_put_direct_and_keep_key(api):
+    """PUT 直存(无 CAS);留空 key 沿用旧值(GET 仍显示 has_key)。"""
     _save_default()
     body = {
         "primary": {"base_url": "http://new/v1", "api_key": "",
                     "model": "m", "enabled": True},
-        "expected_revision": 0,  # 库里已是 1 → 409
     }
-    assert api.put("/api/admin/llm-providers", json=body).status_code == 409
-    # 正确 revision + 留空 key → 沿用旧值(GET 仍显示 has_key)
-    body["expected_revision"] = 1
     ok = api.put("/api/admin/llm-providers", json=body)
     assert ok.status_code == 200
+    assert ok.json()["revision"] == 2
     cfg = store.load_providers()
     assert cfg["primary"]["api_key"] == "sk-p"
     assert cfg["primary"]["base_url"] == "http://new/v1"
+    body["primary"]["model"] = "new-model"
+    again = api.put("/api/admin/llm-providers", json=body)
+    assert again.status_code == 200
+    assert again.json()["revision"] == 3
+    assert store.resolve_active()["primary"]["model"] == "new-model"
+
+
+def test_api_invalid_save_preserves_config(api):
+    _save_default()
+    before = store.load_providers()
+    resp = api.put("/api/admin/llm-providers", json={
+        "primary": {"base_url": "http://new/v1", "model": ""}})
+    assert resp.status_code == 400
+    assert store.load_providers() == before
 
 
 # ── PII 脱敏前置(设计 7.3:先于 call_logs 记录)────────────────

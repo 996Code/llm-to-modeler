@@ -1,7 +1,7 @@
 """平台 LLM 供应商管理 API(设计 8.6/C8,admin 门禁)。
 
 GET  /api/admin/llm-providers   当前配置(api_key 不回显,has_key 布尔)
-PUT  /api/admin/llm-providers   整档保存(revision CAS;api_key 留空=沿用旧值)
+PUT  /api/admin/llm-providers   整档直存(api_key 留空沿用旧值,revision 用于缓存失效)
 POST /api/admin/llm-providers/probe  连通性探测(主/备各发一次 1-token 请求)
 """
 import logging
@@ -31,7 +31,6 @@ class ProviderRoleIn(BaseModel):
 class ProvidersSaveBody(BaseModel):
     primary: ProviderRoleIn
     fallback: ProviderRoleIn | None = None
-    expected_revision: int
     comment: str = ""
 
 
@@ -74,12 +73,10 @@ async def put_providers(body: ProvidersSaveBody, request: Request) -> dict:
                 content[role]["_existing_key"] = old_key
     try:
         new_rev = store.save_providers(
-            content, body.expected_revision,
+            content,
             updated_by=getattr(request.state, "user_id", None) or "admin")
     except store.ProviderConfigError as e:
         raise HTTPException(400, f"供应商配置校验失败: {e}")
-    except store.ProviderConflictError as e:
-        raise HTTPException(409, str(e))
     store.invalidate_cache()
     return {"revision": new_rev}
 

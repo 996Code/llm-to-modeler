@@ -74,7 +74,7 @@ def _make_client(store, monkeypatch, log_full):
     from services import llm_providers as _providers
     _providers.save_providers({
         "primary": {"base_url": "http://x/v1", "api_key": "k",
-                    "model": LLMConfig().model}}, 0, "test")
+                    "model": LLMConfig().model}}, updated_by="test")
     client = LLMClient(config=LLMConfig(base_url="http://x/v1", api_key="k"), conversation_store=store)
     return client
 

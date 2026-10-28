@@ -45,7 +45,7 @@ def _bare_client() -> LLMClient:
     _providers.reset_runtime_cache_for_tests()
     _providers.save_providers({
         "primary": {"base_url": "http://test", "api_key": "k",
-                    "model": "qwen3.8-max"}}, 0, "test")
+                    "model": "qwen3.8-max"}}, updated_by="test")
     return client
 
 

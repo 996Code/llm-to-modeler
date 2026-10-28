@@ -1,7 +1,7 @@
 """平台 LLM 供应商配置(设计 8.6/C8):DB 唯一事实源,管理页维护,运行时热生效。
 
 职责边界:
-  - 本模块只管"配置的存取"(revision CAS);
+  - 本模块负责配置存取,revision 用于运行时缓存失效;
   - 运行时解析与主备切换在 llm/client.py(每轮读当前生效配置);
   - 管理端 API 在 api/llm_providers.py。
 
@@ -9,7 +9,7 @@
   {"primary":   {base_url, api_key, model, enabled, price_in, price_out},
    "fallback":  {...同构,可缺省}}
   - api_key 明文存储(与 .env 同信任域:库与配置文件同机同权限;
-    管理端 GET/PUT 均走 admin 门禁,直接回显/写回,不做遮蔽往返)。
+    管理端 GET/PUT 均走 admin 门禁,GET 不回显,PUT 留空沿用旧值)。
   - price_in/out: 元/千token,可空(null)——空则调用日志不计成本。
   - enabled=False 的角色不参与解析(留配置不删,便于临时停用);
     fallback 缺省 = 无备用。
@@ -27,10 +27,6 @@ SCOPE = "global"
 
 class ProviderConfigError(ValueError):
     """配置结构非法(管理端保存 400)。"""
-
-
-class ProviderConflictError(Exception):
-    """revision CAS 冲突(管理端 409)。"""
 
 
 # ── 存取(平台 public.llm_providers 单行档,模式对齐 assistant_config)──
@@ -91,7 +87,7 @@ _ROLE_FIELDS = ("base_url", "api_key", "model", "enabled", "price_in", "price_ou
 
 
 def validate_providers(content: Dict[str, Any]) -> Dict[str, Any]:
-    """校验+规范化;非法抛 ProviderConfigError。返回可入库形状(api_key 加密)。"""
+    """校验并规范化为可入库配置;非法抛 ProviderConfigError。"""
     if not isinstance(content, dict):
         raise ProviderConfigError("配置必须是 JSON 对象")
     primary = content.get("primary")
@@ -131,18 +127,14 @@ def validate_providers(content: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def save_providers(content: Dict[str, Any], expected_revision: int,
-                   updated_by: str = "") -> int:
-    """整档保存(CAS);冲突抛 ProviderConflictError,返回新 revision。"""
+def save_providers(content: Dict[str, Any], updated_by: str = "") -> int:
+    """直接保存并递增 revision,使运行时配置缓存失效。"""
     with _conn() as conn:
         _ensure_table(conn)
         row = conn.execute(
-            "SELECT revision, content FROM llm_providers WHERE scope = ?",
+            "SELECT revision FROM llm_providers WHERE scope = ?",
             (SCOPE,)).fetchone()
         current = int(row["revision"]) if row else 0
-        if current != int(expected_revision):
-            raise ProviderConflictError(
-                f"配置已变更(当前 revision {current},提交基于 {expected_revision})")
         payload = validate_providers(content)
         new_rev = current + 1
         if row:

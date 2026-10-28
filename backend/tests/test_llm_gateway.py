@@ -176,7 +176,7 @@ class TestChatCache:
         d = LLMConfig()
         _providers.save_providers({
             "primary": {"base_url": d.base_url, "api_key": d.api_key,
-                        "model": d.model}}, 0, "test")
+                        "model": d.model}}, updated_by="test")
         yield
         _providers.reset_runtime_cache_for_tests()
 
