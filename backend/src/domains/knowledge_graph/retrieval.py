@@ -389,17 +389,29 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     # 种子——别名/错别字/部分匹配场景)时,kg_chunks PG 全文检索补充召回。
     # 旧路在此场景整体哑火(纯包含匹配对"孔明诸葛亮"这类查询永不命中),
     # 第三路按 2-gram 全文召回原文片段,让回答仍有资料可依。
-    # 文档实体收敛(通用,零业务词):意图种子命中 document 类型实体时,
-    # 该实体的来源文档就是用户所指范围——同模板批量库(兄弟文档条款
-    # 文本几乎相同)的邻居片段不再混入。未命中 document 实体(用户
-    # 没点名任何文档)不收敛,行为与原先完全一致。实体与类型均来自
-    # 图谱抽取/本体配置,不含任何编号正则。
+    # 文档实体收敛(通用,零业务词):意图命中 document 类型实体且为
+    # "点名"级强匹配时,该实体的来源文档就是用户所指范围——同模板
+    # 批量库(兄弟文档条款文本几乎相同)的邻居片段不再混入。未命中
+    # document 实体(用户没点名)不收敛,行为与原先完全一致。
+    # 强匹配=归一化后 term 与实体名 相等/前缀/后缀(编号或完整标题);
+    # 仅中段子串(如泛指型号词)不算点名——find_entities 的 CONTAINS
+    # 兜底会让短词命中长文档名,弱信号触发收敛会误挡同类多文档素材。
     _DOC_SCOPE_MAX_DOCS = 3  # 来源文档超过此数=泛指而非点名,不收敛
     auto_doc_scope: Optional[set] = None
     if doc_filter is None and seeds:
+        from sdk.graph_store import normalize_name as _norm
+        strong_terms = {_norm(str(t)) for t in terms if str(t).strip()}
+
+        def _named(entity_name: str) -> bool:
+            name = _norm(str(entity_name or ""))
+            if not name:
+                return False
+            return any(name == t or name.startswith(t) or name.endswith(t)
+                       for t in strong_terms if t)
+
         scope_docs = set()
         for s in seeds:
-            if str(s.get("type") or "") == "document":
+            if str(s.get("type") or "") == "document" and _named(s.get("name")):
                 scope_docs.update(s.get("sourceDocs") or [])
         if 0 < len(scope_docs) <= _DOC_SCOPE_MAX_DOCS:
             auto_doc_scope = scope_docs
@@ -549,6 +561,8 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     if auto_doc_scope is not None and not chunks and kb.get("vectorEnabled"):
         _stage("kb_search.vector", "指定文档内零召回,放开范围全库检索…")
         diagnostics["docScopeRelaxed"] = True
+        _t0 = time.monotonic()
+        _err = None
         try:
             vector = runtime.get_vector(app_state)
             k = top_k or int(_cfg(app_state, "vector_top_k", 5))
@@ -560,8 +574,24 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             for h in hits:
                 h["docName"] = _doc_names.get(h.get("docId") or "", "")
             chunks = hits
-        except Exception:
+            diagnostics["parentContextHits"] = _apply_parent_context(store, hits)
+        except Exception as e:
+            _err = str(e)
             logger.warning("文档收敛回退全库检索失败", exc_info=True)
+        finally:
+            _log_retrieval_call(
+                app_state, CT_VECTOR, f"{_vector_backend()}:search",
+                request_data={"stage": "kg.vector_search", "kbId": kb["id"],
+                              "kb": kb.get("name"), "topK": k,
+                              "query": query[:200], "docScopeRelaxed": True},
+                response_data={"hits": len(chunks),
+                               "results": [
+                                   {"doc": h.get("docName") or h.get("docId") or "?",
+                                    "seq": h.get("seq"),
+                                    "score": round(float(h.get("score") or 0.0), 4)}
+                                   for h in chunks]},
+                duration_ms=int((time.monotonic() - _t0) * 1000),
+                error=_err, conv_id=conv_id)
 
     return {"intent": intent, "seeds": seeds, "subgraph": subgraph,
             "chunks": chunks, "diagnostics": diagnostics}

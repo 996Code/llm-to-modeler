@@ -266,7 +266,7 @@ class TestDocumentEntityScope:
             "id": "kb1:规程甲", "name": "规程甲大纲", "normalized": "规程甲",
             "type": "document", "description": "", "aliases": [],
             "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
-        env.llm.intent = {"entities": ["规程甲"], "relation_types": [],
+        env.llm.query_result = {"entities": ["规程甲"], "relation_types": [],
                           "keywords": [], "hop": 1}
         # fake 向量命中按真实文档注入:目标文档高分在前,兄弟文档在后
         env.vector.hits = [
@@ -286,7 +286,7 @@ class TestDocumentEntityScope:
             "id": "kb1:甲", "name": "甲", "normalized": "甲", "type": "person",
             "description": "", "aliases": [], "sourceDocs": [docs[0]["id"]],
             "typeStatus": "approved", "updatedAt": ""}
-        env.llm.intent = {"entities": ["甲"], "relation_types": [],
+        env.llm.query_result = {"entities": ["甲"], "relation_types": [],
                           "keywords": [], "hop": 1}
         out = retrieval.hybrid_retrieve(env.app_state, KB1, "甲的资料")
         assert "docScopeFromEntity" not in out["diagnostics"]
@@ -298,7 +298,7 @@ class TestDocumentEntityScope:
             "id": "kb1:规程甲", "name": "规程甲大纲", "normalized": "规程甲",
             "type": "document", "description": "", "aliases": [],
             "sourceDocs": ["doc-missing"], "typeStatus": "approved", "updatedAt": ""}
-        env.llm.intent = {"entities": ["规程甲"], "relation_types": [],
+        env.llm.query_result = {"entities": ["规程甲"], "relation_types": [],
                           "keywords": [], "hop": 1}
         env.vector.hits = [
             {"chunkId": f"{docs[1]['id']}-c0", "docId": docs[1]["id"], "seq": 0,
@@ -313,7 +313,7 @@ class TestDocumentEntityScope:
             "id": "kb1:规程甲", "name": "规程甲大纲", "normalized": "规程甲",
             "type": "document", "description": "", "aliases": [],
             "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
-        env.llm.intent = {"entities": ["规程甲"], "relation_types": [],
+        env.llm.query_result = {"entities": ["规程甲"], "relation_types": [],
                           "keywords": [], "hop": 1}
         env.vector.hits = [
             {"chunkId": f"{docs[i]['id']}-c0", "docId": docs[i]["id"], "seq": 0,
@@ -321,4 +321,65 @@ class TestDocumentEntityScope:
         out = retrieval.hybrid_retrieve(env.app_state, KB1, "规程甲的环境要求",
                                         doc_filter={docs[1]["id"]})
         assert all(c["docId"] == docs[1]["id"] for c in out["chunks"])
+        assert "docScopeFromEntity" not in out["diagnostics"]
+
+    def test_mid_substring_document_hit_does_not_converge(self, env):
+        """泛指型号词仅是文档名中段子串(CONTAINS 兜底命中)→ 不收敛。
+
+        场景:库里有多份"水分测定仪"规程,用户泛问型号词;短词是长文档
+        实体名的中段——命中种子但不是点名,误收敛会挡掉同类多文档素材。
+        """
+        kb, docs = _mk_docs(env, 3)
+        env.graph.nodes[("kb1", "jjf1381-2012原棉水分测定仪型式评价大纲")] = {
+            "id": "kb1:d1381", "name": "JJF 1381-2012 原棉水分测定仪型式评价大纲",
+            "normalized": "jjf1381-2012原棉水分测定仪型式评价大纲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.vector.hits = [
+            {"chunkId": f"{docs[i]['id']}-c0", "docId": docs[i]["id"], "seq": 0,
+             "text": f"水分测定仪文档{i}块", "score": 0.9 - i * 0.05} for i in range(3)]
+        env.llm.query_result = {"entities": ["水分测定仪"], "relation_types": [],
+                          "keywords": [], "hop": 1}
+        # fake graph 按 normalized 精确匹配:意图词是中段子串,真实图
+        # CONTAINS 兜底会命中——这里直接模拟该兜底结果(种子已返回)
+        env.graph.nodes[("kb1", "水分测定仪")] = env.graph.nodes[
+            ("kb1", "jjf1381-2012原棉水分测定仪型式评价大纲")]
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "水分测定仪怎么校准")
+        assert "docScopeFromEntity" not in out["diagnostics"]
+        assert {c["docId"] for c in out["chunks"]} == {d["id"] for d in docs}
+
+    def test_multiple_document_seeds_merge_scope(self, env):
+        """多个 document 实体(同一规程的不同版本)合并为范围。"""
+        kb, docs = _mk_docs(env, 3)
+        for key, name, doc in (
+                ("jjf1规程甲大纲", "JJF 1 规程甲大纲", docs[0]),
+                ("jjf2规程甲大纲", "JJF 2 规程甲大纲", docs[1])):
+            env.graph.nodes[("kb1", key)] = {
+                "id": f"kb1:{key}", "name": name, "normalized": key,
+                "type": "document", "description": "", "aliases": [],
+                "sourceDocs": [doc["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.vector.hits = [
+            {"chunkId": f"{docs[i]['id']}-c0", "docId": docs[i]["id"], "seq": 0,
+             "text": f"规程甲v{i}块", "score": 0.9 - i * 0.05} for i in range(3)]
+        env.llm.query_result = {"entities": ["JJF 1", "JJF 2"],
+                          "relation_types": [], "keywords": [], "hop": 1}
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "规程甲新旧版本差异")
+        assert set(out["diagnostics"]["docScopeFromEntity"]) == {
+            docs[0]["id"], docs[1]["id"]}
+        assert {c["docId"] for c in out["chunks"]} == {docs[0]["id"], docs[1]["id"]}
+
+    def test_more_than_three_source_docs_means_generic_not_named(self, env):
+        """document 实体来源文档过多=泛指引用,不收敛。"""
+        kb, docs = _mk_docs(env, 4)
+        env.graph.nodes[("kb1", "总纲")] = {
+            "id": "kb1:总纲", "name": "总纲", "normalized": "总纲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [d["id"] for d in docs], "typeStatus": "approved",
+            "updatedAt": ""}
+        env.vector.hits = [
+            {"chunkId": f"{docs[i]['id']}-c0", "docId": docs[i]["id"], "seq": 0,
+             "text": f"文档{i}块", "score": 0.9 - i * 0.05} for i in range(4)]
+        env.llm.query_result = {"entities": ["总纲"], "relation_types": [],
+                          "keywords": [], "hop": 1}
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "总纲相关要求")
         assert "docScopeFromEntity" not in out["diagnostics"]
