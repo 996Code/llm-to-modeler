@@ -180,17 +180,20 @@ defineExpose({ show })
 .wiz-footer { display: flex; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px solid #eef1f7; }
 .wiz-summary .wiz-row { margin: 6px 0; font-size: 13px; color: #4b5563; }
 .wiz-summary b { color: #1f2937; margin-right: 10px; }
-.kg-templates { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.kg-templates { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 .kg-tpl {
-  border: 1px solid #e6ebf2; border-radius: 10px; padding: 10px 12px; cursor: pointer;
+  border: 1px solid #e6ebf2; border-radius: 8px; padding: 10px 12px; cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
 .kg-tpl:hover { border-color: #a5b4fc; }
 .kg-tpl.on { border-color: #2f54eb; background: #f5f7ff; }
 .kg-tpl-title { font-weight: 600; font-size: 13px; color: #1f2937; }
 .kg-tpl-desc { font-size: 12px; color: #6b7280; margin: 4px 0 2px; }
-.kg-tpl-meta { font-size: 11px; color: #94a3b8; }
+.kg-tpl-meta { font-size: 12px; color: #94a3b8; }
 .dm-upload-icon { font-size: 26px; color: #2f54eb; margin: 4px 0; }
 .dm-upload-text { font-size: 13px; color: #374151; margin: 0; }
 .dm-upload-hint { font-size: 12px; color: #9ca3af; margin: 2px 0 0; }
+.wiz-footer { flex-wrap: wrap; }
+.wiz-row, .kg-tpl { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .kg-templates { grid-template-columns: minmax(0, 1fr); } }
 </style>

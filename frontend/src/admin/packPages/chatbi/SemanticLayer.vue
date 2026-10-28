@@ -8,7 +8,7 @@
       <a-tag v-if="version" color="success">v{{ version }}</a-tag>
       <a-input-search v-model:value="search" placeholder="搜索表名 / 中文名 / 指标名..." style="width: 260px"
                       allow-clear />
-      <div style="margin-left: auto; display: flex; gap: 8px">
+      <div class="sl-toolbar-actions">
         <a-button size="small" @click="loadContent"><ReloadOutlined /> 刷新</a-button>
         <a-button size="small" @click="openVersions"><HistoryOutlined /> 版本历史</a-button>
       </div>
@@ -677,8 +677,10 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.sl-page { display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 210px); min-height: 480px; }
-.sl-toolbar { display: flex; align-items: center; gap: 10px; }
+.sl-page { display: flex; flex-direction: column; gap: 16px; height: calc(100vh - 210px); min-height: 480px; min-width: 0; container-type: inline-size; }
+.sl-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sl-toolbar-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+.sl-toolbar > :deep(.ant-select), .sl-toolbar > :deep(.ant-input-search) { max-width: 100%; }
 .muted { color: #86909c; font-size: 12px; }
 
 /* 双栏布局 */
@@ -687,7 +689,7 @@ onMounted(() => {
 /* 左栏表列表 */
 .sl-table-list {
   width: 270px; flex-shrink: 0; display: flex; flex-direction: column;
-  background: #fff; border: 1px solid #eef1f7; border-radius: 10px; overflow: hidden;
+  background: #fff; overflow: hidden;
 }
 .sl-list-head {
   padding: 10px 14px; font-weight: 600; font-size: 13px; color: #1f2937;
@@ -703,16 +705,16 @@ onMounted(() => {
 .sl-table-item.active .sl-table-name { color: #3370ff; }
 .sl-table-name { font-size: 13px; font-weight: 600; color: #1f2937; }
 .sl-table-meta { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
-.sl-table-meta code { font-size: 11px; color: #86909c; }
+.sl-table-meta code { font-size: 12px; color: #86909c; }
 .sl-stats { margin-left: auto; display: flex; gap: 6px; }
-.sl-stats .stat { font-size: 11px; color: #86909c; }
+.sl-stats .stat { font-size: 12px; color: #86909c; }
 .sl-stats b { color: #4e5969; font-weight: 600; }
 .sl-list-empty { padding: 30px 0; text-align: center; color: #c9cdd4; font-size: 12px; }
 
 /* 右栏详情 */
 .sl-detail {
-  flex: 1; overflow-y: auto; background: #fff; border: 1px solid #eef1f7;
-  border-radius: 10px; padding: 16px 18px;
+  flex: 1; min-width: 0; overflow-y: auto; background: #fff;
+  padding: 0 0 0 16px; border-left: 1px solid #eef1f7;
 }
 .sl-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .sl-detail-title { display: flex; align-items: center; gap: 8px; font-size: 16px; }
@@ -754,5 +756,16 @@ onMounted(() => {
 
 /* 指标弹窗双栏 */
 .sl-metric-form .form-row { display: flex; gap: 12px; }
-.sl-metric-form .half { flex: 1; }
+.sl-metric-form .half { flex: 1; min-width: 0; }
+.sl-detail-head, .sl-detail-title, .sl-table-meta { flex-wrap: wrap; overflow-wrap: anywhere; }
+.sl-section { overflow-x: auto; }
+@container (max-width: 760px) {
+  .sl-layout { flex-direction: column; overflow: visible; }
+  .sl-table-list { width: 100%; max-height: 240px; }
+  .sl-detail { border-left: 0; border-top: 1px solid #eef1f7; padding: 16px 0 0; overflow: visible; }
+}
+@media (max-width: 600px) {
+  .sl-page { height: auto; }
+  .sl-metric-form .form-row { flex-direction: column; gap: 0; }
+}
 </style>

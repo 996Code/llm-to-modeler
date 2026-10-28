@@ -1,37 +1,26 @@
 <template>
-  <div>
-    <!-- 页头 tab:插件 | MCP 服务 | 模型供应商,说明入口在右 -->
-    <div class="pk-tabs-row">
-      <a-radio-group v-model:value="innerTab" size="small" button-style="solid">
-        <a-radio-button value="packs">
-          <AppstoreOutlined /> 插件
-          <span class="pk-tab-count">{{ payload ? `${enabledCount}/${payload.items.length}` : '' }}</span>
-        </a-radio-button>
-        <a-radio-button value="mcp">
-          <ApiOutlined /> MCP 服务
-          <span v-if="mcpStats.total" class="pk-tab-count">{{ mcpStats.enabled }}/{{ mcpStats.total }}</span>
-        </a-radio-button>
-        <a-radio-button value="llm">
-          <CloudOutlined /> 模型供应商
-        </a-radio-button>
-      </a-radio-group>
-      <a-popover placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
-        <template #content>
-          <div class="pk-help">
-            <div class="pk-help-title"><ThunderboltOutlined /> 插件开关热生效,无需重启服务</div>
-            <div class="pk-help-body">
-              启停状态持久化在 <code>{{ payload?.stateFile ?? 'data/pack_state.json' }}</code>(初始来源:{{ sourceLabel }}),重启后保持。
-              依赖未配置的插件无法启用——可在插件"设置"里补配连接信息,或配好环境变量后点"重新检测"热加载。
-              MCP 服务 tab 里登记的外部 server 供插件(如智能问数数据源)引用。
-              模型供应商 tab 维护对话/抽取调用的主备端点——是 LLM 的唯一配置入口,保存即热生效;未配置时对话请求会直接报错提示(不回退 .env)。
-            </div>
-          </div>
-        </template>
-        <a class="pk-help-link" title="插件与 MCP 服务说明">
-          <QuestionCircleOutlined /> 说明
-        </a>
-      </a-popover>
-    </div>
+  <div class="integration-page">
+    <a-tabs v-model:activeKey="innerTab" class="flat-tabs">
+      <a-tab-pane key="packs">
+        <template #tab><AppstoreOutlined /> 插件 <span class="pk-tab-count">{{ payload ? `${enabledCount}/${payload.items.length}` : '' }}</span></template>
+      </a-tab-pane>
+      <a-tab-pane key="mcp">
+        <template #tab><ApiOutlined /> MCP 服务 <span v-if="mcpStats.total" class="pk-tab-count">{{ mcpStats.enabled }}/{{ mcpStats.total }}</span></template>
+      </a-tab-pane>
+      <a-tab-pane key="llm">
+        <template #tab><CloudOutlined /> 模型供应商</template>
+      </a-tab-pane>
+      <template #rightExtra>
+        <a-popover :key="innerTab" placement="bottomRight" trigger="click" overlay-class-name="pk-help-pop">
+          <template #content>
+            <div class="help-pop help-pop-wide" v-html="currentHelp.html"></div>
+          </template>
+          <a-button type="text" size="small" :aria-label="currentHelp.title" class="help-link">
+            <template #icon><QuestionCircleOutlined /></template>说明
+          </a-button>
+        </a-popover>
+      </template>
+    </a-tabs>
     <template v-if="innerTab === 'packs'">
 
     <div class="pk-grid">
@@ -117,9 +106,10 @@ import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import {
   ApiOutlined, AppstoreOutlined, CloudOutlined, QuestionCircleOutlined,
-  RightOutlined, SettingOutlined, SyncOutlined, ThunderboltOutlined,
+  RightOutlined, SettingOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import { listMcpServers, AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
+import { chip, iconBtn, rules } from '../helpHtml'
 import type { LoadSafely } from './loadSafely'
 import LlmProviders from './LlmProviders.vue'
 import McpServersPanel from './McpServersPanel.vue'
@@ -149,12 +139,35 @@ const rechecking = ref('')
 const settingsOpen = ref(false)
 const settingsPack = ref('')
 
-const sourceLabel = computed(() => {
-  const s = payload.value?.source
-  if (s === 'file') return '管理端历史操作'
-  if (s === 'env') return 'PACKS_ENABLED 环境变量'
-  return '全部发现即启用'
-})
+// 说明与其他页同标准:编号条目 + 彩色状态标签 + 行内按钮图标引用(见 helpHtml.ts)
+const helpByTab: Record<string, { title: string; html: string }> = {
+  packs: {
+    title: '插件说明',
+    html: rules([
+      '卡片开关启停插件,<b>热切换即时生效</b>,无需重启服务。',
+      `状态标签:${chip('green', '运行中')} ${chip('red', '运行异常')} ${chip('red', '装配失败')} ${chip('plain', '已禁用')} ${chip('orange', '连接失败')} ${chip('red', '依赖未配置')}——异常时悬停标签查看原因。`,
+      '连接异常时:打开「设置」检查连接信息,再点「重新检测」。',
+    ]),
+  },
+  mcp: {
+    title: 'MCP 服务说明',
+    html: rules([
+      `登记业务平台的服务地址与认证信息,连接成功后可查看工具清单(${iconBtn('reload', '刷新快照(重新探测)')})。`,
+      '「服务说明」要写清该系统提供什么业务——它将作为智能客服里<b>能力分组的标题</b>;工具声明不完整的不会进入对话路由。',
+      `行内 ${iconBtn('edit', '编辑')} / ${iconBtn('delete', '删除', 'red')};停用服务即停止调用。`,
+      '对外接入密钥仅用于其他应用连接本系统,请妥善保管。',
+    ]),
+  },
+  llm: {
+    title: '模型供应商说明',
+    html: rules([
+      '填写主供应商的接口地址、密钥和模型,<b>保存后生效</b>;密钥留空时保留原值。',
+      '备用供应商为可选项,在主供应商连接失败或服务不可用时接管。',
+      '单价用于费用统计,可以不填;「连通性检测」使用已保存的配置。',
+    ]),
+  },
+}
+const currentHelp = computed(() => helpByTab[innerTab.value] || helpByTab.packs)
 
 // 行标题的启用计数(与左侧导航徽标同源语义)
 const enabledCount = computed(
@@ -240,13 +253,6 @@ onMounted(load)
   display: inline-flex; align-items: center; gap: 8px;
 }
 .pk-toolbar-count { margin-left: 2px; font-weight: 400; }
-.pk-help-link { color: #94a3b8; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
-.pk-help-link:hover { color: #2f54eb; }
-.pk-help-title { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; color: #2f54eb; }
-.pk-help-body { font-size: 12px; color: #64748b; line-height: 1.7; max-width: 380px; }
-.pk-help-body code {
-  background: #f0f5ff; padding: 1px 6px; border-radius: 4px; font-size: 12px; color: #2f54eb;
-}
 .pk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
 .pk-card {
   border: 1px solid #e6ebf2; border-radius: 12px; padding: 16px 18px; background: #fff;
@@ -278,4 +284,9 @@ onMounted(load)
 .pk-meta { display: inline-flex; gap: 4px; flex-wrap: wrap; min-width: 0; }
 .pk-actions { white-space: nowrap; font-size: 13px; }
 .pk-actions a { color: #2f54eb; }
+.pk-grid { gap: 16px; }
+.pk-card { padding: 16px; }
+.pk-foot { flex-wrap: wrap; gap: 12px; }
+.pk-name { overflow-wrap: anywhere; }
+@media (max-width: 700px) { .pk-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>

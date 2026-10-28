@@ -180,15 +180,8 @@
               </div>
               <div class="config-card-actions">
                 <!-- @click.stop：阻止事件冒泡（避免触发外层 config-card 的点击）。
-                     按钮按 pack 声明的动作集渲染（actions: view_json/apply/rewind），
+                     按钮按 pack 声明的动作集渲染（actions: rewind/apply），
                      组件不硬编码——下个插件的制品卡可声明不同的动作组合 -->
-                <a-button
-                  v-if="packActions.includes('view_json')"
-                  size="small" type="link"
-                  @click.stop="showJsonViewer(msg.configSnapshot)"
-                >
-                  <EyeOutlined /> 查看 JSON
-                </a-button>
                 <!-- 切换到此版本（git checkout 式：对话保留，只切制品）：
                      pack 声明 rewind 且该版不是当前生效版本时显示（包括最后
                      一张卡——从旧版跳回最新同样走这里） -->
@@ -214,7 +207,7 @@
                 </a-button>
                 <!-- 宿主不支持 apply：退化为复制 JSON。注意此项独立于 packActions
                      声明——复制是任何制品的最后出口（逃生口原则），即便 pack
-                     未声明 view_json 也保留内容带走的能力 -->
+                     未声明动作也保留内容带走的能力 -->
                 <a-button v-if="!port.capabilities.has('apply')" size="small" type="link" @click.stop="copyConfig(msg.configSnapshot)">
                   <CopyOutlined /> 复制 JSON
                 </a-button>
@@ -356,7 +349,7 @@
          视口才有可读性；撑大悬浮窗本体由 RESIZE 协议承担，见 showJsonViewer） -->
     <Modal
       v-model:open="jsonViewerVisible"
-      title="AI 配置 JSON"
+      title="详情 JSON"
       :footer="null"
       width="100%"
       wrapClassName="json-viewer-fullscreen"
@@ -569,9 +562,9 @@ const sysConfig = useSysConfig()
 const packDisplay = ref<Record<string, any> | null>(null)
 const packDisplays = ref<Record<string, { data_labels?: Record<string, string> }>>({})
 const packArtifactType = ref<string | undefined>(undefined)
-// 制品卡动作集（pack 声明，未声明回退最小集 view_json）——不同插件的制品
+// 制品卡动作集（pack 声明，驱动 apply/rewind 按钮）——不同插件的制品
 // 交互不同，按钮由声明驱动而非组件硬编码
-const packActions = ref<string[]>(['view_json'])
+const packActions = ref<string[]>([])
 onMounted(async () => {
   // 挂载时从服务端刷新系统配置（管理端改了显示开关，新会话/刷新即生效；
   // 失败回退 localStorage 缓存再回退默认，见 sysConfig composable）

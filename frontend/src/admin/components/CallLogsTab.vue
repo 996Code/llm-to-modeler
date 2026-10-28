@@ -1,11 +1,6 @@
 <template>
   <div>
     <div class="cl-toolbar">
-      <a-radio-group v-model:value="viewMode" size="small" style="margin-right:12px">
-        <a-radio-button value="detail">调用明细</a-radio-button>
-        <a-radio-button value="stats">按环节统计</a-radio-button>
-        <a-radio-button value="audit">审计日志</a-radio-button>
-      </a-radio-group>
 
       <!-- 调用明细筛选 -->
       <template v-if="viewMode === 'detail'">
@@ -219,7 +214,10 @@ const filterConvId = ref('')
 const filterPack = ref('')
 const packOptions = ref<{ value: string; label: string }[]>([])
 
-const viewMode = ref<'detail' | 'stats' | 'audit'>('detail')
+// 导航由记录页控制；独立挂载时默认显示调用明细。
+const props = defineProps<{ viewMode?: 'detail' | 'stats' | 'audit' }>()
+const viewMode = computed<'detail' | 'stats' | 'audit'>(
+  () => props.viewMode || 'detail')
 const statsRows = ref<CallStageItem[]>([])
 const statsLoading = ref(false)
 const statsTotalTokens = ref(0)
@@ -375,7 +373,13 @@ function onTableChange(pag: { current?: number; pageSize?: number }) {
 
 function openDetail(record: CallLogItem) { detail.value = record; detailOpen.value = true }
 
-onMounted(() => { load(); loadStats(); loadAudit(); loadPackOptions() })
+onMounted(() => { loadActiveView(); loadPackOptions() })
+
+function loadActiveView() {
+  if (viewMode.value === 'stats') loadStats()
+  else if (viewMode.value === 'audit') loadAudit()
+  else load()
+}
 
 async function loadPackOptions() {
   try {
@@ -384,10 +388,7 @@ async function loadPackOptions() {
   } catch { /* 静默 */ }
 }
 
-watch(viewMode, (v) => {
-  if (v === 'stats') loadStats()
-  else if (v === 'audit') loadAudit()
-})
+watch(viewMode, loadActiveView)
 
 function fmtTokens(n?: number): string {
   if (!n) return '0'

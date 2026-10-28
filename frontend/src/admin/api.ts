@@ -959,6 +959,8 @@ export interface McpServer {
   /** 插件引用标识(小写字母/数字/-/_) */
   code: string
   url: string
+  /** 服务级说明(说清该系统提供什么业务;能力路由分组标题) */
+  description?: string
   headers: Record<string, string>
   timeout: number
   read_timeout: number
@@ -974,6 +976,7 @@ export interface McpServerBody {
   name: string
   code?: string
   url: string
+  description?: string
   headers: Record<string, string>
   timeout: number
   read_timeout: number

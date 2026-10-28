@@ -81,11 +81,12 @@ async function clear() {
 </script>
 
 <style scoped>
-.acl { max-width: 760px; }
-.acl-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.acl-col { border: 1px solid #eef1f7; border-radius: 10px; padding: 10px 14px; background: #fff; }
+.acl { max-width: 760px; container-type: inline-size; }
+.acl-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.acl-col { min-width: 0; background: #fff; }
 .acl-col-title { font-weight: 600; font-size: 13px; color: #1f2937; margin-bottom: 8px; }
 .acl-col-sub { font-size: 12px; color: #94a3b8; margin-top: 6px; }
-.acl-actions { display: flex; gap: 8px; align-items: center; margin-top: 14px; }
+.acl-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 16px; }
 .acl-saved { color: #16a34a; font-size: 12px; }
+@container (max-width: 560px) { .acl-row { grid-template-columns: minmax(0, 1fr); } }
 </style>

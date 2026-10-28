@@ -7,6 +7,7 @@ import { createApp } from 'vue'
 import 'ant-design-vue/dist/reset.css'
 import { installAdminAntd } from '../plugins/antdAdmin'
 import AdminApp from './AdminApp.vue'
+import './admin.css'
 
 const app = createApp(AdminApp)
 installAdminAntd(app)

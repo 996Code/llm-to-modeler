@@ -459,6 +459,11 @@ async def create_kb(request: Request, payload: Dict[str, Any]):
 
 @router.put("/kbs/{kb_id}", dependencies=[Depends(admin_required)])
 async def update_kb(kb_id: str, request: Request, payload: Dict[str, Any]):
+    """更新库基本信息(name/description)或配置(schema/chunk_params)。
+
+    已有文档(解析已开始)的库不允许改分段参数——分段决定切块与图谱
+    重建口径,中途改动会造成新旧块口径混杂;确需调整请清库重建。
+    """
     _kb_or_404(request, kb_id)
     store = runtime.get_kg_store(request.app.state)
     name = payload.get("name")
@@ -472,11 +477,16 @@ async def update_kb(kb_id: str, request: Request, payload: Dict[str, Any]):
     schema = payload.get("schema")
     if schema is not None and not isinstance(schema, dict):
         raise HTTPException(422, "schema 必须是对象")
+    chunk_params = _validated_chunk_params(payload)
+    if chunk_params is not None and store.list_documents(kb_id):
+        raise HTTPException(
+            422, "该库已有文档导入,分段参数不可修改;"
+                 "仅支持编辑名称、描述与本体。确需调整请删除文档或清库重建。")
     store.update_kb(
         kb_id, name=name,
         description=str(payload.get("description") or "").strip() if payload.get("description") is not None else None,
         schema_json=schema,
-        chunk_params=_validated_chunk_params(payload),
+        chunk_params=chunk_params,
     )
     return store.get_kb(kb_id)
 

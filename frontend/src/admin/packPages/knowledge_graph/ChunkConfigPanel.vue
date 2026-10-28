@@ -132,18 +132,18 @@ watch(() => props.files.length, (n) => {
 </script>
 
 <style scoped>
-.ccp-grid { display: grid; grid-template-columns: 300px 1fr; gap: 14px; }
-.ccp-params, .ccp-preview {
-  border: 1px solid #eef1f7; border-radius: 10px; padding: 10px 14px; background: #fff;
-}
-.ccp-params-title { font-weight: 600; font-size: 13px; color: #1f2937; margin-bottom: 8px; display: flex; align-items: center; }
+.ccp { container-type: inline-size; }
+.ccp-grid { display: grid; grid-template-columns: minmax(0, 280px) minmax(0, 1fr); gap: 16px; }
+.ccp-params, .ccp-preview { min-width: 0; background: #fff; }
+.ccp-params-title { font-weight: 600; font-size: 16px; color: #1f2937; margin-bottom: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+@container (max-width: 640px) { .ccp-grid { grid-template-columns: minmax(0, 1fr); } }
 .ccp-row { display: flex; align-items: center; justify-content: space-between; margin: 6px 0; }
-.ccp-label { font-size: 12.5px; color: #4b5563; }
+.ccp-label { font-size: 12px; color: #4b5563; }
 .ccp-note {
   margin-top: 10px; padding: 8px 10px; background: #f8fafc; border-radius: 8px;
   font-size: 12px; color: #6b7280; line-height: 1.7;
 }
-.ccp-empty { color: #9ca3af; font-size: 12.5px; padding: 24px 0; text-align: center; }
+.ccp-empty { color: #9ca3af; font-size: 12px; padding: 24px 0; text-align: center; }
 .ccp-error { color: #ef4444; }
 .ccp-stats { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .ccp-chunk-list { max-height: 320px; overflow-y: auto; }

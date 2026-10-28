@@ -3,12 +3,9 @@
     <div class="tab-toolbar">
       <span>共 <b>{{ queries.length }}</b> 条</span>
       <a-button size="small" @click="loadQueries"><ReloadOutlined /> 刷新</a-button>
-      <span class="sq-hint">
-        <InfoCircleOutlined /> 行数为保存时快照, 导出 Excel / 加入看板会实时重跑 SQL
-      </span>
     </div>
     <a-table :data-source="queries" :loading="loadingQ" row-key="id" size="small"
-             :pagination="queries.length > 20 ? { pageSize: 20 } : false">
+             :scroll="{ x: 960 }" :pagination="queries.length > 20 ? { pageSize: 20 } : false">
         <a-table-column title="问题" data-index="question" :ellipsis="true" />
         <a-table-column title="SQL" :ellipsis="true" width="300">
           <template #default="{ record }">
@@ -178,12 +175,11 @@ onMounted(() => { loadQueries(); loadDashboards() })
 <style scoped>
 .sq-page { display: flex; flex-direction: column; }
 .tab-toolbar {
-  display: flex; align-items: center; gap: 8px;
-  margin-bottom: 12px; font-size: 13px; color: #86909c;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 16px; font-size: 13px; color: #86909c;
 }
 .tab-toolbar b { color: #1d2129; }
 /* 快照语义提示: 工具栏右端(与记忆页"共 N 条"同排版位), 不多占一行 */
-.sq-hint { font-size: 12px; color: #999; margin-left: auto; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 /* 列宽内单行省略(ellipsis 由 a-table-column 接管, 不再 max-width 硬限——
@@ -201,6 +197,8 @@ onMounted(() => { loadQueries(); loadDashboards() })
 }
 .aw-preview-label { font-size: 12px; color: #86909c; margin-bottom: 4px; }
 .aw-preview-q { font-size: 13px; color: #1f2329; font-weight: 500; }
+.aw-form .half { min-width: 0; }
+@media (max-width: 600px) { .aw-form .form-row { flex-direction: column; gap: 0; } }
 </style>
 
 <style>

@@ -54,29 +54,43 @@
 
     <main class="shell-main">
       <div class="page-card">
-        <!-- 合并组 1: 概览 + 审计&调用(顶层菜单瘦身的二级 tab,插件页同款形态) -->
-        <div v-if="tab === 'insights'" class="merged-tabs">
-          <div class="merged-tabs-row">
-            <a-radio-group v-model:value="insightsTab" size="small" button-style="solid">
-              <a-radio-button value="overview"><DashboardOutlined /> 概览</a-radio-button>
-              <a-radio-button value="calllogs"><ApiOutlined /> 审计 & 调用</a-radio-button>
-            </a-radio-group>
-          </div>
-          <OverviewTab v-if="insightsTab === 'overview'" />
-          <CallLogsTab v-else />
-        </div>
-        <!-- 合并组 2: 会话 + 任务中心 -->
-        <div v-else-if="tab === 'convo'" class="merged-tabs">
-          <div class="merged-tabs-row">
-            <a-radio-group v-model:value="convoTab" size="small" button-style="solid">
-              <a-radio-button value="conversations"><MessageOutlined /> 会话</a-radio-button>
-              <a-radio-button value="tasks"><CloudServerOutlined /> 任务中心</a-radio-button>
-            </a-radio-group>
-          </div>
-          <ConversationsTab v-if="convoTab === 'conversations'" />
-          <TasksTab v-else />
-        </div>
+        <!-- 概览:只有总览一屏(其余视图归「活动记录」) -->
+        <OverviewTab v-if="tab === 'overview'" />
         <PacksTab v-else-if="tab === 'packs'" @open-page="openPackPage" @refresh-pages="loadPackPages" />
+        <!-- 活动记录:会话/任务/调用/统计/审计 五视图一层 tab(页面内部
+             视图已提升到组级,不再 tab 套 tab) -->
+        <a-tabs v-else-if="tab === 'activity'" v-model:activeKey="activityTab" class="flat-tabs">
+          <a-tab-pane key="conversations">
+            <template #tab><MessageOutlined /> 会话</template>
+            <ConversationsTab v-if="activityTab === 'conversations'" />
+          </a-tab-pane>
+          <a-tab-pane key="tasks">
+            <template #tab><CloudServerOutlined /> 任务</template>
+            <TasksTab v-if="activityTab === 'tasks'" />
+          </a-tab-pane>
+          <a-tab-pane key="detail">
+            <template #tab><ApiOutlined /> 调用明细</template>
+            <CallLogsTab view-mode="detail" />
+          </a-tab-pane>
+          <a-tab-pane key="stats">
+            <template #tab><BarChartOutlined /> 环节统计</template>
+            <CallLogsTab view-mode="stats" />
+          </a-tab-pane>
+          <a-tab-pane key="audit">
+            <template #tab><AuditOutlined /> 审计日志</template>
+            <CallLogsTab view-mode="audit" />
+          </a-tab-pane>
+          <template #rightExtra>
+            <a-popover :key="activityTab" placement="bottomRight" trigger="click">
+              <template #content>
+                <div class="help-pop" v-html="activityHelpHtml"></div>
+              </template>
+              <a-button type="text" size="small" :aria-label="activityHelpTitle" class="help-link">
+                <template #icon><QuestionCircleOutlined /></template>说明
+              </a-button>
+            </a-popover>
+          </template>
+        </a-tabs>
         <!-- pack 自定义管理页(v-if 切换:离开即卸载, 图谱类重资源页不留后台实例);
              知识库-测试也走此通道(loadPackPages 动态追加,跟随插件启停) -->
         <template v-else-if="packPageMap[tab]">
@@ -92,7 +106,8 @@
 import { computed, onMounted, provide, ref, shallowRef } from 'vue'
 import { message } from 'ant-design-vue'
 import type { Component } from 'vue'
-import {ApiOutlined, AppstoreOutlined, CloudServerOutlined, DashboardOutlined, LogoutOutlined, MessageOutlined, PartitionOutlined} from '@ant-design/icons-vue'
+import {ApiOutlined, AppstoreOutlined, AuditOutlined, BarChartOutlined, CloudServerOutlined, DashboardOutlined, LogoutOutlined, MessageOutlined, PartitionOutlined, QuestionCircleOutlined} from '@ant-design/icons-vue'
+import { rules } from './helpHtml'
 import OverviewTab from './components/OverviewTab.vue'
 import ConversationsTab from './components/ConversationsTab.vue'
 import CallLogsTab from './components/CallLogsTab.vue'
@@ -106,16 +121,56 @@ import {
   UnauthorizedError,
 } from './api'
 
-const tab = ref('insights')
-const insightsTab = ref('overview')   // 概览 & 审计 组内 tab
-const convoTab = ref('conversations') // 会话 & 任务 组内 tab
+const tab = ref('overview')
+// 活动记录 组内一层 tab(会话/任务/调用三视图;调用视图是 CallLogsTab
+// 内部 viewMode 提升而来,不出现 tab 套 tab)
+const activityTab = ref<'conversations' | 'tasks' | 'detail' | 'stats' | 'audit'>('conversations')
 
-// 一级导航:固定三项(概览&审计 / 会话&任务 / 插件) + pack 动态页——
-// 顶层菜单瘦身:模型供应商并入「插件」,概览+审计、会话+任务各自合并
+// ── 记录页说明(与其他页同标准:编号条目,配 helpHtml.ts) ──
+const activityHelpMap: Record<string, { title: string; html: string }> = {
+  conversations: {
+    title: '会话说明',
+    html: rules([
+      '完整对话记录;点开一行查看消息明细与链路追踪。',
+      '数据范围见顶部时间区间,点「刷新」拉取最新。',
+    ]),
+  },
+  tasks: {
+    title: '任务说明',
+    html: rules([
+      '后台任务的执行状态与产物;失败任务可查看失败原因。',
+    ]),
+  },
+  detail: {
+    title: '调用明细说明',
+    html: rules([
+      '每次 LLM / 上游服务调用的请求与响应明细,用于排查链路问题。',
+    ]),
+  },
+  stats: {
+    title: '环节统计说明',
+    html: rules([
+      '按环节(模型/上游/检索等)汇总调用量、耗时与费用,辅助定位慢点与成本。',
+    ]),
+  },
+  audit: {
+    title: '审计日志说明',
+    html: rules([
+      '管理端操作审计:配置变更、导入导出等关键动作全量留痕。',
+    ]),
+  },
+}
+const activityHelp = computed(() => activityHelpMap[activityTab.value] || activityHelpMap.conversations)
+const activityHelpHtml = computed(() => activityHelp.value.html)
+const activityHelpTitle = computed(() => activityHelp.value.title)
+
+// 一级导航:概览 → 集成 → 记录 + pack 动态页。「集成」承载插件启停/
+// MCP 服务/模型供应商(共同点是"接入什么、怎么接");「记录」汇聚会话/
+// 任务/调用/审计(共同点是"发生过的事")
 const navItems = computed(() => [
-  { key: 'insights', label: '概览 & 审计', icon: DashboardOutlined },
-  { key: 'convo', label: '会话 & 任务', icon: MessageOutlined },
-  { key: 'packs', label: '插件', icon: AppstoreOutlined },
+  { key: 'overview', label: '概览', icon: DashboardOutlined },
+  { key: 'packs', label: '集成', icon: AppstoreOutlined },
+  { key: 'activity', label: '记录', icon: MessageOutlined },
   ...packPages.value.map((p) => ({
     key: `pack-page:${p.pageKey}`, label: p.title, icon: PartitionOutlined })),
 ])
@@ -344,14 +399,13 @@ onMounted(async () => {
   max-width: 1760px;   /* 宽屏自适应:1400 在 2K+ 显示器两侧各留 ~580px 空白(用户 10-15 报"间距太大") */
   width: 100%;
   margin: 0 auto;
-  padding: 16px 20px;
+  padding: 12px 20px;
 }
 .page-card {
   background: #fff;
-  border-radius: 12px;
-  border: 1px solid #e5e6eb;
-  padding: 20px 24px;
+  padding: 8px 16px 16px;
   min-height: calc(100vh - 160px);
+  min-width: 0;
 }
 .shell-footer {
   text-align: center;

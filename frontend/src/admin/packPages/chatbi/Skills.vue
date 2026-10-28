@@ -2,7 +2,7 @@
   <div class="skills-page">
     <div class="tab-toolbar">
       <span>共 <b>{{ skills.length }}</b> 条</span>
-      <span class="muted">规则文件随插件分发, 每次查询按方言注入 SQL 生成 prompt</span>
+      <span class="muted">只读</span>
     </div>
 
     <a-empty v-if="!loading && !skills.length"
@@ -17,11 +17,11 @@
           </template>
           <pre class="skill-content">{{ s.content }}</pre>
           <!-- 方言 reference(postgresql/mysql 各自的细则) -->
-          <a-tabs v-if="Object.keys(s.references || {}).length" size="small">
-            <a-tab-pane v-for="(text, dbType) in s.references" :key="dbType" :tab="dbType">
+          <a-collapse v-if="Object.keys(s.references || {}).length" ghost class="skill-references">
+            <a-collapse-panel v-for="(text, dbType) in s.references" :key="dbType" :header="String(dbType)">
               <pre class="skill-content">{{ text }}</pre>
-            </a-tab-pane>
-          </a-tabs>
+            </a-collapse-panel>
+          </a-collapse>
         </a-collapse-panel>
       </a-collapse>
   </div>
@@ -56,14 +56,14 @@ onMounted(loadSkills)
 <style scoped>
 .skills-page { display: flex; flex-direction: column; }
 .tab-toolbar {
-  display: flex; align-items: center; gap: 8px;
-  margin-bottom: 12px; font-size: 13px; color: #86909c;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 16px; font-size: 13px; color: #86909c;
 }
 .tab-toolbar b { color: #1d2129; }
 .tab-toolbar .muted { margin-left: 0; }
 .muted { color: #999; font-size: 12px; margin-left: 6px; }
 .skill-name { font-weight: 600; margin-right: 8px; }
-.skill-ver { font-size: 11px; }
+.skill-ver { font-size: 12px; }
 .skill-desc { color: #86909c; font-size: 12px; margin-left: 8px; }
 .skill-content {
   margin: 0; padding: 12px; background: #f7f8fa; border-radius: 8px;

@@ -12,7 +12,7 @@
         <a-alert v-else-if="error" class="et-feedback" :message="error" type="error" show-icon>
           <template #action><a-button size="small" @click="load"><template #icon><ReloadOutlined /></template>重试</a-button></template>
         </a-alert>
-        <a-tabs v-model:active-key="activeTab">
+        <a-tabs v-model:active-key="activeTab" class="flat-tabs">
           <a-tab-pane key="identity" tab="测试身份">
             <div class="et-sidebar-content">
               <section class="et-section">

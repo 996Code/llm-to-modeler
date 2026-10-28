@@ -5,13 +5,15 @@
       <!-- 左侧:知识库树(a-tree;folder=可折叠目录,kb=叶子带统计) -->
       <aside class="kg-side">
         <div class="kg-side-head">
-          <div class="kg-side-title"><PartitionOutlined class="kg-side-icon" /> 知识库</div>
-          <div class="kg-side-btns">
-            <a-button size="small" type="primary" @click="wizardRef?.show()"><PlusOutlined /> 新建库</a-button>
-            <a-tooltip title="新建文件夹(仅作分组目录)">
-              <a-button size="small" @click="openFolderCreate"><FolderAddOutlined /></a-button>
+          <span class="kg-side-title"><PartitionOutlined class="kg-side-icon" /> 知识库</span>
+          <span class="kg-side-btns">
+            <a-tooltip title="新建知识库">
+              <a-button size="small" type="text" aria-label="新建知识库" @click="wizardRef?.show()"><PlusOutlined /></a-button>
             </a-tooltip>
-          </div>
+            <a-tooltip title="新建文件夹(仅作分组目录)">
+              <a-button size="small" type="text" aria-label="新建文件夹" @click="openFolderCreate"><FolderAddOutlined /></a-button>
+            </a-tooltip>
+          </span>
         </div>
         <div class="kg-side-tree">
           <div v-if="loadingKbs && !tree.length" class="kg-side-tip">加载中…</div>
@@ -94,6 +96,7 @@
               <span><ApartmentOutlined /> 关系 <b>{{ currentKb.relationTotal ?? 0 }}</b></span>
             </div>
             <div class="kg-info-actions">
+              <a-button size="small" @click="openEditKb"><EditOutlined /> 编辑</a-button>
               <a-popconfirm
                 title="删除当前知识库将同时清除图谱、向量与上传文件,确认?"
                 ok-text="删除" ok-type="danger" @confirm="doDeleteCurrent"
@@ -104,7 +107,7 @@
             </div>
           </div>
 
-          <a-tabs v-model:activeKey="tab" size="small">
+          <a-tabs v-model:activeKey="tab" class="flat-tabs">
             <a-tab-pane key="docs">
               <template #tab><FileTextOutlined /> 文档导入</template>
               <DocManager :kb-id="currentKbId" :refresh-tick="refreshTick"
@@ -123,40 +126,23 @@
               <RetrievalTest :kb-id="currentKbId" />
             </a-tab-pane>
             <a-tab-pane key="acl">
-              <template #tab>
-                <span class="kg-acl-tab">
-                  <SafetyOutlined /> 数据权限
-                  <a-popover placement="bottom" trigger="click">
-                    <template #content>
-                      <div class="kg-acl-tip">
-                        <p>仅当宿主传入用户身份(X-User-Id)或角色(pack_params 的 user_roles)时生效;</p>
-                        <p><b>不配置 = 所有人可检索</b>;未传身份时不过滤。</p>
-                        <p>用户/角色候选由宿主经同步接口写入;管理端页面不受此限制。</p>
-                      </div>
-                    </template>
-                    <a class="kg-acl-info" @click.stop><QuestionCircleOutlined /></a>
-                  </a-popover>
-                </span>
-              </template>
+              <template #tab><SafetyOutlined /> 数据权限</template>
               <AclEditor :kb-id="currentKbId" />
             </a-tab-pane>
             <a-tab-pane key="annotations">
-              <template #tab>
-                <span class="kg-acl-tab">
-                  <BookOutlined /> 标注回复
-                  <a-popover placement="bottom" trigger="click">
-                    <template #content>
-                      <div class="kg-acl-tip">
-                        <p>录入「问题 → 标准答案」:用户提问与标注问题强相似(≥0.90)时</p>
-                        <p>直接返回标准答案,不走检索——老答错的问题补课一次,终身正确。</p>
-                      </div>
-                    </template>
-                    <a class="kg-acl-info" @click.stop><QuestionCircleOutlined /></a>
-                  </a-popover>
-                </span>
-              </template>
+              <template #tab><BookOutlined /> 标注回复</template>
               <AnnotationManager :kb-id="currentKbId" />
             </a-tab-pane>
+            <template #rightExtra>
+              <a-popover :key="tab" placement="bottomRight" trigger="click">
+                <template #content>
+                  <div class="help-pop help-pop-wide" v-html="currentHelpHtml"></div>
+                </template>
+                <a-button type="text" size="small" :aria-label="currentHelpTitle" class="help-link">
+                  <template #icon><QuestionCircleOutlined /></template>说明
+                </a-button>
+              </a-popover>
+            </template>
           </a-tabs>
         </template>
 
@@ -165,7 +151,13 @@
           <PartitionOutlined class="kg-empty-icon" />
           <div class="kg-empty-title">{{ kbs.length ? '未选择知识库' : '还没有知识库' }}</div>
           <div class="kg-empty-sub">
-            {{ kbs.length ? '从左侧树选择一个知识库查看详情' : '每个库独立本体 / 图谱 / 向量 collection(物理隔离,删库即清)——点左侧「新建库」创建第一个' }}
+            {{ kbs.length ? '请选择一个知识库查看详情' : '新建知识库后即可上传文档' }}
+          </div>
+          <div v-if="!kbs.length" class="kg-empty-actions">
+            <a-button size="small" type="primary" @click="wizardRef?.show()"><PlusOutlined /> 新建库</a-button>
+            <a-tooltip title="新建文件夹(仅作分组目录)">
+              <a-button size="small" @click="openFolderCreate"><FolderAddOutlined /></a-button>
+            </a-tooltip>
           </div>
         </div>
       </section>
@@ -208,6 +200,19 @@
         </a-form-item>
       </a-form>
     </a-modal>
+
+    <!-- 库编辑弹窗:改名/描述(本体与分段在各自子页维护) -->
+    <a-modal v-model:open="editKbOpen" :title="`编辑「${editKbName}」`" :confirm-loading="editKbSaving"
+             ok-text="保存" cancel-text="取消" @ok="doEditKb">
+      <a-form layout="vertical" style="margin-top: 8px">
+        <a-form-item label="库名称" required>
+          <a-input v-model:value="editKbName" :maxlength="60" />
+        </a-form-item>
+        <a-form-item label="描述">
+          <a-textarea v-model:value="editKbDesc" :rows="3" :maxlength="200" placeholder="库用途说明(可空)" />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
@@ -228,6 +233,7 @@ import {
   KgKnowledgeBase, KgTemplate, KgTreeNode, createKgFolder, deleteKgKb,
   fetchKgKbTree, fetchKgTemplates, moveKbNode, updateKgKb,
 } from '../../api'
+import { chip, rules } from '../../helpHtml'
 import type { LoadSafely } from '../../components/loadSafely'
 import {
   buildFolderOptions, collectFolderKeys, flattenKbs, mapTreeData, subtreeIds,
@@ -247,6 +253,52 @@ const tree = ref<KgTreeNode[]>([])
 const currentKbId = ref('')
 const loadingKbs = ref(false)
 const tab = ref('docs')
+
+// ── 说明(与其他页同标准:编号条目+彩色标签+按钮图标引用) ──
+const helpHtmlMap: Record<string, { title: string; html: string }> = {
+  docs: {
+    title: '文档导入说明',
+    html: rules([
+      '上传文档自动解析分段入库;左侧选中库后在此管理它的文档。',
+      `已开始解析的库<b>锁定分段参数</b>,只能改基本信息;解析完成后方可调整。`,
+    ]),
+  },
+  graph: {
+    title: '图谱浏览说明',
+    html: rules([
+      '浏览知识图谱抽取出的实体与关系;支持检索定位、点开节点看详情。',
+    ]),
+  },
+  schema: {
+    title: '本体设置说明',
+    html: rules([
+      '定义实体/关系类型约束,指导文档抽取与图谱展示;修改后对新解析生效。',
+    ]),
+  },
+  'retrieval-test': {
+    title: '检索测试说明',
+    html: rules([
+      '输入一句话验证该库的检索召回与引用片段,<b>不写入任何数据</b>。',
+    ]),
+  },
+  acl: {
+    title: '数据权限说明',
+    html: rules([
+      '仅当宿主传入用户身份(X-User-Id)或角色(pack_params 的 user_roles)时生效。',
+      `${chip('orange', '不配置 = 所有人可检索')};未传身份时不过滤。`,
+      '用户/角色候选由宿主经同步接口写入;管理端页面不受此限制。',
+    ]),
+  },
+  annotations: {
+    title: '标注回复说明',
+    html: rules([
+      '录入问题和标准答案;相似提问达到匹配阈值时,直接返回<b>已启用</b>的答案。',
+    ]),
+  },
+}
+const currentHelp = computed(() => helpHtmlMap[tab.value] || helpHtmlMap.docs)
+const currentHelpHtml = computed(() => currentHelp.value.html)
+const currentHelpTitle = computed(() => currentHelp.value.title)
 // 刷新联动:点「刷新」时自增,子页(文档/图谱/本体)watch 它重载
 const refreshTick = ref(0)
 // 树展开键(默认展开全部:每次加载后置为全部目录键)
@@ -343,6 +395,37 @@ async function doFolderCreate() {
   folderCreating.value = false
 }
 
+// ── 编辑库(改名/描述) ────────────────────────────────
+const editKbOpen = ref(false)
+const editKbSaving = ref(false)
+const editKbName = ref('')
+const editKbDesc = ref('')
+
+function openEditKb() {
+  if (!currentKb.value) return
+  editKbName.value = currentKb.value.name
+  editKbDesc.value = currentKb.value.description || ''
+  editKbOpen.value = true
+}
+
+async function doEditKb() {
+  if (!editKbName.value.trim()) {
+    message.warning('请输入库名称')
+    return
+  }
+  editKbSaving.value = true
+  await loadSafely(async () => {
+    await updateKgKb(currentKbId.value, {
+      name: editKbName.value.trim(),
+      description: editKbDesc.value.trim() || undefined,
+    })
+    message.success('已保存')
+    editKbOpen.value = false
+    loadKbs()
+  })
+  editKbSaving.value = false
+}
+
 // ── 移动节点(换父目录/提顶层) ──────────────────────
 const moveOpen = ref(false)
 const moving = ref(false)
@@ -433,26 +516,29 @@ async function doDeleteCurrent() {
 </script>
 
 <style scoped>
-.kg-page { padding: 0; }
+.kg-page { padding: 0; min-width: 0; font-size: 13px; }
+.kg-page :deep(.flat-tabs > .ant-tabs-nav) { margin-bottom: var(--admin-header-gap, 12px); }
+.kg-page :deep(.ant-tabs-tab), .kg-page :deep(.ant-table) { font-size: 13px; }
 
 /* ── 左右分栏骨架 ─────────────────────────────── */
-.kg-split { display: flex; gap: 12px; align-items: stretch; }
+.kg-split { display: flex; gap: 16px; align-items: stretch; }
 .kg-side {
   width: 232px; flex-shrink: 0; align-self: flex-start;
-  border: 1px solid #e5e6eb; border-radius: 10px; background: #fff;
-  padding: 8px; position: sticky; top: 76px;
+  border-right: 1px solid #e5e6eb; background: #fff;
+  padding: 0 16px 0 0; position: sticky; top: 76px;
 }
 .kg-main { flex: 1; min-width: 0; }
 
-/* 左侧:标题行 + 树 */
+/* 左侧:标题 + 两个图标按钮的窄头行,下面紧跟库树 */
 .kg-side-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 2px 4px 8px; border-bottom: 1px solid #eef1f5; margin-bottom: 6px;
+  padding-bottom: 6px; margin-bottom: 6px;
+  border-bottom: 1px solid #eef1f5;
 }
 .kg-side-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #1f2329; }
 .kg-side-icon { color: #2f54eb; font-size: 15px; }
-.kg-side-btns { display: flex; gap: 6px; }
-.kg-side-tree { max-height: calc(100vh - 220px); overflow-y: auto; }
+.kg-side-btns { display: flex; align-items: center; }
+.kg-side-tree { max-height: calc(100vh - 200px); overflow-y: auto; }
 .kg-side-tree :deep(.ant-tree) { background: transparent; font-size: 13px; }
 .kg-side-tree :deep(.ant-tree .ant-tree-node-content-wrapper) {
   padding: 0 2px; border-radius: 6px;
@@ -477,7 +563,7 @@ async function doDeleteCurrent() {
 .kg-side-tree :deep(.ant-tree.ant-tree-show-line .ant-tree-indent-unit::before) {
   border-right-color: #d5dbe3;   /* 连接线淡灰,不抢名字视觉 */
 }
-.kg-side-tip { padding: 16px 4px; text-align: center; color: #94a3b8; font-size: 12.5px; }
+.kg-side-tip { padding: 16px 4px; text-align: center; color: #94a3b8; font-size: 12px; }
 
 /* 树节点:图标 + 名称/统计 + hover 操作 */
 .kb-node {
@@ -492,7 +578,7 @@ async function doDeleteCurrent() {
   font-size: 13px; font-weight: 600; color: #1f2329;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.kb-node-meta { font-size: 11px; color: #94a3b8; margin-top: 1px; line-height: 1.2; }
+.kb-node-meta { font-size: 12px; color: #94a3b8; margin-top: 1px; line-height: 1.2; }
 .kb-node-acts { display: none; align-items: center; gap: 6px; flex-shrink: 0; }
 .kb-node:hover .kb-node-acts { display: inline-flex; }
 .kb-act { font-size: 13px; color: #6b7280; cursor: pointer; }
@@ -500,8 +586,8 @@ async function doDeleteCurrent() {
 .kb-act.danger:hover { color: #ef4444; }
 
 .kb-item-empty {
-  border: 1.5px dashed #c7d2fe; border-radius: 10px; padding: 18px 10px;
-  text-align: center; cursor: pointer; color: #9ca3af; font-size: 12.5px; line-height: 1.7;
+  border: 1.5px dashed #c7d2fe; border-radius: 8px; padding: 18px 10px;
+  text-align: center; cursor: pointer; color: #9ca3af; font-size: 12px; line-height: 1.7;
   background: #fafbff; transition: border-color 0.15s, background 0.15s;
 }
 .kb-item-empty:hover { border-color: #2f54eb; background: #f5f7ff; color: #2f54eb; }
@@ -510,11 +596,11 @@ async function doDeleteCurrent() {
 /* 右侧:信息条(含原工作条拆解出的删除/刷新) */
 .kg-info {
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-  border: 1px solid #eef1f7; border-radius: 10px; padding: 8px 16px;
-  margin-bottom: 12px; background: #fff;
+  border-bottom: 1px solid #eef1f7; padding: 0 0 8px;
+  margin-bottom: 8px; background: #fff;
 }
 .kg-info-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.kg-info-name { font-weight: 700; font-size: 13.5px; color: #1f2937; }
+.kg-info-name { font-weight: 600; font-size: 16px; color: #1f2937; }
 .kg-info-desc { color: #9ca3af; font-size: 12px; max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kg-info-stats { margin-left: auto; display: flex; gap: 16px; }
 .kg-info-stats span { font-size: 12px; color: #6b7280; display: flex; align-items: center; gap: 4px; }
@@ -523,15 +609,20 @@ async function doDeleteCurrent() {
 
 /* 右侧空态:无库/未选中提示(创建引导在左侧树) */
 .kg-empty {
-  border: 1.5px dashed #dcdfe6; border-radius: 12px; padding: 60px 20px; text-align: center;
+  border: 1.5px dashed #dcdfe6; border-radius: 8px; padding: 60px 20px; text-align: center;
   background: #fafbfc;
 }
 .kg-empty-icon { font-size: 30px; color: #c9cdd4; }
-.kg-acl-tab { display: inline-flex; align-items: center; gap: 4px; }
-.kg-acl-info { color: #94a3b8; display: inline-flex; align-items: center; }
-.kg-acl-info:hover { color: #2f54eb; }
-.kg-acl-tip { max-width: 320px; font-size: 12.5px; line-height: 1.8; color: #4b5563; }
-.kg-acl-tip p { margin: 0; }
+.kg-empty-actions { display: flex; justify-content: center; gap: 8px; margin-top: 14px; }
 .kg-empty-title { font-weight: 700; font-size: 15px; color: #4e5969; margin-top: 8px; }
-.kg-empty-sub { font-size: 12.5px; color: #9ca3af; margin-top: 4px; }
+.kg-empty-sub { font-size: 12px; color: #9ca3af; margin-top: 4px; }
+.kg-info-stats, .kg-info-actions { flex-wrap: wrap; }
+.kg-info-desc { max-width: 100%; }
+.kg-main { container-type: inline-size; }
+@media (max-width: 900px) {
+  .kg-split { flex-direction: column; }
+  .kg-side { width: 100%; box-sizing: border-box; position: static; border-right: 0; border-bottom: 1px solid #e5e6eb; padding: 0 0 16px; }
+  .kg-side-tree { max-height: 240px; }
+  .kg-info-stats { margin-left: 0; }
+}
 </style>

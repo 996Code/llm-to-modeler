@@ -1,27 +1,20 @@
 <template>
   <div class="dash-page">
-    <!-- 看板 Tab 列表(横向页签,对标原版 DashboardView) -->
-    <div v-if="dashboards.length" class="dash-tabs">
-      <div
-        v-for="d in dashboards" :key="d.id"
-        :class="['dash-tab', { active: currentDashId === d.id }]"
-        @click="openDashboard(d.id)"
-      >
-        <span class="tab-name">{{ d.name }}</span>
+    <div class="dash-toolbar">
+      <template v-if="dashboards.length">
+        <a-select :value="currentDashId" class="dash-selector" placeholder="选择看板"
+                  :options="dashboards.map((d) => ({ value: d.id, label: d.name }))"
+                  @change="openDashboard" />
         <a-dropdown :trigger="['click']">
-          <MoreOutlined class="tab-more" @click.stop />
+          <a-button size="small" :disabled="!currentDashId" aria-label="看板操作" title="看板操作"><MoreOutlined /></a-button>
           <template #overlay>
-            <a-menu @click="({ key }: any) => dashMenu(key, d)">
+            <a-menu @click="({ key }: any) => dashMenu(key, dashboards.find((d) => d.id === currentDashId))">
               <a-menu-item key="rename"><EditOutlined /> 重命名</a-menu-item>
               <a-menu-item key="delete" danger><DeleteOutlined /> 删除</a-menu-item>
             </a-menu>
           </template>
         </a-dropdown>
-      </div>
-    </div>
-
-    <!-- 工具条 -->
-    <div class="dash-toolbar">
+      </template>
       <a-button type="primary" size="small" @click="openCreateDash">
         <PlusOutlined /> 新建看板
       </a-button>
@@ -415,6 +408,7 @@ function openCreateDash() {
 }
 
 function dashMenu(key: string, d: any) {
+  if (!d) return
   if (key === 'rename') {
     renameTarget = d
     dashModalMode.value = 'rename'
@@ -484,27 +478,12 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.dash-page { display: flex; flex-direction: column; gap: 12px; }
+.dash-page { display: flex; flex-direction: column; gap: 16px; }
 
-/* 看板页签 */
-.dash-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
-.dash-tab {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 12px; border-radius: 8px; cursor: pointer;
-  border: 1px solid var(--border-color, #e5e6eb); background: #fff;
-  font-size: 13px; color: var(--text-regular, #4e5969);
-  transition: all 0.15s;
-}
-.dash-tab:hover { border-color: #a5b4fc; }
-.dash-tab.active {
-  background: var(--color-primary-light, #eaf0ff); color: var(--color-primary, #3370ff);
-  border-color: var(--color-primary, #3370ff); font-weight: 600;
-}
-.tab-more { font-size: 12px; opacity: 0.45; padding: 2px; }
-.tab-more:hover { opacity: 1; color: var(--color-primary, #3370ff); }
-
-.dash-toolbar { display: flex; align-items: center; gap: 8px; }
-.grid-container { border-radius: 10px; }
+/* 看板选择属于当前业务对象，不增加子页面导航层级。 */
+.dash-selector { width: 220px; max-width: 100%; }
+.dash-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.grid-container { border-radius: 8px; }
 
 /* 工具条图标按钮:与 widget 内 .w-btn 完全同规格(22px/同色/同圆角/hover
    同浅灰)——总刷新与单图表刷新视觉完全统一 */
@@ -521,7 +500,7 @@ onBeforeUnmount(() => {
 /* 编辑模式:hover 的 widget 淡色背景高亮(去掉整区底色, 只留悬停反馈,
    拖拽定位更方便)。gridstack 的 item 是运行时生成的 DOM(无 scoped
    属性), 必须 :deep */
-.grid-editing { border-radius: 10px; padding: 6px; }
+.grid-editing { border-radius: 8px; padding: 6px; }
 .grid-editing :deep(.grid-stack-item) { border-radius: 8px; transition: background 0.12s; }
 .grid-editing :deep(.grid-stack-item:hover) {
   background: #eef3ff;     /* 淡蓝——只标识 hover 的这一个图表 */
@@ -563,7 +542,7 @@ onBeforeUnmount(() => {
 }
 .grid-container :deep(.more-line), .grid-container :deep(.live-meta) { color: #999; font-size: 12px; margin-top: 4px; }
 .grid-container :deep(.widget-footer) {
-  font-size: 11px; color: #bbb; padding: 4px 2px 0; text-align: right;
+  font-size: 12px; color: #bbb; padding: 4px 2px 0; text-align: right;
   border-top: 1px solid #f7f8fa; flex-shrink: 0;
 }
 .grid-container :deep(.widget-table-wrap) { height: 100%; overflow: auto; }

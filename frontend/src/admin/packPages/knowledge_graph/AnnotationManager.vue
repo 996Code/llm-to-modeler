@@ -5,9 +5,8 @@
       <a-popover placement="bottomLeft" trigger="click">
         <template #content>
           <div class="anno-tip">
-            <p>知识库"老答错同一个问题"的治本件:录入「问题 → 标准答案」,</p>
-            <p>用户提问与标注问题<b>强相似</b>(≥0.90)时直接返回标准答案,不走检索。</p>
-            <p>点踩的记录可整理成标录入库;错过的知识补课一次,终身正确。</p>
+            <p>用户提问与已启用的标注问题相似度达到 0.90 时，直接返回标准答案。</p>
+            <p>请定期检查答案是否仍适用于当前业务。</p>
           </div>
         </template>
         <a class="anno-info"><QuestionCircleOutlined /></a>
@@ -18,7 +17,7 @@
 
     <a-table
       :columns="cols" :data-source="items" :loading="loading" row-key="id"
-      size="small" :pagination="{ pageSize: 20, showTotal: (t: number) => `共 ${t} 条` }"
+      size="small" :scroll="{ x: 640 }" :pagination="{ pageSize: 20, showTotal: (t: number) => `共 ${t} 条` }"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'question'">
@@ -142,11 +141,11 @@ async function remove(r: KgAnnotation) {
 </script>
 
 <style scoped>
-.anno-head { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
-.anno-title { font-weight: 600; font-size: 13.5px; color: #1f2937; }
+.anno-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
+.anno-title { font-weight: 600; font-size: 16px; color: #1f2937; }
 .anno-info { color: #94a3b8; cursor: pointer; }
 .anno-info:hover { color: #2f54eb; }
-.anno-tip { max-width: 330px; font-size: 12.5px; line-height: 1.8; color: #4b5563; }
+.anno-tip { max-width: 330px; font-size: 12px; line-height: 1.8; color: #4b5563; }
 .anno-tip p { margin: 0; }
 .anno-q { color: #1f2937; font-weight: 500; }
 .anno-a { color: #4b5563; }

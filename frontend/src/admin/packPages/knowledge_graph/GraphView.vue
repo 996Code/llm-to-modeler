@@ -373,14 +373,15 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .gv-page { display: flex; flex-direction: column; }
-.gv-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+.gv-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.gv-toolbar > :deep(.ant-select), .gv-toolbar > :deep(.ant-input-search) { max-width: 100%; }
 .gv-tip { color: #9ca3af; font-size: 12px; margin-left: auto; }
 .gv-expanding { color: #2563eb; font-size: 12px; white-space: nowrap; }
 /* 显式高度(不用 flex:1):G6 canvas 会反向撑大容器,flex 高度构成
    "canvas 变大 → 容器变大 → resize 更大" 的失控反馈(实测打满 2^24) */
 .gv-chart {
   height: calc(100vh - 330px); min-height: 420px; max-height: 900px;
-  border: 1px solid #e6ebf2; border-radius: 12px; background: #fff; overflow: hidden;
+  border: 1px solid #e6ebf2; border-radius: 8px; background: #fff; overflow: hidden;
 }
 .gv-hidden { visibility: hidden; }
 .gv-empty { height: 420px; display: flex; align-items: center; justify-content: center; }

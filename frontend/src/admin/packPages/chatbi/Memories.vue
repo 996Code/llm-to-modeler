@@ -38,12 +38,9 @@
       </a-popconfirm>
       <span class="mem-count">共 <b>{{ memories.length }}</b> 条</span>
     </div>
-    <div class="mem-hint">
-      <InfoCircleOutlined /> 生效中的记忆会在每次查询时按关键词召回并注入 SQL 生成;已整理的原始记忆已并入新记忆, 不再参与召回
-    </div>
 
       <a-table :data-source="filtered" :loading="loading" row-key="id" size="small"
-               :pagination="filtered.length > 20 ? { pageSize: 20 } : false">
+               :scroll="{ x: 1100 }" :pagination="filtered.length > 20 ? { pageSize: 20 } : false">
         <a-table-column title="名称" data-index="name" width="180">
           <template #default="{ record }">
             <b>{{ record.name }}</b>
@@ -142,7 +139,7 @@
 // 整理走异步任务(任务中心观测进度), 完成后自动刷新列表。
 import { computed, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import {DeleteOutlined, EditOutlined, ForkOutlined, InfoCircleOutlined, LinkOutlined, PlusOutlined} from '@ant-design/icons-vue'
+import {DeleteOutlined, EditOutlined, ForkOutlined, LinkOutlined, PlusOutlined} from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
 import { tasksApi } from '../../api'
 
@@ -318,12 +315,11 @@ onMounted(() => {
 <style scoped>
 .mem-page { display: flex; flex-direction: column; }
 .mem-toolbar {
-  display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+  display: flex; align-items: center; gap: 8px; margin-bottom: 16px;
   font-size: 13px; flex-wrap: wrap;
 }
 .mem-count { color: #86909c; margin-left: auto; }
 .mem-count b { color: #1d2129; }
-.mem-hint { font-size: 12px; color: #999; margin-bottom: 12px; }
 .mem-scope { font-size: 12px; color: #4e5969; }
 .mem-content {
   display: block; overflow: hidden; text-overflow: ellipsis;
@@ -331,7 +327,11 @@ onMounted(() => {
 }
 .mem-content:hover { color: #1677ff; }
 .mem-form .form-row { display: flex; gap: 12px; }
-.mem-form .half { flex: 1; }
+.mem-form .half { flex: 1; min-width: 0; }
+@media (max-width: 600px) {
+  .mem-form .form-row { flex-direction: column; gap: 0; }
+  .mem-toolbar :deep(.ant-radio-group) { display: flex; flex-wrap: wrap; }
+}
 </style>
 
 <style>

@@ -13,7 +13,7 @@
       </a-button>
     </div>
     <a-table :data-source="datasources" :loading="loadingDs" row-key="id" size="small"
-               :pagination="false">
+               :pagination="false" :scroll="{ x: 1000 }">
         <a-table-column title="名称" data-index="name" />
         <a-table-column title="类型" data-index="dbType" width="90">
           <template #default="{ record }">
@@ -475,8 +475,8 @@ onMounted(loadList)
 <style scoped>
 .ds-manager { display: flex; flex-direction: column; }
 .tab-toolbar {
-  display: flex; align-items: center; gap: 8px;
-  margin-bottom: 12px; font-size: 13px; color: #86909c;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 16px; font-size: 13px; color: #86909c;
 }
 .tab-toolbar b { color: #1d2129; }
 .tab-toolbar .muted { margin-left: 0; }
@@ -491,11 +491,16 @@ onMounted(loadList)
   background: #f7f8fa; border-radius: 8px; padding: 10px 4px; text-align: center;
 }
 .metric-card b { display: block; font-size: 18px; color: #1f2329; }
-.metric-card span { font-size: 11px; color: #86909c; }
+.metric-card span { font-size: 12px; color: #86909c; }
 .metric-card.warn { background: #fff7e6; }
 .metric-card.warn b { color: #d46b08; }
 .scan-stage { color: #999; font-size: 12px; }
 /* 新建弹窗双栏:两个字段一行,压缩纵向长度 */
 .ds-form .form-row { display: flex; gap: 12px; }
-.ds-form .half { flex: 1; }
+.ds-form .half { flex: 1; min-width: 0; }
+.dep-line { flex-wrap: wrap; }
+@media (max-width: 600px) {
+  .ds-form .form-row { flex-direction: column; gap: 0; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 </style>

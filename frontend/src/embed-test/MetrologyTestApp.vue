@@ -9,7 +9,7 @@
     </header>
     <div class="mt-workspace">
       <aside class="mt-sidebar">
-        <a-tabs v-model:active-key="activeTab">
+        <a-tabs v-model:active-key="activeTab" class="flat-tabs">
           <a-tab-pane key="cases" tab="测试用例">
             <div class="mt-sidebar-content">
               <section class="mt-section">

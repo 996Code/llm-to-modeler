@@ -1,0 +1,149 @@
+.shell {
+  --admin-text: #1f2937;
+  --admin-muted: #6b7280;
+  --admin-border: #e5e7eb;
+  --admin-accent: #2563eb;
+  --admin-header-gap: 12px;
+  font-size: 13px;
+  color: var(--admin-text);
+  letter-spacing: 0;
+}
+
+.shell .flat-tabs > .ant-tabs-nav {
+  margin: 0 0 var(--admin-header-gap);
+}
+
+.shell .flat-tabs > .ant-tabs-nav .ant-tabs-tab {
+  padding: 8px 0;
+  font-size: 13px;
+}
+
+.shell .flat-tabs > .ant-tabs-nav .ant-tabs-tab + .ant-tabs-tab {
+  margin-left: 24px;
+}
+
+.shell .flat-tabs > .ant-tabs-nav .ant-tabs-tab-active .ant-tabs-tab-btn {
+  font-weight: 600;
+}
+
+.shell .flat-tabs > .ant-tabs-nav .ant-tabs-extra-content {
+  margin-left: 16px;
+}
+
+.shell :is(.cv-toolbar, .tk-toolbar, .cl-toolbar, .ov-toolbar) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 0 0 var(--admin-header-gap);
+}
+
+.shell :is(.cv-toolbar, .tk-toolbar, .cl-toolbar, .ov-toolbar) > * {
+  max-width: 100%;
+}
+
+.shell .ant-table-wrapper {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* 表体按视口动态限高(翻页不用长滚找分页器);高度随分辨率自适应,
+   头部/工具栏占地大时表格自动矮下去。分页器 sticky 贴视口底常驻。 */
+.shell .ant-table-content {
+  max-height: calc(100dvh - 300px);
+  overflow: auto;
+}
+
+.shell .ant-table-wrapper .ant-table-pagination {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  margin-bottom: 0;
+  padding: 8px 0;
+  background: #fff;
+}
+
+.shell .ant-table {
+  font-size: 13px;
+}
+
+.shell .ant-table-thead > tr > th {
+  color: #4b5563;
+  font-weight: 500;
+  background: #f8fafc;
+}
+
+.shell .ant-table-cell {
+  overflow-wrap: anywhere;
+}
+
+.shell :is(.ant-btn, .ant-input, .ant-select-selector, .ant-input-number) {
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.shell :is(.lp-foot, .metro-admin-foot) .ant-space {
+  flex-wrap: wrap;
+}
+
+.shell :is(.ov-card, .pk-card) {
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.shell :is(.ov-card, .pk-card):hover {
+  box-shadow: none;
+  border-color: #cbd5e1;
+}
+
+.shell :is(.et, .mt) {
+  padding: 0;
+  font-size: 13px;
+}
+
+.shell :is(.et-heading, .mt-heading) h1 {
+  font-size: 16px;
+}
+
+.shell :is(.et-header, .mt-header) {
+  margin-bottom: var(--admin-header-gap);
+  flex-wrap: wrap;
+}
+
+.shell :is(.et-workspace, .mt-workspace) {
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
+.shell :is(.et-preview, .mt-preview) {
+  padding: 16px;
+}
+
+@media (max-width: 700px) {
+  .shell .flat-tabs > .ant-tabs-nav .ant-tabs-tab + .ant-tabs-tab {
+    margin-left: 20px;
+  }
+
+  .shell :is(.cv-toolbar, .tk-toolbar, .cl-toolbar, .ov-toolbar) {
+    gap: 8px;
+  }
+}
+
+/* ── 说明弹窗统一样式(rightExtra「说明」内容经 v-html 注入 popover 门户,须全局) ──
+   用法:容器 <div class="help-pop" v-html="...">,内容多加 help-pop-wide。
+   配套构造器见 src/admin/helpHtml.ts(chip/iconBtn/rules)。 */
+.help-pop { max-width: 360px; font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; }
+.help-pop-wide { max-width: 460px; }
+.help-pop b { color: #1f2937; }
+.help-pop .chip { display: inline-flex; align-items: center; padding: 0 6px; border-radius: 4px;
+  font-size: 11px; font-style: normal; line-height: 18px; margin: 0 2px; white-space: nowrap; }
+.help-pop .chip-blue { background: #e6f4ff; color: #1677ff; border: 1px solid #91caff; }
+.help-pop .chip-green { background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; }
+.help-pop .chip-red { background: #fff2f0; color: #cf1322; border: 1px solid #ffa39e; }
+.help-pop .chip-orange { background: #fff7e6; color: #d46b08; border: 1px solid #ffd591; }
+.help-pop .chip-plain { background: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; }
+.help-pop .chip-btn svg { width: 12px; height: 12px; margin-right: 4px; fill: currentColor; flex: none; }
+/* 各页 rightExtra「说明」入口按钮(统一外观,配 .help-pop 弹窗内容) */
+.help-link { color: #94a3b8; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+.help-link:hover { color: #2f54eb; }

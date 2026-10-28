@@ -325,6 +325,28 @@ class TestKnowledgeGraphApi:
 
         assert client.delete(f"/api/packs/knowledge_graph/kbs/{kb['id']}").json()["success"] is True
 
+    def test_kb_chunk_params_locked_once_documents_exist(self, kg_client):
+        """已有文档(解析开始)的库:分段参数不可改(422);基本信息仍可改。"""
+        client, _ = kg_client
+        base = "/api/packs/knowledge_graph/kbs"
+        kb = client.post(base, json={"name": "分段锁"}).json()
+        # 空库:分段可配(建库后、解析前的调整窗口)
+        assert client.put(f"{base}/{kb['id']}", json={
+            "chunk_params": {"chunk_target_chars": 800, "chunk_overlap_chars": 120}}).status_code == 200
+
+        content = "# A\n内容".encode()
+        up = client.post(f"{base}/{kb['id']}/documents",
+                         files=[("files", ("a.md", content, "text/markdown"))]).json()["items"]
+        assert up[0]["ok"]
+
+        r = client.put(f"{base}/{kb['id']}", json={
+            "chunk_params": {"chunk_target_chars": 300}})
+        assert r.status_code == 422 and "分段参数不可修改" in r.json()["detail"]
+
+        # 基本信息不受影响
+        r2 = client.put(f"{base}/{kb['id']}", json={"name": "分段锁改名", "description": "d"})
+        assert r2.status_code == 200 and r2.json()["name"] == "分段锁改名"
+
     def test_upload_dedup_and_reject(self, kg_client):
         client, _ = kg_client
         kb = client.post("/api/packs/knowledge_graph/kbs", json={"name": "U"}).json()

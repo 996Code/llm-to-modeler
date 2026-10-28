@@ -10,7 +10,7 @@
       <p class="dm-upload-icon"><InboxOutlined /></p>
       <p class="dm-upload-text">点击或拖拽文件到此处上传</p>
       <p class="dm-upload-hint">
-        支持 md / txt / pdf / docx,单文件 ≤ {{ maxMb }}MB;同库同内容自动去重;扫描版 PDF 导入时自动 OCR 识别(pypdfium2 渲染 + RapidOCR)
+        支持 md / txt / pdf / docx，单文件 ≤ {{ maxMb }}MB；同内容自动去重，扫描版 PDF 自动识别
         <a-popover placement="bottom" trigger="hover">
           <template #content>
             <div class="dm-chunk-pop">
@@ -43,13 +43,28 @@
       </template>
     </a-alert>
 
-    <!-- 工具条 -->
+    <!-- 工具条(一行):导入 / 分段 / 批量删除 / 统计 / 提示 -->
     <div class="dm-toolbar">
-      <a-button type="primary" :disabled="!importableCount" :loading="importingAll" @click="doImportAll">
+      <a-button type="primary" size="small" :disabled="!importableCount" :loading="importingAll" @click="doImportAll">
         <CloudUploadOutlined /> 导入全部未处理文档
       </a-button>
-      <a-button size="small" @click="openChunkConfig"><SettingOutlined /> 分段配置</a-button>
-      <span class="dm-tip">上传成功即自动发起导入(后台任务):解析(扫描件自动 OCR)→ 切块 → LLM 抽取实体关系 → Neo4j 图谱 + PG 向量;任务中心可查日志</span>
+      <!-- 分段配置:已有文档(解析开始)后分段口径不可再改(后端同款 422 守卫) -->
+      <a-tooltip v-if="docs.length" title="该库已有文档导入,分段参数不可修改">
+        <a-button size="small" disabled><SettingOutlined /> 分段配置</a-button>
+      </a-tooltip>
+      <a-button v-else size="small" @click="openChunkConfig"><SettingOutlined /> 分段配置</a-button>
+      <a-popconfirm
+        :title="`将删除选中的 ${selectedIds.length} 个文档(含图谱贡献与向量),确认?`"
+        :disabled="!selectedIds.length" @confirm="doBatchDelete"
+      >
+        <a-button danger size="small" :disabled="!selectedIds.length" :loading="batchDeleting">
+          <DeleteOutlined /> 批量删除{{ selectedIds.length ? `(${selectedIds.length})` : '' }}
+        </a-button>
+      </a-popconfirm>
+      <a-button size="small" @click="loadUsage">
+        <BarChartOutlined /> 使用统计
+      </a-button>
+      <span class="dm-tip">上传成功后自动导入，可在任务中心查看进度</span>
     </div>
 
     <!-- D33 分段重配(已有库):调参与预览同向导;保存为库级参数,重导入生效 -->
@@ -61,23 +76,10 @@
     </a-modal>
 
     <!-- 文档表 -->
-    <div class="dm-toolbar">
-      <a-popconfirm
-        :title="`将删除选中的 ${selectedIds.length} 个文档(含图谱贡献与向量),确认?`"
-        :disabled="!selectedIds.length" @confirm="doBatchDelete"
-      >
-        <a-button danger size="small" :disabled="!selectedIds.length" :loading="batchDeleting">
-          <DeleteOutlined /> 批量删除{{ selectedIds.length ? `(${selectedIds.length})` : '' }}
-        </a-button>
-      </a-popconfirm>
-      <a-button size="small" style="margin-left: 8px" @click="loadUsage">
-        <BarChartOutlined /> 使用统计
-      </a-button>
-    </div>
     <a-table
       :columns="columns" :data-source="docs" :loading="loading" row-key="id"
       :row-selection="{ selectedRowKeys: selectedIds, onChange: (k: string[]) => selectedIds = k }"
-      size="middle" :pagination="{ pageSize: 20, showTotal: (t: number) => `共 ${t} 条` }"
+      size="small" :scroll="{ x: 1100 }" :pagination="{ pageSize: 20, showTotal: (t: number) => `共 ${t} 条` }"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'filename'">
@@ -732,13 +734,13 @@ onBeforeUnmount(() => window.clearInterval(timer))
 .dm-chunk-link { color: #6b7280; font-size: 12px; margin-left: 10px; cursor: pointer; }
 .dm-chunk-link:hover { color: #2f54eb; }
 .dm-chunk-pop { max-width: 420px; }
-.dm-chunk-pop-title { font-weight: 600; color: #1f2937; margin-bottom: 4px; font-size: 12.5px; }
-.dm-chunk-list { margin: 0; padding-left: 16px; color: #6b7280; font-size: 12.5px; line-height: 1.9; }
-.dm-upload-line { font-size: 12.5px; color: #4b5563; display: flex; align-items: center; gap: 6px; }
+.dm-chunk-pop-title { font-weight: 600; color: #1f2937; margin-bottom: 4px; font-size: 12px; }
+.dm-chunk-list { margin: 0; padding-left: 16px; color: #6b7280; font-size: 12px; line-height: 1.9; }
+.dm-upload-line { font-size: 12px; color: #4b5563; display: flex; align-items: center; gap: 6px; }
 .dm-ok { color: #16a34a; }
 .dm-bad { color: #dc2626; }
 .dm-reason { color: #dc2626; }
-.dm-toolbar { display: flex; align-items: center; gap: 12px; margin: 14px 0 12px; }
+.dm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
 .dm-tip { color: #9ca3af; font-size: 12px; }
 .dm-file-icon { margin-right: 8px; color: #64748b; }
 .dm-file-icon.pdf { color: #dc2626; }
@@ -749,7 +751,7 @@ onBeforeUnmount(() => window.clearInterval(timer))
 .dm-counts { font-size: 12px; color: #6b7280; }
 .dm-done { color: #16a34a; font-size: 12px; font-weight: 600; }
 .dm-danger { color: #dc2626; }
-.dm-chunks__summary { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.dm-chunks__summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
 .dm-chunks__spacer { flex: 1; }
 .dm-chunks__preview {
   display: inline-block; max-width: 340px; overflow: hidden;
@@ -758,8 +760,8 @@ onBeforeUnmount(() => window.clearInterval(timer))
 }
 .dm-chunks__dim { color: #d1d5db; }
 .dm-chunks__hint { color: #9ca3af; font-size: 12px; margin-top: 10px; }
-.dm-chunk-edit-warn { margin-top: 8px; color: #d97706; font-size: 12.5px; }
-.dm-meta-tag { font-size: 11px; cursor: pointer; }
+.dm-chunk-edit-warn { margin-top: 8px; color: #d97706; font-size: 12px; }
+.dm-meta-tag { font-size: 12px; cursor: pointer; }
 .dm-meta-add { font-size: 12px; color: #94a3b8; }
 .dm-meta-add:hover { color: #2f54eb; }
 .dm-meta-hint { font-size: 12px; color: #94a3b8; margin-bottom: 10px; }
