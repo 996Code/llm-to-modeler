@@ -22,6 +22,17 @@
 | [嵌入模式总体设计.md](嵌入模式总体设计.md) | 嵌入模式（IM 聊天窗 + SDK）总体设计 |
 | [共享内核API契约.md](共享内核API契约.md) | 编排插件消费的两个底层薄入口：KG 证据服务 retrieve_evidence + 问数受控执行 execute_controlled（信封分态/错误类型保留/插件间依赖声明） |
 
+### 链路走读（代码级数据流，doc/flows/）
+
+一句话/一份文档进来后数据在代码里的完整路径——向量化的调用点、匹配策略、LLM 提示词的拼装：
+
+| 文档 | 链路 |
+|---|---|
+| [flows/engine.md](flows/engine.md) | 对话引擎：SSE 入口→归属校验→意图路由→LangGraph 工具调度→追问中断/恢复（question_id 令牌）→SSE 事件流 |
+| [flows/knowledge-graph.md](flows/knowledge-graph.md) | 导入向：文档→解析分段→bge-m3 向量化(pgvector)→LLM 图谱抽取(Neo4j,断点续跑)；检索向：意图解析→图谱种子三层匹配→文档实体收敛→向量/全文路→D15/D17→answer.j2 提示词→引用校验 |
+| [flows/chatbi.md](flows/chatbi.md) | 智能问数：两阶段选表→SQL/MCP 工具调用生成(提示词 sections)→三层校验/受控执行(自愈门)→图表→记忆/反馈回流 |
+| [flows/customer-service.md](flows/customer-service.md) | 智能客服：路由表合成(server::tool 身份/声明门禁)→两段式提取→追问令牌→prepare_plan→受控执行→结论(引用校验) |
+
 ## 第三部分 · 开发与运维手册（doc/agents/）
 
 | 文档 | 内容 |
@@ -53,7 +64,7 @@
 
 ## 第六部分 · 业务与工具
 
-智能客服投标材料：[一体化架构图](customer-service-bid.html) · [技术说明与代码依据](customer-service-bid-notes.md)。一张图合并平台底座、知识咨询、MCP 对接与受阻处理，附 PNG / SVG；明确已实现能力与生产对接边界。
+智能客服链路图（代码级走读、插件总览）归入 [总索引 · 智能客服](index.html#metrology-assistant)。投标架构图为**独立单文件** [customer-service-bid.html](customer-service-bid.html)，不进入总索引；图源 `diagram-src/customer-service-bid.workflow.json`，与成品同名。
 
 | 文档 | 内容 |
 |---|---|
