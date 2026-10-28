@@ -45,7 +45,9 @@
 构建全在开发机（Mac）上做，服务器只收镜像直接切换：
 
 ```bash
-cd <干净worktree>   # 出包纪律见 branch-and-release.md；不带主工作区在途文件
+cd <干净worktree>   # 出包纪律见 branch-and-release.md:必须先同步到最新 main
+                    # 再出包(worktree 停在旧提交会打出旧包——脚本有新鲜度守卫,
+                    # 但先 remove 再 add + git log 核对是第一原则);不带主工作区在途文件
 bash deploy/local-build.sh
 ```
 

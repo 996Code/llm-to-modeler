@@ -37,6 +37,23 @@ PY_IMAGE_AMD64="python:3.12-slim-trixie-amd64"   # 钉 trixie+amd64(显式钉套
 log()  { printf '\033[32m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
 err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 
+# ── ⓪' 新鲜度守卫:HEAD 必须是 origin/main ────────────────────────
+# 10-28 实录:复用了 /tmp 里停在旧提交的 worktree,服务器拿到落后 7 个
+# 提交的镜像。守卫拒绝非 origin/main 的 HEAD 出包(重打历史版本用
+# ALLOW_STALE_HEAD=1)。离线时 fetch 失败则跳过校验(仅打印基线)。
+git fetch origin main --quiet 2>/dev/null || log "⓪' (fetch 失败/离线,跳过新鲜度校验)"
+if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
+  if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ] \
+     && [ "${ALLOW_STALE_HEAD:-0}" != "1" ]; then
+    err "HEAD($(git rev-parse --short HEAD)) ≠ origin/main($(git rev-parse --short origin/main))"
+    err "出包必须基于最新 main。worktree 先执行:"
+    err "  git fetch origin && git checkout --detach origin/main"
+    err "(确认要重打历史版本: ALLOW_STALE_HEAD=1 bash deploy/local-build.sh)"
+    exit 1
+  fi
+  log "⓪' 出包基线 $(git rev-parse --short HEAD) = origin/main ✓"
+fi
+
 # ── ⓪ amd64 基础镜像自检(缺则拉;Mac 上用别名单独存 amd64 版) ─────────
 ensure_amd64() {
   docker image inspect "$PY_IMAGE_AMD64" >/dev/null 2>&1 && return 0
