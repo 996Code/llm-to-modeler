@@ -1066,7 +1066,10 @@ class MetrologyAssistantTool(Tool):
 
     def _run_kg(self, scenario: str, cfg: dict, ctx: ToolContext,
                 mem, merged: dict, stage) -> ToolResult:
-        instrument = merged.get("instrument") or ""
+        # instrument 与 name 是同义槽(不同场景各自声明);提取模型对二者
+        # 的取舍不稳定(qwen3.7-plus 常把器具名填进 name,99.22 实录:
+        # 结论降级"该器具"→uncertain)。此处兜底合并,取先非空者。
+        instrument = merged.get("instrument") or merged.get("name") or ""
         purpose = merged.get("purpose") or ""
         action = cfg["action"]
         # 选库规则(全部可配置,代码只查表):显式 kb → kb_rules 按槽位值
