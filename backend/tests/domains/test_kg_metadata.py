@@ -383,3 +383,103 @@ class TestDocumentEntityScope:
                           "keywords": [], "hop": 1}
         out = retrieval.hybrid_retrieve(env.app_state, KB1, "总纲相关要求")
         assert "docScopeFromEntity" not in out["diagnostics"]
+
+    def test_scope_widens_vector_window_before_filter(self, env):
+        """P1:收敛时放大检索窗再过滤——全库 top_k 里兄弟占席时,目标
+        文档排在 LIMIT 之后的块也要拿得到(先过滤后截断)。"""
+        kb, docs = _mk_docs(env, 3)
+        env.graph.nodes[("kb1", "规程甲")] = {
+            "id": "kb1:规程甲", "name": "规程甲大纲", "normalized": "规程甲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.llm.query_result = {"entities": ["规程甲"], "relation_types": [],
+                                "keywords": [], "hop": 1}
+        # 8 条命中:兄弟文档 4 条在前,目标文档 4 条排在 6-9 位
+        # (默认 top_k=5 只能取到第 1 条目标块;放大窗后应取足 5 条目标块)
+        env.vector.hits = (
+            [{"chunkId": f"{docs[1]['id']}-b{i}", "docId": docs[1]["id"], "seq": i,
+              "text": f"兄弟块{i}", "score": 0.9 - i * 0.01} for i in range(4)] +
+            [{"chunkId": f"{docs[0]['id']}-a{i}", "docId": docs[0]["id"], "seq": i,
+              "text": f"目标块{i}", "score": 0.85 - i * 0.01} for i in range(4)])
+        seen = {}
+        env.vector.search = lambda kb_id, qvec, top_k=5: (
+            seen.setdefault('k', []).append(top_k),
+            env.vector.hits[:top_k])[1]
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "规程甲的环境要求")
+        # 目标文档 4 条块全部取到(含排在全库第 8 位的 a3——旧的全库
+        # top_k=5 后过滤只能拿到 1 条);兄弟块 0 条
+        assert len(out["chunks"]) == 4, "放大窗后应取足目标文档全部块"
+        assert all(c["docId"] == docs[0]["id"] for c in out["chunks"])
+        assert max(seen['k']) >= 8, "检索窗确实放大到覆盖第 8 位"
+
+    def test_short_genre_word_is_not_naming(self, env):
+        """归一化后 <3 字的体裁词(大纲/总纲/规程)不算点名,不收敛。"""
+        kb, docs = _mk_docs(env, 2)
+        env.graph.nodes[("kb1", "大纲")] = {
+            "id": "kb1:大纲", "name": "检定规程大纲", "normalized": "大纲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.vector.hits = [
+            {"chunkId": f"{docs[i]['id']}-c0", "docId": docs[i]["id"], "seq": 0,
+             "text": f"文档{i}块", "score": 0.9 - i * 0.05} for i in range(2)]
+        env.llm.query_result = {"entities": ["大纲"], "relation_types": [],
+                                "keywords": [], "hop": 1}
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "大纲要求")
+        assert "docScopeFromEntity" not in out["diagnostics"]
+
+    def test_vector_search_failure_still_relaxes(self, env):
+        """收敛场景向量检索抛异常:不提前放弃,回退轮接住(第二次成功)。"""
+        kb, docs = _mk_docs(env, 2)
+        env.graph.nodes[("kb1", "规程甲")] = {
+            "id": "kb1:规程甲", "name": "规程甲大纲", "normalized": "规程甲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.llm.query_result = {"entities": ["规程甲"], "relation_types": [],
+                                "keywords": [], "hop": 1}
+        good = [{"chunkId": f"{docs[0]['id']}-c0", "docId": docs[0]["id"],
+                 "seq": 0, "text": "目标块", "score": 0.9}]
+        calls = {"n": 0}
+
+        def flaky(kb_id, qvec, top_k=5):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("vector backend down")
+            return good
+        env.vector.search = flaky
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "规程甲的环境要求")
+        assert out["chunks"], "检索失败后回退轮应接住,不能空手而归"
+        assert out["diagnostics"].get("vectorDegraded") is True
+        assert out["diagnostics"].get("docScopeRelaxed") is True
+
+    def test_generic_word_prefix_of_doc_name_is_not_naming(self, env):
+        """通用器具词恰为文档名前缀("压力表"→"压力表检定规程")且无
+        编号特征、覆盖不过半 → 不算点名,不收敛(多份同类规程素材保留)。"""
+        kb, docs = _mk_docs(env, 2)
+        env.graph.nodes[("kb1", "压力表检定规程")] = {
+            "id": "kb1:p", "name": "压力表检定规程", "normalized": "压力表检定规程",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.vector.hits = [
+            {"chunkId": f"{docs[i]['id']}-c0", "docId": docs[i]["id"], "seq": 0,
+             "text": f"压力表规程{i}块", "score": 0.9 - i * 0.05} for i in range(2)]
+        env.llm.query_result = {"entities": ["压力表"], "relation_types": [],
+                                "keywords": [], "hop": 1}
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "压力表怎么检定")
+        assert "docScopeFromEntity" not in out["diagnostics"]
+        assert {c["docId"] for c in out["chunks"]} == {d["id"] for d in docs}
+
+    def test_identifier_prefix_is_naming_even_when_short_coverage(self, env):
+        """编号前缀("JJF 1381"覆盖长标题不足半)仍是点名——标识符信号。"""
+        kb, docs = _mk_docs(env, 2)
+        env.graph.nodes[("kb1", "jjf1381-2012原棉水分测定仪型式评价大纲")] = {
+            "id": "kb1:1381", "name": "JJF 1381-2012 原棉水分测定仪型式评价大纲",
+            "normalized": "jjf1381-2012原棉水分测定仪型式评价大纲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.vector.hits = [
+            {"chunkId": f"{docs[i]['id']}-c0", "docId": docs[i]["id"], "seq": 0,
+             "text": f"文档{i}块", "score": 0.9 - i * 0.05} for i in range(2)]
+        env.llm.query_result = {"entities": ["JJF 1381"], "relation_types": [],
+                                "keywords": [], "hop": 1}
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "JJF 1381 的实验环境")
+        assert out["diagnostics"].get("docScopeFromEntity") == [docs[0]["id"]]

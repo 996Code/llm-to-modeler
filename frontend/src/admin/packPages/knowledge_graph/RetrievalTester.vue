@@ -72,6 +72,12 @@
             {{ result.diagnostics.parentContextHits }} 段已回带父块上下文
           </a-tag>
         </div>
+        <a-tag v-if="(result.diagnostics.docScopeFromEntity ?? []).length" color="purple">
+          命中文档实体,已收敛到 {{ result.diagnostics.docScopeFromEntity!.length }} 份指定文档
+        </a-tag>
+        <a-tag v-if="result.diagnostics.docScopeRelaxed" color="orange">
+          指定文档内零召回,已放开全库检索
+        </a-tag>
         <a-tag v-if="result.diagnostics.vectorDegraded" color="red">向量检索失败,已降级纯图谱</a-tag>
         <a-tag v-if="(result.diagnostics.fulltextHits ?? 0) > 0" color="orange">
           图谱零命中,全文兜底救回 {{ result.diagnostics.fulltextHits }} 条

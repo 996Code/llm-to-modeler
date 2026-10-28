@@ -118,6 +118,10 @@ def normalize_slot(value, slot_type='text', enum_options=None):
     raw = str(value).strip()
     if slot_type in ('boolean', 'json'):
         try:
+            if slot_type == 'json' and isinstance(value, (dict, list)):
+                # 提取器按提示词返回原生 JSON 对象——直接通过,
+                # str() 再 loads 会把 Python repr 当 JSON 解析失败
+                return value, None
             return (typed_value(value, {'type': 'boolean'}) if slot_type == 'boolean' else json.loads(raw)), None
         except (ValueError, TypeError):
             return None, '请提供 true/false' if slot_type == 'boolean' else '请提供合法 JSON'
@@ -407,7 +411,15 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 notice = (action.get('notices') or {}).get(result.status) or {}
                 title = notice.get('title') or ('无权查询' if result.status == 'forbidden' else '未找到数据')
                 message = notice.get('message') or ('当前身份无权查询该业务数据。' if result.status == 'forbidden' else '未找到符合条件的数据,请核对查询条件。')
-                return _notice(result.status, title, message.format(**merged), notice.get('order', '').format(**merged))
+                # 模板引用的槽位本轮可能缺席(通知多在缺槽/异常路径触发),
+                # format_map+缺失兜空——format KeyError 会把业务通知升级成工具异常
+                class _SafeMap(dict):
+                    def __missing__(self, key):
+                        return ''
+                safe = _SafeMap(merged)
+                return _notice(result.status, title,
+                               message.format_map(safe),
+                               notice.get('order', '').format_map(safe))
             message = result.error.message if result.error else result.status
             return ToolResult(error_for_llm=f'{noun}查询失败({result.status}): {message}。已如实上报,请稍后重试。')
         return getattr(self, action.get('card') or '_table_card')(result, merged, stage)

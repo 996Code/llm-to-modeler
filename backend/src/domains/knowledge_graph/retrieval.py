@@ -260,7 +260,8 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     top_k: Optional[int] = None,
                     on_stage=None,
                     intent: Optional[Dict[str, Any]] = None,
-                    doc_filter: Optional[set] = None) -> Dict[str, Any]:
+                    doc_filter: Optional[set] = None,
+                    auto_doc_scope_enabled: bool = True) -> Dict[str, Any]:
     """混合检索:返回 {intent, seeds, subgraph, chunks}。
 
     图谱路仅无文档范围时执行;向量路仅 kb.vector_enabled 时执行(失败降级为空)。
@@ -397,17 +398,33 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     # 仅中段子串(如泛指型号词)不算点名——find_entities 的 CONTAINS
     # 兜底会让短词命中长文档名,弱信号触发收敛会误挡同类多文档素材。
     _DOC_SCOPE_MAX_DOCS = 3  # 来源文档超过此数=泛指而非点名,不收敛
+    _NAMED_TERM_MIN_CHARS = 3  # 归一化后短于此=体裁词(大纲/规程/总纲),不算点名
     auto_doc_scope: Optional[set] = None
-    if doc_filter is None and seeds:
+    if doc_filter is None and auto_doc_scope_enabled and seeds:
         from sdk.graph_store import normalize_name as _norm
-        strong_terms = {_norm(str(t)) for t in terms if str(t).strip()}
+
+        def _identifier_like(t: str) -> bool:
+            # 编号特征(含数字)是跨命名体系的通用标识符信号——
+            # GB/T、ISO、JJF、企标编号都含数字;不算业务硬编码
+            return any(c.isdigit() for c in t)
 
         def _named(entity_name: str) -> bool:
             name = _norm(str(entity_name or ""))
             if not name:
                 return False
-            return any(name == t or name.startswith(t) or name.endswith(t)
-                       for t in strong_terms if t)
+            for t in {_norm(str(x)) for x in terms}:
+                if len(t) < _NAMED_TERM_MIN_CHARS:
+                    continue  # 体裁短词(大纲/总纲)不算点名
+                if name == t:
+                    return True
+                # 前缀/后缀=引用了标题的头部(编号)或尾部(完整标题),
+                # 但须防主题词误点名:通用词("压力表")恰是文档名
+                # ("压力表检定规程")前缀时,要求 term 覆盖标题多数,
+                # 或 term 带编号特征(引用的是标识符而非主题词)
+                if (name.startswith(t) or name.endswith(t)) and (
+                        len(t) * 2 >= len(name) or _identifier_like(t)):
+                    return True
+            return False
 
         scope_docs = set()
         for s in seeds:
@@ -419,6 +436,9 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             _stage("kb_search.vector",
                    f"命中文档实体,检索收敛到 {len(auto_doc_scope)} 份指定文档…")
     effective_filter = doc_filter if doc_filter is not None else auto_doc_scope
+    # 设计取舍(留痕):自动收敛只过滤片段路(向量/全文),不过滤 BFS 子图
+    # ——实体关系归属无法按文档证明(实体属性跨文档合并),过滤会连
+    # 定位信息一起丢;kb_search 结论只消费 chunks,子图仅作定位/展示。
 
     chunks: List[Dict[str, Any]] = []
     fulltext_hits: List[Dict[str, Any]] = []
@@ -432,7 +452,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             fulltext_hits = store.search_chunks_fulltext(kb["id"], query, limit=10)
             if effective_filter is not None:
                 fulltext_hits = [h for h in fulltext_hits
-                                 if h.get("docId") in doc_filter]
+                                 if h.get("docId") in effective_filter]
             for h in fulltext_hits:
                 h["docName"] = _doc_names.get(h.get("docId") or "", "")
             chunks.extend(fulltext_hits)
@@ -477,10 +497,16 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             # doc 名映射提前(日志里直接给文档名而不是裸 ID)
             _doc_names = {d["id"]: d["filename"] for d in store.list_documents(kb["id"])}
             try:
-                hits = vector.search(kb["id"], qvec, top_k=k)
+                # 范围收敛时放大检索窗再过滤(而非全库 top_k 后过滤):
+                # 同模板批量库的兄弟文档条款分数与本尊近乎相同,全库取
+                # top_k 时兄弟占席,目标文档自己的高分章节可能排在
+                # LIMIT 之外被系统性截断——先过滤后截断才拿得足块数
+                search_k = (k * max(1, len(effective_filter) * 2)
+                            if effective_filter is not None else k)
+                hits = vector.search(kb["id"], qvec, top_k=search_k)
                 if effective_filter is not None:
                     # D7 元数据白名单/文档实体收敛:命中按文档过滤(空集=零召回)
-                    hits = [h for h in hits if h.get("docId") in effective_filter]
+                    hits = [h for h in hits if h.get("docId") in effective_filter][:k]
                 for h in hits:
                     h["docName"] = _doc_names.get(h.get("docId") or "", "")
             except Exception as e:
@@ -536,22 +562,20 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             # (_apply_parent_context 内消化,不拖垮检索)
             diagnostics["parentContextHits"] = _apply_parent_context(store, kept)
         except Exception as e:
-            # 降级事件本身也入观测:连接建不起来/元数据读失败时,
-            # 调用日志里留一条 degraded 记录(否则"为什么只走了图谱路"不可查)。
-            # search 本身的失败内层 finally 已记,这里跳过防同一次失败落两条
-            if _search_failed:
-                logger.warning(f"向量检索失败,降级纯图谱: {e}")
-                diagnostics["vectorDegraded"] = True
-                # 全文兜底命中不随降级丢弃(第三路独立于向量路)
-                return {"intent": intent, "seeds": seeds, "subgraph": subgraph,
-                        "chunks": chunks, "diagnostics": diagnostics}
-            _log_retrieval_call(
-                app_state, CT_VECTOR, f"{_vector_backend()}:search",
-                request_data={"stage": "kg.vector_search", "kbId": kb["id"],
-                              "kb": kb.get("name"), "degraded": True},
-                response_data={"hits": 0, "degraded": True},
-                duration_ms=int((time.monotonic() - _t0) * 1000),
-                error=str(e), conv_id=conv_id)
+            # search 本身的失败内层 finally 已记日志,这里跳过防同一次
+            # 失败落两条;前置失败(embeddings/元数据)在此补一条 degraded
+            # 记录(否则"为什么只走了图谱路"不可查)。
+            # 不提前 return:收敛场景仍需走下方 relax 兜底(检索失败恰是
+            # 最该放开的时刻);无收敛时 relax 条件不满足,落到函数尾
+            # 返回,语义与原提前 return 一致(全文兜底块仍保留)。
+            if not _search_failed:
+                _log_retrieval_call(
+                    app_state, CT_VECTOR, f"{_vector_backend()}:search",
+                    request_data={"stage": "kg.vector_search", "kbId": kb["id"],
+                                  "kb": kb.get("name"), "degraded": True},
+                    response_data={"hits": 0, "degraded": True},
+                    duration_ms=int((time.monotonic() - _t0) * 1000),
+                    error=str(e), conv_id=conv_id)
             logger.warning(f"向量检索失败,降级纯图谱: {e}")
             diagnostics["vectorDegraded"] = True
 
@@ -563,12 +587,19 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
         diagnostics["docScopeRelaxed"] = True
         _t0 = time.monotonic()
         _err = None
+        k = top_k or int(_cfg(app_state, "vector_top_k", 5))  # 先绑定:finally 引用它
         try:
             vector = runtime.get_vector(app_state)
-            k = top_k or int(_cfg(app_state, "vector_top_k", 5))
             qvec = app_state.llm_client.embeddings(
                 [query], conv_id=conv_id, stage="kg.query_embed", mode="query")[0]
-            hits = vector.search(kb["id"], qvec, top_k=k)
+            hits = sorted(vector.search(kb["id"], qvec, top_k=k),
+                          key=lambda h: float(h.get("score") or 0.0), reverse=True)
+            # 同父块去重(与主路同款):同一章多个子段只留最高分,
+            # 不让同章挤占全部名额
+            _seen_parents = set()
+            hits = [h for h in hits
+                    if (p := str(h.get("chunkId") or "").split("#", 1)[0])
+                    not in _seen_parents and not _seen_parents.add(p)]
             _doc_names = {d["id"]: d["filename"]
                           for d in store.list_documents(kb["id"])}
             for h in hits:
@@ -767,7 +798,8 @@ def _requery_once(app_state, kbs, query: str, retrieved: Dict[str, Any],
             app_state, bq, _merged_relation_types(kbs), conv_id=conv_id)
         per_extra = [hybrid_retrieve(app_state, kb, bq, conv_id=conv_id,
                                      top_k=top_k, on_stage=_stage,
-                                     intent=bq_intent, doc_filter=doc_filter)
+                                     intent=bq_intent, doc_filter=doc_filter,
+                                     auto_doc_scope_enabled=False)
                      for kb in kbs]
         extra = per_extra[0]
         for r in per_extra[1:]:

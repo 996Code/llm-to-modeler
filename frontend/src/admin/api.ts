@@ -925,6 +925,10 @@ export interface KgRetrieveDiagnostics {
   fulltextHits?: number
   /** 父子回带成功回带父块上下文的片段数(0=向量路无回带:全文兜底命中/零召回/降级,均为正常态非故障) */
   parentContextHits?: number
+  /** 文档实体收敛:命中 document 实体点名的文档 ID 集(未点名不出现) */
+  docScopeFromEntity?: string[]
+  /** 收敛后指定文档内零召回,已放开全库重查 */
+  docScopeRelaxed?: boolean
 }
 export interface KgRetrieveTestResult {
   kb: { id: string; name: string }

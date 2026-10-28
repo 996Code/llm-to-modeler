@@ -175,7 +175,9 @@ def effective_scenarios(config: dict | None = None) -> dict:
         from domains.metrology_assistant.scenario_config import load_scenarios
         table = load_scenarios()
     else:
-        table = validate_config(config)["scenarios"]
+        # 草案走与保存同款 strict 校验:预演不合法草案直接 400,
+        # 而不是宽松档放行后"预演过保存炸"
+        table = validate_config(config, strict=True)["scenarios"]
     try:
         resolved = resolve_scenarios(table)
         return {**auto_scenarios(resolved), **resolved}

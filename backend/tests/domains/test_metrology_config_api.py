@@ -25,7 +25,15 @@ def client(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fresh_pack(monkeypatch):
-    """每测试清 metrology 单例与缓存(表由 conftest 清)。"""
+    """每测试清 metrology 单例与缓存(表由 conftest 清)。
+
+    根 .env 的 METROLOGY_PROGRESS_DATASOURCE_ID 会随 main.py 的
+    load_dotenv 进入进程环境,全量跑时把 legacy progress 的数据源
+    解析成真实 id→强校验 None→blocked,单跑(不加载 .env)才过——
+    在此显式清掉,根治"全量偶发"。
+    """
+    monkeypatch.delenv("METROLOGY_PROGRESS_DATASOURCE_ID", raising=False)
+    monkeypatch.delenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", raising=False)
     from domains.metrology_assistant import runtime
     runtime.reset_runtime_cache()
     yield
