@@ -8,7 +8,7 @@
     <a-tabs v-model:activeKey="tab" class="flat-tabs">
       <template #rightExtra>
         <div class="metro-tab-actions">
-          <a-button v-if="tab === 'routing'" size="small" type="text" :loading="routingLoading" @click="loadRouting"><ReloadOutlined /> 刷新</a-button>
+          <a-button v-if="tab === 'routing'" size="small" type="text" :loading="routingLoading" @click="loadRouting(true)"><ReloadOutlined /> 刷新</a-button>
           <a-popover :key="tab" trigger="click" placement="bottomRight">
             <template #content>
               <div class="help-pop help-pop-wide" v-html="currentHelpHtml"></div>
@@ -37,7 +37,7 @@
               </span>
             </div>
             <a-table
-              :data-source="grp.caps" :row-key="(r: any) => r.tool || r.scenario_key || r.label" size="small"
+              :data-source="grp.caps" :row-key="capabilityKey" size="small"
               :pagination="false" :loading="routingLoading" :scroll="{ x: 960 }"
             >
               <a-table-column title="能力" key="label">
@@ -96,7 +96,7 @@
                       <a-button size="small" type="text" aria-label="编辑覆盖" @click="openCapEditor(record)"><EditOutlined /></a-button>
                     </a-tooltip>
                     <a-tooltip v-if="record.status === 'auto' && record.kind === 'chatbi'" title="以此声明为起点创建覆盖">
-                      <a-button size="small" type="text" aria-label="创建覆盖" :loading="polishing === record.tool" @click="openCapEditor(record)"><FormOutlined /></a-button>
+                      <a-button size="small" type="text" aria-label="创建覆盖" :loading="polishing === capabilityKey(record)" @click="openCapEditor(record)"><FormOutlined /></a-button>
                     </a-tooltip>
                     <a-tooltip v-if="record.status === 'auto' || record.status === 'polished'" title="预演能力">
                       <a-button size="small" type="text" aria-label="预演能力" @click="tryInDry(record)"><ExperimentOutlined /></a-button>
@@ -107,7 +107,7 @@
                       <a-popconfirm title="放弃此能力的覆盖,回到 MCP 最新声明的自动生成?"
                                     ok-text="重置" ok-type="danger" cancel-text="取消" @confirm="resetToLatest(record)">
                         <a-button size="small" type="text" class="cap-reset-btn" aria-label="重置为最新声明"
-                                  :loading="resetting === record.scenario_key">
+                                  :loading="resetting === capabilityKey(record)">
                           <RollbackOutlined />
                         </a-button>
                       </a-popconfirm>
@@ -145,6 +145,7 @@
     <!-- 能力编辑抽屉:声明参考(最新快照,只读) + 覆盖编辑(以本页为准);
          保存=整档落库;行级「重置为最新声明」放弃覆盖回到自动生成 -->
     <a-drawer v-model:open="editorOpen" width="min(720px, 92vw)"
+              :closable="!saving" :mask-closable="!saving" :keyboard="!saving"
               :title="editorTitle" class="cap-editor-drawer">
       <div v-if="editorCap" class="ed-decl">
         <div class="ed-decl-title">MCP 声明参考(只读,刷新能力路由取最新)</div>
@@ -179,7 +180,7 @@
                 </label>
               </div>
               <label class="field">
-                <span>追问文案({subject}=器具名占位)</span>
+                <span>追问文案 <a-tooltip title="{subject} 为已识别的主体名称占位符"><QuestionCircleOutlined /></a-tooltip></span>
                 <textarea v-model="currentScenario.required.question" rows="2" />
               </label>
               <div class="field-grid">
@@ -199,6 +200,15 @@
                 </label>
               </div>
               <label class="field">
+                <span>主信息提取提示</span>
+                <textarea v-model="currentScenario.required.extract_hint" rows="2" />
+              </label>
+              <label class="field">
+                <span>参数提取提示 <a-tooltip title="JSON 对象：信息标识到提取提示。支持主信息之外的可选参数。"><QuestionCircleOutlined /></a-tooltip></span>
+                <textarea :value="jsonText(currentScenario, '_param_hints')" rows="3"
+                          @input="setJson(currentScenario, '_param_hints', $event)" />
+              </label>
+              <label class="field">
                 <span>追问选项 <a-tooltip title="每行填写一个选项，格式为：名称, 说明"><QuestionCircleOutlined /></a-tooltip></span>
                 <textarea
                   :value="optionsText(currentScenario)"
@@ -212,7 +222,10 @@
               <div class="field-grid">
                 <label class="field">
                   <span>动作类型</span>
-                  <select v-model="currentScenario.action.kind">
+                  <!-- 切换类型时清掉另一类专属字段的 JSON 解析错误,
+                       否则保存会被指向不可见字段的错误永久拦截 -->
+                  <select :value="currentScenario.action.kind"
+                          @change="onKindChange(currentScenario, $event)">
                     <option value="kg">知识库检索</option>
                     <option value="chatbi">业务查询</option>
                   </select>
@@ -229,6 +242,10 @@
                 </label>
               </div>
               <template v-if="currentScenario.action.kind === 'chatbi'">
+                <label class="field">
+                  <span>MCP 服务</span>
+                  <input v-model="currentScenario.action.server" />
+                </label>
                 <div class="field-grid">
                   <label class="field">
                     <span>调用工具</span>
@@ -246,6 +263,20 @@
                   </label>
                 </div>
                 <label class="field">
+                  <span>工具参数定义 <a-tooltip title="JSON Schema：properties 定义参数类型，required 列出全部必填参数；缺省沿用旧主信息定义。"><QuestionCircleOutlined /></a-tooltip></span>
+                  <textarea :value="jsonText(currentScenario, 'input_schema')" rows="6"
+                            @input="setJson(currentScenario, 'input_schema', $event)" />
+                </label>
+                <div v-if="parameterRows.length" class="parameter-table-wrap">
+                  <table class="parameter-table">
+                    <thead><tr><th>参数</th><th>必填</th><th>类型</th><th>信息来源</th><th>提取提示</th></tr></thead>
+                    <tbody><tr v-for="param in parameterRows" :key="param.name">
+                      <td>{{ param.name }}</td><td>{{ param.required ? '是' : '否' }}</td>
+                      <td>{{ param.type }}</td><td>{{ param.source }}</td><td>{{ param.hint || '—' }}</td>
+                    </tr></tbody>
+                  </table>
+                </div>
+                <label class="field">
                   <span>工具参数映射 <a-tooltip title='填写 JSON，键为工具参数名，值为信息标识。例如 {"order_no": "order_no"}'><QuestionCircleOutlined /></a-tooltip></span>
                   <textarea
                     :value="paramsText(currentScenario)"
@@ -260,16 +291,44 @@
                   />
                 </label>
               </template>
-              <a-tooltip v-else title="知识来源在知识库管理中维护；调用业务工具请选择业务查询并绑定数据源。">
-                <span class="field-help"><QuestionCircleOutlined /> 知识库检索设置</span>
-              </a-tooltip>
+              <template v-else>
+                <div class="field-grid">
+                  <label class="field">
+                    <span>问答模式</span>
+                    <select v-model="currentScenario.action.conclusion">
+                      <option value="answer">通用问答</option>
+                      <option v-if="currentScenario.action.conclusion && currentScenario.action.conclusion !== 'answer'"
+                              :value="currentScenario.action.conclusion">{{ currentScenario.action.conclusion }}（当前）</option>
+                      <option v-if="!currentScenario.action.conclusion" :value="undefined">沿用现有模式</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>知识库来源</span>
+                    <input v-model="currentScenario.action.kb" />
+                  </label>
+                </div>
+                <label class="field">
+                  <span>知识库选择规则 <a-tooltip title='按顺序匹配信息值。JSON 数组，例如 [{"slot":"topic","in":["检定"],"kb":"检定指南"}]'><QuestionCircleOutlined /></a-tooltip></span>
+                  <textarea :value="jsonText(currentScenario, 'kb_rules')" rows="4"
+                            @input="setJson(currentScenario, 'kb_rules', $event)" />
+                </label>
+                <label class="field">
+                  <span>检索问题模板 <a-tooltip title="留空使用用户原问题；可引用已提取的信息标识。"><QuestionCircleOutlined /></a-tooltip></span>
+                  <textarea v-model="currentScenario.action.query_template" rows="2" />
+                </label>
+                <label class="field">
+                  <span>回答指引 <a-tooltip title="追加业务回答要求，不改变证据引用和知识库授权约束。"><QuestionCircleOutlined /></a-tooltip></span>
+                  <textarea v-model="currentScenario.action.answer_prompt" rows="3" />
+                </label>
+              </template>
             </fieldset>
           </div>
-      <div v-if="saveError" class="save-error">{{ saveError }}</div>
+      <div v-for="(error, field) in jsonErrors" :key="field" class="save-error" role="alert">{{ error }}</div>
+      <div v-if="saveError" class="save-error" role="alert">{{ saveError }}</div>
       <template #footer>
         <a-space wrap>
           <a-button type="primary" :loading="saving" @click="drawerSave"><SaveOutlined /> 保存</a-button>
-          <a-button @click="cancelEdit">取消</a-button>
+          <a-button :disabled="saving" @click="cancelEdit">取消</a-button>
         </a-space>
         <div class="ed-foot-note">覆盖保存后以本页为准;要回到 MCP 最新声明,请在能力列表行内点「重置为最新声明」</div>
       </template>
@@ -282,7 +341,7 @@
 // 智能客服管理页 —— 能力路由(总览+行内编辑抽屉) + 联调预演。
 // 编辑语义:抽屉内改覆盖、保存即整档落库(以本页为准,优先于 MCP 声明);
 // 行级「重置为最新声明」=放弃覆盖回到自动;全局刷新只重拉声明、永不动覆盖。
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { ApiOutlined, DiffOutlined, EditOutlined, ExperimentOutlined, FormOutlined, PlayCircleOutlined, PlusOutlined, ProfileOutlined, QuestionCircleOutlined, ReloadOutlined, RollbackOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons-vue'
 import { chatbiApi } from '../../api'
@@ -319,60 +378,85 @@ const saveError = ref('')
 const editorOpen = ref(false)
 const editorCap = ref<RoutingCap | null>(null)
 const currentKey = ref('')
-const editSnapshot = ref<MetrologyScenario | null>(null)   // 打开时的快照(取消还原)
-const currentScenario = computed(() => draft.value.scenarios[currentKey.value])
+const editorDraft = ref<MetrologyScenario | null>(null)
+const currentScenario = computed(() => editorDraft.value)
 const editorTitle = computed(() => editorCap.value
   ? `编辑「${editorCap.value.label || editorCap.value.tool}」`
   : '编辑能力')
+const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value))
+let editorRequest = 0
+
+function capabilityKey(cap: Pick<RoutingCap, 'server' | 'tool'> & Partial<RoutingCap>): string {
+  return JSON.stringify([cap.server || '', cap.tool || '', cap.scenario_key || ''])
+}
 
 async function openCapEditor(cap: RoutingCap) {
+  if (saving.value || resetting.value) return
+  const request = ++editorRequest
   saveError.value = ''
+  clearJsonFields()
+  editorDraft.value = null
   editorCap.value = cap
   if (cap.status === 'polished' && cap.scenario_key) {
     currentKey.value = cap.scenario_key
+    const scenario = config.value.content.scenarios[cap.scenario_key]
+    if (!scenario) { routingError.value = '配置已变化，请刷新后重试'; return }
+    editorDraft.value = clone(scenario)
   } else if (cap.status === 'auto' && cap.kind === 'chatbi') {
-    // 自动能力:先按声明起草一份覆盖(落到 draft,未保存不生效)
-    polishing.value = cap.tool || ''
+    const polishKey = capabilityKey(cap)
+    polishing.value = polishKey
     try {
       const { data } = await metrologyApi.post('/config/capability-import/draft',
         { server: cap.server, tool: cap.tool })
+      if (request !== editorRequest) return
       let key = data.key
       let n = 2
-      while (draft.value.scenarios[key]) key = `${data.key}_${n++}`
-      draft.value.scenarios[key] = data.scenario
+      while (config.value.content.scenarios[key]) key = `${data.key}_${n++}`
+      editorDraft.value = clone(data.scenario)
       currentKey.value = key
     } catch (e: any) {
-      routingError.value = e?.response?.data?.detail || '起草失败'
-      polishing.value = ''
+      if (request === editorRequest) routingError.value = e?.response?.data?.detail || '起草失败'
       return
+    } finally {
+      // 只清自己的 spinner:中途打开别的编辑不打断其加载态,
+      // 也不因 request 不匹配让本行永久转圈
+      if (polishing.value === polishKey) polishing.value = ''
     }
-    polishing.value = ''
-  } else {
-    return
-  }
-  editSnapshot.value = JSON.parse(JSON.stringify(draft.value.scenarios[currentKey.value] || null))
+  } else return
   editorOpen.value = true
 }
 
-function cancelEdit() {
-  if (editSnapshot.value && currentKey.value) {
-    draft.value.scenarios[currentKey.value] = editSnapshot.value
-  }
-  editorOpen.value = false
+function clearEditor() {
+  ++editorRequest
+  editorDraft.value = null
+  editorCap.value = null
+  currentKey.value = ''
+  clearJsonFields()
   saveError.value = ''
+}
+watch(editorOpen, open => { if (!open) clearEditor() })
+function cancelEdit() {
+  if (saving.value) return
+  editorOpen.value = false
+  clearEditor()
 }
 
 async function drawerSave() {
+  if (saving.value || resetting.value || !editorDraft.value || !currentKey.value) return
+  saveError.value = Object.values(jsonErrors).find(Boolean) || ''
+  if (saveError.value) return
+  const content = clone(config.value.content)
+  content.scenarios[currentKey.value] = clone(editorDraft.value)
   saving.value = true
-  saveError.value = ''
   try {
     await metrologyApi.put('/config', {
-      content: draft.value,
-      comment: `能力路由编辑(${Object.keys(draft.value.scenarios).length} 个场景)`,
+      content,
+      comment: `能力路由编辑(${Object.keys(content.scenarios).length} 个场景)`,
     })
+    config.value.content = clone(content)
+    draft.value = clone(content)
     message.success('已保存,下一次对话生效')
     editorOpen.value = false
-    await reload()
     await loadRouting()
   } catch (e: any) {
     if (e?.response?.status === 400) saveError.value = `校验失败: ${e.response.data?.detail || ''}`
@@ -382,23 +466,25 @@ async function drawerSave() {
   }
 }
 
-// 行级重置:放弃该能力的覆盖,回到按 MCP 最新声明自动生成
+// Reset is derived only from saved content, never from an open editor.
 const resetting = ref('')
 async function resetToLatest(cap: RoutingCap) {
-  if (!cap.scenario_key) return
-  resetting.value = cap.scenario_key
+  if (!cap.scenario_key || saving.value || resetting.value) return
+  resetting.value = capabilityKey(cap)
+  const content = clone(config.value.content)
+  delete content.scenarios[cap.scenario_key]
   try {
-    delete draft.value.scenarios[cap.scenario_key]
     await metrologyApi.put('/config', {
-      content: draft.value,
+      content,
       comment: `重置为最新声明 ${cap.scenario_key}(放弃覆盖)`,
     })
+    config.value.content = clone(content)
+    draft.value = clone(content)
+    if (currentKey.value === cap.scenario_key) cancelEdit()
     message.success('已重置,按 MCP 最新声明自动生成')
-    await reload()
     await loadRouting()
   } catch (e: any) {
     message.error(e?.response?.data?.detail || '重置失败')
-    await reload()
   } finally {
     resetting.value = ''
   }
@@ -477,11 +563,13 @@ const routingSummary = computed(() => {
   return parts.join(' · ')
 })
 
-async function loadRouting() {
+async function loadRouting(force = false) {
   routingLoading.value = true
   routingError.value = ''
   try {
-    const { data } = await metrologyApi.get('/config/routing')
+    const { data } = force
+      ? await metrologyApi.get('/config/routing', { params: { refresh: true } })
+      : await metrologyApi.get('/config/routing')
     routing.value = data.capabilities || []
     serverProfiles.value = data.servers || []
   } catch (e: any) {
@@ -544,23 +632,48 @@ function pickDatasource(cfg: MetrologyScenario, ev: Event) {
   cfg.action.datasource_id = id
   if (d) {
     cfg.action.ds_name = d.name
-    // mcp 数据源建源时限定过工具(database 字段)——带出为默认工具
-    if (d.dbType === 'mcp' && d.database && !cfg.action.tool) cfg.action.tool = d.database
+    if (d.dbType === 'mcp') {
+      if (cfg.action.server && cfg.action.server !== d.host) {
+        cfg.action.tool = d.database || ''
+        delete cfg.action.input_schema
+        delete jsonTexts.input_schema
+        delete jsonErrors.input_schema
+      }
+      cfg.action.server = d.host
+      if (d.database && !cfg.action.tool) cfg.action.tool = d.database
+    }
   }
 }
 
 function serverTools(cfg: MetrologyScenario): string[] {
   // 绑定 mcp 数据源时,用能力路由表(server → tools)把工具变下拉
   const d = datasources.value.find((x) => x.id === cfg.action.datasource_id)
-  if (!d || d.dbType !== 'mcp') return []
+  const server = cfg.action.server || (d?.dbType === 'mcp' ? d.host : '')
+  if (!server) return []
   const names = routing.value
-    .filter((r) => r.kind === 'chatbi' && r.server === d.host)
+    .filter((r) => r.kind === 'chatbi' && r.server === server)
     .map((r) => r.tool || '')
     .filter(Boolean)
   return names
 }
 
-// ── Tab3 联调预演:一句话走提取+求值;草案差异对比 ──
+const parameterRows = computed(() => {
+  const cfg = currentScenario.value
+  if (!cfg) return []
+  const schema = cfg.action.input_schema
+  const names = new Set([...Object.keys(schema?.properties || {}), ...(schema?.required || []), ...Object.keys(cfg.action.params || {})])
+  return [...names].map(name => {
+    const source = cfg.action.params?.[name] || name
+    const property = schema?.properties?.[name]
+    return { name, source,
+      required: schema ? !!schema.required?.includes(name) : source === cfg.required.slot,
+      type: Array.isArray(property?.type) ? property.type.join(' | ') : property?.type || 'text',
+      hint: cfg._param_hints?.[source] || (source === cfg.required.slot ? cfg.required.extract_hint || '' : ''),
+    }
+  })
+})
+
+// ── Tab2 联调预演 ──
 const dry = reactive({
   text: '', execute: false, loading: false,
   current: null as any, error: '',
@@ -576,10 +689,11 @@ function fmtDry(r: any): string {
     const a = r.action
     lines.push(a.kind === 'kg'
       ? `将调用: 知识库证据检索 → 「${a.kb}」`
-      : a.auto
-        ? `将调用: ${a.server}:${a.tool}(自动路由,执行期解析数据源)(${JSON.stringify(a.params)})`
-        : `将调用: ${a.datasource_name} · ${a.tool}(${JSON.stringify(a.params)})`)
+      : a.datasource_name
+        ? `将调用: ${a.datasource_name} · ${a.tool}(${JSON.stringify(a.params)})`
+        : `将调用: ${a.server || '?'}:${a.tool}${a.auto === true ? '(自动路由,执行期解析数据源)' : ''}(${JSON.stringify(a.params)})`)
   }
+  if (r.error) lines.push(`未执行: ${r.error}`)
   if (r.note) lines.push(`说明: ${r.note}`)
   if (r.executed) lines.push(r.executed.ok
     ? `真实执行: ok(${r.executed.rows ?? '?'} 行)`
@@ -612,20 +726,66 @@ function setOptions(cfg: MetrologyScenario, ev: Event) {
     return { label: label || '', description: description || '' }
   })
 }
-function paramsText(cfg: MetrologyScenario): string {
-  return JSON.stringify(cfg.action.params || {}, null, 0)
+type JsonField = 'params' | 'notices' | '_param_hints' | 'input_schema' | 'kb_rules'
+const jsonTexts = reactive<Partial<Record<JsonField, string>>>({})
+const jsonErrors = reactive<Partial<Record<JsonField, string>>>({})
+const jsonLabels: Record<JsonField, string> = {
+  params: '工具参数映射', notices: '状态通知', _param_hints: '参数提取提示',
+  input_schema: '工具参数定义', kb_rules: '知识库选择规则',
 }
-function setParams(cfg: MetrologyScenario, ev: Event) {
-  try { cfg.action.params = JSON.parse((ev.target as HTMLTextAreaElement).value) }
-  catch { /* 保留旧值,保存时后端校验兜底 */ }
+function clearJsonFields() {
+  for (const key of Object.keys(jsonTexts) as JsonField[]) delete jsonTexts[key]
+  for (const key of Object.keys(jsonErrors) as JsonField[]) delete jsonErrors[key]
 }
-function noticesText(cfg: MetrologyScenario): string {
-  return JSON.stringify(cfg.action.notices || {}, null, 2)
+/** 切换动作类型:清另一类专属字段的 JSON 错误与草稿文本(字段已不可见) */
+function onKindChange(cfg: MetrologyScenario, ev: Event) {
+  cfg.action.kind = (ev.target as HTMLSelectElement).value as 'kg' | 'chatbi'
+  const stale: JsonField[] = cfg.action.kind === 'chatbi'
+    ? ['kb_rules'] : ['input_schema', 'params', 'notices']
+  for (const field of stale) {
+    delete jsonErrors[field]
+    delete jsonTexts[field]
+  }
 }
-function setNotices(cfg: MetrologyScenario, ev: Event) {
-  try { cfg.action.notices = JSON.parse((ev.target as HTMLTextAreaElement).value) }
-  catch { /* 保留旧值 */ }
+function jsonText(cfg: MetrologyScenario, field: JsonField): string {
+  if (jsonTexts[field] !== undefined) return jsonTexts[field]!
+  const value = field === '_param_hints' ? cfg._param_hints : cfg.action[field]
+  return JSON.stringify(value ?? (field === 'kb_rules' ? [] : {}), null, 2)
 }
+function isObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+function setJson(cfg: MetrologyScenario, field: JsonField, ev: Event) {
+  const text = (ev.target as HTMLTextAreaElement).value
+  jsonTexts[field] = text
+  try {
+    const value = JSON.parse(text || (field === 'kb_rules' ? '[]' : '{}'))
+    if (field === 'kb_rules') {
+      if (!Array.isArray(value) || value.some(r => !isObject(r) || typeof r.slot !== 'string' || !r.slot.trim()
+        || typeof r.kb !== 'string' || !r.kb.trim() || !Array.isArray(r.in) || !r.in.length
+        || r.in.some((v: unknown) => typeof v !== 'string'))) throw new Error('应为 {slot, in: [值], kb} 数组')
+    } else {
+      if (!isObject(value)) throw new Error('应为 JSON 对象')
+      if ((field === 'params' || field === '_param_hints') && Object.values(value).some(v => typeof v !== 'string'))
+        throw new Error('每项值应为文本')
+      if (field === 'input_schema' && ((value.properties !== undefined && !isObject(value.properties))
+        || (value.required !== undefined && (!Array.isArray(value.required) || value.required.some(v => typeof v !== 'string')))))
+        throw new Error('properties 应为对象，required 应为参数名数组')
+      if (field === 'notices' && Object.values(value).some(v => !isObject(v) || typeof v.title !== 'string' || typeof v.message !== 'string'))
+        throw new Error('每项通知应含 title 和 message')
+    }
+    if (field === '_param_hints') cfg._param_hints = value as MetrologyScenario['_param_hints']
+    else (cfg.action as Record<string, unknown>)[field] = value
+    delete jsonErrors[field]
+    saveError.value = ''
+  } catch (e: any) {
+    jsonErrors[field] = `${jsonLabels[field]}: ${e.message || 'JSON 无效'}`
+  }
+}
+function paramsText(cfg: MetrologyScenario): string { return jsonText(cfg, 'params') }
+function setParams(cfg: MetrologyScenario, ev: Event) { setJson(cfg, 'params', ev) }
+function noticesText(cfg: MetrologyScenario): string { return jsonText(cfg, 'notices') }
+function setNotices(cfg: MetrologyScenario, ev: Event) { setJson(cfg, 'notices', ev) }
 
 onMounted(async () => {
   await reload()
@@ -658,6 +818,11 @@ onMounted(async () => {
 .cap-reset-btn:not(:disabled):hover { color: #d46b08; background: #fff7e6; }
 .cap-reset-btn .anticon { font-size: 15px; }
 .cap-blocked, .cap-error { color: #d4380d; font-size: 12px; overflow-wrap: anywhere; }
+.parameter-table-wrap { overflow-x: auto; }
+.parameter-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+.parameter-table th, .parameter-table td { text-align: left; vertical-align: top; padding: 7px; border-bottom: 1px solid #edf0f3; overflow-wrap: anywhere; }
+.parameter-table th { color: #4a5568; background: #f6f7f9; }
+.parameter-table th:nth-child(2) { width: 38px; }
 .scenario-editor { display: flex; flex-direction: column; gap: 16px; }
 .ed-decl { border: 1px solid #edf0f3; border-radius: 8px; padding: 10px 12px; margin-bottom: 16px; background: #f8fafc; }
 .ed-decl-title { font-size: 12px; font-weight: 600; color: #4a5568; margin-bottom: 4px; }

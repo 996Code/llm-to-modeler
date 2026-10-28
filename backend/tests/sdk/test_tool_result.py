@@ -41,6 +41,20 @@ class TestAskSpec:
         assert len(spec.questions) == 1
         assert spec.questions[0].header == "字段"
 
+    def test_question_id_roundtrips_as_opaque_string(self):
+        token = "opaque / question:1?=value"
+        spec = AskSpec(questions=[AskQuestion(
+            question="Confirm?", header="confirm", options=[], question_id=token,
+        )])
+        restored = AskSpec.model_validate_json(spec.model_dump_json())
+        assert restored.questions[0].question_id == token
+
+    def test_question_id_is_optional_and_does_not_coerce_numbers(self):
+        question = AskQuestion(question="Confirm?", header="confirm", options=[])
+        assert question.question_id is None
+        with pytest.raises(ValidationError):
+            AskQuestion(question="Confirm?", header="confirm", options=[], question_id=123)
+
     def test_ask_option_requires_label_and_description(self):
         with pytest.raises(ValidationError):
             AskOption()  # 缺必填

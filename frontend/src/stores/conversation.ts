@@ -17,7 +17,7 @@ import { defineStore } from 'pinia'
 // computed：声明懒计算的派生值（类似 Java getter，但带缓存；依赖不变时不重算）
 import { ref, computed } from 'vue'
 // 仅导入类型（编译期检查，运行时不打包）
-import type { Conversation, FormConfig, Message } from '../types'
+import type { ClarificationOption, ClarificationQuestion, Conversation, FormConfig, Message } from '../types'
 // 统一消费普通发送、追问恢复与继续生成返回的结果契约
 import { applyConversationResult } from './conversationResult'
 import * as api from '../services/api'
@@ -309,9 +309,15 @@ export const useConversationStore = defineStore('conversation', () => {
     // user,快照永远 false(真实事故:追问回答的 answers 从未发出过,
     // 每轮都当新消息重新路由,追问死循环)
     const wasClarifying = pendingClarification.value
-    const clarifyAnswers = wasClarifying
-      ? { ...(structuredAnswers || {}), text }
-      : undefined
+    const pendingQuestionId = messages.value.at(-1)?.clarificationQuestions
+      ?.find(q => typeof q.question_id === 'string')?.question_id
+    // Explicit card answers belong to that card, including token-free legacy cards.
+    // Never fill their identity from the latest pending question.
+    const clarifyAnswers = structuredAnswers !== undefined
+      ? { ...structuredAnswers, text }
+      : wasClarifying
+        ? { ...(typeof pendingQuestionId === 'string' ? { __question_id: pendingQuestionId } : {}), text }
+        : undefined
 
     // Add user message
     // 先把用户消息塞进列表（乐观更新，UI 立即显示）
@@ -402,6 +408,12 @@ export const useConversationStore = defineStore('conversation', () => {
       stageMessage.value = ''
       currentStage.value = ''
     }
+  }
+
+  async function answerClarification(question: ClarificationQuestion, option: ClarificationOption) {
+    const answers: Record<string, string> = { [question.header]: option.label }
+    if (typeof question.question_id === 'string') answers.__question_id = question.question_id
+    await sendMessage(option.label, undefined, answers)
   }
 
   // D10 历史加载续答:挂起轮断点续跑(该轮 user 已落库,只补 assistant)。
@@ -503,5 +515,6 @@ export const useConversationStore = defineStore('conversation', () => {
     startNewConversation,
     removeConversation,
     sendMessage,
+    answerClarification,
   }
 })

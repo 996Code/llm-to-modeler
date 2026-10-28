@@ -13,9 +13,8 @@ invalid_input/unavailable/error)即业务信封;非信封按表格形状归一
 (columns/rows、list[dict]、裸 dict 单条记录)。信封形状但状态枚举
 未知 = 契约错误(invalid_input),不交给模型补齐(设计 4.4/13.2)。
 
-Demo 薄版边界(P1 补,设计 17-C):身份注入(ctx 按约定覆盖身份字段)
-与原始 inputSchema 验参未做——当前仅参数形状校验 + MCP 层 required
-拦截,深度验参靠编排方确定性槽位解析暂代。
+执行前按注册表原始 inputSchema 完整本地验参,禁止外部 ref;探测失败
+保留能力快照供查看,但不得执行。身份注入由调用方负责。
 """
 import time
 from dataclasses import dataclass, field
@@ -36,66 +35,53 @@ _STATUS_CLASSIFICATION = {
 }
 
 
-# ── inputSchema 验参(P1/设计 4.3:完整 Schema 校验,不过不发) ──────
-# 覆盖 object 一层的 required/type/enum + 嵌套 object 的 required/type;
-# 不解析远程 $ref(拒绝联网解析,设计 7.5);未知类型关键字宽松放行
-# (JSON Schema 开放集,只做契约确定性校验,不做全实现)。
-
-_JSON_TYPE_MAP = {
-    "string": str, "number": (int, float), "integer": int,
-    "boolean": bool, "object": dict, "array": list,
-}
-
-
-def _schema_type_ok(value, t: str) -> bool:
-    """JSON Schema 类型判定(bool 是 int 子类,显式排除)。"""
-    if t == "string":
-        return isinstance(value, str)
-    if t == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if t == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if t == "boolean":
-        return isinstance(value, bool)
-    if t == "object":
-        return isinstance(value, dict)
-    if t == "array":
-        return isinstance(value, list)
-    return True  # 未知类型关键字:JSON Schema 开放集,不拦
-
-
-def _is_empty(v) -> bool:
-    if isinstance(v, str):
-        return not v.strip()
-    return v is None or (isinstance(v, (list, dict)) and len(v) == 0)
-
+# JSON Schema validation is entirely local; remote references never resolve.
 
 def validate_against_schema(args: dict, schema) -> Optional[str]:
-    """按工具 inputSchema 验参;返回用户可读错误(None=通过)。
-
-    schema=None/非 dict = 无 Schema 可验(放行——MCP 层仍会拦 required;
-    注册表快照缺失时宁可放行到传输层也不猜)。远程 $ref 不解析(设计 7.5)。
-    """
-    if not isinstance(schema, dict):
+    """Validate the complete declared dialect and preserve readable legacy errors."""
+    if schema is None:
         return None
-    props = schema.get("properties") or {}
-    for name in schema.get("required") or []:
-        if _is_empty(args.get(name)):
-            return f"缺少必填参数 {name}"
-    for name, value in args.items():
-        p = props.get(name)
-        if not isinstance(p, dict) or value is None:
-            continue  # Schema 未声明的不拦(扩展宽容)
-        t = p.get("type")
-        if isinstance(t, str) and not _schema_type_ok(value, t):
-            return f"参数 {name} 需要 {t} 类型"
-        enum = p.get("enum")
-        if isinstance(enum, list) and enum and value not in enum:
-            return f"参数 {name} 的值必须是: {'、'.join(map(str, enum))}"
-        if isinstance(value, dict) and isinstance(p.get("properties"), dict):
-            nested = validate_against_schema(value, p)
-            if nested:
-                return nested
+    if not isinstance(schema, (dict, bool)):
+        return "工具 inputSchema 格式无效"
+    from jsonschema import Draft202012Validator, validators
+    from referencing import Registry
+    from referencing.exceptions import NoSuchResource
+
+    def no_remote(uri):
+        raise NoSuchResource(ref=uri)
+
+    def check_refs(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in ("$ref", "$dynamicRef", "$recursiveRef") and (
+                        not isinstance(value, str) or not value.startswith("#")):
+                    raise ValueError("禁止远程或外部 JSON Schema ref")
+                check_refs(value)
+        elif isinstance(node, list):
+            for value in node:
+                check_refs(value)
+
+    try:
+        check_refs(schema)
+        validator_cls = validators.validator_for(schema, default=Draft202012Validator)
+        validator_cls.check_schema(schema)
+        validator = validator_cls(schema, registry=Registry(retrieve=no_remote))
+        error = next(validator.iter_errors(args), None)
+        if error:
+            if error.validator == "required":
+                missing = next((n for n in error.validator_value if n not in error.instance), "")
+                return f"缺少必填参数 {missing}"
+            path = ".".join(map(str, error.absolute_path)) or "$"
+            if error.validator == "enum":
+                return f"参数 {path} 的值必须是: {error.validator_value}"
+            return f"参数 {path} 校验失败: {error.message}"
+        # Existing interactive callers treat blank required text as a missing slot.
+        if isinstance(schema, dict) and isinstance(args, dict):
+            for name in schema.get("required") or []:
+                if isinstance(args.get(name), str) and not args[name].strip():
+                    return f"缺少必填参数 {name}"
+    except Exception as exc:
+        return f"工具 inputSchema 无法本地校验: {str(exc)[:250]}"
     return None
 
 
@@ -130,24 +116,36 @@ def _err(status: str, message: str, started: float,
 
 
 def _normalize_tabular(payload: Any) -> Optional[dict]:
-    """非信封返回的表格形状归一(与 execute_mcp_tool 同映射)。"""
-    if isinstance(payload, dict) and isinstance(payload.get("columns"), list) \
-            and isinstance(payload.get("rows"), list):
-        columns = [str(c) for c in payload["columns"]]
-        rows = [tuple(r) if isinstance(r, (list, tuple)) else (r,)
-                for r in payload["rows"]]
-        return {"columns": columns, "rows": rows}
+    """Normalize named tables without dropping fields or guessing row widths."""
+    if payload is None or payload == {}:
+        return {"columns": [], "rows": []}
+    if isinstance(payload, dict) and ("columns" in payload or "rows" in payload):
+        if not isinstance(payload.get("columns"), list) or not isinstance(payload.get("rows"), list):
+            return None
+        columns = payload["columns"]
+        if not all(isinstance(c, str) for c in columns) or len(set(columns)) != len(columns):
+            return None
+        rows = []
+        for row in payload["rows"]:
+            if isinstance(row, dict):
+                if set(row) - set(columns):
+                    return None
+                rows.append(tuple(row.get(c) for c in columns))
+            elif isinstance(row, (list, tuple)) and len(row) == len(columns):
+                rows.append(tuple(row))
+            else:
+                return None
+        return {"columns": list(columns), "rows": rows}
     if isinstance(payload, list):
         if not payload:
             return {"columns": [], "rows": []}
         if all(isinstance(r, dict) for r in payload):
-            columns = [str(k) for k in payload[0].keys()]
+            columns = list(dict.fromkeys(k for r in payload for k in r))
             rows = [tuple(r.get(c) for c in columns) for r in payload]
             return {"columns": columns, "rows": rows}
-        if all(isinstance(r, (list, tuple)) for r in payload):
-            return None  # 无列名,不猜
-        return {"columns": ["value"],
-                "rows": [(r,) for r in payload]}
+        if any(isinstance(r, (dict, list, tuple)) for r in payload):
+            return None
+        return {"columns": ["value"], "rows": [(r,) for r in payload]}
     if isinstance(payload, dict):
         return {"record": dict(payload)}
     if isinstance(payload, (int, float, bool, str)):
@@ -167,27 +165,26 @@ def _invoke_mcp_core(info, tool: str, args: dict, started: float,
     验参只有一份实现,信封不再被当成功数据行(此前 execute_mcp_tool
     的真实缺口)。
     """
-    # inputSchema 验参(P1/设计 4.3):注册表快照里的原始 Schema——
-    # required/type/enum/嵌套,不过不发请求
+    # Validate the registry's complete inputSchema before any remote execution.
     try:
         from services.mcp_registry import McpServerStore
         server = McpServerStore().get_by_code(info.host)
-        snapshot = (server or {}).get("tools_snapshot") or []
-        tool_schema = next(
-            (t.get("inputSchema") for t in snapshot
-             if t.get("name") == tool), None)
-        # 快照一致性(设计 0.5.1 降级版:不匹配即报错刷新):server 在册
-        # 但快照里没有该工具 = 快照过期(工具已下线/改名)——明确报错
-        # 并提示刷新,不让调用模糊失败在传输层
-        if server and tool_schema is None and snapshot:
-            known = [t.get("name") for t in snapshot]
-            return _err("invalid_input",
-                        f"工具 {tool} 不在该 MCP 服务当前快照"
-                        f"(现有: {', '.join(known[:8])})——"
-                        "请刷新数据源/语义层快照后重试",
-                        started, source)
-    except Exception:  # noqa: BLE001
-        tool_schema = None  # 注册表不可读:放行到传输层,不在此猜
+    except Exception:
+        return _err("unavailable", "MCP 注册表暂不可读,拒绝执行", started, source)
+    from sdk import mcp_client
+    if server:
+        execution_error = mcp_client.server_execution_error(server)
+        if execution_error:
+            return _err("unavailable", execution_error, started, source)
+    snapshot = (server or {}).get("tools_snapshot") or []
+    declaration = next((t for t in snapshot if t.get("name") == tool), None)
+    if server and declaration is None:
+        known = [t.get("name", "") for t in snapshot]
+        return _err("invalid_input",
+                    f"工具 {tool} 不在该 MCP 服务当前快照"
+                    f"(现有: {', '.join(known[:8])})——请刷新数据源/语义层快照后重试",
+                    started, source)
+    tool_schema = declaration.get("inputSchema") if declaration else None
     schema_err = validate_against_schema(args, tool_schema)
     if schema_err:
         return _err("invalid_input", schema_err, started, source)
@@ -217,6 +214,8 @@ def _invoke_mcp_core(info, tool: str, args: dict, started: float,
             and ("data" in payload or "message" in payload):
         status = str(payload["status"])
         if status == "ok":
+            if "data" not in payload:
+                return _err("invalid_input", "业务信封 ok 缺少 data", started, source)
             normalized = _normalize_tabular(payload.get("data"))
             if normalized is None:
                 return _err("invalid_input",

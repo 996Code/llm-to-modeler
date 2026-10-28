@@ -226,6 +226,12 @@ class KbSearchTool(Tool):
             ctx.trace("kb_search.resolve_kb", f"跨库检索 {len(kbs)} 个知识库", "ok", detail={
                 "kbs": [k["name"] for k in kbs], "source": "all-cross"})
 
+        # Library annotations have no document provenance. Skip the shortcut
+        # for an explicit document scope; unscoped requests keep their behavior.
+        doc_filter_raw = (state.get("pack_params") or {}).get(
+            "knowledge_graph", {}).get("doc_filter")
+        scoped = isinstance(doc_filter_raw, dict) and bool(doc_filter_raw)
+
         # ── D32 标注短路(前置层,检索之前) ──
         # 知识库"老答错同一个问题"的治本件:「问题→标准答案」高阈值
         # 向量命中直接作答,不走检索——错过的知识补课一次终身正确。
@@ -235,10 +241,10 @@ class KbSearchTool(Tool):
             from domains.knowledge_graph import annotations as kg_annotations
             hit = None
             hit_kb = None
-            if kb is not None:
+            if kb is not None and not scoped:
                 hit = kg_annotations.match_annotation(self._app_state, kb["id"], query)
                 hit_kb = kb
-            else:
+            elif not scoped:
                 for k in kbs:
                     hit = kg_annotations.match_annotation(self._app_state, k["id"], query)
                     if hit:
@@ -270,17 +276,12 @@ class KbSearchTool(Tool):
         # ── D7 文档元数据过滤(嵌入模式:宿主传 doc_filter 才生效) ──
         # pack_params.knowledge_graph.doc_filter = {"部门":"销售"} 扁平键值
         # → doc 白名单集合(None=不过滤;空集=无文档匹配→两路零召回)
-        doc_filter_raw = (state.get("pack_params") or {}).get(
-            "knowledge_graph", {}).get("doc_filter")
         doc_filter = None
-        if isinstance(doc_filter_raw, dict) and doc_filter_raw:
-            doc_filter = store.filter_doc_ids_by_metadata(
-                kb["id"] if kb else (kbs[0]["id"] if len(kbs) == 1 else ""), doc_filter_raw)
-            # 跨库:每库各自解析后并集(白名单跨库聚合;单库直接用)
-            if doc_filter is not None and kb is None:
-                for k in kbs[1:]:
-                    extra = store.filter_doc_ids_by_metadata(k["id"], doc_filter_raw)
-                    doc_filter |= (extra if extra is not None else set())
+        if scoped:
+            doc_filter = set()
+            for k in ([kb] if kb is not None else kbs):
+                ids = store.filter_doc_ids_by_metadata(k["id"], doc_filter_raw)
+                doc_filter |= (ids if ids is not None else set())
 
         # ── 混合检索 + 回答 ──
         # on_stage 把 retrieval 内部各阶段(意图/图谱/子图/全文兜底/向量/

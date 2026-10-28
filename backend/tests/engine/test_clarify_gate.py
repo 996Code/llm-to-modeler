@@ -234,6 +234,46 @@ class TestResumeZeroLLM:
 
 
 class TestSSESequenceSnapshot:
+    def test_token_roundtrip_through_real_checkpoint_sse_history_and_resume(self, graph_bundle, tmp_path, monkeypatch):
+        import asyncio
+        import json
+        from engine.stream import stream_graph
+        from sdk.tool import AskQuestion, AskSpec
+        from services.conversation_store import ConversationStore
+
+        graph, tool, _ = graph_bundle
+        token = "opaque / question:1?=value"
+        store = ConversationStore(str(tmp_path / "history.db"))
+        cid = store.create_conversation("qa")["id"]
+
+        def execute(state, ctx):
+            answers = state.get("clarify_answers")
+            if answers:
+                return ToolResult(artifact={"answeredWith": answers}, summary="Done")
+            return ToolResult(ask=AskSpec(questions=[AskQuestion(
+                question="Choose", header="kind", options=[], question_id=token,
+            )]))
+
+        monkeypatch.setattr(tool, "execute", execute)
+
+        async def consume(answers=None):
+            return [event async for event in stream_graph(
+                graph=graph, user_input="A" if answers else "Choose",
+                conversation_id=cid, user_id="qa", conversation_store=store,
+                answers=answers,
+            )]
+
+        events = asyncio.run(consume())
+        results = [json.loads(event.split("data: ", 1)[1]) for event in events
+                   if event.startswith("event: result\n")]
+        assert results[0]["questions"][0]["question_id"] == token
+        history = store.get_conversation(cid, "qa")["messages"]
+        assert history[-1]["clarificationQuestions"][0]["question_id"] == token
+        answers = {"kind": "A", "text": "A", "__question_id": "opaque / older-token"}
+        asyncio.run(consume(answers))
+        result = graph.get_state({"configurable": {"thread_id": cid}}).values["tool_result"]
+        assert result["artifact"]["answeredWith"] == answers
+
     """对外 SSE 事件序列快照:result/needsClarification/questions 结构、
     pipeline_definition、stage 顺序——stream.py 与前端零改动兼容。"""
 
@@ -316,6 +356,26 @@ class TestClarifyGateUnits:
         pending = update["pending_questions"]
         assert pending["questions"][0]["question"] == "金额字段的可编辑角色是？"
         assert "summary" in pending
+
+    def test_question_token_survives_execute_and_answer_resume(self, monkeypatch):
+        from sdk.tool import AskQuestion, AskSpec
+        token = "opaque / token:old"
+
+        class TokenTool(_ProbeTool):
+            def execute(self, state, ctx):
+                return ToolResult(ask=AskSpec(questions=[AskQuestion(
+                    question="Choose", header="kind", options=[], question_id=token,
+                )]))
+
+        self._registry_with(TokenTool())
+        state = {"tool_name": "probe_tool", "tool_state": {}, "conversation_id": ""}
+        update = self.nodes.execute_tool_node(state)
+        assert update["pending_questions"]["questions"][0]["question_id"] == token
+        answers = {"kind": "A", "text": "A", "__question_id": "opaque / token:older"}
+        monkeypatch.setattr(self.nodes, "interrupt", lambda value: answers)
+        resumed = self.nodes.clarify_gate_node({**state, **update})
+        # Never replace a historical card's token with the current pending token.
+        assert resumed["tool_state"]["clarify_answers"] == answers
 
     def test_clarify_gate_injects_answers_and_clears_pending(self, monkeypatch):
         """clarify_gate:interrupt 拿到答案 → 注入 tool_state、清 pending、

@@ -39,12 +39,24 @@ def register_server_loader(fn: Callable[[str], Optional[Dict[str, Any]]]) -> Non
     _server_loader = fn
 
 
+def server_execution_error(cfg: dict) -> Optional[str]:
+    """A retained snapshot describes capabilities, not current executability."""
+    if cfg.get("enabled") is False:
+        return "MCP server 已停用"
+    probe = cfg.get("probe_status")
+    if probe not in (None, "", "connected") or (
+            not probe and cfg.get("status") not in (None, "connected")):
+        return "MCP server 尚未通过最新探测,请刷新连接后重试"
+    return None
+
+
 def _load_server(code: str) -> Dict[str, Any]:
     cfg = _server_loader(code) if _server_loader else None
     if not cfg:
         raise ToolError(f"未注册的 MCP server: {code}", ToolError.PERMANENT)
-    if cfg.get("enabled") is False:
-        raise ToolError(f"MCP server 已停用: {code}", ToolError.PERMANENT)
+    error = server_execution_error(cfg)
+    if error:
+        raise ToolError(f"{error}: {code}", ToolError.PERMANENT)
     return cfg
 
 
@@ -58,7 +70,17 @@ def _build_http_client(headers: Dict[str, str], timeout: float,
 
 async def _invoke(session, tool: Optional[str], args: Optional[dict]):
     if tool is None:
-        return await session.list_tools()
+        result = await session.list_tools()
+        tools = list(result.tools)
+        seen = set()
+        while result.nextCursor:
+            cursor = result.nextCursor
+            if cursor in seen:
+                raise ToolError("MCP 工具分页游标重复,拒绝使用不完整快照", ToolError.PERMANENT)
+            seen.add(cursor)
+            result = await session.list_tools(cursor=cursor)
+            tools.extend(result.tools)
+        return result.model_copy(update={"tools": tools, "nextCursor": None})
     return await session.call_tool(tool, args or {})
 
 
@@ -87,7 +109,7 @@ async def _run_session(cfg, tool: Optional[str], args: Optional[dict]):
                 return await _invoke(session, tool, args)
 
 
-def _convert(result) -> dict:
+def _convert(result) -> Any:
     """CallToolResult → dict:structuredContent 优先;text 先试 json.loads。"""
     sc = getattr(result, "structuredContent", None)
     if isinstance(sc, dict):
@@ -100,7 +122,26 @@ def _convert(result) -> dict:
                 return parsed if isinstance(parsed, (dict, list)) else {"text": parsed}
             except (ValueError, TypeError):
                 continue
-    return {"content": [getattr(c, "text", "") for c in result.content or []]}
+    content = getattr(result, "content", None) or []
+    return {"content": [getattr(c, "text", "") for c in content]} if content else []
+
+
+def _transport_error_type(exc: Exception) -> str:
+    """Unwrap task-group errors without classifying authentication as transient."""
+    pending = [exc]
+    codes = []
+    while pending:
+        current = pending.pop()
+        if isinstance(current, httpx.HTTPStatusError):
+            codes.append(current.response.status_code)
+        pending.extend(getattr(current, "exceptions", ()))
+    if 401 in codes:
+        return ToolError.CREDENTIAL
+    if 403 in codes:
+        return ToolError.PERMANENT
+    if any(400 <= code < 500 and code not in (408, 429) for code in codes):
+        return ToolError.PERMANENT
+    return ToolError.RETRYABLE
 
 
 def _sync(coro):
@@ -111,13 +152,13 @@ def list_remote_tools(server_cfg: Dict[str, Any]) -> List[dict]:
     """直连探测(注册表刷新用),返回 [{name,description,inputSchema,...}]。"""
     try:
         result = _sync(_run_session(server_cfg, None, None))
-        return [{"name": t.name, "description": t.description or "",
-                 "inputSchema": t.inputSchema} for t in result.tools]
+        return [t.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for t in result.tools]
     except ToolError:
         raise
     except Exception as e:
         raise ToolError(f"MCP server 连接失败({server_cfg['url']}): {e}",
-                        ToolError.RETRYABLE)
+                        _transport_error_type(e))
 
 
 def call_remote_tool(server_cfg: Dict[str, Any], tool: str, args: dict) -> dict:
@@ -132,7 +173,7 @@ def call_remote_tool(server_cfg: Dict[str, Any], tool: str, args: dict) -> dict:
         raise
     except Exception as e:
         raise ToolError(f"MCP 调用失败({server_cfg['url']}/{tool}): {e}",
-                        ToolError.RETRYABLE)
+                        _transport_error_type(e))
 
 
 def list_tools(code: str) -> List[dict]:

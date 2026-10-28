@@ -11,6 +11,10 @@ from fastapi import APIRouter, Depends, Request
 
 from sdk.pack_api import admin_required
 
+from domains.metrology_assistant.legacy_demo import (
+    STRONG_INSPECTION_PURPOSES, MANDATORY_CHECK_KB, REGULATION_KB,
+    PROGRESS_DATASOURCE_ENV, DEMO_ORDER_OPTIONS,
+)
 from domains.metrology_assistant.tools import assistant as cfg
 
 logger = logging.getLogger(__name__)
@@ -18,7 +22,39 @@ router = APIRouter()
 
 
 @router.get("/test/env", dependencies=[Depends(admin_required)])
-async def test_env(request: Request) -> dict:
+async def test_env(request: Request, legacy_demo: bool = False) -> dict:
+    if legacy_demo:
+        return await _legacy_test_env(request)
+    table = cfg._runtime_scenarios()
+    names = set()
+    for scenario in table.values():
+        action = scenario['action']
+        if action.get('kind') == 'kg':
+            if action.get('kb'):
+                names.add(action['kb'])
+            names.update(r['kb'] for r in action.get('kb_rules') or [] if r.get('kb'))
+    errors, kbs = [], []
+    if names:
+        from domains.knowledge_graph import runtime as kg_runtime
+        try:
+            store = kg_runtime.get_kg_store(request.app.state)
+            for name in sorted(names):
+                kb = store.get_kb_by_name(name)
+                docs = store.list_documents(kb['id']) if kb else []
+                kbs.append({'name': name, 'exists': kb is not None, 'docs': len(docs),
+                            'imported': sum(d.get('importStatus') == 'succeeded' for d in docs),
+                            'status': 'ok' if kb else 'missing'})
+        except Exception:
+            logger.exception('Assistant diagnostics dependency unavailable')
+            errors.append('知识库状态读取失败,请查看服务日志')
+    return {'errors': errors, 'kbMapping': {}, 'kbs': kbs, 'progress': {},
+            'orderFixtures': [], 'capabilities': [
+                {'key': key, 'label': c.get('label'), 'kind': c['action']['kind'],
+                 'server': c['action'].get('server'), 'tool': c['action'].get('tool')}
+                for key, c in table.items()]}
+
+
+async def _legacy_test_env(request: Request) -> dict:
     """客服运行依赖面的只读快照(不跑 LLM/不发业务查询)。"""
     # ── 知识库两库(强检判定链的资料来源) ──
     from domains.knowledge_graph import runtime as kg_runtime

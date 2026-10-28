@@ -1163,7 +1163,8 @@ async def search(request: Request, payload: Dict[str, Any]):
     try:
         hit = None
         hit_kb = None
-        for k in target:
+        # Annotations are library-wide and have no document provenance.
+        for k in (target if doc_filter is None else []):
             hit = await asyncio.to_thread(
                 kg_annotations.match_annotation, request.app.state, k["id"], query)
             if hit:

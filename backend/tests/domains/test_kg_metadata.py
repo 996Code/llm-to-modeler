@@ -97,6 +97,89 @@ class TestStoreMetadata:
 
 class TestRetrieveFilter:
 
+    @pytest.mark.parametrize("scope", [set(), {"d1"}])
+    def test_scoped_graph_is_omitted_even_when_entities_match(self, env, scope):
+        from tests.domains.test_knowledge_graph_m4 import KB1
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "q", doc_filter=scope)
+        assert out["subgraph"] == {"nodes": [], "edges": []}
+        assert out["seeds"] == []
+        assert out["diagnostics"]["graphOmitted"] == "document_scope"
+        assert not [c for c in env.obs_calls if c["call_type"] == "graph"]
+
+    def test_single_kb_multi_keeps_document_scope(self, env):
+        kb, docs = _mk_docs(env, 2)
+        env.vector.hits = []
+        out = retrieval.answer_question_multi(
+            env.app_state, [kb], "元数据测试关键词", doc_filter={docs[0]["id"]})
+        assert out["chunks"]
+        assert {c["docId"] for c in out["chunks"]} == {docs[0]["id"]}
+
+    def test_evidence_scope_explains_omission_and_keeps_only_allowed_docs(self, env):
+        from domains.knowledge_graph.service import retrieve_evidence
+        from tests.domains.test_knowledge_graph_m4 import TestKbSearchTool
+        kb, docs = _mk_docs(env, 2)
+        TestKbSearchTool()._retarget_graph(env, kb["id"])
+        env.store.set_doc_metadata(docs[0]["id"], kb["id"], {"department": "sales"})
+        env.vector.hits = []
+        out = retrieve_evidence(env.app_state, kb["name"], "元数据测试关键词",
+                                metadata_filter={"department": "sales"})
+        assert out["chunks"]
+        assert {c["docId"] for c in out["chunks"]} == {docs[0]["id"]}
+        assert out["subgraph"] == {"nodes": [], "edges": []}
+        assert out["diagnostics"]["graphOmitted"] == "document_scope"
+        assert out["diagnostics"]["docFilterCount"] == 1
+        assert not any(k in c for c in out["chunks"] for k in ("childText", "parentChars"))
+
+    def test_cross_kb_scope_keeps_first_library_documents(self, env):
+        kb, docs = _mk_docs(env, 2)
+        env.store.set_doc_metadata(docs[0]["id"], kb["id"], {"department": "sales"})
+        env.store.create_kb("empty-library")
+        env.vector.hits = []
+        out = KbSearchTool(env.app_state).execute(
+            {"user_input": "元数据测试关键词", "pack_params": {
+                "knowledge_graph": {"doc_filter": {"department": "sales"}}}}, _ctx(env))
+        assert out.artifact
+        assert {c["docId"] for c in out.artifact["sources"]["chunks"]} == {docs[0]["id"]}
+
+    @pytest.mark.parametrize("metadata", [{"department": "missing"}, {"department": []}])
+    def test_evidence_empty_scope_never_expands(self, env, metadata):
+        from domains.knowledge_graph.service import retrieve_evidence
+        kb, _ = _mk_docs(env, 2)
+        out = retrieve_evidence(env.app_state, kb["name"], "元数据测试关键词",
+                                metadata_filter=metadata)
+        assert out["chunks"] == []
+        assert out["subgraph"] == {"nodes": [], "edges": []}
+        assert out["diagnostics"]["docFilterCount"] == 0
+
+    @pytest.mark.parametrize("filter_value", ["sales", "missing"])
+    def test_kb_search_scope_skips_library_annotation(self, env, filter_value):
+        from domains.knowledge_graph import annotations
+        kb, docs = _mk_docs(env, 2)
+        env.store.set_kb_vector_info(kb["id"], "test-embed", 3, True)
+        env.store.set_doc_metadata(docs[0]["id"], kb["id"], {"department": "sales"})
+        annotations.upsert_annotation(env.app_state, kb["id"], "q", "outside-scope-secret")
+        out = KbSearchTool(env.app_state).execute(
+            {"user_input": "元数据测试关键词", "kb": kb["name"],
+             "pack_params": {"knowledge_graph": {"doc_filter": {"department": filter_value}}}},
+            _ctx(env))
+        assert out.artifact and not out.artifact.get("annotationHit")
+        assert "outside-scope-secret" not in str(out.artifact)
+
+    @pytest.mark.parametrize("filter_value", ["sales", "missing"])
+    def test_rest_scope_skips_library_annotation(self, client, filter_value):
+        from domains.knowledge_graph import annotations
+        c, env = client
+        kb, docs = _mk_docs(env, 2)
+        env.store.set_kb_vector_info(kb["id"], "test-embed", 3, True)
+        env.store.set_doc_metadata(docs[0]["id"], kb["id"], {"department": "sales"})
+        annotations.upsert_annotation(env.app_state, kb["id"], "q", "outside-scope-secret")
+        response = c.post("/api/packs/knowledge_graph/search", json={
+            "query": "元数据测试关键词", "kb": kb["name"],
+            "doc_filter": {"department": filter_value}})
+        assert response.status_code == 200
+        assert not response.json().get("annotationHit")
+        assert "outside-scope-secret" not in response.text
+
     def test_hybrid_filters_both_paths(self, env):
         """doc_filter 白名单:向量路与全文路命中都按白名单滤。"""
         kb, docs = _mk_docs(env, 3)

@@ -45,13 +45,17 @@ def _build_server_a() -> Starlette:
     server = Server("srv-a")
 
     @server.list_tools()
-    async def _list():
-        return [
+    async def _list(request: types.ListToolsRequest):
+        tools = [
             types.Tool(name="echo_text", description="纯文本返回",
                        inputSchema={"type": "object",
                                    "properties": {"who": {"type": "string"}},
                                    "required": ["who"]}),
-            types.Tool(name="calc", description="int 参数加法",
+            types.Tool(name="calc", description="int 参数加法", title="Calculator",
+                       outputSchema={"type": "object", "properties": {"result": {"type": "integer"}},
+                                     "required": ["result"]},
+                       annotations=types.ToolAnnotations(readOnlyHint=True),
+                       _meta={"vendor": {"revision": 1}},
                        inputSchema={"type": "object",
                                    "properties": {"a": {"type": "integer"},
                                                  "b": {"type": "integer"}},
@@ -66,6 +70,9 @@ def _build_server_a() -> Starlette:
             types.Tool(name="always_fail", description="永远失败",
                        inputSchema={"type": "object", "properties": {}}),
         ]
+        cursor = request.params.cursor if request and request.params else None
+        return types.ListToolsResult(tools=tools[:2] if cursor is None else tools[2:],
+                                     nextCursor="second-page" if cursor is None else None)
 
     @server.call_tool()
     async def _call(name: str, args: dict):
@@ -254,6 +261,10 @@ def test_multi_server_registry_and_calls(servers):
                                   read_timeout=cfg["read_timeout"])
         assert row["status"] == "connected", f"{code} 探测失败"
     assert len(store.get_by_code("srv_a")["tools_snapshot"]) == 4
+    calc = next(t for t in store.get_by_code("srv_a")["tools_snapshot"] if t["name"] == "calc")
+    assert calc["outputSchema"]["required"] == ["result"]
+    assert calc["annotations"]["readOnlyHint"] is True
+    assert calc["_meta"] == {"vendor": {"revision": 1}} and calc["title"] == "Calculator"
     assert len(store.get_by_code("srv_b")["tools_snapshot"]) == 1
 
     # 纯文本非 JSON → content 兜底
@@ -285,11 +296,11 @@ def test_tool_error_is_permanent(servers):
 
 
 def test_wrong_header_unauthorized(servers):
-    """Server C 错 key → 连接层 401 → retryable 分流(如实报错)。"""
+    """Server C 错 key → 连接层 401 → credential,不得自动重试。"""
     from sdk import mcp_client
     mcp_client.register_server_loader(lambda code: {
         "url": servers["srv_c"]["url"], "headers": {"X-Api-Key": "wrong"},
         "timeout": 5.0, "read_timeout": 10.0} if code == "bad_key" else None)
     with pytest.raises(PackInvokeError) as ei:
         mcp_client.call_tool("bad_key", "secret_echo", {"msg": "x"})
-    assert ei.value.error_type == "retryable"
+    assert ei.value.error_type == "credential"

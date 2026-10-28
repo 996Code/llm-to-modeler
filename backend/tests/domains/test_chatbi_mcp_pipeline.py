@@ -258,17 +258,19 @@ class TestMcpPipeline:
 
     def test_self_heal_loop_regenerates_tool_call(self, env, monkeypatch):
         from sdk import mcp_client
-        from sdk.tool import PackInvokeError
         calls = {"n": 0}
 
         def flaky(code, tool, args):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise PackInvokeError(
-                    "MCP 工具 query_gmv 执行失败: 参数 city 缺失",
-                    PackInvokeError.PERMANENT)
+                return {"status": "invalid_input", "message": "参数 city 缺失"}
             return {"columns": ["city", "gmv"], "rows": [["上海", 100]]}
         monkeypatch.setattr(mcp_client, "call_tool", flaky)
+        # Automatic correction is only allowed for explicitly read-only tools.
+        from services.mcp_registry import McpServerStore
+        monkeypatch.setattr(mcp_client, "list_remote_tools", lambda cfg: [
+            {**t, "annotations": {"readOnlyHint": True}} for t in TOOLS])
+        McpServerStore().create_server("Reports", "srv_a", "http://example.invalid/mcp", {})
 
         llm = FakeLLM({
             "chatbi.think": {"tables": [], "aggregation": "", "caveats": []},
@@ -324,3 +326,29 @@ class TestMcpPipeline:
         assert state.get("execute_result") is not None
         assert state["execute_result"].rows == [(100,)]
         assert state.get("_error") is None
+
+
+def test_mcp_heal_allows_unannotated_and_blocks_destructive(monkeypatch):
+    """存量工具(未声明 annotations)保持自愈能力;明确声明破坏性才禁止。"""
+    from domains.chatbi.tools import ask_data as ad
+    from sdk import mcp_client
+    from services.mcp_registry import McpServerStore
+    from types import SimpleNamespace
+
+    from itertools import count
+    seq = count()
+    call = '{"tool": "query_gmv", "args": {}}'
+
+    def _decl(annotations):
+        code = f"srv_h{next(seq)}"
+        monkeypatch.setattr(mcp_client, "list_remote_tools",
+                            lambda cfg: [{"name": "query_gmv", "description": "查询 GMV",
+                                          "inputSchema": {"type": "object"},
+                                          "annotations": annotations}])
+        McpServerStore().create_server("Heal", code, "http://example.invalid/mcp", {})
+        return SimpleNamespace(host=code, db_type="mcp")
+
+    assert ad._mcp_readonly_call(_decl({}), call) is True, "未声明=中性,存量可自愈"
+    assert ad._mcp_readonly_call(_decl({"readOnlyHint": True}), call) is True
+    assert ad._mcp_readonly_call(_decl({"destructiveHint": True}), call) is False
+    assert ad._mcp_readonly_call(_decl({"readOnlyHint": False}), call) is False

@@ -15,6 +15,7 @@
 - sse: SSE 传输探针(sse_ping),验证 sdk client 的 /sse 传输协商分支;
 - auth: X-Api-Key 鉴权(streamable),验证注册表 headers 传递。
 """
+import asyncio
 import json
 import threading
 import time
@@ -483,7 +484,7 @@ def build_metrology_server() -> Starlette:
                                              "无法估算费用"})
             rows = []
             for h in hits[:5]:
-                unit = float(h.get("fee") or 0)
+                unit = float(h.get("fee_yuan") or 0)
                 subtotal = unit * qty * (1.5 if urgent else 1.0)
                 rows.append({"name": h["name"], "unit_fee_yuan": unit,
                              "quantity": qty,
@@ -526,7 +527,7 @@ def build_metrology_server() -> Starlette:
             # 故障演示: 睡过客户端 read_timeout → 调用方超时如实报错;
             # 万一客户端 read_timeout 更长真等到了, 也只回 unavailable
             # 业务信封,绝不回 ok+空 data 冒充成功
-            time.sleep(METROLOGY_TIMEOUT_SECONDS)
+            await asyncio.sleep(METROLOGY_TIMEOUT_SECONDS)
             return _envelope({"status": "unavailable",
                               "message": "业务平台处理超时(模拟)"})
         rec = METROLOGY_ORDERS.get(order_no)

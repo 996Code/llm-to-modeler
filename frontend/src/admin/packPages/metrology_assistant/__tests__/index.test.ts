@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { effectScope, type EffectScope, type Ref } from 'vue'
+import { effectScope, nextTick, type EffectScope, type Ref } from 'vue'
 import { readFileSync } from 'node:fs'
 import Index from '../index.vue'
-import type { MetrologyConfig } from '../../../metrologyApi'
+import type { MetrologyConfig, MetrologyScenario } from '../../../metrologyApi'
 
 const boundary = vi.hoisted(() => ({
   get: vi.fn(), put: vi.fn(), post: vi.fn(), datasources: vi.fn(),
@@ -33,6 +33,15 @@ const saved: MetrologyConfig = {
 type State = {
   config: Ref<MetrologyConfig>
   draft: Ref<MetrologyConfig['content']>
+  currentScenario: Readonly<Ref<MetrologyScenario | null>>
+  capabilityKey: (cap: any) => string
+  serverTools: (cfg: MetrologyScenario) => string[]
+  setParams: (cfg: MetrologyScenario, event: Event) => void
+  setJson: (cfg: MetrologyScenario, field: string, event: Event) => void
+  jsonText: (cfg: MetrologyScenario, field: string) => string
+  parameterRows: Readonly<Ref<Array<{ name: string; required: boolean; type: string; source: string; hint: string }>>>
+  datasources: Ref<Array<any>>
+  pickDatasource: (cfg: MetrologyScenario, event: Event) => void
   saveError: Ref<string>
   dry: { text: string; execute: boolean; current: unknown; error: string }
   tab: Ref<string>
@@ -47,6 +56,7 @@ type State = {
   drawerSave: () => Promise<void>
   resetToLatest: (cap: any) => Promise<void>
   reload: () => Promise<void>
+  loadRouting: (force?: boolean) => Promise<void>
   runDry: () => Promise<void>
 }
 let scope: EffectScope
@@ -83,6 +93,18 @@ describe('智能客服能力路由(编辑抽屉版)', () => {
     expect(boundary.get.mock.calls.map(([url]) => url)).toEqual(['/config', '/config/routing'])
   })
 
+  it('仅显式刷新重探测声明，初次加载和保存后不强制刷新', async () => {
+    const state = await loaded()
+    expect(boundary.get.mock.calls.filter(([url]) => url === '/config/routing')).toEqual([['/config/routing']])
+    await state.loadRouting(true)
+    expect(boundary.get).toHaveBeenLastCalledWith('/config/routing', { params: { refresh: true } })
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi', scenario_key: 'progress' })
+    await state.drawerSave()
+    expect(boundary.get).toHaveBeenLastCalledWith('/config/routing')
+    await state.resetToLatest({ scenario_key: 'progress' })
+    expect(boundary.get).toHaveBeenLastCalledWith('/config/routing')
+  })
+
   it('polished 能力行编辑:打开抽屉改追问文案,保存整档落库', async () => {
     const state = await loaded()
     await state.openCapEditor({ status: 'polished', kind: 'chatbi',
@@ -90,7 +112,7 @@ describe('智能客服能力路由(编辑抽屉版)', () => {
     expect(state.editorOpen.value).toBe(true)
     expect(state.currentKey.value).toBe('progress')
 
-    state.draft.value.scenarios.progress.required.question = '请提供委托单号(回执单上可查)'
+    state.currentScenario.value!.required.question = '请提供委托单号(回执单上可查)'
     await state.drawerSave()
     expect(boundary.put).toHaveBeenCalledWith('/config', {
       content: expect.objectContaining({ scenarios: expect.objectContaining({
@@ -107,7 +129,7 @@ describe('智能客服能力路由(编辑抽屉版)', () => {
     const state = await loaded()
     await state.openCapEditor({ status: 'polished', kind: 'chatbi',
       scenario_key: 'progress', tool: 'query_progress', label: '进度查询' })
-    state.draft.value.scenarios.progress.label = '改坏了'
+    state.currentScenario.value!.label = '改坏了'
     state.cancelEdit()
     expect(state.draft.value.scenarios.progress.label).toBe('进度查询')
     expect(boundary.put).not.toHaveBeenCalled()
@@ -127,7 +149,8 @@ describe('智能客服能力路由(编辑抽屉版)', () => {
     expect(boundary.post).toHaveBeenCalledWith('/config/capability-import/draft',
       { server: 'metrology', tool: 'query_workload' })
     expect(state.currentKey.value).toBe('query_workload')
-    expect(state.draft.value.scenarios.query_workload).toBeTruthy()
+    expect(state.currentScenario.value!.label).toBe('工作量')
+    expect(state.draft.value.scenarios.query_workload).toBeUndefined()
 
     await state.resetToLatest({ status: 'polished', kind: 'chatbi',
       scenario_key: 'query_workload', tool: 'query_workload' })
@@ -144,6 +167,124 @@ describe('智能客服能力路由(编辑抽屉版)', () => {
     await state.drawerSave()
     expect(state.saveError.value).toBe('校验失败: 请选择数据源')
     expect(state.draft.value.scenarios.progress).toBeTruthy()
+  })
+
+  it.each(['cancel', 'close'])('新建覆盖后 %s 不夹带到另一能力保存', async mode => {
+    const state = await loaded()
+    boundary.post.mockResolvedValueOnce({ data: { key: 'new', scenario: structuredClone(saved.content.scenarios.progress) } })
+    await state.openCapEditor({ status: 'auto', kind: 'chatbi', server: 'other', tool: 'query_progress' })
+    state.currentScenario.value!.label = '不应落库'
+    if (mode === 'cancel') state.cancelEdit()
+    else { state.editorOpen.value = false; await nextTick() }
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi', scenario_key: 'progress' })
+    await state.drawerSave()
+    expect(Object.keys(boundary.put.mock.calls[0][1].content.scenarios)).toEqual(['progress'])
+  })
+
+  it('失败编辑不夹带到重置，删除最后覆盖且失败不改已保存配置', async () => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi', scenario_key: 'progress' })
+    state.currentScenario.value!.label = '未保存'
+    boundary.put.mockRejectedValueOnce(new Error('offline'))
+    await state.drawerSave()
+    expect(state.config.value.content).toEqual(saved.content)
+    boundary.put.mockRejectedValueOnce(new Error('offline'))
+    await state.resetToLatest({ scenario_key: 'progress' })
+    expect(boundary.put.mock.calls[1][1].content.scenarios).toEqual({})
+    expect(state.config.value.content).toEqual(saved.content)
+  })
+
+  it('非法参数 JSON 阻止保存而不是静默沿用旧值', async () => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi', scenario_key: 'progress' })
+    state.setParams(state.currentScenario.value!, { target: { value: '{bad' } } as unknown as Event)
+    await state.drawerSave()
+    expect(boundary.put).not.toHaveBeenCalled()
+    expect(state.saveError.value).toContain('工具参数映射')
+  })
+
+  it('同名工具按服务隔离身份，未绑定数据源也按 action.server 限定工具', async () => {
+    const state = await loaded()
+    const a = { server: 'a', tool: 'query' }, b = { server: 'b', tool: 'query' }
+    expect(state.capabilityKey(a)).not.toBe(state.capabilityKey(b))
+    state.routing.value = [
+      { ...a, kind: 'chatbi', status: 'auto' },
+      { server: 'b', tool: 'private_query', kind: 'chatbi', status: 'auto' },
+    ] as any
+    expect(state.serverTools({ ...saved.content.scenarios.progress, action: { kind: 'chatbi', server: 'a' } } as any)).toEqual(['query'])
+  })
+
+  it('保存保留顶层、场景、槽位及动作的未知配置字段', async () => {
+    const fixture = structuredClone(saved) as any
+    fixture.content.future = { enabled: true }
+    fixture.content.scenarios.progress.future = { keep: true }
+    fixture.content.scenarios.progress.required.future = ['x']
+    fixture.content.scenarios.progress.action.future = { nested: 1 }
+    boundary.get.mockImplementation(async (url: string) => ({ data: url === '/config' ? fixture : { capabilities: [], servers: [] } }))
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi', scenario_key: 'progress' })
+    state.currentScenario.value!.label = '新名称'
+    await state.drawerSave()
+    expect(boundary.put.mock.calls[0][1].content).toEqual({ ...fixture.content, scenarios: {
+      progress: { ...fixture.content.scenarios.progress, label: '新名称' },
+    } })
+  })
+
+  it('多参数显示完整 schema 的必填、类型、映射来源和提取提示', async () => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi', scenario_key: 'progress' })
+    const cfg = state.currentScenario.value!
+    cfg.action.input_schema = { type: 'object', required: ['order_no', 'year'], properties: {
+      order_no: { type: 'string' }, year: { type: 'integer' }, verbose: { type: 'boolean' },
+    } }
+    cfg.action.params = { order_no: 'order_no', year: 'booking_year' }
+    cfg._param_hints = { booking_year: '预约年份' }
+    expect(state.parameterRows.value).toEqual([
+      { name: 'order_no', required: true, type: 'string', source: 'order_no', hint: '' },
+      { name: 'year', required: true, type: 'integer', source: 'booking_year', hint: '预约年份' },
+      { name: 'verbose', required: false, type: 'boolean', source: 'verbose', hint: '' },
+    ])
+  })
+
+  it('通用问答保留空 required，保存知识来源、查询模板与回答指引', async () => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'kg', scenario_key: 'progress' })
+    const cfg = state.currentScenario.value!
+    cfg.required = {}
+    cfg.action = { kind: 'kg', conclusion: 'answer', kb: '办事指南', query_template: '{question}', answer_prompt: '简洁列出步骤' }
+    state.setJson(cfg, 'kb_rules', { target: { value: '[{"slot":"topic","in":["检定"],"kb":"检定指南"}]' } } as unknown as Event)
+    await state.drawerSave()
+    expect(boundary.put.mock.calls[0][1].content.scenarios.progress).toMatchObject({
+      required: {}, action: { kind: 'kg', conclusion: 'answer', kb: '办事指南', query_template: '{question}', answer_prompt: '简洁列出步骤',
+        kb_rules: [{ slot: 'topic', in: ['检定'], kb: '检定指南' }] },
+    })
+  })
+
+  it.each(['input_schema', '_param_hints', 'kb_rules', 'notices'])('%s 非法结构保留输入并阻止保存，修正后可保存', async field => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi', scenario_key: 'progress' })
+    const cfg = state.currentScenario.value!
+    const bad = field === 'kb_rules' ? '[{}]' : '{"required":1}'
+    state.setJson(cfg, field, { target: { value: bad } } as unknown as Event)
+    expect(state.jsonText(cfg, field)).toBe(bad)
+    await state.drawerSave()
+    expect(boundary.put).not.toHaveBeenCalled()
+    state.setJson(cfg, field, { target: { value: field === 'kb_rules' ? '[]' : '{}' } } as unknown as Event)
+    await state.drawerSave()
+    expect(boundary.put).toHaveBeenCalledTimes(1)
+  })
+
+  it('更换到另一个 MCP 服务的数据源不保留旧服务工具和 schema', async () => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi', scenario_key: 'progress' })
+    const cfg = state.currentScenario.value!
+    cfg.action.server = 'a'
+    cfg.action.input_schema = { properties: { old: { type: 'string' } } }
+    state.datasources.value = [{ id: 'b', name: 'B服务', dbType: 'mcp', host: 'b', database: 'query' }]
+    state.pickDatasource(cfg, { target: { value: 'b' } } as unknown as Event)
+    expect(cfg.action.server).toBe('b')
+    expect(cfg.action.tool).toBe('query')
+    expect(cfg.action.input_schema).toBeUndefined()
   })
 
   it('页面结构:两层 tab(能力路由/联调预演)+行内编辑抽屉,无独立润色场景页', () => {

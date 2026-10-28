@@ -223,7 +223,8 @@ def resolve_datasource(db, ds_id: str | None = None,
 
 class ExecuteResult:
     def __init__(self, ok: bool, columns=None, rows=None, rowcount: int = 0,
-                 duration_ms: int = 0, error: str = "", truncated: bool = False):
+                 duration_ms: int = 0, error: str = "", truncated: bool = False,
+                 status: str = "", error_type: str = "", retryable: bool = False):
         self.ok = ok
         self.columns = columns or []
         self.rows = rows or []
@@ -231,6 +232,9 @@ class ExecuteResult:
         self.duration_ms = duration_ms
         self.error = error
         self.truncated = truncated
+        self.status = status
+        self.error_type = error_type
+        self.retryable = retryable
 
 
 def _pg_connect(info: DataSourceInfo, timeout_seconds: int,
@@ -388,7 +392,10 @@ def execute_mcp_tool(info: DataSourceInfo, tool_call: dict,
         msg = core.error.message if core.error else core.status
         logger.warning("MCP 工具调用失败(%s, %dms): %s",
                        info.host, duration, msg[:160])
-        return ExecuteResult(False, error=msg, duration_ms=duration)
+        return ExecuteResult(False, error=msg, duration_ms=duration,
+                             status=core.status,
+                             error_type=core.error.error_type if core.error else "permanent",
+                             retryable=bool(core.error and core.error.retryable))
     data = core.data or {}
     if "columns" in data and "rows" in data:
         columns = [str(c) for c in data["columns"]]

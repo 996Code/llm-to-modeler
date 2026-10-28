@@ -911,7 +911,7 @@ function quickFill(text: string) {
  * 与打字回传的 {text: 原话} 是同一 answers 契约的两种形态。
  */
 function answerClarification(q: ClarificationQuestion, opt: ClarificationOption) {
-  store.sendMessage(opt.label, undefined, { [q.header]: opt.label })
+  store.answerClarification(q, opt)
 }
 
 /** ChatInput 子组件 emit 的 send 事件处理：统一转发给 store。 */

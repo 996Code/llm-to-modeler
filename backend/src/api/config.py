@@ -215,6 +215,12 @@ async def chat(req: ChatRequest, request: Request):
 
     返回 StreamingResponse（text/event-stream），前端用 ReadableStream 逐事件解析。
     """
+    user_id = request.headers.get("X-User-Id") or "anonymous"
+    # Fail before loading history or opening SSE: checkpoint reads/writes use
+    # conversation_id directly and do not enforce ownership themselves.
+    if req.conversation_id and not request.app.state.conversation_store.conversation_exists(
+            req.conversation_id, user_id):
+        raise HTTPException(404, "会话不存在")
     graph = request.app.state.graph  # LangGraph 编排器，类比 Spring 的 DispatcherServlet
     # 宿主显式下发的上下文优先于会话库旧配置（P1：防止陈旧基线覆盖手动修改）
     context_artifact = (
@@ -238,7 +244,7 @@ async def chat(req: ChatRequest, request: Request):
             graph=graph,
             user_input=req.message,
             conversation_id=req.conversation_id,
-            user_id=request.headers.get("X-User-Id") or "anonymous",  # 与 conversations API 缺省一致（"" 会让 chat 流静默跳过落库）
+            user_id=user_id,  # 与 conversations API 缺省一致
             answers=req.answers,  # ← 追问回答（非空表示追问恢复）
             image_base64=req.image_base64,  # ← 图片 base64（图片识别）
             conversation_store=request.app.state.conversation_store,

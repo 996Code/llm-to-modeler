@@ -637,7 +637,7 @@ def execute_tool_node(state: GraphState) -> dict:
         # 构建 interrupt payload(发给前端的数据;存入 pending_questions,
         # 由 clarify_gate 节点据此 interrupt——本节点绝不挂起)
         # model_dump()：Pydantic 对象转 dict，类比 Jackson 序列化
-        questions_data = [q.model_dump() for q in result.ask.questions]
+        questions_data = [q.model_dump(exclude_none=True) for q in result.ask.questions]
         # 拼人类可读的追问文案，供前端展示
         questions_text = "我需要确认一些信息：\n" + "\n".join(
             f"{i+1}. {q.question}" for i, q in enumerate(result.ask.questions)

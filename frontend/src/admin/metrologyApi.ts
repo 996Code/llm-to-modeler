@@ -7,14 +7,27 @@
 import axios from 'axios'
 import { getAdminToken, UnauthorizedError } from './api'
 
+export interface MetrologyInputSchema {
+  type?: string | string[]
+  properties?: Record<string, MetrologyInputSchema>
+  required?: string[]
+  description?: string
+  enum?: unknown[]
+  [key: string]: unknown
+}
+
 export interface MetrologyScenario {
+  [key: string]: unknown
   label: string
   intent: string
+  _param_hints?: Record<string, string>
   required: {
-    slot: string
-    header: string
-    question: string
-    options?: { label: string; description?: string }[]
+    [key: string]: unknown
+    slot?: string
+    header?: string
+    question?: string
+    extract_hint?: string
+    options?: { label: string; description?: string; [key: string]: unknown }[]
     subject_slot?: string
     subject_default?: string
     normalize?: string
@@ -22,8 +35,15 @@ export interface MetrologyScenario {
     enum_options?: string[]
   }
   action: {
+    [key: string]: unknown
     kind: 'kg' | 'chatbi'
-    /** 显式绑定的 ChatBI 数据源 ID(优先于 env;能力起草/管理页下拉写入) */
+    server?: string
+    input_schema?: MetrologyInputSchema
+    kb?: string
+    kb_rules?: { slot: string; in: string[]; kb: string; [key: string]: unknown }[]
+    query_template?: string
+    answer_prompt?: string
+    conclusion?: string
     datasource_id?: string
     env?: string
     ds_name?: string
@@ -31,7 +51,7 @@ export interface MetrologyScenario {
     params?: Record<string, string>
     stage?: string
     error_noun?: string
-    notices?: Record<string, { title: string; message: string; order?: string }>
+    notices?: Record<string, { title: string; message: string; order?: string; [key: string]: unknown }>
     card?: string
   }
 }
@@ -39,7 +59,7 @@ export interface MetrologyScenario {
 export interface MetrologyConfig {
   revision: number
   factory: boolean
-  content: { scenarios: Record<string, MetrologyScenario> }
+  content: { scenarios: Record<string, MetrologyScenario>; [key: string]: unknown }
 }
 
 export const metrologyApi = axios.create({

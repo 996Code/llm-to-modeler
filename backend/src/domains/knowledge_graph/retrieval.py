@@ -260,17 +260,17 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     top_k: Optional[int] = None,
                     on_stage=None,
                     intent: Optional[Dict[str, Any]] = None,
-                    doc_filter: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    doc_filter: Optional[set] = None) -> Dict[str, Any]:
     """混合检索:返回 {intent, seeds, subgraph, chunks}。
 
-    图谱路始终执行;向量路仅 kb.vector_enabled 时执行(失败降级为空)。
+    图谱路仅无文档范围时执行;向量路仅 kb.vector_enabled 时执行(失败降级为空)。
     on_stage(stage_key, message): 各阶段进度回调(可选)。
     intent: 预解析的检索意图(可选;跨库检索 answer_question_multi 传入
     ——所有库共享同一 query 意图,不逐库重复烧 LLM)。传入时跳过意图
     解析与对应 stage 事件(由调用方统一发)。
-    doc_filter: D7 文档元数据过滤(嵌入模式宿主经 pack_params 传入,
-    扁平键值 AND 匹配)——向量路与全文路按 doc 白名单下推;
-    图谱路不过滤(实体跨文档归属,元数据是文档级概念)。空/None 不过滤。
+    doc_filter: 已解析的文档 ID 白名单,向量路与全文路均按此过滤。
+    None 不过滤;空集零召回。实体属性跨文档合并,无法证明范围时
+    省略图谱路(含种子与诊断),不把库级内容带入受限文档范围。
     """
     def _stage(key: str, message: str) -> None:
         if on_stage is not None:
@@ -280,7 +280,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 pass
 
     store = runtime.get_kg_store(app_state)
-    graph = runtime.get_graph(app_state)
+    graph = runtime.get_graph(app_state) if doc_filter is None else None
     schema = kb.get("schema") or {}
     if intent is None:
         _stage("kb_search.intent", "解析检索意图(实体/关键词/跳数)…")
@@ -298,7 +298,10 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                                    "parentContextHits": 0}
     seeds: List[Dict[str, Any]] = []
     subgraph = {"nodes": [], "edges": []}
-    if terms:
+    if doc_filter is not None:
+        diagnostics["graphOmitted"] = "document_scope"
+        _stage("kb_search.graph", "文档范围已限定,省略无法证明文档归属的图谱召回")
+    if terms and doc_filter is None:
         _stage("kb_search.graph",
                f"库「{kb.get('name')}」图谱实体匹配({len(terms)} 个种子词)…")
         _t0 = time.monotonic()
@@ -864,7 +867,7 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
     kbs = [kb for kb in kbs if not (kb["id"] in _seen or _seen.add(kb["id"]))]
     if len(kbs) == 1:
         result = answer_question(app_state, kbs[0], query, conv_id=conv_id,
-                                top_k=top_k, on_stage=on_stage)
+                                top_k=top_k, on_stage=on_stage, doc_filter=doc_filter)
         result["kbs"] = [{"id": kbs[0]["id"], "name": kbs[0].get("name") or ""}]
         return result
 

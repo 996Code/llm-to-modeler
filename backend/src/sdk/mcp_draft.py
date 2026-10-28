@@ -15,7 +15,9 @@ _TYPE_MAP = {
     "string": "text",
     "number": "number",
     "integer": "number",
-    "boolean": "text",   # 布尔暂映射 text(没有 bool 槽位;追问选项承载)
+    "boolean": "boolean",
+    "object": "json",
+    "array": "json",
 }
 
 
@@ -26,31 +28,40 @@ def translate_input_schema(schema: Optional[dict]) -> Dict[str, Any]:
     (首见序;required 属性排在前面更利于起草器选主槽位)。
     schema 非法/为空返回空 slots——起草器自行兜底。
     """
+    from copy import deepcopy
+
     if not isinstance(schema, dict):
-        return {"slots": [], "required_slot": None, "summary": ""}
+        return {"slots": [], "required_slot": None, "summary": "",
+                "raw_schema": deepcopy(schema)}
     props = schema.get("properties") or {}
+    if not isinstance(props, dict):
+        props = {}
     required = [str(r) for r in schema.get("required") or []]
     slots: List[Dict[str, Any]] = []
     for name in list(required) + [k for k in props if k not in required]:
         p = props.get(name)
         if not isinstance(p, dict):
             continue
-        slot_type = _TYPE_MAP.get(str(p.get("type") or ""), "text")
-        enum_options: List[str] = []
-        if slot_type == "text" and isinstance(p.get("enum"), list) and p["enum"]:
+        declared_type = p.get("type")
+        is_union = isinstance(declared_type, list) or any(
+            k in p for k in ("anyOf", "oneOf", "allOf", "$ref"))
+        slot_type = "json" if is_union else _TYPE_MAP.get(str(declared_type or ""), "text")
+        enum_options = deepcopy(p["enum"]) if isinstance(p.get("enum"), list) else []
+        if slot_type == "text" and enum_options:
             slot_type = "enum"
-            enum_options = [str(v) for v in p["enum"]]
         slots.append({
             "name": str(name),
             "slot_type": slot_type,
             "enum_options": enum_options,
             "description": str(p.get("description") or ""),
             "required": name in required,
+            "raw_schema": deepcopy(p),
         })
     return {
         "slots": slots,
         "required_slot": required[0] if required else None,
         "summary": str(schema.get("description") or ""),
+        "raw_schema": deepcopy(schema),
     }
 
 

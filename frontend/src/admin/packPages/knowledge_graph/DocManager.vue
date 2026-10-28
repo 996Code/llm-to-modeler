@@ -73,6 +73,9 @@
           {{ meta.label }} ({{ statusCounts[s] || 0 }})
         </a-select-option>
       </a-select>
+      <!-- 名称模糊搜索(本地过滤;配合状态筛选同时生效) -->
+      <a-input-search v-model:value="nameFilter" size="small" style="width: 200px"
+                      placeholder="按文档名称搜索" allow-clear />
       <span class="dm-tip">上传成功后自动导入，可在任务中心查看进度</span>
     </div>
 
@@ -84,11 +87,14 @@
                message="保存仅影响后续导入;已导入文档需「重导」才会按新分段重建(图谱实体随重导同步重建)" />
     </a-modal>
 
-    <!-- 文档表 -->
+    <!-- 文档表:y 限高让表体自身出滚动条(仅 x 滚动时 antd 把表体
+         挪进独立 .ant-table-body,.ant-table-content 的全局限高管不到
+         它——文档多时表格无限长且翻页像没生效) -->
     <a-table
-      :columns="columns" :data-source="filteredDocs" :loading="loading" row-key="id"
+      :columns="columns" :data-source="pagedDocs" :loading="loading" row-key="id"
       :row-selection="{ selectedRowKeys: selectedIds, onChange: (k: string[]) => selectedIds = k }"
-      size="small" :scroll="{ x: 1100 }" :pagination="{ pageSize: 20, showTotal: (t: number) => `共 ${t} 条` }"
+      size="small" :scroll="{ x: 1100, y: tableScrollY }"
+      :pagination="docPagination" @change="onTableChange"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'filename'">
@@ -413,15 +419,48 @@ const STATUS: Record<string, { color: string; label: string }> = {
 const statusColor = (s: string) => STATUS[s]?.color || 'default'
 const statusLabel = (s: string) => STATUS[s]?.label || s
 
-// ── 状态筛选(本地过滤;文档列表全量拉回,千级无压力) ──
+// ── 筛选(状态+名称模糊;文档列表全量拉回,本地过滤千级无压力) ──
 const statusFilter = ref('')
+const nameFilter = ref('')
 const statusCounts = computed(() => {
   const c: Record<string, number> = {}
   for (const d of docs.value) c[d.importStatus] = (c[d.importStatus] || 0) + 1
   return c
 })
-const filteredDocs = computed(() =>
-  statusFilter.value ? docs.value.filter((d) => d.importStatus === statusFilter.value) : docs.value)
+const filteredDocs = computed(() => docs.value.filter((d) =>
+  (!statusFilter.value || d.importStatus === statusFilter.value)
+  && (!nameKeyword.value || (d.filename || '').toLowerCase().includes(nameKeyword.value))))
+const nameKeyword = computed(() => nameFilter.value.trim().toLowerCase())
+
+// ── 分页(筛选变化回第 1 页;页码/每页条数由表格 change 事件回写) ──
+const docPage = ref(1)
+const docPageSize = ref(20)
+const pagedDocs = computed(() => {
+  const start = (docPage.value - 1) * docPageSize.value
+  return filteredDocs.value.slice(start, start + docPageSize.value)
+})
+const docPagination = computed(() => ({
+  current: docPage.value,
+  pageSize: docPageSize.value,
+  total: filteredDocs.value.length,
+  showSizeChanger: true,
+  pageSizeOptions: ['20', '50', '100'],
+  showTotal: (t: number) => `共 ${t} 条`,
+}))
+function onTableChange(pag: { current?: number; pageSize?: number }) {
+  if (pag.pageSize && pag.pageSize !== docPageSize.value) {
+    docPageSize.value = pag.pageSize
+    docPage.value = 1
+  } else if (pag.current) {
+    docPage.value = pag.current
+  }
+}
+watch([statusFilter, nameKeyword], () => {
+  docPage.value = 1
+  selectedIds.value = []
+})
+// 表体限高按视口算(与全站表格口径一致,减头部/工具栏/翻页占位)
+const tableScrollY = computed(() => Math.max(240, window.innerHeight - 380))
 function onStatusFilterChange() {
   // 清空勾选:勾选里可能混着被筛掉的行,保留会导致"批量删除(N)"与可见行对不上
   selectedIds.value = []

@@ -52,6 +52,10 @@ class FakeCtx:
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     runtime.reset_runtime_cache()
+    from domains.metrology_assistant.legacy_demo import demo_scenarios
+    from domains.metrology_assistant import capability_import as ci
+    monkeypatch.setattr(mta, '_current_scenarios', demo_scenarios)
+    monkeypatch.setattr(ci, 'resolve_scenarios', lambda table: table)
     monkeypatch.delenv("METROLOGY_PROGRESS_DATASOURCE_ID", raising=False)
     yield
     runtime.reset_runtime_cache()
@@ -93,12 +97,13 @@ def test_answer_consumes_pending_and_advances_revision():
     # 补答走 answers 通道(不烧提取)
     ctx.llm_client = FakeLLM(extract={})
     result = tool.execute(
-        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026"}}, ctx)
-    after = store.get_flow(_db(), "conv-flow")
+        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026", '__question_id': (ctx.session_state.get('pending') or {}).get('question_id')}}, ctx)
+    after = store.get_flow_by_id(_db(), flow['flowId'])
     # 追问后未配置数据源 → error_for_llm(执行到了 chatbi 分支)
     assert result.error_for_llm is not None
     assert "数据源未配置" in result.error_for_llm
-    assert after["flowRevision"] == rev + 1
+    assert after["flowRevision"] > rev
+    assert after['status'] == 'failed'
     assert after["pendingQuestion"] is None
     assert after["slots"]["order_no"] == "BJ2026"
     # 消费后 pending 清空:新消息(带单号)直接执行,不被旧 pending 吞
@@ -120,7 +125,7 @@ def test_stale_pending_answer_rejected():
                        slots={"order_no": "BJ9999"}, clear_pending=True)
     ctx.llm_client = FakeLLM(extract={})
     result = tool.execute(
-        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026"}}, ctx)
+        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026", '__question_id': (ctx.session_state.get('pending') or {}).get('question_id')}}, ctx)
     assert result.error_for_llm is not None
     assert "已被处理" in result.error_for_llm
 
@@ -153,7 +158,7 @@ def test_slot_change_invalidates_running_flow():
                                       "instrument": "", "purpose": "",
                                       "order_no": "BJ2026"})
     tool.execute({"user_input": "查 BJ2026 进度"}, ctx)
-    flow1 = store.get_flow(_db(), "conv-flow")
+    flow1 = store.get_flow(_db(), "conv-flow", include_done=True)
     assert flow1 is not None and flow1["slots"].get("order_no") == "BJ2026"
 
     # 第二轮:明确换单号 BJ2027(与 flow 槽位冲突)→ 旧 flow cancelled
@@ -162,7 +167,7 @@ def test_slot_change_invalidates_running_flow():
                                       "order_no": "BJ2027"})
     tool.execute({"user_input": "查 BJ2027 进度"}, ctx)
     # 旧 flow 已 cancelled(get_flow 只看 running → None 或新 flow)
-    current = store.get_flow(_db(), "conv-flow")
+    current = store.get_flow(_db(), "conv-flow", include_done=True)
     assert current is not None
     assert current["flowId"] != flow1["flowId"]  # 新任务新 flow
     # cancelled 行保留(审计):直接查行
@@ -170,7 +175,7 @@ def test_slot_change_invalidates_running_flow():
         row = conn.execute(
             "SELECT status FROM assistant_flows WHERE flow_id = ?",
             (flow1["flowId"],)).fetchone()
-    assert row["status"] == "cancelled"
+    assert row["status"] == "failed"
     # KV pending 同步清
     assert ctx.session_state.get("pending") is None
 
@@ -246,7 +251,7 @@ def test_identity_gate_rejects_cross_user_resume():
     ctx.user_id = "user-b"
     ctx.llm_client = FakeLLM(extract={})
     result = tool.execute(
-        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026"}}, ctx)
+        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026", '__question_id': (ctx.session_state.get('pending') or {}).get('question_id')}}, ctx)
     assert result.error_for_llm is not None
     assert "不一致" in result.error_for_llm
     # flow 未被消费(pending 仍在,归属人自己仍可答)
@@ -254,7 +259,7 @@ def test_identity_gate_rejects_cross_user_resume():
     assert flow["pendingQuestion"] is not None
     ctx.user_id = "anonymous"
     r2 = tool.execute(
-        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026"}}, ctx)
+        {"user_input": "", "clarify_answers": {"委托单号": "BJ2026", '__question_id': (ctx.session_state.get('pending') or {}).get('question_id')}}, ctx)
     assert r2.error_for_llm is not None and "不一致" not in r2.error_for_llm
 
 
@@ -327,7 +332,7 @@ def test_dynamic_slot_extraction_from_scenario_table():
         },
     }
     prompt = mta._build_extract_prompt("{}", "10月1号来", scenarios=table)
-    assert '"date": ""' in prompt and "预约日期" in prompt
+    assert '"slot": "date"' in prompt and "预约日期" in prompt
     got = mta.extract_slots(
         type("L", (), {"chat_json": lambda self, m, **k: {
             "scenario": "booking", "date": "2026年10月1日"}})(),

@@ -134,6 +134,64 @@ class TestResumeEndpoint:
         assert captured.get("user_id") == "tester"   # 会话归属人(作者一致)
 
 
+class TestChatOwnership:
+
+    @pytest.mark.parametrize("answers", [None, {"text": "continue"}])
+    @pytest.mark.parametrize("identity", ["someone-else", "anonymous"])
+    def test_foreign_chat_rejected_before_stream(self, app_with_store, monkeypatch,
+                                                 answers, identity):
+        app, store = app_with_store
+        cid = _make_conv(store, with_assistant=False)
+        invoked = []
+
+        async def stream(**kwargs):
+            invoked.append(kwargs)
+            yield "event: done\ndata: {}\n\n"
+
+        monkeypatch.setattr("engine.stream.stream_graph", stream)
+        response = TestClient(app).post(
+            "/api/config/chat", headers={"X-User-Id": identity},
+            json={"message": "continue", "conversation_id": cid,
+                  "answers": answers, "context": {"artifact": {"x": 1}}})
+        assert response.status_code == 404
+        assert invoked == []
+        assert len(store.get_messages(cid)) == 1
+
+    def test_unknown_chat_rejected(self, app_with_store, monkeypatch):
+        app, _ = app_with_store
+
+        async def stream(**kwargs):
+            yield "event: done\ndata: {}\n\n"
+
+        monkeypatch.setattr("engine.stream.stream_graph", stream)
+        assert TestClient(app).post(
+            "/api/config/chat", json={"message": "q", "conversation_id": "missing"}
+        ).status_code == 404
+
+    @pytest.mark.parametrize("user", ["tester", "anonymous"])
+    @pytest.mark.parametrize("answers", [None, {"text": "continue"}])
+    def test_owner_and_new_chat_still_stream(self, app_with_store, monkeypatch,
+                                            user, answers):
+        app, store = app_with_store
+        cid = store.create_conversation(user)["id"]
+        captured = []
+
+        async def stream(**kwargs):
+            captured.append(kwargs)
+            yield "event: done\ndata: {}\n\n"
+
+        monkeypatch.setattr("engine.stream.stream_graph", stream)
+        client = TestClient(app)
+        headers = {"X-User-Id": user} if user != "anonymous" else {}
+        for conv_id in (cid, None):
+            response = client.post("/api/config/chat", headers=headers,
+                                   json={"message": "q", "conversation_id": conv_id,
+                                         "answers": answers})
+            assert response.status_code == 200
+        assert [c["conversation_id"] for c in captured] == [cid, None]
+        assert all(c["user_id"] == user for c in captured)
+
+
 class TestResumePersistence:
     """落库辅助只写 assistant——user 消息在请求到达时已即时落库
     (流式中断不丢问句),收尾重复写 user 会让历史同一句问两遍。"""

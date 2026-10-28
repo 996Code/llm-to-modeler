@@ -68,7 +68,8 @@ _STATUS_CANCELLED = "cancelled"
 
 
 def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+    from datetime import datetime
+    return datetime.now().isoformat(timespec='microseconds')
 
 
 class FlowRevisionError(Exception):
@@ -168,11 +169,11 @@ def create_flow(db, conversation_id: str, user_id: str,
             return str(row["flow_id"])
         conn.execute(
             "INSERT INTO assistant_flows (flow_id, conversation_id, "
-            "user_id, scenario, slots, flow_revision, status, "
+            "user_id, scenario, slots, config_revision, flow_revision, status, "
             "created_at, updated_at) VALUES "
-            "(?, ?, ?, ?, ?, 1, ?, ?, ?)",
+            "(?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
             (flow_id, conversation_id, user_id or "", scenario or "",
-             json.dumps(slots, ensure_ascii=False), _STATUS_RUNNING,
+             json.dumps(slots, ensure_ascii=False), config_revision, _STATUS_RUNNING,
              _now(), _now()))
         return flow_id
 
@@ -193,6 +194,12 @@ def get_flow(db, conversation_id: str,
     if not row:
         return None
     return _row_to_flow(row)
+
+
+def get_flow_by_id(db, flow_id: str) -> Optional[Dict[str, Any]]:
+    with db.connect() as conn:
+        row = conn.execute("SELECT * FROM assistant_flows WHERE flow_id = ?", (flow_id,)).fetchone()
+    return _row_to_flow(row) if row else None
 
 
 def advance_flow(db, flow_id: str, expected_revision: int,
@@ -234,7 +241,7 @@ def advance_flow(db, flow_id: str, expected_revision: int,
     with db.connect() as conn:
         cur = conn.execute(
             f"UPDATE assistant_flows SET {', '.join(sets)} "
-            "WHERE flow_id = ? AND flow_revision = ?", params)
+            "WHERE flow_id = ? AND flow_revision = ? AND status = 'running'", params)
         if cur.rowcount == 0:
             raise FlowRevisionError(
                 f"flow 版本冲突(flow_id={flow_id}, "
@@ -251,7 +258,8 @@ def close_running_flows(db, conversation_id: str,
     """
     with db.connect() as conn:
         cur = conn.execute(
-            "UPDATE assistant_flows SET status = ?, updated_at = ? "
+            "UPDATE assistant_flows SET status = ?, updated_at = ?, "
+            "flow_revision = flow_revision + 1, pending_question = NULL "
             "WHERE conversation_id = ? AND status = ?",
             (_STATUS_CANCELLED, _now(), conversation_id, _STATUS_RUNNING))
         return cur.rowcount

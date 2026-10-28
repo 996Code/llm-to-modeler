@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
 # 声明质量画像的数据源,由业务提供方在注册时维护)
 _MIGRATIONS = [
     "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS probe_status TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS probe_error TEXT NOT NULL DEFAULT ''",
 ]
 
 
@@ -61,6 +63,8 @@ class McpServerStore:
                 "headers": json.loads(r["headers_json"] or "{}"),
                 "timeout": r["timeout"], "read_timeout": r["read_timeout"],
                 "status": r["status"],
+                "probe_status": r["probe_status"] or r["status"],
+                "probe_error": r["probe_error"] or "",
                 "enabled": bool(r["enabled"]),
                 "tools_snapshot": json.loads(r["tools_json"] or "[]"),
                 "created_at": r["created_at"], "updated_at": r["updated_at"]}
@@ -141,7 +145,7 @@ class McpServerStore:
         return self._row(cur)
 
     def apply_probe(self, sid: str) -> dict:
-        """事务外探测回写:成功 connected+快照;失败保持 pending(不抛,如实返回)。"""
+        """成功更新快照;失败保留快照,status=pending/probe_status=failed 禁执行。"""
         with self.db.connect() as conn:
             cur = conn.execute(
                 "SELECT * FROM mcp_servers WHERE id = ?", (sid,)).fetchone()
@@ -149,21 +153,26 @@ class McpServerStore:
             raise ValueError("server 不存在")
         cfg = {"url": cur["url"], "headers": json.loads(cur["headers_json"] or "{}"),
                "timeout": cur["timeout"], "read_timeout": cur["read_timeout"]}
-        status, snapshot = "pending", []
+        status, probe_status, probe_error = "pending", "failed", ""
+        snapshot = json.loads(cur["tools_json"] or "[]")
         try:
             from sdk.mcp_client import list_remote_tools
             snapshot = list_remote_tools(cfg)
-            status = "connected"
+            status = probe_status = "connected"
         except Exception as e:
-            logger.warning(f"mcp probe failed({cur['code']}): {e}")
+            # Keep last known capabilities for inspection, never as permission to execute.
+            probe_error = str(e)[:500]
+            logger.warning("mcp probe failed(%s): %s", cur["code"], e)
         with self._lock, self.db.connect() as conn:
             cur = conn.execute(
                 "SELECT id FROM mcp_servers WHERE id = ?", (sid,)).fetchone()
             if not cur:
                 raise ValueError("server 不存在(探测期间被删除)")
             conn.execute(
-                "UPDATE mcp_servers SET status=?,tools_json=?,updated_at=? WHERE id=?",
-                (status, json.dumps(snapshot, ensure_ascii=False), _now(), sid))
+                "UPDATE mcp_servers SET status=?,probe_status=?,probe_error=?,"
+                "tools_json=?,updated_at=? WHERE id=?",
+                (status, probe_status, probe_error,
+                 json.dumps(snapshot, ensure_ascii=False), _now(), sid))
             cur = conn.execute(
                 "SELECT * FROM mcp_servers WHERE id = ?", (sid,)).fetchone()
         return self._row(cur)

@@ -70,6 +70,17 @@ class FakeCtx:
         self.emitted.append((event, args))
 
 
+@pytest.fixture(autouse=True)
+def explicit_legacy_demo(monkeypatch):
+    from domains.metrology_assistant.legacy_demo import demo_scenarios
+    from domains.metrology_assistant import capability_import as ci
+    monkeypatch.setattr(mta, '_current_scenarios', demo_scenarios)
+    monkeypatch.setattr(ci, 'resolve_scenarios', lambda table: table)
+    from domains.chatbi import datasources
+    monkeypatch.setattr(datasources, 'get_datasource', lambda db, ds: SimpleNamespace(
+        host='metrology', database='', is_active=True, db_type='mcp'))
+
+
 @pytest.fixture
 def tool():
     return mta.MetrologyAssistantTool(app_state=object())
@@ -84,7 +95,7 @@ def test_extract_slots_normalizes():
                            "order_no": "bj2026"})
     got = mta.extract_slots(llm, "压力表要强检吗", {}, "c1")
     assert got == {"scenario": "mandatory_check", "instrument": "压力表",
-                   "purpose": "贸易结算", "order_no": "BJ2026"}
+                   "purpose": "贸易结算"}
 
 
 def test_extract_slots_invalid_scenario_falls_to_other():
@@ -106,10 +117,11 @@ def test_parse_clarify_answers_structured_and_text():
         "purpose": "安全防护"}
     assert mta.parse_clarify_answers({"委托单号": "BJ2026"}) == {
         "order_no": "BJ2026"}
-    assert mta.parse_clarify_answers({"text": "帮我查 BJ2027 这个单"}) == {
-        "order_no": "BJ2027"}
-    assert mta.parse_clarify_answers({"text": "用于贸易结算的"}) == {
-        "purpose": "贸易结算"}
+    assert mta.parse_clarify_answers({'text': 'BJ2027'}, pending={
+        'slot': 'order_no', 'header': '委托单号'}) == {'order_no': 'BJ2027'}
+    assert mta.parse_clarify_answers({'text': '安全防护'}, pending={
+        'slot': 'purpose', 'header': '器具用途'}) == {'purpose': '安全防护'}
+    assert mta.parse_clarify_answers({'text': '帮我查 BJ2027 这个单'}) == {}
 
 
 def test_resolve_kb_for_purpose():
@@ -181,7 +193,7 @@ def test_compose_conclusion_uncertain_can_have_no_evidence():
 def _run(tool, ctx, user_input, clarify=None, mem=None):
     state = {"user_input": user_input}
     if clarify:
-        state["clarify_answers"] = clarify
+        state["clarify_answers"] = {**clarify, '__question_id': (ctx.session_state.get('pending') or {}).get('question_id')}
     return tool.execute(state, ctx)
 
 
@@ -296,9 +308,11 @@ def test_clarify_resume_skips_extraction(tool, monkeypatch):
     monkeypatch.setattr(
         "domains.knowledge_graph.service.retrieve_evidence", fake_retrieve)
     mem = FakeMem()
-    mem.set("pending", {"scenario": "mandatory_check",
-                        "slots": {"instrument": "压力表", "purpose": "",
-                                  "order_no": ""}})
+    cfg = mta._current_scenarios()['mandatory_check']
+    mem.set("pending", {"scenario": "mandatory_check", 'slot': 'purpose', 'header': '器具用途',
+                        'question_id': 'legacy-explicit-question',
+                        'snapshot': mta.declaration_snapshot(cfg), 'user_input': '压力表要强检吗',
+                        "slots": {"instrument": "压力表", "purpose": ""}})
     ctx = FakeCtx(FakeLLM(conclusion=_answer()), mem=mem)
     r = _run(tool, ctx, "贸易结算", clarify={"器具用途": "贸易结算"})
     assert "属于强制检定" in r.summary
@@ -440,7 +454,7 @@ def test_other_scenario_honest_scope(tool):
     ctx = FakeCtx(FakeLLM(extract={"scenario": "other", "instrument": "",
                                    "purpose": "", "order_no": ""}))
     r = _run(tool, ctx, "今天天气怎么样")
-    assert "五类问题" in r.artifact["message"]
+    assert "5类问题" in r.artifact["message"]
     assert "价目信息" in r.artifact["message"]
     assert r.reply is None
     assert r.artifact_type == "data"
@@ -831,10 +845,10 @@ def test_auto_scenarios_skips_edited_and_unexecutable(monkeypatch):
     auto = ci.auto_scenarios(table)
     assert "query_progress" not in auto    # 润色优先,不重复
     assert "query_orphan" not in auto      # 无数据源可执行 → 跳过
-    fresh = auto["query_fresh"]
+    fresh = auto["metrology::query_fresh"]
     assert fresh["action"]["server"] == "metrology"
     assert fresh["required"]["slot"] == "keyword"
-    assert fresh["required"]["question"].startswith("请提供关键词")
+    assert fresh["required"]["question"].startswith("请提供keyword")
     assert fresh["action"]["card"] == "_table_card"
     assert fresh["_auto"] is True
 

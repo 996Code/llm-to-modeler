@@ -224,6 +224,37 @@ class TestKbSearchAcl:
         assert result.artifact and len(result.artifact["kbs"]) == 2
 
 
+# ── evidence service 生效点 ─────────────────────────────────
+
+class TestEvidenceAcl:
+
+    @pytest.mark.parametrize("user,roles,allowed", [
+        ("u1", None, True), ("u2", ["legal"], True),
+        ("u2", " other, legal ", True), (None, ["legal"], True),
+        ("u2", ["other"], False), ("anonymous", None, True),
+    ])
+    def test_reuses_kb_acl(self, env, user, roles, allowed):
+        from domains.knowledge_graph.service import retrieve_evidence
+        kb = env.store.create_kb("evidence-acl")
+        env.store.set_kb_acl(kb["id"], ["u1"], ["legal"])
+        if allowed:
+            out = retrieve_evidence(env.app_state, kb["name"], "q",
+                                    user_id=user, roles=roles)
+            assert out["kb"]["id"] == kb["id"]
+        else:
+            with pytest.raises(PermissionError):
+                retrieve_evidence(env.app_state, kb["name"], "q",
+                                  user_id=user, roles=roles)
+            assert env.llm.chat_calls == []
+            assert env.obs_calls == []
+
+    def test_legacy_call_and_open_kb(self, env):
+        from domains.knowledge_graph.service import retrieve_evidence
+        kb = env.store.create_kb("legacy-evidence")
+        assert retrieve_evidence(env.app_state, kb["name"], "q")["kb"]["id"] == kb["id"]
+        assert retrieve_evidence(env.app_state, kb["name"], "q", user_id="u1")["kb"]["id"] == kb["id"]
+
+
 # ── /search REST 生效点 ────────────────────────────────────
 
 class TestSearchRestAcl:

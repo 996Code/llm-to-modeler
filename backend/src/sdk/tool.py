@@ -157,6 +157,8 @@ class AskQuestion(BaseModel):
     header: str                       # ≤12 字符,前端显示为 chip
     options: list[AskOption]          # 2-4 个(前端自动加"其他")
     multi_select: bool = False
+    # Opaque correlation token, echoed in answers.__question_id; not authorization.
+    question_id: Optional[str] = None
 
 
 class AskSpec(BaseModel):

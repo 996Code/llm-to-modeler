@@ -31,6 +31,65 @@ beforeEach(() => {
 })
 
 describe('conversation store result consumption', () => {
+  it('returns the current question token for typed answers', async () => {
+    const store = useConversationStore()
+    store.messages.push({ role: 'assistant', content: 'Choose', needsClarification: true,
+      clarificationQuestions: [{ question: 'Choose', header: 'kind', options: [], question_id: 'opaque / token:new' }],
+    } as any)
+    await store.sendMessage('free text')
+    expect(vi.mocked(api.chat).mock.calls[0]?.[3]).toEqual({ text: 'free text', __question_id: 'opaque / token:new' })
+  })
+
+  it('returns the selected historical card token instead of the latest question token', async () => {
+    const store = useConversationStore()
+    store.messages.push({ role: 'assistant', content: 'Choose', needsClarification: true,
+      clarificationQuestions: [{ question: 'Choose', header: 'kind', options: [], question_id: 'new' }],
+    } as any)
+    await store.answerClarification({ question: 'Choose', header: 'kind', options: [], question_id: 'old' },
+      { label: 'A', description: '' })
+    expect(vi.mocked(api.chat).mock.calls[0]?.[3]).toEqual({ kind: 'A', text: 'A', __question_id: 'old' })
+  })
+
+  it('sends a historical token even when no clarification is currently pending', async () => {
+    const store = useConversationStore()
+    store.messages.push({ role: 'assistant', content: 'Done' })
+    await store.answerClarification({ question: 'Choose', header: 'kind', options: [], question_id: 'old' },
+      { label: 'A', description: '' })
+    expect(vi.mocked(api.chat).mock.calls[0]?.[3]).toEqual({ kind: 'A', text: 'A', __question_id: 'old' })
+  })
+
+  it('does not borrow the current token for a legacy card with no token', async () => {
+    const store = useConversationStore()
+    store.messages.push({ role: 'assistant', content: 'Choose', needsClarification: true,
+      clarificationQuestions: [{ question: 'Choose', header: 'kind', options: [], question_id: 'new' }],
+    } as any)
+    await store.answerClarification({ question: 'Legacy', header: 'kind', options: [] },
+      { label: 'A', description: '' })
+    expect(vi.mocked(api.chat).mock.calls[0]?.[3]).toEqual({ kind: 'A', text: 'A' })
+  })
+
+  it('keeps other plugins typed answers token-free', async () => {
+    const store = useConversationStore()
+    store.messages.push({ role: 'assistant', content: 'Choose', needsClarification: true,
+      clarificationQuestions: [{ question: 'Choose', header: 'kind', options: [] }],
+    })
+    await store.sendMessage('free text')
+    expect(vi.mocked(api.chat).mock.calls[0]?.[3]).toEqual({ text: 'free text' })
+  })
+
+  it('uses each reloaded historical question token without rebinding cards', async () => {
+    vi.mocked(api.getConversation).mockResolvedValue({ id: 'history', title: '', messages: [
+      { role: 'assistant', content: 'Old', needsClarification: true,
+        clarificationQuestions: [{ question: 'Choose', header: 'kind', options: [], question_id: 'old' }] },
+      { role: 'assistant', content: 'New', needsClarification: true,
+        clarificationQuestions: [{ question: 'Choose', header: 'kind', options: [], question_id: 'new' }] },
+    ] } as any)
+    const store = useConversationStore()
+    await store.selectConversation('history')
+    await store.answerClarification(store.messages[0]!.clarificationQuestions![0]!, { label: 'A', description: '' })
+    expect(vi.mocked(api.chat).mock.calls[0]?.[3]).toEqual({ kind: 'A', text: 'A', __question_id: 'old' })
+    expect(store.messages[1]!.clarificationQuestions![0]).toMatchObject({ question_id: 'new' })
+  })
   it('uses the same data artifact contract for resume results and keeps citations', async () => {
     vi.mocked(api.chatResume).mockImplementation(async (_conversationId, callbacks) => {
       callbacks.onResult?.({

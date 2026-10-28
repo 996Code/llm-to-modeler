@@ -1,11 +1,4 @@
-# 智能客服插件 manifest(pack 代号 metrology_assistant 沿用历史名)
-# 能力面: 知识问答(强检判定等,结论带依据引用) + 业务查询(MCP 注册的
-# 业务平台工具自动路由);场景/槽位/规则在 DB 配置,声明完整即自动接入。
-
-# 插件间依赖(通用声明机制,平台零插件名知识):
-# 强检判定走知识库检索内核;进度/价目查询走智能问数受控执行内核。
-# 任一被依赖插件停用时,管理端会先拒绝(反向依赖检查),并把本插件
-# 置为"依赖未满足"而不装配。
+# Generic customer assistant; installed scenarios and MCP declarations define capabilities.
 dependencies:
   knowledge_graph:
     pack: knowledge_graph
@@ -16,16 +9,12 @@ dependencies:
 
 domain:
   description: >
-    智能客服:业务咨询问答与查询——知识问答(如器具是否强制检定,结论
-    带依据引用)与业务平台查询(经 MCP 注册的工具自动路由,含归属校验)
-  compact_focus: 已确认的器具/用途/委托单号、命中的资料库与业务结论
+    智能客服:根据已接入能力进行知识问答与业务查询,答案遵守资料证据与访问权限。
+  compact_focus: 已选择能力、该能力已确认参数、当前追问、资料来源与查询结果
 
 runtime_contract:
   required_tools: [metrology_assistant]
 
-# P1 管理页:场景与槽位/规则与来源两 tab(packPages/metrology_assistant
-# 目录约定自动挂载);场景配置事实源在 DB(assistant_config 表),
-# 本 YAML 只留插件声明与出厂默认种子。
 admin:
   page: metrology_assistant
   title: 智能客服
@@ -40,29 +29,8 @@ artifact:
       kb: 知识库
       conclusion: 结论
       chunkCount: 命中片段
-      orderNo: 委托单号
-      instrument: 器具
       status: 状态
-      progress: 进度
-      currentStep: 当前环节
-      eta: 预计完成
-      reportNo: 报告号
-      finishedAt: 完成时间
-      validUntil: 有效期至
-      queriedAt: 查询时间
-      name: 器具名称
-      model: 型号规格
-      measureRange: 测量范围
-      accuracy: 准确度等级
-      feeYuan: 检测费
-      mandatoryL1: 强检一级目录
-      mandatoryL2: 强检二级目录
-      periodMonths: 检校周期
-      regulation: 技术规程
+      columns: 数据列
+      rowTotal: 结果行数
     welcome_icon: search
-    welcome_examples:
-      - {title: 强检判定, desc: 器具+用途,是否强制检定, prompt: 压力表用于贸易结算,需要强制检定吗？, icon: search}
-      - {title: 进度查询, desc: 委托单检测进度, prompt: 帮我查一下委托单 BJ2026 的检测进度, icon: file-text}
-      - {title: 检测耗时, desc: 多少个工作日, prompt: 压力表送检大概要几个工作日？, icon: clock-circle}
-      - {title: 资质能力, desc: 能不能检, prompt: 你们能检角膜曲率计吗？, icon: safety-certificate}
-      - {title: 器具价目, desc: 检测费·检校周期, prompt: 角膜曲率计的检定周期是多久？, icon: file-text}
+    welcome_examples: []

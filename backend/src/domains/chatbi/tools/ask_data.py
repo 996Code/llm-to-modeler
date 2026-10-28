@@ -97,6 +97,35 @@ def _validate_mcp_tool_call(tool_call, model_names: set) -> str | None:
     return None
 
 
+def _mcp_readonly_call(ds, tool_call_json: str) -> bool:
+    """Retry requires an explicit read-only declaration, never a name heuristic."""
+    try:
+        from services.mcp_registry import McpServerStore
+        from sdk.mcp_client import server_execution_error
+        call = json.loads(tool_call_json)
+        server = McpServerStore().get_by_code(ds.host)
+        if not server or server_execution_error(server):
+            return False
+        declaration = next((t for t in server.get("tools_snapshot", [])
+                            if t.get("name") == call.get("tool")), {})
+        annotations = declaration.get("annotations") or {}
+        # 未声明 annotations 视为中性(存量工具保持旧自愈能力,自愈只
+        # 修参数不改工具/服务);明确声明破坏性或显式非只读才禁止
+        if annotations.get("destructiveHint") is True:
+            return False
+        if "readOnlyHint" in annotations and annotations.get("readOnlyHint") is not True:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _mcp_can_heal(ds, tool_call_json: str, result) -> bool:
+    return (getattr(result, "status", "") == "invalid_input"
+            and getattr(result, "error_type", "") != "credential"
+            and _mcp_readonly_call(ds, tool_call_json))
+
+
 def _heal_mcp_tool_call(llm, tool_call_json: str, error: str,
                         schema_ctx: str, model_names: set,
                         conv_id: str | None = None) -> dict | None:
@@ -687,7 +716,17 @@ class AskDataTool(CompositeTool):
         注入段沿用 SQL 版(skills/fewshot/预思考/记忆/历史/上轮筛选),
         跳过 JOIN 路径/指标段(合成语义层无 relationships/metrics)。
         """
-        sections = []
+        sections = [f"【schema】\n{schema_ctx}"]
+        try:
+            from services.mcp_registry import McpServerStore
+            server = McpServerStore().get_by_code(ds.host)
+            declarations = [t for t in (server or {}).get("tools_snapshot", [])
+                            if t.get("name") in {m.name for m in content.models}]
+            if declarations:
+                sections.append("【MCP 原始声明】\n" + json.dumps(declarations, ensure_ascii=False))
+        except Exception:
+            state["_error"] = "工具调用失败: MCP 注册表暂不可读"
+            return
         try:
             from domains.chatbi.skills_loader import load_skills_text
             skills_text = load_skills_text(ds.db_type)
@@ -887,7 +926,8 @@ class AskDataTool(CompositeTool):
                                f"(自愈熔断中,稍后再试): {last_error}")
             return
         heal_rounds = 0
-        while last_error is not None and heal_rounds < max_rounds:
+        while (last_error is not None and heal_rounds < max_rounds
+               and _mcp_can_heal(ds, tool_call_json, result)):
             heal_rounds += 1
             ctx.emit("stage", "execute_sql", f"自愈中 (第 {heal_rounds} 轮)...")
             if not state.get("heal_before_sql"):
@@ -903,7 +943,11 @@ class AskDataTool(CompositeTool):
             if err:
                 last_error = f"{err} (自愈第 {heal_rounds} 轮)"
                 continue
-            tool_call_json = json.dumps(healed, ensure_ascii=False)
+            candidate = json.dumps(healed, ensure_ascii=False)
+            if not _mcp_readonly_call(ds, candidate):
+                last_error = "修正后的工具未明确声明只读,拒绝自动执行"
+                break
+            tool_call_json = candidate
             result = datasources.execute_mcp_tool(ds, tool_call_json,
                                                   max_rows=max_rows)
             last_error = result.error if not result.ok else None

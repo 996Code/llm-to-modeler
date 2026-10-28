@@ -14,7 +14,7 @@ from sdk.relational_store import PackRelationalDB
 from services.mcp_registry import McpServerStore
 
 
-URL = "/api/packs/metrology_assistant/test/env"
+URL = "/api/packs/metrology_assistant/test/env?legacy_demo=true"
 SECRET = "private-dependency-credential"
 DEPENDENCY_ERROR = (
     f"url=https://user:{SECRET}@internal/mcp "
@@ -229,6 +229,16 @@ def test_env_rejects_unauthorized_before_reading_dependencies(env, monkeypatch, 
 
     monkeypatch.setattr(kg_runtime, "get_kg_store", must_not_read)
     assert env.client.get(URL, headers=headers).status_code == 401
+
+
+def test_empty_diagnostics_does_not_invent_demo_resources(env, monkeypatch):
+    from domains.metrology_assistant.tools import assistant
+    monkeypatch.setattr(assistant, '_runtime_scenarios', lambda: {})
+    response = env.client.get('/api/packs/metrology_assistant/test/env')
+    assert response.status_code == 200
+    assert response.json()['kbs'] == []
+    assert response.json()['orderFixtures'] == []
+    assert response.json()['kbMapping'] == {}
 
 
 def test_env_accepts_valid_admin_token(env, monkeypatch):

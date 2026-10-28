@@ -72,6 +72,7 @@ export interface ClarificationQuestion {
   header: string                    // 问题分类标题
   options: ClarificationOption[]    // 候选选项列表
   multi_select?: boolean            // 是否允许多选
+  question_id?: string | null        // 不透明关联 token，回答原样回传 __question_id（不是授权）
 }
 
 /** 追问选项 —— 对应后端 AskOption model */
