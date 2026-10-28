@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>智能客服一体化架构</title>
+<style>*{box-sizing:border-box}body{margin:0;color:#17212b;background:#fff;font:15px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;letter-spacing:0}main{max-width:1440px;margin:auto;padding:28px}h1{font-size:26px;margin:0 0 12px}p{color:#596675;margin:8px 0 18px}nav{display:flex;gap:22px;flex-wrap:wrap;margin-bottom:16px}a{color:#08758a;text-underline-offset:4px}img{display:block;width:100%;height:auto}.note{font-size:13px;border-top:1px solid #dce3e8;padding-top:14px}@media(max-width:650px){main{padding:18px}h1{font-size:22px}}@media print{nav,.note{display:none}main{padding:0}h1,p{display:none}}</style>
+</head>
+<body><main>
+<h1>智能客服一体化架构</h1>
+<p>一张图呈现平台底座、智能客服场景、MCP 系统对接，以及链路受阻时的追问、人工确认建议和错误处理。</p>
+<nav aria-label="图件下载"><a href="customer-service-bid-unified.png" download>PNG 高清图</a><a href="customer-service-bid-unified.svg" download>SVG 矢量图</a><a href="customer-service-bid-unified.html?theme=light">交互查看</a><a href="customer-service-bid-notes.md">代码依据与实施边界</a></nav>
+<img src="customer-service-bid-unified.svg" alt="智能客服一体化架构：统一服务入口、平台客服编排、模型接入；知识服务经本地检索形成引用答复，业务查询经受控服务和 MCP 底座访问业务系统；缺条件追问，缺证据提示人工确认，拒权查无和接口异常明确处理。">
+<p class="note">业务查询走固定 MCP 工具，不生成业务 SQL；真实系统身份、业务授权、审批白名单与只读约束需逐系统落实。演示接口不等于生产已接通，模型主备也不等于自动纯检索降级。依据为当前工作区代码，不作为生产验收证明。</p>
+</main></body></html>

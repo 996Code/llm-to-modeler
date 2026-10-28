@@ -72,6 +72,7 @@ def main() -> int:
     ap.add_argument("--secret", default="")
     args = ap.parse_args()
     client = requests.Session()
+    all_ok = True
     if args.secret:
         r = client.post(f"{args.base}/api/auth/token",
                         json={"secret": args.secret})
@@ -101,7 +102,6 @@ def main() -> int:
         r = client.put(f"{args.base}/api/admin/llm-providers", json={
             "primary": {"base_url": env_base, "api_key": env_key,
                         "model": env_model, "enabled": True},
-            "expected_revision": providers.get("revision", 0),
         })
         all_ok &= ok("LLM 供应商经 API 种入 DB(env 引导,一次性)",
                      r.status_code == 200,
@@ -109,7 +109,6 @@ def main() -> int:
                      else r.text[:200])
         if r.status_code != 200:
             return 2
-    all_ok = True
 
     # 1. MCP server 注册(复用 or 新建;超时演示依赖 timeout/read_timeout=10s,
     #    注册默认 30/300 会让 BJ0000 拖到 32s+——干净机器必配)

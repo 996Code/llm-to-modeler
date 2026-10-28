@@ -1,0 +1,56 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "智能客服一体化架构｜平台底座 · MCP 对接 · 场景与异常处理",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {"id":"all","label":"端到端总览","focus":["request","route","model","kb","evidence","answer","source","validate","call","business"],"note":"同一平台入口，知识咨询与业务接口查询分路；底层 MCP 负责跨系统标准对接。"},
+      {"id":"blocked","label":"链路受阻出口","focus":["clarify","uncertain","reject","error"],"note":"缺条件追问、缺证据人工确认、业务拒权或查无、技术失败分别处理。"}
+    ]
+  },
+  "lanes": [
+    {"id":"platform","label":"平台与模型底座"},
+    {"id":"knowledge","label":"知识咨询链路"},
+    {"id":"mcp","label":"MCP 系统对接"},
+    {"id":"exception","label":"受阻与恢复","variant":"exception"}
+  ],
+  "mainPath":["request","route","source","validate","call","business"],
+  "nodes":[
+    {"id":"request","lane":"platform","col":0,"type":"frontend","label":"统一服务入口","sublabel":"独立窗口 / 系统嵌入","width":164},
+    {"id":"route","lane":"platform","col":1,"type":"backend","label":"平台与客服编排","sublabel":"会话恢复 / 场景提槽","width":164},
+    {"id":"model","lane":"platform","col":2,"type":"cloud","label":"统一模型接入","sublabel":"可配置主备 / 限速计量","width":164},
+    {"id":"uncertain","lane":"platform","col":3,"type":"security","label":"缺证据不确定","sublabel":"提示需人工确认","width":164},
+    {"id":"kb","lane":"knowledge","col":2,"type":"backend","label":"知识证据服务","sublabel":"强检 / 资质 / 检测周期","width":164},
+    {"id":"evidence","lane":"knowledge","col":3,"type":"database","label":"本地知识检索","sublabel":"图谱 / 向量 / 全文","width":164},
+    {"id":"answer","lane":"knowledge","col":5,"type":"frontend","label":"有据知识答复","sublabel":"结论与来源引用校验","width":164},
+    {"id":"source","lane":"mcp","col":2,"type":"security","label":"受控执行服务","sublabel":"固定源与工具 / 基础验参","width":164},
+    {"id":"validate","lane":"mcp","col":3,"type":"messagebus","label":"MCP 接入底座","sublabel":"注册发现 / 快照 / 协议","width":164},
+    {"id":"call","lane":"mcp","col":4,"type":"external","label":"业务系统适配端","sublabel":"授权接口 / 业务信封","width":164},
+    {"id":"business","lane":"mcp","col":5,"type":"frontend","label":"结构化业务结果","sublabel":"进度 / 价目 / 通用表格","width":164},
+    {"id":"clarify","lane":"exception","col":1,"type":"frontend","label":"缺条件先追问","sublabel":"补齐后恢复原流程","width":164},
+    {"id":"reject","lane":"exception","col":4,"type":"security","label":"拒权或查无记录","sublabel":"按场景通知 / 错误诊断","width":164},
+    {"id":"error","lane":"exception","col":5,"type":"security","label":"接口与契约异常","sublabel":"明确失败 / 不伪装成功","width":164}
+  ],
+  "edges":[
+    {"id":"entry","from":"request","to":"route","variant":"emphasis"},
+    {"id":"model-use","from":"route","to":"model","label":"模型调用"},
+    {"id":"knowledge-route","from":"route","to":"kb","variant":"emphasis"},
+    {"id":"business-route","from":"route","to":"source","variant":"emphasis"},
+    {"id":"ask","from":"route","to":"clarify","variant":"security","role":"branch"},
+    {"id":"retrieve","from":"kb","to":"evidence"},
+    {"id":"grounded","from":"evidence","to":"answer","label":"有效证据","variant":"emphasis"},
+    {"id":"no-evidence","from":"evidence","to":"uncertain","variant":"security","role":"branch"},
+    {"id":"invoke","from":"source","to":"validate"},
+    {"id":"transport","from":"validate","to":"call"},
+    {"id":"result","from":"call","to":"business","variant":"emphasis"},
+    {"id":"negative","from":"call","to":"reject","variant":"security","role":"branch"},
+    {"id":"technical","from":"call","to":"error","variant":"security","role":"error"}
+  ],
+  "cards":[
+    {"dot":"cyan","title":"平台统一底座","items":["FastAPI + LangGraph 编排；SSE 返回结果，PostgreSQL 保存会话与追问现场。","知识存储使用 PostgreSQL / pgvector / Neo4j；模型经统一接入层调用。","管理端维护插件、能力、供应商和调用日志；不代表已具备全量 MCP 审计。"]},
+    {"dot":"emerald","title":"MCP 系统对接边界","items":["登记服务地址与静态请求头，发现工具；通过 SSE / Streamable HTTP 调用预定义业务接口。","客服固定 MCP 工具查询，不生成业务 SQL；本项目应隔离通用问数的 SQL 生成入口。","真实身份、业务归属、审批白名单与只读约束须逐系统落实；演示接口不等于生产接通。"]},
+    {"dot":"rose","title":"不同链路走不通时","items":["缺条件追问恢复；知识无依据提示人工确认，但不是自动转人工工单。","验源验参不通过不发业务请求；拒权、查无、超时和契约异常分态返回。","当前不承诺 MCP 自动重试、全失败纯检索降级、附件组合报价或身份费用闭环。"]}
+  ]
+}

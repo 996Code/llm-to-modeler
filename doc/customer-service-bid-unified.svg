@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 -66 1225 718" width="1225" height="718" data-theme="light" data-preset="classic" role="img" lang="zh-CN" aria-label="智能客服一体化架构｜平台底座 · MCP 对接 · 场景与异常处理">
+<style><![CDATA[    .c-grid       { stroke: #e2e8f0; fill: none; }
+    .c-mask       { fill: #ffffff; stroke: none; }
+    .c-frontend   { fill: rgba(34, 211, 238, 0.15);   stroke: #0891b2; }
+    .c-backend    { fill: rgba(52, 211, 153, 0.18);    stroke: #059669; }
+    .c-database   { fill: rgba(167, 139, 250, 0.2);   stroke: #7c3aed; }
+    .c-cloud      { fill: rgba(251, 191, 36, 0.18);      stroke: #d97706; }
+    .c-security   { fill: rgba(251, 113, 133, 0.15);   stroke: #e11d48; }
+    .c-messagebus { fill: rgba(251, 146, 60, 0.15); stroke: #ea580c; }
+    .c-external   { fill: rgba(148, 163, 184, 0.18);   stroke: #64748b; }
+    .t-primary { fill: #0f172a; }
+    .t-muted   { fill: #64748b; }
+    .t-dim     { fill: #94a3b8; }
+    .t-frontend   { fill: #0891b2; }
+    .t-backend    { fill: #059669; }
+    .t-database   { fill: #7c3aed; }
+    .t-cloud      { fill: #d97706; }
+    .t-security   { fill: #e11d48; }
+    .t-messagebus { fill: #ea580c; }
+    .t-external   { fill: #64748b; }
+    .a-default   { stroke: #94a3b8; fill: none; }
+    .a-emphasis  { stroke: #059669; fill: none; }
+    .a-security  { stroke: #e11d48; fill: none; stroke-dasharray: 5,5; }
+    .a-dashed    { stroke: #7c3aed; fill: none; stroke-dasharray: 4,4; }
+    .m-default   { fill: #94a3b8; }
+    .m-emphasis  { fill: #059669; }
+    .m-security  { fill: #e11d48; }
+    .m-dashed    { fill: #7c3aed; }
+    .c-security-group { fill: none; stroke: #e11d48; stroke-dasharray: 4,4; }
+    .c-region         { fill: rgba(251, 191, 36, 0.05); stroke: #d97706; stroke-dasharray: 8,4; }
+    .c-lane           { fill: rgba(248, 250, 252, 0.65); stroke: #cbd5e1; stroke-dasharray: 6,6; }
+.semantic-sigil{fill:none;stroke:currentColor;stroke-width:1.5}.sigil-fill{fill:currentColor;stroke:none}.s-lane{color:#cbd5e1}.s-frontend{color:#0891b2}.s-backend{color:#059669}.s-database{color:#7c3aed}.s-cloud{color:#d97706}.s-security{color:#e11d48}.s-messagebus{color:#ea580c}.s-external{color:#64748b}
+text{font-family:"PingFang SC","Microsoft YaHei",sans-serif;letter-spacing:0}]]></style>
+<rect x="0" y="-66" width="1225" height="718" fill="#ffffff"/><text x="40" y="-24" fill="#0f172a" style="font-size:22px;font-weight:600">智能客服一体化架构｜平台底座 · MCP 对接 · 场景与异常处理</text>
+        <title id="archify-diagram-title">智能客服一体化架构｜平台底座 · MCP 对接 · 场景与异常处理</title>
+        <desc id="archify-diagram-description">由 Archify 生成的工作流图。</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Swimlanes -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-0" x="40" y="52" width="1169" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="74" class="t-dim" font-size="10" font-weight="600">01 / 平台与模型底座</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-1" x="40" y="176" width="1169" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="198" class="t-dim" font-size="10" font-weight="600">02 / 知识咨询链路</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-2" x="40" y="300" width="1169" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <text x="54" y="322" class="t-dim" font-size="10" font-weight="600">03 / MCP 系统对接</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="lane" data-composition-frame-id="lane-3" x="40" y="424" width="1169" height="104" rx="10" class="c-lane" stroke-width="1"/>
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="exception-lane" data-composition-frame-id="lane-3-exception" x="46" y="430" width="1157" height="92" rx="8" class="c-security-group" stroke-width="1"/>
+        <text x="54" y="446" class="t-security" font-size="10" font-weight="600">EX / 受阻与恢复</text>
+
+        <!-- Phase headers -->
+
+
+        <!-- Workflow groups -->
+
+
+        <!-- Edge paths -->
+        <path data-edge-from="route" data-edge-to="clarify" data-edge-key="0" data-edge-id="ask" data-composition-points="404,119;420,119;420,491;404,491" d="M 404 119 L 420 119 L 420 491 L 404 491" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="route" data-edge-to="source" data-edge-key="1" data-edge-id="business-route" data-composition-points="322,145;322,367;460.4,367" d="M 322 145 L 322 367 L 460.4 367" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="request" data-edge-to="route" data-edge-key="2" data-edge-id="entry" data-composition-points="212,119;240,119" d="M 212 119 L 240 119" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="evidence" data-edge-to="answer" data-edge-label="有效证据" data-edge-key="3" data-edge-id="grounded" data-composition-points="816.4,243;1036.4,243" d="M 816.4 243 L 1036.4 243" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="source" data-edge-to="validate" data-edge-key="4" data-edge-id="invoke" data-composition-points="624.4,367;652.4,367" d="M 624.4 367 L 652.4 367" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="route" data-edge-to="kb" data-edge-key="5" data-edge-id="knowledge-route" data-composition-points="336,145;336,243;460.4,243" d="M 336 145 L 336 243 L 460.4 243" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="route" data-edge-to="model" data-edge-label="模型调用" data-edge-key="6" data-edge-id="model-use" data-composition-points="322,93;322,77;542.4,77;542.4,93" d="M 322 93 L 322 77 L 542.4 77 L 542.4 93" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="call" data-edge-to="reject" data-edge-key="7" data-edge-id="negative" data-composition-points="1008.4,367;1024.4,367;1024.4,491;1008.4,491" d="M 1008.4 367 L 1024.4 367 L 1024.4 491 L 1008.4 491" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="evidence" data-edge-to="uncertain" data-edge-key="8" data-edge-id="no-evidence" data-composition-points="734.4,217;734.4,145" d="M 734.4 217 L 734.4 145" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="call" data-edge-to="business" data-edge-key="9" data-edge-id="result" data-composition-points="1008.4,367;1036.4,367" d="M 1008.4 367 L 1036.4 367" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="kb" data-edge-to="evidence" data-edge-key="10" data-edge-id="retrieve" data-composition-points="624.4,243;652.4,243" d="M 624.4 243 L 652.4 243" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="call" data-edge-to="error" data-edge-key="11" data-edge-id="technical" data-composition-points="933.4,393;933.4,414;1118.4,414;1118.4,465" d="M 933.4 393 L 933.4 414 L 1118.4 414 L 1118.4 465" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="validate" data-edge-to="call" data-edge-key="12" data-edge-id="transport" data-composition-points="816.4,367;844.4,367" d="M 816.4 367 L 844.4 367" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+
+        <!-- Nodes -->
+        <g id="node-request" data-node-id="request" data-node-label="统一服务入口" tabindex="0" role="button" aria-label="聚焦统一服务入口，独立窗口 / 系统嵌入, 平台与模型底座" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="独立窗口 / 系统嵌入" data-node-context="平台与模型底座">
+          <title>统一服务入口 · 独立窗口 / 系统嵌入 · 平台与模型底座</title>
+          <rect x="48" y="93" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="48" y="93" width="164" height="52" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(54 99) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="130" y="114" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">统一服务入口</text>
+          <text data-detail="context" x="130" y="131" class="t-muted" font-size="8" text-anchor="middle">独立窗口 / 系统嵌入</text>
+        </g>
+
+        <g id="node-route" data-node-id="route" data-node-label="平台与客服编排" tabindex="0" role="button" aria-label="聚焦平台与客服编排，会话恢复 / 场景提槽, 平台与模型底座" aria-pressed="false" data-node-kind="backend" data-node-sublabel="会话恢复 / 场景提槽" data-node-context="平台与模型底座">
+          <title>平台与客服编排 · 会话恢复 / 场景提槽 · 平台与模型底座</title>
+          <rect x="240" y="93" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="240" y="93" width="164" height="52" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(246 99) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="322" y="114" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">平台与客服编排</text>
+          <text data-detail="context" x="322" y="131" class="t-muted" font-size="8" text-anchor="middle">会话恢复 / 场景提槽</text>
+        </g>
+
+        <g id="node-model" data-node-id="model" data-node-label="统一模型接入" tabindex="0" role="button" aria-label="聚焦统一模型接入，可配置主备 / 限速计量, 平台与模型底座" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="可配置主备 / 限速计量" data-node-context="平台与模型底座">
+          <title>统一模型接入 · 可配置主备 / 限速计量 · 平台与模型底座</title>
+          <rect x="460.4" y="93" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="460.4" y="93" width="164" height="52" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(466.4 99) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="542.4" y="114" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">统一模型接入</text>
+          <text data-detail="context" x="542.4" y="131" class="t-muted" font-size="8" text-anchor="middle">可配置主备 / 限速计量</text>
+        </g>
+
+        <g id="node-uncertain" data-node-id="uncertain" data-node-label="缺证据不确定" tabindex="0" role="button" aria-label="聚焦缺证据不确定，提示需人工确认, 平台与模型底座" aria-pressed="false" data-node-kind="security" data-node-sublabel="提示需人工确认" data-node-context="平台与模型底座">
+          <title>缺证据不确定 · 提示需人工确认 · 平台与模型底座</title>
+          <rect x="652.4" y="93" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="652.4" y="93" width="164" height="52" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(658.4 99) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="734.4" y="114" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">缺证据不确定</text>
+          <text data-detail="context" x="734.4" y="131" class="t-muted" font-size="8" text-anchor="middle">提示需人工确认</text>
+        </g>
+
+        <g id="node-kb" data-node-id="kb" data-node-label="知识证据服务" tabindex="0" role="button" aria-label="聚焦知识证据服务，强检 / 资质 / 检测周期, 知识咨询链路" aria-pressed="false" data-node-kind="backend" data-node-sublabel="强检 / 资质 / 检测周期" data-node-context="知识咨询链路">
+          <title>知识证据服务 · 强检 / 资质 / 检测周期 · 知识咨询链路</title>
+          <rect x="460.4" y="217" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="460.4" y="217" width="164" height="52" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(466.4 223) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="542.4" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">知识证据服务</text>
+          <text data-detail="context" x="542.4" y="255" class="t-muted" font-size="8" text-anchor="middle">强检 / 资质 / 检测周期</text>
+        </g>
+
+        <g id="node-evidence" data-node-id="evidence" data-node-label="本地知识检索" tabindex="0" role="button" aria-label="聚焦本地知识检索，图谱 / 向量 / 全文, 知识咨询链路" aria-pressed="false" data-node-kind="database" data-node-sublabel="图谱 / 向量 / 全文" data-node-context="知识咨询链路">
+          <title>本地知识检索 · 图谱 / 向量 / 全文 · 知识咨询链路</title>
+          <rect x="652.4" y="217" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="652.4" y="217" width="164" height="52" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(658.4 223) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="734.4" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">本地知识检索</text>
+          <text data-detail="context" x="734.4" y="255" class="t-muted" font-size="8" text-anchor="middle">图谱 / 向量 / 全文</text>
+        </g>
+
+        <g id="node-answer" data-node-id="answer" data-node-label="有据知识答复" tabindex="0" role="button" aria-label="聚焦有据知识答复，结论与来源引用校验, 知识咨询链路" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="结论与来源引用校验" data-node-context="知识咨询链路">
+          <title>有据知识答复 · 结论与来源引用校验 · 知识咨询链路</title>
+          <rect x="1036.4" y="217" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="1036.4" y="217" width="164" height="52" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(1042.4 223) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="1118.4" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">有据知识答复</text>
+          <text data-detail="context" x="1118.4" y="255" class="t-muted" font-size="8" text-anchor="middle">结论与来源引用校验</text>
+        </g>
+
+        <g id="node-source" data-node-id="source" data-node-label="受控执行服务" tabindex="0" role="button" aria-label="聚焦受控执行服务，固定源与工具 / 基础验参, MCP 系统对接" aria-pressed="false" data-node-kind="security" data-node-sublabel="固定源与工具 / 基础验参" data-node-context="MCP 系统对接">
+          <title>受控执行服务 · 固定源与工具 / 基础验参 · MCP 系统对接</title>
+          <rect x="460.4" y="341" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="460.4" y="341" width="164" height="52" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(466.4 347) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="542.4" y="362" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">受控执行服务</text>
+          <text data-detail="context" x="542.4" y="379" class="t-muted" font-size="8" text-anchor="middle">固定源与工具 / 基础验参</text>
+        </g>
+
+        <g id="node-validate" data-node-id="validate" data-node-label="MCP 接入底座" tabindex="0" role="button" aria-label="聚焦MCP 接入底座，注册发现 / 快照 / 协议, MCP 系统对接" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="注册发现 / 快照 / 协议" data-node-context="MCP 系统对接">
+          <title>MCP 接入底座 · 注册发现 / 快照 / 协议 · MCP 系统对接</title>
+          <rect x="652.4" y="341" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="652.4" y="341" width="164" height="52" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(658.4 347) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="734.4" y="362" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">MCP 接入底座</text>
+          <text data-detail="context" x="734.4" y="379" class="t-muted" font-size="8" text-anchor="middle">注册发现 / 快照 / 协议</text>
+        </g>
+
+        <g id="node-call" data-node-id="call" data-node-label="业务系统适配端" tabindex="0" role="button" aria-label="聚焦业务系统适配端，授权接口 / 业务信封, MCP 系统对接" aria-pressed="false" data-node-kind="external" data-node-sublabel="授权接口 / 业务信封" data-node-context="MCP 系统对接">
+          <title>业务系统适配端 · 授权接口 / 业务信封 · MCP 系统对接</title>
+          <rect x="844.4" y="341" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="844.4" y="341" width="164" height="52" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(850.4 347) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="926.4" y="362" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">业务系统适配端</text>
+          <text data-detail="context" x="926.4" y="379" class="t-muted" font-size="8" text-anchor="middle">授权接口 / 业务信封</text>
+        </g>
+
+        <g id="node-business" data-node-id="business" data-node-label="结构化业务结果" tabindex="0" role="button" aria-label="聚焦结构化业务结果，进度 / 价目 / 通用表格, MCP 系统对接" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="进度 / 价目 / 通用表格" data-node-context="MCP 系统对接">
+          <title>结构化业务结果 · 进度 / 价目 / 通用表格 · MCP 系统对接</title>
+          <rect x="1036.4" y="341" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="1036.4" y="341" width="164" height="52" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(1042.4 347) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="1118.4" y="362" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">结构化业务结果</text>
+          <text data-detail="context" x="1118.4" y="379" class="t-muted" font-size="8" text-anchor="middle">进度 / 价目 / 通用表格</text>
+        </g>
+
+        <g id="node-clarify" data-node-id="clarify" data-node-label="缺条件先追问" tabindex="0" role="button" aria-label="聚焦缺条件先追问，补齐后恢复原流程, 受阻与恢复" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="补齐后恢复原流程" data-node-context="受阻与恢复">
+          <title>缺条件先追问 · 补齐后恢复原流程 · 受阻与恢复</title>
+          <rect x="240" y="465" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="240" y="465" width="164" height="52" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(246 471) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="322" y="486" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">缺条件先追问</text>
+          <text data-detail="context" x="322" y="503" class="t-muted" font-size="8" text-anchor="middle">补齐后恢复原流程</text>
+        </g>
+
+        <g id="node-reject" data-node-id="reject" data-node-label="拒权或查无记录" tabindex="0" role="button" aria-label="聚焦拒权或查无记录，按场景通知 / 错误诊断, 受阻与恢复" aria-pressed="false" data-node-kind="security" data-node-sublabel="按场景通知 / 错误诊断" data-node-context="受阻与恢复">
+          <title>拒权或查无记录 · 按场景通知 / 错误诊断 · 受阻与恢复</title>
+          <rect x="844.4" y="465" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="844.4" y="465" width="164" height="52" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(850.4 471) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="926.4" y="486" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">拒权或查无记录</text>
+          <text data-detail="context" x="926.4" y="503" class="t-muted" font-size="8" text-anchor="middle">按场景通知 / 错误诊断</text>
+        </g>
+
+        <g id="node-error" data-node-id="error" data-node-label="接口与契约异常" tabindex="0" role="button" aria-label="聚焦接口与契约异常，明确失败 / 不伪装成功, 受阻与恢复" aria-pressed="false" data-node-kind="security" data-node-sublabel="明确失败 / 不伪装成功" data-node-context="受阻与恢复">
+          <title>接口与契约异常 · 明确失败 / 不伪装成功 · 受阻与恢复</title>
+          <rect x="1036.4" y="465" width="164" height="52" rx="6" class="c-mask"/>
+          <rect x="1036.4" y="465" width="164" height="52" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(1042.4 471) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="1118.4" y="486" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">接口与契约异常</text>
+          <text data-detail="context" x="1118.4" y="503" class="t-muted" font-size="8" text-anchor="middle">明确失败 / 不伪装成功</text>
+        </g>
+
+        <!-- Edge labels -->
+
+
+
+        <g data-detail="context" data-edge-from="evidence" data-edge-to="answer" data-edge-label="有效证据" data-edge-key="3" data-edge-id="grounded">
+          <rect x="902.2" y="223" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="926.4000000000001" y="233" class="t-backend" font-size="8" text-anchor="middle">有效证据</text>
+        </g>
+
+
+        <g data-detail="context" data-edge-from="route" data-edge-to="model" data-edge-label="模型调用" data-edge-key="6" data-edge-id="model-use">
+          <rect x="408" y="57" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="432.2" y="67" class="t-muted" font-size="8" text-anchor="middle">模型调用</text>
+        </g>
+
+
+
+
+
+
+
+        <!-- Legend -->
+        <g data-legend="" data-legend-bridge="">
+          <text x="20" y="552" class="t-primary" font-size="12" font-weight="650">图例</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="用户界面" data-legend-x="20" data-legend-baseline="572" data-legend-width="78">
+            <rect x="20" y="564" width="14" height="9" rx="2" class="c-frontend" stroke-width="1"/>
+            <text x="42" y="572" class="t-muted" font-size="7.5" font-weight="500">用户界面</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Agent 逻辑" data-legend-x="105" data-legend-baseline="572" data-legend-width="87">
+            <rect x="105" y="564" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
+            <text x="127" y="572" class="t-muted" font-size="7.5" font-weight="500">Agent 逻辑</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="策略" data-legend-x="199" data-legend-baseline="572" data-legend-width="61">
+            <rect x="199" y="564" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
+            <text x="221" y="572" class="t-muted" font-size="7.5" font-weight="500">策略</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="工具操作" data-legend-x="267" data-legend-baseline="572" data-legend-width="78">
+            <rect x="267" y="564" width="14" height="9" rx="2" class="c-messagebus" stroke-width="1"/>
+            <text x="289" y="572" class="t-muted" font-size="7.5" font-weight="500">工具操作</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="上下文 / 追踪" data-legend-x="352" data-legend-baseline="572" data-legend-width="100">
+            <rect x="352" y="564" width="14" height="9" rx="2" class="c-database" stroke-width="1"/>
+            <text x="374" y="572" class="t-muted" font-size="7.5" font-weight="500">上下文 / 追踪</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="云服务" data-legend-x="459" data-legend-baseline="572" data-legend-width="70">
+            <rect x="459" y="564" width="14" height="9" rx="2" class="c-cloud" stroke-width="1"/>
+            <text x="481" y="572" class="t-muted" font-size="7.5" font-weight="500">云服务</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="外部系统" data-legend-x="536" data-legend-baseline="572" data-legend-width="78">
+            <rect x="536" y="564" width="14" height="9" rx="2" class="c-external" stroke-width="1"/>
+            <text x="558" y="572" class="t-muted" font-size="7.5" font-weight="500">外部系统</text>
+          </g>
+        </g>
+      </svg>
