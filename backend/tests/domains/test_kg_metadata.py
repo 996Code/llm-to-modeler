@@ -15,7 +15,7 @@ from domains.knowledge_graph.tools.kb_search import KbSearchTool
 from sdk.tool import ToolContext
 
 # 复用 m4 检索 fake 环境
-from tests.domains.test_knowledge_graph_m4 import _ctx, env  # noqa: F401
+from tests.domains.test_knowledge_graph_m4 import KB1, _ctx, env  # noqa: F401
 
 
 @pytest.fixture()
@@ -253,3 +253,72 @@ class TestRetrieveFilter:
                           "doc_filter": {"部门": "法务"}})
         assert r2.status_code == 200
         assert not r2.json().get("sources", {}).get("chunks")
+
+
+class TestDocumentEntityScope:
+    """文档实体驱动的检索收敛(通用,零业务词):意图种子命中 document
+    类型实体 → 向量/全文路收敛到其实体来源文档;未命中行为不变;
+    收敛后零召回回退全库;调用方显式 doc_filter 优先不被覆盖。"""
+
+    def test_document_seed_limits_vector_hits_to_its_docs(self, env):
+        kb, docs = _mk_docs(env, 3)
+        env.graph.nodes[("kb1", "规程甲")] = {
+            "id": "kb1:规程甲", "name": "规程甲大纲", "normalized": "规程甲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.llm.intent = {"entities": ["规程甲"], "relation_types": [],
+                          "keywords": [], "hop": 1}
+        # fake 向量命中按真实文档注入:目标文档高分在前,兄弟文档在后
+        env.vector.hits = [
+            {"chunkId": f"{docs[0]['id']}-c0", "docId": docs[0]["id"], "seq": 0,
+             "text": "规程甲的环境要求块", "score": 0.9},
+            {"chunkId": f"{docs[1]['id']}-c0", "docId": docs[1]["id"], "seq": 0,
+             "text": "兄弟文档同款条款块", "score": 0.85},
+        ]
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "规程甲的环境要求")
+        assert out["chunks"], "应召回目标文档片段"
+        assert all(c["docId"] == docs[0]["id"] for c in out["chunks"])
+        assert out["diagnostics"].get("docScopeFromEntity") == [docs[0]["id"]]
+
+    def test_no_document_seed_keeps_full_library_behavior(self, env):
+        kb, docs = _mk_docs(env, 3)
+        env.graph.nodes[("kb1", "甲")] = {  # 已有普通实体(person)
+            "id": "kb1:甲", "name": "甲", "normalized": "甲", "type": "person",
+            "description": "", "aliases": [], "sourceDocs": [docs[0]["id"]],
+            "typeStatus": "approved", "updatedAt": ""}
+        env.llm.intent = {"entities": ["甲"], "relation_types": [],
+                          "keywords": [], "hop": 1}
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "甲的资料")
+        assert "docScopeFromEntity" not in out["diagnostics"]
+
+    def test_empty_scope_after_convergence_relaxes_to_full_library(self, env):
+        kb, docs = _mk_docs(env, 2)
+        # document 实体指向 docA,但向量路只命中 docB(收敛后零块)
+        env.graph.nodes[("kb1", "规程甲")] = {
+            "id": "kb1:规程甲", "name": "规程甲大纲", "normalized": "规程甲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": ["doc-missing"], "typeStatus": "approved", "updatedAt": ""}
+        env.llm.intent = {"entities": ["规程甲"], "relation_types": [],
+                          "keywords": [], "hop": 1}
+        env.vector.hits = [
+            {"chunkId": f"{docs[1]['id']}-c0", "docId": docs[1]["id"], "seq": 0,
+             "text": "兄弟文档块", "score": 0.8}]
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "规程甲的环境要求")
+        assert out["chunks"], "收敛零召回应回退全库,不能空手而归"
+        assert out["diagnostics"].get("docScopeRelaxed") is True
+
+    def test_explicit_doc_filter_is_not_overridden(self, env):
+        kb, docs = _mk_docs(env, 3)
+        env.graph.nodes[("kb1", "规程甲")] = {
+            "id": "kb1:规程甲", "name": "规程甲大纲", "normalized": "规程甲",
+            "type": "document", "description": "", "aliases": [],
+            "sourceDocs": [docs[0]["id"]], "typeStatus": "approved", "updatedAt": ""}
+        env.llm.intent = {"entities": ["规程甲"], "relation_types": [],
+                          "keywords": [], "hop": 1}
+        env.vector.hits = [
+            {"chunkId": f"{docs[i]['id']}-c0", "docId": docs[i]["id"], "seq": 0,
+             "text": f"文档{i}块", "score": 0.9 - i * 0.05} for i in range(3)]
+        out = retrieval.hybrid_retrieve(env.app_state, KB1, "规程甲的环境要求",
+                                        doc_filter={docs[1]["id"]})
+        assert all(c["docId"] == docs[1]["id"] for c in out["chunks"])
+        assert "docScopeFromEntity" not in out["diagnostics"]

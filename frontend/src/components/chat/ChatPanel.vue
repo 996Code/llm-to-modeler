@@ -270,12 +270,6 @@
                           @click.stop="openTurnTrace(i)">
                   <NodeIndexOutlined /> 本轮链路
                 </a-button>
-                <!-- 查看详情:KG 检索结果在"显示检索结果"关闭时一并隐藏
-                     (卡片都藏了,详情入口留着是死按钮) -->
-                <a-button v-if="!(msg.dataResult.type === 'kg_search_result' && !sysConfig.showRetrieval)"
-                          size="small" type="link" @click.stop="showJsonViewer(msg.dataResult)">
-                  <EyeOutlined /> 查看详情
-                </a-button>
                 <!-- P2#14 结果反馈: chatbi 数据卡底部点赞/点踩(datasource_id
                      是 chatbi 制品特征, KG 检索卡不渲染);点击微调对应表/关系
                      置信度, 开关 feedback_enabled 默认关(关时后端 422, 静默) -->
@@ -345,22 +339,6 @@
       :total-tokens="convTokens"
     />
 
-    <!-- JSON 查看器 Modal：全屏（嵌入模式下 iframe 只有 420px 宽，弹窗必须拉满
-         视口才有可读性；撑大悬浮窗本体由 RESIZE 协议承担，见 showJsonViewer） -->
-    <Modal
-      v-model:open="jsonViewerVisible"
-      title="详情 JSON"
-      :footer="null"
-      width="100%"
-      wrapClassName="json-viewer-fullscreen"
-      :bodyStyle="{ padding: 0, flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }"
-    >
-      <!-- 变更视图：红删绿增（基线=画布/上一版），无基线时显示完整 JSON -->
-      <div class="json-viewer-body">
-        <JsonDiffView :oldObj="store.baselineConfig" :newObj="jsonViewerData" />
-      </div>
-    </Modal>
-
     <!-- 本轮链路弹窗:阶段时间线 + 耗时 + LLM 次数/token(通用能力) -->
     <TurnTraceModal v-model="traceVisible"
                     :conversation-id="traceConvId"
@@ -391,7 +369,7 @@ import { ref, computed, watch, nextTick, onMounted } from 'vue'
 import {
   UserOutlined, FormOutlined, TableOutlined, CheckOutlined, CloseCircleOutlined,
   InfoCircleOutlined, PlayCircleOutlined,
-  CheckCircleOutlined, EyeOutlined, QuestionCircleOutlined,
+  CheckCircleOutlined, QuestionCircleOutlined,
   CopyOutlined, RollbackOutlined, RedoOutlined,
   ContactsOutlined,
   SearchOutlined, ShareAltOutlined, FileTextOutlined, ApartmentOutlined, RobotOutlined,
@@ -417,7 +395,6 @@ import KgGraphCard from './KgGraphCard.vue'
 import BiChartCard from './BiChartCard.vue'
 import { exportQueryToExcel } from '../../utils/exportExcel'
 // 子组件：JSON 变更视图（查看弹窗用，红删绿增）
-import JsonDiffView from '../json/JsonDiffView.vue'
 import TurnTraceModal from './TurnTraceModal.vue'
 // HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage
 import { getHostPort } from '../../composables/hostPort'
@@ -601,8 +578,6 @@ const applying = ref(false)
 const rewinding = ref(false)
 
 // JSON 查看器状态：弹窗显隐 + 弹窗内显示的 JSON 文本
-const jsonViewerVisible = ref(false)
-const jsonViewerData = ref<Record<string, any> | null>(null)
 
 /**
  * 打开 JSON 查看器弹窗：把任意对象格式化成 2 空格缩进的 JSON 字符串后展示。
@@ -783,19 +758,6 @@ function retryLastQuestion(msgIndex: number) {
   }
   antdMessage.warning('未找到可重试的问题')
 }
-
-function showJsonViewer(data: FormConfig | Record<string, any>) {  // 存对象：变更视图在 JsonDiffView 内做序列化 + 行级 diff
-  jsonViewerData.value = data as Record<string, any>
-  jsonViewerVisible.value = true
-  // 嵌入模式：请求宿主把悬浮窗临时撑大（420px 里看 diff 不可读）。
-  // 宿主不支持 RESIZE 则静默无效果（弹窗仍全屏占满 iframe 视口）
-  if (port.connected) port.notifyResize('expanded')
-}
-
-// 关闭查看器：恢复宿主悬浮窗原始尺寸（v-model:open 关闭路径统一收口在这里）
-watch(jsonViewerVisible, (open) => {
-  if (!open && port.connected) port.notifyResize('normal')
-})
 
 /**
  * 从数据结果中提取「适合展示」的字段（最多 6 个）。

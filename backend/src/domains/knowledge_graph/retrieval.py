@@ -389,6 +389,25 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     # 种子——别名/错别字/部分匹配场景)时,kg_chunks PG 全文检索补充召回。
     # 旧路在此场景整体哑火(纯包含匹配对"孔明诸葛亮"这类查询永不命中),
     # 第三路按 2-gram 全文召回原文片段,让回答仍有资料可依。
+    # 文档实体收敛(通用,零业务词):意图种子命中 document 类型实体时,
+    # 该实体的来源文档就是用户所指范围——同模板批量库(兄弟文档条款
+    # 文本几乎相同)的邻居片段不再混入。未命中 document 实体(用户
+    # 没点名任何文档)不收敛,行为与原先完全一致。实体与类型均来自
+    # 图谱抽取/本体配置,不含任何编号正则。
+    _DOC_SCOPE_MAX_DOCS = 3  # 来源文档超过此数=泛指而非点名,不收敛
+    auto_doc_scope: Optional[set] = None
+    if doc_filter is None and seeds:
+        scope_docs = set()
+        for s in seeds:
+            if str(s.get("type") or "") == "document":
+                scope_docs.update(s.get("sourceDocs") or [])
+        if 0 < len(scope_docs) <= _DOC_SCOPE_MAX_DOCS:
+            auto_doc_scope = scope_docs
+            diagnostics["docScopeFromEntity"] = sorted(auto_doc_scope)
+            _stage("kb_search.vector",
+                   f"命中文档实体,检索收敛到 {len(auto_doc_scope)} 份指定文档…")
+    effective_filter = doc_filter if doc_filter is not None else auto_doc_scope
+
     chunks: List[Dict[str, Any]] = []
     fulltext_hits: List[Dict[str, Any]] = []
     if not seeds and _cfg(app_state, "fulltext_fallback_enabled", True):
@@ -399,7 +418,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             _doc_names = {d["id"]: d["filename"]
                           for d in store.list_documents(kb["id"])}
             fulltext_hits = store.search_chunks_fulltext(kb["id"], query, limit=10)
-            if doc_filter is not None:
+            if effective_filter is not None:
                 fulltext_hits = [h for h in fulltext_hits
                                  if h.get("docId") in doc_filter]
             for h in fulltext_hits:
@@ -447,9 +466,9 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             _doc_names = {d["id"]: d["filename"] for d in store.list_documents(kb["id"])}
             try:
                 hits = vector.search(kb["id"], qvec, top_k=k)
-                if doc_filter is not None:
-                    # D7 元数据白名单:向量命中按文档过滤(空集=零召回)
-                    hits = [h for h in hits if h.get("docId") in doc_filter]
+                if effective_filter is not None:
+                    # D7 元数据白名单/文档实体收敛:命中按文档过滤(空集=零召回)
+                    hits = [h for h in hits if h.get("docId") in effective_filter]
                 for h in hits:
                     h["docName"] = _doc_names.get(h.get("docId") or "", "")
             except Exception as e:
@@ -523,6 +542,26 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 error=str(e), conv_id=conv_id)
             logger.warning(f"向量检索失败,降级纯图谱: {e}")
             diagnostics["vectorDegraded"] = True
+
+    # 文档实体收敛后零召回:实体指向的文档已删/未解析,或语义查询与
+    # 该文档全部片段都不相似——放开范围全库重查一轮,不能空手而归
+    # (标注短路/答案生成在 kb_search 层,这里保证 chunks 有料)。
+    if auto_doc_scope is not None and not chunks and kb.get("vectorEnabled"):
+        _stage("kb_search.vector", "指定文档内零召回,放开范围全库检索…")
+        diagnostics["docScopeRelaxed"] = True
+        try:
+            vector = runtime.get_vector(app_state)
+            k = top_k or int(_cfg(app_state, "vector_top_k", 5))
+            qvec = app_state.llm_client.embeddings(
+                [query], conv_id=conv_id, stage="kg.query_embed", mode="query")[0]
+            hits = vector.search(kb["id"], qvec, top_k=k)
+            _doc_names = {d["id"]: d["filename"]
+                          for d in store.list_documents(kb["id"])}
+            for h in hits:
+                h["docName"] = _doc_names.get(h.get("docId") or "", "")
+            chunks = hits
+        except Exception:
+            logger.warning("文档收敛回退全库检索失败", exc_info=True)
 
     return {"intent": intent, "seeds": seeds, "subgraph": subgraph,
             "chunks": chunks, "diagnostics": diagnostics}
