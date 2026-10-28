@@ -6,7 +6,12 @@
   **metrology-mcp**（mock 计量业务平台，客服 Demo）+ neo4j + postgres(pgvector)
 - 默认 **19090**（HOST_PORT），免密（无 ADMIN_TOKEN）
 - neo4j 17687(bolt) / pgvector 15432；**表在 knowledge_graph schema**（psql 查询要带前缀）
-- LLM = 996code 中转站 qwen3.7-plus（速度波动大，每批 4 块 50-80s 常见）；embedding = 本地 bge-m3
+- **LLM 供应商 = DB 唯一事实源**（`llm_providers` 表，管理端「插件页→模型供应商」维护，热生效）：
+  .22 配 996code 中转站 qwen3.7-plus（速度波动大，每批 4 块 50-80s 常见）。
+  **env 的 LLM_BASE_URL/API_KEY/MODEL 已废弃**（双事实源被裁决去掉）——env 只管温度/超时等
+  非端点参数。新库/新部署须先配置供应商，否则所有 LLM 调用前置闸报错
+  （deploy.sh 健康验证后自动探测 `configured` 并提醒）。
+- embedding = 本地 bge-m3
 - 凭证（root SSH / Neo4j 密码）在服务器 `.env` 与运维备忘，**不入库**
 - 红线：**28080（别人的部署）绝对不动**；1Panel PG(5432) 是共享生产库
 
@@ -22,6 +27,10 @@
 
 ## 客服 Demo 服务器侧一次性配置
 
+0. **LLM 供应商迁移**（旧 .env → DB，一次性）：管理页手工填，或直接写库——
+   `insert into llm_providers (scope, revision, content, updated_by, updated_at)
+   values ('global', 1, '{"primary":{"base_url":"http://996code.top:18080/v1","api_key":"<旧env值>","model":"qwen3.7-plus","enabled":true,"price_in":null,"price_out":null}}', 'migration', '<时间>')`
+   （表在 public schema；写完删 .env 里废弃的 LLM_BASE_URL/API_KEY/MODEL 三行）
 1. `.env` 扩容：`PACKS_ENABLED` 加 `chatbi,metrology_assistant`（或删掉该键=全量），
    配 `METROLOGY_PROGRESS_DATASOURCE_ID` / `METROLOGY_INSTRUMENT_DATASOURCE_ID`
 2. 注册数据（对着 19090 API 跑 `tools/bid-demo/setup_demo.py`，MCP URL 用上面的

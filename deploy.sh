@@ -360,6 +360,16 @@ if [ "$DEPLOY_FAILED" -ne 0 ]; then
 fi
 log "   全栈健康就绪 ✓（postgres / neo4j / metrology-mcp / app）"
 
+# LLM 供应商就绪探测(非阻断):base_url/api_key/model 已迁 DB(llm_providers
+# 表,管理端「插件页→模型供应商」维护,env 端点变量已废弃)。未配置时所有
+# LLM 调用前置闸报错——新库/新部署最常见的事故,这里显式提醒而非静默
+if command -v curl >/dev/null; then
+  _prov=$(curl -sf --max-time 5 "http://127.0.0.1:${HOST_PORT}/api/admin/llm-providers" 2>/dev/null || true)
+  if [ -n "$_prov" ] && ! printf '%s' "$_prov" | grep -q '"configured": *true'; then
+    log "   ⚠ LLM 供应商未配置——LLM 调用将失败。请到管理端「插件页→模型供应商」配置(或迁移旧 .env 的 LLM_* 值入库)"
+  fi
+fi
+
 log "发布完成："
 log "   前端入口  http://<主机>:${HOST_PORT}/ai-modeler/（网关同前缀反代）"
 log "   管理      ./deploy.sh --status / --logs / --down"
