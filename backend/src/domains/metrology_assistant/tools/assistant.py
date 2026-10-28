@@ -95,7 +95,9 @@ SCENARIOS = {
             "enum_options": list(STRONG_INSPECTION_PURPOSES)
                             + ["内部使用", "校准"],
             "extract_hint": "purpose: 用途(贸易结算/安全防护/医疗卫生/环境监测/"
-                            "执法鉴定/内部使用/校准等);消息与背景都没提 → 空串",
+                            "执法鉴定/内部使用/校准等);消息与背景都没提 → 空串;"
+                            "instrument: 所问的器具名称(如 压力表/角膜曲率计),"
+                            "消息里提到就填 instrument 槽——不是价目查询的 name 槽",
         },
         "action": {
             "kind": "kg",
@@ -1066,10 +1068,7 @@ class MetrologyAssistantTool(Tool):
 
     def _run_kg(self, scenario: str, cfg: dict, ctx: ToolContext,
                 mem, merged: dict, stage) -> ToolResult:
-        # instrument 与 name 是同义槽(不同场景各自声明);提取模型对二者
-        # 的取舍不稳定(qwen3.7-plus 常把器具名填进 name,99.22 实录:
-        # 结论降级"该器具"→uncertain)。此处兜底合并,取先非空者。
-        instrument = merged.get("instrument") or merged.get("name") or ""
+        instrument = merged.get("instrument") or ""
         purpose = merged.get("purpose") or ""
         action = cfg["action"]
         # 选库规则(全部可配置,代码只查表):显式 kb → kb_rules 按槽位值

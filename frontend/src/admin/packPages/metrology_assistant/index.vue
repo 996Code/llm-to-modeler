@@ -103,14 +103,15 @@
                     </a-tooltip>
                     <!-- 行级重置:放弃本能力的覆盖,回到按 MCP 最新声明自动生成
                          (全局刷新不动任何覆盖;这个按钮是唯一的"以声明为准"出口) -->
-                    <a-popconfirm v-if="record.status === 'polished' && record.kind === 'chatbi'"
-                                  title="放弃此能力的覆盖,回到 MCP 最新声明的自动生成?"
-                                  ok-text="重置" ok-type="danger" cancel-text="取消" @confirm="resetToLatest(record)">
-                      <a-button size="small" type="text" class="cap-reset-btn" aria-label="重置为最新声明"
-                                :loading="resetting === record.scenario_key">
-                        <RollbackOutlined />
-                      </a-button>
-                    </a-popconfirm>
+                    <a-tooltip v-if="record.status === 'polished' && record.kind === 'chatbi'" title="重置为最新声明(放弃覆盖)">
+                      <a-popconfirm title="放弃此能力的覆盖,回到 MCP 最新声明的自动生成?"
+                                    ok-text="重置" ok-type="danger" cancel-text="取消" @confirm="resetToLatest(record)">
+                        <a-button size="small" type="text" class="cap-reset-btn" aria-label="重置为最新声明"
+                                  :loading="resetting === record.scenario_key">
+                          <RollbackOutlined />
+                        </a-button>
+                      </a-popconfirm>
+                    </a-tooltip>
                   </a-space>
                 </template>
               </a-table-column>
