@@ -30,8 +30,12 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     updated_at    TEXT NOT NULL
 )
 """
-# 既有表补列(幂等;CREATE TABLE IF NOT EXISTS 不改已存在表)
-_MIGRATE = "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS enabled INTEGER NOT NULL DEFAULT 1"
+# 既有表补列(幂等;CREATE TABLE IF NOT EXISTS 不改已存在表):
+# description = 服务级说明(说清该系统提供什么业务;能力路由分组标题与
+# 声明质量画像的数据源,由业务提供方在注册时维护)
+_MIGRATIONS = [
+    "ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''",
+]
 
 
 def _now() -> str:
@@ -48,10 +52,12 @@ class McpServerStore:
         self._lock = threading.Lock()
         with self.db.connect() as conn:
             conn.execute(_DDL)
-            conn.execute(_MIGRATE)
+            for stmt in _MIGRATIONS:
+                conn.execute(stmt)
 
     def _row(self, r) -> Dict[str, Any]:
         return {"id": r["id"], "name": r["name"], "code": r["code"], "url": r["url"],
+                "description": r["description"] if "description" in r.keys() else "",
                 "headers": json.loads(r["headers_json"] or "{}"),
                 "timeout": r["timeout"], "read_timeout": r["read_timeout"],
                 "status": r["status"],
@@ -72,18 +78,20 @@ class McpServerStore:
         return self._row(r) if r else None
 
     def create_server(self, name: str, code: str, url: str, headers: dict,
-                      timeout: float = 30.0, read_timeout: float = 300.0) -> dict:
+                      timeout: float = 30.0, read_timeout: float = 300.0,
+                      description: str = "") -> dict:
         if not _CODE_RE.fullmatch(code or ""):
             raise ValueError("code 只允许小写字母/数字/-/_，1-24 位")
         sid, now = uuid.uuid4().hex, _now()
         try:
             with self._lock, self.db.connect() as conn:
                 conn.execute(
-                    "INSERT INTO mcp_servers (id,name,code,url,headers_json,"
-                    "timeout,read_timeout,status,tools_json,created_at,updated_at)"
-                    " VALUES (?,?,?,?,?,?,?,'pending','[]',?,?)",
-                    (sid, name, code, url, json.dumps(headers or {}), timeout,
-                     read_timeout, now, now))
+                    "INSERT INTO mcp_servers (id,name,code,url,description,"
+                    "headers_json,timeout,read_timeout,status,tools_json,"
+                    "created_at,updated_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,'pending','[]',?,?)",
+                    (sid, name, code, url, str(description or ""), json.dumps(headers or {}),
+                     timeout, read_timeout, now, now))
         except Exception as e:
             if "unique" in str(e).lower() or "duplicate" in str(e).lower():
                 raise ValueError(f"code 已存在: {code}")
@@ -100,16 +108,18 @@ class McpServerStore:
                 return cur_val if v is None else v
             f = {"name": fields.get("name") or cur["name"],
                  "url": fields.get("url") or cur["url"],
+                 "description": (fields["description"] if fields.get("description") is not None
+                                 else (cur["description"] if "description" in cur.keys() else "")),
                  "headers_json": json.dumps(
                      fields.get("headers") if isinstance(fields.get("headers"), dict)
                      else json.loads(cur["headers_json"] or "{}")),
                  "timeout": _num("timeout", cur["timeout"]),
                  "read_timeout": _num("read_timeout", cur["read_timeout"])}
             conn.execute(
-                "UPDATE mcp_servers SET name=?,url=?,headers_json=?,timeout=?,"
-                "read_timeout=?,updated_at=? WHERE id=?",
-                (f["name"], f["url"], f["headers_json"], f["timeout"],
-                 f["read_timeout"], _now(), sid))
+                "UPDATE mcp_servers SET name=?,url=?,description=?,headers_json=?,"
+                "timeout=?,read_timeout=?,updated_at=? WHERE id=?",
+                (f["name"], f["url"], f["description"], f["headers_json"],
+                 f["timeout"], f["read_timeout"], _now(), sid))
         return self.apply_probe(sid)
 
     def delete_server(self, sid: str) -> None:

@@ -5,8 +5,7 @@
   - 本模块把通用槽位翻译成"场景表一行"的草稿(工具→数据源绑定、
     槽位→required、参数→params 映射),并提供库存视图(哪些工具已
     接入/可接入/绑定已失效);
-  - 起草不落库——管理页确认后走既有整档保存(revision CAS),
-    人工润色对客话术是设计要求,不是流程负担。
+  - 起草不落库,管理页润色后整档保存。
 """
 import logging
 from typing import Any, Dict, List, Optional
@@ -236,6 +235,37 @@ def _refresh_stale_snapshots(rows: List[dict]) -> None:
                    name=f"mcp-snapshot-refresh-{sid[:8]}").start()
 
 
+# ── 声明质量门禁 ──────────────────────────────────────────────
+# 声明(description/参数说明)是自动路由的唯一语义来源,责任在 MCP 提供
+# 方。描述说不清的工具进了路由也是死能力(LLM 不知道它是干嘛的,用户
+# 永远问不到),还占提示词——所以门禁拦下,标记出来让提供方补声明,
+# 而不是由管理员在润色场景里替业务方写描述。
+
+def _tool_issues(decl: dict) -> List[str]:
+    """工具声明体检:返回问题清单(空=通过)。
+
+    - 工具描述缺失/过短(<6 字) → 拦截(不进路由)
+    - required 参数无说明 → 告警(可路由,但追问文案会退化成参数名直出)
+    """
+    issues: List[str] = []
+    desc = str(decl.get("description") or "").strip()
+    if len(desc) < 6:
+        issues.append("工具描述缺失或过短(不足 6 字)")
+    schema = decl.get("inputSchema")
+    if isinstance(schema, dict):
+        props = schema.get("properties") or {}
+        for name in schema.get("required") or []:
+            p = props.get(name)
+            if isinstance(p, dict) and not str(p.get("description") or "").strip():
+                issues.append(f"必填参数 {name} 无说明")
+    return issues
+
+
+def _blocking_issues(decl: dict) -> bool:
+    """是否存在拦截级问题(工具描述缺失)。"""
+    return len(str(decl.get("description") or "").strip()) < 6
+
+
 def auto_scenarios(table: dict) -> Dict[str, dict]:
     """未编排 MCP 工具 → 运行时自动场景(注册即识别,零发布)。
 
@@ -244,8 +274,9 @@ def auto_scenarios(table: dict) -> Dict[str, dict]:
     追问/归一/受控执行/通用表格卡全复用既有机器。MCP 上新接口
     无需起草/刷新/发布:快照超 TTL 后台自动重探测,下一轮即出现。
     跳过并留痕:已被场景表编排的工具(润色优先,按 action.tool 判定
-    ——场景 key 与工具名不同,按 key 去重会漏)/无可映射参数/暂无
-    可执行数据源(接入数据源后自动出现)。
+    ——场景 key 与工具名不同,按 key 去重会漏)/声明不完整(描述
+    缺失,提供方补声明后自动出现)/无可映射参数/暂无可执行数据源
+    (接入数据源后自动出现)。
     """
     from sdk.mcp_draft import translate_input_schema
     rows = _servers_rows()
@@ -262,6 +293,10 @@ def auto_scenarios(table: dict) -> Dict[str, dict]:
             if not name:
                 continue
             if (name in edited_tools or name in table or name in out):
+                continue
+            if _blocking_issues(decl):
+                logger.info("自动路由拦截 %s/%s:声明不完整(描述缺失),"
+                            "请业务平台补充 MCP 声明", code, name)
                 continue
             slots = translate_input_schema(decl.get("inputSchema"))["slots"]
             if not slots:
@@ -366,14 +401,24 @@ def routing_overview() -> Dict[str, Any]:
         logger.exception("路由总览:数据源名称读取失败(降级显示 id)")
 
     caps: List[dict] = []
+    server_stats: Dict[str, Dict[str, int]] = {}
     for s in rows:
         code = s["code"]
+        server_stats[code] = {"tools": 0, "incomplete": 0, "warnings": 0}
         for decl in (s.get("tools_snapshot") or []):
             if not (isinstance(decl, dict) and decl.get("name")):
                 continue
             name = decl["name"]
             desc = decl.get("description") or ""
+            # 画像的 tools 计全部快照工具;声明质量只对"走声明路由"的
+            # 工具负责——已润色的路由文案来自场景表,声明缺失不算它的账
+            server_stats[code]["tools"] += 1
             key = polish_by_tool.get(name)
+            if key is None:
+                if _blocking_issues(decl):
+                    server_stats[code]["incomplete"] += 1
+                elif _tool_issues(decl):
+                    server_stats[code]["warnings"] += 1
             if key:
                 cfg = table[key]
                 req = cfg.get("required") or {}
@@ -395,6 +440,15 @@ def routing_overview() -> Dict[str, Any]:
                     "card": action.get("card"),
                 })
                 continue
+            # 声明不完整(工具描述缺失):不进路由,红色标出让提供方补声明
+            if _blocking_issues(decl):
+                caps.append({"kind": "chatbi", "tool": name, "server": code,
+                             "description": desc or "(无描述)",
+                             "status": "incomplete",
+                             "issues": _tool_issues(decl),
+                             "scenario_key": None, "label": name,
+                             "datasource": None, "ask": None, "card": None})
+                continue
             slots = translate_input_schema(decl.get("inputSchema"))["slots"]
             if not slots:
                 caps.append({"kind": "chatbi", "tool": name, "server": code,
@@ -413,6 +467,7 @@ def routing_overview() -> Dict[str, Any]:
                 "kind": "chatbi", "tool": name, "server": code,
                 "description": desc or synth["label"],
                 "status": "auto", "scenario_key": None,
+                "issues": _tool_issues(decl) or None,
                 "label": synth["label"],
                 "datasource": {"datasource_id": ds,
                                "datasource_name": ds_names.get(ds, ""),
@@ -437,7 +492,22 @@ def routing_overview() -> Dict[str, Any]:
                         "question": (cfg.get("required") or {}).get("question")},
                 "card": None,
             })
-    return {"capabilities": caps}
+    # 服务画像:分组标题 + 声明质量汇总(缺服务描述/若干工具声明不完整
+    # 都在这里可见,提醒补声明而不是去润色场景里修)
+    servers_profile = []
+    for s in rows:
+        st = server_stats.get(s["code"]) or {"tools": 0, "incomplete": 0, "warnings": 0}
+        profile = {
+            "code": s["code"], "name": s.get("name") or s["code"],
+            "description": s.get("description") or "",
+            "tools": st["tools"], "incomplete": st["incomplete"],
+            "warnings": st["warnings"], "enabled": s.get("enabled", True),
+            "status": s.get("status") or "",
+        }
+        if not profile["description"]:
+            profile["issues"] = ["服务描述未填写(建议说明该系统提供什么业务)"]
+        servers_profile.append(profile)
+    return {"capabilities": caps, "servers": servers_profile}
 
 
 _ZH: Dict[str, str] = {

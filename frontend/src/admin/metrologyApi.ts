@@ -42,13 +42,6 @@ export interface MetrologyConfig {
   content: { scenarios: Record<string, MetrologyScenario> }
 }
 
-export interface MetrologyHistoryItem {
-  revision: number
-  updatedBy: string
-  updatedAt: string
-  comment: string
-}
-
 export const metrologyApi = axios.create({
   baseURL: (import.meta.env.BASE_URL || '/') + 'api/packs/metrology_assistant',
   headers: { 'Content-Type': 'application/json' },

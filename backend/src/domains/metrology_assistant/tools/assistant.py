@@ -1,4 +1,4 @@
-"""计量智能客服主工具(南京院竞标 Demo 薄编排)。
+"""智能客服主工具(场景表+MCP 自动路由驱动,业务内容数据化)。
 
 七步管线(设计文档 0.5.0/C1):
   场景路由 → LLM 槽位提取 → 记忆/追问答案合并 → 必要条件追问(AskSpec)
@@ -298,7 +298,7 @@ def _build_extract_prompt(background: str, user_input: str,
                               + (p_hint or "本轮明确提到的值")
                               + ";没提 → 空串")
     slot_hints = "\n".join(dict.fromkeys(hint_lines))
-    return f"""你是计量业务客服的槽位提取器。从用户消息提取 JSON(只输出 JSON):
+    return f"""你是智能客服的槽位提取器。从用户消息提取 JSON(只输出 JSON):
 
 {{"scenario": "{keys}"{", " + slot_json if slots else ""}}}
 
@@ -692,13 +692,12 @@ def _unsupported_notice() -> ToolResult:
 # ── 主工具(通用执行器) ───────────────────────────────────────
 
 class MetrologyAssistantTool(Tool):
-    """计量智能客服——场景由 SCENARIOS 表定义,本类只含通用执行逻辑。"""
+    """智能客服——场景由场景表定义,本类只含通用执行逻辑。"""
 
     name = "metrology_assistant"
-    description = ("计量智能客服:器具强检判定(按用途检索知识库依据,结论"
-                   "带引用)、委托单进度/报告/证书/预约/价目等业务查询——"
-                   "业务平台 MCP 注册的工具自动接入路由(新工具免配置),"
-                   "含归属校验")
+    description = ("智能客服:业务咨询问答与查询——知识问答(结论带依据"
+                   "引用)与业务平台查询;MCP 注册的工具声明完整即自动"
+                   "接入路由(新工具免配置),含归属校验")
     when = ("用户咨询计量器具强检/检测费/检校周期/价目/适用规程,或查询"
             "委托单/订单检测进度、报告状态等业务平台提供的能力")
     state_scope = "metrology_assistant"
@@ -714,7 +713,7 @@ class MetrologyAssistantTool(Tool):
         也承载 MCP 工具查询,Neo4j 故障不应挡住它们);kg 动作在
         _run_kg 内已有安全兜底(异常→如实报错,不编结果)。"""
         if not self._app_state:
-            return ToolResult(error_for_llm="计量客服插件未正确装配(app_state 未注入)")
+            return ToolResult(error_for_llm="智能客服插件未正确装配(app_state 未注入)")
         return None
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:

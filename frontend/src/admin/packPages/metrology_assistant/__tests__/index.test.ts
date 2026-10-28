@@ -1,133 +1,166 @@
-// 计量客服管理页组件测试:配置加载/编辑脏标记/保存 CAS 冲突/回滚。
-// Vitest node 环境(与 embed-test 同款):不挂载 DOM,mock metrologyApi
-// 与 ant-design-vue,断言组件逻辑(reload/dirty/save/rollback 调用序列)。
-import { describe, expect, it, vi, beforeEach } from 'vitest'
-
-const mocks = vi.hoisted(() => {
-  const state: {
-    config: any
-    history: any[]
-    putCalls: any[]
-    rollbackCalls: any[]
-    conflict: boolean
-  } = { config: null, history: [], putCalls: [], rollbackCalls: [], conflict: false }
-  return {
-    state,
-    metrologyApi: {
-      get: vi.fn(async (url: string) => {
-        if (url === '/config') return { data: state.config }
-        if (url === '/config/history') return { data: { items: state.history } }
-        throw new Error(`unexpected GET ${url}`)
-      }),
-      put: vi.fn(async (_url: string, body: any) => {
-        state.putCalls.push(body)
-        if (state.conflict) {
-          throw { response: { status: 409, data: { detail: '配置已变更' } } }
-        }
-        return { data: { revision: body.expected_revision + 1 } }
-      }),
-      post: vi.fn(async (_url: string, body: any) => {
-        state.rollbackCalls.push(body)
-        return { data: { revision: 99 } }
-      }),
-    },
-    message: { success: vi.fn(), error: vi.fn() },
-  }
-})
-
-vi.mock('ant-design-vue', () => ({
-  message: mocks.message,
-  // 组件桩:模板里的 a-* 组件全部渲染为空
-  Tabs: { name: 'Tabs', props: ['activeKey'], template: '<div><slot /></div>' },
-  TabPane: { name: 'TabPane', props: [], template: '<div><slot name="tab" /><slot /></div>' },
-  Tag: { name: 'Tag', props: ['color'], template: '<span><slot /></span>' },
-  Button: { name: 'Button', props: ['disabled', 'loading', 'type', 'size'], template: '<button><slot /></button>' },
-  Space: { name: 'Space', props: [], template: '<div><slot /></div>' },
-  Alert: { name: 'Alert', props: ['type', 'showIcon'], template: '<div><slot name="message" /></div>' },
-  Drawer: { name: 'Drawer', props: ['open', 'title', 'width'], template: '<div><slot /></div>' },
-  List: { name: 'List', props: ['dataSource', 'size'], template: '<div><slot name="renderItem" /></div>' },
-  ListItem: { name: 'ListItem', props: [], template: '<div><slot /><slot name="actions" /></div>' },
-  ListItemMeta: { name: 'ListItemMeta', props: [], template: '<div><slot name="title" /><slot name="description" /></div>' },
-  Popconfirm: { name: 'Popconfirm', props: ['title', 'okText', 'okType'], template: '<div><slot /></div>' },
-}))
-vi.mock('@ant-design/icons-vue', () => new Proxy({}, {
-  get: (_t, name) => ({ name: String(name), template: '<i />' }),
-}))
-vi.mock('../../../admin/api', () => ({
-  getAdminToken: () => 't',
-  UnauthorizedError: class extends Error {},
-}))
-vi.mock('../../../metrologyApi', () => ({ metrologyApi: mocks.metrologyApi }))
-
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { effectScope, type EffectScope, type Ref } from 'vue'
+import { readFileSync } from 'node:fs'
 import Index from '../index.vue'
+import type { MetrologyConfig } from '../../../metrologyApi'
 
-const FACTORY = {
+const boundary = vi.hoisted(() => ({
+  get: vi.fn(), put: vi.fn(), post: vi.fn(), datasources: vi.fn(),
+  success: vi.fn(), error: vi.fn(), mounted: [] as Array<() => Promise<void>>,
+}))
+vi.mock('../../../metrologyApi', () => ({
+  metrologyApi: { get: boundary.get, put: boundary.put, post: boundary.post },
+}))
+vi.mock('../../../api', () => ({ chatbiApi: { get: boundary.datasources } }))
+vi.mock('ant-design-vue', () => ({ message: { success: boundary.success, error: boundary.error } }))
+vi.mock('vue', async importOriginal => ({
+  ...await importOriginal<typeof import('vue')>(),
+  useSSRContext: () => ({ modules: new Set<string>() }),
+  onMounted: (callback: () => Promise<void>) => boundary.mounted.push(callback),
+}))
+
+const saved: MetrologyConfig = {
   revision: 1,
   factory: false,
-  content: {
-    scenarios: {
-      progress: {
-        label: '委托单检测进度查询',
-        intent: '问检测进度',
-        required: { slot: 'order_no', header: '委托单号', question: '请提供委托单号', options: [] },
-        action: { kind: 'chatbi', env: 'METROLOGY_PROGRESS_DATASOURCE_ID', ds_name: '计量业务平台', tool: 'query_progress', params: { order_no: 'order_no' }, stage: '查询', error_noun: '业务接口', notices: {}, card: '_progress_card' },
-      },
-      mandatory_check: {
-        label: '强检判定',
-        intent: '问强检',
-        required: { slot: 'purpose', header: '器具用途', question: '{subject}用途?', options: [] },
-        action: { kind: 'kg' },
-      },
+  content: { scenarios: {
+    progress: {
+      label: '进度查询', intent: '查询检测进度',
+      required: { slot: 'order_no', header: '委托单号', question: '请提供委托单号', options: [] },
+      action: { kind: 'chatbi', datasource_id: 'business', tool: 'query_progress', params: { order_no: 'order_no' } },
     },
-  },
+  } },
 }
-
-function mount() {
-  // 最小挂载:组件 setup 逻辑跑通(onMounted 的 reload/loadHistory)
-  const app = { mount: vi.fn() }
-  return app
+type State = {
+  config: Ref<MetrologyConfig>
+  draft: Ref<MetrologyConfig['content']>
+  saveError: Ref<string>
+  dry: { text: string; execute: boolean; current: unknown; error: string }
+  tab: Ref<string>
+  currentHelp: Readonly<Ref<string>>
+  routing: Ref<Array<{ status: string }>>
+  routingSummary: Readonly<Ref<string>>
+  editorOpen: Ref<boolean>
+  editorCap: Ref<unknown>
+  currentKey: Ref<string>
+  openCapEditor: (cap: any) => Promise<void>
+  cancelEdit: () => void
+  drawerSave: () => Promise<void>
+  resetToLatest: (cap: any) => Promise<void>
+  reload: () => Promise<void>
+  runDry: () => Promise<void>
 }
+let scope: EffectScope
+function setup() {
+  const component = Index as unknown as {
+    setup: (props: object, context: { expose: (value?: unknown) => void }) => State
+  }
+  return scope.run(() => component.setup({}, { expose: () => {} }))!
+}
+async function loaded() {
+  const state = setup()
+  await boundary.mounted[0]()
+  return state
+}
+beforeEach(() => {
+  vi.resetAllMocks()
+  boundary.mounted.length = 0
+  scope = effectScope()
+  boundary.get.mockImplementation(async (url: string) => {
+    if (url === '/config') return { data: structuredClone(saved) }
+    if (url === '/config/routing') return { data: { capabilities: [], servers: [] } }
+    throw new Error(`Unexpected GET ${url}`)
+  })
+  boundary.datasources.mockResolvedValue({ data: { items: [] } })
+  boundary.put.mockResolvedValue({ data: { revision: 2 } })
+})
+afterEach(() => scope.stop())
 
-describe('metrology_assistant 管理页', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    mocks.state.config = JSON.parse(JSON.stringify(FACTORY))
-    mocks.state.history = [{ revision: 1, updatedBy: 'seed', updatedAt: '2026-10-26', comment: '出厂默认种子' }]
-    mocks.state.putCalls = []
-    mocks.state.rollbackCalls = []
-    mocks.state.conflict = false
+describe('智能客服能力路由(编辑抽屉版)', () => {
+  it('加载配置与路由总览,不再请求历史', async () => {
+    const state = await loaded()
+    expect(state.draft.value).toEqual(saved.content)
+    expect(state.draft.value).not.toBe(state.config.value.content)
+    expect(boundary.get.mock.calls.map(([url]) => url)).toEqual(['/config', '/config/routing'])
   })
 
-  it('metrologyApi 客户端:GET /config 返回结构透传', async () => {
-    const { data } = await mocks.metrologyApi.get('/config')
-    expect(data.revision).toBe(1)
-    expect(Object.keys(data.content.scenarios)).toEqual(['progress', 'mandatory_check'])
+  it('polished 能力行编辑:打开抽屉改追问文案,保存整档落库', async () => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi',
+      scenario_key: 'progress', tool: 'query_progress', label: '进度查询' })
+    expect(state.editorOpen.value).toBe(true)
+    expect(state.currentKey.value).toBe('progress')
+
+    state.draft.value.scenarios.progress.required.question = '请提供委托单号(回执单上可查)'
+    await state.drawerSave()
+    expect(boundary.put).toHaveBeenCalledWith('/config', {
+      content: expect.objectContaining({ scenarios: expect.objectContaining({
+        progress: expect.objectContaining({ required: expect.objectContaining({
+          question: '请提供委托单号(回执单上可查)' }) }) }) }),
+      comment: expect.stringContaining('能力路由编辑'),
+    })
+    expect(boundary.put.mock.calls[0][1]).not.toHaveProperty('expected_revision')
+    expect(state.editorOpen.value).toBe(false)
+    expect(boundary.success).toHaveBeenCalledWith('已保存,下一次对话生效')
   })
 
-  it('保存:整档提交携带 expected_revision(乐观锁)', async () => {
-    const body = { content: FACTORY.content, expected_revision: 1, comment: 'x' }
-    const { data } = await mocks.metrologyApi.put('/config', body)
-    expect(data.revision).toBe(2)
-    expect(mocks.state.putCalls[0].expected_revision).toBe(1)
+  it('取消编辑还原快照,不落库', async () => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi',
+      scenario_key: 'progress', tool: 'query_progress', label: '进度查询' })
+    state.draft.value.scenarios.progress.label = '改坏了'
+    state.cancelEdit()
+    expect(state.draft.value.scenarios.progress.label).toBe('进度查询')
+    expect(boundary.put).not.toHaveBeenCalled()
+    expect(state.editorOpen.value).toBe(false)
   })
 
-  it('保存冲突:409 不落库,调用方拿到异常状态', async () => {
-    mocks.state.conflict = true
-    await expect(mocks.metrologyApi.put('/config', {
-      content: FACTORY.content, expected_revision: 1,
-    })).rejects.toMatchObject({ response: { status: 409 } })
-    expect(mocks.state.putCalls).toHaveLength(1)
+  it('auto 能力行创建覆盖:先按声明起草再编辑;行级重置放弃覆盖回到自动', async () => {
+    const state = await loaded()
+    boundary.post.mockResolvedValueOnce({ data: {
+      key: 'query_workload',
+      scenario: { label: '工作量', intent: '问工作量',
+        required: { slot: 'category', header: '类别', question: '请提供类别', options: [] },
+        action: { kind: 'chatbi', server: 'metrology', tool: 'query_workload',
+          params: { category: 'category' }, card: '_table_card' } } } })
+    await state.openCapEditor({ status: 'auto', kind: 'chatbi', server: 'metrology',
+      tool: 'query_workload', label: '工作量', description: '统计检测工作量' })
+    expect(boundary.post).toHaveBeenCalledWith('/config/capability-import/draft',
+      { server: 'metrology', tool: 'query_workload' })
+    expect(state.currentKey.value).toBe('query_workload')
+    expect(state.draft.value.scenarios.query_workload).toBeTruthy()
+
+    await state.resetToLatest({ status: 'polished', kind: 'chatbi',
+      scenario_key: 'query_workload', tool: 'query_workload' })
+    expect(state.draft.value.scenarios.query_workload).toBeUndefined()
+    const putBody = boundary.put.mock.calls[0][1]
+    expect(putBody.comment).toContain('重置为最新声明')
   })
 
-  it('回滚:POST to_revision,服务端生成新 revision', async () => {
-    const { data } = await mocks.metrologyApi.post('/config/rollback', { to_revision: 1 })
-    expect(data.revision).toBe(99)
-    expect(mocks.state.rollbackCalls[0].to_revision).toBe(1)
+  it('校验失败保留草稿并显示错误', async () => {
+    const state = await loaded()
+    await state.openCapEditor({ status: 'polished', kind: 'chatbi',
+      scenario_key: 'progress', tool: 'query_progress', label: '进度查询' })
+    boundary.put.mockRejectedValue({ response: { status: 400, data: { detail: '请选择数据源' } } })
+    await state.drawerSave()
+    expect(state.saveError.value).toBe('校验失败: 请选择数据源')
+    expect(state.draft.value.scenarios.progress).toBeTruthy()
   })
 
-  it('组件模块可导入(依赖图完整)', async () => {
-    // import 不炸 = 模板/依赖/类型接线完整(vue-tsc 已做类型层)
-    expect(Index).toBeTruthy()
-    expect(typeof Index).toBe('object')
+  it('页面结构:两层 tab(能力路由/联调预演)+行内编辑抽屉,无独立润色场景页', () => {
+    const source = readFileSync(new URL('../index.vue', import.meta.url), 'utf8')
+    const template = source.split('<script setup')[0]
+    expect(template.match(/<a-tab-pane key=/g)).toHaveLength(2)
+    expect(template).toContain('key="routing"')
+    expect(template).toContain('key="dryrun"')
+    expect(template).not.toContain('key="scenarios"')
+    expect(template).toContain('<a-drawer')
+    expect(template).toContain('MCP 声明参考')
+    expect(template).toContain('重置为最新声明')
+    expect(template).toContain('@click="openCapEditor(record)"')
+    expect(template).toContain('@confirm="resetToLatest(record)"')
+    expect(template).not.toContain('删除覆盖')
+    const visibleCopy = template.replace(/<[^>]*>/g, '')
+    expect(visibleCopy).not.toMatch(/revision|\.env|CAS|call_logs|历史与回滚/)
+    expect(source).not.toMatch(/expected_revision|\/config\/history|\/config\/rollback/)
   })
 })

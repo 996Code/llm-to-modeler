@@ -1,7 +1,6 @@
 """metrology_assistant 装配入口(南京院竞标 Demo 薄编排插件)。
 
-契约对照 knowledge_graph/pack.py:create_registry 必须;无自有 API/
-后台任务/设置页(Demo 阶段全免,工程化后再加管理页三 tab)。
+提供工具注册、确定性路由及测试页和配置管理 API。
 create_router:确定性直达主工具——场景识别在工具内做,不为单工具
 多烧一次路由 LLM(设计 5.1 路由第 2 层/第 9 章"零路由模型调用")。
 """
@@ -40,8 +39,7 @@ def create_router(registry=None):
 def create_api_router():
     """插件自有 HTTP API(挂 /api/packs/metrology_assistant)。
 
-    测试页数据面(api.py)+ 场景配置管理面(config_api.py, P1 管理页
-    两 tab 的保存语义:revision CAS/历史/回滚)。
+    测试页数据面(api.py)和场景配置管理面(config_api.py)。
     """
     from fastapi import APIRouter
     from domains.metrology_assistant.api import router as test_router

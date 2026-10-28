@@ -1,15 +1,10 @@
 """metrology_assistant 场景配置与对话 flow 存储(设计 §8.1/§8.3/§6)。
 
-两张表:
-  assistant_config   场景/槽位/规则/来源映射的唯一事实源(revision 乐观锁
-                     + 历史快照;YAML 常量只作首启种子)
+存储边界:
+  assistant_config   场景配置的唯一事实源,整档直存,revision 用于缓存失效
+  assistant_config_history  保留已有数据,不追加快照
   assistant_flows    跨轮对话权威状态(场景/条件/flow_revision/pending
                      追问;CAS 推进防迟到覆盖)
-
-铁律(与 chatbi semantic 同款):
-  - 保存走 expected_revision CAS,冲突返回 409 由上层翻译;
-  - 历史快照只增不改(回滚=旧快照经验证后生成新 revision);
-  - 无凭据字段入快照(数据源 ID 是登记引用,不是凭据)。
 """
 import json
 import logging
@@ -25,7 +20,6 @@ logger = logging.getLogger(__name__)
 METROLOGY_DDL = [
     # 场景配置:单行权威档(scope='global'),revision 单调递增。
     # content 存完整配置 JSON(scenarios/labels/welcome 等);
-    # history 行只增不改,回滚=旧 content 经校验后写新 revision。
     """CREATE TABLE IF NOT EXISTS assistant_config (
         scope TEXT PRIMARY KEY,
         revision INTEGER NOT NULL,
@@ -75,10 +69,6 @@ _STATUS_CANCELLED = "cancelled"
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
-
-
-class ConfigConflictError(Exception):
-    """revision CAS 冲突(上层翻译 409)。"""
 
 
 class FlowRevisionError(Exception):
@@ -132,29 +122,18 @@ def seed_config_if_absent(db, default: Dict[str, Any],
             "updated_by, updated_at) VALUES (?, 1, ?, ?, ?)",
             (CONFIG_SCOPE, json.dumps(payload, ensure_ascii=False),
              updated_by, _now()))
-        _append_history(conn, CONFIG_SCOPE, 1, payload, updated_by,
-                        "出厂默认种子")
         return 1
 
 
-def save_config(db, content: Dict[str, Any], expected_revision: int,
-                updated_by: str = "", comment: str = "") -> int:
-    """整档保存(CAS):expected_revision 不匹配抛 ConfigConflictError。
-
-    成功返回新 revision;历史快照同事务追加(无凭据字段——数据源 ID
-    是登记引用,不是凭据,可入快照)。
-    """
+def save_config(db, content: Dict[str, Any], updated_by: str = "",
+                comment: str = "") -> int:
+    """整档直存并递增 revision,用于运行时缓存失效。"""
     payload = {k: v for k, v in content.items() if not k.startswith("_")}
-    new_rev = int(expected_revision) + 1
     with db.connect() as conn:
         row = conn.execute(
             "SELECT revision FROM assistant_config WHERE scope = ?",
             (CONFIG_SCOPE,)).fetchone()
-        current = int(row["revision"]) if row else 0
-        if current != int(expected_revision):
-            raise ConfigConflictError(
-                f"配置已变更(当前 revision {current}, 提交基于 "
-                f"{expected_revision}), 请刷新后重试")
+        new_rev = (int(row["revision"]) if row else 0) + 1
         if row:
             conn.execute(
                 "UPDATE assistant_config SET revision = ?, content = ?, "
@@ -168,74 +147,7 @@ def save_config(db, content: Dict[str, Any], expected_revision: int,
                 (CONFIG_SCOPE, new_rev,
                  json.dumps(payload, ensure_ascii=False),
                  updated_by or "", _now()))
-        _append_history(conn, CONFIG_SCOPE, new_rev, payload,
-                        updated_by, comment)
         return new_rev
-
-
-def list_config_history(db, limit: int = 20) -> List[Dict[str, Any]]:
-    """历史快照列表(倒序;content 不回传全量,列表页只看元信息)。"""
-    with db.connect() as conn:
-        rows = conn.execute(
-            "SELECT revision, updated_by, updated_at, comment "
-            "FROM assistant_config_history WHERE scope = ? "
-            "ORDER BY revision DESC LIMIT ?",
-            (CONFIG_SCOPE, int(limit))).fetchall()
-    return [{"revision": int(r["revision"]),
-             "updatedBy": r["updated_by"] or "",
-             "updatedAt": r["updated_at"],
-             "comment": r["comment"] or ""} for r in rows]
-
-
-def get_config_history_entry(db, revision: int) -> Optional[Dict[str, Any]]:
-    """取某 revision 的完整快照(回滚预览/差异对比用)。"""
-    with db.connect() as conn:
-        row = conn.execute(
-            "SELECT content, updated_by, updated_at, comment "
-            "FROM assistant_config_history WHERE scope = ? AND revision = ?",
-            (CONFIG_SCOPE, int(revision))).fetchone()
-    if not row:
-        return None
-    r = dict(row)
-    return {"revision": int(revision), "content": json.loads(r["content"]),
-            "updatedBy": r.get("updated_by") or "", "updatedAt": r["updated_at"],
-            "comment": r.get("comment") or ""}
-
-
-def rollback_config(db, to_revision: int, updated_by: str = "",
-                    comment: str = "") -> int:
-    """回滚:旧快照经当前校验后生成新 revision(不改历史)。
-
-    目标 revision 不存在抛 ValueError。
-    """
-    entry = get_config_history_entry(db, to_revision)
-    if entry is None:
-        raise ValueError(f"历史快照 revision {to_revision} 不存在")
-    with db.connect() as conn:
-        row = conn.execute(
-            "SELECT revision FROM assistant_config WHERE scope = ?",
-            (CONFIG_SCOPE,)).fetchone()
-        current = int(row["revision"]) if row else 0
-        new_rev = current + 1
-        conn.execute(
-            "UPDATE assistant_config SET revision = ?, content = ?, "
-            "updated_by = ?, updated_at = ? WHERE scope = ?",
-            (new_rev, json.dumps(entry["content"], ensure_ascii=False),
-             updated_by or "", _now(), CONFIG_SCOPE))
-        _append_history(conn, CONFIG_SCOPE, new_rev, entry["content"],
-                        updated_by, comment or f"回滚至 revision {to_revision}")
-        return new_rev
-
-
-def _append_history(conn, scope: str, revision: int, content: Dict[str, Any],
-                    updated_by: str, comment: str) -> None:
-    conn.execute(
-        "INSERT INTO assistant_config_history (id, scope, revision, "
-        "content, updated_by, updated_at, comment) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), scope, int(revision),
-         json.dumps(content, ensure_ascii=False),
-         updated_by or "", _now(), comment or ""))
 
 
 # ── 对话 flow(设计 §6)──────────────────────────────────────

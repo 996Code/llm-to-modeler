@@ -216,6 +216,38 @@ METROLOGY_WORKLOAD = [
     {"category": "温度仪表", "orders": 21, "units": 47},
 ]
 
+# 扩展工具夹具(费用估算/窗口/余量/标准器)
+METROLOGY_WINDOW_STAFF = [
+    {"window": "一号受理窗", "staff": "王工", "duty": "收件/缴费"},
+    {"window": "二号受理窗", "staff": "李工", "duty": "加急收件"},
+    {"window": "取件窗", "staff": "赵工", "duty": "证书/报告发放"},
+]
+METROLOGY_LAB_CAPACITY = {
+    "2026-11-05": [
+        {"lab": "压力实验室", "capacity": 40, "remaining": 12},
+        {"lab": "电学实验室", "capacity": 30, "remaining": 8},
+        {"lab": "长度实验室", "capacity": 50, "remaining": 25},
+    ],
+}
+METROLOGY_STANDARD_DEVICES = [
+    {"name": "活塞式压力计", "category": "压力", "accuracy": "0.05 级",
+     "cert_valid_until": "2027-06-30"},
+    {"name": "多功能校准源", "category": "电学", "accuracy": "0.02 级",
+     "cert_valid_until": "2027-03-15"},
+    {"name": "量块套装", "category": "长度", "accuracy": "3 等",
+     "cert_valid_until": "2026-12-20"},
+]
+
+# 设备管理平台夹具(第二业务 server:验证多服务分组与画像)
+EQUIPMENT_DEVICES = {
+    "EQ-0001": {"name": "精密压力表(0~1.6MPa)", "status": "在用",
+                "location": "力学楼 302", "last_calibrated": "2026-08-12"},
+    "EQ-0002": {"name": "电子台秤(30kg)", "status": "停用",
+                "location": "库房 B 区", "last_calibrated": "2026-05-30"},
+    "EQ-0003": {"name": "红外测温仪", "status": "在用",
+                "location": "热学楼 105", "last_calibrated": "2026-09-01"},
+}
+
 # 器具价目夹具(AI.xlsx 转换,已清洗: 去导出 HTML 标签/尾逗号,数值转 int):
 # 检测费/强检一二级目录(null=不在强检目录)/检校周期/技术规程
 METROLOGY_INSTRUMENTS = json.loads(
@@ -305,7 +337,67 @@ def build_metrology_server() -> Starlette:
                                      "type": "string",
                                      "description": "器具类别(如 压力/电学/"
                                      "长度;答\"全部\"统计所有类别)"}},
-                                 "required": []})]
+                                 "required": []}),
+                # ── 声明完整的扩展工具(自动路由直接可用) ──
+                types.Tool(
+                    name="query_fee_estimate",
+                    description="估算器具检测费用(按器具名与送检数量,"
+                                "可选加急;返回单价与小计)",
+                    inputSchema={"type": "object",
+                                 "properties": {
+                                     "name": {"type": "string",
+                                              "description": "器具名称(如 "
+                                              "数字压力表)"},
+                                     "quantity": {"type": "number",
+                                                  "description": "送检数量"
+                                                  "(默认 1)"},
+                                     "urgent": {"type": "string",
+                                                "enum": ["是", "否"],
+                                                "description": "是否加急"
+                                                "(加急费 +50%)"}},
+                                 "required": ["name"]}),
+                types.Tool(
+                    name="query_window_staff",
+                    description="查询受理窗口与值班人员(按窗口名模糊过滤,"
+                                "如 一号窗/取件窗)",
+                    inputSchema={"type": "object",
+                                 "properties": {"window": {
+                                     "type": "string",
+                                     "description": "窗口名称(可空=全部窗口)"}},
+                                 "required": []}),
+                types.Tool(
+                    name="query_lab_capacity",
+                    description="查询检定实验室某日期的接单余量(各实验室"
+                                "剩余可接台件数)",
+                    inputSchema={"type": "object",
+                                 "properties": {"date": {
+                                     "type": "string",
+                                     "description": "查询日期(格式 "
+                                     "2026-11-05)"}},
+                                 "required": ["date"]}),
+                types.Tool(
+                    name="query_standard_devices",
+                    description="查询单位的标准器台账(计量标准装置名称/"
+                                "等级/证书有效期;类别可过滤)",
+                    inputSchema={"type": "object",
+                                 "properties": {"category": {
+                                     "type": "string",
+                                     "description": "标准器类别(如 压力/"
+                                     "电学/长度;可空=全部)"}},
+                                 "required": []}),
+                # ── 故意声明不完整(验证声明质量门禁:不进路由,标红) ──
+                types.Tool(
+                    name="query_legacy_entry",
+                    description="",
+                    inputSchema={"type": "object",
+                                 "properties": {"x": {"type": "string"}},
+                                 "required": ["x"]}),
+                types.Tool(
+                    name="query_tmp_debug",
+                    description="查询",
+                    inputSchema={"type": "object",
+                                 "properties": {"code": {"type": "string"}},
+                                 "required": ["code"]})]
 
     @server.call_tool()
     async def _call(name: str, args: dict):
@@ -374,6 +466,59 @@ def build_metrology_server() -> Starlette:
                     "status": "not_found",
                     "message": f"没有类别含「{category}」的工作量数据"})
             return _envelope({"status": "ok", "data": rows})
+        if name == "query_fee_estimate":
+            qname = str(args.get("name") or "").strip()
+            if not qname:
+                return _envelope({"status": "invalid_input",
+                                  "message": "缺少器具名称(name)"})
+            try:
+                qty = max(1, int(args.get("quantity") or 1))
+            except (TypeError, ValueError):
+                qty = 1
+            urgent = str(args.get("urgent") or "否") == "是"
+            hits = [r for r in METROLOGY_INSTRUMENTS if qname in r["name"]]
+            if not hits:
+                return _envelope({"status": "not_found",
+                                  "message": f"未找到器具「{qname}」的价目,"
+                                             "无法估算费用"})
+            rows = []
+            for h in hits[:5]:
+                unit = float(h.get("fee") or 0)
+                subtotal = unit * qty * (1.5 if urgent else 1.0)
+                rows.append({"name": h["name"], "unit_fee_yuan": unit,
+                             "quantity": qty,
+                             "urgent": "是" if urgent else "否",
+                             "subtotal_yuan": round(subtotal, 2)})
+            return _envelope({"status": "ok", "data": rows})
+        if name == "query_window_staff":
+            win = str(args.get("window") or "").strip()
+            rows = [r for r in METROLOGY_WINDOW_STAFF
+                    if not win or win in r["window"]]
+            if not rows:
+                return _envelope({"status": "not_found",
+                                  "message": f"没有名称含「{win}」的受理窗口"})
+            return _envelope({"status": "ok", "data": rows})
+        if name == "query_lab_capacity":
+            date = str(args.get("date") or "").strip()
+            rows = METROLOGY_LAB_CAPACITY.get(date)
+            if not rows:
+                return _envelope({"status": "not_found",
+                                  "message": f"{date} 没有排产数据"})
+            return _envelope({"status": "ok", "data": rows})
+        if name == "query_standard_devices":
+            cat = str(args.get("category") or "").strip()
+            rows = [r for r in METROLOGY_STANDARD_DEVICES
+                    if not cat or cat in r["category"]]
+            if not rows:
+                return _envelope({"status": "not_found",
+                                  "message": f"没有类别含「{cat}」的标准器"})
+            return _envelope({"status": "ok", "data": rows})
+        if name in ("query_legacy_entry", "query_tmp_debug"):
+            # 声明不完整工具:实现完好,但被门禁拦在路由外——即使可执行,
+            # 声明说不清也不进对话路由(能力路由页标红让提供方补声明)
+            return _envelope({"status": "ok",
+                              "data": [{"note": "legacy/debug 工具,"
+                                                "声明不完整已拦在路由外"}]})
         if name != "query_progress":
             raise ValueError(f"tool not found: {name}")
         order_no = str(args.get("order_no") or "").strip().upper()
@@ -396,6 +541,88 @@ def build_metrology_server() -> Starlette:
             "data": {"order_no": order_no, **rec,
                      "queried_at": time.strftime("%Y-%m-%d %H:%M")},
         })
+
+    return _streamable_app(server)
+
+
+# ── 设备管理平台 server(第二业务域:验证多服务分组/画像) ────────
+
+def build_equipment_server() -> Starlette:
+    """"设备管理" server:3 个声明完整的查询工具。"""
+    server = Server("e2e-equipment")
+
+    @server.list_tools()
+    async def _list():
+        return [
+            types.Tool(
+                name="query_equipment_status",
+                description="按设备编号查询设备状态(名称/在用停用/存放"
+                            "位置/最近校准日期)",
+                inputSchema={"type": "object",
+                             "properties": {"eq_code": {
+                                 "type": "string",
+                                 "description": "设备编号(EQ 开头,如 "
+                                 "EQ-0001)"}},
+                             "required": ["eq_code"]}),
+            types.Tool(
+                name="query_equipment_list",
+                description="按存放位置查询在用设备清单(如 力学楼/库房)",
+                inputSchema={"type": "object",
+                             "properties": {"location": {
+                                 "type": "string",
+                                 "description": "存放位置(模糊匹配,如 "
+                                 "力学楼;答\"全部\"列全部)"}},
+                             "required": []}),
+            types.Tool(
+                name="query_calibration_due",
+                description="查询即将到期待校准的设备(按剩余天数过滤,"
+                                "默认 90 天内)",
+                inputSchema={"type": "object",
+                             "properties": {"days": {
+                                 "type": "number",
+                                 "description": "剩余天数阈值(默认 90)"}},
+                             "required": []}),
+        ]
+
+    @server.call_tool()
+    async def _call(name: str, args: dict):
+        args = args or {}
+        if name == "query_equipment_status":
+            code = str(args.get("eq_code") or "").strip().upper()
+            rec = EQUIPMENT_DEVICES.get(code)
+            if not rec:
+                return _envelope({"status": "not_found",
+                                  "message": f"未找到设备 {code}"})
+            return _envelope({"status": "ok", "data": [
+                {"eq_code": code, **rec}]})
+        if name == "query_equipment_list":
+            loc = str(args.get("location") or "").strip()
+            rows = [{"eq_code": k, **v} for k, v in EQUIPMENT_DEVICES.items()
+                    if not loc or loc == "全部" or loc in v["location"]]
+            if not rows:
+                return _envelope({"status": "not_found",
+                                  "message": f"位置「{loc}」没有在用设备"})
+            return _envelope({"status": "ok", "data": rows})
+        if name == "query_calibration_due":
+            import datetime as _dt
+            try:
+                days = int(args.get("days") or 90)
+            except (TypeError, ValueError):
+                days = 90
+            today = _dt.date(2026, 11, 1)  # 演示环境固定"今天"
+            rows = []
+            for k, v in EQUIPMENT_DEVICES.items():
+                due = _dt.date.fromisoformat(v["last_calibrated"])
+                remain = (due - today).days + 365  # 年度周期
+                if remain <= days:
+                    rows.append({"eq_code": k, "name": v["name"],
+                                 "last_calibrated": v["last_calibrated"],
+                                 "days_remaining": remain})
+            if not rows:
+                return _envelope({"status": "not_found",
+                                  "message": f"{days} 天内没有到期待校准设备"})
+            return _envelope({"status": "ok", "data": rows})
+        raise ValueError(f"tool not found: {name}")
 
     return _streamable_app(server)
 

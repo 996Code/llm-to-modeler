@@ -173,7 +173,8 @@ async def create_mcp_server(request: Request, _: None = Depends(require_admin)):
             url=str(payload.get("url") or "").strip(),
             headers=payload.get("headers") or {},
             timeout=float(payload.get("timeout") or 30),
-            read_timeout=float(payload.get("read_timeout") or 300))
+            read_timeout=float(payload.get("read_timeout") or 300),
+            description=str(payload.get("description") or "").strip())
     except ValueError as e:
         raise HTTPException(409, str(e))
 
@@ -185,7 +186,7 @@ async def update_mcp_server(sid: str, request: Request,
         payload = await request.json()
     except Exception:
         raise HTTPException(400, "请求体必须是 JSON")
-    allowed = {"name", "url", "headers", "timeout", "read_timeout"}
+    allowed = {"name", "url", "description", "headers", "timeout", "read_timeout"}
     clean = {k: v for k, v in (payload or {}).items() if k in allowed}
     try:
         return await asyncio.to_thread(

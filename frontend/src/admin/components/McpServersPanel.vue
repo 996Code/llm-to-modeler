@@ -18,6 +18,13 @@
         </a-button>
       </a-tooltip>    </div>
 
+    <div class="mcp-toolbar">
+      <span class="mcp-count">共 {{ servers.length }} 个服务</span>
+      <a-button type="primary" size="small" @click="openCreate">
+        <template #icon><PlusOutlined /></template>注册外部服务
+      </a-button>
+    </div>
+
     <a-table
       :columns="columns"
       :data-source="servers"
@@ -27,7 +34,13 @@
       :pagination="false"
     >
       <template #bodyCell="{ column, record }">
-        <template v-if="column.key === 'status'">
+        <template v-if="column.key === 'name'">
+          <div class="mcp-name-cell">
+            <span class="mcp-name">{{ record.name }}</span>
+            <span v-if="!record.description" class="mcp-name-warn">未填服务说明</span>
+          </div>
+        </template>
+        <template v-else-if="column.key === 'status'">
           <a-tooltip :title="record.status === 'connected' ? '探测成功,工具快照已保存' : '上次探测失败,保持待连接'">
             <a-tag :color="record.status === 'connected' ? 'green' : 'orange'">
               {{ record.status === 'connected' ? '已连接' : '待连接' }}
@@ -40,6 +53,10 @@
             <a-tag color="purple">{{ record.tools_snapshot.length }} 个工具</a-tag>
           </a-tooltip>
           <a-tag v-else>-</a-tag>
+          <a-tooltip v-if="undeclaredCount(record)"
+                     :title="`${undeclaredCount(record)} 个工具声明不完整(描述缺失),不进入对话路由——请业务平台补充 MCP 声明`">
+            <a-tag color="red">{{ undeclaredCount(record) }} 声明不完整</a-tag>
+          </a-tooltip>
         </template>
         <template v-else-if="column.key === 'ops'">
           <a-switch :checked="record.enabled !== false" size="small"
@@ -76,11 +93,6 @@
       </template>
     </a-table>
 
-    <a-button type="primary" size="small" style="margin-top: 10px" @click="openCreate">
-      <template #icon><PlusOutlined /></template>
-      注册外部服务
-    </a-button>
-
     <a-modal
       v-model:open="open"
       :title="editing ? '编辑 MCP 服务' : '注册 MCP 服务'"
@@ -91,6 +103,10 @@
       <a-form layout="vertical" style="margin-top: 12px">
         <a-form-item label="名称" required>
           <a-input v-model:value="form.name" placeholder="展示名,如 数据服务" />
+        </a-form-item>
+        <a-form-item label="服务说明（说清该系统提供什么业务，作为能力分组标题）">
+          <a-textarea v-model:value="form.description" :rows="2"
+                      placeholder="如：计量业务平台，提供委托单进度/证书/报告等查询" />
         </a-form-item>
         <a-form-item v-if="!editing" label="标识（插件引用用，小写字母/数字/-/_）" required>
           <a-input v-model:value="form.code" placeholder="如 ext_data" />
@@ -144,16 +160,22 @@ const open = ref(false)
 const saving = ref(false)
 const editing = ref<McpServer | null>(null)
 const refreshing = ref('')
-const form = ref({ name: '', code: '', url: '', headersText: '{}', timeout: 30, read_timeout: 300 })
+const form = ref({ name: '', code: '', url: '', description: '', headersText: '{}', timeout: 30, read_timeout: 300 })
 
 const columns = [
-  { title: '名称', dataIndex: 'name' },
+  { title: '名称', key: 'name' },
   { title: '标识', dataIndex: 'code' },
   { title: 'URL', dataIndex: 'url', ellipsis: true },
   { title: '状态', key: 'status', width: 90 },
-  { title: '工具数', key: 'tools', width: 90 },
+  { title: '工具数', key: 'tools', width: 130 },
   { title: '操作', key: 'ops', width: 130 },
 ]
+
+/** 快照内声明不完整的工具数(描述缺失/过短)——提示提供方补声明。 */
+function undeclaredCount(s: McpServer): number {
+  return (s.tools_snapshot || []).filter(
+    (t) => !t.description || t.description.trim().length < 6).length
+}
 
 async function load() {
   loading.value = true
@@ -171,13 +193,13 @@ onMounted(load)
 
 function openCreate() {
   editing.value = null
-  form.value = { name: '', code: '', url: '', headersText: '{}', timeout: 30, read_timeout: 300 }
+  form.value = { name: '', code: '', url: '', description: '', headersText: '{}', timeout: 30, read_timeout: 300 }
   open.value = true
 }
 function openEdit(s: McpServer) {
   editing.value = s
   form.value = {
-    name: s.name, code: s.code, url: s.url,
+    name: s.name, code: s.code, url: s.url, description: s.description || '',
     headersText: JSON.stringify(s.headers ?? {}, null, 2),
     timeout: s.timeout, read_timeout: s.read_timeout,
   }
@@ -200,7 +222,9 @@ async function save() {
   let ok = false
   await loadSafely(async () => {
     const body = {
-      name: form.value.name.trim(), url: form.value.url.trim(), headers,
+      name: form.value.name.trim(), url: form.value.url.trim(),
+      description: form.value.description.trim(),
+      headers,
       timeout: form.value.timeout ?? 30, read_timeout: form.value.read_timeout ?? 300,
     }
     const r = editing.value
@@ -292,6 +316,9 @@ async function toggleEnabled(rec: McpServer, on: boolean) {
 </script>
 
 <style scoped>
+.mcp-panel { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.mcp-toolbar { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+.mcp-count { font-size: 13px; color: #6b7280; }
 /* 标题行(独立顶级页形态) */
 .pk-toolbar {
   display: flex; align-items: center; justify-content: space-between;
@@ -318,6 +345,9 @@ async function toggleEnabled(rec: McpServer, on: boolean) {
   background: #f0f5ff; padding: 1px 6px; border-radius: 4px; font-size: 12px; color: #2f54eb;
 }
 .mcp-ops { display: inline-flex; gap: 2px; }
+.mcp-name-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mcp-name { font-weight: 500; }
+.mcp-name-warn { font-size: 12px; color: #d4380d; }
 .mcp-tools { display: flex; flex-direction: column; gap: 4px; }
 .mcp-tool { display: flex; gap: 10px; font-size: 12px; line-height: 1.6; }
 .mcp-tool-name {

@@ -1,9 +1,7 @@
 """metrology 场景配置管理 API 测试(P1 管理页数据面)。
 
-覆盖:首启种子/GET 默认、整档保存 CAS(409 冲突)、校验拒绝(400)、
-历史列表/快照、回滚(旧快照生成新 revision)、保存后热生效(缓存
-失效,load_scenarios 读到新配置)、执行器经 DB 场景表跑通(改追问
-文案 → 追问问题变)。
+覆盖:GET 默认、整档直存、校验拒绝(400)、历史数据保留、保存后
+热生效、执行器使用 DB 场景表。
 
 跑法:backend 目录 .venv/bin/python -m pytest tests/domains/ -q
 (conftest 建表+每测试清 metrology_assistant schema)。
@@ -51,69 +49,74 @@ def test_get_config_seeds_factory_default(client):
         "turnaround", "qualification"}
 
 
-def test_save_config_cas_and_conflict(client):
-    """整档保存:revision 递增;旧 revision 再存 409。"""
+def test_save_config_direct(client):
+    """整档直存(无 CAS):revision 服务端自增;重复保存各自生效。"""
     current = client.get("/api/packs/metrology_assistant/config").json()
     content = current["content"]
     content["scenarios"]["progress"]["required"]["question"] = "请提供单号(改)"
     resp = client.put("/api/packs/metrology_assistant/config", json={
-        "content": content, "expected_revision": current["revision"],
-        "comment": "改追问"})
+        "content": content, "comment": "改追问"})
     assert resp.status_code == 200
-    new_rev = resp.json()["revision"]
-    assert new_rev == current["revision"] + 1
-    # 旧 revision 再保存 → 409
+    assert resp.json()["revision"] == current["revision"] + 1
+    content["scenarios"]["progress"]["required"]["question"] = "再次保存"
     resp2 = client.put("/api/packs/metrology_assistant/config", json={
-        "content": content, "expected_revision": current["revision"]})
-    assert resp2.status_code == 409
+        "content": content})
+    assert resp2.status_code == 200
+    assert resp2.json()["revision"] == resp.json()["revision"] + 1
+    after = client.get("/api/packs/metrology_assistant/config").json()
+    assert after["content"] == content
+    assert after["factory"] is False
+
+
+def test_config_save_preserves_existing_history(client):
+    from domains.metrology_assistant import store
+    from domains.metrology_assistant.scenario_config import factory_default_config
+
+    db = _db()
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO assistant_config_history "
+            "(id, scope, revision, content, updated_by, updated_at, comment) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("snapshot-1", "global", 1, '{"scenarios": {}}',
+             "admin", "2026-01-01T00:00:00", "snapshot"))
+        before = [dict(row) for row in conn.execute(
+            "SELECT * FROM assistant_config_history").fetchall()]
+    assert store.seed_config_if_absent(db, factory_default_config()) == 1
+    content = client.get("/api/packs/metrology_assistant/config").json()["content"]
+    resp = client.put("/api/packs/metrology_assistant/config", json={"content": content})
+    assert resp.status_code == 200
+    assert resp.json()["revision"] == 2
+    with db.connect() as conn:
+        after = [dict(row) for row in conn.execute(
+            "SELECT * FROM assistant_config_history").fetchall()]
+    assert after == before
+
+
+def test_config_history_and_rollback_routes_absent(client):
+    base = "/api/packs/metrology_assistant/config"
+    assert client.get(f"{base}/history").status_code == 404
+    assert client.get(f"{base}/history/1").status_code == 404
+    assert client.post(f"{base}/rollback", json={"to_revision": 1}).status_code == 404
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    assert "expected_revision" not in schemas["ConfigSaveBody"]["properties"]
+    assert {"server", "tool"} <= schemas["CapabilityDraftBody"]["properties"].keys()
+    assert "text" in schemas["DryRunBody"]["properties"]
 
 
 def test_save_config_validation_rejects_bad_shape(client):
     """坏结构 400:缺 required/action/kind 枚举。"""
-    client.get("/api/packs/metrology_assistant/config")  # 种子化
+    before = client.get("/api/packs/metrology_assistant/config").json()
     bad = {"scenarios": {"x": {"label": "X", "intent": "x"}}}
     resp = client.put("/api/packs/metrology_assistant/config", json={
-        "content": bad, "expected_revision": 1})
+        "content": bad})
     assert resp.status_code == 400
     assert "校验失败" in resp.json()["detail"]
     # 空 scenarios 同样拒绝
     resp2 = client.put("/api/packs/metrology_assistant/config", json={
-        "content": {"scenarios": {}}, "expected_revision": 1})
+        "content": {"scenarios": {}}})
     assert resp2.status_code == 400
-
-
-def test_history_and_rollback(client):
-    """历史列表元信息 + 回滚生成新 revision 且内容回到旧档。"""
-    current = client.get("/api/packs/metrology_assistant/config").json()
-    content = current["content"]
-    # v1:首次保存(expected_revision=0 → 种子化 revision 1)
-    resp1 = client.put("/api/packs/metrology_assistant/config", json={
-        "content": content, "expected_revision": current["revision"],
-        "comment": "v1"})
-    assert resp1.status_code == 200
-    # v2:改追问文案(revision 2)
-    content["scenarios"]["progress"]["required"]["question"] = "v2 文案"
-    resp2 = client.put("/api/packs/metrology_assistant/config", json={
-        "content": content, "expected_revision": resp1.json()["revision"],
-        "comment": "v2"})
-    assert resp2.status_code == 200
-    hist = client.get("/api/packs/metrology_assistant/config/history").json()
-    revisions = [h["revision"] for h in hist["items"]]
-    assert 2 in revisions and 1 in revisions
-    entry = client.get("/api/packs/metrology_assistant/config/history/1").json()
-    assert "请提供委托单号" in entry["content"]["scenarios"]["progress"][
-        "required"]["question"]
-    resp = client.post("/api/packs/metrology_assistant/config/rollback",
-                       json={"to_revision": 1, "comment": "回滚"})
-    assert resp.status_code == 200
-    after = client.get("/api/packs/metrology_assistant/config").json()
-    assert after["revision"] == 3
-    assert "请提供委托单号" in after["content"]["scenarios"]["progress"][
-        "required"]["question"]
-    # 不存在的 revision → 404
-    resp404 = client.post("/api/packs/metrology_assistant/config/rollback",
-                          json={"to_revision": 999})
-    assert resp404.status_code == 404
+    assert client.get("/api/packs/metrology_assistant/config").json() == before
 
 
 def test_save_hot_reloads_runtime_scenarios(client):
@@ -124,7 +127,7 @@ def test_save_hot_reloads_runtime_scenarios(client):
     content = current["content"]
     content["scenarios"]["progress"]["required"]["question"] = "热生效文案?"
     client.put("/api/packs/metrology_assistant/config", json={
-        "content": content, "expected_revision": current["revision"]})
+        "content": content})
     table = load_scenarios()
     assert table["progress"]["required"]["question"] == "热生效文案?"
     # AskOption 复原:执行器消费 SDK 类型
@@ -167,7 +170,7 @@ def test_executor_uses_db_scenario_table(client, monkeypatch):
     content = current["content"]
     content["scenarios"]["progress"]["required"]["question"] = "请给出单号(新)"
     client.put("/api/packs/metrology_assistant/config", json={
-        "content": content, "expected_revision": current["revision"]})
+        "content": content})
 
     from domains.metrology_assistant.tools.assistant import MetrologyAssistantTool
     tool = MetrologyAssistantTool(app_state=object())
@@ -258,7 +261,7 @@ def test_dry_run_execute_prefers_explicit_datasource_id(client, monkeypatch):
     content = current["content"]
     content["scenarios"]["progress"]["action"]["datasource_id"] = "ds-explicit"
     client.put("/api/packs/metrology_assistant/config", json={
-        "content": content, "expected_revision": current["revision"],
+        "content": content,
         "comment": "显式绑定"})
 
     resp = _dry(monkeypatch, client, {
@@ -333,7 +336,8 @@ def test_capability_inventory_and_draft(client, monkeypatch):
 
 
 def test_routing_overview_states(client, monkeypatch):
-    """路由总览三态:polished(场景表命中)/auto(可执行)/blocked(无源)。"""
+    """路由总览四态:polished(场景表命中)/auto(可执行)/blocked(无源)/
+    incomplete(声明不完整);servers 画像按服务汇总质量。"""
     from datetime import datetime as _dt, timezone as _tz
     from domains.metrology_assistant import capability_import as ci
     from domains.chatbi import datasources as bi_ds
@@ -342,9 +346,10 @@ def test_routing_overview_states(client, monkeypatch):
 
     _fresh = _dt.now(_tz.utc).isoformat()
     monkeypatch.setattr(ci, "_servers_rows", lambda: [
-        {"id": "s1", "code": "metrology", "enabled": True,
+        {"id": "s1", "code": "metrology", "name": "计量业务平台",
+         "description": "计量检定业务查询", "enabled": True,
          "updated_at": _fresh, "tools_snapshot": [
-            # progress 已被出厂场景表编排 → polished
+            # progress 已被出厂场景表编排 → polished(声明短不算账)
             {"name": "query_progress", "description": "查进度",
              "inputSchema": {"properties": {"order_no": {"type": "string"}},
                              "required": ["order_no"]}},
@@ -352,11 +357,19 @@ def test_routing_overview_states(client, monkeypatch):
             {"name": "query_fresh", "description": "查询最新活动",
              "inputSchema": {"properties": {"keyword": {"type": "string"}},
                              "required": ["keyword"]}},
+            # 声明缺失 → incomplete(即使有数据源也不进路由)
+            {"name": "query_legacy", "description": "",
+             "inputSchema": {"properties": {"x": {"type": "string"}},
+                             "required": ["x"]}},
+            # 声明过短(<6 字) → 同样 incomplete
+            {"name": "query_vague", "description": "查询",
+             "inputSchema": {"properties": {"y": {"type": "string"}},
+                             "required": ["y"]}},
          ]},
         {"id": "s2", "code": "lonely", "enabled": True,
          "updated_at": _fresh, "tools_snapshot": [
             # 未编排且无数据源 → blocked
-            {"name": "query_orphan", "description": "孤儿",
+            {"name": "query_orphan", "description": "孤儿工具没有数据源绑定",
              "inputSchema": {"properties": {"x": {"type": "string"}},
                              "required": ["x"]}},
          ]},
@@ -369,14 +382,64 @@ def test_routing_overview_states(client, monkeypatch):
 
     resp = client.get("/api/packs/metrology_assistant/config/routing")
     assert resp.status_code == 200
-    caps = {c["tool"]: c for c in resp.json()["capabilities"]}
+    body = resp.json()
+    caps = {c["tool"]: c for c in body["capabilities"]}
     assert caps["query_progress"]["status"] == "polished"
     assert caps["query_progress"]["scenario_key"] == "progress"
     assert caps["query_fresh"]["status"] == "auto"
     assert caps["query_fresh"]["ask"]["slot"] == "keyword"
     assert caps["query_fresh"]["datasource"]["datasource_name"] == "计量业务平台(通用)"
+    assert caps["query_legacy"]["status"] == "incomplete"
+    assert any("描述缺失" in i for i in caps["query_legacy"]["issues"])
+    assert caps["query_vague"]["status"] == "incomplete"
     assert caps["query_orphan"]["status"] == "blocked"
     assert "数据源" in caps["query_orphan"]["blocked_reason"]
     # kg 能力(出厂强检场景)也在总览里
-    kg = [c for c in resp.json()["capabilities"] if c["kind"] == "kg"]
+    kg = [c for c in body["capabilities"] if c["kind"] == "kg"]
     assert kg and kg[0]["scenario_key"] == "mandatory_check"
+    # 服务画像:metrology 4 工具 2 声明不完整;lonely 缺服务描述被提示
+    servers = {s["code"]: s for s in body["servers"]}
+    assert servers["metrology"]["tools"] == 4
+    assert servers["metrology"]["incomplete"] == 2
+    assert servers["metrology"]["description"] == "计量检定业务查询"
+    assert servers["lonely"].get("issues")
+
+
+def test_auto_scenarios_blocks_undeclared_tools(monkeypatch):
+    """声明门禁:描述缺失的工具不合成自动场景(即使可执行);
+    补上合格描述后即恢复自动接入。"""
+    from datetime import datetime as _dt, timezone as _tz
+    from domains.metrology_assistant import capability_import as ci
+    from domains.chatbi import datasources as bi_ds
+    from domains.chatbi import runtime as bi_runtime
+    from types import SimpleNamespace as _NS
+
+    _fresh = _dt.now(_tz.utc).isoformat()
+    snapshot = {"id": "s1", "code": "metrology", "enabled": True,
+                "updated_at": _fresh, "tools_snapshot": [
+        {"name": "tool_ok", "description": "声明完整的查询工具",
+         "inputSchema": {"properties": {"a": {"type": "string"}},
+                         "required": ["a"]}},
+        {"name": "tool_bad", "description": "",
+         "inputSchema": {"properties": {"b": {"type": "string"}},
+                         "required": ["b"]}},
+    ]}
+
+    def _rows():
+        return [dict(snapshot, tools_snapshot=list(snapshot["tools_snapshot"]))]
+    monkeypatch.setattr(ci, "_servers_rows", _rows)
+    fake = _NS(id="ds-1", host="metrology", db_type="mcp",
+               database="", is_active=True)
+    monkeypatch.setattr(bi_ds, "list_datasources",
+                        lambda db, active_only=False: [fake])
+    monkeypatch.setattr(bi_runtime, "get_pack_db", lambda: object())
+
+    table = {"progress": {"action": {"kind": "chatbi", "tool": "query_progress"}}}
+    auto = ci.auto_scenarios(table)
+    assert "tool_ok" in auto
+    assert "tool_bad" not in auto  # 声明缺失被门禁拦截
+
+    # 提供方补齐声明 → 下一轮自动出现
+    snapshot["tools_snapshot"][1]["description"] = "补齐后的业务查询说明"
+    auto2 = ci.auto_scenarios(table)
+    assert "tool_bad" in auto2
