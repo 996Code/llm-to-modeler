@@ -19,7 +19,7 @@
           "chatbi",
           "cards"
         ],
-        "note": "一次提问从槽位提取到结构化结果卡的完整路径。"
+        "note": "一次提问:两段式提取→缺槽追问(令牌)→prepare_plan→受控执行→带引用结论。"
       },
       {
         "id": "scenarios",
@@ -30,7 +30,7 @@
           "chatbi",
           "cards"
         ],
-        "note": "SCENARIOS 表是唯一事实源：强检判定走 KG，进度/价目走受控执行。"
+        "note": "路由表=场景表覆盖(管理员话术,契约取服务端当前声明)∪MCP 声明自动合成;计量演示是 legacy_demo 显式兼容。"
       },
       {
         "id": "deps",
@@ -53,7 +53,7 @@
     },
     {
       "id": "assistant",
-      "label": "计量客服（薄编排）"
+      "label": "智能客服(通用编排)"
     },
     {
       "id": "kernels",
@@ -100,8 +100,8 @@
       "lane": "assistant",
       "col": 0,
       "type": "cloud",
-      "label": "LLM 槽位提取",
-      "sublabel": "chat_json 单次",
+      "label": "两段式提取",
+      "sublabel": "select→按声明提参数",
       "tag": "LLM",
       "width": 110
     },
@@ -110,8 +110,8 @@
       "lane": "assistant",
       "col": 1,
       "type": "backend",
-      "label": "SCENARIOS 场景表",
-      "sublabel": "唯一事实源",
+      "label": "路由表合成",
+      "sublabel": "覆盖∪自动·声明门禁",
       "width": 125
     },
     {
@@ -119,8 +119,8 @@
       "lane": "assistant",
       "col": 2,
       "type": "backend",
-      "label": "缺槽追问",
-      "sublabel": "AskSpec 追问",
+      "label": "追问与令牌",
+      "sublabel": "令牌·CAS·快照过期",
       "width": 125
     },
     {
@@ -128,8 +128,8 @@
       "lane": "assistant",
       "col": 3,
       "type": "backend",
-      "label": "通用执行器",
-      "sublabel": "按 action.kind 分发",
+      "label": "prepare_plan",
+      "sublabel": "required 全集·选库·强校验",
       "width": 125
     },
     {
@@ -137,8 +137,8 @@
       "lane": "kernels",
       "col": 4,
       "type": "database",
-      "label": "knowledge_graph",
-      "sublabel": "retrieve_evidence",
+      "label": "retrieve_evidence",
+      "sublabel": "带身份/ACL·文档收敛",
       "width": 130
     },
     {
@@ -146,8 +146,8 @@
       "lane": "kernels",
       "col": 3,
       "type": "database",
-      "label": "chatbi 受控执行",
-      "sublabel": "execute_controlled",
+      "label": "execute_controlled",
+      "sublabel": "jsonschema 验参·信封分态",
       "width": 130
     },
     {
@@ -156,7 +156,7 @@
       "col": 5,
       "type": "frontend",
       "label": "结构化结果卡",
-      "sublabel": "artifact.pack+card",
+      "sublabel": "通用表格·legacy 专用卡",
       "width": 140
     },
     {
@@ -164,8 +164,8 @@
       "lane": "kernels",
       "col": 5,
       "type": "cloud",
-      "label": "三态结论",
-      "sublabel": "decision 枚举校验",
+      "label": "结论生成",
+      "sublabel": "三态/answer·引用校验",
       "tag": "LLM",
       "width": 120
     },
@@ -192,8 +192,8 @@
       "lane": "kernels",
       "col": 2,
       "type": "security",
-      "label": "信封分态",
-      "sublabel": "查无/拒权=卡·故障=error",
+      "label": "受控内核",
+      "sublabel": "共用内核·原始声明验参",
       "width": 130
     },
     {
@@ -201,8 +201,8 @@
       "lane": "platform",
       "col": 2,
       "type": "database",
-      "label": "assistant_config",
-      "sublabel": "场景配置 CAS",
+      "label": "场景表(DB)",
+      "sublabel": "空安装零业务·显式升级",
       "width": 120
     },
     {
@@ -211,7 +211,7 @@
       "col": 4,
       "type": "backend",
       "label": "flows 状态机",
-      "sublabel": "CAS 原子消费",
+      "sublabel": "pending 持久·CAS",
       "width": 120
     }
   ],

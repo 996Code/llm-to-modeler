@@ -130,3 +130,16 @@ query
 
 配置开关（插件设置）：`vector_top_k` / `graph_max_nodes` / `rerank_enabled` /
 `reorder_enabled`（默认开）/ `fulltext_fallback_enabled` / 标注阈值等。
+
+## 数据形态速查
+
+导入向：PDF 字节 → `parse_to_text` 纯文本 → `chunk_text` `[{seq, text}]` →
+子段 `[{chunkId: "<父id>#0", embedding: [1024 floats]}]` → pgvector 行；
+LLM 抽取 `{"entities": [{name, type, aliases}], "relations": [{source, target, type}]}` →
+Neo4j `MERGE (:Entity {kb_id, normalized_name})`。
+
+检索向：「JJF 1381 的实验环境」→ 意图 `{entities: ["JJF 1381-2012 …大纲"], keywords: ["实验环境"], hop: 1}` →
+种子（normalized 三层匹配）→ 收敛 `{docScopeFromEntity: [docId]}` →
+向量命中 `[{chunkId: "父#2", docId, score: 0.78}]` → 父块回带（text=整章窗口）→
+linearize 三段（三元组/实体详情/`[片段:N] 原文`）→ answer.j2 →
+`{answer, sources: {chunks: 按最终序}}`（引用编号=chunks 序）。

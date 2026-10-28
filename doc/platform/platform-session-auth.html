@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="generator" content="archify 2.17.0-dev.1">
-  <title>会话与认证链：多租户隔离与 Token 签发</title>
+  <title>会话与认证链：多租户隔离·Token 签发·追问令牌</title>
   <script>
     // Resolve the theme before first paint so light-preference users don't
     // see a dark flash. The toolbar script below re-applies with UI state.
@@ -5081,7 +5081,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
            data-preset-badge-blueprint="蓝图 / 修订 01"
            data-preset-badge-editorial="编辑风格 / 现场笔记">
         <div class="pulse-dot"></div>
-        <h1>会话与认证链：多租户隔离与 Token 签发</h1>
+        <h1>会话与认证链：多租户隔离·Token 签发·追问令牌</h1>
       </div>
     </div>
 
@@ -5130,8 +5130,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / 图版 04">
-      <svg viewBox="0 0 1000 760" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">会话与认证链：多租户隔离与 Token 签发</title>
+      <svg viewBox="0 0 1000 900" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">会话与认证链：多租户隔离·Token 签发·追问令牌</title>
         <desc id="archify-diagram-description">由 Archify 生成的时序图。</desc>
         <!-- Definitions -->
         <defs>
@@ -5162,21 +5162,23 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
         <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="2" x="48" y="550" width="904" height="150" rx="10" class="c-lane" stroke-width="1"/>
 
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="segment" data-composition-frame-id="3" x="48" y="700" width="904" height="124" rx="10" class="c-lane" stroke-width="1"/>
+
         <!-- Lifelines -->
-        <path d="M 62 142 L 62 695" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
-        <path d="M 170 142 L 170 695" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
-        <path d="M 278 142 L 278 695" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
-        <path d="M 386 142 L 386 695" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
-        <path d="M 494 142 L 494 695" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
-        <path d="M 602 142 L 602 695" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 62 142 L 62 835" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 170 142 L 170 835" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 278 142 L 278 835" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 386 142 L 386 835" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 494 142 L 494 835" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
+        <path d="M 602 142 L 602 835" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
 
         <!-- Activations -->
         <rect x="381" y="165" width="10" height="45" rx="3" class="c-mask"/>
         <rect x="381" y="165" width="10" height="45" rx="3" class="c-security" stroke-width="1"/>
         <rect x="165" y="245" width="10" height="85" rx="3" class="c-mask"/>
         <rect x="165" y="245" width="10" height="85" rx="3" class="c-security" stroke-width="1"/>
-        <rect x="273" y="315" width="10" height="365" rx="3" class="c-mask"/>
-        <rect x="273" y="315" width="10" height="365" rx="3" class="c-backend" stroke-width="1"/>
+        <rect x="273" y="315" width="10" height="503" rx="3" class="c-mask"/>
+        <rect x="273" y="315" width="10" height="503" rx="3" class="c-backend" stroke-width="1"/>
         <rect x="489" y="395" width="10" height="215" rx="3" class="c-mask"/>
         <rect x="489" y="395" width="10" height="215" rx="3" class="c-backend" stroke-width="1"/>
         <rect x="597" y="425" width="10" height="35" rx="3" class="c-mask"/>
@@ -5271,6 +5273,38 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </g>
         </g>
 
+        <g data-edge-from="client" data-edge-to="api" data-edge-label="chat 补答(answers+__question_id)" data-edge-key="11">
+          <path data-composition-edge-from="client" data-composition-edge-to="api" data-composition-points="69,712;271,712" d="M 69 712 L 271 712" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <g data-detail="context">
+          <rect x="80.8" y="692" width="178.4" height="16" rx="3" class="c-mask"/>
+          <text x="170" y="702" class="t-backend" font-size="9" text-anchor="middle">chat 补答(answers+__question_id)</text>
+        </g>
+        </g>
+
+        <g data-edge-from="api" data-edge-to="store" data-edge-label="flow 归属+pending 校验" data-edge-key="12">
+          <path data-composition-edge-from="api" data-composition-edge-to="store" data-composition-points="285,744;487,744" d="M 285 744 L 487 744" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <g data-detail="context">
+          <rect x="322.8" y="724" width="126.4" height="16" rx="3" class="c-mask"/>
+          <text x="386" y="734" class="t-backend" font-size="9" text-anchor="middle">flow 归属+pending 校验</text>
+        </g>
+        </g>
+
+        <g data-edge-from="store" data-edge-to="api" data-edge-label="令牌不符=旧卡重放" data-edge-key="13">
+          <path data-composition-edge-from="store" data-composition-edge-to="api" data-composition-points="487,776;285,776" d="M 487 776 L 285 776" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <g data-detail="context">
+          <rect x="335.8" y="756" width="100.4" height="16" rx="3" class="c-mask"/>
+          <text x="386" y="766" class="t-backend" font-size="9" text-anchor="middle">令牌不符=旧卡重放</text>
+        </g>
+        </g>
+
+        <g data-edge-from="api" data-edge-to="client" data-edge-label="该追问已过期(不消费 pending)" data-edge-key="14">
+          <path data-composition-edge-from="api" data-composition-edge-to="client" data-composition-points="271,808;69,808" d="M 271 808 L 69 808" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <g data-detail="context">
+          <rect x="91.2" y="788" width="157.6" height="16" rx="3" class="c-mask"/>
+          <text x="170" y="798" class="t-backend" font-size="9" text-anchor="middle">该追问已过期(不消费 pending)</text>
+        </g>
+        </g>
+
         <!-- Segment Labels -->
         <g data-graph-role="segment-label" data-segment-id="0">
           <rect x="56" y="128" width="55.6" height="18" rx="3" class="c-mask"/>
@@ -5283,6 +5317,10 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <g data-graph-role="segment-label" data-segment-id="2">
           <rect x="56" y="528" width="55.6" height="18" rx="3" class="c-mask"/>
           <text x="62" y="541" class="t-dim" font-size="9" font-weight="600">越权防护</text>
+        </g>
+        <g data-graph-role="segment-label" data-segment-id="3">
+          <rect x="56" y="590" width="55.6" height="18" rx="3" class="c-mask"/>
+          <text x="62" y="603" class="t-dim" font-size="9" font-weight="600">追问令牌</text>
         </g>
 
         <!-- Participants -->
@@ -5358,26 +5396,26 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
         <!-- Legend -->
         <g data-legend="">
-          <text x="40" y="686" class="t-primary" font-size="12" font-weight="650">图例</text>
-          <g data-legend-semantic-kind="emphasis" data-legend-x="40" data-legend-baseline="706" data-legend-width="63">
-            <path d="M 40 703 L 74 703" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-            <text x="83" y="706" class="t-muted" font-size="10" font-weight="500">请求</text>
+          <text x="40" y="826" class="t-primary" font-size="12" font-weight="650">图例</text>
+          <g data-legend-semantic-kind="emphasis" data-legend-x="40" data-legend-baseline="846" data-legend-width="63">
+            <path d="M 40 843 L 74 843" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+            <text x="83" y="846" class="t-muted" font-size="10" font-weight="500">请求</text>
           </g>
-          <g data-legend-semantic-kind="return" data-legend-x="125" data-legend-baseline="706" data-legend-width="63">
-            <path d="M 125 703 L 159 703" class="a-default" stroke-width="1.4" stroke-dasharray="3,5" marker-end="url(#arrowhead)"/>
-            <text x="168" y="706" class="t-muted" font-size="10" font-weight="500">返回</text>
+          <g data-legend-semantic-kind="return" data-legend-x="125" data-legend-baseline="846" data-legend-width="63">
+            <path d="M 125 843 L 159 843" class="a-default" stroke-width="1.4" stroke-dasharray="3,5" marker-end="url(#arrowhead)"/>
+            <text x="168" y="846" class="t-muted" font-size="10" font-weight="500">返回</text>
           </g>
-          <g data-legend-semantic-kind="security" data-legend-x="210" data-legend-baseline="706" data-legend-width="63">
-            <path d="M 210 703 L 244 703" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
-            <text x="253" y="706" class="t-muted" font-size="10" font-weight="500">安全</text>
+          <g data-legend-semantic-kind="security" data-legend-x="210" data-legend-baseline="846" data-legend-width="63">
+            <path d="M 210 843 L 244 843" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+            <text x="253" y="846" class="t-muted" font-size="10" font-weight="500">安全</text>
           </g>
-          <g data-legend-semantic-kind="dashed" data-legend-x="295" data-legend-baseline="706" data-legend-width="83">
-            <path d="M 295 703 L 329 703" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-            <text x="338" y="706" class="t-muted" font-size="10" font-weight="500">异步追踪</text>
+          <g data-legend-semantic-kind="dashed" data-legend-x="295" data-legend-baseline="846" data-legend-width="83">
+            <path d="M 295 843 L 329 843" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+            <text x="338" y="846" class="t-muted" font-size="10" font-weight="500">异步追踪</text>
           </g>
-          <g data-legend-semantic-kind="default" data-legend-x="400" data-legend-baseline="706" data-legend-width="83">
-            <path d="M 400 703 L 434 703" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-            <text x="443" y="706" class="t-muted" font-size="10" font-weight="500">默认消息</text>
+          <g data-legend-semantic-kind="default" data-legend-x="400" data-legend-baseline="846" data-legend-width="83">
+            <path d="M 400 843 L 434 843" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+            <text x="443" y="846" class="t-muted" font-size="10" font-weight="500">默认消息</text>
           </g>
         </g>
       </svg>

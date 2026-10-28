@@ -100,3 +100,13 @@ POST /api/config/chat (SSE)
 
 深入各插件：[customer-service.md](customer-service.md) ·
 [knowledge-graph.md](knowledge-graph.md) · [chatbi.md](chatbi.md)
+
+## 数据形态速查
+
+`POST /config/chat {message, packs, conversation_id?}` →
+route_pack/route_tool `{"pack": "metrology_assistant", "tool": "metrology_assistant"}` →
+execute_tool state `{user_input, clarify_answers?, …}` →
+AskSpec `{questions: [{question, header, options, question_id: "uuid"}]}` →
+interrupt（checkpointer 落 PG）→ SSE 追问卡 →
+补答 `{answers: {"器具用途": "贸易结算", "__question_id": "uuid"}}` →
+`Command(resume)` → 工具续跑 → 制品/结论 → SSE `status: done`。

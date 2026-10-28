@@ -1,0 +1,574 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "智能客服架构｜渠道接入 · 对话引擎 · RAG 知识 · MCP 集成",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1150,
+      760
+    ],
+    "views": [
+      {
+        "id": "dialog",
+        "label": "对话主链",
+        "focus": [
+          "users",
+          "channel",
+          "nlu",
+          "dm",
+          "nlg",
+          "handoff"
+        ],
+        "note": "渠道接入 → 意图理解 → 多轮对话 → 回答生成；无法回答时人工兜底（业界会话式 AI 标配）。"
+      },
+      {
+        "id": "knowledge",
+        "label": "RAG 知识链",
+        "focus": [
+          "rag",
+          "hybrid",
+          "embed",
+          "knowops",
+          "handoff"
+        ],
+        "note": "知识摄取向量化 → 混合检索 → 证据增强生成带引用；知识运营持续导入与治理。"
+      },
+      {
+        "id": "integration",
+        "label": "业务与模型集成",
+        "focus": [
+          "controlled",
+          "mcp",
+          "bizsys",
+          "llm",
+          "provider",
+          "t2s",
+          "guard",
+          "ds"
+        ],
+        "note": "业务查询走固定 MCP 工具；智能问数 Text-to-SQL 独立通道：SQL 生成 → 三层校验 → 只读执行；模型统一网关出网调用境内供应商。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "users",
+      "type": "external",
+      "label": "用户",
+      "sublabel": "Web / 业务系统内",
+      "pos": [
+        40,
+        80
+      ],
+      "size": [
+        130,
+        60
+      ]
+    },
+    {
+      "id": "channel",
+      "type": "frontend",
+      "label": "渠道接入层",
+      "sublabel": "独立窗口 / 系统嵌入 / SSE",
+      "pos": [
+        270,
+        80
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "nlu",
+      "type": "backend",
+      "label": "意图识别 · 槽位提取",
+      "sublabel": "NLU",
+      "pos": [
+        270,
+        190
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "dm",
+      "type": "backend",
+      "label": "对话管理 · 多轮追问",
+      "sublabel": "DM · 断点恢复",
+      "pos": [
+        510,
+        190
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "nlg",
+      "type": "backend",
+      "label": "回答生成 · 引用溯源",
+      "sublabel": "NLG",
+      "pos": [
+        750,
+        190
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "rag",
+      "type": "backend",
+      "label": "知识检索服务",
+      "sublabel": "RAG · 条件选库",
+      "pos": [
+        270,
+        300
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "hybrid",
+      "type": "database",
+      "label": "混合检索",
+      "sublabel": "图谱 / 向量 / 全文",
+      "pos": [
+        510,
+        300
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "handoff",
+      "type": "security",
+      "label": "人工确认兜底",
+      "sublabel": "无据不答提示",
+      "pos": [
+        750,
+        300
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "embed",
+      "type": "backend",
+      "label": "向量化服务",
+      "sublabel": "bge-m3 本地",
+      "pos": [
+        270,
+        410
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "大模型网关",
+      "sublabel": "主备切换 / 限速计量",
+      "pos": [
+        750,
+        410
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "provider",
+      "type": "cloud",
+      "label": "境内模型供应商",
+      "sublabel": "境内 API · 可插拔",
+      "pos": [
+        990,
+        410
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "controlled",
+      "type": "security",
+      "label": "受控执行服务",
+      "sublabel": "固定工具 / 验参",
+      "pos": [
+        270,
+        520
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "mcp",
+      "type": "messagebus",
+      "label": "MCP 接入底座",
+      "sublabel": "注册 / 发现 / 协议",
+      "pos": [
+        510,
+        520
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "bizsys",
+      "type": "external",
+      "label": "业务系统",
+      "sublabel": "MCP 服务端 / 权威业务数据",
+      "pos": [
+        990,
+        630
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "admin",
+      "type": "backend",
+      "label": "管理端与审计",
+      "sublabel": "插件 / 能力 / 调用日志",
+      "pos": [
+        270,
+        630
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "pg",
+      "type": "database",
+      "label": "平台数据库",
+      "sublabel": "会话 / checkpoint",
+      "pos": [
+        510,
+        630
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "knowops",
+      "type": "backend",
+      "label": "知识运营管理",
+      "sublabel": "导入 / 标注 / 权限",
+      "pos": [
+        750,
+        630
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "t2s",
+      "type": "backend",
+      "label": "智能问数 Text-to-SQL",
+      "sublabel": "Schema 检索 / SQL 生成",
+      "pos": [
+        510,
+        410
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "guard",
+      "type": "security",
+      "label": "SQL 三层校验",
+      "sublabel": "AST 只读 / 列白名单",
+      "pos": [
+        750,
+        520
+      ],
+      "size": [
+        200,
+        60
+      ]
+    },
+    {
+      "id": "ds",
+      "type": "database",
+      "label": "分析数据源",
+      "sublabel": "只读账号 / 列白名单",
+      "pos": [
+        990,
+        520
+      ],
+      "size": [
+        140,
+        60
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "智能客服平台（部署于采购人内网）",
+      "wraps": [
+        "channel",
+        "nlu",
+        "dm",
+        "nlg",
+        "rag",
+        "hybrid",
+        "handoff",
+        "embed",
+        "llm",
+        "controlled",
+        "mcp",
+        "admin",
+        "pg",
+        "knowops",
+        "t2s",
+        "guard"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "users-channel",
+      "from": "users",
+      "to": "channel",
+      "label": "SSE 对话",
+      "variant": "emphasis"
+    },
+    {
+      "id": "channel-nlu",
+      "from": "channel",
+      "to": "nlu",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "nlu-dm",
+      "from": "nlu",
+      "to": "dm"
+    },
+    {
+      "id": "dm-nlg",
+      "from": "dm",
+      "to": "nlg"
+    },
+    {
+      "id": "nlu-rag",
+      "from": "nlu",
+      "to": "rag",
+      "label": "知识场景",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "nlu-controlled",
+      "from": "nlu",
+      "to": "controlled",
+      "label": "业务场景",
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [
+        [
+          256,
+          220
+        ],
+        [
+          256,
+          550
+        ]
+      ],
+      "labelSegment": 1
+    },
+    {
+      "id": "rag-hybrid",
+      "from": "rag",
+      "to": "hybrid"
+    },
+    {
+      "id": "hybrid-handoff",
+      "from": "hybrid",
+      "to": "handoff"
+    },
+    {
+      "id": "hybrid-nlg",
+      "from": "hybrid",
+      "to": "nlg",
+      "label": "证据增强",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "via": [
+        [
+          610,
+          265
+        ],
+        [
+          850,
+          265
+        ]
+      ],
+      "labelDy": 9,
+      "labelSegment": 1
+    },
+    {
+      "id": "rag-embed",
+      "from": "rag",
+      "to": "embed",
+      "label": "向量化",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "controlled-mcp",
+      "from": "controlled",
+      "to": "mcp"
+    },
+    {
+      "id": "mcp-bizsys",
+      "from": "mcp",
+      "to": "bizsys",
+      "label": "MCP 调用",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          610,
+          600
+        ],
+        [
+          1060,
+          600
+        ]
+      ]
+    },
+    {
+      "id": "llm-provider",
+      "from": "llm",
+      "to": "provider"
+    },
+    {
+      "id": "admin-pg",
+      "from": "admin",
+      "to": "pg"
+    },
+    {
+      "id": "knowops-pg",
+      "from": "knowops",
+      "to": "pg",
+      "variant": "dashed"
+    },
+    {
+      "id": "dm-t2s",
+      "from": "dm",
+      "to": "t2s",
+      "label": "问数场景",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          610,
+          150
+        ],
+        [
+          960,
+          150
+        ],
+        [
+          960,
+          385
+        ],
+        [
+          610,
+          385
+        ]
+      ]
+    },
+    {
+      "id": "t2s-guard",
+      "from": "t2s",
+      "to": "guard",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          610,
+          490
+        ],
+        [
+          850,
+          490
+        ]
+      ]
+    },
+    {
+      "id": "guard-ds",
+      "from": "guard",
+      "to": "ds",
+      "fromSide": "right",
+      "toSide": "left"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "业界参考（本次检索）",
+      "items": [
+        "分层参考 IBM 会话式 AI 与 Microsoft Bot Framework：渠道接入、NLU 意图/实体、对话管理、回答生成、人工交接。",
+        "知识链路参考 AWS / Microsoft RAG：知识摄取向量化 → 混合检索 → 证据增强 → 生成带引用。",
+        "人工兜底为业界标配；本平台当前实现为无据不答并提示人工确认。"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "本平台落地",
+      "items": [
+        "引擎层：LLM 意图路由 + 槽位提取 + LangGraph 编排，多轮追问与断点恢复。",
+        "知识层：图谱 / 向量 / 全文混合检索，回答带结论校验与引用编号；知识运营含导入、标注、权限。",
+        "集成层：固定 MCP 工具受控调用业务系统返回结构化结果；模型统一网关支持主备与限速。",
+        "智能问数（Text-to-SQL）：Schema 检索生成 SQL，经 AST 只读、危险函数、列白名单三层校验，仅以只读账号在白名单库表执行。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "边界与承诺",
+      "items": [
+        "平台部署于采购人内网；出网点仅模型 API（境内供应商）与业务系统 MCP 通道。",
+        "客服业务查询走固定 MCP 工具；智能问数为独立通道，SQL 只读执行且与客服受控路径隔离，不开放业务库直连。",
+        "不承诺自动转坐席工单、附件组合报价、MCP 自动重试或全失败纯检索降级。"
+      ]
+    }
+  ]
+}

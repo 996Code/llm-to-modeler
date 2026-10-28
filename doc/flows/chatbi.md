@@ -96,3 +96,13 @@ max_execution_time。错误脱敏（不回显连接串）。
 `chatbi.retrieve.refine`（选表）→ `chatbi.think` →
 `chatbi.generate_sql | generate_mcp` → `chatbi.heal | heal_mcp`（自愈）→
 `chatbi.chart` → `chatbi.memory.extract`（记忆）。
+
+## 数据形态速查
+
+「上季度各部门销售额」→ think `{tables: ["销售明细"], aggregation: "按部门 SUM"}` →
+生成提示词 9 段拼接（skills→…→用户问题）→ SQL 文本 →
+三层校验 `{ok: true}` → 执行 `{columns, rows}`（注入 LIMIT 后 fetchmany）→
+chart `{chart_type: "bar", x: "部门", y: "销售额"}` → 制品（rows_sample 50 + table_provenance）。
+
+MCP 路径：生成 `{"tool": "query_equipment_status", "args": {"eq_code": "EQ-0001"}}` →
+jsonschema 验参 → 信封 `{status: ok, data: {columns, rows}}` → 表格归一 → 同款制品。

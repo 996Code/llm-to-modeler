@@ -164,3 +164,19 @@ table = scenario_config.load_scenarios()          # DB 场景表(管理员覆盖
 2. 管理页「集成→MCP 服务」登记地址（server 级人工一步=管理员安全背书）。
 3. 「智能问数→数据源」建该 server 的通用源（host=server code）。
 4. 声明完整的工具自动进对话路由；要定制话术→能力路由页创建覆盖。
+
+## 数据形态速查（一句话在每步的样子）
+
+「压力表用于贸易结算,需要强制检定吗」→
+select: `{"scenario": "mandatory_check"}` →
+extract: `{"purpose": "贸易结算", "instrument": "压力表"}`（typed）→
+prepare_plan: `{kind: kg, kb: 强检目录, query: "压力表 贸易结算 强制检定 检定周期", conclusion: mandatory}` →
+retrieve_evidence: `{chunks: [{chunkId, docId, text, score}…]}`（已收敛/父块回带）→
+compose: `{decision: mandatory, conclusion, evidence: [{text, chunk_refs: [1]}]}` →
+制品 `kg_search_result`（answer+sources.chunks+cited_chunks）。
+
+「查一下 EQ-0001 设备状态」→
+select: `{"scenario": "equipment::query_equipment_status"}`（自动路由 key）→
+extract: `{"eq_code": "EQ-0001"}` →
+prepare_plan: `{kind: chatbi, server: equipment, tool: query_equipment_status, params: {eq_code: "EQ-0001"}}` →
+execute_controlled 信封: `{status: ok, data: {columns, rows}}` → 制品 `metrology_table`。
