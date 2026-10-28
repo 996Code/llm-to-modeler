@@ -70,6 +70,10 @@ CPU 配置需在服务器 compose 的业务服务中声明 `cpus: ${APP_CPU_LIMI
   neo4j（HTTP :7474 收敛）→ metrology-mcp（/mcp 200/406 收敛）→ app（容器健康 +
   宿主端口端到端 curl 穿 nginx）。探测等 compose healthcheck 收敛（`docker inspect
   State.Health.Status`），检查逻辑单一事实源在 compose 文件
+- **停全栈后再部署的顺序坑**：`deploy.sh --down` 删掉全部容器后，切换脚本只拉
+  app/metrology-mcp（`up -d --no-deps`）不重建 neo4j——app 启动时 KG 探针
+  DNS 失败 → knowledge_graph 插件被跳过 →"指定的插件当前不可用"。**先
+  `docker compose up -d neo4j postgres` 等健康，再跑切换**（10-28 实测）。
 - 回滚：`bash deploy.sh --rollback`（次新镜像；app 与 metrology-mcp 同镜像同切换）。
 - **收尾清理（本地）**：部署验证通过后删本地构建镜像（服务器已 `docker load`
   副本，回滚用服务器上的）：`docker rmi llm-modeler:<tag> llm-modeler:latest-local`。
