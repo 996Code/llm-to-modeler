@@ -47,8 +47,23 @@ async def test_env(request: Request, legacy_demo: bool = False) -> dict:
         except Exception:
             logger.exception('Assistant diagnostics dependency unavailable')
             errors.append('知识库状态读取失败,请查看服务日志')
+    # 单号夹具:场景表里"委托单号"类槽位的追问选项(表驱动,演示部署
+    # 经 legacy 升级/显式初始化后 options 自带 BJ2026/BJ2027)+
+    # mock 行为测试单(拒权/查无/超时——演示平台显式数据)。
+    fixtures = []
+    for scenario in table.values():
+        req = scenario.get('required') or {}
+        if '单号' in str(req.get('header') or ''):
+            fixtures.extend({'order': o.get('label'), 'desc': o.get('description') or ''}
+                            for o in (req.get('options') or [])
+                            if isinstance(o, dict) and o.get('label'))
+    fixtures += [
+        {'order': 'BJ8888', 'desc': '他主体单(拒权)'},
+        {'order': 'BJ9000', 'desc': '不存在(查无)'},
+        {'order': 'BJ0000', 'desc': '触发超时(约10s 如实报错)'},
+    ]
     return {'errors': errors, 'kbMapping': {}, 'kbs': kbs, 'progress': {},
-            'orderFixtures': [], 'capabilities': [
+            'orderFixtures': fixtures, 'capabilities': [
                 {'key': key, 'label': c.get('label'), 'kind': c['action']['kind'],
                  'server': c['action'].get('server'), 'tool': c['action'].get('tool')}
                 for key, c in table.items()]}

@@ -237,8 +237,11 @@ def test_empty_diagnostics_does_not_invent_demo_resources(env, monkeypatch):
     response = env.client.get('/api/packs/metrology_assistant/test/env')
     assert response.status_code == 200
     assert response.json()['kbs'] == []
-    assert response.json()['orderFixtures'] == []
     assert response.json()['kbMapping'] == {}
+    # 空场景表不虚构库/映射;单号夹具只剩 mock 行为演示单(拒权/查无/超时
+    # 是演示平台固定行为,与场景配置无关)
+    assert [f['order'] for f in response.json()['orderFixtures']] == [
+        'BJ8888', 'BJ9000', 'BJ0000']
 
 
 def test_env_accepts_valid_admin_token(env, monkeypatch):
