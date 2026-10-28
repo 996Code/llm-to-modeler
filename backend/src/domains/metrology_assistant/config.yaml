@@ -33,4 +33,12 @@ artifact:
       columns: 数据列
       rowTotal: 结果行数
     welcome_icon: search
-    welcome_examples: []
+    # 欢迎示例是本 pack 的展示声明(manifest 层):给进入智能客服的用户
+    # 能力入口提示;引擎零业务词的边界在代码,manifest 描述自身合法。
+    welcome_examples:
+      - {title: 强检判定, desc: 器具+用途,是否强制检定, prompt: 压力表用于贸易结算,需要强制检定吗？, icon: search}
+      - {title: 进度查询, desc: 委托单检测进度, prompt: 帮我查一下委托单 BJ2026 的检测进度, icon: file-text}
+      - {title: 检测耗时, desc: 多少个工作日, prompt: 压力表送检大概要几个工作日？, icon: clock-circle}
+      - {title: 资质能力, desc: 能不能检, prompt: 你们能检角膜曲率计吗？, icon: safety-certificate}
+      - {title: 器具价目, desc: 检测费·检校周期, prompt: 角膜曲率计的检定周期是多久？, icon: file-text}
+      - {title: 设备查询, desc: 设备状态·校准到期, prompt: 帮我查一下 EQ-0001 设备现在什么状态, icon: tool}
