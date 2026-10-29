@@ -1,0 +1,485 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "智能客服案例走链：四组真实数据·逐步参数",
+  "output": "../pack/customer-service-case-walk.html",
+  "locale": "zh-CN",
+  "animation": "trace",
+  "quality_profile": "showcase",
+  "views": [
+   {
+    "id": "case1",
+    "label": "①业务查询",
+    "focus": [
+     "c1_ask",
+     "c1_extract",
+     "c1_call",
+     "c1_env",
+     "c1_card",
+     "c1_states"
+    ],
+    "note": "「查 BJ2026 进度」:命中→order_no=\"BJ2026\"→验参→信封 ok{检测中 3/5·压力示值误差检定·预计10-30}→进度卡;8888拒权/9000查无/0000超时如实分态。"
+   },
+   {
+    "id": "case2",
+    "label": "②知识类",
+    "focus": [
+     "c2_ask",
+     "c2_hit",
+     "c2_pick",
+     "c2_kb",
+     "c2_concl",
+     "c2_card"
+    ],
+    "note": "「压力表贸易结算要强检吗」:缺用途→追问选项→选库强检目录三路检索→{属于强制检定,evidence:[片段1]};无据三态存疑如实。"
+   },
+   {
+    "id": "case3",
+    "label": "③追问闭环",
+    "focus": [
+     "c3_ask",
+     "c3_q",
+     "c3_a",
+     "c3_resume",
+     "c3_call",
+     "c3_card"
+    ],
+    "note": "「帮我查下进度」缺单号:追问卡(令牌防串答)→补答 BJ2026→断点续跑零提取 LLM→同款进度卡。"
+   },
+   {
+    "id": "case4",
+    "label": "④未命中兜底",
+    "focus": [
+     "c4_ask",
+     "c4_none",
+     "c4_cross",
+     "c4_hit",
+     "c4_concl",
+     "c4_card"
+    ],
+    "note": "「资质认定条件」:{scenario:null}→跨库检索(法律库 ACL 静默跳过)→CMA 命中→{六项条件,evidence:[1,2]};零召回诚实「未找到」。"
+   }
+  ]
+ },
+ "lanes": [
+  {
+   "id": "c1",
+   "label": "案例① 业务查询(BJ2026)"
+  },
+  {
+   "id": "c2",
+   "label": "案例② 知识类(强检判定)"
+  },
+  {
+   "id": "c3",
+   "label": "案例③ 追问闭环"
+  },
+  {
+   "id": "c4",
+   "label": "案例④ 未命中兜底"
+  }
+ ],
+ "phases": [
+  {
+   "id": "ask",
+   "label": "提问",
+   "fromCol": 0,
+   "toCol": 0
+  },
+  {
+   "id": "resolve",
+   "label": "识别与追问",
+   "fromCol": 1,
+   "toCol": 2
+  },
+  {
+   "id": "exec",
+   "label": "检索与执行",
+   "fromCol": 3,
+   "toCol": 4,
+   "variant": "emphasis"
+  },
+  {
+   "id": "present",
+   "label": "呈现",
+   "fromCol": 5,
+   "toCol": 5
+  }
+ ],
+ "nodes": [
+  {
+   "id": "c1_ask",
+   "lane": "c1",
+   "col": 0,
+   "type": "external",
+   "label": "用户提问",
+   "sublabel": "「查一下 BJ2026 的进度」",
+   "width": 140
+  },
+  {
+   "id": "c1_extract",
+   "lane": "c1",
+   "col": 1,
+   "type": "backend",
+   "label": "命中·提参数",
+   "sublabel": "order_no=\"BJ2026\"",
+   "width": 140
+  },
+  {
+   "id": "c1_call",
+   "lane": "c1",
+   "col": 2,
+   "type": "security",
+   "label": "受控调用",
+   "sublabel": "验参→MCP(9771)",
+   "width": 130
+  },
+  {
+   "id": "c1_env",
+   "lane": "c1",
+   "col": 3,
+   "type": "database",
+   "label": "业务信封",
+   "sublabel": "ok{检测中 3/5·示值误差检定}",
+   "width": 150
+  },
+  {
+   "id": "c1_card",
+   "lane": "c1",
+   "col": 4,
+   "type": "frontend",
+   "label": "进度卡",
+   "sublabel": "预计 2026-10-30",
+   "width": 120
+  },
+  {
+   "id": "c1_states",
+   "lane": "c1",
+   "col": 5,
+   "type": "messagebus",
+   "label": "分态如实",
+   "sublabel": "8888拒权·9000查无·0000超时",
+   "width": 145
+  },
+  {
+   "id": "c2_ask",
+   "lane": "c2",
+   "col": 0,
+   "type": "external",
+   "label": "用户提问",
+   "sublabel": "「压力表贸易结算要强检吗」",
+   "width": 145
+  },
+  {
+   "id": "c2_hit",
+   "lane": "c2",
+   "col": 1,
+   "type": "backend",
+   "label": "命中·缺用途",
+   "sublabel": "强检判定 · 缺用途",
+   "width": 130
+  },
+  {
+   "id": "c2_pick",
+   "lane": "c2",
+   "col": 2,
+   "type": "frontend",
+   "label": "追问选项卡",
+   "sublabel": "点选「贸易结算」",
+   "width": 125
+  },
+  {
+   "id": "c2_kb",
+   "lane": "c2",
+   "col": 3,
+   "type": "database",
+   "label": "选库·三路检索",
+   "sublabel": "贸易结算→强检目录",
+   "width": 135
+  },
+  {
+   "id": "c2_concl",
+   "lane": "c2",
+   "col": 4,
+   "type": "backend",
+   "label": "证据结论",
+   "sublabel": "{属于强制检定, evidence:[1]}",
+   "width": 145
+  },
+  {
+   "id": "c2_card",
+   "lane": "c2",
+   "col": 5,
+   "type": "frontend",
+   "label": "证据链卡",
+   "sublabel": "引用可回原文",
+   "width": 120
+  },
+  {
+   "id": "c3_ask",
+   "lane": "c3",
+   "col": 0,
+   "type": "external",
+   "label": "用户提问",
+   "sublabel": "「帮我查下进度」缺单号",
+   "width": 140
+  },
+  {
+   "id": "c3_q",
+   "lane": "c3",
+   "col": 1,
+   "type": "frontend",
+   "label": "追问卡",
+   "sublabel": "问题令牌防串答",
+   "width": 125
+  },
+  {
+   "id": "c3_a",
+   "lane": "c3",
+   "col": 2,
+   "type": "external",
+   "label": "补答",
+   "sublabel": "「BJ2026」",
+   "width": 110
+  },
+  {
+   "id": "c3_resume",
+   "lane": "c3",
+   "col": 3,
+   "type": "backend",
+   "label": "断点续跑",
+   "sublabel": "零提取 LLM·直进执行",
+   "width": 135
+  },
+  {
+   "id": "c3_call",
+   "lane": "c3",
+   "col": 4,
+   "type": "security",
+   "label": "验参·信封",
+   "sublabel": "ok{检测中 3/5…}",
+   "width": 130
+  },
+  {
+   "id": "c3_card",
+   "lane": "c3",
+   "col": 5,
+   "type": "frontend",
+   "label": "进度卡",
+   "sublabel": "与案例①同款",
+   "width": 115
+  },
+  {
+   "id": "c4_ask",
+   "lane": "c4",
+   "col": 0,
+   "type": "external",
+   "label": "用户提问",
+   "sublabel": "「资质认定需哪些条件」",
+   "width": 140
+  },
+  {
+   "id": "c4_none",
+   "lane": "c4",
+   "col": 1,
+   "type": "messagebus",
+   "label": "全部未命中",
+   "sublabel": "{scenario:null}",
+   "width": 120
+  },
+  {
+   "id": "c4_cross",
+   "lane": "c4",
+   "col": 2,
+   "type": "database",
+   "label": "跨库检索",
+   "sublabel": "法律库 ACL 静默跳过",
+   "width": 135
+  },
+  {
+   "id": "c4_hit",
+   "lane": "c4",
+   "col": 3,
+   "type": "database",
+   "label": "证据命中",
+   "sublabel": "CMA 汇编×2@内部文件库",
+   "width": 150
+  },
+  {
+   "id": "c4_concl",
+   "lane": "c4",
+   "col": 4,
+   "type": "backend",
+   "label": "综合回答",
+   "sublabel": "{六项条件, evidence:[1,2]}",
+   "width": 145
+  },
+  {
+   "id": "c4_card",
+   "lane": "c4",
+   "col": 5,
+   "type": "frontend",
+   "label": "证据链卡",
+   "sublabel": "零召回→诚实「未找到」",
+   "width": 135
+  }
+ ],
+ "edges": [
+  {
+   "id": "e1",
+   "from": "c1_ask",
+   "to": "c1_extract",
+   "label": "命中能力",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e2",
+   "from": "c1_extract",
+   "to": "c1_call",
+   "label": "参数齐备"
+  },
+  {
+   "id": "e3",
+   "from": "c1_call",
+   "to": "c1_env",
+   "label": "信封返回"
+  },
+  {
+   "id": "e4",
+   "from": "c1_env",
+   "to": "c1_card",
+   "label": "归一化",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e5",
+   "from": "c1_env",
+   "to": "c1_states",
+   "label": "非 ok 分态"
+  },
+  {
+   "id": "e6",
+   "from": "c2_ask",
+   "to": "c2_hit",
+   "label": "命中场景",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e7",
+   "from": "c2_hit",
+   "to": "c2_pick",
+   "label": "缺必填槽位"
+  },
+  {
+   "id": "e8",
+   "from": "c2_pick",
+   "to": "c2_kb",
+   "label": "用途定库"
+  },
+  {
+   "id": "e9",
+   "from": "c2_kb",
+   "to": "c2_concl",
+   "label": "有据才答",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e10",
+   "from": "c2_concl",
+   "to": "c2_card",
+   "label": "引用校验"
+  },
+  {
+   "id": "e11",
+   "from": "c3_ask",
+   "to": "c3_q",
+   "label": "缺单号",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e12",
+   "from": "c3_q",
+   "to": "c3_a",
+   "label": "挂起等补答"
+  },
+  {
+   "id": "e13",
+   "from": "c3_a",
+   "to": "c3_resume",
+   "label": "断点续跑"
+  },
+  {
+   "id": "e14",
+   "from": "c3_resume",
+   "to": "c3_call",
+   "label": "直进执行"
+  },
+  {
+   "id": "e15",
+   "from": "c3_call",
+   "to": "c3_card",
+   "label": "同款卡",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e16",
+   "from": "c4_ask",
+   "to": "c4_none",
+   "label": "未命中",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e17",
+   "from": "c4_none",
+   "to": "c4_cross",
+   "label": "兜底触发"
+  },
+  {
+   "id": "e18",
+   "from": "c4_cross",
+   "to": "c4_hit",
+   "label": "命中片段"
+  },
+  {
+   "id": "e19",
+   "from": "c4_hit",
+   "to": "c4_concl",
+   "label": "引用[1][2]",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e20",
+   "from": "c4_concl",
+   "to": "c4_card",
+   "label": "fallback 标记"
+  }
+ ],
+ "mainPath": [
+  "c1_ask",
+  "c1_extract",
+  "c1_call",
+  "c1_env",
+  "c1_card"
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "案例数据出处",
+   "items": [
+    "四组案例全部取自 99.22 服务器实测夹具(2026-10-29 浏览器实测)",
+    "BJ2026/8888/9000/0000 为计量平台演示单号:正常/拒权/查无/超时",
+    "兜底案例即实测:5 库参与,法律库 ACL 过滤,客户无感知"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "对应全量链路",
+   "items": [
+    "四条泳道=《总链路·多渠道路由分派》裁出的路径",
+    "案例①③走 智能问数→MCP 链;②④走 知识库链",
+    "逐步参数=该跳真实数据形态,与走读文档 flows/customer-service.md 同口径"
+   ]
+  }
+ ]
+}
