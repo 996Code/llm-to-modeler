@@ -5645,15 +5645,15 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <ul>
           <li>&bull; 对外地址 /ai-modeler/api/config/chat（网关剥前缀）：系统唯一对话端点，SSE 流式返回</li>
           <li>&bull; 前端以 iframe 嵌入（?embed=true&amp;hostless=1&amp;packs=metrology_assistant），INIT/URL 的 packs 声明一路透传到每条 chat 消息（stores/conversation.ts）</li>
-          <li>&bull; 引擎四节点图（engine/graph.py:142-195）：classify_intent → check_confidence → execute_tool → clarify_gate → handle_result，PostgresSaver 按 thread_id=会话ID 存 checkpoint</li>
-          <li>&bull; 客服插件路由零 LLM：packs 声明只剩一个 → 一级直通（nodes.py:_route_pack）；MetrologyDirectRouter 确定性返回 (metrology_assistant, 1.0)（pack.py:16-26）</li>
+          <li>&bull; 引擎四节点图（engine/graph.py:142-149）：classify_intent → check_confidence → execute_tool → clarify_gate → handle_result，PostgresSaver 按 thread_id=会话ID 存 checkpoint</li>
+          <li>&bull; 客服插件路由零 LLM：packs 声明只剩一个 → 一级直通（nodes.py:_route_pack）；MetrologyDirectRouter 确定性返回 (metrology_assistant, 1.0)（pack.py:15-26）</li>
         </ul>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div class="card-dot orange"></div>
-          <h3>入口装配（api/config.py:202）</h3>
+          <h3>入口装配（api/config.py:203 chat）</h3>
         </div>
         <ul>
           <li>&bull; 加载会话配置（宿主 context 优先、会话库兜底）与历史（超窗口 70% 触发异步压缩）</li>
@@ -5665,13 +5665,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot emerald"></div>
-          <h3>客服七步管线（assistant.py:401 execute）</h3>
+          <h3>客服管线（assistant.py:271 execute）</h3>
         </div>
         <ul>
-          <li>&bull; 一次 chat_json 同时出场景+器具/用途/委托单号三槽位（extract_slots:197），失败上抛不静默猜</li>
-          <li>&bull; 记忆/追问答案合并：本轮明确值优先，会话 KV（SessionStateHandle）只补空缺（merge_slots:218）</li>
+          <li>&bull; 两段式提取：先 chat_json 选能力（assistant.select，只读 label/intent），再按该能力声明提参数（extract_slots:61），失败上抛不静默猜</li>
+          <li>&bull; 记忆/追问答案合并：本轮明确值优先，会话 KV（SessionStateHandle）只补空缺（merge_slots:91）</li>
           <li>&bull; 缺必填槽位 → AskSpec 追问（用途四选项/委托单号夹具），经引擎 clarify_gate interrupt 挂起；answers 恢复从 pending 确定性续跑，不再烧提取</li>
-          <li>&bull; SCENARIOS 场景表（assistant.py:81）是唯一事实源：强检判定/进度查询/价目查询三场景 + 范围外如实答复通知卡</li>
+          <li>&bull; 场景表=DB 覆盖 ∪ MCP 声明自动合成（capability_import.py）：强检判定/耗时/资质/价目等场景，覆盖契约始终取服务端当前声明</li>
         </ul>
       </div>
 
@@ -5681,8 +5681,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>双内核（复用不重造）</h3>
         </div>
         <ul>
-          <li>&bull; 强检判定：用途→选库（强检目录/检定规程，resolve_kb_for_purpose:351）→ KG 混合检索图谱+向量（kg/service.py:15）→ 三态结论 mandatory/not_mandatory/uncertain，依据必须带 chunk_refs 引用，非法上抛不生成伪结论（compose_conclusion:298）</li>
-          <li>&bull; 进度/价目：env 绑定数据源 ID → execute_controlled 验源验参（仅 MCP 型+工具白名单）→ 信封判定先于形状归一（chatbi/controlled.py:93）</li>
+          <li>&bull; 强检判定：用途→选库（强检目录/检定规程，resolve_kb_for_purpose:239）→ KG 混合检索图谱+向量（kg/service.py:15 retrieve_evidence）→ 三态结论 mandatory/not_mandatory/uncertain，依据必须带 chunk_refs 引用，非法上抛不生成伪结论（legacy_demo.py:287 compose_conclusion）</li>
+          <li>&bull; 进度/价目：env 绑定数据源 ID → execute_controlled 验源验参（仅 MCP 型+工具白名单，chatbi/controlled.py:249）→ 信封判定先于形状归一</li>
           <li>&bull; MCP 业务平台为 mock（tools/mcp-e2e/metrology_server.py，9771）：BJ2026/2027 正常、BJ8888 拒权、BJ9000 查无、BJ0000 超时——演示话术须如实说明模拟</li>
           <li>&bull; 信封分态：查无/拒权=业务通知卡；技术或契约故障=error_for_llm 如实报错，不成功化（LLM 失败不静默降级红线）</li>
         </ul>
@@ -5697,7 +5697,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <li>&bull; 会话 = append-only 事件流（ConversationStore）：user/assistant/tool_result/checkpoint/ask/trace 七类事件，重放重建视图（engine/conversation.py:60）</li>
           <li>&bull; LLM 调用日志按会话+环节（route_pack/assistant.extract/conclude）写 call_logs，管理端链路视图按轮时间线展示</li>
           <li>&bull; 追问现场随 checkpoint（PostgresSaver）+ask 事件双保险，刷新/重启后历史加载可恢复追问卡（pendingResume 续答端点 /chat/resume）</li>
-          <li>&bull; Demo 边界：场景配置在代码 SCENARIOS 表、多轮状态用会话 KV（P1 迁 assistant_config 表+flows 状态机）</li>
+          <li>&bull; 场景配置事实源在 assistant_config 表（DB 覆盖∪MCP 自动合成，管理页两 tab 维护）；多轮状态 flows 表+会话 KV 双轨</li>
         </ul>
       </div>
     </div>

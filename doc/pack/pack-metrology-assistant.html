@@ -5639,9 +5639,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>薄编排（assistant.py）</h3>
         </div>
         <ul>
-          <li>&bull; SCENARIOS 场景表是唯一事实源：意图描述、必填槽位与追问规格、动作绑定、结果卡构建</li>
-          <li>&bull; 新增场景 = 加一条表项，提取提示词由表自动拼装，执行器零改动（P1 迁 DB 配置）</li>
-          <li>&bull; 一次 chat_json 出场景+器具/用途/委托单号三槽位，追问答案确定性恢复不重烧提取</li>
+          <li>&bull; 场景表（DB 覆盖∪MCP 声明自动合成）是路由事实源：意图描述、必填槽位与追问规格、动作绑定、结果卡构建</li>
+          <li>&bull; 新增能力 = MCP 注册声明完整即自动接入，管理页可加覆盖定制话术（保存热生效）；覆盖契约始终取服务端当前声明</li>
+          <li>&bull; 两段式提取：先选能力（只读 label/intent）再按该能力声明提参数；追问答案确定性恢复不重烧提取</li>
         </ul>
       </div>
 
@@ -5672,7 +5672,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       <div class="card">
         <div class="card-header">
           <div class="card-dot amber"></div>
-          <h3>配置与状态（P1 工程化）</h3>
+          <h3>配置与状态</h3>
         </div>
         <ul>
           <li>&bull; 场景配置唯一事实源在 assistant_config 表(manage 两 tab 维护):revision CAS 整档保存,冲突 409;保存即失效缓存,下一次对话读到新配置</li>
