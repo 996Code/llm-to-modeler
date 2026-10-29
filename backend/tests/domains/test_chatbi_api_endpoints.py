@@ -24,7 +24,9 @@ def client(monkeypatch):
 
     async def _allow(request):
         return None
-    pp._admin_auth_fn = _allow
+    # monkeypatch 落盘(裸赋值不恢复会泄漏到整个进程,后续测试的管理
+    # 鉴权全被换成恒放行——曾让 kg 同步测试的组合顺序假失败)
+    monkeypatch.setattr(pp, "_admin_auth_fn", _allow)
 
     # 测试库替换单例(api._db 走 runtime.get_pack_db)
     from sdk.relational_store import PackRelationalDB
