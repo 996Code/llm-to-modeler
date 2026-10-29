@@ -149,3 +149,45 @@ class TestMergeRetrieved:
         out = _merge_retrieved(base, extra)
         assert len(out["subgraph"]["nodes"]) == 2
         assert len(out["subgraph"]["edges"]) == 2
+
+
+class TestMultiRequeryAdoption:
+    """多库全链路:补检成果必须进入最终 chunks/sources(回归 10-29 线上事故)。
+
+    事故机制:answer_question_multi 在 _requery_once 之后,rerank/reorder/
+    sources/返回值四处消费的是 requery 前的旧 merged_chunks 变量——
+    补检捞回的高分块被首轮旧清单覆盖丢弃,多库查询答"查不到"。
+    此前用例只单测 _requery_once/_merge_retrieved(各自正确),从未断言
+    多库端到端的采纳,故漏网。
+    """
+
+    def test_补检块进入最终chunks与sources(self, env, monkeypatch):
+        from types import SimpleNamespace
+
+        thin = {"chunks": [{"chunkId": "a", "score": 0.5, "text": "封面元数据"}],
+                "seeds": [], "intent": {},
+                "subgraph": {"nodes": [], "edges": []}}
+        rich = {"chunks": [{"chunkId": "b", "score": 0.9, "text": "范围:0.01Ω~99.99Ω"}],
+                "seeds": [], "intent": {},
+                "subgraph": {"nodes": [], "edges": []}}
+        # 2 库 × (首轮 + 补检轮):前两次瘦召回,后两次补检捞回
+        seq_results = [thin, thin, rich, rich]
+        monkeypatch.setattr(retrieval, "hybrid_retrieve",
+                            lambda app_state, kb, q, **kw: seq_results.pop(0))
+        monkeypatch.setattr(retrieval, "parse_query_intent",
+                            lambda *a, **kw: {"terms": [], "keywords": []})
+        monkeypatch.setattr(retrieval, "_judge_evidence",
+                            lambda *a, **kw: "换个角度的检索词")
+        monkeypatch.setattr(retrieval, "linearize_context",
+                            lambda r: {"triples": [], "node_details": [],
+                                       "chunk_texts": [c["text"] for c in r["chunks"]]})
+        monkeypatch.setattr(retrieval, "_prompt_loader",
+                            lambda: SimpleNamespace(render=lambda *a, **kw: "ctx"))
+        kbs = [{"id": "kb1", "name": "库一"}, {"id": "kb2", "name": "库二"}]
+        result = retrieval.answer_question_multi(
+            env.app_state, kbs, "某标准 适用于什么范围？", conv_id="c-multi")
+        final_ids = {c["chunkId"] for c in result["chunks"]}
+        source_texts = " ".join(c.get("text") or "" for c in
+                                (result.get("sources") or {}).get("chunks") or [])
+        assert "b" in final_ids, "补检捞回的高分块未进入最终 chunks"
+        assert "0.01Ω" in source_texts, "补检块未进入 sources(前端引用卡数据源)"

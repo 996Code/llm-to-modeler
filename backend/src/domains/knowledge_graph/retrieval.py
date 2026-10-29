@@ -1039,6 +1039,11 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
     if _cfg(app_state, "auto_retrieve_loop", True):
         retrieved = _requery_once(app_state, kbs, query, retrieved,
                                   conv_id, top_k, _stage, doc_filter)
+        # 补检后同步本地变量:下游 rerank/reorder/sources/返回值全部读
+        # merged_chunks——不同步会拿首轮旧清单覆盖补检成果(线上实测:
+        # 补检捞回含答案的摘要/正文块后全被丢弃,多库查询答"查不到",
+        # D17 自上线起补检在多库路径从未生效)。单库路径无此问题。
+        merged_chunks = retrieved.get("chunks") or merged_chunks
 
     # P0#4 rerank:与单库同款——合并后、linearize 前重排;排序后顺序即
     # 编号权威源。开关默认关;失败降级原序不阻断
