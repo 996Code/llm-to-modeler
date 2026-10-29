@@ -157,6 +157,13 @@ export const useConversationStore = defineStore('conversation', () => {
 
   // ---------------- 动作（Actions，类比 Service 方法）----------------
 
+  // 会话选择代际:每次切换/新建/删除自增;selectConversation 捕获进入时
+  // 的代际,晚到的旧加载按代丢弃。此前的守卫拿"当前 id 是否等于目标 id"
+  // 判断,从已载入的会话切到另一个会话时必被误杀(真实事故:第二次载入
+  // 历史提示成功但页面不变——第一次能成只因当时 currentConversation
+  // 还是 null)。
+  let selectionEpoch = 0
+
   /**
    * 加载历史会话列表。
    * try/finally 保证无论成功失败都把 loading 置回 false。
@@ -175,6 +182,7 @@ export const useConversationStore = defineStore('conversation', () => {
    * @param id 会话 ID
    */
   async function selectConversation(id: string) {
+    const epoch = ++selectionEpoch
     loading.value = true
     // 切会话即清流式 UI 态(进度条/阶段提示):原会话若仍在流式中,其
     // SSE 回调已被会话切换守卫拦住不串扰这里;streaming 标志留给原流
@@ -184,15 +192,9 @@ export const useConversationStore = defineStore('conversation', () => {
     pipelineSteps.value = []
     try {
       const conv = await api.getConversation(id)
-      // 双重校验:加载期间用户可能又切了别的会话(含切到新会话=null)——
-      // 晚到的响应不得覆盖当前选择。只认"当前仍是本次要加载的会话或
-      // 尚无选择"两种状态
-      if (currentConversation.value?.id !== undefined
-          && currentConversation.value?.id !== id) {
-        // 已切走,丢弃本次加载(以当前选择为准)
-        loading.value = false
-        return
-      }
+      // 竞态守卫:加载期间用户又切了会话/新建/删除(代际已变)——本次
+      // 晚到的响应作废,以最新选择为准
+      if (epoch !== selectionEpoch) return
       currentConversation.value = conv
       // 历史消息里的 dataArtifact(数据型制品快照,如 KG 检索子图)映射到
       // dataResult——前端渲染分支复用 SSE 实时路径的同一条(图谱卡/数据卡)
@@ -237,6 +239,7 @@ export const useConversationStore = defineStore('conversation', () => {
    * 空会话刷屏)。侧边栏也不刷新:未入库的会话本就不该出现在列表里。
    */
   function startNewConversation() {
+    selectionEpoch++  // 作废在途的历史载入
     currentConversation.value = null
     messages.value = []
     currentConfig.value = null
@@ -250,6 +253,7 @@ export const useConversationStore = defineStore('conversation', () => {
   async function removeConversation(id: string) {
     await api.deleteConversation(id)
     if (currentConversation.value?.id === id) {
+      selectionEpoch++  // 清空当前选择,作废在途的历史载入
       currentConversation.value = null
       messages.value = []
       currentConfig.value = null
@@ -278,6 +282,7 @@ export const useConversationStore = defineStore('conversation', () => {
       const contextKey = localStorage.getItem('embedded_context_key') || undefined
       const conv = await api.createConversation('', contextKey)
       convId = conv.id
+      selectionEpoch++  // 懒创建落定当前会话,作废在途的历史载入
       currentConversation.value = conv
       await loadConversations()
     }

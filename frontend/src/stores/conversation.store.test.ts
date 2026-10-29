@@ -156,3 +156,52 @@ describe('conversation store result consumption', () => {
     })
   })
 })
+
+describe('selectConversation switching', () => {
+  it('applies a second history load onto a different conversation', async () => {
+    // 真实事故:载入一次历史后再载入另一段历史,提示成功但页面不变——
+    // 旧守卫把"从已有会话切到别的会话"误判成"已切走"静默丢弃
+    vi.mocked(api.getConversation).mockImplementation(async (id: string) => ({
+      id, title: `t-${id}`,
+      messages: [{ role: 'user', content: `msg-${id}` }],
+    } as any))
+    const store = useConversationStore()
+    await store.selectConversation('a')
+    expect(store.currentConversation?.id).toBe('a')
+    expect(store.messages).toMatchObject([{ role: 'user', content: 'msg-a' }])
+    await store.selectConversation('b')
+    expect(store.currentConversation?.id).toBe('b')
+    expect(store.messages).toMatchObject([{ role: 'user', content: 'msg-b' }])
+  })
+
+  it('discards the stale load when selections race', async () => {
+    // 两次载入并发:先发的慢后回——晚到的旧响应不得覆盖新选择
+    let releaseSlow!: () => void
+    vi.mocked(api.getConversation).mockImplementation(async (id: string) => {
+      if (id === 'slow') await new Promise<void>(r => { releaseSlow = r })
+      return { id, title: '', messages: [{ role: 'user', content: id }] } as any
+    })
+    const store = useConversationStore()
+    const slow = store.selectConversation('slow')
+    await store.selectConversation('fast')
+    releaseSlow()
+    await slow
+    expect(store.currentConversation?.id).toBe('fast')
+    expect(store.messages).toMatchObject([{ role: 'user', content: 'fast' }])
+  })
+
+  it('invalidates an in-flight load when starting a new conversation', async () => {
+    let release!: () => void
+    vi.mocked(api.getConversation).mockImplementation(async () => {
+      await new Promise<void>(r => { release = r })
+      return { id: 'late', title: '', messages: [{ role: 'user', content: 'late' }] } as any
+    })
+    const store = useConversationStore()
+    const pending = store.selectConversation('late')
+    store.startNewConversation()
+    release()
+    await pending
+    expect(store.currentConversation).toBeNull()
+    expect(store.messages).toEqual([])
+  })
+})

@@ -2,6 +2,27 @@
 
 > 会过时。接手先核对实际状态（git log / 服务器任务队列），再决定本页还剩多少有效。
 
+## 知识库用户/角色同步 API（2026-10-29）
+
+源系统经 HTTP 同步用户/角色进知识库目录（ACL 候选字典）：全量（整体
+替换+diff 计数+幂等）/增量（upserts 合并+deletes 如实报 missing）/单条
+CRUD（PUT 建改合一）/`GET /sync/status` 对账；kg_subjects 扩 status/
+created_at 列+kg_subject_sync_logs 流水表（留 200 条）。**字段精简裁决
+（用户）**：只留平台自己消费的 id/name/status——attrs 扩展属性曾设计
+后砍掉（当时零消费方，为不存在的场景预留）。文档
+`doc/知识库用户角色同步API.md` 已按**对接方视角**重写（用户裁决：只写
+对方要做什么，不写我们内部怎么做——含运行时身份传递章节：直调 API
+与浮窗 SDK 两种带法）。**鉴权三选一**
+（用户裁决方案 B）：管理凭证（Bearer/X-Admin-Token）或 `X-Api-Key`
+（平台 MCP 密钥，与 /api/mcp 同一把、轮换 5s 同源生效，仅目录/同步
+端点接受）——sdk.pack_api 新增 admin_or_mcp_key_required 依赖倒置实现。
+顺带修既有测试卫生 bug：test_chatbi_api_endpoints 裸覆 `_admin_auth_fn`
+不恢复（泄漏后全进程管理鉴权恒放行，组合顺序假失败）。改动面：kg 的
+api.py/store.py、sdk/pack_api.py、main.py、conftest.py、
+test_kg_subject_sync.py（停用条目不进 ACL 候选；删除目录条目不自动改
+ACL——文档已如实写明）。同批带前端修复：历史对话二次载入被
+selectConversation 竞态守卫误杀（代际计数器替代；3 例回归测试）。
+
 ## PACKS_ENABLED 语义改版（2026-10-29，已部署 99.22）
 
 env 从"锁死启停"改为**部署上限**：配置后名单外插件不加载、管理面不显示，
