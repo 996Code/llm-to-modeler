@@ -28,6 +28,10 @@
 │    KG: retrieve_evidence(带身份/ACL) → 检索三路               │
 │    ChatBI: execute_controlled → MCP 工具(jsonschema 验参)     │
 │ ⑥ 结论生成(LLM×1): 三态判定/通用回答 + 引用编号校验           │
+│ ⓪ 未命中任何能力 → 知识库链路兜底(用户裁决:不做指定库配置)     │
+│    retrieval.answer_question_multi 跨可访问库检索             │
+│    (按身份 ACL 过滤,被拒库静默跳过)                          │
+│    有证据→证据链卡 / 无证据或无可用库→「暂不支持」引导卡       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -148,6 +152,20 @@ table = scenario_config.load_scenarios()          # DB 场景表(管理员覆盖
   必须是有效片段编号（1..N）——引用编号权威源 = chunks 最终序。
 - 制品 `kg_search_result`：answer/kb/引用片段/instrument/purpose + 前端
   通用卡渲染。
+
+## ⓪ 知识库链路兜底——未命中能力不直接拒绝
+
+`tools/assistant.py: _fallback_answer()`。两段式提取选不出任何能力时触发，
+**不配置指定库**（用户裁决，2026-10-29：撤 `fallback_kb`，兜底=知识库链路本身）：
+
+- **同一条检索链**：直接调 `knowledge_graph/retrieval.answer_question_multi`
+  （kb_search 的跨库路径：意图解析→图谱种子→向量/全文→综合回答），参与库=
+  全部知识库（排除 folder）按当前身份 ACL 过滤——被拒库**静默跳过**，不向
+  客户透"无权访问某库"的话术；
+- **证据红线同款**：有召回且有回答 → 证据链卡（`fallback: true`，来源库清单
+  随卡返回）；零召回/无回答/无可用库 → 「暂不支持」引导卡（已检索会注明），
+  不编造；
+- 检索链异常如实 `error_for_llm`，不静默降级成成功。
 
 ## 管理面（能力路由页）
 

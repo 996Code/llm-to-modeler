@@ -84,9 +84,6 @@ def validate_config(config: Dict[str, Any], strict: bool = False) -> Dict[str, A
     模板;装载用宽松档——存量配置缺模板时回退原文检索,不拒绝装载。"""
     if not isinstance(config, dict):
         raise ConfigValidationError("配置必须是 JSON 对象")
-    fallback_kb = config.get("fallback_kb")
-    if fallback_kb is not None and (not isinstance(fallback_kb, str) or not fallback_kb.strip()):
-        raise ConfigValidationError("fallback_kb 必须是非空文本")
     scenarios = config.get(FACTORY_SCENARIOS_KEY)
     if not isinstance(scenarios, dict):
         raise ConfigValidationError("scenarios 必须是对象")
@@ -204,8 +201,7 @@ def load_scenarios() -> Dict[str, Any]:
             for key, cfg in content.get(FACTORY_SCENARIOS_KEY, {}).items()}}
         valid = validate_config(content)
         table = _rehydrate(valid[FACTORY_SCENARIOS_KEY])
-        runtime.set_cached_config(table, int(config.get("_revision", rev)),
-                                  str(valid.get("fallback_kb") or "").strip())
+        runtime.set_cached_config(table, int(config.get("_revision", rev)))
         return copy.deepcopy(table)
     except Exception as exc:
         cached = runtime.cached_config()
@@ -213,10 +209,3 @@ def load_scenarios() -> Dict[str, Any]:
             logger.exception("客服配置读取失败，使用最后有效快照")
             return copy.deepcopy(cached)
         raise RuntimeError("客服配置暂不可用，请检查配置存储或联系管理员") from exc
-
-
-def load_fallback_kb() -> str:
-    """当前配置的兜底知识库名(空串=未配置)。随场景缓存一起热生效。"""
-    from domains.metrology_assistant import runtime
-    load_scenarios()
-    return runtime.cached_fallback_kb()

@@ -132,7 +132,7 @@ class DryRunBody(BaseModel):
     execute: bool = False       # 真实执行复选:槽位齐时真的调底层 API
 
 
-def _dry_run_once(scenarios: dict, llm, body: "DryRunBody", fallback_kb: str = '') -> dict:
+def _dry_run_once(scenarios: dict, llm, body: "DryRunBody") -> dict:
     """Read-only evaluation using the exact conversation plan."""
     from domains.metrology_assistant.tools import assistant as mta
     from domains.metrology_assistant.capability_plan import prepare_plan
@@ -140,9 +140,8 @@ def _dry_run_once(scenarios: dict, llm, body: "DryRunBody", fallback_kb: str = '
     scenario = extracted['scenario']
     out = {'input': body.text, 'scenario': scenario if scenario in scenarios else None}
     if scenario not in scenarios:
-        note = (f'未命中场景(将检索知识库「{fallback_kb}」兜底)' if fallback_kb
-                else '未命中场景(将答复暂不支持)')
-        return {**out, 'missing': True, 'note': note}
+        return {**out, 'missing': True,
+                'note': '未命中场景(将走知识库跨库检索兜底)'}
     cfg = scenarios[scenario]
     merged = mta.merge_slots(extracted, {})
     plan = prepare_plan(cfg, merged, body.text)
@@ -201,11 +200,7 @@ async def dry_run(body: DryRunBody, request: Request) -> dict:
         raise HTTPException(400, f"草案配置校验失败: {e}")
 
     llm = getattr(request.app.state, "llm_client", None)
-    fallback_kb = str((body.config or {}).get("fallback_kb") or "").strip()
-    if not fallback_kb:
-        from domains.metrology_assistant.scenario_config import load_fallback_kb
-        fallback_kb = load_fallback_kb()
-    out = _dry_run_once(scenarios, llm, body, fallback_kb)
+    out = _dry_run_once(scenarios, llm, body)
 
     if (body.execute and not out.get("missing")
             and out.get("action", {}).get("kind") == "chatbi"):

@@ -249,7 +249,7 @@ def _unsupported_notice(table=None, tried_kb=''):
     text = ('当前尚无已接入能力,请联系管理员配置。' if not labels else
             f"当前可咨询{len(labels)}类问题:{';'.join(labels[:10])}。请换个问法,或联系业务窗口人工咨询。")
     if tried_kb:
-        text = f"已检索知识库「{tried_kb}」,未找到相关资料。{text}"
+        text = f"已检索{tried_kb},未找到相关资料。{text}"
     return _notice('unsupported', '暂不支持此问题', text)
 
 
@@ -478,44 +478,62 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                           formatted={'kb': kb_name, 'conclusion': summary[:40], 'chunkCount': len(chunks)})
 
     def _fallback_answer(self, table, user_input, ctx, state, stage):
-        """未命中任何能力时的知识库兜底:默认库检索,有证据才答,否则引导。
+        """未命中任何能力时的知识库链路兜底:跨可访问库检索,有证据才答。
 
-        兜底与场景问答同一条证据红线——检索不到不编造,落回引导卡;
-        授权沿用 knowledge_graph 的 pack_params(角色/文档过滤)。
+        与 kb_search 同一条检索链(意图→图谱种子→向量/全文→综合回答,
+        用户裁决:不做指定库兜底,未命中直接走知识库链路)。按当前身份
+        ACL 过滤参与库——被拒库静默跳过,不向客户透拒权话术;无可用库/
+        无证据落引导卡;引用校验由检索层保证(与 /search REST 同一道红线)。
         """
-        from domains.metrology_assistant.scenario_config import load_fallback_kb
-        try:
-            kb_name = load_fallback_kb()
-        except Exception:  # noqa: BLE001
-            logger.exception('兜底知识库配置读取失败,按未配置处理')
-            kb_name = ''
-        if not kb_name:
-            return _unsupported_notice(table)
         trusted = (state.get('pack_params') or {}).get('knowledge_graph') or {}
-        doc_filter = trusted.get('doc_filter')
-        from domains.knowledge_graph import service
-        stage('assistant.retrieve', f'检索「{kb_name}」资料…')
+        doc_filter_raw = trusted.get('doc_filter')
+        from domains.knowledge_graph import acl as kg_acl
+        from domains.knowledge_graph import retrieval as kg_retrieval
+        from domains.knowledge_graph import runtime as kg_runtime
+        store = kg_runtime.get_kg_store(self._app_state)
+        user, roles = kg_acl.request_identity(
+            getattr(ctx, 'user_id', None), trusted.get('user_roles'))
         try:
-            evidence = service.retrieve_evidence(
-                self._app_state, kb_name, user_input,
-                conv_id=getattr(ctx, 'conv_id', None), user_id=getattr(ctx, 'user_id', None),
-                roles=trusted.get('user_roles'),
-                metadata_filter=doc_filter if isinstance(doc_filter, dict) else None)
-        except PermissionError:
-            return _notice('forbidden', '无权访问知识库', f'当前身份无权访问「{kb_name}」知识库。')
-        except ValueError as error:
-            return ToolResult(error_for_llm=str(error))
+            kbs = [k for k in store.list_kbs() if k.get('kind') != 'folder']
+            if kg_acl.has_identity(user, roles):
+                kbs, _denied = kg_acl.filter_kbs(store, kbs, user, roles)
+        except Exception:  # noqa: BLE001
+            logger.exception('兜底:知识库目录读取失败')
+            return ToolResult(error_for_llm='知识库检索失败,请稍后重试。')
+        if not kbs:
+            return _unsupported_notice(table)
+        doc_filter = None
+        if isinstance(doc_filter_raw, dict) and doc_filter_raw:
+            doc_filter = set()
+            for k in kbs:
+                ids = store.filter_doc_ids_by_metadata(k['id'], doc_filter_raw)
+                doc_filter |= (ids if ids is not None else set())
+        stage('assistant.retrieve', f'检索知识库资料({len(kbs)} 个库)…')
+        try:
+            result = kg_retrieval.answer_question_multi(
+                self._app_state, kbs, user_input,
+                conv_id=getattr(ctx, 'conv_id', None), doc_filter=doc_filter)
         except Exception:  # noqa: BLE001
             logger.exception('知识库兜底检索失败')
             return ToolResult(error_for_llm='知识库检索失败,请稍后重试。')
-        chunks = evidence.get('chunks') or []
-        if not chunks:
-            return _unsupported_notice(table, tried_kb=kb_name)
-        answer = compose_answer(ctx.llm_client, user_input, chunks, getattr(ctx, 'conv_id', None))
-        summary = _format_conclusion(answer, f'在「{kb_name}」库中未检索到相关依据')
-        artifact = _kg_evidence_artifact(evidence, chunks, answer, '知识库检索', 'answer', fallback=True)
-        return ToolResult(artifact=artifact, artifact_type='data', summary=summary,
-                          formatted={'kb': kb_name, 'conclusion': summary[:40], 'chunkCount': len(chunks)})
+        chunks = (result.get('sources') or {}).get('chunks') or []
+        answer = (result.get('answer') or '').strip()
+        if not chunks or not answer:
+            # 无召回或无回答:如实引导,不编造(证据红线与场景问答同款)
+            return _unsupported_notice(table, tried_kb='知识库')
+        artifact = {'type': 'kg_search_result', 'pack': 'metrology_assistant',
+                    'resultDisplay': 'card', 'answer': answer,
+                    'kb': result.get('kb') or {},
+                    'subgraph': result.get('subgraph') or {'nodes': [], 'edges': []},
+                    'sources': result.get('sources') or {},
+                    'cited_chunks': result.get('cited_chunks') or [],
+                    'scenario': '知识库检索', 'answer_kind': 'answer', 'fallback': True}
+        if result.get('kbs'):
+            artifact['kbs'] = result['kbs']
+        return ToolResult(artifact=artifact, artifact_type='data',
+                          summary=f'结论: {answer}',
+                          formatted={'kb': (result.get('kb') or {}).get('name', ''),
+                                     'chunkCount': len(chunks)})
 
     def _table_card(self, result, merged, stage):
         data = result.data

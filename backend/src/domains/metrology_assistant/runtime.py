@@ -26,8 +26,6 @@ _db_lock = threading.Lock()
 # revision 是单调 int,比对成本一次索引查询,可接受。
 _config_cache: dict | None = None
 _config_cache_rev: int = -1
-# 兜底知识库名(配置文档顶层 fallback_kb;空串=未配置,未命中直接引导)
-_config_fallback_kb: str = ""
 _config_cache_lock = threading.Lock()
 
 
@@ -65,12 +63,11 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
 
 def reset_runtime_cache() -> None:
     """测试辅助:清 DB 单例与配置缓存。"""
-    global _db, _config_cache, _config_cache_rev, _config_fallback_kb
+    global _db, _config_cache, _config_cache_rev
     with _db_lock:
         _db = None
     with _config_cache_lock:
         _config_cache, _config_cache_rev = None, -1
-        _config_fallback_kb = ""
 
 
 def cached_config() -> dict | None:
@@ -85,24 +82,16 @@ def cached_revision() -> int:
         return _config_cache_rev
 
 
-def set_cached_config(table: dict, revision: int, fallback_kb: str = "") -> None:
+def set_cached_config(table: dict, revision: int) -> None:
     """写入缓存(scenario_config 装载成功后调用)。"""
-    global _config_cache, _config_cache_rev, _config_fallback_kb
+    global _config_cache, _config_cache_rev
     with _config_cache_lock:
         _config_cache = table
         _config_cache_rev = int(revision)
-        _config_fallback_kb = str(fallback_kb or "")
-
-
-def cached_fallback_kb() -> str:
-    """缓存对应的兜底知识库名(空串=未配置)。"""
-    with _config_cache_lock:
-        return _config_fallback_kb
 
 
 def invalidate_config_cache() -> None:
     """管理页保存成功后失效缓存(下一次请求重读 DB)。"""
-    global _config_cache, _config_cache_rev, _config_fallback_kb
+    global _config_cache, _config_cache_rev
     with _config_cache_lock:
         _config_cache, _config_cache_rev = None, -1
-        _config_fallback_kb = ""

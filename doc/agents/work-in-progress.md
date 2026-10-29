@@ -25,16 +25,19 @@ selectConversation 竞态守卫误杀（代际计数器替代；3 例回归测�
 
 ## 智能客服知识库兜底（2026-10-29，已合入 main 随本轮部署）
 
-未命中任何能力时先检索兜底知识库（配置文档顶层 `fallback_kb`，管理页整档
-PUT 维护），有证据才按证据链回答，无证据/未配置落引导卡（已检索会注明）。
-授权沿用 knowledge_graph pack_params；联调预演未命中文案随配置变化；
-契约测试 9 例（tests/domains/test_metrology_kb_fallback.py）+ metrology 全量
-179 例绿；本地四服务（18080/13080/9771/9772）浏览器实测：兜底命中出
-「知识库检索」证据链卡、无证据如实不编造、BJ2026 走 9771 受控出进度卡、
-预演显示兜底文案。独占全量 pytest：2314 过/1 失败——test_mcp_server::
-test_full_roundtrip 网关 401 为测试顺序性偶发（同分支单跑 0.36s 过，
-分支改动仅 metrology 不涉 MCP 网关）；此前 41 失败+10 错为与另一会话
-并发撞测试库的假失败，独占重跑后全部消失。
+未命中任何能力时走**知识库链路兜底**（用户裁决，2026-10-29 二次定案：
+撤 `fallback_kb` 指定库配置——兜底=知识库链路本身，不是某一个库）。
+`_fallback_answer` 直调 `retrieval.answer_question_multi`（kb_search 同款
+跨库检索链），参与库按当前身份 ACL 过滤（被拒库静默跳过，不向客户透
+拒权话术——初版曾把"无权访问「X」知识库"透给客户，用户否决）；有证据
+出「知识库检索」证据链卡（fallback 标记+来源库清单），无证据/无可用库落
+「暂不支持」引导卡（已检索注明），检索异常如实 error_for_llm。
+`fallback_kb` 配置键/load_fallback_kb/runtime 缓存字段全撤（存量配置残留
+键被忽略）；dry-run 未命中文案改为"将走知识库跨库检索兜底"；管理页说明
+同步。链路图 pack-metrology-assistant（新增"知识库检索链"支路+兜底视图）
+与 flows/customer-service.md（⓪ 节）已体现新逻辑。契约测试重写 9 例
+（tests/domains/test_metrology_kb_fallback.py：跨库/ACL 过滤/无证据/无可用
+库/检索异常/命中不受影响）。
 后续台阶（未开工）：数据查询能力接入 ask_data 库层+pack_params 数据源
 白名单；管理页三组化+编辑抽屉契约只读收敛。
 

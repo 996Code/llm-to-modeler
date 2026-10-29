@@ -1,18 +1,14 @@
-"""未命中能力 → 知识库兜底 → 引导卡 的行为契约。
+"""未命中能力 → 知识库链路兜底(跨库检索)→ 引导卡 的行为契约。
 
-主路径:默认库有证据 → 证据链回答(与 kg 场景同一条红线);
-边界:无证据/未配置/拒权/命中场景不受影响;dry-run 文案随配置变化。
+主路径:跨可访问库检索有证据 → 证据链回答(与 kb_search 同一条链);
+边界:无证据/无可用库/检索异常/ACL 过滤/命中场景不受影响;dry-run 文案。
 """
 from copy import deepcopy
 from types import SimpleNamespace
 
-import pytest
-
 from domains.chatbi.controlled import ControlledResult
 from domains.metrology_assistant import runtime, store
-from domains.metrology_assistant.scenario_config import (
-    ConfigValidationError, validate_config,
-)
+from domains.metrology_assistant.scenario_config import validate_config
 from domains.metrology_assistant.tools import assistant as mta
 
 
@@ -43,6 +39,22 @@ class LLM:
         return deepcopy(self._extract)
 
 
+class StubKgStore:
+    """kg 目录桩:list_kbs/get_all_kb_acl/doc_filter 三件套。"""
+
+    def __init__(self, kbs, acl_map=None):
+        self._kbs, self._acl = kbs, acl_map or {}
+
+    def list_kbs(self):
+        return self._kbs
+
+    def get_all_kb_acl(self):
+        return self._acl
+
+    def filter_doc_ids_by_metadata(self, kb_id, flt):
+        return None  # None=该库不过滤
+
+
 def capability():
     return {'label': 'Stock lookup', 'intent': 'look up stock', 'required': {},
             'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'stock',
@@ -54,100 +66,129 @@ def context(llm, conv='kb-fallback'):
                            user_id='alice', emit=lambda *a: None)
 
 
-def answered():
-    return {'decision': 'answered', 'conclusion': '送检需 5 个工作日',
-            'evidence': [{'text': '第五条:常规器具 5 个工作日', 'chunk_refs': [1]}],
-            'suggestion': '提前预约'}
+def _kbs():
+    return [{'id': 'kb-1', 'name': '检定规程', 'kind': 'kb'},
+            {'id': 'kb-f', 'name': '目录', 'kind': 'folder'},
+            {'id': 'kb-2', 'name': '内部文件', 'kind': 'kb'}]
 
 
-def setup_tool(monkeypatch, cfg=None, fallback='检定规程', retrieve=None):
-    """统一装配:场景表 + 兜底配置 + kg 检索桩。"""
-    table = {'warehouse::stock': cfg or capability()}
+def multi_result(answer='送检需 5 个工作日'):
+    return {'answer': answer, 'kb': {'id': 'kb-1', 'name': '检定规程'},
+            'kbs': [{'id': 'kb-1', 'name': '检定规程'},
+                    {'id': 'kb-2', 'name': '内部文件'}],
+            'subgraph': {'nodes': [], 'edges': []},
+            'sources': {'entities': [], 'chunks': [
+                {'docId': 'd1', 'docName': '周期要点.md', 'text': '第五条:常规器具 5 个工作日',
+                 'score': 0.9}]},
+            'cited_chunks': [1]}
+
+
+def setup_tool(monkeypatch, kbs=None, acl_map=None, multi=None):
+    """统一装配:场景表 + kg 目录桩 + 跨库检索桩。"""
+    table = {'warehouse::stock': capability()}
     monkeypatch.setattr(mta, '_runtime_scenarios', lambda: table)
-    monkeypatch.setattr('domains.metrology_assistant.scenario_config.load_fallback_kb',
-                        lambda: fallback)
-    if retrieve is not None:
-        monkeypatch.setattr('domains.knowledge_graph.service.retrieve_evidence', retrieve)
+    monkeypatch.setattr('domains.knowledge_graph.runtime.get_kg_store',
+                        lambda state: StubKgStore(kbs if kbs is not None else _kbs(), acl_map))
+    if multi is not None:
+        monkeypatch.setattr('domains.knowledge_graph.retrieval.answer_question_multi', multi)
     return mta.MetrologyAssistantTool(object()), table
 
 
 def test_fallback_answers_with_evidence(monkeypatch):
     seen = {}
 
-    def retrieve(app, kb, query, **kwargs):
-        seen.update(kb=kb, query=query, **kwargs)
-        return {'kb': {'id': 'kb-1', 'name': '检定规程'},
-                'chunks': [{'text': '第五条:常规器具 5 个工作日', 'score': 0.9}],
-                'subgraph': {'nodes': [], 'edges': []}}
+    def multi(app, kbs, query, **kwargs):
+        seen.update(kbs=kbs, query=query, **kwargs)
+        return multi_result()
 
-    tool, _ = setup_tool(monkeypatch, retrieve=retrieve)
-    ctx = context(LLM(extract={'scenario': 'other'}, conclusion=answered()))
+    tool, _ = setup_tool(monkeypatch, multi=multi)
+    ctx = context(LLM(extract={'scenario': 'other'}))
     result = tool.execute({'user_input': '送检要几个工作日', 'pack_params': {
         'knowledge_graph': {'user_roles': ['staff'], 'doc_filter': {'team': 'sales'}}}}, ctx)
-    assert seen['kb'] == '检定规程' and seen['query'] == '送检要几个工作日'
-    assert seen['roles'] == ['staff'] and seen['metadata_filter'] == {'team': 'sales'}
+    # 跨库检索:folder 排除,其余全参与;身份与 doc_filter 透传
+    assert [k['id'] for k in seen['kbs']] == ['kb-1', 'kb-2']
+    assert seen['query'] == '送检要几个工作日'
+    assert seen['doc_filter'] is not None          # doc_filter 生效(桩返回 None=全通过)
     assert result.error_for_llm is None
     assert result.artifact['type'] == 'kg_search_result'
-    assert result.artifact['answer_kind'] == 'answer'
     assert result.artifact['fallback'] is True
     assert result.artifact['scenario'] == '知识库检索'
+    assert result.artifact['answer'] == '送检需 5 个工作日'
     assert result.artifact['cited_chunks'] == [1]
+    assert result.artifact['kbs'] and len(result.artifact['kbs']) == 2
     assert result.summary.startswith('结论:')
     assert result.formatted['chunkCount'] == 1
     assert store.get_flow(runtime.get_pack_db(), ctx.conv_id) is None
 
 
+def test_fallback_acl_filters_denied_kbs(monkeypatch):
+    """被 ACL 拒的库静默跳过(参与面收窄),不出面向客户的拒权话术。"""
+    seen = {}
+
+    def multi(app, kbs, query, **kwargs):
+        seen.update(kbs=kbs)
+        return multi_result()
+
+    acl = {'kb-2': [{'subjectType': 'user', 'subjectId': 'someone-else'}]}
+    tool, _ = setup_tool(monkeypatch, acl_map=acl, multi=multi)
+    ctx = context(LLM(extract={'scenario': 'other'}))
+    result = tool.execute({'user_input': '随便问个文档问题'}, ctx)
+    assert [k['id'] for k in seen['kbs']] == ['kb-1']   # kb-2 被过滤
+    assert result.artifact.get('fallback') is True       # 正常出证据卡,无 forbidden
+
+
+def test_fallback_all_denied_returns_guidance(monkeypatch):
+    called = []
+    acl = {'kb-1': [{'subjectType': 'user', 'subjectId': 'x'}],
+           'kb-2': [{'subjectType': 'user', 'subjectId': 'x'}]}
+    tool, table = setup_tool(
+        monkeypatch, acl_map=acl,
+        multi=lambda *a, **kw: called.append(1) or multi_result())
+    ctx = context(LLM(extract={'scenario': 'other'}))
+    result = tool.execute({'user_input': '随便问'}, ctx)
+    assert not called                                  # 无可用库不发起检索
+    assert result.artifact['status'] == 'unsupported'
+    assert '已检索' not in result.artifact['message']
+    assert 'Stock lookup' in result.artifact['message']
+
+
 def test_fallback_without_evidence_returns_guidance(monkeypatch):
     tool, table = setup_tool(
-        monkeypatch, retrieve=lambda *a, **kw: {'chunks': []})
+        monkeypatch, multi=lambda *a, **kw: {'sources': {'chunks': []}, 'answer': ''})
     ctx = context(LLM(extract={'scenario': 'other'}))
     result = tool.execute({'user_input': '今天天气怎么样'}, ctx)
     assert result.artifact['type'] == 'metrology_notice'
     assert result.artifact['status'] == 'unsupported'
-    assert '已检索知识库「检定规程」' in result.artifact['message']
+    assert '已检索知识库,未找到相关资料' in result.artifact['message']
     assert 'Stock lookup' in result.artifact['message']
 
 
-def test_fallback_not_configured_skips_retrieval(monkeypatch):
-    called = []
+def test_fallback_answer_without_chunks_still_guidance(monkeypatch):
+    """有回答文本但零召回片段:证据红线优先,不采信。"""
     tool, _ = setup_tool(
-        monkeypatch, fallback='',
-        retrieve=lambda *a, **kw: called.append(1) or {'chunks': [{'text': 'x'}]})
-    ctx = context(LLM(extract={'scenario': 'other'}))
-    result = tool.execute({'user_input': '今天天气怎么样'}, ctx)
-    assert not called
-    assert result.artifact['status'] == 'unsupported'
-    assert '已检索知识库' not in result.artifact['message']
-
-
-def test_fallback_permission_denied_is_forbidden_notice(monkeypatch):
-    def denied(*a, **kw):
-        raise PermissionError('denied')
-
-    tool, _ = setup_tool(monkeypatch, retrieve=denied)
+        monkeypatch, multi=lambda *a, **kw: {'answer': '看起来能答', 'sources': {
+            'chunks': [{'text': 'x'}]}} | {'sources': {'chunks': []}})
     ctx = context(LLM(extract={'scenario': 'other'}))
     result = tool.execute({'user_input': '随便问'}, ctx)
-    assert result.artifact['status'] == 'forbidden'
-    assert '无权访问' in result.artifact['message']
-
-
-def test_fallback_config_error_degrades_to_guidance(monkeypatch, caplog):
-    def broken():
-        raise RuntimeError('config store down')
-
-    table = {'warehouse::stock': capability()}
-    monkeypatch.setattr(mta, '_runtime_scenarios', lambda: table)
-    monkeypatch.setattr('domains.metrology_assistant.scenario_config.load_fallback_kb', broken)
-    ctx = context(LLM(extract={'scenario': 'other'}))
-    result = mta.MetrologyAssistantTool(object()).execute({'user_input': '随便问'}, ctx)
     assert result.artifact['status'] == 'unsupported'
+
+
+def test_fallback_retrieval_failure_honest_error(monkeypatch):
+    def boom(*a, **kw):
+        raise RuntimeError('retrieval down')
+
+    tool, _ = setup_tool(monkeypatch, multi=boom)
+    ctx = context(LLM(extract={'scenario': 'other'}))
+    result = tool.execute({'user_input': '随便问'}, ctx)
+    assert result.artifact is None
+    assert '知识库检索失败' in result.error_for_llm
 
 
 def test_matched_scenario_bypasses_fallback(monkeypatch):
     called = []
     tool, _ = setup_tool(
         monkeypatch,
-        retrieve=lambda *a, **kw: called.append(1) or {'chunks': [{'text': 'x'}]})
+        multi=lambda *a, **kw: called.append(1) or multi_result())
     from domains.chatbi import datasources, runtime as bi_runtime
     monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
     monkeypatch.setattr(datasources, 'get_datasource', lambda db, ds: SimpleNamespace(
@@ -168,24 +209,12 @@ def test_dry_run_note_reflects_fallback():
     from domains.metrology_assistant.config_api import DryRunBody, _dry_run_once
     body = DryRunBody(text='随便问')
     llm = LLM(extract={'scenario': 'other'})
-    out = _dry_run_once({'warehouse::stock': capability()}, llm, body, '检定规程')
-    assert out['missing'] is True and out['scenario'] is None
-    assert '「检定规程」兜底' in out['note']
     out = _dry_run_once({'warehouse::stock': capability()}, llm, body)
-    assert '暂不支持' in out['note']
+    assert out['missing'] is True and out['scenario'] is None
+    assert '知识库跨库检索兜底' in out['note']
 
 
-def test_validate_config_fallback_kb_rules():
-    assert validate_config({'scenarios': {}, 'fallback_kb': '检定规程'})
+def test_validate_config_without_fallback_kb():
     assert validate_config({'scenarios': {}})
-    with pytest.raises(ConfigValidationError):
-        validate_config({'scenarios': {}, 'fallback_kb': ''})
-    with pytest.raises(ConfigValidationError):
-        validate_config({'scenarios': {}, 'fallback_kb': 3})
-
-
-def test_runtime_cache_carries_fallback_kb():
-    runtime.set_cached_config({'a': {}}, 7, '检定规程')
-    assert runtime.cached_fallback_kb() == '检定规程'
-    runtime.reset_runtime_cache()
-    assert runtime.cached_fallback_kb() == ''
+    # fallback_kb 已废除:存量配置里残留该键不再校验(忽略即可)
+    assert validate_config({'scenarios': {}, 'fallback_kb': '历史残留'})
