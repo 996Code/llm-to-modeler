@@ -34,7 +34,7 @@ selectConversation 竞态守卫误杀（代际计数器替代；3 例回归测�
 「暂不支持」引导卡（已检索注明），检索异常如实 error_for_llm。
 `fallback_kb` 配置键/load_fallback_kb/runtime 缓存字段全撤（存量配置残留
 键被忽略）；dry-run 未命中文案改为"将走知识库跨库检索兜底"；管理页说明
-同步。链路图 pack-metrology-assistant（新增"知识库检索链"支路+兜底视图）
+同步。链路图 customer-service-routing（总图吸收旧 插件总览/能力路由/端到端 三张,渠道接入+能力接入+兜底全在一张）与 flows/customer-service.md（⓪ 节）
 与 flows/customer-service.md（⓪ 节）已体现新逻辑。契约测试重写 9 例
 （tests/domains/test_metrology_kb_fallback.py：跨库/ACL 过滤/无证据/无可用
 库/检索异常/命中不受影响）。

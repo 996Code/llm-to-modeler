@@ -1,0 +1,387 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "智能客服总链路：多渠道接入与能力路由分派",
+  "output": "../pack/customer-service-routing.html",
+  "locale": "zh-CN",
+  "animation": "trace",
+  "quality_profile": "showcase",
+  "views": [
+   {
+    "id": "channels",
+    "label": "渠道接入",
+    "focus": [
+     "ch_std",
+     "ch_embed",
+     "ch_svc",
+     "engine"
+    ],
+    "note": "三个渠道同一入口:独立窗口(anonymous)、嵌入宿主(INIT 下发 userId/角色)、客服窗口(packs 单声明→引擎直通零路由 LLM);会话按用户隔离。"
+   },
+   {
+    "id": "capability",
+    "label": "能力接入",
+    "focus": [
+     "register",
+     "snapshot",
+     "gate",
+     "override",
+     "table"
+    ],
+    "note": "能力两条来路:MCP 服务登记(人工一步)→探测快照(TTL 后台重探)→声明门禁(描述≥6字·schema 合法)→自动合成;管理端场景表只覆盖话术(契约始终取服务端当前声明)。路由表=覆盖∪自动,每轮现算。"
+   },
+   {
+    "id": "dispatch",
+    "label": "路由分派",
+    "focus": [
+     "table",
+     "extract",
+     "ask",
+     "dispatch"
+    ],
+    "note": "两段式提取(先选能力再提参数·类型校验);缺必填槽位→追问挂起(问题令牌),补答断点续跑;槽位齐备→场景分发(计划·数据源绑定)。"
+   },
+   {
+    "id": "links",
+    "label": "三链路执行",
+    "focus": [
+     "dispatch",
+     "kg",
+     "bi",
+     "cards"
+    ],
+    "note": "知识类场景→知识库检索·证据结论(有据才答);业务查询→受控执行(schema 验参→MCP 业务平台信封回传);结果卡经 SSE 推流。"
+   },
+   {
+    "id": "fallback",
+    "label": "兜底",
+    "focus": [
+     "extract",
+     "fallback",
+     "kg"
+    ],
+    "note": "未命中任何能力→跨库兜底(全部可访问库,身份 ACL 过滤,被拒库静默跳过);有证据出证据链卡,零召回落「暂不支持」引导卡——不做指定库配置。"
+   }
+  ]
+ },
+ "lanes": [
+  {
+   "id": "fe",
+   "label": "渠道与呈现"
+  },
+  {
+   "id": "engine",
+   "label": "对话引擎"
+  },
+  {
+   "id": "assistant",
+   "label": "智能客服编排"
+  },
+  {
+   "id": "bi",
+   "label": "智能问数"
+  },
+  {
+   "id": "kg",
+   "label": "知识库"
+  },
+  {
+   "id": "mcp",
+   "label": "MCP 服务(能力源)"
+  },
+  {
+   "id": "admin",
+   "label": "管理面·兜底",
+   "variant": "exception"
+  }
+ ],
+ "phases": [
+  {
+   "id": "intake",
+   "label": "渠道与能力接入",
+   "fromCol": 0,
+   "toCol": 2
+  },
+  {
+   "id": "route",
+   "label": "路由分派",
+   "fromCol": 3,
+   "toCol": 4,
+   "variant": "emphasis"
+  },
+  {
+   "id": "exec",
+   "label": "执行与呈现",
+   "fromCol": 5,
+   "toCol": 5
+  }
+ ],
+ "nodes": [
+  {
+   "id": "ch_std",
+   "lane": "fe",
+   "col": 0,
+   "type": "frontend",
+   "label": "独立窗口",
+   "sublabel": "直接访问",
+   "width": 110
+  },
+  {
+   "id": "ch_embed",
+   "lane": "fe",
+   "col": 1,
+   "type": "frontend",
+   "label": "嵌入宿主",
+   "sublabel": "INIT 身份·画布",
+   "width": 120
+  },
+  {
+   "id": "ch_svc",
+   "lane": "fe",
+   "col": 2,
+   "type": "frontend",
+   "label": "客服窗口",
+   "sublabel": "packs 单声明",
+   "width": 120
+  },
+  {
+   "id": "register",
+   "lane": "mcp",
+   "col": 0,
+   "type": "security",
+   "label": "MCP 登记",
+   "sublabel": "人工一步·地址背书",
+   "width": 125
+  },
+  {
+   "id": "snapshot",
+   "lane": "mcp",
+   "col": 1,
+   "type": "database",
+   "label": "探测快照",
+   "sublabel": "TTL 后台重探",
+   "width": 120
+  },
+  {
+   "id": "gate",
+   "lane": "mcp",
+   "col": 2,
+   "type": "security",
+   "label": "声明门禁",
+   "sublabel": "描述≥6字·schema 合法",
+   "width": 140
+  },
+  {
+   "id": "engine",
+   "lane": "engine",
+   "col": 2,
+   "type": "backend",
+   "label": "引擎直通",
+   "sublabel": "SSE·会话隔离",
+   "width": 115
+  },
+  {
+   "id": "ask",
+   "lane": "engine",
+   "col": 3,
+   "type": "backend",
+   "label": "缺槽追问",
+   "sublabel": "令牌·补答续跑",
+   "width": 120
+  },
+  {
+   "id": "override",
+   "lane": "admin",
+   "col": 3,
+   "type": "database",
+   "label": "场景表覆盖",
+   "sublabel": "只改话术·DB",
+   "width": 125
+  },
+  {
+   "id": "table",
+   "lane": "assistant",
+   "col": 1,
+   "type": "backend",
+   "label": "路由表合成",
+   "sublabel": "覆盖∪自动·每轮现算",
+   "width": 140
+  },
+  {
+   "id": "extract",
+   "lane": "assistant",
+   "col": 2,
+   "type": "backend",
+   "label": "两段式提取",
+   "sublabel": "选能力·提参数",
+   "width": 130
+  },
+  {
+   "id": "dispatch",
+   "lane": "assistant",
+   "col": 3,
+   "type": "backend",
+   "label": "场景分发",
+   "sublabel": "计划·数据源绑定",
+   "width": 130
+  },
+  {
+   "id": "fallback",
+   "lane": "admin",
+   "col": 4,
+   "type": "database",
+   "label": "跨库兜底",
+   "sublabel": "未命中·ACL 过滤",
+   "width": 120
+  },
+  {
+   "id": "kg",
+   "lane": "kg",
+   "col": 5,
+   "type": "database",
+   "label": "知识库链",
+   "sublabel": "选库/跨库·有据才答",
+   "width": 140
+  },
+  {
+   "id": "bi",
+   "lane": "bi",
+   "col": 4,
+   "type": "backend",
+   "label": "受控执行",
+   "sublabel": "验参→MCP·信封分态",
+   "width": 135
+  },
+  {
+   "id": "cards",
+   "lane": "fe",
+   "col": 5,
+   "type": "frontend",
+   "label": "SSE 结果卡",
+   "sublabel": "证据·进度·表格·引导",
+   "width": 140
+  }
+ ],
+ "edges": [
+  {
+   "id": "e1",
+   "from": "ch_std",
+   "to": "engine",
+   "label": "提问"
+  },
+  {
+   "id": "e2",
+   "from": "ch_embed",
+   "to": "engine",
+   "label": "提问(带身份)"
+  },
+  {
+   "id": "e3",
+   "from": "ch_svc",
+   "to": "engine",
+   "label": "直通",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e4",
+   "from": "register",
+   "to": "snapshot",
+   "label": "登记即探测"
+  },
+  {
+   "id": "e5",
+   "from": "snapshot",
+   "to": "gate",
+   "label": "声明质检"
+  },
+  {
+   "id": "e6",
+   "from": "gate",
+   "to": "table",
+   "label": "自动合成场景"
+  },
+  {
+   "id": "e7",
+   "from": "override",
+   "to": "table",
+   "label": "话术覆盖"
+  },
+  {
+   "id": "e8",
+   "from": "engine",
+   "to": "table",
+   "label": "交给客服编排"
+  },
+  {
+   "id": "e9",
+   "from": "table",
+   "to": "extract",
+   "label": "场景表就绪"
+  },
+  {
+   "id": "e10",
+   "from": "extract",
+   "to": "ask",
+   "label": "缺必填槽位"
+  },
+  {
+   "id": "e11",
+   "from": "ask",
+   "to": "dispatch",
+   "label": "补答·续跑"
+  },
+  {
+   "id": "e12",
+   "from": "extract",
+   "to": "dispatch",
+   "label": "槽位齐备",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e13",
+   "from": "extract",
+   "to": "fallback",
+   "label": "未命中任何能力"
+  },
+  {
+   "id": "e14",
+   "from": "fallback",
+   "to": "kg",
+   "label": "跨库·身份过滤"
+  },
+  {
+   "id": "e15",
+   "from": "dispatch",
+   "to": "kg",
+   "label": "知识类场景",
+   "variant": "emphasis"
+  },
+  {
+   "id": "e16",
+   "from": "dispatch",
+   "to": "bi",
+   "label": "业务查询场景"
+  },
+  {
+   "id": "e18",
+   "from": "kg",
+   "to": "cards",
+   "label": "证据链卡"
+  },
+  {
+   "id": "e19",
+   "from": "engine",
+   "to": "extract",
+   "label": "进入编排"
+  }
+ ],
+ "mainPath": [
+  "ch_svc",
+  "engine",
+  "extract",
+  "dispatch",
+  "kg",
+  "cards"
+ ]
+}

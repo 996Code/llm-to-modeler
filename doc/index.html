@@ -125,11 +125,11 @@
 
   <h3>计量智能客服 <span class="en">metrology_assistant</span></h3>
   <div class="grid">
-    <a class="card" href="pack/pack-metrology-assistant.html"><div class="name">插件总览</div><div class="note">通用编排：两段式提取（选能力→按声明提参数）→追问令牌→prepare_plan（required 全集/选库规则/数据源强校验）→受控执行→带引用结论；场景表=DB 覆盖∪MCP 自动合成；未命中走知识库链路兜底（跨可访问库检索）。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/pack-metrology-service-chain.html"><div class="name">端到端链路</div><div class="note">一次提问的完整路径：嵌入侧栏发送→SSE 入口（历史+压缩）→引擎直通→槽位提取与合并→缺槽追问挂起/answers 断点续跑→场景分发→双内核执行→结果卡渲染，全程落库与链路观测。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/customer-service-routing.html"><div class="name">总链路·多渠道路由分派</div><div class="note">核心一张图：三渠道接入（独立/嵌入宿主/客服窗口 packs 直通）→MCP 能力接入（登记→探测→声明门禁→自动合成）∪场景表话术覆盖→路由表每轮现算→两段式提取·追问令牌→场景分发三链路（知识库/受控执行→MCP/跨库兜底）→SSE 结果卡。五章引导：渠道/能力/分派/三链路/兜底。</div><span class="tag">workflow</span></a>
     <a class="card" href="pack/pack-metrology-code-chain.html"><div class="name">调用链·三链路协作</div><div class="note">知识库 · 智能问数 · MCP 怎么协作：知识类场景→知识库检索·证据结论（有据才答）；业务查询→受控执行（schema 验参）→MCP 业务平台信封回传；未命中任何能力→跨库兜底（身份 ACL 过滤）。业务语言标注，五章引导视图。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/customer-service-auto-routing.html"><div class="name">能力路由（注册即识别）</div><div class="note">MCP 工具声明自动接入：声明门禁（描述≥6字/schema 合法）、server::tool 身份、覆盖只改话术契约取服务端当前声明、TTL 后台重探与行级重置。</div><span class="tag">workflow</span></a>
-    <a class="card" href="pack/metrology-code-walkthrough.html"><div class="name">代码级走读（单文件：讲解+两张内嵌图）</div><div class="note">函数级行号讲解：启动装配、SSE 桥、四节点、七步管线、追问编排、前端消费、落库表。内嵌图为 10-27 基线；最新链路形态（含知识库兜底）看上面两张独立图。</div><span class="tag">guide</span></a>
+    <a class="card" href="pack/customer-service-example.html"><div class="name">业务链路实例</div><div class="note">两个真实场景走全链：委托单进度查询（业务查询→MCP 信封）与强检判定（知识类→选库→证据结论），看数据在每一步的形态。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/customer-service-demo.html"><div class="name">演示链路（竞标/测试数据）</div><div class="note">面向演示场面的链路脚本：测试数据下的完整问答走位，配演示节奏。</div><span class="tag">workflow</span></a>
+    <a class="card" href="pack/metrology-code-walkthrough.html"><div class="name">代码级走读（单文件：讲解+两张内嵌图）</div><div class="note">函数级行号讲解：启动装配、SSE 桥、四节点、七步管线、追问编排、前端消费、落库表。内嵌图为 10-27 基线；最新链路形态（含知识库兜底）看上面两张链路图。</div><span class="tag">guide</span></a>
   </div>
 
   <h3>请假申请 <span class="en">leave_application（插件开发教学范例）</span></h3>
