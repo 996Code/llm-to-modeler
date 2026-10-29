@@ -145,9 +145,9 @@ SCENARIOS = {
                    "conclusion": "qualification"},
     },
     "instrument_info": {
-        "label": "器具检测费/检校周期/强检归类等价目信息查询",
-        "intent": "问器具的检测费/收费标准/检校周期(多久检一次/复检"
-                  "时间间隔,不是单次耗时)/强检目录归类/技术规程号",
+        "label": "器具检测费/测量范围/准确度/检校周期/强检归类等价目信息查询",
+        "intent": "问器具的检测费/收费标准/测量范围/准确度/检校周期(多久检"
+                  "一次/复检时间间隔,不是单次耗时)/强检目录归类/技术规程号",
         "required": {
             "slot": "instrument",
             "header": INSTRUMENT_HEADER,
@@ -176,13 +176,19 @@ SCENARIOS = {
     },
 }
 
+# 价目查询初版意图原文:路由 LLM 只读 label/intent 选能力,初版未列
+# 测量范围/准确度,"查 X 的测量范围"这类字段级提问选不中能力——
+# 存量未改写配置按此精确相等识别,装载时原位升级到现行文本
+_INSTRUMENT_INFO_INTENT_V1 = ("问器具的检测费/收费标准/检校周期(多久检一次/复检"
+                              "时间间隔,不是单次耗时)/强检目录归类/技术规程号")
+
 
 def upgrade_legacy_scenario(key: str, cfg: dict) -> dict:
     """Recognize only original stored demo declarations; never writes config.
 
     三个计量结论场景的原始存量声明不带 query_template——按旧运行时
-    语义显式补全,升级后行为与旧版一致;人工改过的配置不匹配精确相等
-    条件,不会被覆盖。
+    语义显式补全;价目查询按初版意图原文识别后换现行描述(补测量
+    范围/准确度);人工改过的配置不匹配精确相等条件,不会被覆盖。
     """
     from copy import deepcopy
     out = deepcopy(cfg)
@@ -212,6 +218,10 @@ def upgrade_legacy_scenario(key: str, cfg: dict) -> dict:
         template = ('{instrument} 检测 耗时 工作日' if key == 'turnaround'
                     else '{instrument} 检测 资质 承接范围')
         out['action'].setdefault('query_template', template)
+    elif (key == 'instrument_info' and action == SCENARIOS[key]['action']
+            and cfg.get('intent') == _INSTRUMENT_INFO_INTENT_V1):
+        out['label'] = SCENARIOS[key]['label']
+        out['intent'] = SCENARIOS[key]['intent']
     return out
 
 

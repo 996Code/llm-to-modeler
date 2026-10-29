@@ -248,6 +248,30 @@ def test_only_exact_stored_legacy_configuration_is_upgraded():
     assert upgrade_legacy_scenario('custom', original) == original
 
 
+def test_stored_v1_instrument_intent_is_upgraded_to_current_wording():
+    """存量未改写配置的价目意图原文 → 装载时原位升级为含测量范围/准确度的现行文本。
+
+    路由 LLM 只读 label/intent 选能力,初版未列"测量范围",字段级提问
+    (查 X 的测量范围)选不中能力而落知识库兜底——升级后无需改 DB 即命中。
+    """
+    from domains.metrology_assistant.legacy_demo import (
+        SCENARIOS, upgrade_legacy_scenario, _INSTRUMENT_INFO_INTENT_V1,
+    )
+    stored = {**deepcopy(SCENARIOS['instrument_info']),
+              'intent': _INSTRUMENT_INFO_INTENT_V1}
+    got = upgrade_legacy_scenario('instrument_info', stored)
+    assert got['intent'] == SCENARIOS['instrument_info']['intent']
+    assert '测量范围' in got['intent'] and '准确度' in got['intent']
+    assert got['label'] == SCENARIOS['instrument_info']['label']
+    assert stored['intent'] == _INSTRUMENT_INFO_INTENT_V1  # 原对象不被改写
+    # 人工润色过的 intent 不匹配原文,保持不动
+    polished = {**deepcopy(SCENARIOS['instrument_info']), 'intent': '人工改过的意图'}
+    assert upgrade_legacy_scenario('instrument_info', polished) == polished
+    # 现行种子文本(已是新版)不触发重复改写
+    current = deepcopy(SCENARIOS['instrument_info'])
+    assert upgrade_legacy_scenario('instrument_info', current) == current
+
+
 def test_subject_slot_query_alias_and_normalization():
     from domains.metrology_assistant.capability_plan import prepare_plan
     cfg = {'label': 'x', 'intent': 'x', 'required': {

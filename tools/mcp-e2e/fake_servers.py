@@ -250,7 +250,7 @@ EQUIPMENT_DEVICES = {
 }
 
 # 器具价目夹具(AI.xlsx 转换,已清洗: 去导出 HTML 标签/尾逗号,数值转 int):
-# 检测费/强检一二级目录(null=不在强检目录)/检校周期/技术规程
+# 测量范围/准确度/检测费/强检一二级目录(null=不在强检目录)/检校周期/技术规程
 METROLOGY_INSTRUMENTS = json.loads(
     (Path(__file__).resolve().parent / "metrology_instruments.json")
     .read_text(encoding="utf-8"))
@@ -269,7 +269,8 @@ def build_metrology_server() -> Starlette:
     - query_progress: 委托单检测进度(归属校验),业务信封 ok / forbidden
       (单存在但不属于当前主体) / not_found(单不存在)——受控执行方先判
       信封再归一,forbidden 不再被当成成功数据行;
-    - query_instrument: 器具价目(检测费/强检目录/检校周期/技术规程),
+    - query_instrument: 器具价目(测量范围/准确度/检测费/强检目录/
+      检校周期/技术规程),
       名称精确→包含两级匹配,可叠加型号过滤;多行命中全返回
       (如同名器具不同量程价目不同);
     - query_appointment: 按日期查当日预约送检单(date 槽位链路);
@@ -290,8 +291,9 @@ def build_metrology_server() -> Starlette:
                          "required": ["order_no"]}),
                 types.Tool(
                     name="query_instrument",
-                    description="查询器具价目信息: 检测费/强检目录归类/"
-                                "检校周期/技术规程(名称支持模糊匹配)",
+                    description="查询器具价目信息: 检测费/测量范围/准确度/"
+                                "强检目录归类/检校周期/技术规程"
+                                "(名称支持模糊匹配,可按型号过滤)",
                     inputSchema={"type": "object",
                                  "properties": {
                                      "name": {"type": "string",
