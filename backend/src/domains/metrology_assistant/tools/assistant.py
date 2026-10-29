@@ -223,6 +223,19 @@ def _notice(status, title, message, order_no=''):
     return ToolResult(artifact=artifact, artifact_type='data', summary=message)
 
 
+def _kg_evidence_artifact(evidence, chunks, answer, label, kind, **extra):
+    """kg 证据链结果卡(场景问答与兜底问答共用同一份投影)。"""
+    return {'type': 'kg_search_result', 'pack': 'metrology_assistant', 'resultDisplay': 'card',
+            'answer': answer, 'kb': evidence.get('kb') or {},
+            'subgraph': evidence.get('subgraph') or {'nodes': [], 'edges': []},
+            'sources': {'entities': [n.get('name') for n in (evidence.get('subgraph') or {}).get('nodes') or []][:20],
+                        'chunks': [{'kbId': (evidence.get('kb') or {}).get('id'),
+                                    **{k: c.get(k) for k in ('docId', 'docName', 'score', 'seq', 'childSeq', 'parentContext')},
+                                    'text': (c.get('text') or '').strip()[:1200]} for c in chunks]},
+            'cited_chunks': sorted({r for i in answer['evidence'] for r in i['chunk_refs']}),
+            'scenario': label, 'answer_kind': kind, **extra}
+
+
 def resolve_kb_for_purpose(purpose):
     return MANDATORY_CHECK_KB if purpose in STRONG_INSPECTION_PURPOSES else REGULATION_KB
 
@@ -230,11 +243,13 @@ def resolve_kb_for_purpose(purpose):
 _kb_from_rules = kb_from_rules
 
 
-def _unsupported_notice(table=None):
+def _unsupported_notice(table=None, tried_kb=''):
     table = _runtime_scenarios() if table is None else table
     labels = [c.get('label', k) for k, c in table.items()]
     text = ('当前尚无已接入能力,请联系管理员配置。' if not labels else
             f"当前可咨询{len(labels)}类问题:{';'.join(labels[:10])}。请换个问法,或联系业务窗口人工咨询。")
+    if tried_kb:
+        text = f"已检索知识库「{tried_kb}」,未找到相关资料。{text}"
     return _notice('unsupported', '暂不支持此问题', text)
 
 
@@ -295,7 +310,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 extracted = extract_slots(ctx.llm_client, user_input, background, getattr(ctx, 'conv_id', None), table)
                 scenario = extracted['scenario']
                 if scenario not in table:
-                    return _unsupported_notice(table)
+                    return self._fallback_answer(table, user_input, ctx, state, stage)
                 cfg = table[scenario]
                 base = background.get(scenario) or {}
                 if flow and flow.get('scenario') == scenario:
@@ -457,16 +472,48 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         if not answer['evidence']:
             answer['evidence_gap'] = gap if not chunks else '资料不足以支撑'
         summary = _format_conclusion(answer, gap if not chunks else '资料不足以支撑')
-        artifact = {'type': 'kg_search_result', 'pack': 'metrology_assistant', 'resultDisplay': 'card',
-                    'answer': answer, 'kb': evidence.get('kb') or {},
-                    'subgraph': evidence.get('subgraph') or {'nodes': [], 'edges': []},
-                    'sources': {'entities': [n.get('name') for n in (evidence.get('subgraph') or {}).get('nodes') or []][:20],
-                                'chunks': [{'kbId': (evidence.get('kb') or {}).get('id'),
-                                            **{k: c.get(k) for k in ('docId', 'docName', 'score', 'seq', 'childSeq', 'parentContext')},
-                                            'text': (c.get('text') or '').strip()[:1200]} for c in chunks]},
-                    'cited_chunks': sorted({r for i in answer['evidence'] for r in i['chunk_refs']}),
-                    'scenario': cfg.get('label', scenario), 'answer_kind': kind,
-                    'instrument': instrument, 'purpose': purpose}
+        artifact = _kg_evidence_artifact(evidence, chunks, answer, cfg.get('label', scenario), kind,
+                                         instrument=instrument, purpose=purpose)
+        return ToolResult(artifact=artifact, artifact_type='data', summary=summary,
+                          formatted={'kb': kb_name, 'conclusion': summary[:40], 'chunkCount': len(chunks)})
+
+    def _fallback_answer(self, table, user_input, ctx, state, stage):
+        """未命中任何能力时的知识库兜底:默认库检索,有证据才答,否则引导。
+
+        兜底与场景问答同一条证据红线——检索不到不编造,落回引导卡;
+        授权沿用 knowledge_graph 的 pack_params(角色/文档过滤)。
+        """
+        from domains.metrology_assistant.scenario_config import load_fallback_kb
+        try:
+            kb_name = load_fallback_kb()
+        except Exception:  # noqa: BLE001
+            logger.exception('兜底知识库配置读取失败,按未配置处理')
+            kb_name = ''
+        if not kb_name:
+            return _unsupported_notice(table)
+        trusted = (state.get('pack_params') or {}).get('knowledge_graph') or {}
+        doc_filter = trusted.get('doc_filter')
+        from domains.knowledge_graph import service
+        stage('assistant.retrieve', f'检索「{kb_name}」资料…')
+        try:
+            evidence = service.retrieve_evidence(
+                self._app_state, kb_name, user_input,
+                conv_id=getattr(ctx, 'conv_id', None), user_id=getattr(ctx, 'user_id', None),
+                roles=trusted.get('user_roles'),
+                metadata_filter=doc_filter if isinstance(doc_filter, dict) else None)
+        except PermissionError:
+            return _notice('forbidden', '无权访问知识库', f'当前身份无权访问「{kb_name}」知识库。')
+        except ValueError as error:
+            return ToolResult(error_for_llm=str(error))
+        except Exception:  # noqa: BLE001
+            logger.exception('知识库兜底检索失败')
+            return ToolResult(error_for_llm='知识库检索失败,请稍后重试。')
+        chunks = evidence.get('chunks') or []
+        if not chunks:
+            return _unsupported_notice(table, tried_kb=kb_name)
+        answer = compose_answer(ctx.llm_client, user_input, chunks, getattr(ctx, 'conv_id', None))
+        summary = _format_conclusion(answer, f'在「{kb_name}」库中未检索到相关依据')
+        artifact = _kg_evidence_artifact(evidence, chunks, answer, '知识库检索', 'answer', fallback=True)
         return ToolResult(artifact=artifact, artifact_type='data', summary=summary,
                           formatted={'kb': kb_name, 'conclusion': summary[:40], 'chunkCount': len(chunks)})
 
