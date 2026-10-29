@@ -2,6 +2,29 @@
 
 > 会过时。接手先核对实际状态（git log / 服务器任务队列），再决定本页还剩多少有效。
 
+## 智能客服知识库兜底（2026-10-29，分支 feat/metrology-kb-fallback 0e7e382，本地已验未合未部署）
+
+未命中任何能力时先检索兜底知识库（配置文档顶层 `fallback_kb`，管理页整档
+PUT 维护），有证据才按证据链回答，无证据/未配置落引导卡（已检索会注明）。
+授权沿用 knowledge_graph pack_params；联调预演未命中文案随配置变化；
+契约测试 9 例（tests/domains/test_metrology_kb_fallback.py）+ metrology 全量
+179 例绿；本地四服务（18080/13080/9771/9772）浏览器实测：兜底命中出
+「知识库检索」证据链卡、无证据如实不编造、BJ2026 走 9771 受控出进度卡、
+预演显示兜底文案。注意：同机全量 pytest 曾与另一会话并发撞测试库出现
+41 假失败（零 metrology），需独占测试库重跑失败文件定论。
+后续台阶（未开工）：数据查询能力接入 ask_data 库层+pack_params 数据源
+白名单；管理页三组化+编辑抽屉契约只读收敛。
+
+## 知识库用户/角色同步 API（2026-10-29，本地完成未提交未部署）
+
+源系统经 HTTP 同步用户/角色进知识库目录（ACL 候选字典）：全量（整体
+替换+diff 计数+幂等）/增量（upserts 合并+deletes 如实报 missing）/单条
+CRUD（PUT 建改合一）/`GET /sync/status` 对账；kg_subjects 扩 attrs/status/
+created_at 列+kg_subject_sync_logs 流水表（留 200 条）。契约文档
+`doc/知识库用户角色同步API.md`（对接方直接看这份）。改动面：kg 的
+api.py/store.py+新测试 test_kg_subject_sync.py（domains 1702 全绿；
+停用条目不进 ACL 候选；删除目录条目不自动改 ACL——文档已如实写明）。
+
 ## PACKS_ENABLED 语义改版（2026-10-29，已部署 99.22）
 
 env 从"锁死启停"改为**部署上限**：配置后名单外插件不加载、管理面不显示，
