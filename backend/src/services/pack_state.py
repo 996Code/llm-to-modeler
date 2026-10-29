@@ -5,13 +5,17 @@ PACKS_ENABLED(env)只能"改配置重启生效"。本模块把启停状态变成
 跨重启持久的数据,管理端(api/admin.py)的插件开关就是改这里的内存态 +
 落盘,再由 services/pack_manager.py 热切换引擎装配。
 
-【状态来源优先级】(首次构造时解析,之后以内存态为准)
+【状态来源与 env 上限】(首次构造时解析,之后以内存态为准)
+  基础集合:
   1. 状态文件存在 → 文件里的 enabled 集合 + 新发现 pack 自动并入
-     (管理端操作过的就以此为准,此时 env PACKS_ENABLED 不再生效——
-     避免"界面开了、重启又关回去";新部署的 pack 目录默认启用,
+     (管理端操作过的就以此为准;新部署的 pack 目录默认启用,
      与"缺省全启用"语义一致,新插件即插即用)
   2. 状态文件不存在 + env PACKS_ENABLED 已配置 → env 作为初始默认值
   3. 状态文件不存在 + env 未配置 → 全部发现的 pack 都启用(向后兼容)
+  上限(基础集合解析完后统一施加,堵"状态文件架空 env"的隐形运行):
+  - env PACKS_ENABLED 配置时是**硬上限**:基础集合 ∩ 名单。名单外的
+    pack 不启用、不装配、管理面不显示;名单内由管理端自由启停(热切换)。
+    未配置 = 不设限,全量放开。
 
 【持久化】
   - 文件格式:{"version": 1, "enabled": ["pack_a", ...], "revision": N}
@@ -80,6 +84,7 @@ class PackState:
         self._dirty = False
 
         persisted = self._read_file()
+        need_write = False
         if persisted is not None:
             self._source = "file"
             enabled: Set[str] = persisted
@@ -94,10 +99,8 @@ class PackState:
             if new_packs:
                 logger.info(f"新发现 pack 自动启用: {sorted(new_packs)}")
                 enabled = enabled | new_packs
-            if legacy or new_packs:
-                # 旧格式迁移/新包并入 → 立即落盘补全 known(此后语义精确)
-                self._enabled = enabled & set(self._discovered)
-                self._write_disk_state(self._enabled)
+            # 旧格式迁移/新包并入 → 解析完 env 上限后统一落盘补全 known
+            need_write = legacy or bool(new_packs)
         else:
             env_names = env_pack_whitelist()
             if env_names is not None:
@@ -107,11 +110,25 @@ class PackState:
                 self._source = "all"
                 enabled = set(self._discovered)
 
+        # env 上限(PACKS_ENABLED):配置了就是硬上限——无论基础集合来自
+        # 状态文件还是默认值,名单外一律不启用(fail-closed)。env 是部署方
+        # 的"只许跑这些",管理端启停只在名单内进行;此后任何落盘写的都是
+        # 封顶后的集合(env 放开前被挡在外的包不会自己跑起来)
+        allowed = env_pack_whitelist()
+        if allowed is not None:
+            capped_out = (enabled & set(self._discovered)) - allowed
+            if capped_out:
+                logger.warning(
+                    f"PACKS_ENABLED 上限生效,以下插件本次不启用: {sorted(capped_out)}")
+            enabled = enabled & allowed
+
         # 交集清洗:状态里引用了磁盘上不存在的 pack(被删/改名)→ 丢弃并告警
         unknown = enabled - set(self._discovered)
         if unknown:
             logger.warning(f"pack 状态引用了未发现的 pack(已忽略): {sorted(unknown)}")
         self._enabled: Set[str] = enabled & set(self._discovered)
+        if need_write:
+            self._write_disk_state(self._enabled)
 
         logger.info(
             f"PackState initialized: source={self._source}, "

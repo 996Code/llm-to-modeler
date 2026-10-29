@@ -23,6 +23,9 @@
     </a-tabs>
     <template v-if="innerTab === 'packs'">
 
+    <a-alert v-if="payload?.envAllowlist" type="info" show-icon class="pk-env-note"
+             message="部署限定生效中:仅显示 PACKS_ENABLED 名单内的插件(名单外不加载、不显示),名单内可正常启停。" />
+
     <div class="pk-grid">
       <div v-for="pack in payload?.items ?? []" :key="pack.name" class="pk-card" :class="{ off: !pack.enabled }">
         <div class="pk-head">
@@ -45,11 +48,7 @@
               </a-tooltip>
             </div>
           </div>
-          <a-tooltip v-if="payload?.envPinned" title="PACKS_ENABLED 已配置——插件清单由 env 底层锁定,启停已禁用">
-            <a-switch :checked="pack.enabled" disabled />
-          </a-tooltip>
           <a-switch
-            v-else
             :checked="pack.enabled" :loading="toggling === pack.name"
             :disabled="!!toggling || !depOk(pack)"
             @click="(checked: boolean | undefined) => toggle(pack, !!checked)"
@@ -254,6 +253,7 @@ onMounted(load)
 }
 .pk-toolbar-count { margin-left: 2px; font-weight: 400; }
 .pk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+.pk-env-note { margin-bottom: 14px; }
 .pk-card {
   border: 1px solid #e6ebf2; border-radius: 12px; padding: 16px 18px; background: #fff;
   transition: box-shadow 0.15s, opacity 0.15s;

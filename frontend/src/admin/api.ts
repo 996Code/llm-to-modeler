@@ -169,8 +169,8 @@ export interface PacksPayload {
   items: AdminPack[]
   stateFile: string
   source: string
-  /** PACKS_ENABLED 配置时=true:清单 env 锁定,启停开关禁用 */
-  envPinned?: boolean
+  /** PACKS_ENABLED 配置时=true:部署上限生效——仅名单内插件可见可启停 */
+  envAllowlist?: boolean
 }
 
 // ── 口令管理 ──────────────────────────────────────────────

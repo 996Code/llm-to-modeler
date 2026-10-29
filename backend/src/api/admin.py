@@ -592,9 +592,9 @@ def _packs_payload(request: Request) -> Dict[str, Any]:
     all_configs = load_pack_configs(pack_names=pack_state.discovered_names())
 
     items = []
-    # env 硬控(PACKS_ENABLED):配置了白名单 → 管理面只透出清单内的插件
-    # (启动时只注册这些,启停开关随之失效——底层控制);未配置 = 全量
-    # 发现+可启停(现状)。概览计数/插件页/启停接口三者同源
+    # env 上限(PACKS_ENABLED):配置了白名单 → 名单外的 pack 不装配、
+    # 管理面不透出(不显示);名单内正常启停(热切换)。概览计数/插件页/
+    # 启停接口三者同源。未配置 = 全量发现 + 可启停
     from services.pack_state import env_pack_whitelist
     whitelist = env_pack_whitelist()
     for name in pack_state.discovered_names():
@@ -627,8 +627,8 @@ def _packs_payload(request: Request) -> Dict[str, Any]:
         "items": items,
         "stateFile": pack_state.state_path,
         "source": pack_state.source,
-        # env 硬控标记:PACKS_ENABLED 配置时前端隐藏启停开关
-        "envPinned": whitelist is not None,
+        # env 上限标记:PACKS_ENABLED 配置时前端展示"部署限定"提示
+        "envAllowlist": whitelist is not None,
     }
 
 
@@ -673,13 +673,15 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     from services.pack_manager import assemble_packs
     from services.pack_state import env_pack_whitelist
 
-    # env 硬控:PACKS_ENABLED 配置时启停被锁(注册集在启动期已定,
-    # 管理面热切换与 env 语义冲突;要改清单请改 env 后重启)
+    # env 上限:PACKS_ENABLED 名单外的插件不可启停(名单外本就不装配、
+    # 管理面不显示——此处拦的是绕过界面的直接 API 调用;名单内走下方
+    # 依赖校验/热切换正常流程)
     whitelist = env_pack_whitelist()
-    if whitelist is not None:
+    if whitelist is not None and name not in whitelist:
         raise HTTPException(
-            422, "PACKS_ENABLED 已配置——插件清单由 env 底层锁定,启停已禁用"
-                 "(修改 .env 的 PACKS_ENABLED 后重启生效)")
+            422, f"插件「{name}」不在 PACKS_ENABLED 白名单内"
+                 "(env 部署上限:名单外插件不加载、不可启停;"
+                 "如需放开请调整 .env 的 PACKS_ENABLED 后重启)")
 
     pack_state = request.app.state.pack_state
     if not pack_state.is_discovered(name):

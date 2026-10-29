@@ -252,6 +252,79 @@ def test_admin_pack_unknown_404(client):
     assert client.post("/api/admin/packs/ghost/enable", headers=_auth_headers()).status_code == 404
 
 
+# ── env 上限(PACKS_ENABLED) ───────────────────────────────────
+
+def _env_client(tmp_path, monkeypatch, env_value, enabled=None):
+    """带 PACKS_ENABLED 的最小应用(env 上限场景,其余同 client fixture)。
+
+    enabled 提供时预置新格式状态文件,模拟"先在无 env 环境操作过、
+    后配 env"的部署序。
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", ADMIN_TOKEN)
+    if env_value is None:
+        monkeypatch.delenv("PACKS_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("PACKS_ENABLED", env_value)
+    state_path = tmp_path / "pack_state.json"
+    if enabled is not None:
+        import json
+        state_path.write_text(json.dumps({
+            "version": 1, "revision": 1, "enabled": enabled,
+            "known": sorted(set(enabled) | set(PACKS)),
+        }), encoding="utf-8")
+
+    app = FastAPI()
+    app.include_router(admin_router)
+    app.include_router(conversations_router)
+    app.include_router(settings_router)
+    app.state.conversation_store = ConversationStore(str(tmp_path / "conversations.db"))
+    app.state.pack_state = PackState(str(state_path), PACKS)
+    app.state.pack_tools = {}
+    app.state.llm_client = object()
+    app.state.asset_client = object()
+    app.state.conversation_manager = object()
+    return app
+
+
+def test_admin_env_allowlist_hides_and_blocks(tmp_path, monkeypatch):
+    """env 上限:名单外插件不显示、不启用(含状态文件里 enabled 的——
+    封顶不隐形运行);绕过界面的直接 API 调用被 422 拒。"""
+    app = _env_client(tmp_path, monkeypatch, "njmind_form", enabled=list(PACKS))
+    with TestClient(app) as c:
+        body = c.get("/api/admin/packs", headers=_auth_headers()).json()
+        assert [i["name"] for i in body["items"]] == ["njmind_form"]
+        assert body["envAllowlist"] is True
+        # leave_application 文件里 enabled,但名单外 → 实际未启用
+        assert c.app.state.pack_state.enabled_names() == {"njmind_form"}
+        resp = c.post("/api/admin/packs/leave_application/enable",
+                      headers=_auth_headers())
+        assert resp.status_code == 422
+
+
+def test_admin_env_allowlist_toggle_inside(tmp_path, monkeypatch):
+    """env 上限:名单内插件照常启停热切换(不再整体锁定)。"""
+    app = _env_client(tmp_path, monkeypatch, "njmind_form,leave_application",
+                      enabled=["njmind_form"])
+    with TestClient(app) as c:
+        body = c.get("/api/admin/packs", headers=_auth_headers()).json()
+        assert body["envAllowlist"] is True
+        assert {i["name"]: i["enabled"] for i in body["items"]} == {
+            "njmind_form": True, "leave_application": False}
+        resp = c.post("/api/admin/packs/leave_application/enable",
+                      headers=_auth_headers())
+        assert resp.status_code == 200
+        assert set(resp.json()["loaded"]) == set(PACKS)
+
+
+def test_admin_env_unset_shows_all(tmp_path, monkeypatch):
+    """env 未配置 → 全量显示、无上限标记。"""
+    app = _env_client(tmp_path, monkeypatch, None)
+    with TestClient(app) as c:
+        body = c.get("/api/admin/packs", headers=_auth_headers()).json()
+        assert body["envAllowlist"] is False
+        assert {i["name"] for i in body["items"]} == set(PACKS)
+
+
 # ── 链路追踪(trace) ─────────────────────────────────────────
 
 def test_admin_conversation_trace(client):
