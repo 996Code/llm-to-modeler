@@ -2,70 +2,68 @@
  "schema_version": 1,
  "diagram_type": "sequence",
  "meta": {
-  "title": "计量智能客服：代码级调用链（函数 + 行号）",
-  "output": "../pack/metrology-code-chain.html",
-  "locale": "zh-CN",
-  "quality_profile": "showcase",
+  "title": "智能客服调用链：知识库 · 智能问数 · MCP 怎么协作",
+  "output": "../pack/pack-metrology-code-chain.html",
   "viewBox": [
    1020,
    1650
   ],
+  "locale": "zh-CN",
+  "animation": "trace",
+  "quality_profile": "showcase",
   "views": [
    {
-    "id": "entry",
-    "label": "入口装配",
+    "id": "route",
+    "label": "请求与路由",
     "focus": [
      "fe",
      "api",
-     "pg",
-     "stream"
-    ],
-    "note": "chat():203 加载历史与压缩判定后交给 stream_graph:93。"
-   },
-   {
-    "id": "graph-run",
-    "label": "图执行",
-    "focus": [
-     "stream",
-     "graph",
-     "llm",
-     "tool"
-    ],
-    "note": "classify:162 路由直通 → execute_tool:452 → 工具 execute:271。"
-   },
-   {
-    "id": "clarify",
-    "label": "追问恢复",
-    "focus": [
-     "tool",
-     "stream",
-     "fe",
-     "api",
-     "graph"
-    ],
-    "note": "AskSpec 挂起 → needsClarification → answers → Command(resume) 续跑。"
-   },
-   {
-    "id": "kernels",
-    "label": "双内核",
-    "focus": [
-     "tool",
-     "kg",
-     "pg",
-     "bi",
+     "engine",
      "llm"
     ],
-    "note": "KG 证据检索与三态结论；ChatBI 受控执行调 MCP mock 平台。"
+    "note": "客服窗口 packs 单声明→引擎直通该插件,零路由 LLM;引擎只做机制,业务语义全在插件层。"
+   },
+   {
+    "id": "orchestrate",
+    "label": "客服编排",
+    "focus": [
+     "cs",
+     "llm",
+     "engine",
+     "fe"
+    ],
+    "note": "两段式提取:先选能力、再提参数(类型校验);缺必填槽位→追问卡片挂起,用户补答后断点续跑,不重烧提取 LLM。"
+   },
+   {
+    "id": "kg-lane",
+    "label": "知识库链路",
+    "focus": [
+     "cs",
+     "kg",
+     "pg",
+     "llm"
+    ],
+    "note": "知识类场景(强检判定/检定周期/资质能力):按用途选库→图谱·向量·全文三路检索→有据才答,结论带片段引用可回原文。"
+   },
+   {
+    "id": "bi-mcp",
+    "label": "智能问数→MCP",
+    "focus": [
+     "cs",
+     "bi",
+     "mcp"
+    ],
+    "note": "业务查询类场景(进度/价目/预约/设备):智能问数受控执行——参数先过 schema 校验再调 MCP 业务平台;信封分态(拒权/查无/超时)如实上屏,不冒充成功。"
    },
    {
     "id": "fallback",
-    "label": "知识库兜底",
+    "label": "兜底链路",
     "focus": [
-     "tool",
+     "cs",
      "kg",
      "pg"
     ],
-    "note": "未命中任何能力走知识库链路本身(assistant.py:480→retrieval.py:935):跨可访问库检索,ACL 拒的库静默跳过;有证据出证据链卡(fallback 标记+来源库清单),零召回落引导卡。"
+    "note": "未命中任何能力走知识库链路兜底:跨全部可访问库检索(身份 ACL 过滤,被拒库静默跳过);有证据出证据链卡,零召回落「暂不支持」引导卡。"
    }
   ]
  },
@@ -73,490 +71,314 @@
   {
    "id": "fe",
    "type": "external",
-   "label": "前端",
-   "sublabel": "api.ts:299"
+   "label": "对话窗口",
+   "sublabel": "客服/嵌入前端"
   },
   {
    "id": "api",
    "type": "backend",
-   "label": "config.py",
-   "sublabel": "chat():202"
+   "label": "对话入口",
+   "sublabel": "SSE 流式接口"
   },
   {
-   "id": "pg",
-   "type": "database",
-   "label": "PostgreSQL",
-   "sublabel": "4 Store+Saver"
-  },
-  {
-   "id": "stream",
+   "id": "engine",
    "type": "backend",
-   "label": "stream.py",
-   "sublabel": "stream_graph:93"
-  },
-  {
-   "id": "graph",
-   "type": "backend",
-   "label": "nodes.py",
-   "sublabel": "LangGraph 节点"
+   "label": "对话引擎",
+   "sublabel": "路由·追问恢复"
   },
   {
    "id": "llm",
    "type": "cloud",
-   "label": "LLM 网关",
-   "sublabel": "chat_json"
+   "label": "大模型",
+   "sublabel": "提取/结论/回答"
   },
   {
-   "id": "tool",
+   "id": "cs",
    "type": "backend",
-   "label": "assistant.py",
-   "sublabel": "execute:401"
+   "label": "智能客服编排",
+   "sublabel": "场景路由·槽位·计划"
   },
   {
    "id": "kg",
    "type": "database",
-   "label": "KG 内核",
-   "sublabel": "service.py:15"
+   "label": "知识库",
+   "sublabel": "图谱+向量+全文"
   },
   {
    "id": "bi",
    "type": "backend",
-   "label": "ChatBI→MCP",
-   "sublabel": "controlled.py:93"
+   "label": "智能问数",
+   "sublabel": "受控执行内核"
+  },
+  {
+   "id": "mcp",
+   "type": "external",
+   "label": "MCP 业务平台",
+   "sublabel": "计量/设备平台"
+  },
+  {
+   "id": "pg",
+   "type": "database",
+   "label": "数据库",
+   "sublabel": "会话与存档"
   }
  ],
  "segments": [
   {
    "from": 150,
-   "to": 264,
-   "label": "请求装配"
+   "to": 332,
+   "label": "请求与路由"
   },
   {
-   "from": 280,
-   "to": 545,
-   "label": "图执行（工作线程）"
+   "from": 352,
+   "to": 632,
+   "label": "客服编排：选能力·提参数·追问"
   },
   {
-   "from": 563,
-   "to": 672,
-   "label": "追问恢复（挂起→answers）"
+   "from": 656,
+   "to": 876,
+   "label": "知识库链路：证据检索（知识类场景）"
   },
   {
-   "from": 678,
-   "to": 896,
-   "label": "双内核执行"
+   "from": 900,
+   "to": 1060,
+   "label": "智能问数→MCP：受控执行（业务查询场景）"
   },
   {
-   "from": 910,
-   "to": 1124,
+   "from": 1120,
+   "to": 1320,
+   "label": "兜底链路：未命中→跨库检索"
+  },
+  {
+   "from": 1360,
+   "to": 1484,
    "label": "结果回流"
-  },
-  {
-   "from": 1138,
-   "to": 1400,
-   "label": "未命中→知识库链路兜底（b538544 起）"
   }
  ],
  "messages": [
   {
-   "id": "m1",
    "from": "fe",
    "to": "api",
    "y": 170,
-   "label": "POST /api/config/chat（packs 声明）",
-   "variant": "emphasis"
+   "label": "发送问题（SSE 流式请求）"
   },
   {
-   "id": "m2",
    "from": "api",
    "to": "pg",
    "y": 198,
-   "label": "加载会话+历史+should_compress（_load_history:153）",
-   "variant": "default"
+   "label": "读会话与历史（含压缩摘要）"
   },
   {
-   "id": "m3",
    "from": "pg",
    "to": "api",
    "y": 226,
-   "label": "messages + summary",
-   "variant": "return"
+   "label": "消息与摘要"
   },
   {
-   "id": "m4",
    "from": "api",
-   "to": "stream",
+   "to": "engine",
    "y": 254,
-   "label": "stream_graph(graph, message, history, packs…)",
-   "variant": "default"
+   "label": "进入对话图（携带 packs 声明）"
   },
   {
-   "id": "m5",
-   "from": "stream",
-   "to": "pg",
-   "y": 290,
-   "label": "add_message(user) 即时落库（:175）",
-   "variant": "dashed"
-  },
-  {
-   "id": "m6",
-   "from": "stream",
-   "to": "graph",
-   "y": 318,
-   "label": "graph.stream(input, {thread_id=conv_id})（:389）",
-   "variant": "emphasis"
-  },
-  {
-   "id": "m7",
-   "from": "graph",
+   "from": "engine",
    "to": "llm",
-   "y": 346,
-   "label": "标题生成 chat_json（:276；_route_pack:922 直通零路由 LLM）",
-   "variant": "default"
+   "y": 282,
+   "label": "生成会话标题（单插件直通,免路由）"
   },
   {
-   "id": "m8",
    "from": "llm",
-   "to": "graph",
-   "y": 374,
-   "label": "title",
+   "to": "engine",
+   "y": 310,
+   "label": "标题",
    "variant": "return"
   },
   {
-   "id": "m9",
-   "from": "graph",
-   "to": "pg",
-   "y": 402,
-   "label": "PostgresSaver 节点快照",
-   "variant": "dashed"
+   "from": "engine",
+   "to": "cs",
+   "y": 380,
+   "label": "交给智能客服工具"
   },
   {
-   "id": "m10",
-   "from": "graph",
-   "to": "tool",
-   "y": 430,
-   "label": "execute_tool_node:452 → execute(state, ctx)（preflight:390）",
-   "variant": "emphasis"
-  },
-  {
-   "id": "m11",
-   "from": "tool",
+   "from": "cs",
    "to": "llm",
-   "y": 458,
-   "label": "extract_slots:61 chat_json（stage=assistant.extract）",
-   "variant": "default"
+   "y": 408,
+   "label": "① 选能力：这句话属于哪类业务"
   },
   {
-   "id": "m12",
    "from": "llm",
-   "to": "tool",
-   "y": 486,
-   "label": "{scenario, instrument, purpose, order_no}",
+   "to": "cs",
+   "y": 436,
+   "label": "命中场景 / 未命中",
    "variant": "return"
   },
   {
-   "id": "m13",
-   "from": "tool",
-   "to": "graph",
-   "y": 514,
-   "label": "ToolResult{ask:AskSpec}（缺槽→_ask_required:398）",
-   "variant": "security"
+   "from": "cs",
+   "to": "llm",
+   "y": 464,
+   "label": "② 提参数：器具名/单号/日期等槽位"
   },
   {
-   "id": "m14",
-   "from": "stream",
+   "from": "llm",
+   "to": "cs",
+   "y": 492,
+   "label": "槽位结果（类型校验）",
+   "variant": "return"
+  },
+  {
+   "from": "cs",
+   "to": "engine",
+   "y": 520,
+   "label": "缺必填槽位 → 追问"
+  },
+  {
+   "from": "engine",
    "to": "fe",
-   "y": 575,
-   "label": "SSE result: needsClarification+questions（stream.py:417）",
-   "variant": "security"
+   "y": 548,
+   "label": "追问卡片挂起（问题令牌防串答）"
   },
   {
-   "id": "m15",
    "from": "fe",
    "to": "api",
-   "y": 605,
-   "label": "POST chat {answers}（ChatPanel:920 answerClarification）",
-   "variant": "security"
+   "y": 576,
+   "label": "用户点选/输入补答"
   },
   {
-   "id": "m16",
    "from": "api",
-   "to": "stream",
-   "y": 633,
-   "label": "stream_graph(answers=…)",
-   "variant": "default"
+   "to": "engine",
+   "y": 604,
+   "label": "恢复执行（断点续跑,不重烧提取）"
   },
   {
-   "id": "m17",
-   "from": "stream",
-   "to": "graph",
-   "y": 661,
-   "label": "Command(resume=answers)（stream.py:184）",
-   "variant": "emphasis"
-  },
-  {
-   "id": "m18",
-   "from": "graph",
-   "to": "tool",
-   "y": 690,
-   "label": "重跑 execute（mem.pending 续跑，零提取 LLM）",
-   "variant": "emphasis"
-  },
-  {
-   "id": "m19",
-   "from": "tool",
+   "from": "cs",
    "to": "kg",
-   "y": 718,
-   "label": "retrieve_evidence（用途→选库 resolve_kb_for_purpose:239·:449）",
-   "variant": "emphasis"
+   "y": 680,
+   "label": "按用途选库查证据（强检目录/检定规程）"
   },
   {
-   "id": "m20",
    "from": "kg",
    "to": "pg",
-   "y": 746,
-   "label": "hybrid_retrieve:258（图谱路必跑+向量路）",
-   "variant": "dashed"
+   "y": 708,
+   "label": "三路检索：图谱实体→向量→全文"
   },
   {
-   "id": "m21",
    "from": "pg",
    "to": "kg",
-   "y": 774,
-   "label": "chunks + subgraph",
+   "y": 736,
+   "label": "命中片段 + 关联子图",
    "variant": "return"
   },
   {
-   "id": "m22",
    "from": "kg",
-   "to": "tool",
-   "y": 802,
-   "label": "{kb, chunks, subgraph, diagnostics}",
+   "to": "cs",
+   "y": 764,
+   "label": "证据包（片段/实体/诊断）",
    "variant": "return"
   },
   {
-   "id": "m23",
-   "from": "tool",
+   "from": "cs",
    "to": "llm",
-   "y": 830,
-   "label": "compose_conclusion:176（三态+chunk_refs 校验）",
-   "variant": "default"
+   "y": 792,
+   "label": "③ 下结论：有据才答,带片段引用"
   },
   {
-   "id": "m24",
    "from": "llm",
-   "to": "tool",
-   "y": 858,
-   "label": "{decision, conclusion, evidence[]}",
+   "to": "cs",
+   "y": 820,
+   "label": "结论（确定/存疑/不足 三态）",
    "variant": "return"
   },
   {
-   "id": "m25",
-   "from": "tool",
+   "from": "cs",
+   "to": "engine",
+   "y": 848,
+   "label": "证据链结果卡",
+   "variant": "emphasis"
+  },
+  {
+   "from": "cs",
    "to": "bi",
-   "y": 886,
-   "label": "execute_controlled（_run_chatbi:408；进度/价目分支）",
-   "variant": "emphasis"
+   "y": 920,
+   "label": "按场景计划调底层（数据源已绑定）"
   },
   {
-   "id": "m28",
    "from": "bi",
-   "to": "tool",
+   "to": "mcp",
+   "y": 948,
+   "label": "受控调用业务工具（参数先过 schema 校验）"
+  },
+  {
+   "from": "mcp",
+   "to": "bi",
    "y": 976,
-   "label": "ControlledResult（call_tool:195→mock 平台 9771→信封分态）",
+   "label": "业务信封（ok/拒权/查无/超时 如实分态）",
    "variant": "return"
   },
   {
-   "id": "m29",
-   "from": "tool",
-   "to": "graph",
+   "from": "bi",
+   "to": "cs",
    "y": 1004,
-   "label": "ToolResult{artifact(data), summary, formatted}",
+   "label": "归一化数据行（信封先判再归一）",
    "variant": "return"
   },
   {
-   "id": "m30",
-   "from": "graph",
-   "to": "stream",
+   "from": "cs",
+   "to": "engine",
    "y": 1032,
-   "label": "chunk：sse_events[result]（stream.py:489）",
-   "variant": "default"
-  },
-  {
-   "id": "m31",
-   "from": "stream",
-   "to": "fe",
-   "y": 1060,
-   "label": "SSE: result（artifact.type 卡片+conversationId）",
+   "label": "结构化结果卡（进度卡/表格卡）",
    "variant": "emphasis"
   },
   {
-   "id": "m32",
-   "from": "stream",
-   "to": "pg",
-   "y": 1088,
-   "label": "_save_result_conversation:532（assistant+checkpoint+trace）",
-   "variant": "dashed"
+   "from": "cs",
+   "to": "kg",
+   "y": 1180,
+   "label": "未命中任何能力 → 跨库检索兜底"
   },
   {
-   "id": "m33",
-   "from": "stream",
+   "from": "kg",
+   "to": "pg",
+   "y": 1208,
+   "label": "可访问库解析（身份过滤,被拒库静默跳过）"
+  },
+  {
+   "from": "kg",
+   "to": "pg",
+   "y": 1236,
+   "label": "跨库综合检索与回答（同知识问答一条链）"
+  },
+  {
+   "from": "pg",
+   "to": "kg",
+   "y": 1264,
+   "label": "回答 + 引用片段 + 来源库",
+   "variant": "return"
+  },
+  {
+   "from": "kg",
+   "to": "cs",
+   "y": 1292,
+   "label": "证据链卡（兜底标记）/ 零召回→引导卡",
+   "variant": "return"
+  },
+  {
+   "from": "engine",
    "to": "fe",
-   "y": 1116,
-   "label": "SSE: done",
+   "y": 1400,
+   "label": "SSE 实时推流：阶段进度→结果卡",
    "variant": "emphasis"
   },
   {
-   "id": "fb1170",
-   "y": 1170,
-   "from": "tool",
-   "to": "kg",
-   "label": "未命中场景 → _fallback_answer:480（无指定库,链路即兜底）"
-  },
-  {
-   "id": "fb1198",
-   "y": 1198,
-   "from": "kg",
+   "from": "engine",
    "to": "pg",
-   "label": "可访问库解析:list_kbs+filter_kbs（ACL 拒的库静默跳过）"
+   "y": 1428,
+   "label": "落库：消息/制品/链路打点/checkpoint"
   },
   {
-   "id": "fb1226",
-   "y": 1226,
-   "from": "pg",
-   "to": "kg",
-   "label": "kbs（排除 folder）"
-  },
-  {
-   "id": "fb1254",
-   "y": 1254,
-   "from": "kg",
-   "to": "pg",
-   "label": "answer_question_multi:935（意图→图谱→向量/全文→综合）"
-  },
-  {
-   "id": "fb1282",
-   "y": 1282,
-   "from": "pg",
-   "to": "kg",
-   "label": "answer + sources + cited_chunks（引用校验在检索层）"
-  },
-  {
-   "id": "fb1310",
-   "y": 1310,
-   "from": "kg",
-   "to": "tool",
-   "label": "{answer, chunks, kbs, subgraph}"
-  },
-  {
-   "id": "fb1338",
-   "y": 1338,
-   "from": "tool",
-   "to": "graph",
-   "label": "ToolResult{证据链卡 fallback:true / 零召回→引导卡:523}"
-  }
- ],
- "activations": [
-  {
-   "participant": "api",
-   "from": 165,
-   "to": 645,
-   "type": "backend"
-  },
-  {
-   "participant": "pg",
-   "from": 193,
-   "to": 1093,
-   "type": "database"
-  },
-  {
-   "participant": "stream",
-   "from": 249,
-   "to": 1121,
-   "type": "backend"
-  },
-  {
-   "participant": "graph",
-   "from": 313,
-   "to": 1037,
-   "type": "backend"
-  },
-  {
-   "participant": "llm",
-   "from": 341,
-   "to": 862,
-   "type": "cloud"
-  },
-  {
-   "participant": "tool",
-   "from": 425,
-   "to": 1009,
-   "type": "backend"
-  },
-  {
-   "participant": "kg",
-   "from": 713,
-   "to": 807,
-   "type": "database"
-  },
-  {
-   "participant": "bi",
-   "from": 881,
-   "to": 980,
-   "type": "backend"
-  }
- ],
- "cards": [
-  {
-   "dot": "cyan",
-   "title": "调用栈速查（启动→入口）",
-   "items": [
-    "启动装配 main.py lifespan：scan_pack_dirs → assemble_packs（含依赖闸门：缺 knowledge_graph/chatbi 不装配）→ build_graph:83 编图 → nodes.configure 注入依赖",
-    "chat:202 → _load_current_config:83 / _load_history:153 / _extract_forward_headers:121 → stream_graph:93",
-    "_run_graph:316 工作线程内先绑 thread-local（set_forward_headers / bind_conversation / set_realtime_emitter:352）再跑图，finally 全清防串线"
-   ]
-  },
-  {
-   "dot": "orange",
-   "title": "GraphState 状态总线（graph_state.py）",
-   "items": [
-    "输入键：user_input / conversation_id（=checkpoint thread_id）/ packs / pack_params / context_artifact / forward_headers",
-    "节点间握手键：tool_name、intent_confidence → tool_state（工具私有，图不读结构）→ tool_result（ToolResult.model_dump）",
-    "追问键：pending_questions（execute_tool 提交的 interrupt payload）/ clarify_answers（resume 注入 tool_state 后清空）",
-    "节点只返回增量 dict，LangGraph 按 channel 覆盖合并；每过一节点 PostgresSaver 存快照"
-   ]
-  },
-  {
-   "dot": "emerald",
-   "title": "七步管线函数级（assistant.py）",
-   "items": [
-    "execute:401 开局 emit pipeline_definition（四步进度条骨架）+ _make_monotonic_stage（进度只进不退）",
-    "extract_slots:197 一次 chat_json 出场景+三槽位（temp=0，失败上抛不猜）；merge_slots:218 本轮值优先、记忆补空缺",
-    "追问答案路径：parse_clarify_answers:228 确定性解析（单号正则 ([A-Z]{2}\\d{3,}) / 用途关键词），mem.pending 存 {scenario, slots}",
-    "记忆回写：SessionStateHandle（sdk/tool.py:14，scope=metrology_assistant）→ session_pack_state 表，存 scenario+slots",
-    "结果卡：_run_kg:512 出 kg_search_result（answer+sources.chunks+cited_chunks）；_run_chatbi:465 → _progress_card:588 / _instrument_card:617"
-   ]
-  },
-  {
-   "dot": "rose",
-   "title": "双内核契约（不重造轮子）",
-   "items": [
-    "KG：retrieve_evidence（kg/service.py:15）显式库名（不存在即 ValueError）+ 元数据白名单（空集=零结果不回退全库）+ 不生成答案",
-    "检索：hybrid_retrieve（retrieval.py:258）图谱路始终执行、向量路按 kb.vector_enabled（失败降级为空），chunk 瘦身剔除 childText/parentChars",
-    "结论：compose_conclusion:298 严格校验 decision 三态枚举 / conclusion 非空 / chunk_refs 必须是 1..N 整数——非法 ValueError，宁可不答不编依据",
-    "ChatBI：execute_controlled（controlled.py:93）验源（db_type=mcp、is_active、工具白名单=info.database）→ mcp_client.call_tool:135（info.host=MCP server code，经 mcp_registry.get_by_code 查 URL）→ streamable_http 会话 call_tool（timeout 30s/read 可配）→ 信封判定（ENVELOPE_STATUS）先于归一",
-    "mock 平台（tools/mcp-e2e/metrology_server.py:9771）：query_progress 单号夹具 BJ2026/BJ2027/BJ8888 拒权/BJ9000 查无/BJ0000 10s 超时；query_instrument 价目 24 条"
-   ]
-  },
-  {
-   "dot": "amber",
-   "title": "SSE 协议与落库面",
-   "items": [
-    "事件格式（sse.py:57）：event/id/data 三行+空行；类型 stage / pipeline_definition / result / error / done；15s 心跳输出「: ping」注释行",
-    "双通道推送：实时通道 set_realtime_emitter（工具 ctx.emit 直推，不等节点结束）+ 列表通道 sse_events 随 chunk 补发",
-    "落库表：events（7 类事件 append-only）/ session_meta（标题+currentConfig）/ call_logs（LLM 按 stage 打点，llm/client.py:297）/ session_pack_state（会话 KV 记忆）/ checkpoint 三表（PostgresSaver）",
-    "管理端链路视图 = events(kind=trace) + call_logs 同源时间线（conversations.py:173 /trace 端点按轮聚合 LLM 次数与 token）"
-   ]
+   "from": "engine",
+   "to": "fe",
+   "y": 1456,
+   "label": "完成（卡片可查依据·下载原文）",
+   "variant": "return"
   }
  ]
 }
