@@ -5577,7 +5577,44 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
     <!-- Info Cards -->
     <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot cyan"></div>
+          <h3>案例 · 业务查询（进度查询）</h3>
+        </div>
+        <ul>
+          <li>&bull; 问：「查一下 BJ2026 的进度」→ 命中能力 委托单检测进度查询(metrology::query_progress)</li>
+          <li>&bull; 提取到单号槽位 BJ2026 → 受控执行:参数过 schema 校验后调 MCP 业务平台(9771)</li>
+          <li>&bull; 信封 ok → 进度卡:检测中 3/5,当前步骤 压力示值误差检定,预计完成 2026-10-30</li>
+          <li>&bull; 分态如实:BJ8888(他人主体)→forbidden 拒权卡;BJ9000→not_found 查无卡;BJ0000→超时如实报错,不冒充成功</li>
+        </ul>
+      </div>
 
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>案例 · 知识类（强检判定）</h3>
+        </div>
+        <ul>
+          <li>&bull; 问：「压力表用于贸易结算,需要强制检定吗」→ 命中 强检判定 场景</li>
+          <li>&bull; 缺「器具用途」槽位 → 追问卡(选项:贸易结算/安全防护/医疗卫生…)→ 用户点选</li>
+          <li>&bull; 按用途选库:贸易结算→强检目录库;三路检索(图谱种子→向量→全文)</li>
+          <li>&bull; 有据才答:「属于强制检定,依据《强检目录》XX 条」+ 片段引用,点引用可回原文</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>案例 · 未命中兜底（跨库检索）</h3>
+        </div>
+        <ul>
+          <li>&bull; 问：「检验检测机构申请资质认定需要满足哪些基本条件」→ 未命中任何能力</li>
+          <li>&bull; 跨全部可访问库检索(5 个库;法律库被身份 ACL 静默跳过,客户无感知)</li>
+          <li>&bull; CMA 资质汇编(内部文件库)命中 → 六项基本条件证据链卡,标注来源库</li>
+          <li>&bull; 真零召回(如「食堂有什么菜」)→ 诚实答「未找到相关内容」,不编造</li>
+        </ul>
+      </div>
     </div>
 
   </div>
