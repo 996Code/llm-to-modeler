@@ -191,6 +191,13 @@ from sdk.pack_api import register_admin_auth
 
 register_admin_auth(require_admin)
 
+# 装配 sdk.pack_api 的 MCP 密钥解析(镜像 main.py;同步接口 X-Api-Key
+# 接受分支的测试依赖它)
+from services.mcp_server import _cached_key
+from sdk.pack_api import register_mcp_key_resolver
+
+register_mcp_key_resolver(_cached_key)
+
 # ── 测试隔离:每测试清表 ──────────────────────────────────────
 # 全部业务表(schema 限定:平台表在 public,pack 表在各自独立 schema——
 # 见 sdk.relational_store 的命名空间隔离)。TRUNCATE RESTART IDENTITY 把

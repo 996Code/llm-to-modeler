@@ -159,13 +159,24 @@ class KGStore:
         created_at TEXT NOT NULL,
         UNIQUE (kb_id, subject_type, subject_id)
     )""",
-    # 数据权限选择字典(宿主同步):用户/角色候选,ACL 编辑页下拉选择
+    # 数据权限选择字典(宿主同步):用户/角色候选,ACL 编辑页下拉选择;
+    # status 停用条目不进 ACL 候选
     """CREATE TABLE IF NOT EXISTS kg_subjects (
         subject_type TEXT NOT NULL,   -- user | role
         subject_id TEXT NOT NULL,
         display_name TEXT DEFAULT '', -- 展示名(可选;空则显示 subject_id)
+        status TEXT DEFAULT 'active', -- active | disabled
+        created_at TEXT,
         updated_at TEXT NOT NULL,
         PRIMARY KEY (subject_type, subject_id)
+    )""",
+    # 目录同步/管理操作流水(全量/增量/单条 upsert/删除;只留最近 200 条)
+    """CREATE TABLE IF NOT EXISTS kg_subject_sync_logs (
+        id TEXT PRIMARY KEY,
+        subject_type TEXT NOT NULL,
+        mode TEXT NOT NULL,          -- full | delta | upsert | delete
+        summary JSONB DEFAULT '{}'::jsonb,
+        synced_at TEXT NOT NULL
     )""",
     ]
 
@@ -206,6 +217,20 @@ class KGStore:
                              "ADD COLUMN IF NOT EXISTS hit_count INTEGER DEFAULT 0")
         except Exception as e:
             logger.warning(f"hit_count 列迁移失败(不影响启动,下次重试): {e}")
+        # 用户/角色目录同步(全量+增量+CRUD):kg_subjects 补 status/
+        # created_at;存量行回填 created_at=updated_at(首见时间不可考,取
+        # 最近更新时间是最诚实的近似)。同步日志表同批落成。
+        try:
+            with self._get_conn() as conn:
+                conn.execute("ALTER TABLE kg_subjects "
+                             "ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'")
+                conn.execute("ALTER TABLE kg_subjects "
+                             "ADD COLUMN IF NOT EXISTS created_at TEXT")
+                conn.execute(
+                    "UPDATE kg_subjects SET created_at = COALESCE(created_at, updated_at) "
+                    "WHERE created_at IS NULL")
+        except Exception as e:
+            logger.warning(f"kg_subjects 目录列迁移失败(不影响启动,下次重试): {e}")
         # 一次性迁移:存量"未决"库(vector_enabled=0 且无 embedding_model
         # 记录——曾因探测失败落 0)翻转为启用——本地 bge-m3 定死能力。
         # 模型变更显式关闭的库(0 且有模型记录)不动:那是向量兼容性保护态。
@@ -453,30 +478,271 @@ class KGStore:
                 {"subjectType": r["subject_type"], "subjectId": r["subject_id"]})
         return out
 
-    # ── 数据权限选择字典(宿主同步) ───────────────────────
+    # ── 用户/角色目录(源系统同步 + 单条管理;ACL 候选字典) ──
+    # 对外契约(全量/增量/CRUD/同步状态)见 doc/知识库用户角色同步API.md。
 
-    def sync_subjects(self, subject_type: str,
-                      items: List[Dict[str, str]]) -> None:
-        """全量替换某类型(user/role)的候选字典——宿主组织/角色变更后推送。
+    def sync_subjects_full(self, subject_type: str,
+                           items: List[Dict[str, Any]]) -> Dict[str, int]:
+        """全量替换某类型目录——源系统推送权威快照。
 
-        items: [{id, name?}];同步语义为全量(不在本次清单里的旧条目删除),
-        宿主侧删了人/角色,这里跟着消失(残留项会导致 ACL 里选到幽灵主体)。
+        items: [{id, name?, status?}](api 层已校验去重)。清单外旧条目
+        删除(源侧删人这里跟着走,ACL 下拉不残留幽灵);值未变的行不写
+        (updated_at 不假跳,重推同清单完全幂等)。整个替换一个事务,
+        中途失败全部回滚。
+        """
+        now = _now()
+        created = updated = unchanged = 0
+        with self._get_conn() as conn:
+            current = self._subjects_map(conn, subject_type)
+            keep = set()
+            for it in items:
+                sid = it["id"]
+                keep.add(sid)
+                name = it.get("name") or ""
+                status = it.get("status") or "active"
+                old = current.get(sid)
+                if old is None:
+                    created += 1
+                    conn.execute(
+                        "INSERT INTO kg_subjects (subject_type, subject_id, "
+                        "display_name, status, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (subject_type, sid, name, status, now, now))
+                elif self._subject_changed(old, name, status):
+                    updated += 1
+                    conn.execute(
+                        "UPDATE kg_subjects SET display_name = ?, "
+                        "status = ?, updated_at = ? "
+                        "WHERE subject_type = ? AND subject_id = ?",
+                        (name, status, now, subject_type, sid))
+                else:
+                    unchanged += 1
+            removed = [sid for sid in current if sid not in keep]
+            if removed:
+                conn.executemany(
+                    "DELETE FROM kg_subjects "
+                    "WHERE subject_type = ? AND subject_id = ?",
+                    [(subject_type, sid) for sid in removed])
+            summary = {"received": len(items), "created": created,
+                       "updated": updated, "unchanged": unchanged,
+                       "removed": len(removed)}
+            self._log_subject_sync(conn, subject_type, "full", summary, now)
+        return summary
+
+    def sync_subjects_delta(self, subject_type: str,
+                            upserts: List[Dict[str, Any]],
+                            deletes: List[str]) -> Dict[str, Any]:
+        """增量同步:upserts 按 id 合并(缺省字段保持现值),deletes 如实报缺失。
+
+        重放安全:upsert 值未变不写(幂等);删除不存在的 id 进 missing 不
+        报错——源系统重推已消费过的增量不会失败。整批一个事务。同批
+        upsert 又 delete 同一 id 时 delete 生效(顺序语义,建议避免)。
+        """
+        now = _now()
+        inserted = updated = unchanged = deleted = 0
+        with self._get_conn() as conn:
+            current = self._subjects_map(conn, subject_type)
+            for it in upserts:
+                sid = it["id"]
+                old = current.get(sid)
+                if old is None:
+                    inserted += 1
+                    name = it.get("name") or ""
+                    status = it.get("status") or "active"
+                    conn.execute(
+                        "INSERT INTO kg_subjects (subject_type, subject_id, "
+                        "display_name, status, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (subject_type, sid, name, status, now, now))
+                    current[sid] = {"display_name": name, "status": status}
+                else:
+                    name = (it["name"] if it.get("name") is not None
+                            else old["display_name"] or "")
+                    status = it.get("status") or old["status"] or "active"
+                    if self._subject_changed(old, name, status):
+                        updated += 1
+                        conn.execute(
+                            "UPDATE kg_subjects SET display_name = ?, "
+                            "status = ?, updated_at = ? "
+                            "WHERE subject_type = ? AND subject_id = ?",
+                            (name, status, now, subject_type, sid))
+                        current[sid] = {"display_name": name, "status": status}
+                    else:
+                        unchanged += 1
+            hit = [sid for sid in deletes if sid in current]
+            if hit:
+                conn.executemany(
+                    "DELETE FROM kg_subjects "
+                    "WHERE subject_type = ? AND subject_id = ?",
+                    [(subject_type, sid) for sid in hit])
+                deleted = len(hit)
+            missing = [sid for sid in deletes if sid not in current]
+            summary = {"upserts": len(upserts), "inserted": inserted,
+                       "updated": updated, "unchanged": unchanged,
+                       "deletes": len(deletes), "deleted": deleted,
+                       "missing": missing}
+            self._log_subject_sync(conn, subject_type, "delta", summary, now)
+        return summary
+
+    def upsert_subject(self, subject_type: str, subject_id: str,
+                       fields: Dict[str, Any]) -> Dict[str, Any]:
+        """单条 upsert(建/改合一):缺省字段=新建用默认/更新保现值。
+
+        返回落库记录 + created 标记(是否本次新建)。
         """
         now = _now()
         with self._get_conn() as conn:
-            conn.execute(
-                "DELETE FROM kg_subjects WHERE subject_type = ?", (subject_type,))
-            conn.executemany(
-                "INSERT INTO kg_subjects (subject_type, subject_id, display_name, updated_at) "
-                "VALUES (?, ?, ?, ?)",
-                [(subject_type, str(it["id"]).strip(),
-                  str(it.get("name") or "").strip(), now) for it in items])
+            old = self._subjects_map(conn, subject_type).get(subject_id)
+            created = old is None
+            if created:
+                conn.execute(
+                    "INSERT INTO kg_subjects (subject_type, subject_id, "
+                    "display_name, status, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (subject_type, subject_id, fields.get("name") or "",
+                     fields.get("status") or "active", now, now))
+            else:
+                name = (fields["name"] if fields.get("name") is not None
+                        else old["display_name"] or "")
+                status = fields.get("status") or old["status"] or "active"
+                if self._subject_changed(old, name, status):
+                    conn.execute(
+                        "UPDATE kg_subjects SET display_name = ?, "
+                        "status = ?, updated_at = ? "
+                        "WHERE subject_type = ? AND subject_id = ?",
+                        (name, status, now, subject_type, subject_id))
+            row = conn.execute(
+                "SELECT * FROM kg_subjects "
+                "WHERE subject_type = ? AND subject_id = ?",
+                (subject_type, subject_id)).fetchone()
+            self._log_subject_sync(conn, subject_type, "upsert",
+                                   {"id": subject_id, "created": created}, now)
+        return {**self._subject_out(row), "created": created}
+
+    def delete_subject(self, subject_type: str, subject_id: str) -> bool:
+        now = _now()
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM kg_subjects "
+                "WHERE subject_type = ? AND subject_id = ?",
+                (subject_type, subject_id))
+            ok = cur.rowcount > 0
+            if ok:
+                self._log_subject_sync(conn, subject_type, "delete",
+                                       {"id": subject_id}, now)
+        return ok
+
+    def get_subject(self, subject_type: str,
+                    subject_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM kg_subjects "
+                "WHERE subject_type = ? AND subject_id = ?",
+                (subject_type, subject_id)).fetchone()
+        return self._subject_out(row) if row else None
+
+    def list_subjects_page(self, subject_type: str, q: str = "",
+                           status: str = "", page: Optional[int] = None,
+                           page_size: int = 50) -> Dict[str, Any]:
+        """目录列表:q 模糊匹配 id/名称,status 过滤;page 传了才分页。
+
+        不传 page 返回全部(小字典全量拉取的兼容口径)。
+        """
+        where = ["subject_type = ?"]
+        params: List[Any] = [subject_type]
+        if q:
+            like = f"%{q}%"
+            where.append("(subject_id ILIKE ? OR display_name ILIKE ?)")
+            params += [like, like]
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        cond = " AND ".join(where)
+        with self._get_conn() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) AS n FROM kg_subjects WHERE {cond}",
+                tuple(params)).fetchone()["n"]
+            sql = f"SELECT * FROM kg_subjects WHERE {cond} ORDER BY subject_id"
+            if page is not None:
+                sql += " LIMIT ? OFFSET ?"
+                params += [page_size, (page - 1) * page_size]
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return {"items": [self._subject_out(r) for r in rows], "total": total,
+                "page": page, "pageSize": page_size if page is not None else None}
+
+    def subjects_sync_status(self) -> Dict[str, Any]:
+        """目录同步状态总览:各类计数(总/在用/停用)+ 最近一次同步 + 流水。"""
+        with self._get_conn() as conn:
+            out: Dict[str, Any] = {}
+            for t in ("user", "role"):
+                rows = conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM kg_subjects "
+                    "WHERE subject_type = ? GROUP BY status", (t,)).fetchall()
+                by = {r["status"]: r["n"] for r in rows}
+                out[t] = {"total": sum(by.values()),
+                          "active": by.get("active", 0),
+                          "disabled": by.get("disabled", 0)}
+            for r in conn.execute(
+                    "SELECT DISTINCT ON (subject_type) subject_type, mode, synced_at "
+                    "FROM kg_subject_sync_logs "
+                    "ORDER BY subject_type, synced_at DESC").fetchall():
+                out[r["subject_type"]]["lastSyncAt"] = r["synced_at"]
+                out[r["subject_type"]]["lastMode"] = r["mode"]
+            recent = conn.execute(
+                "SELECT subject_type, mode, summary, synced_at "
+                "FROM kg_subject_sync_logs "
+                "ORDER BY synced_at DESC LIMIT 20").fetchall()
+        out["recent"] = [{"subjectType": r["subject_type"], "mode": r["mode"],
+                          "summary": r["summary"] or {},
+                          "syncedAt": r["synced_at"]} for r in recent]
+        return out
+
+    def _subjects_map(self, conn,
+                      subject_type: str) -> Dict[str, Dict[str, Any]]:
+        """某类型目录全量快照(id → {display_name, status});同步 diff 用。"""
+        return {r["subject_id"]: {"display_name": r["display_name"],
+                                  "status": r["status"] or "active"}
+                for r in conn.execute(
+                    "SELECT subject_id, display_name, status "
+                    "FROM kg_subjects WHERE subject_type = ?",
+                    (subject_type,)).fetchall()}
+
+    @staticmethod
+    def _subject_changed(old: Dict[str, Any], name: str,
+                         status: str) -> bool:
+        return ((old["display_name"] or "") != name
+                or (old["status"] or "active") != status)
+
+    @staticmethod
+    def _subject_out(r) -> Dict[str, Any]:
+        """行 → 对外形状(name 空则回退显示 id,与 ACL 候选口径一致)。"""
+        return {"id": r["subject_id"],
+                "name": r["display_name"] or r["subject_id"],
+                "status": r["status"] or "active",
+                "createdAt": r["created_at"] or "",
+                "updatedAt": r["updated_at"]}
+
+    def _log_subject_sync(self, conn, subject_type: str, mode: str,
+                          summary: Dict[str, Any], now: str) -> None:
+        """同步/管理操作流水(同事务写入;只留最近 200 条防膨胀)。"""
+        conn.execute(
+            "INSERT INTO kg_subject_sync_logs "
+            "(id, subject_type, mode, summary, synced_at) "
+            "VALUES (?, ?, ?, ?::jsonb, ?)",
+            (str(uuid.uuid4()), subject_type, mode,
+             json.dumps(summary, ensure_ascii=False), now))
+        conn.execute(
+            "DELETE FROM kg_subject_sync_logs WHERE id NOT IN ("
+            "SELECT id FROM kg_subject_sync_logs "
+            "ORDER BY synced_at DESC LIMIT 200)")
 
     def list_subjects(self, subject_type: str) -> List[Dict[str, str]]:
+        """活跃目录(ACL 编辑页下拉候选;停用条目不出现)。"""
         with self._get_conn() as conn:
             rows = conn.execute(
                 "SELECT subject_id, display_name FROM kg_subjects "
-                "WHERE subject_type = ? ORDER BY subject_id", (subject_type,)).fetchall()
+                "WHERE subject_type = ? AND status = 'active' "
+                "ORDER BY subject_id", (subject_type,)).fetchall()
         return [{"id": r["subject_id"],
                  "name": r["display_name"] or r["subject_id"]} for r in rows]
 

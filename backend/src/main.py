@@ -334,6 +334,13 @@ from api.admin import require_admin as _require_admin
 from sdk.pack_api import register_admin_auth
 register_admin_auth(_require_admin)
 
+# 平台 MCP 密钥解析注册进 SDK(知识库同步接口的 X-Api-Key 接受分支:
+# 与 /api/mcp 同一把密钥,管理端 MCP 设置里生成/轮换;复用 mcp_server
+# 的读取链路,轮换 5s 内生效两边同源)
+from services.mcp_server import _cached_key as _mcp_key_of
+from sdk.pack_api import register_mcp_key_resolver
+register_mcp_key_resolver(_mcp_key_of)
+
 # 插件配置读取器工厂注册进 SDK(同款依赖倒置:插件经
 # sdk.pack_api.settings_reader 取 reader,不 import services 层)
 from services.pack_settings import PackSettingsReader as _PSR

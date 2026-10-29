@@ -55,6 +55,47 @@ async def admin_required(request: Request) -> None:
     await _admin_auth_fn(request)
 
 
+# ── 平台 MCP 密钥解析(依赖倒置,同 admin_auth 模式) ──────────
+# 同步类端点除管理凭证外还接受 X-Api-Key(与对外 MCP 端点 /api/mcp
+# 同一把密钥,管理端 MCP 设置里生成/轮换)——对接方一把钥匙走 REST
+# 同步。解析实现由宿主装配期注册(生产实现 = services.mcp_server 的
+# 读取链路),SDK 不反向 import services 层。
+_mcp_key_resolver: Optional[Callable[[Request], str]] = None
+
+
+def register_mcp_key_resolver(fn: Callable[[Request], str]) -> None:
+    """宿主注册 MCP 密钥解析实现(装配期调用一次)。
+
+    fn(request) -> str:当前生效的 MCP 密钥;空串=未配置。重复注册记
+    warning 后覆盖(语义同 register_admin_auth)。
+    """
+    global _mcp_key_resolver
+    if _mcp_key_resolver is not None and _mcp_key_resolver is not fn:
+        logger.warning("register_mcp_key_resolver 重复注册(覆盖旧实现)")
+    _mcp_key_resolver = fn
+
+
+async def admin_or_mcp_key_required(request: Request) -> None:
+    """管理端鉴权 或 平台 MCP 密钥(三选一)——同步类端点用。
+
+    规则(fail-closed):
+      - 带 X-Api-Key:必须与平台 MCP 密钥匹配,不回落管理鉴权分支
+        (防错钥匙静默漏过);未配置 MCP 密钥 503(与 /api/mcp 同文案);
+      - 不带 X-Api-Key:走 admin_required(Bearer token / X-Admin-Token /
+        开放模式)。
+    """
+    supplied = (request.headers.get("X-Api-Key") or "").strip()
+    if supplied:
+        import hmac
+        expected = _mcp_key_resolver(request) if _mcp_key_resolver is not None else ""
+        if not expected:
+            raise HTTPException(503, "MCP 未启用:管理端未配置 MCP API Key")
+        if not hmac.compare_digest(supplied.encode(), expected.encode()):
+            raise HTTPException(401, "MCP API Key 无效")
+        return
+    await admin_required(request)
+
+
 async def user_required(request: Request) -> None:
     """用户级端点鉴权(信任模型与 conversations API 一致)。
 

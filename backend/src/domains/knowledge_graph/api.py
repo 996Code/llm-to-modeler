@@ -18,6 +18,15 @@
   DELETE /kbs/{id}/documents/{doc_id}  删文档(联动清理;导入任务 M3)
   GET    /kbs/{id}/graph               图谱浏览(限量节点+邻接边;过滤 q/types)
   GET    /kbs/{id}/graph/expand        点击节点增量展开(1 跳)
+
+【用户/角色目录同步】(源系统经 HTTP 推送;契约见 doc/知识库用户角色同步API.md)
+  POST   /subjects/{type}              全量同步(整体替换,单次一个事务,幂等)
+  POST   /subjects/{type}/delta        增量同步(upserts 合并+deletes,重放安全)
+  GET    /subjects/{type}              列表(q/status 过滤,page/pageSize 分页可选)
+  GET    /subjects/{type}/{id}         单条详情
+  PUT    /subjects/{type}/{id}         单条 upsert(建/改合一,重试安全)
+  DELETE /subjects/{type}/{id}         删除单条
+  GET    /sync/status                  同步状态总览(计数+最近同步+流水)
 """
 import asyncio
 import hashlib
@@ -32,7 +41,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from sdk.pack_api import admin_required
+from sdk.pack_api import admin_required, admin_or_mcp_key_required
 from domains.knowledge_graph import runtime
 from sdk.doc_parser import (
     allowed_extension, chunk_text, mime_for, parse_to_text,
@@ -294,38 +303,220 @@ async def set_kb_acl(kb_id: str, request: Request, payload: Dict[str, Any]):
     return {"users": users, "roles": roles}
 
 
-# ── 数据权限候选字典(宿主同步;ACL 编辑页下拉选择的数据源) ──
+# ── 用户/角色目录:同步(全量/增量)+ CRUD + 状态 ─────────────
+# 源系统(组织/人员/角色管理方)经 HTTP 推送;完整契约与示例见
+# doc/知识库用户角色同步API.md。鉴权:管理凭证(Bearer/X-Admin-Token/
+# 开放模式)或 X-Api-Key(平台 MCP 密钥,与 /api/mcp 同一把)三选一。
+# 目录是 ACL 配置的候选字典——检索判权仍按请求身份(X-User-Id/roles)
+# +库 ACL,删除目录条目不自动改动已配置的 ACL。
 
-@router.post("/subjects/{subject_type}", dependencies=[Depends(admin_required)])
-async def sync_subjects(subject_type: str, request: Request, payload: Dict[str, Any]):
-    """宿主同步用户/角色字典(全量替换)。
+_SUBJECT_TYPES = ("user", "role")
+_SUBJECT_LABELS = {"user": "用户", "role": "角色"}
+# 批量上限:防误推全量组织库打挂单事务;更大的量分批推(全量后接增量)
+_FULL_SYNC_MAX_ITEMS = 20000
+_DELTA_MAX_UPSERTS = 5000
+_DELTA_MAX_DELETES = 5000
+_SUBJECT_ID_MAX = 128
+_SUBJECT_NAME_MAX = 128
 
-    Body: {items: [{id, name?}, ...]}——组织/人员/角色系统变更后由宿主
-    推送;ACL 编辑页的下拉候选即来自这里。宿主侧删除的条目随之消失。
-    subject_type: user | role。
-    """
-    if subject_type not in ("user", "role"):
+
+def _subject_type_or_422(subject_type: str) -> str:
+    if subject_type not in _SUBJECT_TYPES:
         raise HTTPException(422, "subject_type 必须是 user|role")
-    raw = payload.get("items")
+    return subject_type
+
+
+def _validated_subject_fields(item: Dict[str, Any], where: str) -> Dict[str, Any]:
+    """校验/归一单条的可选字段(name/status);id 由调用方处理。"""
+    out: Dict[str, Any] = {}
+    if item.get("name") is not None:
+        name = str(item["name"]).strip()
+        if len(name) > _SUBJECT_NAME_MAX:
+            raise HTTPException(
+                422, f"{where}.name 超长(上限 {_SUBJECT_NAME_MAX} 字符)")
+        out["name"] = name
+    if item.get("status") is not None:
+        if item["status"] not in ("active", "disabled"):
+            raise HTTPException(422, f"{where}.status 必须是 active|disabled")
+        out["status"] = item["status"]
+    return out
+
+
+def _validated_subject_items(raw: Any, cap: int, field: str) -> List[Dict[str, Any]]:
+    """批量条目校验:必须是数组、不超上限、逐条合法、id 不重复。"""
     if not isinstance(raw, list):
-        raise HTTPException(422, "items 必须是数组")
-    items = []
-    for it in raw:
+        raise HTTPException(422, f"{field} 必须是数组")
+    if len(raw) > cap:
+        raise HTTPException(422, f"{field} 单次上限 {cap} 条,请分批推送")
+    items: List[Dict[str, Any]] = []
+    for i, it in enumerate(raw):
         if not isinstance(it, dict):
-            continue
+            raise HTTPException(422, f"{field}[{i}] 必须是对象")
         sid = str(it.get("id") or "").strip()
-        if sid:
-            items.append({"id": sid, "name": str(it.get("name") or "").strip()})
-    runtime.get_kg_store(request.app.state).sync_subjects(subject_type, items)
-    logger.info(f"subjects synced: {subject_type} ({len(items)} 条)")
-    return {"subjectType": subject_type, "count": len(items)}
+        if not sid:
+            raise HTTPException(422, f"{field}[{i}] 缺少 id")
+        if len(sid) > _SUBJECT_ID_MAX:
+            raise HTTPException(
+                422, f"{field}[{i}].id 超长(上限 {_SUBJECT_ID_MAX} 字符)")
+        items.append({"id": sid, **_validated_subject_fields(it, f"{field}[{i}]")})
+    seen, dups = set(), set()
+    for it in items:
+        if it["id"] in seen:
+            dups.add(it["id"])
+        seen.add(it["id"])
+    if dups:
+        raise HTTPException(
+            422, f"{field} 内 id 重复: {', '.join(sorted(dups)[:10])}")
+    return items
 
 
-@router.get("/subjects/{subject_type}", dependencies=[Depends(admin_required)])
+def _validated_delta_deletes(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        raise HTTPException(422, "deletes 必须是数组")
+    if len(raw) > _DELTA_MAX_DELETES:
+        raise HTTPException(422, f"deletes 单次上限 {_DELTA_MAX_DELETES} 条")
+    out: List[str] = []
+    seen = set()
+    for i, d in enumerate(raw):
+        sid = str(d or "").strip()
+        if not sid:
+            raise HTTPException(422, f"deletes[{i}] 不能为空")
+        if len(sid) > _SUBJECT_ID_MAX:
+            raise HTTPException(
+                422, f"deletes[{i}] 超长(上限 {_SUBJECT_ID_MAX} 字符)")
+        if sid in seen:
+            raise HTTPException(422, f"deletes 内 id 重复: {sid}")
+        seen.add(sid)
+        out.append(sid)
+    return out
+
+
+@router.post("/subjects/{subject_type}",
+             dependencies=[Depends(admin_or_mcp_key_required)])
+async def sync_subjects(subject_type: str, request: Request,
+                        payload: Dict[str, Any]):
+    """全量同步用户/角色目录(整体替换;单次调用一个事务)。
+
+    Body: {items: [{id, name?, status?}, ...]}——源系统推送权威
+    快照;不在清单内的旧条目随之删除(源侧删人这里跟着走)。重推同清单
+    幂等:值未变的行不动(updated_at 不假跳)。
+
+    Returns: {subjectType, count, created, updated, unchanged, removed}
+    """
+    _subject_type_or_422(subject_type)
+    items = _validated_subject_items(
+        (payload or {}).get("items"), _FULL_SYNC_MAX_ITEMS, "items")
+    summary = runtime.get_kg_store(request.app.state).sync_subjects_full(
+        subject_type, items)
+    logger.info(f"subjects full sync: {subject_type} ({summary})")
+    return {"subjectType": subject_type, "count": len(items),
+            "created": summary["created"], "updated": summary["updated"],
+            "unchanged": summary["unchanged"], "removed": summary["removed"]}
+
+
+@router.post("/subjects/{subject_type}/delta",
+             dependencies=[Depends(admin_or_mcp_key_required)])
+async def sync_subjects_delta(subject_type: str, request: Request,
+                              payload: Dict[str, Any]):
+    """增量同步(upserts 合并 + deletes;单次调用一个事务,重放安全)。
+
+    Body: {upserts?: [{id, name?, status?}], deletes?: [id]}
+      - upserts 按 id 新建或合并:本次提供的字段才覆盖,缺省字段保持现值;
+      - deletes 删不存在的 id 如实进 missing(不报错——源系统重推已
+        消费过的增量不会失败)。
+    """
+    _subject_type_or_422(subject_type)
+    payload = payload or {}
+    upserts = _validated_subject_items(
+        payload.get("upserts") or [], _DELTA_MAX_UPSERTS, "upserts")
+    deletes = _validated_delta_deletes(payload.get("deletes") or [])
+    result = runtime.get_kg_store(request.app.state).sync_subjects_delta(
+        subject_type, upserts, deletes)
+    logger.info(f"subjects delta sync: {subject_type} "
+                f"(+{result['inserted']}~{result['updated']}-{result['deleted']})")
+    return {"subjectType": subject_type, **result}
+
+
+@router.get("/subjects/{subject_type}",
+            dependencies=[Depends(admin_or_mcp_key_required)])
 async def list_subjects(subject_type: str, request: Request):
-    if subject_type not in ("user", "role"):
-        raise HTTPException(422, "subject_type 必须是 user|role")
-    return {"items": runtime.get_kg_store(request.app.state).list_subjects(subject_type)}
+    """目录列表。Query: q(id/名称模糊)、status(active|disabled)、
+    page/pageSize(1~200;不传 page 返回全部)。"""
+    _subject_type_or_422(subject_type)
+    qp = request.query_params
+    q = (qp.get("q") or "").strip()
+    status = (qp.get("status") or "").strip()
+    if status and status not in ("active", "disabled"):
+        raise HTTPException(422, "status 必须是 active|disabled")
+    page = None
+    page_size = 50
+    if qp.get("page") is not None:
+        try:
+            page = int(qp.get("page"))
+            page_size = int(qp.get("pageSize") or 50)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "page/pageSize 必须是整数")
+        if page < 1:
+            raise HTTPException(422, "page 须从 1 起")
+        if not 1 <= page_size <= 200:
+            raise HTTPException(422, "pageSize 须在 1~200")
+    return runtime.get_kg_store(request.app.state).list_subjects_page(
+        subject_type, q=q, status=status, page=page, page_size=page_size)
+
+
+@router.get("/subjects/{subject_type}/{subject_id}",
+            dependencies=[Depends(admin_or_mcp_key_required)])
+async def get_subject(subject_type: str, subject_id: str, request: Request):
+    """单条详情(name/status/创建与更新时间)。"""
+    _subject_type_or_422(subject_type)
+    rec = runtime.get_kg_store(request.app.state).get_subject(
+        subject_type, subject_id.strip())
+    if not rec:
+        raise HTTPException(
+            404, f"{_SUBJECT_LABELS[subject_type]}不存在: {subject_id}")
+    return rec
+
+
+@router.put("/subjects/{subject_type}/{subject_id}",
+            dependencies=[Depends(admin_or_mcp_key_required)])
+async def upsert_subject(subject_type: str, subject_id: str,
+                         request: Request, payload: Dict[str, Any]):
+    """新增或更新单条(建/改合一,重试安全)。
+
+    Body: {name?, status?}——新建时缺省字段用默认值(空名/active);
+    更新时缺省字段保持现值。
+    """
+    _subject_type_or_422(subject_type)
+    sid = subject_id.strip()
+    if not sid:
+        raise HTTPException(422, "subject_id 不能为空")
+    if len(sid) > _SUBJECT_ID_MAX:
+        raise HTTPException(422, f"subject_id 超长(上限 {_SUBJECT_ID_MAX} 字符)")
+    fields = _validated_subject_fields(payload or {}, "body")
+    rec = runtime.get_kg_store(request.app.state).upsert_subject(
+        subject_type, sid, fields)
+    logger.info(f"subject upsert: {subject_type}/{sid} "
+                f"(created={rec['created']})")
+    return rec
+
+
+@router.delete("/subjects/{subject_type}/{subject_id}",
+               dependencies=[Depends(admin_or_mcp_key_required)])
+async def delete_subject(subject_type: str, subject_id: str, request: Request):
+    """删除单条(不存在 404,如实区分"已删过"与"删成功")。"""
+    _subject_type_or_422(subject_type)
+    if not runtime.get_kg_store(request.app.state).delete_subject(
+            subject_type, subject_id.strip()):
+        raise HTTPException(
+            404, f"{_SUBJECT_LABELS[subject_type]}不存在: {subject_id}")
+    logger.info(f"subject deleted: {subject_type}/{subject_id}")
+    return {"success": True}
+
+
+@router.get("/sync/status", dependencies=[Depends(admin_or_mcp_key_required)])
+async def subjects_sync_status(request: Request):
+    """目录同步状态总览:各类计数(总/在用/停用)+ 最近一次同步 + 操作流水。"""
+    return runtime.get_kg_store(request.app.state).subjects_sync_status()
 
 
 # ── 标注回复 CRUD(D32:知识库标准答案;管理端维护,检索时短路) ──

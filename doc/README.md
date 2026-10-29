@@ -51,6 +51,7 @@
 |---|---|
 | [mcp-integration-design.md](mcp-integration-design.md) | MCP 双向接入设计（一+二期总纲） |
 | [mcp-phase1-plan.md](mcp-phase1-plan.md) / [mcp-phase2-plan.md](mcp-phase2-plan.md) | MCP 分期实施计划 |
+| [知识库用户角色同步API.md](知识库用户角色同步API.md) | 知识库用户/角色同步对接指南（面向源系统：全量/增量/CRUD/状态 + 运行时身份传递，只写对方要做什么） |
 | [chatbi-kg-linkage-idea.md](chatbi-kg-linkage-idea.md) | ChatBI 与 KG 联动构想 |
 | [deploy/single/README.md](../deploy/single/README.md) | 单容器部署说明 |
 
