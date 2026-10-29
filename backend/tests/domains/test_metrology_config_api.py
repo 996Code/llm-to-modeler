@@ -242,7 +242,7 @@ def _dry(monkeypatch, client, payload):
         "scenario": "progress", "instrument": "",
         "purpose": "", "order_no": ""})
     monkeypatch.setattr(config_api, "_dry_run_once",
-                        lambda sc, llm, b: _orig(sc, _NoAskLLM(extract), b))
+                        lambda sc, llm, b, *extra: _orig(sc, _NoAskLLM(extract), b, *extra))
     return client.post("/api/packs/metrology_assistant/config/dry-run",
                        json=payload)
 
