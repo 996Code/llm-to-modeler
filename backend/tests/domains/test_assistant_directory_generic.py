@@ -220,15 +220,28 @@ def test_legacy_mode_without_template_queries_user_input_not_domain_words():
 
 def test_stored_turnaround_demo_gets_legacy_query_template(monkeypatch):
     from domains.metrology_assistant import runtime, store
-    from domains.metrology_assistant.legacy_demo import SCENARIOS
+    from domains.metrology_assistant.legacy_demo import (
+        SCENARIOS, _TURNAROUND_ACTION_V1,
+    )
     runtime.reset_runtime_cache()
     original = config._jsonable({"scenarios": SCENARIOS})
+    # 存量 DB 里的检测耗时还是初版 kg 问答(库里无工作日数据)——装载时
+    # 原位升级为业务查询(query_turnaround);qualification 仍补 query_template
+    v1_turnaround = {"label": "器具检测耗时/工作日咨询",
+                     "intent": SCENARIOS["turnaround"]["intent"],
+                     "required": {"slot": "instrument", "header": "器具名称",
+                                  "question": "请提供器具名称", "options": []},
+                     "action": dict(_TURNAROUND_ACTION_V1)}
+    stored = {**original, "scenarios": {
+        **original["scenarios"], "turnaround": v1_turnaround}}
     monkeypatch.setattr(runtime, "get_pack_db", lambda: None)
     monkeypatch.setattr(store, "current_revision", lambda db: 1)
-    monkeypatch.setattr(store, "load_config", lambda db: {**original, "_revision": 1})
+    monkeypatch.setattr(store, "load_config", lambda db: {**stored, "_revision": 1})
     try:
         loaded = config.load_scenarios()
-        assert loaded["turnaround"]["action"]["query_template"] == "{instrument} 检测 耗时 工作日"
+        up = loaded["turnaround"]["action"]
+        assert up["kind"] == "chatbi" and up["tool"] == "query_turnaround"
+        assert up["server"] == "metrology"
         assert loaded["qualification"]["action"]["query_template"] == "{instrument} 检测 资质 承接范围"
     finally:
         runtime.reset_runtime_cache()

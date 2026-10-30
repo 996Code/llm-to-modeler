@@ -15,6 +15,10 @@
   名称精确→包含匹配,可叠加型号过滤;"压力"命中多行、"无线温度记录器"
   同名两行(不同量程不同价)可做多行与过滤测试样例。
 
+工具 query_turnaround(器具检测时限,业务信封返回):
+  常规/加急工作日(测试数据,演示评分"检测所需工作日"的数据面);
+  名称精确→包含匹配;压力表 5/2、电子秤 3/1、角膜曲率计 7/3 等。
+
 工具 query_appointment(预约送检单,date 槽位链路):
   2026-10-26 三条(上午两条/下午一条)、2026-10-27 一条;其余日期 not_found。
 
@@ -48,8 +52,8 @@ if __name__ == "__main__":
     host = os.getenv("METROLOGY_MCP_HOST", "127.0.0.1")
     port = int(os.getenv("METROLOGY_MCP_PORT", "9771"))
     print(f"计量业务平台 MCP server: http://{host}:{port}/mcp "
-          "(工具: query_progress / query_instrument / query_appointment / "
-          "query_certificate / query_report)")
+          "(工具: query_progress / query_instrument / query_turnaround / "
+          "query_appointment / query_certificate / query_report)")
     print("单号夹具: BJ2026/BJ2027 正常, BJ8888 拒权, BJ9000 不存在, "
           "BJ0000 超时")
     print("价目夹具: 24 条器具(测量范围/准确度/检测费/强检目录/周期/规程), "

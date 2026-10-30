@@ -128,8 +128,23 @@ SCENARIOS = {
             "options": [],
             "extract_hint": "instrument: 器具名称;指代(\"它/同一台\")从会话背景解析",
         },
-        "action": {"kind": "kg", "kb": REGULATION_KB,
-                   "conclusion": "turnaround"},
+        "action": {
+            "kind": "chatbi",
+            "server": "metrology",
+            "ds_name": "计量业务平台(通用)",
+            "tool": "query_turnaround",
+            "params": {"name": "instrument"},
+            "stage": "查询「{instrument}」检测时限…",
+            "error_noun": "检测时限",
+            "notices": {
+                "not_found": {
+                    "title": "未找到该器具时限",
+                    "message": "检测时限表中未找到「{instrument}」,请核对器具名称"
+                               "后重试,或联系业务窗口确认。",
+                },
+            },
+            "card": "_table_card",
+        },
     },
     "qualification": {
         "label": "资质能力范围咨询(能否检测某器具)",
@@ -182,13 +197,21 @@ SCENARIOS = {
 _INSTRUMENT_INFO_INTENT_V1 = ("问器具的检测费/收费标准/检校周期(多久检一次/复检"
                               "时间间隔,不是单次耗时)/强检目录归类/技术规程号")
 
+# 检测耗时场景初版(纯知识库问答):知识库里没有耗时/工作日数据,一直
+# 答"资料不足";检测时限是业务平台的承诺数据,随 query_turnaround
+# 工具落地改为业务查询。存量 DB 按原文精确相等识别后原位升级。
+_TURNAROUND_ACTION_V1 = {"kind": "kg", "kb": REGULATION_KB,
+                         "conclusion": "turnaround"}
+
 
 def upgrade_legacy_scenario(key: str, cfg: dict) -> dict:
     """Recognize only original stored demo declarations; never writes config.
 
-    三个计量结论场景的原始存量声明不带 query_template——按旧运行时
-    语义显式补全;价目查询按初版意图原文识别后换现行描述(补测量
-    范围/准确度);人工改过的配置不匹配精确相等条件,不会被覆盖。
+    两个计量结论场景的原始存量声明不带 query_template——按旧运行时
+    语义显式补全;检测耗时初版(kg 问答,库里无工作日数据)按原文识别
+    后原位升级为业务查询(query_turnaround);价目查询按初版意图原文
+    识别后换现行描述(补测量范围/准确度);人工改过的配置不匹配精确
+    相等条件,不会被覆盖。
     """
     from copy import deepcopy
     out = deepcopy(cfg)
@@ -212,11 +235,13 @@ def upgrade_legacy_scenario(key: str, cfg: dict) -> dict:
         fallback = {'slot': 'purpose', 'in': ['内部使用', '校准'], 'kb': REGULATION_KB}
         if tuple(sorted(fallback['in'])) not in covered:
             rules.append(fallback)
-    elif key in ('turnaround', 'qualification') and action == SCENARIOS[key]['action'] \
+    elif (key == 'turnaround' and action == _TURNAROUND_ACTION_V1
+            and cfg.get('intent') == SCENARIOS['turnaround']['intent']):
+        out = deepcopy(SCENARIOS['turnaround'])
+    elif key == 'qualification' and action == SCENARIOS[key]['action'] \
             and required.get('slot') == 'instrument' \
             and cfg.get('intent') == SCENARIOS[key]['intent']:
-        template = ('{instrument} 检测 耗时 工作日' if key == 'turnaround'
-                    else '{instrument} 检测 资质 承接范围')
+        template = '{instrument} 检测 资质 承接范围'
         out['action'].setdefault('query_template', template)
     elif (key == 'instrument_info' and action == SCENARIOS[key]['action']
             and cfg.get('intent') == _INSTRUMENT_INFO_INTENT_V1):
