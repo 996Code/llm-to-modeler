@@ -225,17 +225,24 @@ def test_stored_turnaround_demo_gets_legacy_query_template(monkeypatch):
     )
     runtime.reset_runtime_cache()
     original = config._jsonable({"scenarios": SCENARIOS})
-    # 存量 DB 里的检测耗时还是初版 kg 问答(库里无工作日数据)——装载时
-    # 原位升级为业务查询(query_turnaround);qualification 仍补 query_template
-    v1_turnaround = {"label": "器具检测耗时/工作日咨询",
-                     "intent": SCENARIOS["turnaround"]["intent"],
-                     "required": {"slot": "instrument", "header": "器具名称",
-                                  "question": "请提供器具名称", "options": []},
-                     # 带 query_template 的存量形态(整档保存把升级视图落库)也要命中
-                     "action": {**_TURNAROUND_ACTION_V1,
-                                "query_template": "{instrument} 检测 耗时 工作日"}}
+    # 存量 DB 里的检测耗时/资质能力还是初版 kg 问答(库里无对应数据,
+    # 可能带历史上落库的 query_template)——装载时原位升级为业务查询
+    v1 = {"label": "x", "intent": SCENARIOS["turnaround"]["intent"],
+          "required": {"slot": "instrument", "header": "器具名称",
+                       "question": "请提供器具名称", "options": []},
+          "action": {**_TURNAROUND_ACTION_V1,
+                     "query_template": "{instrument} 检测 耗时 工作日"}}
+    v1_q = {"label": "y", "intent": SCENARIOS["qualification"]["intent"],
+            "required": {"slot": "instrument", "header": "器具名称",
+                         "question": "请提供器具名称", "options": []},
+            "action": {"kind": "kg", "kb": "检定规程",
+                       "conclusion": "qualification",
+                       "query_template": "{instrument} 检测 资质 承接范围"}}
+    # 人工改过 intent 的 kg 存量:不命中识别,保持原样
+    v1_custom = {**v1_q, "intent": "人工定制的意图"}
     stored = {**original, "scenarios": {
-        **original["scenarios"], "turnaround": v1_turnaround}}
+        **original["scenarios"], "turnaround": v1, "qualification": v1_q,
+        "qualification_custom": v1_custom}}
     monkeypatch.setattr(runtime, "get_pack_db", lambda: None)
     monkeypatch.setattr(store, "current_revision", lambda db: 1)
     monkeypatch.setattr(store, "load_config", lambda db: {**stored, "_revision": 1})
@@ -244,6 +251,8 @@ def test_stored_turnaround_demo_gets_legacy_query_template(monkeypatch):
         up = loaded["turnaround"]["action"]
         assert up["kind"] == "chatbi" and up["tool"] == "query_turnaround"
         assert up["server"] == "metrology"
-        assert loaded["qualification"]["action"]["query_template"] == "{instrument} 检测 资质 承接范围"
+        upq = loaded["qualification"]["action"]
+        assert upq["kind"] == "chatbi" and upq["tool"] == "query_qualification"
+        assert loaded["qualification_custom"]["action"]["kind"] == "kg"
     finally:
         runtime.reset_runtime_cache()

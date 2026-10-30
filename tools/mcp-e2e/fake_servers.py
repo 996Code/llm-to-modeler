@@ -250,33 +250,59 @@ EQUIPMENT_DEVICES = {
 }
 
 # 检测时限夹具(演示评分"检测所需工作日"——业务平台的时限承诺,测试数据):
-# 常规/加急工作日;名称精确→包含匹配(与价目同款),未命中 not_found
+# 覆盖价目表全部器具(按名称哈希确定性取 3/5/7/10 常规日,加急约 40%),
+# 另含价目表外的演示常问器具;名称精确→包含匹配(与价目同款)
 METROLOGY_TURNAROUND = [
     {"name": "压力表", "category": "压力仪表", "regular_days": 5, "urgent_days": 2,
      "note": "含一般压力表/精密压力表,出证后 1 个工作日可取"},
     {"name": "数字压力计", "category": "压力仪表", "regular_days": 5, "urgent_days": 2,
      "note": "出证后 1 个工作日可取"},
+    {"name": "压力变送器", "category": "压力仪表", "regular_days": 5, "urgent_days": 2, "note": None},
+    {"name": "压力传感器", "category": "压力仪表", "regular_days": 3, "urgent_days": 1, "note": None},
+    {"name": "血压计", "category": "医疗卫生器械", "regular_days": 5, "urgent_days": 2,
+     "note": "含血压表"},
+    {"name": "肺活量测试仪", "category": "医疗卫生器械", "regular_days": 5, "urgent_days": 2, "note": None},
+    {"name": "心电监护仪", "category": "医疗卫生器械", "regular_days": 5, "urgent_days": 2, "note": None},
+    {"name": "医用吸引器", "category": "医疗卫生器械", "regular_days": 3, "urgent_days": 1, "note": None},
     {"name": "电子秤", "category": "衡器", "regular_days": 3, "urgent_days": 1,
      "note": "含电子汽车衡,大衡器现场检定另加 2 个工作日"},
     {"name": "角膜曲率计", "category": "光学仪器", "regular_days": 7, "urgent_days": 3,
      "note": "含验光类仪器"},
-    {"name": "血压计", "category": "医疗卫生器械", "regular_days": 5, "urgent_days": 2,
-     "note": "含血压表"},
-    {"name": "肺活量测试仪", "category": "医疗卫生器械", "regular_days": 5, "urgent_days": 2,
-     "note": None},
-    {"name": "电学仪器", "category": "电学", "regular_days": 5, "urgent_days": 2,
-     "note": "按类别承诺"},
-    {"name": "长度量具", "category": "长度", "regular_days": 7, "urgent_days": 3,
-     "note": "量块/卡尺类"},
-    {"name": "温度仪表", "category": "温度", "regular_days": 5, "urgent_days": 2,
-     "note": None},
+    {"name": "裂隙灯显微镜", "category": "光学仪器", "regular_days": 7, "urgent_days": 2, "note": None},
+    {"name": "单相电能表", "category": "电学仪器", "regular_days": 3, "urgent_days": 1, "note": None},
+    {"name": "电流传感器", "category": "电学仪器", "regular_days": 5, "urgent_days": 2, "note": None},
+    {"name": "电磁流量计", "category": "流量仪表", "regular_days": 5, "urgent_days": 2, "note": None},
+    {"name": "矢量信号发生器", "category": "电学仪器", "regular_days": 7, "urgent_days": 3, "note": None},
+    {"name": "耐电压测试仪校准装置", "category": "电学仪器", "regular_days": 3, "urgent_days": 1, "note": None},
+    {"name": "变频串联谐振试验装置", "category": "电学仪器", "regular_days": 3, "urgent_days": 1, "note": None},
+    {"name": "钢卷尺", "category": "长度量具", "regular_days": 10, "urgent_days": 3, "note": None},
+    {"name": "跳动检查仪", "category": "长度量具", "regular_days": 3, "urgent_days": 1, "note": None},
+    {"name": "砝码", "category": "质量器具", "regular_days": 5, "urgent_days": 2, "note": None},
+    {"name": "膜式燃气表", "category": "流量仪表", "regular_days": 3, "urgent_days": 1, "note": None},
+    {"name": "冷水水表", "category": "流量仪表", "regular_days": 10, "urgent_days": 3, "note": None},
+    {"name": "无线温压传感器", "category": "温度仪表", "regular_days": 5, "urgent_days": 2, "note": None},
+    {"name": "透射式烟度计", "category": "理化分析仪器", "regular_days": 10, "urgent_days": 3, "note": None},
+    {"name": "冰箱温度计", "category": "温度仪表", "regular_days": 7, "urgent_days": 2, "note": None},
+    {"name": "无线温度记录器", "category": "温度仪表", "regular_days": 5, "urgent_days": 2, "note": None},
 ]
+
+# 资质能力夹具(演示评分"资质能力表"):能检什么=价目表收录范围,
+# 按器具派生——在册可检(附类目与强检目录归类),不在册 not_found
+# (须定义在 METROLOGY_INSTRUMENTS 之后)
 
 # 器具价目夹具(AI.xlsx 转换,已清洗: 去导出 HTML 标签/尾逗号,数值转 int):
 # 测量范围/准确度/检测费/强检一二级目录(null=不在强检目录)/检校周期/技术规程
 METROLOGY_INSTRUMENTS = json.loads(
     (Path(__file__).resolve().parent / "metrology_instruments.json")
     .read_text(encoding="utf-8"))
+
+METROLOGY_QUALIFICATION = [
+    {"name": r["name"], "category": r.get("mandatory_l1") or "一般校准项目",
+     "mandatory": f'{r["mandatory_l1"]}/{r["mandatory_l2"]}' if r.get("mandatory_l1")
+                  else "非强检器具",
+     "basis": "机构资质附表(与价目表同源)"}
+    for r in METROLOGY_INSTRUMENTS
+]
 
 
 def _envelope(payload: dict) -> tuple:
@@ -298,6 +324,8 @@ def build_metrology_server() -> Starlette:
       (如同名器具不同量程价目不同);
     - query_turnaround: 器具检测时限承诺(常规/加急工作日,测试数据),
       名称精确→包含两级匹配;演示评分"检测所需工作日"的数据面;
+    - query_qualification: 资质能力范围(能检什么=价目表收录,测试数据),
+      在册可检附类目/强检归类;演示评分"资质能力表"的数据面;
     - query_appointment: 按日期查当日预约送检单(date 槽位链路);
     - query_certificate: 按状态查证书清单(state 带 enum 白名单);
     - query_report: 按报告号查报告进度(拒权分态 + 通用表格卡)。
@@ -337,6 +365,16 @@ def build_metrology_server() -> Starlette:
                                      "type": "string",
                                      "description": "器具名称(必填,先精确后包含"
                                      "匹配,如 压力表/角膜曲率计)"}},
+                                 "required": ["name"]}),
+                types.Tool(
+                    name="query_qualification",
+                    description="查询机构资质能力范围:该器具是否可检/所属"
+                                "类目与强检目录归类(名称支持模糊匹配)",
+                    inputSchema={"type": "object",
+                                 "properties": {"name": {
+                                     "type": "string",
+                                     "description": "器具名称(必填,先精确后包含"
+                                     "匹配;在册=具备检测资质)"}},
                                  "required": ["name"]}),
                 types.Tool(
                     name="query_appointment",
@@ -470,6 +508,20 @@ def build_metrology_server() -> Starlette:
             if not hits:
                 return _envelope({"status": "not_found",
                                   "message": f"未找到器具「{qname}」的检测时限信息"})
+            return _envelope({"status": "ok", "data": hits})
+        if name == "query_qualification":
+            qname = str(args.get("name") or "").strip()
+            if not qname:
+                return _envelope({"status": "invalid_input",
+                                  "message": "缺少器具名称(name)"})
+            hits = [r for r in METROLOGY_QUALIFICATION if r["name"] == qname]
+            if not hits:
+                hits = [r for r in METROLOGY_QUALIFICATION if qname in r["name"]]
+            if not hits:
+                return _envelope({
+                    "status": "not_found",
+                    "message": f"资质能力表中未收录「{qname}」,暂不具备该器具的"
+                               "检测资质或需人工确认承接范围"})
             return _envelope({"status": "ok", "data": hits})
         if name == "query_appointment":
             date = str(args.get("date") or "").strip()

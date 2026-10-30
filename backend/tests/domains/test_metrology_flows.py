@@ -298,15 +298,14 @@ def test_turnaround_and_qualification_route_and_conclude(monkeypatch):
 
 
 def test_kg_scenarios_use_explicit_kb_from_table():
-    """场景表显式 kb 绑定:qualification 查检定规程库;检测耗时走业务时限。"""
+    """kg 问答只剩强检判定(按用途选库);耗时/资质走业务平台查询。"""
     table = mta._current_scenarios()
-    assert table["qualification"]["action"]["kb"] == mta.REGULATION_KB
-    assert table["qualification"]["action"]["conclusion"] == "qualification"
     # mandatory_check 无显式 kb:沿用按用途选库分支
     assert "kb" not in table["mandatory_check"]["action"]
-    # 检测耗时:业务平台的时限承诺(query_turnaround),不再是 kg 问答
-    assert table["turnaround"]["action"]["kind"] == "chatbi"
+    # 检测耗时/资质能力:业务平台数据(query_turnaround/query_qualification)
     assert table["turnaround"]["action"]["tool"] == "query_turnaround"
+    assert table["qualification"]["action"]["tool"] == "query_qualification"
+    assert table["qualification"]["action"]["kind"] == "chatbi"
 
 
 def test_slot_type_list():

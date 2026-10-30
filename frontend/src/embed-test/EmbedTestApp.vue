@@ -18,12 +18,14 @@
               <section class="et-section">
                 <label class="et-field">
                   <span>用户</span>
-                  <a-select v-model:value="userId" placeholder="不传 user_id" allow-clear
+                  <a-select v-model:value="userId" placeholder="不传 user_id" allow-clear show-search
+                            option-filter-prop="label"
                             :options="userOptions" :disabled="loading || !!error" @change="dirty = true" />
                 </label>
                 <label class="et-field">
                   <span>角色（可多选）</span>
-                  <a-select v-model:value="pickedRoles" mode="multiple" placeholder="不传角色"
+                  <a-select v-model:value="pickedRoles" mode="multiple" placeholder="不传角色" show-search
+                            option-filter-prop="label"
                             :options="roleOptions" :max-tag-count="4" :disabled="loading || !!error" @change="dirty = true" />
                 </label>
                 <a-button type="primary" block :disabled="!dirty || loading || !!error" @click="reload">

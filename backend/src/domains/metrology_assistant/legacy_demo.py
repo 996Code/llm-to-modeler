@@ -156,8 +156,23 @@ SCENARIOS = {
             "options": [],
             "extract_hint": "instrument: 器具名称;指代(\"它/同一台\")从会话背景解析",
         },
-        "action": {"kind": "kg", "kb": REGULATION_KB,
-                   "conclusion": "qualification"},
+        "action": {
+            "kind": "chatbi",
+            "server": "metrology",
+            "ds_name": "计量业务平台(通用)",
+            "tool": "query_qualification",
+            "params": {"name": "instrument"},
+            "stage": "查询「{instrument}」的资质能力…",
+            "error_noun": "资质能力",
+            "notices": {
+                "not_found": {
+                    "title": "未收录该器具资质",
+                    "message": "资质能力表中未收录「{instrument}」,暂不具备该器具"
+                               "的检测资质,或需人工确认承接范围。",
+                },
+            },
+            "card": "_table_card",
+        },
     },
     "instrument_info": {
         "label": "器具检测费/测量范围/准确度/检校周期/强检归类等价目信息查询",
@@ -207,11 +222,10 @@ _TURNAROUND_ACTION_V1 = {"kind": "kg", "kb": REGULATION_KB,
 def upgrade_legacy_scenario(key: str, cfg: dict) -> dict:
     """Recognize only original stored demo declarations; never writes config.
 
-    两个计量结论场景的原始存量声明不带 query_template——按旧运行时
-    语义显式补全;检测耗时初版(kg 问答,库里无工作日数据)按原文识别
-    后原位升级为业务查询(query_turnaround);价目查询按初版意图原文
-    识别后换现行描述(补测量范围/准确度);人工改过的配置不匹配精确
-    相等条件,不会被覆盖。
+    mandatory_check 的原始存量声明不带 query_template——按旧运行时语义
+    显式补全;检测耗时/资质能力初版(kg 问答,库里无对应数据)按结构
+    识别后原位升级为业务查询;价目查询按初版意图原文识别后换现行描述
+    (补测量范围/准确度);人工改过的配置不匹配精确相等条件,不会被覆盖。
     """
     from copy import deepcopy
     out = deepcopy(cfg)
@@ -242,11 +256,12 @@ def upgrade_legacy_scenario(key: str, cfg: dict) -> dict:
         # 按结构匹配而非整典相等:存量可能带历史上补全的 query_template
         # (整档保存把升级视图落库),人工改过 intent 的不命中
         out = deepcopy(SCENARIOS['turnaround'])
-    elif key == 'qualification' and action == SCENARIOS[key]['action'] \
-            and required.get('slot') == 'instrument' \
-            and cfg.get('intent') == SCENARIOS[key]['intent']:
-        template = '{instrument} 检测 资质 承接范围'
-        out['action'].setdefault('query_template', template)
+    elif (key == 'qualification' and action.get('kind') == 'kg'
+            and action.get('kb') == REGULATION_KB
+            and action.get('conclusion') == 'qualification'
+            and cfg.get('intent') == SCENARIOS['qualification']['intent']):
+        # 资质能力初版 kg 问答(库里无资质数据)→业务查询(query_qualification)
+        out = deepcopy(SCENARIOS['qualification'])
     elif (key == 'instrument_info' and action == SCENARIOS[key]['action']
             and cfg.get('intent') == _INSTRUMENT_INFO_INTENT_V1):
         out['label'] = SCENARIOS[key]['label']
