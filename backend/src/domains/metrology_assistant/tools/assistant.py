@@ -247,7 +247,7 @@ def _unsupported_notice(table=None, tried_kb=''):
     table = _runtime_scenarios() if table is None else table
     labels = [c.get('label', k) for k, c in table.items()]
     text = ('当前尚无已接入能力,请联系管理员配置。' if not labels else
-            f"当前可咨询{len(labels)}类问题:{';'.join(labels[:10])}。请换个问法,或联系业务窗口人工咨询。")
+            f"当前可咨询{len(labels)}类问题:{';'.join(labels[:10])}。请换个问法,或联系业务窗口人工确认。")
     if tried_kb:
         text = f"已检索{tried_kb},未找到相关资料。{text}"
     return _notice('unsupported', '暂不支持此问题', text)

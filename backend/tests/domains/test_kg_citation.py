@@ -24,6 +24,14 @@ def test_citation_rule_present():
     assert "可用引用编号" in out
 
 
+def test_no_match_rule_requires_manual_confirmation():
+    """拒答边界契约:资料不足时,回答须明确提示需人工确认(演示评分要求)。"""
+    out = render_answer(kb_name="测试库", triples=[], node_details=[],
+                        chunk_texts=["〔A〕内容一"], query="q")
+    assert "知识库中未找到相关内容" in out
+    assert "人工确认" in out
+
+
 # ── cited_chunks 解析回传 ─────────────────────────────────────
 
 class TestParseCitedChunks:
