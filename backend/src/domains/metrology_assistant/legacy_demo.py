@@ -235,8 +235,12 @@ def upgrade_legacy_scenario(key: str, cfg: dict) -> dict:
         fallback = {'slot': 'purpose', 'in': ['内部使用', '校准'], 'kb': REGULATION_KB}
         if tuple(sorted(fallback['in'])) not in covered:
             rules.append(fallback)
-    elif (key == 'turnaround' and action == _TURNAROUND_ACTION_V1
+    elif (key == 'turnaround' and action.get('kind') == 'kg'
+            and action.get('kb') == REGULATION_KB
+            and action.get('conclusion') == 'turnaround'
             and cfg.get('intent') == SCENARIOS['turnaround']['intent']):
+        # 按结构匹配而非整典相等:存量可能带历史上补全的 query_template
+        # (整档保存把升级视图落库),人工改过 intent 的不命中
         out = deepcopy(SCENARIOS['turnaround'])
     elif key == 'qualification' and action == SCENARIOS[key]['action'] \
             and required.get('slot') == 'instrument' \

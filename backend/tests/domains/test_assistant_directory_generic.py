@@ -231,7 +231,9 @@ def test_stored_turnaround_demo_gets_legacy_query_template(monkeypatch):
                      "intent": SCENARIOS["turnaround"]["intent"],
                      "required": {"slot": "instrument", "header": "器具名称",
                                   "question": "请提供器具名称", "options": []},
-                     "action": dict(_TURNAROUND_ACTION_V1)}
+                     # 带 query_template 的存量形态(整档保存把升级视图落库)也要命中
+                     "action": {**_TURNAROUND_ACTION_V1,
+                                "query_template": "{instrument} 检测 耗时 工作日"}}
     stored = {**original, "scenarios": {
         **original["scenarios"], "turnaround": v1_turnaround}}
     monkeypatch.setattr(runtime, "get_pack_db", lambda: None)
