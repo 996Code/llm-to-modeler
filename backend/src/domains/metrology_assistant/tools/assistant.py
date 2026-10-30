@@ -347,7 +347,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 elif plan['kind'] == 'kg':
                     result = self._run_kg(scenario, cfg, ctx, merged, stage, plan, state, user_input)
                 else:
-                    result = self._run_chatbi(cfg, merged, stage, plan)
+                    result = self._run_chatbi(cfg, merged, stage, plan, ctx, state, user_input, table)
             except Exception:
                 self._finish_flow(flow, scenario, merged, 'failed')
                 raise
@@ -405,7 +405,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                                                             options=required.get('options') or [])]),
                           summary=f"需要{required['header']}")
 
-    def _run_chatbi(self, cfg, merged, stage, plan):
+    def _run_chatbi(self, cfg, merged, stage, plan, ctx, state, user_input, table):
         from domains.chatbi.controlled import execute_controlled
         action = cfg['action']
         noun = action.get('error_noun') or cfg.get('label') or '业务接口'
@@ -422,6 +422,14 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
             logger.exception('%s查询失败', noun)
             return ToolResult(error_for_llm=f'{noun}查询失败,已如实上报,请稍后重试。')
         if not result.ok:
+            if result.status == 'not_found':
+                # 业务数据查无 → 知识库链路兜底(与能力未命中同一条链):
+                # 业务表未收录的对象(如价目表外的器具),知识可能在库里,
+                # 原问题继续检索;知识库也无依据时回业务通知卡。
+                # 拒权/参数错误不降级——那是权限与契约问题,查库答非所问。
+                kb = self._fallback_answer(table, user_input, ctx, state, stage)
+                if kb.artifact and kb.artifact.get('type') == 'kg_search_result':
+                    return kb
             if result.status in ('forbidden', 'not_found'):
                 notice = (action.get('notices') or {}).get(result.status) or {}
                 title = notice.get('title') or ('无权查询' if result.status == 'forbidden' else '未找到数据')

@@ -1,7 +1,8 @@
-"""未命中能力 → 知识库链路兜底(跨库检索)→ 引导卡 的行为契约。
+"""未命中能力 / 业务数据查无 → 知识库链路兜底(跨库检索)→ 引导卡 的行为契约。
 
 主路径:跨可访问库检索有证据 → 证据链回答(与 kb_search 同一条链);
-边界:无证据/无可用库/检索异常/ACL 过滤/命中场景不受影响;dry-run 文案。
+边界:无证据/无可用库/检索异常/ACL 过滤/命中场景不受影响;dry-run 文案;
+数据层兜底:受控查询 not_found → 原问题转知识库,无依据回业务通知。
 """
 from copy import deepcopy
 from types import SimpleNamespace
@@ -201,6 +202,69 @@ def test_matched_scenario_bypasses_fallback(monkeypatch):
     assert not called
     assert result.artifact['type'] != 'kg_search_result'
     assert result.error_for_llm is None
+
+
+# ── 数据层兜底:业务查询 not_found → 原问题转知识库 ──────────────
+
+def _controlled(status, monkeypatch, ok=False):
+    monkeypatch.setattr(
+        'domains.chatbi.controlled.execute_controlled',
+        lambda *a, **kw: ControlledResult(
+            ok=ok, status=status,
+            error=None if ok else type('E', (), {'message': status})(), source={}))
+
+
+def _datasource_ok(monkeypatch):
+    from domains.chatbi import datasources, runtime as bi_runtime
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource', lambda db, ds: SimpleNamespace(
+        host='warehouse', database='', is_active=True, db_type='mcp'))
+
+
+def test_chatbi_not_found_falls_back_to_kb(monkeypatch):
+    """业务表未收录(如价目表外器具)→ 原问题走知识库,有据出证据卡。"""
+    seen = {}
+
+    def multi(app, kbs, query, **kwargs):
+        seen.update(query=query)
+        return multi_result(answer='检定周期为 1 年')
+
+    tool, _ = setup_tool(monkeypatch, multi=multi)
+    _datasource_ok(monkeypatch)
+    _controlled('not_found', monkeypatch)
+    ctx = context(LLM(extract={'scenario': 'warehouse::stock'}))
+    result = tool.execute({'user_input': '血压计的检定周期是多久'}, ctx)
+    assert seen['query'] == '血压计的检定周期是多久'   # 原问题检索
+    assert result.artifact['type'] == 'kg_search_result'
+    assert result.artifact.get('fallback') is True
+    assert result.artifact['answer'] == '检定周期为 1 年'
+
+
+def test_chatbi_not_found_kb_empty_keeps_business_notice(monkeypatch):
+    """知识库也无依据 → 回业务查无通知(业务事实仍在,不吞进引导卡)。"""
+    tool, _ = setup_tool(
+        monkeypatch, multi=lambda *a, **kw: {'sources': {'chunks': []}, 'answer': ''})
+    _datasource_ok(monkeypatch)
+    _controlled('not_found', monkeypatch)
+    ctx = context(LLM(extract={'scenario': 'warehouse::stock'}))
+    result = tool.execute({'user_input': '查一个不存在的东西'}, ctx)
+    assert result.artifact['type'] == 'metrology_notice'
+    assert result.artifact['status'] == 'not_found'
+    assert '未找到符合条件的数据' in result.artifact['message']
+
+
+def test_chatbi_forbidden_does_not_fall_back(monkeypatch):
+    """拒权是权限事实,不转知识库(装作能答反而错)。"""
+    called = []
+    tool, _ = setup_tool(
+        monkeypatch, multi=lambda *a, **kw: called.append(1) or multi_result())
+    _datasource_ok(monkeypatch)
+    _controlled('forbidden', monkeypatch)
+    ctx = context(LLM(extract={'scenario': 'warehouse::stock'}))
+    result = tool.execute({'user_input': '查别人的单'}, ctx)
+    assert not called                                   # 未发起知识库检索
+    assert result.artifact['status'] == 'forbidden'
+    assert result.artifact['type'] == 'metrology_notice'
 
 
 # ── dry-run 文案与配置校验 ──────────────────────────────────────
