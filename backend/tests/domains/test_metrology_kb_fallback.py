@@ -253,6 +253,21 @@ def test_chatbi_not_found_kb_empty_keeps_business_notice(monkeypatch):
     assert '未找到符合条件的数据' in result.artifact['message']
 
 
+def test_chatbi_not_found_zero_citation_keeps_business_notice(monkeypatch):
+    """弱召回 0 引用的合成"未找到"不顶业务查无事实(委托单查无仍出业务通知)。"""
+    weak = {'answer': '知识库中未找到相关内容,建议联系业务窗口确认',
+            'kb': {'id': 'kb-1', 'name': '检定规程'},
+            'sources': {'chunks': [{'docId': 'd1', 'docName': '弱相关.md', 'text': 'x', 'score': 0.5}]},
+            'cited_chunks': []}
+    tool, _ = setup_tool(monkeypatch, multi=lambda *a, **kw: weak)
+    _datasource_ok(monkeypatch)
+    _controlled('not_found', monkeypatch)
+    ctx = context(LLM(extract={'scenario': 'warehouse::stock'}))
+    result = tool.execute({'user_input': '查一下 BJ9000 的进度'}, ctx)
+    assert result.artifact['type'] == 'metrology_notice'
+    assert result.artifact['status'] == 'not_found'
+
+
 def test_chatbi_forbidden_does_not_fall_back(monkeypatch):
     """拒权是权限事实,不转知识库(装作能答反而错)。"""
     called = []

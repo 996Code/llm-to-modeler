@@ -427,8 +427,11 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 # 业务表未收录的对象(如价目表外的器具),知识可能在库里,
                 # 原问题继续检索;知识库也无依据时回业务通知卡。
                 # 拒权/参数错误不降级——那是权限与契约问题,查库答非所问。
+                # 有片段被回答引用才算兜底成立(证据红线):弱召回 0 引用的
+                # 合成"未找到"不顶掉业务查无事实——委托单查无仍出业务通知。
                 kb = self._fallback_answer(table, user_input, ctx, state, stage)
-                if kb.artifact and kb.artifact.get('type') == 'kg_search_result':
+                if (kb.artifact and kb.artifact.get('type') == 'kg_search_result'
+                        and kb.artifact.get('cited_chunks')):
                     return kb
             if result.status in ('forbidden', 'not_found'):
                 notice = (action.get('notices') or {}).get(result.status) or {}
