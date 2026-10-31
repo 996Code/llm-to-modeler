@@ -24,12 +24,13 @@
         </button>
 
         <div v-if="openTurns.includes(turn.index)" class="tr-timeline">
-          <div v-for="(item, idx) in turn.items" :key="idx" class="tr-item" :class="'tr-' + itemLineClass(item)">
+          <div v-for="(item, idx) in turn.items" :key="idx"
+               class="tr-item" :class="['tr-' + itemLineClass(item), { open: expandedRows.has(rowKey(turn.index, idx)) }]">
             <span class="tr-rail"></span>
             <div class="tr-item-body">
-              <!-- 用户 / 助手 -->
+              <!-- 用户 / 助手:内容锚点,气泡直接展示 -->
               <template v-if="item.type === 'event' && (item.kind === 'user' || item.kind === 'assistant')">
-                <div class="tr-item-head">
+                <div class="tr-item-head flat">
                   <span class="tr-tag" :class="item.kind === 'user' ? 'tg-user' : 'tg-assistant'">
                     {{ item.kind === 'user' ? '用户' : '助手' }}
                   </span>
@@ -40,52 +41,48 @@
                 </div>
               </template>
 
-              <!-- 打点(trace) -->
-              <template v-else-if="item.type === 'event' && item.kind === 'trace'">
-                <div class="tr-item-head">
-                  <span class="tr-tag" :class="'tg-' + (item.payload?.status || 'info')">
-                    {{ item.payload?.title || item.payload?.stage }}
+              <!-- 打点(trace) / 系统事件:点行头展开 -->
+              <template v-else-if="item.type === 'event'">
+                <div class="tr-item-head" @click="toggleItem(turn.index, idx)">
+                  <span class="tr-tag" :class="item.kind === 'trace' ? ('tg-' + (item.payload?.status || 'info')) : 'tg-sys'">
+                    {{ item.kind === 'trace' ? (item.payload?.title || item.payload?.stage) : eventLabel(item.kind) }}
                   </span>
-                  <span v-if="item.payload?.duration_ms != null" class="tr-dur">{{ item.payload.duration_ms }}ms</span>
+                  <span v-if="item.kind === 'trace' && item.payload?.duration_ms != null" class="tr-dur">{{ fmtMs(item.payload.duration_ms) }}</span>
                   <span class="tr-ts">{{ fmtTime(item.at) }}</span>
+                  <DownOutlined class="tr-arrow" :class="{ open: expandedRows.has(rowKey(turn.index, idx)) }" />
                 </div>
-                <JsonViewer v-if="hasKeys(item.payload?.detail)" label="明细" :data="item.payload?.detail"
-                  :height="200" :default-collapsed="true" />
+                <div v-if="expandedRows.has(rowKey(turn.index, idx))" class="tr-detail">
+                  <JsonViewer v-if="hasKeys(item.payload?.detail ?? item.payload)" label="明细"
+                    :data="item.payload?.detail ?? item.payload" :height="200" :default-collapsed="false" />
+                </div>
               </template>
 
-              <!-- LLM / 上游调用 -->
+              <!-- LLM / 上游调用:点行头展开格式化明细(一键切原始) -->
               <template v-else-if="item.type === 'call'">
-                <div class="tr-item-head">
+                <div class="tr-item-head" @click="toggleItem(turn.index, idx)">
                   <span class="tr-tag" :class="CALL_TYPE_CLS[item.callType || ''] || 'tg-sys'">
                     {{ CALL_TYPE_META[item.callType || '']?.label || item.callType }} · {{ stageLabel(item.stage, item.endpoint) }}
                   </span>
-                  <!-- 检索调用摘要:召回量/匹配度一眼可见,不用展开 JSON -->
                   <span v-if="recallSummary(item)" class="tr-recall">{{ recallSummary(item) }}</span>
-                  <span class="tr-dur" :class="durClass(item.durationMs)">{{ item.durationMs ?? '-' }}ms</span>
-                  <a-tag v-if="item.statusCode != null" :color="item.statusCode < 400 ? 'green' : 'red'" class="tr-code">
-                    {{ item.statusCode }}
-                  </a-tag>
                   <span v-if="item.errorMessage" class="tr-err">{{ truncate(item.errorMessage, 60) }}</span>
+                  <span class="tr-dur" :class="durClass(item.durationMs)">{{ fmtMs(item.durationMs ?? null) }}</span>
+                  <a-tag v-if="item.statusCode != null && item.statusCode >= 400" color="red" class="tr-code">{{ item.statusCode }}</a-tag>
                   <span class="tr-ts">{{ fmtTime(item.at) }}</span>
+                  <DownOutlined class="tr-arrow" :class="{ open: expandedRows.has(rowKey(turn.index, idx)) }" />
                 </div>
-                <!-- 数据明细:默认格式化,一键切原始 JSON -->
-                <a class="tr-raw-toggle" @click="toggleRaw(idx)">{{ rawRows.has(idx) ? '⇤ 格式化明细' : '原始数据 →' }}</a>
-                <template v-if="!rawRows.has(idx)">
-                  <TraceDetailSections :sections="formatDetail(item as any)" />
-                </template>
-                <template v-else>
-                  <JsonViewer label="请求" :data="item.requestData" :height="220" :default-collapsed="true" />
-                  <JsonViewer label="响应" :data="item.responseData" :height="260" :default-collapsed="true" />
-                </template>
-              </template>
-
-              <!-- 系统事件:checkpoint / compacted / compact_trace / ask -->
-              <template v-else>
-                <div class="tr-item-head">
-                  <span class="tr-tag tg-sys">{{ eventLabel(item.kind) }}</span>
-                  <span class="tr-ts">{{ fmtTime(item.at) }}</span>
+                <div v-if="expandedRows.has(rowKey(turn.index, idx))" class="tr-detail">
+                  <div class="tr-detail-bar">
+                    <a class="tr-raw-toggle" @click.stop="toggleRaw(turn.index, idx)">
+                      {{ rawRows.has(rowKey(turn.index, idx)) ? '⇤ 格式化明细' : '原始数据 →' }}
+                    </a>
+                  </div>
+                  <TraceDetailSections v-if="!rawRows.has(rowKey(turn.index, idx))"
+                    :sections="formatDetail(item as any)" />
+                  <template v-else>
+                    <JsonViewer label="请求" :data="item.requestData" :height="220" :default-collapsed="false" />
+                    <JsonViewer label="响应" :data="item.responseData" :height="260" :default-collapsed="false" />
+                  </template>
                 </div>
-                <JsonViewer label="载荷" :data="item.payload" :height="180" :default-collapsed="true" />
               </template>
             </div>
           </div>
@@ -105,10 +102,12 @@
 </template>
 
 <script setup lang="ts">
-// 会话链路追踪视图(视觉升级版):轮次卡片 + 时间线 + JsonViewer。
+// 会话链路追踪视图:轮次卡片 + 时间线。行头点击展开该条明细(call 默认
+// 格式化展示,一键切原始 JSON),收起时一行一标签,时间线一眼可读。
 import { inject, onMounted, ref, watch } from 'vue'
 import {
   MessageOutlined, RobotOutlined, CloudServerOutlined, NodeIndexOutlined, FileTextOutlined,
+  DownOutlined,
 } from '@ant-design/icons-vue'
 import { ConversationTrace as TraceType, fetchConversationTrace, fmtTime } from '../api'
 import type { LoadSafely } from './loadSafely'
@@ -117,12 +116,22 @@ import { formatDetail } from '../../shared/traceDetail'
 import TraceDetailSections from '../../shared/TraceDetailSections.vue'
 import { CALL_TYPE_META, CALL_TYPE_CLS, stageLabel } from '../labels'
 
-/** 数据明细视图:默认格式化,per-item 可切原始 JSON */
-const rawRows = ref(new Set<number>())
-function toggleRaw(idx: number) {
+/** 行展开态与原始数据视图:key = 轮次:行号(跨轮不撞) */
+const expandedRows = ref(new Set<string>())
+const rawRows = ref(new Set<string>())
+const rowKey = (turn: number, idx: number) => `${turn}:${idx}`
+function toggleItem(turn: number, idx: number) {
+  const key = rowKey(turn, idx)
+  const s = new Set(expandedRows.value)
+  if (s.has(key)) s.delete(key)
+  else s.add(key)
+  expandedRows.value = s
+}
+function toggleRaw(turn: number, idx: number) {
+  const key = rowKey(turn, idx)
   const s = new Set(rawRows.value)
-  if (s.has(idx)) s.delete(idx)
-  else s.add(idx)
+  if (s.has(key)) s.delete(key)
+  else s.add(key)
   rawRows.value = s
 }
 
@@ -148,7 +157,6 @@ const loadSafely = inject<LoadSafely>('loadSafely')!
 const trace = ref<TraceType | null>(null)
 const loading = ref(false)
 const openTurns = ref<number[]>([])
-
 
 function eventLabel(kind: string | undefined): string {
   const map: Record<string, string> = {
@@ -180,7 +188,8 @@ function durClass(ms: number | null | undefined): string[] {
   return []
 }
 
-function fmtMs(ms: number): string {
+function fmtMs(ms: number | null | undefined): string {
+  if (ms == null) return '-'
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
 }
 
@@ -243,13 +252,13 @@ watch(() => props.convId, load)
 .tb.llm { background: #f5f3ff; color: #6d28d9; }
 .tb.up { background: #ecfeff; color: #0e7490; }
 
-.tr-timeline { padding: 4px 14px 12px 18px; }
-.tr-item { position: relative; padding: 7px 0 7px 18px; }
+.tr-timeline { padding: 6px 14px 14px 18px; }
+.tr-item { position: relative; padding: 4px 0 4px 18px; border-radius: 8px; }
 .tr-rail {
-  position: absolute; left: 0; top: 14px; width: 8px; height: 8px; border-radius: 50%;
+  position: absolute; left: 0; top: 13px; width: 8px; height: 8px; border-radius: 50%;
 }
 .tr-rail::after {
-  content: ''; position: absolute; left: 3px; top: 12px; bottom: -14px; width: 2px;
+  content: ''; position: absolute; left: 3px; top: 12px; bottom: -12px; width: 2px;
   background: #eef0f4;
 }
 .tr-item:last-child .tr-rail::after { display: none; }
@@ -261,18 +270,19 @@ watch(() => props.convId, load)
 .tr-graphcall .tr-rail { background: #3b82f6; }
 .tr-vectorcall .tr-rail { background: #22c55e; }
 .tr-fulltextcall .tr-rail { background: #f97316; }
-.tg-graph { background: #eff6ff; color: #1d4ed8; }
-.tg-vector { background: #f0fdf4; color: #15803d; }
-.tg-fulltext { background: #fff7ed; color: #c2410c; }
-.tr-recall {
-  font-size: 11px; color: #2563eb; background: #f0f5ff;
-  border-radius: 6px; padding: 1px 8px; font-variant-numeric: tabular-nums;
-}
 .tr-sys .tr-rail { background: #cbd5e1; }
 
-.tr-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 行头:可点击展开的行 hover 有反馈,展开行左侧高亮 */
+.tr-item-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 3px 6px; margin: 0 -6px; border-radius: 6px; cursor: pointer; user-select: none;
+}
+.tr-item-head:hover { background: #f5f7fb; }
+.tr-item-head.flat { cursor: default; padding: 3px 6px; margin-top: 4px; }
+.tr-item-head.flat:hover { background: transparent; }
+.tr-item.open .tr-item-head { background: #f5f7fb; }
 .tr-tag {
-  font-size: 12px; border-radius: 6px; padding: 1px 8px; font-weight: 500;
+  font-size: 12px; border-radius: 6px; padding: 1px 8px; font-weight: 500; line-height: 18px;
 }
 .tg-user { background: #f0fdf4; color: #15803d; }
 .tg-assistant { background: #eff6ff; color: #1d4ed8; }
@@ -283,21 +293,37 @@ watch(() => props.convId, load)
 .tg-ask { background: #fffbeb; color: #b45309; }
 .tg-info { background: #eff6ff; color: #1d4ed8; }
 .tg-sys { background: #f1f5f9; color: #64748b; }
+.tg-graph { background: #eff6ff; color: #1d4ed8; }
+.tg-vector { background: #f0fdf4; color: #15803d; }
+.tg-fulltext { background: #fff7ed; color: #c2410c; }
+.tr-recall {
+  font-size: 11px; color: #2563eb; background: #f0f5ff;
+  border-radius: 6px; padding: 1px 8px; font-variant-numeric: tabular-nums;
+}
 .tr-ts { font-size: 11px; color: #c3c8d4; }
-.tr-dur { font-size: 12px; font-weight: 600; color: #374151; }
+.tr-dur { font-size: 12px; font-weight: 600; color: #374151; margin-left: auto; }
 .dur-orange { color: #ea580c; }
 .dur-red { color: #dc2626; }
 .tr-code { font-size: 11px; line-height: 16px; }
 .tr-err { font-size: 12px; color: #ef4444; }
+.tr-arrow { font-size: 10px; color: #b6bdc9; flex-shrink: 0; transition: transform 0.15s; }
+.tr-arrow.open { transform: rotate(180deg); }
 .tr-bubble {
   margin-top: 5px; padding: 7px 10px; border-radius: 8px; font-size: 13px; line-height: 1.6;
   white-space: pre-wrap; word-break: break-all;
 }
 .bb-user { background: #f0fdf4; color: #14532d; }
 .bb-assistant { background: #eff6ff; color: #1e3a8a; }
+
+/* 展开明细:浅卡片承载,切换链接置右上 */
+.tr-detail {
+  margin: 6px 0 4px; padding: 10px 12px; background: #f8fafc;
+  border: 1px solid #eef2f7; border-radius: 8px;
+}
+.tr-detail-bar { display: flex; justify-content: flex-end; margin-bottom: 2px; }
+.tr-raw-toggle { font-size: 11px; color: #3370ff; cursor: pointer; }
 .tr-config-head {
   display: flex; align-items: center; gap: 6px; margin: 18px 0 4px;
   font-weight: 600; color: #1f2937; font-size: 14px;
 }
-.tr-raw-toggle { font-size: 11px; color: #3370ff; cursor: pointer; display: inline-block; margin: 2px 0; }
 </style>
