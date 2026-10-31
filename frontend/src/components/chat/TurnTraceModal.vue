@@ -4,8 +4,23 @@
     <div v-if="loading" class="tc-loading"><a-spin tip="链路加载中..." /></div>
     <div v-else-if="!turn" class="tc-empty">暂无链路数据</div>
     <template v-else>
-      <!-- 汇总条:耗时 / LLM 次数 / token -->
-      <div class="tc-summary">
+      <!-- 视图切换:简明(用户视角,人话步骤) / 开发者(全量打点与数据) -->
+      <div class="tc-mode">
+        <a-radio-group v-model:value="mode" size="small">
+          <a-radio-button value="simple">简明</a-radio-button>
+          <a-radio-button value="dev">开发者</a-radio-button>
+        </a-radio-group>
+        <span class="tc-mode-hint">{{ mode === 'simple' ? '这一轮的关键步骤' : '完整打点、耗时与数据明细' }}</span>
+      </div>
+
+      <!-- 汇总条 -->
+      <div v-if="mode === 'simple'" class="tc-summary">
+        <div class="tc-stat"><b>{{ fmtMs(turn.wallMs) }}</b><span>总耗时</span></div>
+        <div class="tc-stat"><b>{{ stats.ai }}</b><span>AI 处理</span></div>
+        <div class="tc-stat" v-if="stats.retrieve"><b>{{ stats.retrieve }}</b><span>资料检索</span></div>
+        <div class="tc-stat" v-if="stats.upstream"><b>{{ stats.upstream }}</b><span>业务查询</span></div>
+      </div>
+      <div v-else class="tc-summary">
         <div class="tc-stat">
           <b>{{ fmtMs(turn.wallMs) }}</b><span>总耗时</span>
         </div>
@@ -22,61 +37,78 @@
 
       <!-- 时间线:每行可点开看细节 -->
       <div class="tc-timeline">
-        <div v-for="(item, i) in displayItems" :key="i"
-             class="tc-item" :class="[itemClass(item), { open: expanded.has(i) }]">
-          <div class="tc-item-head" @click="toggleExpand(i)">
-            <span class="tc-dot" />
-            <span class="tc-name">{{ itemLabel(item) }}</span>
-            <span v-if="subLabel(item)" class="tc-sub-inline">{{ subLabel(item) }}</span>
-            <span v-if="item.durationMs != null" class="tc-dur">{{ fmtMs(item.durationMs) }}</span>
-            <DownOutlined class="tc-arrow" :class="{ open: expanded.has(i) }" />
-          </div>
-          <!-- 展开区:该阶段的全部细节 -->
-          <div v-if="expanded.has(i)" class="tc-detail">
-            <div class="tc-detail-meta">
-              <span>时间 {{ fmtTime(item.at) }}</span>
-              <span v-if="item.type === 'call' && item.statusCode != null">状态 {{ item.statusCode }}</span>
-              <span v-if="item.type === 'call' && item.stage">阶段 {{ item.stage }}</span>
+        <!-- 简明视图:业务语言步骤,只留时间/错误,不出 JSON -->
+        <template v-if="mode === 'simple'">
+          <div v-for="(item, i) in simpleRows" :key="i"
+               class="tc-item" :class="[itemClass(item), { open: expanded.has(i) }]">
+            <div class="tc-item-head" @click="toggleExpand(i)">
+              <span class="tc-dot" />
+              <span class="tc-name">{{ simpleLabel(item) }}</span>
+              <span v-if="simpleSub(item)" class="tc-sub-inline">{{ simpleSub(item) }}</span>
+              <span v-if="item.durationMs != null" class="tc-dur">{{ fmtMs(item.durationMs) }}</span>
+              <DownOutlined v-if="item.errorMessage" class="tc-arrow" :class="{ open: expanded.has(i) }" />
             </div>
-            <div v-if="item.errorMessage" class="tc-error">{{ item.errorMessage }}</div>
-            <div v-if="itemPayload(item)" class="tc-payload-block">
-              <div class="tc-payload-head" @click.stop="toggleJsonRaw(i)">
-                <span>细节 JSON</span>
-                <span class="tc-payload-hint">{{ jsonRaw.has(i) ? '收起' : '格式化' }}</span>
+            <div v-if="expanded.has(i) && item.errorMessage" class="tc-detail">
+              <div class="tc-detail-meta"><span>时间 {{ fmtTime(item.at) }}</span></div>
+              <div class="tc-error">{{ item.errorMessage }}</div>
+            </div>
+          </div>
+          <div class="tc-item done">
+            <div class="tc-item-head">
+              <span class="tc-dot" /><span class="tc-name">回答完成</span>
+              <span class="tc-dur">{{ fmtMs(turn.wallMs) }}</span>
+            </div>
+          </div>
+        </template>
+        <!-- 开发者视图:全量条目 + 细节 JSON -->
+        <template v-else>
+          <div v-for="(item, i) in displayItems" :key="i"
+               class="tc-item" :class="[itemClass(item), { open: expanded.has(i) }]">
+            <div class="tc-item-head" @click="toggleExpand(i)">
+              <span class="tc-dot" />
+              <span class="tc-name">{{ itemLabel(item) }}</span>
+              <span v-if="subLabel(item)" class="tc-sub-inline">{{ subLabel(item) }}</span>
+              <span v-if="item.durationMs != null" class="tc-dur">{{ fmtMs(item.durationMs) }}</span>
+              <DownOutlined class="tc-arrow" :class="{ open: expanded.has(i) }" />
+            </div>
+            <!-- 展开区:该阶段的全部细节 -->
+            <div v-if="expanded.has(i)" class="tc-detail">
+              <div class="tc-detail-meta">
+                <span>时间 {{ fmtTime(item.at) }}</span>
+                <span v-if="item.type === 'call' && item.statusCode != null">状态 {{ item.statusCode }}</span>
+                <span v-if="item.type === 'call' && item.stage">阶段 {{ item.stage }}</span>
               </div>
-              <pre class="tc-payload">{{ itemPayloadText(item, i) }}</pre>
+              <div v-if="item.errorMessage" class="tc-error">{{ item.errorMessage }}</div>
+              <div v-if="itemPayload(item)" class="tc-payload-block">
+                <div class="tc-payload-head" @click.stop="toggleJsonRaw(i)">
+                  <span>细节 JSON</span>
+                  <span class="tc-payload-hint">{{ jsonRaw.has(i) ? '收起' : '格式化' }}</span>
+                </div>
+                <pre class="tc-payload">{{ itemPayloadText(item, i) }}</pre>
+              </div>
             </div>
           </div>
-        </div>
+        </template>
       </div>
     </template>
   </a-modal>
 </template>
 
 <script setup lang="ts">
-// 本轮链路弹窗(通用能力):查询完成后在对话内查看这一轮做了什么——
-// 阶段时间线 + 每步耗时 + LLM 调用次数 + token 用量。
-// 每行可点开:该阶段的时间/状态码/错误/完整 payload(细节 JSON)。
+// 本轮链路弹窗(通用能力):查询完成后在对话内查看这一轮做了什么。
+// 双视图:简明(默认,业务语言步骤——你的提问→AI 理解/提取→资料检索→
+// 生成结论→回答完成,隐藏 checkpoint/初始化/token/JSON 等开发者细节)与
+// 开发者(全量时间线+耗时+token+细节 JSON)。映射规则集中在
+// turnTraceBusiness.ts(两视图共用,带单测)。
 // 数据来自 GET /api/conversations/{id}/trace?turn=N(引擎级打点,任何 pack 可用)。
 import { computed, ref, watch } from 'vue'
 import { DownOutlined } from '@ant-design/icons-vue'
 import { getConversationTrace } from '../../services/api'
+import {
+  simpleItems, simpleLabel, simpleSub, simpleStats, STAGE_LABELS,
+} from './turnTraceBusiness'
+import type { TraceItem } from './turnTraceBusiness'
 
-// 链路条目/轮次类型(与服务层 getConversationTrace 对齐)
-interface TraceItem {
-  type: 'event' | 'call'
-  kind?: string
-  callType?: string
-  stage?: string | null
-  durationMs?: number | null
-  statusCode?: number | null
-  errorMessage?: string | null
-  at: string
-  payload?: Record<string, any>
-  requestData?: Record<string, any> | null
-  responseData?: Record<string, any> | null
-  [k: string]: unknown
-}
 interface TraceTurnLocal {
   userContent?: string | null
   startedAt?: string
@@ -97,6 +129,7 @@ const props = defineProps<{
 const visible = defineModel<boolean>({ default: false })
 const loading = ref(false)
 const turn = ref<TraceTurnLocal | null>(null)
+const mode = ref<'simple' | 'dev'>('simple')
 // 展开的行(细节区) + 该行 payload 以原始 JSON 展示(不格式化)
 const expanded = ref(new Set<number>())
 const jsonRaw = ref(new Set<number>())
@@ -105,6 +138,7 @@ watch(visible, async (v) => {
   if (!v || !props.conversationId) return
   loading.value = true
   turn.value = null
+  mode.value = 'simple'
   expanded.value = new Set()
   jsonRaw.value = new Set()
   try {
@@ -130,27 +164,21 @@ function toggleJsonRaw(i: number) {
   jsonRaw.value = s
 }
 
-// 展示过滤:assistant 制品快照事件(纯数据回放)不进时间线, 只留过程性活动
+// 简明视图:过滤+翻译后的行与汇总
+const simpleRows = computed(() => simpleItems(turn.value?.items || []))
+const stats = computed(() => simpleStats(turn.value?.items || []))
+
+// 开发者视图展示过滤:assistant 制品快照事件(纯数据回放)不进时间线
 const displayItems = computed(() =>
   (turn.value?.items || []).filter((i) => !(i.type === 'event' && i.kind === 'assistant')))
 
-// 阶段名映射(引擎 + 常见 pack 打点;未知原样展示)
-const _STAGE_LABELS: Record<string, string> = {
-  route_pack: '意图路由', route_tool: '工具选择', compress_history: '历史压缩',
-  'chatbi.embed': '问题向量化', 'chatbi.retrieve': '表结构检索',
-  'chatbi.retrieve.refine': '检索精筛', 'chatbi.think': '预思考',
-  'chatbi.generate_sql': 'SQL 生成', 'chatbi.execute': 'SQL 执行',
-  'chatbi.check': '结果校验', 'chatbi.heal': 'SQL 自愈',
-  'chatbi.chart': '图表生成', 'chatbi.memory.extract': '记忆提炼',
-  'chatbi.memory.consolidate': '记忆整理',
-}
 const _KIND_LABELS: Record<string, string> = {
   user: '用户消息', assistant: '回复完成', stage: '阶段推进', trace: '链路打点',
 }
 
 function itemLabel(item: TraceItem): string {
   if (item.type === 'call') {
-    if (item.callType === 'llm') return `LLM · ${_STAGE_LABELS[item.stage || ''] || item.stage || '调用'}`
+    if (item.callType === 'llm') return `LLM · ${STAGE_LABELS[item.stage || ''] || item.stage || '调用'}`
     return `调用 · ${item.callType}`
   }
   const kind = item.kind || ''
@@ -247,6 +275,10 @@ function fmtTime(at?: string): string {
 <style scoped>
 .tc-loading, .tc-empty { padding: 40px 0; text-align: center; color: var(--text-placeholder); }
 
+/* 视图切换 */
+.tc-mode { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.tc-mode-hint { font-size: 11.5px; color: var(--text-placeholder); }
+
 /* 汇总条 */
 .tc-summary { display: flex; gap: 10px; margin-bottom: 14px; }
 .tc-stat {
@@ -258,7 +290,7 @@ function fmtTime(at?: string): string {
 
 /* 时间线 */
 .tc-timeline { max-height: 420px; overflow-y: auto; }
-.tc-item { padding: 6px 0 6px 4px; border-left: 2px solid var(--border-color-light); margin-left: 6px; padding-left: 14px; position: relative; }
+.tc-item { padding: 6px 0 6px 4px; border-left: 2px solid var(--border-color-light); margin-left:  6px; padding-left: 14px; position: relative; }
 .tc-dot {
   position: absolute; left: -5px; top: 12px; width: 8px; height: 8px;
   border-radius: 50%; background: var(--color-primary);
