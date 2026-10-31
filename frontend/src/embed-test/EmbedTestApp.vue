@@ -200,8 +200,8 @@ onMounted(load)
 .et-kb-why { margin-left: auto; flex-shrink: 0; max-width: 50%; overflow-wrap: anywhere; text-align: right; font-size: 11px; color: #7d8592; }
 .et-conversation { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #f5f6f8; }
 .et-preview { flex: 1; min-height: 0; display: flex; justify-content: flex-end; padding: 20px 24px; overflow: hidden; }
-.et-frame { display: block; flex: 0 1 640px; width: 640px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
-.et-preview-status { display: flex; flex: 0 1 640px; min-width: 0; align-items: center; justify-content: center; gap: 8px; color: #7d8592; }
+.et-frame { display: block; flex: 0 1 420px; width: 420px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
+.et-preview-status { display: flex; flex: 0 1 420px; min-width: 0; align-items: center; justify-content: center; gap: 8px; color: #7d8592; }
 @media (max-width: 980px) {
   .et { padding: 16px; }
   .et-workspace { grid-template-columns: 244px minmax(0, 1fr); }

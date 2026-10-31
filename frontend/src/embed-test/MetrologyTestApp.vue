@@ -173,7 +173,7 @@ onBeforeUnmount(() => controller?.abort())
 .mt-rule p { font-size: 12px; color: #7d8592; line-height: 1.8; margin: 6px 0 0; }
 .mt-conversation { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #f5f6f8; }
 .mt-preview { flex: 1; min-height: 0; display: flex; justify-content: flex-end; padding: 20px 24px; overflow: hidden; background: #f5f6f8; }
-.mt-frame { display: block; flex: 0 1 640px; width: 640px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
+.mt-frame { display: block; flex: 0 1 420px; width: 420px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
 @media (max-width: 980px) {
   .mt { padding: 16px; }
   .mt-workspace { grid-template-columns: 244px minmax(0, 1fr); }
