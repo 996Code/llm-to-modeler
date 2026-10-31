@@ -82,6 +82,7 @@ import { computed, inject, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { UserOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { AdminConversation, deleteConversation, fetchConversations, fetchPacks, fmtTime } from '../api'
+import { packOptionsFrom, packLabel } from '../packDisplay'
 import type { LoadSafely } from './loadSafely'
 import ConversationTrace from './ConversationTrace.vue'
 
@@ -109,8 +110,7 @@ function packColor(p: string): string {
 async function loadPackOptions() {
   try {
     const data = await fetchPacks()
-    const opts = data.items.map((p) => ({ label: p.name, value: p.name }))
-    packOptions.value = [...opts, { label: '其他', value: '__other__' }]
+    packOptions.value = packOptionsFrom(data.items, [{ label: '其他', value: '__other__' }])
   } catch {
     packOptions.value = [{ label: '其他', value: '__other__' }]
   }

@@ -12,10 +12,10 @@
           <a-select-option value="interrupted">已中断</a-select-option>
         </a-select></div>
       <div class="filter-item"><span class="filter-label">插件</span>
-        <a-select v-model:value="filterPack" style="width: 160px" @change="search">
+        <a-select v-model:value="filterPack" style="width: 190px" @change="search">
           <a-select-option value="">全部</a-select-option>
           <a-select-option value="system">系统</a-select-option>
-          <a-select-option v-for="p in packs" :key="p" :value="p">{{ p }}</a-select-option>
+          <a-select-option v-for="p in packOpts" :key="p.value" :value="p.value">{{ p.label }}</a-select-option>
         </a-select></div>
       <div class="filter-item"><span class="filter-label">标题</span>
         <a-input v-model:value="filterTitle" placeholder="任务标题" style="width: 170px"
@@ -41,7 +41,7 @@
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'packName'">
-          <a-tag>{{ record.packName || '系统' }}</a-tag>
+          <a-tag>{{ record.packName ? packLabel(record.packName) : '系统' }}</a-tag>
         </template>
         <template v-else-if="column.key === 'title'">
           <div class="tk-title" :title="record.title">{{ record.title || record.taskType }}</div>
@@ -189,6 +189,7 @@
 
 <script setup lang="ts">
 // 任务中心:任务表格(进度条/状态) + 日志抽屉(SSE 实时 + 断流降级轮询)。
+import { packOptionsFrom, packLabel } from '../packDisplay'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {AppstoreOutlined, BarsOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, ReloadOutlined, SearchOutlined} from '@ant-design/icons-vue'
@@ -210,7 +211,7 @@ const filterTitle = ref('')
 // 关掉开关看全量历史)
 const recentOnly = ref(true)
 const lastDays = computed(() => (recentOnly.value ? 7 : 0))
-const packs = ref<string[]>([])
+const packOpts = ref<{ label: string; value: string }[]>([])
 const autoRefresh = ref(true)
 
 const page = reactive({ current: 1, pageSize: 20 })
@@ -295,9 +296,8 @@ let timer: number | undefined
 onMounted(async () => {
   await loadSafely(async () => {
     // 插件筛选项:已启用插件(系统选项固定在首位,由模板写死)
-    packs.value = ((await fetchPacks()).items || [])
-      .filter((p: { enabled?: boolean }) => p.enabled)
-      .map((p: { name: string }) => p.name)
+    packOpts.value = packOptionsFrom(
+      ((await fetchPacks()).items || []).filter((p: { enabled?: boolean }) => p.enabled))
   })
   load()
   // 5s 自动刷新(开关可暂停;有运行中任务时体验良好,列表查询本身轻量)

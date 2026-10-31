@@ -219,6 +219,7 @@
 import { computed, inject, onMounted, reactive, ref, watch } from 'vue'
 import {FileSearchOutlined, ReloadOutlined, SearchOutlined} from '@ant-design/icons-vue'
 import { CallLogItem, fetchCallLogs, fetchCallStats, fetchAuditLogs, fmtTime, shortId, CallStageItem, AuditEventItem, fetchPacks } from '../api'
+import { packOptionsFrom } from '../packDisplay'
 import { formatDetail, type DetailSection } from '../../shared/traceDetail'
 import TraceDetailSections from '../../shared/TraceDetailSections.vue'
 import type { LoadSafely } from './loadSafely'
@@ -413,7 +414,7 @@ function loadActiveView() {
 async function loadPackOptions() {
   try {
     const data = await fetchPacks()
-    packOptions.value = data.items.map((p) => ({ value: p.name, label: p.name }))
+    packOptions.value = packOptionsFrom(data.items)
   } catch { /* 静默 */ }
 }
 

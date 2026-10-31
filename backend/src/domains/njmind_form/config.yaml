@@ -93,3 +93,6 @@ required_prop_defaults:
     selectMode: 1
   12:           # SEGMENT
     displayStyle: 1
+
+admin:
+  title: 表单建模

@@ -92,7 +92,7 @@ export interface AdminPack {
   hasSettings?: boolean
   /** 自定义管理页组件 key(manifest admin.page;空 = 无自定义页) */
   adminPage?: string
-  /** 自定义管理页标题(manifest admin.title) */
+  /** 自定义管理页标题(manifest admin.title)——亦作插件中文显示名 */
   adminTitle?: string
 }
 

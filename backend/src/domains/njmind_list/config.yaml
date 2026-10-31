@@ -35,3 +35,6 @@ artifact:
 # 依赖的上游服务名（地址由宿主 services 表按请求下发，未下发 fail-closed）
 services:
   njmind-modeler: {}
+
+admin:
+  title: 列表配置
