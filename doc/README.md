@@ -72,6 +72,7 @@
 | [njmind_form使用手册.md](njmind_form使用手册.md) | njmind 表单使用手册 |
 | [tools/bid-demo/](../tools/bid-demo/) | 竞标 demo（强检目录/检定规程演示） |
 | [tools/mcp-e2e/](../tools/mcp-e2e/) | MCP 双向 e2e 测试项目 |
+| [test-evidence/](test-evidence/) | 线上全量测试报告与截图证据（按日期归档，浏览器实测） |
 
 ## 附录 · 历史档案（不推荐阅读，仅溯源）
 
