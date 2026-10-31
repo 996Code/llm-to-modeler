@@ -2,19 +2,14 @@
 
 ## 分支模型
 
-- **只保留 main，直接在 main 上按主题分组提交**（2026-10-27 拍板；GitHub 与本地不再有 feat 分支，
-  历史上的 feat/bid-demo 已删除，njmind 上的旧分支残留不管）。
+- **只保留 main，直接在 main 上按主题分组提交**（2026-10-27 拍板；GitHub 与本地不再有 feat 分支）。
 - 提交前跑齐回归（后端 pytest / 前端 vue-tsc+vitest+build），出包纪律见下。
 
-## 双远程
+## 远程
 
-| 远程 | 地址 | 说明 |
-|---|---|---|
-| origin | git@github.com:996Code/llm-to-modeler.git | GitHub（大传输走 SSH） |
-| njmind | http://192.168.99.225:8888/njmind-ai/llm-modeler.git | 内网 GitLab（HTTP，凭证在 macOS 钥匙串 yinjintao） |
-
-- **每次推送两边一起推**：`git push origin main && git push njmind main`
-- 内网 SSH 方式不可用（22 端口公钥未登记），走 HTTP 8888。
+| 远程 | 地址 |
+|---|---|
+| origin | git@github.com:996Code/llm-to-modeler.git |
 
 ## 部署出包纪律
 

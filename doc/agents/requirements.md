@@ -20,7 +20,7 @@
 ## 提交与发布要求
 
 - commit message 讲 **why** 优先于 what，中文，与仓库风格一致。
-- **双远程推送**：GitHub（origin）+ 内网 GitLab（njmind）一起推。
+- **推送 origin（GitHub）**。
 - **修复双落**：feat/bid-demo 与 main 都要有（cherry-pick），保持两分支同步。
 - 部署从**干净 worktree 出包**，不带主工作区在途文件。
 
