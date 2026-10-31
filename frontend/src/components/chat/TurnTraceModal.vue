@@ -40,13 +40,13 @@
         <template v-if="mode === 'simple'">
           <div v-for="(item, i) in simpleRows" :key="i"
                class="tc-item" :class="[itemClass(item), { open: expanded.has(i) }]">
-            <div class="tc-item-head" @click="toggleExpand(i)">
+            <div class="tc-item-head" :class="{ flat: !expandable(item) }" @click="expandable(item) && toggleExpand(i)">
               <span class="tc-dot" />
               <span class="tc-name">{{ simpleLabel(item) }}</span>
               <span v-if="item.mergedCount" class="tc-merge">×{{ item.mergedCount }}</span>
               <span v-if="simpleSub(item)" class="tc-sub-inline">{{ simpleSub(item) }}</span>
               <span v-if="item.durationMs != null" class="tc-dur">{{ fmtMs(item.durationMs) }}</span>
-              <DownOutlined class="tc-arrow" :class="{ open: expanded.has(i) }" />
+              <DownOutlined v-if="expandable(item)" class="tc-arrow" :class="{ open: expanded.has(i) }" />
             </div>
             <div v-if="expanded.has(i)" class="tc-detail">
               <div class="tc-detail-meta">
@@ -60,7 +60,7 @@
                   {{ rawRows.has(i) ? '⇤ 格式化明细' : '原始数据 →' }}
                 </a>
               </div>
-              <TraceDetailSections v-if="!rawRows.has(i)" :sections="formatDetail(item)" />
+              <TraceDetailSections v-if="!rawRows.has(i) && formatDetail(item).length" :sections="formatDetail(item)" />
               <pre v-else class="tc-payload">{{ itemPayloadText(item, i) }}</pre>
             </div>
           </div>
@@ -191,6 +191,13 @@ function toggleJsonRaw(i: number) {
 
 // 简明视图:过滤+翻译后的行与汇总
 const simpleRows = computed(() => simpleItems(turn.value?.items || []))
+// 可展开 = 有格式化明细或有原始数据;纯标签行(如"你的提问")不展开
+function expandable(item: TraceItem): boolean {
+  if (item.type === 'call') return true
+  const detail = (item as any).payload?.detail
+  return !!(detail && typeof detail === 'object' && !Array.isArray(detail)
+    && Object.keys(detail).some(k => detail[k] != null && detail[k] !== ''))
+}
 const stats = computed(() => simpleStats(turn.value?.items || []))
 
 // 开发者视图展示过滤:assistant 制品快照事件(纯数据回放)不进时间线
@@ -321,6 +328,8 @@ function fmtTime(at?: string): string {
   border-radius: 50%; background: var(--color-primary);
 }
 .tc-item-head { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.tc-item-head.flat { cursor: default; }
+.tc-item-head.flat:hover .tc-name { color: var(--text-primary); }
 .tc-item-head:hover .tc-name { color: var(--color-primary); }
 .tc-name { font-size: 13px; color: var(--text-primary); font-weight: 500; flex-shrink: 0; }
 .tc-merge {

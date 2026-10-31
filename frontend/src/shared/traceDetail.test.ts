@@ -71,6 +71,28 @@ describe('链路明细格式化(共享格式化器)', () => {
     expect(flat).toContain('最高 80% · 平均 74%')
     expect(flat).toContain('目录_演示版_.md')
   })
+  it('向量化:输入 N 条 M 字 → 输出 N 条 D 维(本地模型)', () => {
+    const secs = formatDetail({
+      callType: 'llm', stage: 'kg.query_embed',
+      requestData: { stage: 'kg.query_embed', count: 1, chars: 18, backend: 'local', mode: 'query' },
+      responseData: { count: 1, dim: 1024 },
+    })
+    const flat = JSON.stringify(secs)
+    expect(flat).toContain('1 条 · 18 字 · 本地模型')
+    expect(flat).toContain('1 条 · 1024 维向量')
+  })
+  it('空数据:兜底返回空数组,不输出废话占位', () => {
+    expect(formatDetail({ callType: 'upstream', requestData: null, responseData: null })).toEqual([])
+    expect(formatDetail({ callType: 'upstream', requestData: { a: '', b: null }, responseData: {} })).toEqual([])
+  })
+  it('事件类:payload.detail 有货才出行,无 detail 返回空', () => {
+    const ev = formatDetail({ payload: { title: '执行工具 metrology_assistant',
+      detail: { tool: 'metrology_assistant', summary: '属于强制检定' } } } as any)
+    const flat = JSON.stringify(ev)
+    expect(flat).toContain('属于强制检定')
+    expect(formatDetail({ payload: { message: '你的提问' } } as any)).toEqual([])
+    expect(formatDetail({} as any)).toEqual([])
+  })
   it('未知形状:通用扁平化兜底(标量入行,数组计数)', () => {
     const secs = formatDetail(unknown)
     const flat = JSON.stringify(secs)

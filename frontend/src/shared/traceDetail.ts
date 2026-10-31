@@ -99,28 +99,61 @@ function fmtVector(item: TraceCallLike): DetailSection[] {
   return out
 }
 
-// 通用兜底:标量入行,数组/对象计数量
+// 通用兜底:标量入行(空值过滤),数组/对象计数量;无可展示内容返回 []
 function fmtGeneric(item: TraceCallLike): DetailSection[] {
   const out: DetailSection[] = []
   for (const [name, data] of [['请求', item.requestData], ['响应', item.responseData]] as const) {
     if (!data || typeof data !== 'object') continue
-    const rows: [string, string][] = []
-    for (const [k, v] of Object.entries(data as Record<string, unknown>)) {
-      if (v == null || k === 'stage' || k === 'kbId') continue
-      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-        rows.push([k, clip(v, 120)])
-      } else if (Array.isArray(v)) {
-        rows.push([k, `${v.length} 项`])
-      }
-    }
+    const rows = scalarRows(data as Record<string, unknown>)
     if (rows.length) out.push({ title: name, rows: rows.slice(0, 8) })
   }
-  return out.length ? out : [{ rows: [['说明', '该步骤无可展示的明细数据']] }]
+  return out
+}
+
+// 标量键值对 → 行(跳过 null/空串/内部字段,数组计数量);空值不产生行
+function scalarRows(data: Record<string, unknown>, maxLen = 120): [string, string][] {
+  const rows: [string, string][] = []
+  for (const [k, v] of Object.entries(data)) {
+    if (v == null || v === '' || k === 'stage' || k === 'kbId') continue
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      const text = clip(v, maxLen)
+      if (text) rows.push([k, text])
+    } else if (Array.isArray(v)) {
+      rows.push([k, `${v.length} 项`])
+    }
+  }
+  return rows
+}
+
+// 向量化(kg.query_embed):输入 N 条 M 字 → 输出 N 条 D 维向量
+function fmtQueryEmbed(item: TraceCallLike): DetailSection[] {
+  const req = item.requestData || {} as any
+  const resp = item.responseData || {} as any
+  const rows: [string, string][] = []
+  if (req.count != null || req.chars != null) {
+    rows.push(['输入', `${req.count ?? '?'} 条 · ${req.chars ?? '?'} 字`
+      + (req.backend ? ` · ${req.backend === 'local' ? '本地模型' : req.backend}` : '')])
+  }
+  if (resp.count != null || resp.dim != null) {
+    rows.push(['输出', `${resp.count ?? '?'} 条 · ${resp.dim ?? '?'} 维向量`])
+  }
+  return rows.length ? [{ rows }] : []
+}
+
+// 事件类条目(无 request/response):payload.detail 有对象才展开为行
+function fmtEventDetail(item: TraceCallLike): DetailSection[] {
+  const detail = (item as any).payload?.detail
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return []
+  const rows = scalarRows(detail as Record<string, unknown>, 160)
+  return rows.length ? [{ rows }] : []
 }
 
 // 入口:按 stage/callType 分派格式化器
 export function formatDetail(item: TraceCallLike): DetailSection[] {
   const stage = String(item.stage || '')
+  if (!item.callType) return fmtEventDetail(item)   // 事件类:detail 有货才显示
+  // stage 特判优先于 llm:query_embed 虽是 llm 型调用,但语义是向量化
+  if (stage === 'kg.query_embed') return fmtQueryEmbed(item)
   if (item.callType === 'llm') return fmtLlm(item)
   if (stage === 'kg.find_entities') return fmtFindEntities(item)
   if (stage === 'kg.subgraph') return fmtSubgraph(item)
