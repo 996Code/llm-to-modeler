@@ -9,6 +9,37 @@
 > 进阶：`backend/src/domains/ARCHITECTURE.md` —— pack 全部钩子（工具/HTTP API/后台任务/
 > 依赖门控/管理页）+ SDK 存储设施（图/向量/文档解析 + 命名空间隔离契约）。
 
+## 界面一览
+
+> 以下截图来自 99.22 演示环境线上实测（2026-10-31），更多见
+> [doc/test-evidence/](doc/test-evidence/) 归档报告。
+
+**管理端概览** —— 会话/调用/检索大盘，插件启停热切换：
+
+![管理端概览](doc/test-evidence/2026-10-31-9922-full-test/01-admin-overview.png)
+
+**智能客服 · 能力路由** —— MCP 工具声明自动接入 + 人工润色，18 项能力按服务分组：
+
+![能力路由](doc/test-evidence/2026-10-31-9922-full-test/02-capability-routing.png)
+
+**知识问答 · 强检判定** —— 缺条件先追问，结论带知识库片段引用与引用实体：
+
+![强检判定证据卡](doc/test-evidence/2026-10-31-9922-full-test/06-mandatory-evidence.png)
+
+**业务查询 · 器具价目** —— "查一下肺活量测试仪的测量范围"直达 MCP 业务平台，结构化结果卡：
+
+![价目查询](doc/test-evidence/2026-10-31-9922-full-test/07-price-measure-range.png)
+
+**业务查询 · 检测时限 / 委托单进度** —— 检测工作日承诺与进度三态（正常/拒权/查无）：
+
+![检测工作日](doc/test-evidence/2026-10-31-9922-full-test/08-turnaround.png)
+
+![委托单进度](doc/test-evidence/2026-10-31-9922-full-test/13-progress-normal.png)
+
+**知识库管理** —— 库树/文档导入/图谱浏览/检索测试/数据权限，任务中心断点续跑：
+
+![知识库管理页](doc/test-evidence/2026-10-31-9922-full-test/18-kb-page.png)
+
 ## 技术栈
 
 | 层 | 技术 |
