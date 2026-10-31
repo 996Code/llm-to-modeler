@@ -55,10 +55,6 @@
         </a-tabs>
       </aside>
       <section class="mt-conversation" aria-label="客服嵌入测试">
-        <div class="mt-toolbar">
-          <div class="mt-chat-label"><MessageOutlined /><span>嵌入预览</span></div>
-          <span class="mt-embed-size">420px</span>
-        </div>
         <div class="mt-preview"><iframe title="计量智能客服测试对话" class="mt-frame" :src="frameSrc" /></div>
       </section>
     </div>
@@ -68,7 +64,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
-import { CheckCircleFilled, CloseCircleFilled, CopyOutlined, CustomerServiceOutlined, MessageOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { CheckCircleFilled, CloseCircleFilled, CopyOutlined, CustomerServiceOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { adminApi } from '../admin/api'
 
 interface EnvPayload {
@@ -176,12 +172,8 @@ onBeforeUnmount(() => controller?.abort())
 .mt-purpose-tags :deep(.ant-tag) { margin: 0; font-size: 11px; background: #f7f8fa; color: #626b78; }
 .mt-rule p { font-size: 12px; color: #7d8592; line-height: 1.8; margin: 6px 0 0; }
 .mt-conversation { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #f5f6f8; }
-.mt-toolbar { justify-content: space-between; flex-shrink: 0; gap: 12px; padding: 12px 16px; min-height: 54px; background: #fff; border-bottom: 1px solid #e5e7eb; flex-wrap: wrap; }
-.mt-chat-label { gap: 8px; font-size: 13px; font-weight: 500; }
-.mt-chat-label .anticon { color: #73809a; }
-.mt-embed-size { font-size: 11px; color: #8c939e; }
 .mt-preview { flex: 1; min-height: 0; display: flex; justify-content: flex-end; padding: 20px 24px; overflow: hidden; background: #f5f6f8; }
-.mt-frame { display: block; flex: 0 1 420px; width: 420px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
+.mt-frame { display: block; flex: 0 1 640px; width: 640px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
 @media (max-width: 980px) {
   .mt { padding: 16px; }
   .mt-workspace { grid-template-columns: 244px minmax(0, 1fr); }

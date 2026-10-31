@@ -56,10 +56,6 @@
         </a-tabs>
       </aside>
       <section class="et-conversation" aria-label="知识库嵌入测试">
-        <div class="et-toolbar">
-          <div class="et-chat-label"><MessageOutlined /><span>嵌入预览</span></div>
-          <span class="et-embed-size">420px</span>
-        </div>
         <div class="et-preview">
           <iframe v-if="frameKey" :key="frameKey" title="知识库测试对话" class="et-frame" :src="frameSrc" />
           <div v-else class="et-preview-status" :role="error ? 'alert' : 'status'">
@@ -77,7 +73,7 @@ import { computed, onMounted, ref } from 'vue'
 import axios from 'axios'
 import { Empty } from 'ant-design-vue'
 import {
-  CheckCircleFilled, CloseCircleFilled, LoadingOutlined, MessageOutlined,
+  CheckCircleFilled, CloseCircleFilled, LoadingOutlined,
   ReloadOutlined, SafetyOutlined, SettingOutlined,
 } from '@ant-design/icons-vue'
 
@@ -172,7 +168,7 @@ onMounted(load)
 
 <style scoped>
 .et { color: #1f2329; padding: 20px; font-size: 13px; }
-.et-header, .et-heading, .et-toolbar, .et-chat-label { display: flex; align-items: center; }
+.et-header, .et-heading { display: flex; align-items: center; }
 .et-header { justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .et-heading { gap: 10px; min-width: 0; flex-wrap: wrap; }
 .et-heading > .anticon { color: #2563eb; font-size: 20px; }
@@ -203,13 +199,9 @@ onMounted(load)
 .et-kb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .et-kb-why { margin-left: auto; flex-shrink: 0; max-width: 50%; overflow-wrap: anywhere; text-align: right; font-size: 11px; color: #7d8592; }
 .et-conversation { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #f5f6f8; }
-.et-toolbar { justify-content: space-between; flex-shrink: 0; gap: 12px; padding: 12px 16px; min-height: 54px; background: #fff; border-bottom: 1px solid #e5e7eb; flex-wrap: wrap; }
-.et-chat-label { gap: 8px; font-size: 13px; font-weight: 500; }
-.et-chat-label > .anticon { color: #73809a; }
-.et-embed-size { font-size: 11px; color: #8c939e; }
 .et-preview { flex: 1; min-height: 0; display: flex; justify-content: flex-end; padding: 20px 24px; overflow: hidden; }
-.et-frame { display: block; flex: 0 1 420px; width: 420px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
-.et-preview-status { display: flex; flex: 0 1 420px; min-width: 0; align-items: center; justify-content: center; gap: 8px; color: #7d8592; }
+.et-frame { display: block; flex: 0 1 640px; width: 640px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
+.et-preview-status { display: flex; flex: 0 1 640px; min-width: 0; align-items: center; justify-content: center; gap: 8px; color: #7d8592; }
 @media (max-width: 980px) {
   .et { padding: 16px; }
   .et-workspace { grid-template-columns: 244px minmax(0, 1fr); }
