@@ -12,6 +12,7 @@ export interface TraceItem {
   errorMessage?: string | null
   at: string
   payload?: Record<string, any>
+  mergedCount?: number   // 简明视图:相邻同类调用合并后的次数
   [k: string]: unknown
 }
 
@@ -32,6 +33,12 @@ const AI_STAGES: Record<string, string> = {
   'assistant.extract': 'AI 提取关键信息',
   'assistant.conclude': 'AI 生成结论',
   'kg.answer': 'AI 组织回答',
+  'kg.intent': 'AI 分析问题',
+  'kg.query': 'AI 分析问题',
+  'kg.extract': 'AI 生成检索要点',
+  'kg.summary': 'AI 生成摘要',
+  'kg.rerank': 'AI 精筛资料',
+  'kg.sufficiency': 'AI 评估资料',
   'chatbi.think': 'AI 预思考',
   'chatbi.generate_sql': 'AI 生成查询',
 }
@@ -49,7 +56,9 @@ export function isDevOnly(item: TraceItem): boolean {
     return HIDDEN_AI_STAGES.has(item.stage || '')
   }
   if (item.type === 'event' && item.kind === 'trace') {
-    return HIDDEN_TRACE_TITLES.has(String(item.payload?.title || ''))
+    const title = String(item.payload?.title || '')
+    // 无标题的纯 detail 打点也是开发者细节,不进简明时间线
+    return !title || HIDDEN_TRACE_TITLES.has(title)
   }
   return false
 }
@@ -67,7 +76,9 @@ export function simpleLabel(item: TraceItem): string {
   if (kind === 'stage') return String(item.payload?.message || '处理中')
   if (kind === 'trace') {
     const title = String(item.payload?.title || '')
-    return title === '执行工具' ? '执行查询' : (title || '处理节点')
+    // 标题可能带参数(如 "执行工具 metrology_assistant")——前缀命中即认
+    if (title.startsWith('执行工具')) return '执行查询'
+    return title || '处理节点'
   }
   return '处理节点'
 }
@@ -84,7 +95,7 @@ export function simpleSub(item: TraceItem): string {
 }
 
 // 简明模式时间线:过滤开发者条目 + 同名阶段消息去重(阶段消息是"阶段
-// 播报",重复出现不携带新信息——即使中间隔着检索调用也只保留首个)
+// 播报",重复出现不携带新信息) + 相邻同类调用合并(两次图谱检索→×2)
 export function simpleItems(items: TraceItem[]): TraceItem[] {
   const out: TraceItem[] = []
   const seenStages = new Set<string>()
@@ -96,7 +107,14 @@ export function simpleItems(items: TraceItem[]): TraceItem[] {
       if (seenStages.has(msg)) continue
       seenStages.add(msg)
     }
-    out.push(it)
+    const prev = out[out.length - 1]
+    if (it.type === 'call' && prev && prev.type === 'call'
+        && prev.callType === it.callType && prev.stage === it.stage) {
+      prev.durationMs = (prev.durationMs || 0) + (it.durationMs || 0)
+      prev.mergedCount = (prev.mergedCount || 1) + 1
+      continue
+    }
+    out.push({ ...it })
   }
   return out
 }

@@ -44,6 +44,7 @@
             <div class="tc-item-head" @click="toggleExpand(i)">
               <span class="tc-dot" />
               <span class="tc-name">{{ simpleLabel(item) }}</span>
+              <span v-if="item.mergedCount" class="tc-merge">×{{ item.mergedCount }}</span>
               <span v-if="simpleSub(item)" class="tc-sub-inline">{{ simpleSub(item) }}</span>
               <span v-if="item.durationMs != null" class="tc-dur">{{ fmtMs(item.durationMs) }}</span>
               <DownOutlined v-if="item.errorMessage" class="tc-arrow" :class="{ open: expanded.has(i) }" />
@@ -298,6 +299,10 @@ function fmtTime(at?: string): string {
 .tc-item-head { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
 .tc-item-head:hover .tc-name { color: var(--color-primary); }
 .tc-name { font-size: 13px; color: var(--text-primary); font-weight: 500; flex-shrink: 0; }
+.tc-merge {
+  font-size: 10.5px; color: var(--color-primary); background: var(--color-primary-bg, rgba(51,112,255,0.08));
+  border-radius: 8px; padding: 0 6px; flex-shrink: 0;
+}
 .tc-sub-inline {
   font-size: 11.5px; color: var(--text-secondary); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
