@@ -35,6 +35,7 @@ const AI_STAGES: Record<string, string> = {
   'kg.answer': 'AI 组织回答',
   'kg.intent': 'AI 分析问题',
   'kg.query': 'AI 分析问题',
+  'kg.query_embed': '问题向量化',
   'kg.extract': 'AI 生成检索要点',
   'kg.summary': 'AI 生成摘要',
   'kg.rerank': 'AI 精筛资料',
@@ -55,10 +56,14 @@ export function isDevOnly(item: TraceItem): boolean {
   if (item.type === 'call' && item.callType === 'llm') {
     return HIDDEN_AI_STAGES.has(item.stage || '')
   }
-  if (item.type === 'event' && item.kind === 'trace') {
-    const title = String(item.payload?.title || '')
-    // 无标题的纯 detail 打点也是开发者细节,不进简明时间线
-    return !title || HIDDEN_TRACE_TITLES.has(title)
+  if (item.type === 'event') {
+    // 简明时间线只收 user/stage/带标题 trace;checkpoint 与未知事件类型都是开发者细节
+    if (item.kind === 'user' || item.kind === 'stage') return false
+    if (item.kind === 'trace') {
+      const title = String(item.payload?.title || '')
+      return !title || HIDDEN_TRACE_TITLES.has(title)
+    }
+    return true
   }
   return false
 }
@@ -108,8 +113,10 @@ export function simpleItems(items: TraceItem[]): TraceItem[] {
       seenStages.add(msg)
     }
     const prev = out[out.length - 1]
+    // 相邻同类调用按"显示标签"合并(如 find_entities+subgraph 两次图谱
+    // 检索 → 知识图谱检索 ×2):次数与耗时累加
     if (it.type === 'call' && prev && prev.type === 'call'
-        && prev.callType === it.callType && prev.stage === it.stage) {
+        && simpleLabel(prev) === simpleLabel(it)) {
       prev.durationMs = (prev.durationMs || 0) + (it.durationMs || 0)
       prev.mergedCount = (prev.mergedCount || 1) + 1
       continue
