@@ -68,8 +68,15 @@
                   <span v-if="item.errorMessage" class="tr-err">{{ truncate(item.errorMessage, 60) }}</span>
                   <span class="tr-ts">{{ fmtTime(item.at) }}</span>
                 </div>
-                <JsonViewer label="请求" :data="item.requestData" :height="220" :default-collapsed="true" />
-                <JsonViewer label="响应" :data="item.responseData" :height="260" :default-collapsed="true" />
+                <!-- 数据明细:默认格式化,一键切原始 JSON -->
+                <a class="tr-raw-toggle" @click="toggleRaw(idx)">{{ rawRows.has(idx) ? '⇤ 格式化明细' : '原始数据 →' }}</a>
+                <template v-if="!rawRows.has(idx)">
+                  <TraceDetailSections :sections="formatDetail(item as any)" />
+                </template>
+                <template v-else>
+                  <JsonViewer label="请求" :data="item.requestData" :height="220" :default-collapsed="true" />
+                  <JsonViewer label="响应" :data="item.responseData" :height="260" :default-collapsed="true" />
+                </template>
               </template>
 
               <!-- 系统事件:checkpoint / compacted / compact_trace / ask -->
@@ -106,7 +113,18 @@ import {
 import { ConversationTrace as TraceType, fetchConversationTrace, fmtTime } from '../api'
 import type { LoadSafely } from './loadSafely'
 import JsonViewer from './JsonViewer.vue'
+import { formatDetail } from '../../shared/traceDetail'
+import TraceDetailSections from '../../shared/TraceDetailSections.vue'
 import { CALL_TYPE_META, CALL_TYPE_CLS, stageLabel } from '../labels'
+
+/** 数据明细视图:默认格式化,per-item 可切原始 JSON */
+const rawRows = ref(new Set<number>())
+function toggleRaw(idx: number) {
+  const s = new Set(rawRows.value)
+  if (s.has(idx)) s.delete(idx)
+  else s.add(idx)
+  rawRows.value = s
+}
 
 /** 图/向量检索的召回摘要(图谱=种子/节点/边,向量=命中数+top 分数) */
 function recallSummary(item: { callType?: string; responseData?: unknown }): string {
@@ -281,4 +299,5 @@ watch(() => props.convId, load)
   display: flex; align-items: center; gap: 6px; margin: 18px 0 4px;
   font-weight: 600; color: #1f2937; font-size: 14px;
 }
+.tr-raw-toggle { font-size: 11px; color: #3370ff; cursor: pointer; display: inline-block; margin: 2px 0; }
 </style>

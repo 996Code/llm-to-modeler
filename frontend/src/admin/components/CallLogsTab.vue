@@ -189,8 +189,16 @@
             <span style="color: #dc2626">{{ detail.error_message }}</span>
           </a-descriptions-item>
         </a-descriptions>
-        <JsonViewer label="请求" :data="detail.request_data" :height="280" :default-collapsed="false" />
-        <JsonViewer label="响应" :data="detail.response_data" :height="320" />
+        <div style="display: flex; justify-content: flex-end; margin-bottom: 6px">
+          <a class="cl-raw-toggle" @click="detailRaw = !detailRaw">
+            {{ detailRaw ? '⇤ 格式化明细' : '原始数据 →' }}
+          </a>
+        </div>
+        <TraceDetailSections v-if="!detailRaw" :sections="callDetailSections" style="margin-bottom: 12px" />
+        <template v-else>
+          <JsonViewer label="请求" :data="detail.request_data" :height="280" :default-collapsed="true" />
+          <JsonViewer label="响应" :data="detail.response_data" :height="320" />
+        </template>
       </template>
     </a-drawer>
   </div>
@@ -201,6 +209,8 @@
 import { computed, inject, onMounted, reactive, ref, watch } from 'vue'
 import {FileSearchOutlined, ReloadOutlined, SearchOutlined} from '@ant-design/icons-vue'
 import { CallLogItem, fetchCallLogs, fetchCallStats, fetchAuditLogs, fmtTime, shortId, CallStageItem, AuditEventItem, fetchPacks } from '../api'
+import { formatDetail, type DetailSection } from '../../shared/traceDetail'
+import TraceDetailSections from '../../shared/TraceDetailSections.vue'
 import type { LoadSafely } from './loadSafely'
 import JsonViewer from './JsonViewer.vue'
 
@@ -298,6 +308,15 @@ const columns = computed(() => {
 })
 
 const detail = ref<CallLogItem | null>(null)
+const detailRaw = ref(false)  // 抽屉数据视图:默认格式化,可切原始 JSON
+// 抽屉顶部的人读明细:snake_case 字段/stage(在 request_data 内)适配到共享格式化器
+const callDetailSections = computed<DetailSection[]>(() => {
+  const d = detail.value
+  if (!d) return []
+  const req = d.request_data && typeof d.request_data === 'object' ? d.request_data as Record<string, any> : null
+  const resp = d.response_data && typeof d.response_data === 'object' ? d.response_data as Record<string, any> : null
+  return formatDetail({ callType: d.call_type, stage: req?.stage ?? null, requestData: req, responseData: resp })
+})
 const detailOpen = ref(false)
 
 import { CALL_TYPE_META as TYPE_META, STAGE_LABELS } from '../labels'
@@ -371,7 +390,7 @@ function onTableChange(pag: { current?: number; pageSize?: number }) {
   load()
 }
 
-function openDetail(record: CallLogItem) { detail.value = record; detailOpen.value = true }
+function openDetail(record: CallLogItem) { detail.value = record; detailRaw.value = false; detailOpen.value = true }
 
 onMounted(() => { loadActiveView(); loadPackOptions() })
 
@@ -448,6 +467,7 @@ function onAuditTableChange(pag: { current?: number; pageSize?: number }) {
 .cl-detail-click { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .cl-detail-click:hover { color: #1677ff; }
 .cl-conv-none { color: #bbb; font-size: 12px; }
+.cl-raw-toggle { font-size: 12px; color: #3370ff; cursor: pointer; }
 </style>
 <style>
 .audit-detail-popover .audit-detail-full {

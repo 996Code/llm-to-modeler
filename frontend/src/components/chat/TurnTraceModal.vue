@@ -46,11 +46,22 @@
               <span v-if="item.mergedCount" class="tc-merge">×{{ item.mergedCount }}</span>
               <span v-if="simpleSub(item)" class="tc-sub-inline">{{ simpleSub(item) }}</span>
               <span v-if="item.durationMs != null" class="tc-dur">{{ fmtMs(item.durationMs) }}</span>
-              <DownOutlined v-if="item.errorMessage" class="tc-arrow" :class="{ open: expanded.has(i) }" />
+              <DownOutlined class="tc-arrow" :class="{ open: expanded.has(i) }" />
             </div>
-            <div v-if="expanded.has(i) && item.errorMessage" class="tc-detail">
-              <div class="tc-detail-meta"><span>时间 {{ fmtTime(item.at) }}</span></div>
-              <div class="tc-error">{{ item.errorMessage }}</div>
+            <div v-if="expanded.has(i)" class="tc-detail">
+              <div class="tc-detail-meta">
+                <span>时间 {{ fmtTime(item.at) }}</span>
+                <span v-if="item.statusCode != null && item.statusCode >= 400">状态 {{ item.statusCode }}</span>
+              </div>
+              <div v-if="item.errorMessage" class="tc-error">{{ item.errorMessage }}</div>
+              <!-- 数据明细:默认格式化展示(检索词/命中/输出…),一键切原始 JSON -->
+              <div class="tc-detail-bar">
+                <a class="tc-raw-toggle" @click.stop="toggleRaw(i)">
+                  {{ rawRows.has(i) ? '⇤ 格式化明细' : '原始数据 →' }}
+                </a>
+              </div>
+              <TraceDetailSections v-if="!rawRows.has(i)" :sections="formatDetail(item)" />
+              <pre v-else class="tc-payload">{{ itemPayloadText(item, i) }}</pre>
             </div>
           </div>
           <div class="tc-item done">
@@ -108,6 +119,8 @@ import {
   simpleItems, simpleLabel, simpleSub, simpleStats, STAGE_LABELS,
 } from './turnTraceBusiness'
 import type { TraceItem } from './turnTraceBusiness'
+import { formatDetail } from '../../shared/traceDetail'
+import TraceDetailSections from '../../shared/TraceDetailSections.vue'
 
 interface TraceTurnLocal {
   userContent?: string | null
@@ -133,6 +146,17 @@ const mode = ref<'simple' | 'dev'>('simple')
 // 展开的行(细节区) + 该行 payload 以原始 JSON 展示(不格式化)
 const expanded = ref(new Set<number>())
 const jsonRaw = ref(new Set<number>())
+// 简明视图:哪些行切到了"原始数据"视图(默认格式化)
+const rawRows = ref(new Set<number>())
+function toggleRaw(i: number) {
+  const s = new Set(rawRows.value)
+  if (s.has(i)) s.delete(i)
+  else s.add(i)
+  rawRows.value = s
+}
+
+// 切视图时行索引变化,清掉展开态避免错位
+watch(mode, () => { expanded.value = new Set(); jsonRaw.value = new Set(); rawRows.value = new Set() })
 
 watch(visible, async (v) => {
   if (!v || !props.conversationId) return
@@ -141,6 +165,7 @@ watch(visible, async (v) => {
   mode.value = 'simple'
   expanded.value = new Set()
   jsonRaw.value = new Set()
+  rawRows.value = new Set()
   try {
     const data = await getConversationTrace(props.conversationId, props.turnIndex)
     turn.value = data.turns?.[0] || null
@@ -315,6 +340,8 @@ function fmtTime(at?: string): string {
   margin-top: 6px; padding: 8px 10px; background: var(--bg-hover);
   border-radius: var(--radius-md); font-size: 12px;
 }
+.tc-detail-bar { display: flex; justify-content: flex-end; margin-bottom: 2px; }
+.tc-raw-toggle { font-size: 11px; color: var(--color-primary); cursor: pointer; }
 .tc-detail-meta { display: flex; gap: 14px; color: var(--text-secondary); margin-bottom: 6px; flex-wrap: wrap; }
 .tc-error {
   color: var(--color-danger); background: rgba(245, 74, 69, 0.06);
