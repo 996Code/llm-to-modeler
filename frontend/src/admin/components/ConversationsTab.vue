@@ -41,7 +41,8 @@
           </div>
         </template>
         <template v-else-if="column.key === 'pack'">
-          <a-tag v-if="record.pack" :color="packColor(record.pack)" class="cv-pack">{{ packLabel(record.pack) }}</a-tag>
+          <a-tag v-if="record.pack" :color="packColor(record.pack)" class="cv-pack" :title="record.pack">
+            {{ packTitle(record.pack) || record.pack }}</a-tag>
           <span v-else class="cv-pack-other">其他</span>
         </template>
         <template v-else-if="column.key === 'userId'">
@@ -82,7 +83,7 @@ import { computed, inject, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { UserOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { AdminConversation, deleteConversation, fetchConversations, fetchPacks, fmtTime } from '../api'
-import { packOptionsFrom, packLabel } from '../packDisplay'
+import { packOptionsFrom, packLabel, packTitle } from '../packDisplay'
 import type { LoadSafely } from './loadSafely'
 import ConversationTrace from './ConversationTrace.vue'
 
@@ -128,7 +129,7 @@ const pagination = computed(() => ({
 
 const columns = [
   { title: '会话', key: 'title' },  // 不设宽:占满剩余空间(主信息列)
-  { title: '插件', key: 'pack', width: 170, ellipsis: true },
+  { title: '插件', key: 'pack', width: 110 },
   { title: '用户', key: 'userId', width: 120, ellipsis: true },
   { title: '消息', key: 'messageCount', width: 64 },
   { title: '更新时间', key: 'updatedAt', width: 165 },
@@ -209,8 +210,7 @@ onMounted(() => { loadPackOptions(); load() })
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: #4b5563; font-size: 13px;
 }
-.cv-pack { font-size: 11.5px; max-width: 110px; }
-.cv-pack :deep(.ant-tag) { overflow: hidden; text-overflow: ellipsis; }
+.cv-pack { font-size: 11.5px; max-width: 100%; }
 .cv-pack-other { color: #9ca3af; font-size: 12px; }
 .cv-count-tag { min-width: 30px; text-align: center; }
 .cv-time { font-size: 12.5px; color: #374151; white-space: nowrap; }

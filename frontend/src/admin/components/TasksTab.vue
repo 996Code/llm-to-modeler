@@ -41,7 +41,7 @@
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'packName'">
-          <a-tag>{{ record.packName ? packLabel(record.packName) : '系统' }}</a-tag>
+          <a-tag :title="record.packName">{{ record.packName ? (packTitle(record.packName) || record.packName) : '系统' }}</a-tag>
         </template>
         <template v-else-if="column.key === 'title'">
           <div class="tk-title" :title="record.title">{{ record.title || record.taskType }}</div>
@@ -189,7 +189,7 @@
 
 <script setup lang="ts">
 // 任务中心:任务表格(进度条/状态) + 日志抽屉(SSE 实时 + 断流降级轮询)。
-import { packOptionsFrom, packLabel } from '../packDisplay'
+import { packOptionsFrom, packLabel, packTitle } from '../packDisplay'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import {AppstoreOutlined, BarsOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, ReloadOutlined, SearchOutlined} from '@ant-design/icons-vue'
@@ -227,7 +227,7 @@ const pagination = computed(() => ({
 const columns = [
   { title: '时间', key: 'createdAt', width: 165 },
   { title: '标题', key: 'title', ellipsis: true },
-  { title: '插件', key: 'packName', width: 140 },
+  { title: '插件', key: 'packName', width: 110 },
   { title: '状态', key: 'status', width: 90 },
   { title: '进度', key: 'progress', width: 170 },
   { title: '操作', key: 'actions', width: 120 },
