@@ -1,62 +1,72 @@
 <template>
   <div>
-    <div class="cl-toolbar">
-
+    <div class="filter-bar">
       <!-- 调用明细筛选 -->
       <template v-if="viewMode === 'detail'">
-        <a-select v-model:value="filterType" style="width: 130px" @change="search">
-          <a-select-option value="">全部类型</a-select-option>
-          <a-select-option value="llm">LLM 调用</a-select-option>
-          <a-select-option value="upstream">上游调用</a-select-option>
-          <a-select-option value="graph">图谱检索</a-select-option>
-          <a-select-option value="vector">向量检索</a-select-option>
-          <a-select-option value="fulltext">全文检索</a-select-option>
-        </a-select>
-        <a-select v-model:value="filterPack" style="width: 150px" placeholder="按插件过滤" allow-clear
-          @change="search">
-          <a-select-option v-for="p in packOptions" :key="p.value" :value="p.value">{{ p.label }}</a-select-option>
-        </a-select>
-        <a-input v-model:value="filterConvId" placeholder="按会话 ID 过滤" style="width: 260px" allow-clear
-          @pressEnter="search">
-          <template #prefix><SearchOutlined style="color: #bbb" /></template>
-        </a-input>
-        <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
-        <span class="cl-count">共 {{ total }} 条</span>
+        <div class="filter-item"><span class="filter-label">类型</span>
+          <a-select v-model:value="filterType" style="width: 120px" @change="search">
+            <a-select-option value="">全部</a-select-option>
+            <a-select-option value="llm">LLM 调用</a-select-option>
+            <a-select-option value="upstream">上游调用</a-select-option>
+            <a-select-option value="graph">图谱检索</a-select-option>
+            <a-select-option value="vector">向量检索</a-select-option>
+            <a-select-option value="fulltext">全文检索</a-select-option>
+          </a-select></div>
+        <div class="filter-item"><span class="filter-label">插件</span>
+          <a-select v-model:value="filterPack" style="width: 150px" placeholder="全部插件" allow-clear
+            @change="search">
+            <a-select-option v-for="p in packOptions" :key="p.value" :value="p.value">{{ p.label }}</a-select-option>
+          </a-select></div>
+        <div class="filter-item"><span class="filter-label">会话</span>
+          <a-input v-model:value="filterConvId" placeholder="会话 ID" style="width: 230px" allow-clear
+            @pressEnter="search" /></div>
+        <div class="filter-actions">
+          <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
+          <span class="filter-count">共 {{ total }} 条</span>
+        </div>
       </template>
 
       <!-- 按环节统计 -->
       <template v-else-if="viewMode === 'stats'">
-        <a-select v-model:value="statsFilterPack" style="width: 150px" placeholder="按插件过滤" allow-clear
-          @change="loadStats">
-          <a-select-option v-for="p in packOptions" :key="p.value" :value="p.value">{{ p.label }}</a-select-option>
-        </a-select>
-        <span class="cl-count">合计 {{ fmtTokens(statsTotalTokens) }} token</span>
-        <a-button size="small" @click="loadStats"><ReloadOutlined /> 刷新</a-button>
+        <div class="filter-item"><span class="filter-label">插件</span>
+          <a-select v-model:value="statsFilterPack" style="width: 150px" placeholder="全部插件" allow-clear
+            @change="loadStats">
+            <a-select-option v-for="p in packOptions" :key="p.value" :value="p.value">{{ p.label }}</a-select-option>
+          </a-select></div>
+        <div class="filter-actions">
+          <span class="filter-count">合计 {{ fmtTokens(statsTotalTokens) }} token</span>
+          <a-button size="small" @click="loadStats"><ReloadOutlined /> 刷新</a-button>
+        </div>
       </template>
 
       <!-- 审计日志筛选 -->
       <template v-else>
-        <a-select v-model:value="auditFilterType" style="width: 120px" placeholder="资源类型" allow-clear @change="loadAudit">
-          <a-select-option value="datasource">数据源</a-select-option>
-          <a-select-option value="semantic">语义层</a-select-option>
-          <a-select-option value="dashboard">看板</a-select-option>
-          <a-select-option value="memory">记忆</a-select-option>
-          <a-select-option value="conversation">会话</a-select-option>
-          <a-select-option value="skill">规则</a-select-option>
-        </a-select>
-        <a-select v-model:value="auditFilterAction" style="width: 100px" placeholder="动作" allow-clear @change="loadAudit">
-          <a-select-option value="create">创建</a-select-option>
-          <a-select-option value="update">更新</a-select-option>
-          <a-select-option value="delete">删除</a-select-option>
-          <a-select-option value="scan">扫描</a-select-option>
-          <a-select-option value="rollback">回滚</a-select-option>
-          <a-select-option value="consolidate">整理</a-select-option>
-          <a-select-option value="chat">对话</a-select-option>
-          <a-select-option value="login">登录</a-select-option>
-        </a-select>
-        <a-input v-model:value="auditFilterUser" placeholder="按用户过滤" style="width: 150px" allow-clear @pressEnter="loadAudit" />
-        <a-button type="primary" @click="loadAudit"><template #icon><SearchOutlined /></template>查询</a-button>
-        <span class="cl-count">共 {{ auditTotal }} 条</span>
+        <div class="filter-item"><span class="filter-label">资源</span>
+          <a-select v-model:value="auditFilterType" style="width: 110px" placeholder="全部" allow-clear @change="loadAudit">
+            <a-select-option value="datasource">数据源</a-select-option>
+            <a-select-option value="semantic">语义层</a-select-option>
+            <a-select-option value="dashboard">看板</a-select-option>
+            <a-select-option value="memory">记忆</a-select-option>
+            <a-select-option value="conversation">会话</a-select-option>
+            <a-select-option value="skill">规则</a-select-option>
+          </a-select></div>
+        <div class="filter-item"><span class="filter-label">动作</span>
+          <a-select v-model:value="auditFilterAction" style="width: 100px" placeholder="全部" allow-clear @change="loadAudit">
+            <a-select-option value="create">创建</a-select-option>
+            <a-select-option value="update">更新</a-select-option>
+            <a-select-option value="delete">删除</a-select-option>
+            <a-select-option value="scan">扫描</a-select-option>
+            <a-select-option value="rollback">回滚</a-select-option>
+            <a-select-option value="consolidate">整理</a-select-option>
+            <a-select-option value="chat">对话</a-select-option>
+            <a-select-option value="login">登录</a-select-option>
+          </a-select></div>
+        <div class="filter-item"><span class="filter-label">用户</span>
+          <a-input v-model:value="auditFilterUser" placeholder="用户 ID" style="width: 140px" allow-clear @pressEnter="loadAudit" /></div>
+        <div class="filter-actions">
+          <a-button type="primary" @click="loadAudit"><template #icon><SearchOutlined /></template>查询</a-button>
+          <span class="filter-count">共 {{ auditTotal }} 条</span>
+        </div>
       </template>
     </div>
 

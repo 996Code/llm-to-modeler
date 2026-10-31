@@ -1,28 +1,33 @@
 <template>
   <div>
-    <div class="tk-toolbar">
-      <a-select v-model:value="filterStatus" style="width: 130px" @change="search">
-        <a-select-option value="">全部状态</a-select-option>
-        <a-select-option value="running">运行中</a-select-option>
-        <a-select-option value="pending">等待中</a-select-option>
-        <a-select-option value="succeeded">已成功</a-select-option>
-        <a-select-option value="failed">已失败</a-select-option>
-        <a-select-option value="cancelled">已取消</a-select-option>
-        <a-select-option value="interrupted">已中断</a-select-option>
-      </a-select>
-      <a-select v-model:value="filterPack" style="width: 180px" @change="search">
-        <a-select-option value="">全部插件</a-select-option>
-        <a-select-option value="system">系统</a-select-option>
-        <a-select-option v-for="p in packs" :key="p" :value="p">{{ p }}</a-select-option>
-      </a-select>
-      <a-input-search
-        v-model:value="filterTitle" placeholder="标题搜索" style="width: 200px"
-        allow-clear @search="search" @clear="search" />
-      <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
-      <a-button @click="load"><template #icon><ReloadOutlined /></template>刷新</a-button>
-      <a-switch v-model:checked="autoRefresh" checked-children="自动刷新" un-checked-children="暂停" size="small" />
-      <span class="tk-count">共 {{ total }} 条{{ lastDays ? `（近 ${lastDays} 天）` : '' }}</span>
-      <a-switch v-model:checked="recentOnly" checked-children="近7天" un-checked-children="全部" size="small" @change="search" />
+    <div class="filter-bar">
+      <div class="filter-item"><span class="filter-label">状态</span>
+        <a-select v-model:value="filterStatus" style="width: 110px" @change="search">
+          <a-select-option value="">全部</a-select-option>
+          <a-select-option value="running">运行中</a-select-option>
+          <a-select-option value="pending">等待中</a-select-option>
+          <a-select-option value="succeeded">已成功</a-select-option>
+          <a-select-option value="failed">已失败</a-select-option>
+          <a-select-option value="cancelled">已取消</a-select-option>
+          <a-select-option value="interrupted">已中断</a-select-option>
+        </a-select></div>
+      <div class="filter-item"><span class="filter-label">插件</span>
+        <a-select v-model:value="filterPack" style="width: 160px" @change="search">
+          <a-select-option value="">全部</a-select-option>
+          <a-select-option value="system">系统</a-select-option>
+          <a-select-option v-for="p in packs" :key="p" :value="p">{{ p }}</a-select-option>
+        </a-select></div>
+      <div class="filter-item"><span class="filter-label">标题</span>
+        <a-input v-model:value="filterTitle" placeholder="任务标题" style="width: 170px"
+          allow-clear @pressEnter="search" @change="filterTitle === '' && search()" /></div>
+      <div class="filter-item"><span class="filter-label">范围</span>
+        <a-switch v-model:checked="recentOnly" checked-children="近7天" un-checked-children="全部" size="small" @change="search" /></div>
+      <div class="filter-actions">
+        <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
+        <a-button @click="load"><template #icon><ReloadOutlined /></template>刷新</a-button>
+        <a-switch v-model:checked="autoRefresh" checked-children="自动刷新" un-checked-children="暂停" size="small" />
+        <span class="filter-count">共 {{ total }} 条{{ lastDays ? `（近 ${lastDays} 天）` : '' }}</span>
+      </div>
     </div>
 
     <a-table

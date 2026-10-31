@@ -1,21 +1,22 @@
 <template>
   <div>
     <!-- 工具条:搜索 + 计数 -->
-    <div class="cv-toolbar">
-      <a-input v-model:value="filterUserId" placeholder="按用户过滤" style="width: 200px" allow-clear
-        @pressEnter="search">
-        <template #prefix><UserOutlined style="color: #bbb" /></template>
-      </a-input>
-      <a-input v-model:value="filterQ" placeholder="搜标题或对话内容" style="width: 240px" allow-clear
-        @pressEnter="search">
-        <template #prefix><SearchOutlined style="color: #bbb" /></template>
-      </a-input>
+    <div class="filter-bar">
+      <div class="filter-item"><span class="filter-label">用户</span>
+        <a-input v-model:value="filterUserId" placeholder="用户 ID" style="width: 170px" allow-clear
+          @pressEnter="search" /></div>
+      <div class="filter-item"><span class="filter-label">关键词</span>
+        <a-input v-model:value="filterQ" placeholder="标题或对话内容" style="width: 210px" allow-clear
+          @pressEnter="search" /></div>
       <!-- 插件多选筛选:选项=已发现插件 + 「其他」(无路由记录的会话) -->
-      <a-select v-model:value="filterPacks" mode="multiple" allow-clear
-        placeholder="按插件筛选" style="min-width: 200px" :options="packOptions"
-        @change="search" />
-      <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
-      <span class="cv-count">共 {{ total }} 个会话</span>
+      <div class="filter-item"><span class="filter-label">插件</span>
+        <a-select v-model:value="filterPacks" mode="multiple" allow-clear
+          placeholder="全部插件" style="min-width: 180px" :options="packOptions"
+          @change="search" /></div>
+      <div class="filter-actions">
+        <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
+        <span class="filter-count">共 {{ total }} 个会话</span>
+      </div>
     </div>
 
     <a-table
