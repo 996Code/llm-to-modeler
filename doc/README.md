@@ -17,6 +17,7 @@
 | 文档 | 内容 |
 |---|---|
 | [backend/src/domains/ARCHITECTURE.md](../backend/src/domains/ARCHITECTURE.md) | pack 全部钩子（工具/HTTP API/后台任务/依赖门控/管理页）+ SDK 存储设施 |
+| [technical-reference.md](technical-reference.md) | **README 的深度展开**：架构大图 / LangGraph 流程与 GraphState / Tool 协议 / 插件全能力表 / 环境变量全集 / 目录树 / 设计亮点 |
 | [backend/src/domains/README.md](../backend/src/domains/README.md) | 域目录导览 |
 | [backend/src/domains/chatbi/README.md](../backend/src/domains/chatbi/README.md) | ChatBI 插件结构 |
 | [嵌入模式总体设计.md](嵌入模式总体设计.md) | 嵌入模式（IM 聊天窗 + SDK）总体设计 |
@@ -72,7 +73,7 @@
 | [njmind_form使用手册.md](njmind_form使用手册.md) | njmind 表单使用手册 |
 | [tools/bid-demo/](../tools/bid-demo/) | 竞标 demo（强检目录/检定规程演示） |
 | [tools/mcp-e2e/](../tools/mcp-e2e/) | MCP 双向 e2e 测试项目 |
-| [test-evidence/](test-evidence/) | 线上全量测试报告与截图证据（按日期归档，浏览器实测） |
+| [test-evidence/](test-evidence/) | 界面截图库（按日期归档，线上实测） |
 
 ## 附录 · 历史档案（不推荐阅读，仅溯源）
 
