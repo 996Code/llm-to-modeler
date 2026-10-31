@@ -6,10 +6,9 @@
     <template v-else>
       <!-- 视图切换:简明(用户视角,人话步骤) / 开发者(全量打点与数据) -->
       <div class="tc-mode">
-        <a-radio-group v-model:value="mode" size="small">
-          <a-radio-button value="simple">简明</a-radio-button>
-          <a-radio-button value="dev">开发者</a-radio-button>
-        </a-radio-group>
+        <a-segmented :value="mode" size="small"
+                     :options="[{ label: '简明', value: 'simple' }, { label: '开发者', value: 'dev' }]"
+                     @change="(v: any) => (mode = v)" />
         <span class="tc-mode-hint">{{ mode === 'simple' ? '这一轮的关键步骤' : '完整打点、耗时与数据明细' }}</span>
       </div>
 
