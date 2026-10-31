@@ -1,6 +1,6 @@
 <template>
   <a-drawer
-    :open="open" width="560" :title="`插件设置 · ${packName}`"
+    :open="open" width="560" :title="`插件设置 · ${packLabel(packName)}`"
     @close="$emit('update:open', false)"
   >
     <a-spin :spinning="loading">
@@ -75,6 +75,7 @@
 </template>
 
 <script setup lang="ts">
+import { packLabel } from '../packDisplay'
 import { SaveOutlined } from '@ant-design/icons-vue'
 // 插件设置抽屉:settings.schema.yaml 驱动的通用表单(string/int/bool/enum/secret)。
 // secret 掩码哨兵 __SET__ 的语义:显示"已配置"占位,留空提交 = 保持不变。

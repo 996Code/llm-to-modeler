@@ -41,7 +41,7 @@
           </div>
         </template>
         <template v-else-if="column.key === 'pack'">
-          <a-tag v-if="record.pack" :color="packColor(record.pack)" class="cv-pack">{{ record.pack }}</a-tag>
+          <a-tag v-if="record.pack" :color="packColor(record.pack)" class="cv-pack">{{ packLabel(record.pack) }}</a-tag>
           <span v-else class="cv-pack-other">其他</span>
         </template>
         <template v-else-if="column.key === 'userId'">
@@ -128,7 +128,7 @@ const pagination = computed(() => ({
 
 const columns = [
   { title: '会话', key: 'title' },  // 不设宽:占满剩余空间(主信息列)
-  { title: '插件', key: 'pack', width: 130, ellipsis: true },
+  { title: '插件', key: 'pack', width: 170, ellipsis: true },
   { title: '用户', key: 'userId', width: 120, ellipsis: true },
   { title: '消息', key: 'messageCount', width: 64 },
   { title: '更新时间', key: 'updatedAt', width: 165 },

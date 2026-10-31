@@ -30,7 +30,8 @@
             <AppstoreOutlined />
           </div>
           <div class="pk-name-block">
-            <div class="pk-name">{{ pack.name }}</div>
+            <div class="pk-name">{{ pack.adminTitle || pack.name }}</div>
+            <div v-if="pack.adminTitle && pack.adminTitle !== pack.name" class="pk-key">{{ pack.name }}</div>
             <div class="pk-tags">
               <a-tag v-if="pack.enabled && depOk(pack) && pack.loaded && !pack.runtimeError" color="success" class="pk-state">运行中</a-tag>
               <a-tooltip v-else-if="pack.enabled && depOk(pack) && (!pack.loaded || !!pack.runtimeError)"
@@ -105,6 +106,7 @@ import {
   RightOutlined, SettingOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import { listMcpServers, AdminPack, fetchPacks, recheckPack, setPackEnabled } from '../api'
+import { rememberPacks, packLabel } from '../packDisplay'
 import { chip, iconBtn, rules } from '../helpHtml'
 import type { LoadSafely } from './loadSafely'
 import LlmProviders from './LlmProviders.vue'
@@ -184,6 +186,7 @@ function depTooltip(pack: AdminPack): string {
 async function load() {
   await loadSafely(async () => {
     payload.value = await fetchPacks()
+    rememberPacks(payload.value.items)
   })
 }
 
@@ -194,7 +197,7 @@ async function toggle(pack: AdminPack, enabled: boolean) {
     const result = await setPackEnabled(pack.name, enabled)
     payload.value = { items: result.items, stateFile: result.stateFile, source: result.source }
     message.success(
-      `${enabled ? '已启用' : '已禁用'}「${pack.name}」,当前生效:${result.loaded?.join('、')}`,
+      `${enabled ? '已启用' : '已禁用'}「${packLabel(pack.name)}」,当前生效:${(result.loaded || []).map(packLabel).join('、')}`,
     )
     emit('refresh-pages')  // 动态 Tab 集合可能变化(管理页随插件启停)
   })
@@ -208,9 +211,9 @@ async function recheck(pack: AdminPack) {
     const result = await recheckPack(pack.name)
     if (result.dependency.status === 'ok') {
       if (result.reloaded) {
-        message.success(`依赖检测通过,「${pack.name}」已热加载`)
+        message.success(`依赖检测通过,「${packLabel(pack.name)}」已热加载`)
       } else if (pack.enabled) {
-        message.warning(`依赖检测通过,但「${pack.name}」未完整装配,请查看运行错误`)
+        message.warning(`依赖检测通过,但「${packLabel(pack.name)}」未完整装配,请查看运行错误`)
       } else {
         message.success('依赖检测通过(插件处于禁用态,打开开关即可启用)')
       }
@@ -266,6 +269,7 @@ onMounted(load)
   background: linear-gradient(135deg, #eef2ff, #e0e7ff); color: #4f46e5;
 }
 .pk-name-block { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pk-key { font-size: 11px; color: #94a3b8; line-height: 1.3; }
 .pk-name { font-weight: 700; font-size: 14px; color: #1f2937; font-family: 'SF Mono', Menlo, Consolas, monospace; }
 .pk-tags { display: flex; gap: 6px; }
 .pk-state { font-size: 11px; }
