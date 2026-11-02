@@ -810,7 +810,7 @@ class TestIndexRevisionNamespace:
                 conn.execute(
                     "INSERT INTO chatbi_data_sources "
                     "(id, name, db_type, host, port, database, username, "
-                    "encrypted_password, is_active, scan_status, "
+                    "password, is_active, scan_status, "
                     "scan_progress, scan_stage, scan_error, created_at, "
                     "updated_at) VALUES (?, 't', 'postgresql', 'h', 1, 'd', "
                     "'u', 'p', 1, 'idle', 0, '', '', ?, ?)",
@@ -922,7 +922,7 @@ class TestGuardedRebuildPointerFloorSingleEmbed:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, scope_id, created_at, updated_at) "
                 "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
                 "'done', 100, '', '', ?, ?, ?)", (ds, scope, now, now))
@@ -1035,7 +1035,7 @@ class TestRevisionPhysicalIsolation:
                 conn.execute(
                     "INSERT INTO chatbi_data_sources "
                     "(id, name, db_type, host, port, database, username, "
-                    "encrypted_password, is_active, scan_status, "
+                    "password, is_active, scan_status, "
                     "scan_progress, scan_stage, scan_error, created_at, "
                     "updated_at) VALUES (?, 't', 'postgresql', 'h', 1, 'd', "
                     "'u', 'p', 1, 'idle', 0, '', '', ?, ?)",
@@ -1163,7 +1163,7 @@ class TestCrossTableSameNameMetric:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, created_at, updated_at) "
                 "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
                 "'idle', 0, '', '', ?, ?)",
@@ -1239,7 +1239,7 @@ class TestReportLifecycle:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, created_at, updated_at) "
+                "password, is_active, created_at, updated_at) "
                 "VALUES (?, 't', 'pg', 'h', 1, 'd', 'u', 'p', 1, ?, ?)",
                 (ds, now, now))
         report = _new_report()
@@ -1299,7 +1299,7 @@ class TestLongIdentifierIdentity:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, created_at, updated_at) "
                 "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
                 "'idle', 0, '', '', ?, ?)", (ds_id, now, now))
@@ -1357,7 +1357,7 @@ class TestGCSuccessGenerations:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, created_at, updated_at) "
                 "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
                 "'idle', 0, '', '', ?, ?)", (ds_id, now, now))
@@ -1584,7 +1584,7 @@ class TestIdentityFailClosed:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, created_at, updated_at) "
                 "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
                 "'idle', 0, '', '', ?, ?)", (ds_id, now, now))
@@ -1823,7 +1823,7 @@ class TestPointerLagSelfHeal:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, scope_id, created_at, updated_at) "
                 "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
                 "'done', 100, '', '', ?, ?, ?)",
@@ -1876,13 +1876,13 @@ class TestPointerLagSelfHeal:
         settings = {"scan_metric_inference": False}
         monkeypatch.setattr(
             "domains.chatbi.datasources.list_datasources",
-            lambda db, active_only=False: [type("R", (), {"id": ds})()])
+            lambda db, active_only=False: [_real_get(db, ds)])
         # 二十二审 6.3: 用**真实** _row_to_info 构造 DataSourceInfo——
         # 此前 mock 自造 scope_id 属性(生产 dataclass 没有), 测试通过
         # 生产却每轮误判漂移。真实契约: scope 查询走 stores.get_scope。
         from domains.chatbi.datasources import _row_to_info
 
-        def _real_get(db, i, decrypt=False):
+        def _real_get(db, i):
             with db.connect() as conn:
                 row = conn.execute(
                     "SELECT * FROM chatbi_data_sources WHERE id = ?",
@@ -1935,7 +1935,7 @@ class TestUnchangedRefreshZeroRebuild:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, scope_id, created_at, updated_at) "
                 "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', 'p', 1, "
                 "'done', 100, '', '', 'zero-rb-scope', ?, ?)", (ds, now, now))
@@ -1957,7 +1957,7 @@ class TestUnchangedRefreshZeroRebuild:
             "domains.chatbi.semantic.scan_datasource",
             lambda **kw: scan_content)
 
-        def _real_get(db, i, decrypt=False):
+        def _real_get(db, i):
             with db.connect() as conn:
                 row = conn.execute(
                     "SELECT * FROM chatbi_data_sources WHERE id = ?",
@@ -1966,8 +1966,7 @@ class TestUnchangedRefreshZeroRebuild:
 
         monkeypatch.setattr(
             "domains.chatbi.datasources.list_datasources",
-            lambda db, active_only=False: [
-                type("R", (), {"id": ds})()])
+            lambda db, active_only=False: [_real_get(db, ds)])
         monkeypatch.setattr(
             "domains.chatbi.datasources.get_datasource", _real_get)
 
@@ -2205,16 +2204,15 @@ class TestScanDegradedTerminalState:
 
         ds = "degraded-ds"
         now = datetime.now(timezone.utc).isoformat()
-        from domains.chatbi.datasources import encrypt_password
         with pg_engine.connect() as conn:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, created_at, updated_at) "
                 "VALUES (?, 't', 'postgresql', 'h', 1, 'd', 'u', ?, 1, "
                 "'idle', 0, '', '', ?, ?)",
-                (ds, encrypt_password("p"), now, now))
+                (ds, "p", now, now))
 
         content = SemanticModelContent(models=[
             Model(name="t1", display_name="T", columns=[_col("id")]),
@@ -2534,7 +2532,7 @@ class TestSameVersionMultiBuildGC:
             conn.execute(
                 "INSERT INTO chatbi_data_sources "
                 "(id, name, db_type, host, port, database, username, "
-                "encrypted_password, is_active, scan_status, scan_progress, "
+                "password, is_active, scan_status, scan_progress, "
                 "scan_stage, scan_error, scope_id, created_at, updated_at) "
                 "VALUES (?, 't', 'pg', 'h', 1, 'd', 'u', 'p', 1, 'done', 100, "
                 "'', '', 'sib-scope', ?, ?)", (ds, now, now))

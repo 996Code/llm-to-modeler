@@ -45,7 +45,6 @@ export interface MetrologyScenario {
     answer_prompt?: string
     conclusion?: string
     datasource_id?: string
-    env?: string
     ds_name?: string
     tool?: string
     params?: Record<string, string>

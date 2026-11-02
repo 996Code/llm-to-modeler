@@ -100,6 +100,9 @@ async def probe_providers() -> dict:
         for role, cfg, _, _ in chain:
             t0 = time.time()
             try:
+                for field in ("base_url", "model"):
+                    if not (getattr(cfg, field, "") or "").strip():
+                        raise RuntimeError(f"LLM 供应商 {role} 缺少 {field}")
                 c = client._client_for(cfg)
                 c.chat.completions.create(
                     model=cfg.model,

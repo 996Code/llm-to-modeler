@@ -45,9 +45,7 @@ def client(monkeypatch):
     """chatbi router + 测试 pack 库 + 真会话/设置存储(用户级端点全设施)。"""
     from domains.chatbi import api as chatbi_api, runtime
     from sdk.relational_store import PackRelationalDB
-    from domains.chatbi.datasources import init_store, configure_encryption
-    from cryptography.fernet import Fernet
-    configure_encryption(Fernet.generate_key().decode())
+    from domains.chatbi.datasources import init_store
     test_db = PackRelationalDB("chatbi")
     init_store(test_db)
     monkeypatch.setattr(runtime, "get_pack_db", lambda: test_db)

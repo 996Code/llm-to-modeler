@@ -1,41 +1,34 @@
-"""Neo4jGraphStore —— SDK 通用图存储(Neo4j 5,官方 Python driver)。
+"""PgGraphStore —— SDK 通用图存储(PostgreSQL 实现,唯一后端)。
 
 【模块定位】
 从 knowledge_graph 插件下沉的通用图谱设施:带 scope 命名空间隔离的
 实体/关系存储与邻域查询。零领域知识——不认识知识库/文档/本体;实体
 只是"有名字和类型的节点",关系只是"有类型的边"。任何需要图结构的
-插件(知识图谱/血缘/组织关系…)都可复用。
+插件(知识图谱/血缘/组织关系…)都可复用。图数据落在调用方 pack 自己
+的 PG schema(经 PackRelationalDB),复用平台共享连接池。
 
-【图模型】(scope 物理隔离;标签/属性名可由构造参数定制)
-  (:{node_label} {id, {scope_prop}, name, normalized_name, type,
-                  description, aliases[], source_docs[], type_status,
-                  created_at, updated_at})
-    - ({scope_prop}, normalized_name) IS UNIQUE = MERGE 幂等锚点
-    - id = "{scope}:{normalized_name}"(前端图渲染的稳定节点 ID)
-    - source_docs = 引用该实体的"来源组"集合(删除时做引用计数)
-  [:{rel_type} {id, {scope_prop}, doc_id, chunk_id, source_key, target_key,
-                type, description, evidence, created_at, updated_at}]
-    - MERGE 键 = (scope, source_key, target_key, type, chunk_id):
-      同一来源组重导先清理后写入,天然幂等;不同来源组对同一对节点的
-      同型关系各自保留(带各自 doc/chunk 溯源)
+【图模型】(scope 物理隔离;表在 pack schema 内)
+  graph_nodes   主键 (scope, normalized_name),UNIQUE(scope, id)
+                id = "{scope}:{normalized_name}"(前端图渲染的稳定节点 ID)
+  graph_entity_refs 主键 (scope, normalized_name, doc_id, chunk_id)
+                实体的文档/块级贡献(含该次写入声称的 aliases)——
+                delete_document 按 refs 精确清理来源,不猜数组归属
+  graph_edges   主键 (scope, source_key, target_key, type, doc_id, chunk_id)
+                块级留痕:同一 (source,target,type) 跨块/跨文档各存一条,
+                浏览与统计按三元组聚合。键含 doc_id 是对旧图后端空块
+                chunk 键跨文档互相覆盖问题的有意修复。
 
-【命名空间隔离(与 scope_registry 契约配套)】
-  - prefix:约束名/索引名前缀({prefix}entity_key / {prefix}entity_name),
-    每个使用方插件声明自己的前缀并 register_prefix 登记;
-  - scope_id 契约:所有方法首参 scope 必须是服务端签发的不可预测 ID
-    (scope_registry.new_scope_id() 或调用方自己的 UUID),禁止用户输入
-    直传——入口用 is_scope_id_safe 防御。
+【scope_id 契约】所有方法首参 scope 必须是服务端签发的不可预测 ID
+(scope_registry.new_scope_id() 或调用方自己的 UUID),入口防御见
+check_scope_id。
 
-【连接管理】进程级多槽指纹缓存(含 prefix):各指纹独立持有 driver,
-互不驱逐;配置热改出新指纹时新建连接,reset 时统一关闭。双检锁纪律
-——缓存命中只拿轻锁,连接构建在锁外。所有方法线程安全(driver 自带
-连接池)。
-
-【测试替身】单测用内存 Fake 替换(见 tests/),不要求真实 Neo4j;
-GraphStore Protocol 声明了替身需实现的完整方法集。
+【时间戳】ISO TEXT(与平台 Store 存储规约一致)。created_at 首写保留,
+updated_at 每次写入刷新。
 """
+import json
 import logging
 import threading
+import zlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Protocol
 
@@ -113,69 +106,154 @@ def entity_node_id(scope: str, normalized_name: str) -> str:
     return f"{scope}:{normalized_name}"
 
 
-class Neo4jGraphStore:
-    """Neo4j 图存储(driver 直连;地址/凭证由调用方解析注入)。
+def _merge_ordered(base: Optional[List[str]], extra: Optional[List[str]]) -> List[str]:
+    """保序去重并集(base 在前,extra 追加)——别名/来源数组的合并口径。"""
+    out: List[str] = []
+    for x in list(base or []) + list(extra or []):
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+_GRAPH_DDL = [
+    """CREATE TABLE IF NOT EXISTS graph_nodes (
+        scope TEXT NOT NULL,
+        normalized_name TEXT NOT NULL,
+        id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        aliases TEXT[] NOT NULL DEFAULT '{}',
+        source_docs TEXT[] NOT NULL DEFAULT '{}',
+        source_chunks TEXT[] NOT NULL DEFAULT '{}',
+        type_status TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        extra JSONB NOT NULL DEFAULT '{}',
+        PRIMARY KEY (scope, normalized_name),
+        UNIQUE (scope, id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS graph_nodes_name ON graph_nodes (scope, name)",
+    "CREATE INDEX IF NOT EXISTS graph_nodes_norm_prefix "
+    "ON graph_nodes (scope, normalized_name text_pattern_ops)",
+    """CREATE TABLE IF NOT EXISTS graph_entity_refs (
+        scope TEXT NOT NULL,
+        normalized_name TEXT NOT NULL,
+        doc_id TEXT NOT NULL,
+        chunk_id TEXT NOT NULL DEFAULT '',
+        aliases TEXT[] NOT NULL DEFAULT '{}',
+        PRIMARY KEY (scope, normalized_name, doc_id, chunk_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS graph_entity_refs_doc "
+    "ON graph_entity_refs (scope, doc_id)",
+    """CREATE TABLE IF NOT EXISTS graph_edges (
+        scope TEXT NOT NULL,
+        source_key TEXT NOT NULL,
+        target_key TEXT NOT NULL,
+        type TEXT NOT NULL,
+        doc_id TEXT NOT NULL,
+        chunk_id TEXT NOT NULL DEFAULT '',
+        id TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        evidence TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        extra JSONB NOT NULL DEFAULT '{}',
+        PRIMARY KEY (scope, source_key, target_key, type, doc_id, chunk_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS graph_edges_source "
+    "ON graph_edges (scope, source_key)",
+    "CREATE INDEX IF NOT EXISTS graph_edges_target "
+    "ON graph_edges (scope, target_key)",
+    "CREATE INDEX IF NOT EXISTS graph_edges_doc "
+    "ON graph_edges (scope, doc_id)",
+]
+
+
+class PgGraphStore:
+    """PostgreSQL 图存储(表在调用方 pack 的 schema 内;共享连接池)。
 
     Args:
-        prefix: 约束/索引名前缀(命名空间边界;调用方需先在
-            scope_registry 登记该前缀)。
-        node_label / rel_type / scope_prop: 图模型元素名,必传——
-            使用方声明自己的图模型。
+        schema: pack 名(= PG schema 名;表建在其中,与 pack 关系表同域)。
     """
 
-    def __init__(self, uri: str, user: str, password: str, database: str = "neo4j",
-                 prefix: str = "", node_label: str = "",
-                 rel_type: str = "", scope_prop: str = ""):
-        if not (prefix and node_label and rel_type and scope_prop):
-            raise ValueError(
-                "prefix/node_label/rel_type/scope_prop 均为必传,"
-                "由使用方声明自己的图模型")
-        from neo4j import GraphDatabase
-        self._database = database or "neo4j"
-        self._driver = GraphDatabase.driver(
-            uri, auth=(user or "neo4j", password or "")
-        )
-        # 图模型参数(值只来自构造参数,非用户输入——Cypher 拼接无注入面)
-        self._prefix = prefix
-        self._label = node_label
-        self._rel = rel_type
-        self._sp = scope_prop
+    def __init__(self, schema: str):
+        from sdk.relational_store import PackRelationalDB
+        self.schema = schema
+        self._db = PackRelationalDB(schema)
+        lock_key = 0x67726170 + (zlib.crc32(f"graph:{schema}".encode()) & 0xFFFFFFFF)
+        self._db.migrate_locked(lock_key, self._run_ddl)
+        logger.info("PgGraphStore[%s]: graph tables ready", schema)
+
+    @staticmethod
+    def _run_ddl(conn) -> None:
+        for stmt in _GRAPH_DDL:
+            conn.execute(stmt)
 
     def _check_scope(self, scope: str) -> None:
-        """scope_id 契约入口防御(公共实现见 scope_registry.check_scope_id)。"""
         check_scope_id(scope)
 
     # ── 生命周期 ───────────────────────────────────────────
 
     def ping(self) -> None:
-        """连通性 + 鉴权验证(探针复用)。"""
-        self._driver.verify_connectivity()
+        """连通性验证(探针复用)。"""
+        with self._db.connect() as conn:
+            conn.execute("SELECT 1")
 
     def close(self) -> None:
-        try:
-            self._driver.close()
-        except Exception:
-            logger.warning("neo4j driver close failed", exc_info=True)
+        """无独立连接:共享池归属平台,close 不关闭池。"""
 
-    def ensure_constraints(self) -> None:
-        """幂等建约束与索引(库级,一次性成本)。
+    # ── 内部工具 ───────────────────────────────────────────
 
-        唯一性用 IS UNIQUE 而非 NODE KEY:NODE KEY(唯一 + 非空)是企业版
-        功能,社区版只有 UNIQUE;MERGE 幂等锚点只需唯一性。
+    @staticmethod
+    def _node_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": row["id"] or "",
+            "name": row["name"] or row["normalized_name"] or "",
+            "normalized": row["normalized_name"] or "",
+            "type": row["type"] or "",
+            "description": row["description"] or "",
+            "aliases": list(row["aliases"] or []),
+            "sourceDocs": list(row["source_docs"] or []),
+            "typeStatus": row["type_status"] or "",
+            "updatedAt": row["updated_at"] or "",
+        }
+
+    def _fetch_nodes_by_names(self, conn, scope: str,
+                              names: List[str]) -> Dict[str, Dict[str, Any]]:
+        rows = conn.execute(
+            "SELECT * FROM graph_nodes WHERE scope = ? AND normalized_name = ANY(?)",
+            (scope, list(names))).fetchall()
+        return {r["normalized_name"]: self._node_dict(dict(r)) for r in rows}
+
+    @staticmethod
+    def _edge_group_rows(conn, sql: str, params: tuple) -> List[Dict[str, Any]]:
+        """聚合边组查询:按 (sid,tid,rtype) 聚合块级平行边。
+
+        数组按 (有证据优先, created_at, chunk_id) 稳定排序——"证据最全的
+        那条"选取因此确定(旧后端 collect 顺序未定义,这里补稳定口径)。
         """
-        with self._driver.session(database=self._database) as s:
-            s.run(
-                f"CREATE CONSTRAINT {self._prefix}entity_key IF NOT EXISTS "
-                f"FOR (e:{self._label}) REQUIRE (e.{self._sp}, e.normalized_name) IS UNIQUE"
-            ).consume()
-            # name 前缀匹配走 range 索引即可满足 v1 检索;全文索引留待需要时加
-            s.run(
-                f"CREATE INDEX {self._prefix}entity_name IF NOT EXISTS "
-                f"FOR (e:{self._label}) ON (e.{self._sp}, e.name)"
-            ).consume()
+        _ORDER = "(e.evidence <> '') DESC, e.created_at ASC, e.chunk_id ASC"
+        full = sql.format(order=_ORDER)
+        return [dict(r) for r in conn.execute(full, params).fetchall()]
 
-    def _session(self):
-        return self._driver.session(database=self._database)
+    @staticmethod
+    def _edge_from_group(g: Dict[str, Any]) -> Dict[str, Any]:
+        ids = list(g["ids"] or [])
+        descs = list(g["descs"] or [])
+        evids = list(g["evids"] or [])
+        docs = list(g["docs"] or [])
+        best = next((i for i, ev in enumerate(evids) if ev), 0)
+        evidences = [x for x in evids if x][:5]
+        return {
+            "id": ids[best] if ids else "",
+            "source": g["sid"], "target": g["tid"], "type": g["rtype"],
+            "description": descs[best] if descs else "",
+            "evidence": evids[best] if evids else "",
+            "evidences": evidences,
+            "supportChunks": g["cnt"],
+            "docId": docs[best] if docs else "",
+        }
 
     # ── 写入(导入流水线调用) ───────────────────────────────
 
@@ -186,10 +264,10 @@ class Neo4jGraphStore:
         entities: List[Dict[str, Any]],
         relations: List[Dict[str, Any]],
     ) -> Dict[str, int]:
-        """幂等写入一批抽取结果(单事务:实体 MERGE → 关系 MERGE)。
+        """幂等写入一批抽取结果(单事务:节点 upsert → refs → 边 upsert)。
 
         entities: [{name, normalized_name, type, description, aliases,
-                    type_status, chunk_id}]
+                    type_status, chunk_id, chunk_ids?}]
         relations: [{source(normalized), target(normalized), type,
                      description, evidence, chunk_id}]
         Returns: {"entities": 本批实体数, "relations": 本批关系数}
@@ -197,74 +275,122 @@ class Neo4jGraphStore:
         """
         self._check_scope(scope)
         now = _now()
-        with self._session() as s:
-            def _tx(tx):
-                if entities:
-                    tx.run(
-                        f"""
-                        UNWIND $rows AS ent
-                        MERGE (e:{self._label} {{{self._sp}: $kb, normalized_name: ent.normalized_name}})
-                        ON CREATE SET e.id = ent.id, e.created_at = $now, e.name = ent.name,
-                                      e.description = ent.description, e.aliases = ent.aliases
-                        SET e.type = ent.type,
-                            e.description = CASE WHEN e.description IS NULL OR e.description = ''
-                                                THEN ent.description ELSE e.description END,
-                            e.aliases = CASE WHEN size(ent.aliases) > 0
-                                THEN [a IN coalesce(e.aliases, []) WHERE NOT a IN ent.aliases] + ent.aliases
-                                ELSE coalesce(e.aliases, []) END,
-                            e.source_docs = CASE WHEN ent.doc_id IN e.source_docs
-                                                 THEN e.source_docs ELSE coalesce(e.source_docs, []) + ent.doc_id END,
-                            e.source_chunks = CASE WHEN ent.chunk_id = ''
-                                         OR ent.chunk_id IN coalesce(e.source_chunks, [])
-                                                 THEN coalesce(e.source_chunks, [])
-                                                 ELSE coalesce(e.source_chunks, []) + ent.chunk_id END,
-                            e.type_status = ent.type_status,
-                            e.updated_at = $now
-                        """,
-                        kb=scope, now=now,
-                        # 实体带 chunk_ids 列表(批内同名实体的多块溯源并集):
-                        # 按来源块爆炸成多行,MERGE 同一节点逐块累积 source_chunks
-                        rows=[{
-                            "normalized_name": e["normalized_name"],
-                            "id": entity_node_id(scope, e["normalized_name"]),
-                            "name": e.get("name") or e["normalized_name"],
-                            "type": e.get("type") or "",
-                            "description": e.get("description") or "",
-                            "aliases": list(dict.fromkeys(e.get("aliases") or [])),
-                            "type_status": e.get("type_status") or "",
-                            "chunk_id": cid,
-                            "doc_id": doc_id,
-                        } for e in entities
-                          for cid in (e.get("chunk_ids") or [e.get("chunk_id") or ""])],
-                    ).consume()
-                if relations:
-                    tx.run(
-                        f"""
-                        UNWIND $rows AS r
-                        MATCH (s:{self._label} {{{self._sp}: $kb, normalized_name: r.source}})
-                        MATCH (t:{self._label} {{{self._sp}: $kb, normalized_name: r.target}})
-                        MERGE (s)-[rel:{self._rel} {{
-                            {self._sp}: $kb, source_key: r.source, target_key: r.target,
-                            type: r.type, chunk_id: r.chunk_id}}]->(t)
-                        ON CREATE SET rel.created_at = $now, rel.id = r.id
-                        SET rel.doc_id = $doc, rel.description = r.description,
-                            rel.evidence = r.evidence, rel.updated_at = $now
-                        """,
-                        kb=scope, doc=doc_id, now=now,
-                        rows=[{
-                            "source": r["source"], "target": r["target"],
-                            "type": r.get("type") or "",
-                            "description": r.get("description") or "",
-                            "evidence": (r.get("evidence") or "")[:500],
-                            "chunk_id": r.get("chunk_id") or "",
-                            "id": f"{scope}:{r['source']}>{r.get('type')}>{r['target']}:{r.get('chunk_id')}",
-                        } for r in relations],
-                    ).consume()
+        # 同名实体多块贡献先在批内聚合(保序去重;首名保留,类型/状态
+        # 后写覆盖——与旧后端 UNWIND SET 语义一致)
+        agg: Dict[str, Dict[str, Any]] = {}
+        for e in entities:
+            n = str(e.get("normalized_name") or "").strip()
+            if not n:
+                continue
+            a = agg.setdefault(n, {"name": e.get("name") or n, "type": "",
+                                   "desc": "", "status": "", "aliases": [],
+                                   "occ": []})
+            a["type"] = e.get("type") or ""
+            a["status"] = e.get("type_status") or ""
+            if e.get("description"):
+                a["desc"] = e["description"]
+            for al in (e.get("aliases") or []):
+                if al and al not in a["aliases"]:
+                    a["aliases"].append(al)
+            for cid in (e.get("chunk_ids") or [e.get("chunk_id") or ""]):
+                if cid not in a["occ"]:
+                    a["occ"].append(cid)
 
-            created = s.execute_write(_tx)
-
-        # execute_write 返回回调返回值;这里再查一次计数(轻量,管理端/流水线统计用)
+        with self._db.connect() as conn:
+            for n, a in agg.items():
+                self._upsert_node(conn, scope, n, a, doc_id, now)
+                for cid in a["occ"]:
+                    conn.execute(
+                        "INSERT INTO graph_entity_refs "
+                        "(scope, normalized_name, doc_id, chunk_id, aliases) "
+                        "VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT (scope, normalized_name, doc_id, chunk_id) "
+                        "DO UPDATE SET aliases = COALESCE("
+                        "(SELECT array_agg(DISTINCT x) FROM unnest("
+                        "graph_entity_refs.aliases || EXCLUDED.aliases) AS t(x)), '{}')",
+                        (scope, n, doc_id, cid, a["aliases"]))
+            if relations:
+                keys = set()
+                clean: List[Dict[str, str]] = []
+                for r in relations:
+                    s_ = str(r.get("source") or "").strip()
+                    t_ = str(r.get("target") or "").strip()
+                    if not s_ or not t_:
+                        continue
+                    keys.add(s_)
+                    keys.add(t_)
+                    clean.append({"s": s_, "t": t_,
+                                  "type": r.get("type") or "",
+                                  "desc": r.get("description") or "",
+                                  "ev": (r.get("evidence") or "")[:500],
+                                  "cid": r.get("chunk_id") or ""})
+                if keys:
+                    existing = {r["normalized_name"] for r in conn.execute(
+                        "SELECT normalized_name FROM graph_nodes "
+                        "WHERE scope = ? AND normalized_name = ANY(?)",
+                        (scope, sorted(keys))).fetchall()}
+                    for r in clean:
+                        # MATCH 语义:端点不存在的边静默跳过(节点先于边写
+                        # 入,同事务内刚 upsert 的节点可见)
+                        if r["s"] not in existing or r["t"] not in existing:
+                            continue
+                        conn.execute(
+                            "INSERT INTO graph_edges "
+                            "(scope, source_key, target_key, type, doc_id, "
+                            " chunk_id, id, description, evidence, "
+                            " created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT (scope, source_key, target_key, type, "
+                            " doc_id, chunk_id) DO UPDATE SET "
+                            "description = EXCLUDED.description, "
+                            "evidence = EXCLUDED.evidence, "
+                            "updated_at = EXCLUDED.updated_at",
+                            (scope, r["s"], r["t"], r["type"], doc_id, r["cid"],
+                             f"{scope}:{r['s']}>{r['type']}>{r['t']}:{r['cid']}",
+                             r["desc"], r["ev"], now, now))
         return {"entities": len(entities), "relations": len(relations)}
+
+    def _upsert_node(self, conn, scope: str, n: str, a: Dict[str, Any],
+                     doc_id: str, now: str) -> None:
+        """节点 MERGE 语义:首写建(name/created_at/id),重写并集来源。"""
+        for _attempt in (0, 1):
+            row = conn.execute(
+                "SELECT name, type, description, aliases, source_docs, "
+                "source_chunks, type_status FROM graph_nodes "
+                "WHERE scope = ? AND normalized_name = ? FOR UPDATE",
+                (scope, n)).fetchone()
+            if row is None:
+                cur = conn.execute(
+                    "INSERT INTO graph_nodes "
+                    "(scope, normalized_name, id, name, type, description, "
+                    " aliases, source_docs, source_chunks, type_status, "
+                    " created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (scope, normalized_name) DO NOTHING",
+                    (scope, n, entity_node_id(scope, n), a["name"], a["type"],
+                     a["desc"], a["aliases"], [doc_id],
+                     [c for c in a["occ"] if c], a["status"], now, now))
+                if cur.rowcount:
+                    return
+                continue   # 并发已插入:重读合并
+            docs = list(row["source_docs"] or [])
+            if doc_id not in docs:
+                docs.append(doc_id)
+            chunks = [c for c in (row["source_chunks"] or []) if c]
+            for c in a["occ"]:
+                if c and c not in chunks:
+                    chunks.append(c)
+            conn.execute(
+                "UPDATE graph_nodes SET type = ?, type_status = ?, "
+                "description = ?, aliases = ?, source_docs = ?, "
+                "source_chunks = ?, updated_at = ? "
+                "WHERE scope = ? AND normalized_name = ?",
+                (a["type"], a["status"], row["description"] or a["desc"],
+                 _merge_ordered(row["aliases"], a["aliases"]), docs, chunks,
+                 now, scope, n))
+            return
+
+    # ── 溯源与词表 ─────────────────────────────────────────
 
     def chunk_output(self, scope: str, chunk_id: str) -> Dict[str, List[Dict]]:
         """块级抽取产出(块明细"查看产出"用)。
@@ -273,37 +399,36 @@ class Neo4jGraphStore:
         多对多);关系按 chunk_id 精确匹配(写入时逐条带块 id)。
         """
         self._check_scope(scope)
-        with self._session() as s:
-            ent_rows = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
-                f"WHERE $cid IN coalesce(e.source_chunks, []) RETURN e",
-                kb=scope, cid=chunk_id,
-            ).data()
-            rel_rows = s.run(
-                f"MATCH (a:{self._label})-[r:{self._rel} {{{self._sp}: $kb, chunk_id: $cid}}]"
-                f"->(b:{self._label}) "
-                f"RETURN a.name AS source, b.name AS target, properties(r) AS rel",
-                kb=scope, cid=chunk_id,
-            ).data()
-        entities = [self._node_dict(r["e"]) for r in ent_rows]
+        with self._db.connect() as conn:
+            ent_rows = conn.execute(
+                "SELECT * FROM graph_nodes WHERE scope = ? AND ? = ANY(source_chunks)",
+                (scope, chunk_id)).fetchall()
+            rel_rows = conn.execute(
+                "SELECT sn.name AS source, tn.name AS target, e.type, "
+                "e.description, e.evidence FROM graph_edges e "
+                "JOIN graph_nodes sn ON sn.scope = e.scope "
+                " AND sn.normalized_name = e.source_key "
+                "JOIN graph_nodes tn ON tn.scope = e.scope "
+                " AND tn.normalized_name = e.target_key "
+                "WHERE e.scope = ? AND e.chunk_id = ?",
+                (scope, chunk_id)).fetchall()
+        entities = [self._node_dict(dict(r)) for r in ent_rows]
         relations = [{
             "source": r["source"], "target": r["target"],
-            "type": r["rel"].get("type") or "",
-            "description": r["rel"].get("description") or "",
-            "evidence": (r["rel"].get("evidence") or "")[:200],
+            "type": r["type"] or "",
+            "description": r["description"] or "",
+            "evidence": (r["evidence"] or "")[:200],
         } for r in rel_rows]
         return {"entities": entities, "relations": relations}
 
     def list_entity_names(self, scope: str) -> set:
         """库内全部实体 normalized_name(悬空关系过滤的 known 集合扩充用)。"""
         self._check_scope(scope)
-        with self._session() as s:
-            rows = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
-                f"RETURN e.normalized_name AS n",
-                kb=scope,
-            ).data()
-        return {r["n"] for r in rows if r.get("n")}
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT normalized_name FROM graph_nodes WHERE scope = ?",
+                (scope,)).fetchall()
+        return {r["normalized_name"] for r in rows if r["normalized_name"]}
 
     def list_entity_aliases(self, scope: str) -> Dict[str, Dict[str, Any]]:
         """库内全部实体的别名+类型+描述表:normalized_name -> {type, aliases[], description}。
@@ -314,48 +439,21 @@ class Neo4jGraphStore:
         description 随附,词表渲染属性提示(指称消解的特征对卡材料)。
         """
         self._check_scope(scope)
-        with self._session() as s:
-            rows = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
-                f"RETURN e.normalized_name AS n, coalesce(e.type, '') AS t, "
-                f"       coalesce(e.aliases, []) AS a, "
-                f"       coalesce(e.description, '') AS d",
-                kb=scope,
-            ).data()
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT normalized_name, type, aliases, description "
+                "FROM graph_nodes WHERE scope = ? ORDER BY normalized_name",
+                (scope,)).fetchall()
         out: Dict[str, Dict[str, Any]] = {}
         for r in rows:
-            if r.get("n"):
-                out[r["n"]] = {
-                    "type": r.get("t") or "",
-                    "aliases": list(dict.fromkeys(x for x in (r.get("a") or []) if x)),
-                    "description": r.get("d") or "",
+            n = r["normalized_name"]
+            if n:
+                out[n] = {
+                    "type": r["type"] or "",
+                    "aliases": [x for x in (r["aliases"] or []) if x],
+                    "description": r["description"] or "",
                 }
         return out
-
-    def prune_aliases(self, scope: str, names: List[str]) -> int:
-        """从所有实体的 aliases 里移除指定名字(收尾去争议)。
-
-        入库前的独占性校验只保证"本批不扩散",历史遗留/合并吸收进来的
-        泛称别名仍在图里——词表从图渲染,它们会被持续喂给后续抽取
-        (回音室通道)。收尾时把争议别名集清掉,反馈即断。幂等。
-
-        Returns: 实际移除的别名声称条数。
-        """
-        self._check_scope(scope)
-        if not names:
-            return 0
-        now = _now()
-        with self._session() as s:
-            rows = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
-                f"WHERE any(a IN coalesce(e.aliases, []) WHERE a IN $names) "
-                f"WITH e, [a IN coalesce(e.aliases, []) WHERE a IN $names] AS rm "
-                f"SET e.aliases = [a IN coalesce(e.aliases, []) WHERE NOT a IN $names], "
-                f"    e.updated_at = $now "
-                f"RETURN sum(size(rm)) AS removed",
-                kb=scope, names=names, now=now,
-            ).data()
-        return int((rows[0] or {}).get("removed") or 0) if rows else 0
 
     def list_entities(self, scope: str) -> List[Dict]:
         """库内全部实体(含 type/aliases/description/块溯源量/创建时间)。
@@ -365,26 +463,25 @@ class Neo4jGraphStore:
         描述连边做点名匹配。
         """
         self._check_scope(scope)
-        with self._session() as s:
-            rows = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) "
-                f"RETURN e.normalized_name AS n, e.name AS name, e.type AS type, "
-                f"       coalesce(e.aliases, []) AS a, e.source_chunks AS sc, "
-                f"       coalesce(e.description, '') AS d, "
-                f"       coalesce(e.created_at, '') AS cat",
-                kb=scope,
-            ).data()
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT normalized_name, name, type, aliases, source_chunks, "
+                "description, created_at FROM graph_nodes "
+                "WHERE scope = ? ORDER BY normalized_name",
+                (scope,)).fetchall()
         out = []
         for r in rows:
-            if not r.get("n"):
+            n = r["normalized_name"]
+            if not n:
                 continue
             out.append({
-                "normalized": r["n"], "name": r.get("name") or r["n"],
-                "type": r.get("type") or "",
-                "aliases": list(dict.fromkeys(x for x in (r.get("a") or []) if x)),
-                "source_chunks": list(r.get("sc") or []),
-                "description": r.get("d") or "",
-                "created_at": r.get("cat") or "",
+                "normalized": n,
+                "name": r["name"] or n,
+                "type": r["type"] or "",
+                "aliases": [x for x in (r["aliases"] or []) if x],
+                "source_chunks": list(r["source_chunks"] or []),
+                "description": r["description"] or "",
+                "created_at": r["created_at"] or "",
             })
         return out
 
@@ -394,22 +491,56 @@ class Neo4jGraphStore:
         收尾描述连边去重用:两实体间已有任何关系就不再叠加兜底弱边。
         """
         self._check_scope(scope)
-        with self._session() as s:
-            rows = s.run(
-                f"MATCH (a:{self._label} {{{self._sp}: $kb}})"
-                f"-[:{self._rel} {{{self._sp}: $kb}}]->"
-                f"(b:{self._label} {{{self._sp}: $kb}}) "
-                f"WHERE a.normalized_name <> b.normalized_name "
-                f"RETURN DISTINCT a.normalized_name AS a, b.normalized_name AS b",
-                kb=scope,
-            ).data()
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT source_key AS a, target_key AS b "
+                "FROM graph_edges WHERE scope = ? "
+                "AND source_key <> target_key", (scope,)).fetchall()
         out = set()
         for r in rows:
-            a, b = r.get("a"), r.get("b")
+            a, b = r["a"], r["b"]
             if a and b:
                 out.add((a, b))
                 out.add((b, a))
         return out
+
+    def prune_aliases(self, scope: str, names: List[str]) -> int:
+        """从所有实体的 aliases 里移除指定名字(收尾去争议)。
+
+        入库前的独占性校验只保证"本批不扩散",历史遗留/合并吸收进来的
+        泛称别名仍在图里——词表从图渲染,它们会被持续喂给后续抽取
+        (回音室通道)。收尾时把争议别名集清掉,反馈即断。幂等。
+
+        同步清理 graph_entity_refs 里的别名声称,防止下次合并聚合时
+        争议别名从贡献记录复活。
+
+        Returns: 实际移除的别名声称条数(节点级)。
+        """
+        self._check_scope(scope)
+        clean = [n for n in (names or []) if n]
+        if not clean:
+            return 0
+        now = _now()
+        with self._db.connect() as conn:
+            rows = conn.execute(
+                "SELECT aliases FROM graph_nodes WHERE scope = ? "
+                "AND EXISTS (SELECT 1 FROM unnest(aliases) AS t(x) "
+                "WHERE x = ANY(?))", (scope, clean)).fetchall()
+            removed = sum(1 for r in rows for a in (r["aliases"] or [])
+                          if a in clean)
+            conn.execute(
+                "UPDATE graph_nodes SET aliases = COALESCE("
+                "(SELECT array_agg(x) FROM unnest(aliases) AS t(x) "
+                "WHERE x <> ALL(?)), '{}'), updated_at = ? WHERE scope = ? "
+                "AND EXISTS (SELECT 1 FROM unnest(aliases) AS t(x) "
+                "WHERE x = ANY(?))", (clean, now, scope, clean))
+            conn.execute(
+                "UPDATE graph_entity_refs SET aliases = COALESCE("
+                "(SELECT array_agg(x) FROM unnest(aliases) AS t(x) "
+                "WHERE x <> ALL(?)), '{}') WHERE scope = ? "
+                "AND EXISTS (SELECT 1 FROM unnest(aliases) AS t(x) "
+                "WHERE x = ANY(?))", (clean, scope, clean))
+        return removed
 
     def merge_entities(self, scope: str, doc_id: str,
                        pairs: List[Dict]) -> Dict[str, int]:
@@ -420,13 +551,13 @@ class Neo4jGraphStore:
         "青云山/青云门"这种真·不同实体)。合并语义:
           1. 碎片 aliases + 碎片名 并入 canonical 的 aliases(去重)——
              碎片名必须保留,否则碎片节点删除后按别名检索就丢了;
-          2. canonical 并集碎片的 source_docs / source_chunks(溯源不丢);
-          3. 碎片的进出边**迁移**到 canonical(按 upsert 同款 MERGE 键
-             (source_key,target_key,type,chunk_id) 落新边,证据补齐后删
-             旧边——只改关系属性不移端点,DETACH DELETE 会连边一起删,
-             那是丢关系不是合并);
+          2. canonical 并集碎片的 source_docs / source_chunks(溯源不丢),
+             碎片的 refs 贡献记录一并迁移;
+          3. 碎片的进出边**迁移**到 canonical(按本实现的贡献键
+             (source,target,type,doc,chunk) upsert,证据补齐后删旧边
+             ——只改关系归属不移端点);
           4. canonical↔碎片 之间的直连边是合并后的自环,直接删;
-          5. DETACH DELETE 碎片节点。
+          5. 删除碎片节点。
 
         Returns: {"merged": 成功合并的对数}
         """
@@ -434,128 +565,171 @@ class Neo4jGraphStore:
         if not pairs:
             return {"merged": 0}
         now = _now()
-        with self._session() as s:
-            def _tx(tx):
-                n = 0
-                for p in pairs:
-                    canon = str((p or {}).get("canonical") or "").strip()
-                    frag = str((p or {}).get("fragment") or "").strip()
-                    if not canon or not frag or canon == frag:
-                        continue
-                    # ── 0) canonical↔碎片 直连边 = 合并后自环,删 ──
-                    tx.run(
-                        f"MATCH (c:{self._label} {{{self._sp}: $kb, normalized_name: $canon}})"
-                        f"-[self_r:{self._rel} {{{self._sp}: $kb}}]-"
-                        f"(f:{self._label} {{{self._sp}: $kb, normalized_name: $frag}}) "
-                        f"DELETE self_r",
-                        kb=scope, canon=canon, frag=frag,
-                    ).consume()
-                    # ── 1) 出边迁移:f→x 落成 c→x(MERGE 键同 upsert,幂等) ──
-                    tx.run(
-                        f"""
-                        MATCH (f:{self._label} {{{self._sp}: $kb, normalized_name: $frag}})
-                        MATCH (f)-[r:{self._rel} {{{self._sp}: $kb}}]->(x:{self._label})
-                        MATCH (c:{self._label} {{{self._sp}: $kb, normalized_name: $canon}})
-                        MERGE (c)-[r2:{self._rel} {{
-                            {self._sp}: $kb, source_key: $canon,
-                            target_key: x.normalized_name, type: r.type,
-                            chunk_id: r.chunk_id}}]->(x)
-                        ON CREATE SET r2.created_at = r.created_at,
-                                      r2.id = $kb + ':' + $canon + '>' + r.type
-                                              + '>' + x.normalized_name + ':' + r.chunk_id
-                        SET r2.doc_id = coalesce(r2.doc_id, r.doc_id),
-                            r2.description = CASE WHEN coalesce(r2.description,'') = ''
-                                                  THEN r.description ELSE r2.description END,
-                            r2.evidence = CASE WHEN coalesce(r2.evidence,'') = ''
-                                               THEN r.evidence ELSE r2.evidence END,
-                            r2.updated_at = $now
-                        DELETE r
-                        """,
-                        kb=scope, canon=canon, frag=frag, now=now,
-                    ).consume()
-                    # ── 2) 入边迁移:x→f 落成 x→c ──
-                    tx.run(
-                        f"""
-                        MATCH (f:{self._label} {{{self._sp}: $kb, normalized_name: $frag}})
-                        MATCH (x:{self._label})-[r:{self._rel} {{{self._sp}: $kb}}]->(f)
-                        MATCH (c:{self._label} {{{self._sp}: $kb, normalized_name: $canon}})
-                        MERGE (x)-[r2:{self._rel} {{
-                            {self._sp}: $kb, source_key: x.normalized_name,
-                            target_key: $canon, type: r.type,
-                            chunk_id: r.chunk_id}}]->(c)
-                        ON CREATE SET r2.created_at = r.created_at,
-                                      r2.id = $kb + ':' + x.normalized_name + '>' + r.type
-                                              + '>' + $canon + ':' + r.chunk_id
-                        SET r2.doc_id = coalesce(r2.doc_id, r.doc_id),
-                            r2.description = CASE WHEN coalesce(r2.description,'') = ''
-                                                  THEN r.description ELSE r2.description END,
-                            r2.evidence = CASE WHEN coalesce(r2.evidence,'') = ''
-                                               THEN r.evidence ELSE r2.evidence END,
-                            r2.updated_at = $now
-                        DELETE r
-                        """,
-                        kb=scope, canon=canon, frag=frag, now=now,
-                    ).consume()
-                    # ── 3) 属性并集:别名(含碎片名)+ 溯源 ──
-                    ok = tx.run(
-                        f"""
-                        MATCH (c:{self._label} {{{self._sp}: $kb, normalized_name: $canon}})
-                        MATCH (f:{self._label} {{{self._sp}: $kb, normalized_name: $frag}})
-                        SET c.aliases = reduce(acc = coalesce(c.aliases, []),
-                                               a IN coalesce(f.aliases, []) + [$frag] |
-                                               CASE WHEN a = $canon OR a IN acc THEN acc
-                                                    ELSE acc + a END),
-                            c.source_docs = reduce(acc = coalesce(c.source_docs, []),
-                                                   d IN coalesce(f.source_docs, []) |
-                                                   CASE WHEN d IN acc THEN acc ELSE acc + d END),
-                            c.source_chunks = reduce(acc = coalesce(c.source_chunks, []),
-                                                     ch IN coalesce(f.source_chunks, []) |
-                                                     CASE WHEN ch IN acc THEN acc ELSE acc + ch END),
-                            c.updated_at = $now
-                        DETACH DELETE f
-                        RETURN count(c) AS ok
-                        """,
-                        kb=scope, canon=canon, frag=frag, now=now,
-                    ).single()
-                    n += int((ok or {}).get("ok") or 0)
-                return n
-            merged = s.execute_write(_tx)
-        return {"merged": int(merged)}
+        merged = 0
+        with self._db.connect() as conn:
+            for p in pairs:
+                canon = str((p or {}).get("canonical") or "").strip()
+                frag = str((p or {}).get("fragment") or "").strip()
+                if not canon or not frag or canon == frag:
+                    continue
+                # 按名字序锁定双方(防并发同对合并死锁)
+                rows = conn.execute(
+                    "SELECT normalized_name, aliases, source_docs, "
+                    "source_chunks FROM graph_nodes WHERE scope = ? "
+                    "AND normalized_name IN (?, ?) "
+                    "ORDER BY normalized_name FOR UPDATE",
+                    (scope, canon, frag)).fetchall()
+                by = {r["normalized_name"]: r for r in rows}
+                if canon not in by or frag not in by:
+                    continue
+                # 0) canonical↔碎片 直连边 = 合并后自环,删
+                conn.execute(
+                    "DELETE FROM graph_edges WHERE scope = ? "
+                    "AND ((source_key = ? AND target_key = ?) "
+                    "OR (source_key = ? AND target_key = ?))",
+                    (scope, canon, frag, frag, canon))
+                # 1) 出边迁移:f→x 落成 c→x
+                out_edges = [dict(r) for r in conn.execute(
+                    "SELECT * FROM graph_edges WHERE scope = ? AND source_key = ?",
+                    (scope, frag)).fetchall()]
+                for e in out_edges:
+                    self._migrate_edge(conn, scope, e, new_source=canon,
+                                       new_target=e["target_key"], now=now)
+                conn.execute(
+                    "DELETE FROM graph_edges WHERE scope = ? AND source_key = ?",
+                    (scope, frag))
+                # 2) 入边迁移:x→f 落成 x→c
+                in_edges = [dict(r) for r in conn.execute(
+                    "SELECT * FROM graph_edges WHERE scope = ? AND target_key = ?",
+                    (scope, frag)).fetchall()]
+                for e in in_edges:
+                    self._migrate_edge(conn, scope, e,
+                                       new_source=e["source_key"],
+                                       new_target=canon, now=now)
+                conn.execute(
+                    "DELETE FROM graph_edges WHERE scope = ? AND target_key = ?",
+                    (scope, frag))
+                # 3) refs 迁移(别名声称并集)
+                refs = [dict(r) for r in conn.execute(
+                    "SELECT doc_id, chunk_id, aliases FROM graph_entity_refs "
+                    "WHERE scope = ? AND normalized_name = ?",
+                    (scope, frag)).fetchall()]
+                for r in refs:
+                    conn.execute(
+                        "INSERT INTO graph_entity_refs "
+                        "(scope, normalized_name, doc_id, chunk_id, aliases) "
+                        "VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT (scope, normalized_name, doc_id, chunk_id) "
+                        "DO UPDATE SET aliases = COALESCE("
+                        "(SELECT array_agg(DISTINCT x) FROM unnest("
+                        "graph_entity_refs.aliases || EXCLUDED.aliases) AS t(x)), '{}')",
+                        (scope, canon, r["doc_id"], r["chunk_id"],
+                         list(r["aliases"] or [])))
+                conn.execute(
+                    "DELETE FROM graph_entity_refs WHERE scope = ? "
+                    "AND normalized_name = ?", (scope, frag))
+                # 4) 属性并集:别名(含碎片名,不含 canonical 本名)+溯源
+                c, f = by[canon], by[frag]
+                aliases = [x for x in _merge_ordered(
+                    _merge_ordered(c["aliases"], f["aliases"]), [frag])
+                    if x != canon]
+                conn.execute(
+                    "UPDATE graph_nodes SET aliases = ?, source_docs = ?, "
+                    "source_chunks = ?, updated_at = ? "
+                    "WHERE scope = ? AND normalized_name = ?",
+                    (aliases,
+                     _merge_ordered(c["source_docs"], f["source_docs"]),
+                     _merge_ordered(c["source_chunks"], f["source_chunks"]),
+                     now, scope, canon))
+                conn.execute(
+                    "DELETE FROM graph_nodes WHERE scope = ? "
+                    "AND normalized_name = ?", (scope, frag))
+                merged += 1
+        return {"merged": merged}
+
+    @staticmethod
+    def _migrate_edge(conn, scope: str, e: Dict[str, Any],
+                      new_source: str, new_target: str, now: str) -> None:
+        """合并时的单条边迁移:新键 upsert(已有非空证据优先),旧边由调用方删。"""
+        new_id = f"{scope}:{new_source}>{e['type']}>{new_target}:{e['chunk_id']}"
+        conn.execute(
+            "INSERT INTO graph_edges "
+            "(scope, source_key, target_key, type, doc_id, chunk_id, id, "
+            " description, evidence, created_at, updated_at, extra) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb) "
+            "ON CONFLICT (scope, source_key, target_key, type, doc_id, chunk_id) "
+            "DO UPDATE SET "
+            "description = CASE WHEN graph_edges.description = '' "
+            "THEN EXCLUDED.description ELSE graph_edges.description END, "
+            "evidence = CASE WHEN graph_edges.evidence = '' "
+            "THEN EXCLUDED.evidence ELSE graph_edges.evidence END, "
+            "updated_at = EXCLUDED.updated_at",
+            (scope, new_source, new_target, e["type"], e["doc_id"],
+             e["chunk_id"], new_id, e["description"] or "",
+             e["evidence"] or "", e["created_at"], now,
+             json.dumps(e["extra"] or {}, ensure_ascii=False)))
 
     def delete_document(self, scope: str, doc_id: str) -> Dict[str, int]:
-        """删除某文档的全部图谱贡献:边按 doc_id 删,实体去引用,孤立实体删。"""
+        """删除某文档的全部图谱贡献。
+
+        边按 doc_id 删;实体经 refs 精确去源(该文档声称的块引用同步撤
+        出;存量迁移节点无法归因的旧块引用保持原样,不猜),无剩余来源
+        的实体连同其余关联边一并删除。
+        """
         self._check_scope(scope)
-        with self._session() as s:
-            def _tx(tx):
-                edges = tx.run(
-                    f"MATCH (:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb, doc_id: $doc}}]->(:{self._label}) "
-                    f"DELETE r RETURN count(r) AS c",
-                    kb=scope, doc=doc_id,
-                ).single()["c"]
-                nodes = tx.run(
-                    f"""
-                    MATCH (e:{self._label} {{{self._sp}: $kb}})
-                    WHERE $doc IN e.source_docs
-                    SET e.source_docs = [d IN e.source_docs WHERE d <> $doc]
-                    WITH e WHERE size(e.source_docs) = 0
-                    DETACH DELETE e RETURN count(e) AS c
-                    """,
-                    kb=scope, doc=doc_id,
-                ).single()["c"]
-                return {"edges": int(edges), "orphanEntities": int(nodes)}
-            return s.execute_write(_tx)
+        with self._db.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM graph_edges WHERE scope = ? AND doc_id = ?",
+                (scope, doc_id))
+            edges = cur.rowcount
+            ref_rows = [dict(r) for r in conn.execute(
+                "SELECT normalized_name, chunk_id FROM graph_entity_refs "
+                "WHERE scope = ? AND doc_id = ?", (scope, doc_id)).fetchall()]
+            conn.execute(
+                "DELETE FROM graph_entity_refs WHERE scope = ? AND doc_id = ?",
+                (scope, doc_id))
+            drop_chunks: Dict[str, set] = {}
+            for r in ref_rows:
+                drop_chunks.setdefault(r["normalized_name"], set()).add(
+                    r["chunk_id"])
+            nodes = [dict(r) for r in conn.execute(
+                "SELECT normalized_name, source_docs, source_chunks "
+                "FROM graph_nodes WHERE scope = ? AND ? = ANY(source_docs)",
+                (scope, doc_id)).fetchall()]
+            orphans = []
+            for n in nodes:
+                docs = [d for d in (n["source_docs"] or []) if d != doc_id]
+                if not docs:
+                    orphans.append(n["normalized_name"])
+                    continue
+                drop = drop_chunks.get(n["normalized_name"], set())
+                chunks = [c for c in (n["source_chunks"] or [])
+                          if c not in drop]
+                conn.execute(
+                    "UPDATE graph_nodes SET source_docs = ?, source_chunks = ? "
+                    "WHERE scope = ? AND normalized_name = ?",
+                    (docs, chunks, scope, n["normalized_name"]))
+            if orphans:
+                conn.execute(
+                    "DELETE FROM graph_edges WHERE scope = ? "
+                    "AND (source_key = ANY(?) OR target_key = ANY(?))",
+                    (scope, orphans, orphans))
+                conn.execute(
+                    "DELETE FROM graph_nodes WHERE scope = ? "
+                    "AND normalized_name = ANY(?)", (scope, orphans))
+        return {"edges": int(edges), "orphanEntities": len(orphans)}
 
     def delete_scope(self, scope: str) -> Dict[str, int]:
-        """整库删除(一句子图清除)。"""
+        """整库删除(三表同事务清除)。"""
         self._check_scope(scope)
-        with self._session() as s:
-            def _tx(tx):
-                nodes = tx.run(
-                    f"MATCH (e:{self._label} {{{self._sp}: $kb}}) DETACH DELETE e RETURN count(e) AS c",
-                    kb=scope,
-                ).single()["c"]
-                return {"entities": int(nodes)}
-            return s.execute_write(_tx)
+        with self._db.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM graph_nodes WHERE scope = ?", (scope,))
+            n = cur.rowcount
+            conn.execute("DELETE FROM graph_edges WHERE scope = ?", (scope,))
+            conn.execute(
+                "DELETE FROM graph_entity_refs WHERE scope = ?", (scope,))
+        return {"entities": int(n)}
 
     # ── 查询(在线浏览 + 检索) ─────────────────────────────
 
@@ -563,17 +737,13 @@ class Neo4jGraphStore:
         """库级统计。关系数按 (source,type,target) 去重(平行边=块级留痕,
         不去重会虚增数倍,与 document_counts 同语义)。"""
         self._check_scope(scope)
-        with self._session() as s:
-            entities = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) RETURN count(e) AS c", kb=scope
-            ).single()["c"]
-            relations = s.run(
-                f"MATCH (a:{self._label} {{{self._sp}: $kb}})"
-                f"-[r:{self._rel} {{{self._sp}: $kb}}]->"
-                f"(b:{self._label} {{{self._sp}: $kb}}) "
-                f"RETURN count(DISTINCT [a.id, r.type, b.id]) AS c",
-                kb=scope,
-            ).single()["c"]
+        with self._db.connect() as conn:
+            entities = conn.execute(
+                "SELECT count(*) AS c FROM graph_nodes WHERE scope = ?",
+                (scope,)).fetchone()["c"]
+            relations = conn.execute(
+                "SELECT count(DISTINCT (source_key, type, target_key)) AS c "
+                "FROM graph_edges WHERE scope = ?", (scope,)).fetchone()["c"]
         return {"entities": int(entities), "relations": int(relations)}
 
     def document_counts(self, scope: str, doc_id: str) -> Dict[str, int]:
@@ -583,35 +753,15 @@ class Neo4jGraphStore:
         重复计入会让文档的 relation_count 虚增数倍,与用户直觉的"关系数"不符。
         """
         self._check_scope(scope)
-        with self._session() as s:
-            entities = s.run(
-                f"MATCH (e:{self._label} {{{self._sp}: $kb}}) WHERE $doc IN e.source_docs "
-                f"RETURN count(e) AS c", kb=scope, doc=doc_id,
-            ).single()["c"]
-            relations = s.run(
-                f"MATCH (a:{self._label} {{{self._sp}: $kb}})"
-                f"-[r:{self._rel} {{{self._sp}: $kb, doc_id: $doc}}]->"
-                f"(b:{self._label} {{{self._sp}: $kb}}) "
-                f"RETURN count(DISTINCT [a.id, r.type, b.id]) AS c",
-                kb=scope, doc=doc_id,
-            ).single()["c"]
+        with self._db.connect() as conn:
+            entities = conn.execute(
+                "SELECT count(*) AS c FROM graph_nodes WHERE scope = ? "
+                "AND ? = ANY(source_docs)", (scope, doc_id)).fetchone()["c"]
+            relations = conn.execute(
+                "SELECT count(DISTINCT (source_key, type, target_key)) AS c "
+                "FROM graph_edges WHERE scope = ? AND doc_id = ?",
+                (scope, doc_id)).fetchone()["c"]
         return {"entities": int(entities), "relations": int(relations)}
-
-    @staticmethod
-    def _node_dict(record_node) -> Dict[str, Any]:
-        """Neo4j Node → 前端友好的 dict(驼峰;normalized 供检索层做种子)。"""
-        p = dict(record_node)
-        return {
-            "id": p.get("id") or "",
-            "name": p.get("name") or p.get("normalized_name") or "",
-            "normalized": p.get("normalized_name") or "",
-            "type": p.get("type") or "",
-            "description": p.get("description") or "",
-            "aliases": list(p.get("aliases") or []),
-            "sourceDocs": list(p.get("source_docs") or []),
-            "typeStatus": p.get("type_status") or "",
-            "updatedAt": p.get("updated_at") or "",
-        }
 
     def get_graph(
         self,
@@ -623,58 +773,40 @@ class Neo4jGraphStore:
     ) -> Dict[str, Any]:
         """图谱浏览首页数据:限量节点(可按名称/类型过滤)+ 其邻接边。"""
         self._check_scope(scope)
-        clauses = [f"e.{self._sp} = $kb"]
-        params: Dict[str, Any] = {"kb": scope}
+        clauses, params = ["scope = ?"], [scope]
         if q:
-            clauses.append("(toLower(e.name) CONTAINS toLower($q) OR toLower(e.description) CONTAINS toLower($q))")
-            params["q"] = q
+            clauses.append("(strpos(lower(name), lower(?)) > 0 "
+                           "OR strpos(lower(description), lower(?)) > 0)")
+            params += [q, q]
         if node_types:
-            clauses.append("e.type IN $types")
-            params["types"] = node_types
+            clauses.append("type = ANY(?)")
+            params.append(list(node_types))
         where = " AND ".join(clauses)
-
-        with self._session() as s:
-            node_rows = s.run(
-                f"MATCH (e:{self._label}) WHERE {where} "
-                f"RETURN e ORDER BY e.updated_at DESC LIMIT $n",
-                n=limit_nodes, **params,
-            ).data()
-            nodes = [self._node_dict(r["e"]) for r in node_rows]
+        with self._db.connect() as conn:
+            node_rows = [dict(r) for r in conn.execute(
+                f"SELECT * FROM graph_nodes WHERE {where} "
+                "ORDER BY updated_at DESC, normalized_name LIMIT ?",
+                params + [limit_nodes]).fetchall()]
+            nodes = [self._node_dict(r) for r in node_rows]
             ids = [n["id"] for n in nodes]
-            # 同一对节点的同类型关系跨块会存多条(块级留痕:MERGE 键含
-            # chunk_id)。浏览视图按 (source,type,target) 聚合为一条:
-            # evidence 收集全部、count 记录被多少块支持——图里块级数据
-            # 原样保留,只是不再平行画 N 条
-            edge_rows = s.run(
-                f"MATCH (a:{self._label})-[r:{self._rel} {{{self._sp}: $kb}}]->(b:{self._label}) "
-                f"WHERE a.id IN $ids AND b.id IN $ids "
-                # collect(properties(r)) 而非 collect(r):关系对象经 .data()
-                # 序列化后不是 dict,下游 .get() 直接 TypeError(get_graph
-                # 线上 500 的根因;expand_node 返回的是 Node 走 _node_dict 无此问题)
-                f"WITH a.id AS source, b.id AS target, r.type AS rtype, "
-                f"collect(properties(r)) AS rs "
-                f"RETURN source, target, rtype, rs, size(rs) AS cnt "
-                f"ORDER BY cnt DESC LIMIT $m",
-                kb=scope, ids=ids, m=limit_edges,
-            ).data()
-
-        edges = []
-        for e in edge_rows:
-            rs = e["rs"]
-            # 展示字段取"证据最全"的那条(有 evidence 的优先),其余证据并入列表
-            best = next((r for r in rs if r.get("evidence")), rs[0])
-            evidences = [r.get("evidence") for r in rs if r.get("evidence")]
-            edges.append({
-                "id": best.get("id") or "",
-                "source": e["source"], "target": e["target"],
-                "type": e["rtype"],
-                "description": best.get("description") or "",
-                "evidence": best.get("evidence") or "",
-                "evidences": evidences[:5],   # 跨块支持的全部证据(截前 5 条)
-                "supportChunks": e["cnt"],    # 被多少个块抽出——关系强度的天然信号
-                "docId": best.get("doc_id") or "",
-            })
-        return {"nodes": nodes, "edges": edges}
+            groups = self._edge_group_rows(conn, (
+                "SELECT sn.id AS sid, tn.id AS tid, e.type AS rtype, "
+                "count(*) AS cnt, "
+                "array_agg(e.id ORDER BY {order}) AS ids, "
+                "array_agg(e.description ORDER BY {order}) AS descs, "
+                "array_agg(e.evidence ORDER BY {order}) AS evids, "
+                "array_agg(e.doc_id ORDER BY {order}) AS docs "
+                "FROM graph_edges e "
+                "JOIN graph_nodes sn ON sn.scope = e.scope "
+                " AND sn.normalized_name = e.source_key "
+                "JOIN graph_nodes tn ON tn.scope = e.scope "
+                " AND tn.normalized_name = e.target_key "
+                "WHERE e.scope = ? AND sn.id = ANY(?) AND tn.id = ANY(?) "
+                "GROUP BY sn.id, tn.id, e.type "
+                "ORDER BY cnt DESC, sid, tid, rtype LIMIT ?"),
+                (scope, ids, ids, limit_edges)) if ids else []
+        return {"nodes": nodes,
+                "edges": [self._edge_from_group(g) for g in groups]}
 
     def expand_node(
         self, scope: str, node_id: str, limit_nodes: int = 40, limit_edges: int = 80,
@@ -682,87 +814,110 @@ class Neo4jGraphStore:
         """点击节点增量展开:1 跳邻域(双向)。边按 (source,type,target)
         聚合(跨块平行边合并,与 get_graph 同语义)。"""
         self._check_scope(scope)
-        with self._session() as s:
-            rows = s.run(
-                f"MATCH (a:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb}}]-(b:{self._label}) "
-                f"WHERE a.id = $nid "
-                f"WITH a AS center, b AS neighbor, "
-                f"     startNode(r).id AS sid, endNode(r).id AS tid, r.type AS rtype, "
-                f"     collect(properties(r)) AS rs "
-                f"RETURN center, neighbor, sid, tid, rtype, rs, size(rs) AS cnt "
-                f"LIMIT $m",
-                kb=scope, nid=node_id, m=limit_edges,
-            ).data()
-        center = self._node_dict(rows[0]["center"]) if rows else None
-        nodes = [center] if center else []
-        seen = {n["id"] for n in nodes}
-        edges = []
-        for r in rows:
-            neighbor = self._node_dict(r["neighbor"])
-            if neighbor["id"] not in seen and len(nodes) < limit_nodes + 1:
-                nodes.append(neighbor)
-                seen.add(neighbor["id"])
-            rs = r["rs"]
-            best = next((x for x in rs if x.get("evidence")), rs[0])
-            edges.append({
-                "id": best.get("id") or "",
-                "source": r["sid"], "target": r["tid"],
-                "type": r["rtype"],
-                "description": best.get("description") or "",
-                "evidence": best.get("evidence") or "",
-                "evidences": [x.get("evidence") for x in rs if x.get("evidence")][:5],
-                "supportChunks": r["cnt"],
-                "docId": best.get("doc_id") or "",
-            })
-        return {"nodes": nodes, "edges": edges}
+        with self._db.connect() as conn:
+            center_row = conn.execute(
+                "SELECT * FROM graph_nodes WHERE scope = ? AND id = ?",
+                (scope, node_id)).fetchone()
+            center = self._node_dict(dict(center_row)) if center_row else None
+            if center is None:
+                return {"nodes": [], "edges": []}
+            groups = self._edge_group_rows(conn, (
+                "SELECT sn.id AS sid, tn.id AS tid, e.type AS rtype, "
+                "sn.normalized_name AS skey, tn.normalized_name AS tkey, "
+                "count(*) AS cnt, "
+                "array_agg(e.id ORDER BY {order}) AS ids, "
+                "array_agg(e.description ORDER BY {order}) AS descs, "
+                "array_agg(e.evidence ORDER BY {order}) AS evids, "
+                "array_agg(e.doc_id ORDER BY {order}) AS docs "
+                "FROM graph_edges e "
+                "JOIN graph_nodes sn ON sn.scope = e.scope "
+                " AND sn.normalized_name = e.source_key "
+                "JOIN graph_nodes tn ON tn.scope = e.scope "
+                " AND tn.normalized_name = e.target_key "
+                "WHERE e.scope = ? AND (sn.id = ? OR tn.id = ?) "
+                "GROUP BY sn.id, tn.id, e.type, sn.normalized_name, "
+                " tn.normalized_name "
+                "ORDER BY cnt DESC, sid, tid, rtype LIMIT ?"),
+                (scope, node_id, node_id, limit_edges))
+            neighbor_keys = []
+            center_norm = center["normalized"]
+            for g in groups:
+                for key in (g["skey"], g["tkey"]):
+                    if key != center_norm and key not in neighbor_keys:
+                        neighbor_keys.append(key)
+            by_name = self._fetch_nodes_by_names(conn, scope, neighbor_keys) \
+                if neighbor_keys else {}
+        nodes = [center]
+        seen = {center["id"]}
+        for key in neighbor_keys:
+            node = by_name.get(key)
+            if node and node["id"] not in seen and len(nodes) < limit_nodes + 1:
+                nodes.append(node)
+                seen.add(node["id"])
+        return {"nodes": nodes,
+                "edges": [self._edge_from_group(g) for g in groups]}
 
     def find_entities(
         self, scope: str, terms: List[str], limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """按名称词找种子实体:精确(normalized)优先,包含匹配兜底。"""
+        """按名称词找种子实体:精确(normalized/别名小写)优先,
+        前缀次之,包含兜底——上层有结果即不降层(与旧口径一致)。"""
         self._check_scope(scope)
         if not terms:
             return []
         normalized = [normalize_name(t) for t in terms if t.strip()]
         if not normalized:
             return []
-        with self._session() as s:
-            rows = s.run(
-                f"""
-                MATCH (e:{self._label} {{{self._sp}: $kb}})
-                WHERE e.normalized_name IN $terms
-                   OR any(a IN coalesce(e.aliases, []) WHERE toLower(a) IN $terms)
-                RETURN e LIMIT $n
-                """,
-                kb=scope, terms=normalized, n=limit,
-            ).data()
+        lowers = [t.lower() for t in normalized]
+        _COLS = ("id, normalized_name, name, type, description, aliases, "
+                 "source_docs, type_status, updated_at")
+        with self._db.connect() as conn:
+            rows = [dict(r) for r in conn.execute(
+                f"SELECT {_COLS} FROM graph_nodes WHERE scope = ? AND ("
+                "normalized_name = ANY(?) OR EXISTS ("
+                "SELECT 1 FROM unnest(aliases) AS t(a) "
+                "WHERE lower(a) = ANY(?))) "
+                "ORDER BY normalized_name LIMIT ?",
+                (scope, normalized, lowers, limit)).fetchall()]
             if not rows:
-                # 前缀匹配先试:能吃 (scope, name) 上的 range 索引
-                # (kg_entity_name),不用全表扫
-                rows = s.run(
-                    f"""
-                    UNWIND $terms AS t
-                    MATCH (e:{self._label} {{{self._sp}: $kb}})
-                    WHERE e.normalized_name STARTS WITH t
-                       OR any(a IN coalesce(e.aliases, []) WHERE toLower(a) STARTS WITH t)
-                    RETURN DISTINCT e LIMIT $n
-                    """,
-                    kb=scope, terms=normalized, n=limit,
-                ).data()
+                prefixes = [t + "%" for t in normalized]
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT {_COLS} FROM graph_nodes WHERE scope = ? AND ("
+                    "normalized_name LIKE ANY(?) OR EXISTS ("
+                    "SELECT 1 FROM unnest(aliases) AS t(a) "
+                    "WHERE lower(a) LIKE ANY(?))) "
+                    "ORDER BY normalized_name LIMIT ?",
+                    (scope, prefixes,
+                     [p.lower() for p in prefixes], limit)).fetchall()]
             if not rows:
-                # 子串兜底:CONTAINS 无法用索引,按 kb 限定扫描(仅当前库,
-                # 库内实体量级可控;大库场景应优先命中前两层)
-                rows = s.run(
-                    f"""
-                    UNWIND $terms AS t
-                    MATCH (e:{self._label} {{{self._sp}: $kb}})
-                    WHERE e.normalized_name CONTAINS t
-                       OR any(a IN coalesce(e.aliases, []) WHERE toLower(a) CONTAINS t)
-                    RETURN DISTINCT e LIMIT $n
-                    """,
-                    kb=scope, terms=normalized, n=limit,
-                ).data()
-        return [self._node_dict(r["e"]) for r in rows]
+                rows = [dict(r) for r in conn.execute(
+                    f"SELECT {_COLS} FROM graph_nodes WHERE scope = ? AND ("
+                    "strpos(normalized_name, ?) > 0 OR EXISTS ("
+                    "SELECT 1 FROM unnest(aliases) AS t(a) "
+                    "WHERE strpos(lower(a), ?) > 0)) "
+                    "ORDER BY normalized_name LIMIT ?",
+                    (scope, normalized[0], normalized[0], limit)).fetchall()] \
+                    if len(normalized) == 1 else self._contains_all_terms(
+                        conn, scope, normalized, limit, _COLS)
+        return [self._node_dict(r) for r in rows]
+
+    @staticmethod
+    def _contains_all_terms(conn, scope: str, terms: List[str],
+                            limit: int, cols: str) -> List[Dict[str, Any]]:
+        """多词包含层:UNWIND 语义——任一词命中即返回(去重)。"""
+        out: Dict[str, Dict[str, Any]] = {}
+        for t in terms:
+            for r in conn.execute(
+                f"SELECT {cols} FROM graph_nodes WHERE scope = ? AND ("
+                "strpos(normalized_name, ?) > 0 OR EXISTS ("
+                "SELECT 1 FROM unnest(aliases) AS t(a) "
+                "WHERE strpos(lower(a), ?) > 0)) "
+                "ORDER BY normalized_name LIMIT ?",
+                (scope, t, t, limit)).fetchall():
+                out.setdefault(r["normalized_name"], dict(r))
+                if len(out) >= limit:
+                    return list(out.values())
+        return list(out.values())
 
     def subgraph_around(
         self,
@@ -774,143 +929,106 @@ class Neo4jGraphStore:
     ) -> Dict[str, Any]:
         """BFS 扩展种子实体的邻域子图(Python 侧逐跳,便于限量)。
 
-        seed_names 传 normalized_name 列表。
+        seed_names 传 normalized_name 列表。边按 (source,type,target)
+        聚合占限额(块级平行边不重复占位);只保留两端都在结果内的边。
         """
         self._check_scope(scope)
         visited: Dict[str, Dict[str, Any]] = {}
         edges: List[Dict[str, Any]] = []
         edge_keys = set()
-        frontier = list(dict.fromkeys(seed_names))[:max_nodes]
-        # 种子节点先落盘(可能有的名字查不到实体,查不到就跳过)
-        if frontier:
-            with self._session() as s:
-                rows = s.run(
-                    f"MATCH (e:{self._label} {{{self._sp}: $kb}}) WHERE e.normalized_name IN $names RETURN e",
-                    kb=scope, names=frontier,
-                ).data()
-            for r in rows:
-                node = self._node_dict(r["e"])
-                visited[node["id"]] = node
-            frontier = [n for n in frontier
-                        if entity_node_id(scope, n) in visited]
-
-        for _hop in range(max(1, hops)):
-            if not frontier or len(visited) >= max_nodes or len(edges) >= max_edges:
-                break
-            with self._session() as s:
-                rows = s.run(
-                    f"""
-                    MATCH (a:{self._label} {{{self._sp}: $kb}})-[r:{self._rel} {{{self._sp}: $kb}}]-(b:{self._label} {{{self._sp}: $kb}})
-                    WHERE a.normalized_name IN $frontier
-                    WITH b AS nb, startNode(r).id AS sid, endNode(r).id AS tid,
-                         r.type AS rtype, collect(properties(r)) AS rs
-                    RETURN nb, sid, tid, rtype, rs
-                    LIMIT $m
-                    """,
-                    kb=scope, frontier=frontier,
-                    m=max_edges - len(edges),
-                ).data()
-            next_frontier = []
-            for r in rows:
-                node = self._node_dict(r["nb"])
-                if node["id"] not in visited:
-                    if len(visited) < max_nodes:
+        frontier = list(dict.fromkeys(
+            n for n in seed_names if n))[:max_nodes]
+        with self._db.connect() as conn:
+            if frontier:
+                seeds = self._fetch_nodes_by_names(conn, scope, frontier)
+                for node in seeds.values():
+                    visited[node["id"]] = node
+                frontier = [n for n in frontier
+                            if entity_node_id(scope, n) in visited]
+            for _hop in range(max(1, hops)):
+                if not frontier or len(visited) >= max_nodes \
+                        or len(edges) >= max_edges:
+                    break
+                groups = self._edge_group_rows(conn, (
+                    "SELECT sn.id AS sid, tn.id AS tid, e.type AS rtype, "
+                    "sn.normalized_name AS skey, tn.normalized_name AS tkey, "
+                    "count(*) AS cnt, "
+                    "array_agg(e.id ORDER BY {order}) AS ids, "
+                    "array_agg(e.description ORDER BY {order}) AS descs, "
+                    "array_agg(e.evidence ORDER BY {order}) AS evids "
+                    "FROM graph_edges e "
+                    "JOIN graph_nodes sn ON sn.scope = e.scope "
+                    " AND sn.normalized_name = e.source_key "
+                    "JOIN graph_nodes tn ON tn.scope = e.scope "
+                    " AND tn.normalized_name = e.target_key "
+                    "WHERE e.scope = ? AND (sn.normalized_name = ANY(?) "
+                    "OR tn.normalized_name = ANY(?)) "
+                    "GROUP BY sn.id, tn.id, e.type, sn.normalized_name, "
+                    " tn.normalized_name "
+                    "ORDER BY cnt DESC, sid, tid, rtype LIMIT ?"),
+                    (scope, frontier, frontier, max_edges - len(edges)))
+                if not groups:
+                    break
+                frontier_set = set(frontier)
+                next_frontier = []
+                neighbor_keys = []
+                for g in groups:
+                    ekey = (g["sid"], g["rtype"], g["tid"])
+                    if ekey not in edge_keys:
+                        edge_keys.add(ekey)
+                        best = next((i for i, ev in enumerate(g["evids"] or [])
+                                     if ev), 0)
+                        ids = list(g["ids"] or [])
+                        descs = list(g["descs"] or [])
+                        evids = list(g["evids"] or [])
+                        edges.append({
+                            "id": ids[best] if ids else f"{g['sid']}->{g['tid']}",
+                            "source": g["sid"], "target": g["tid"],
+                            "type": g["rtype"],
+                            "description": descs[best] if descs else "",
+                            "evidence": evids[best] if evids else "",
+                        })
+                    # 邻居 = 端点中不在 frontier 侧的那一端(两端都在
+                    # frontier 时两端都可成为邻居,与旧无向匹配一致)
+                    for a, other in ((g["skey"], g["tkey"]),
+                                     (g["tkey"], g["skey"])):
+                        if a in frontier_set and other not in neighbor_keys:
+                            neighbor_keys.append(other)
+                by_name = self._fetch_nodes_by_names(conn, scope, neighbor_keys) \
+                    if neighbor_keys else {}
+                for key in neighbor_keys:
+                    node = by_name.get(key)
+                    if node and node["id"] not in visited \
+                            and len(visited) < max_nodes:
                         visited[node["id"]] = node
-                        # BFS 下一跳按 normalized_name 匹配(查询侧匹配的就是
-                        # normalized_name;用原始 name 会让大写/全角实体在
-                        # hop≥2 时静默匹配落空,多跳检索被截断成一跳)
+                        # BFS 下一跳按 normalized_name(大写/全角实体在
+                        # hop≥2 不断链)
                         next_frontier.append(node["normalized"])
-                # 平行边聚合键 = (source,type,target):跨块的块级留痕边
-                # 不聚合的话会占满 max_edges 限额,把真正的多跳关系挤出去
-                ekey = (r["sid"], r["rtype"], r["tid"])
-                if ekey not in edge_keys:
-                    edge_keys.add(ekey)
-                    rs = r["rs"]
-                    best = next((x for x in rs if x.get("evidence")), rs[0] if rs else {})
-                    edges.append({
-                        "id": best.get("id") or f"{r['sid']}->{r['tid']}",
-                        "source": r["sid"], "target": r["tid"],
-                        "type": r["rtype"],
-                        "description": best.get("description") or "",
-                        "evidence": best.get("evidence") or "",
-                        "docId": best.get("doc_id") or "",
-                    })
-            frontier = next_frontier
-
-        # 只保留两端都在 visited 里的边(限量丢弃的节点对应边不成环)
+                frontier = next_frontier
         valid_ids = set(visited.keys())
-        edges = [e for e in edges if e["source"] in valid_ids and e["target"] in valid_ids]
+        edges = [e for e in edges
+                 if e["source"] in valid_ids and e["target"] in valid_ids]
         return {"nodes": list(visited.values()), "edges": edges[:max_edges]}
 
 
-# ── 进程级单例(设置热改时重建) ────────────────────────────────
+# ── 进程级单例(按 schema 多槽;连接共享平台池,无独立驱动) ────
 
-_cached_stores: Dict[tuple, Neo4jGraphStore] = {}   # 指纹 → store(多槽)
-_cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络 IO)
-_build_lock = threading.Lock()     # 串行化连接构建(网络 IO 在锁外做)
+_cached_stores: Dict[str, "PgGraphStore"] = {}
+_cache_lock = threading.Lock()
 
 
-def get_graph_store(settings: Dict[str, Any], **model_kwargs: Any) -> Neo4jGraphStore:
-    """按解析后的配置取/建图存储单例(指纹 = 连接四元组 + 图模型参数)。
-
-    model_kwargs 透传 Neo4jGraphStore 构造参数(prefix/node_label/
-    rel_type/scope_prop)——不同插件的图模型不同,指纹必须含它们,
-    否则同连接下两个前缀的插件会互相拿到对方的缓存对象。
-
-    缓存按指纹多槽(vector_store.get_vector_store 同款):单槽会在换
-    指纹时驱逐旧连接——两个图模型插件并存时后到者 close 掉前者的
-    driver, 前者下一次调用报 Driver closed(互踢 bug)。多槽下连接数
-    = 活跃指纹数, 各自独立存活。
-
-    锁纪律:缓存命中路径只拿 _cache_lock(微秒级);连接构建(含
-    ensure_constraints 的网络往返,Neo4j 慢时秒级)在锁外做——否则一个
-    重建动作会让所有并发 /search 与导入线程在锁上排队。
-    失败纪律:构建失败清本指纹槽,绝不留下"已 close 却仍被缓存"的
-    driver(否则配置回退到旧指纹时会持续返回坏连接);其他指纹的槽
-    不受牵连。
-    """
-    fp = (
-        settings.get("neo4j_uri"), settings.get("neo4j_user"),
-        settings.get("neo4j_password"), settings.get("neo4j_database"),
-        tuple(sorted(model_kwargs.items())),
-    )
-
-    def build() -> Neo4jGraphStore:
-        store = Neo4jGraphStore(
-            uri=fp[0], user=fp[1] or "neo4j", password=fp[2] or "",
-            database=fp[3] or "neo4j", **model_kwargs,
-        )
-        store.ensure_constraints()
-        return store
-
+def get_graph_store(schema: str) -> "PgGraphStore":
+    """按 schema 取/建图存储单例(轻对象:仅缓存表就绪的句柄)。"""
     with _cache_lock:
-        hit = _cached_stores.get(fp)
+        hit = _cached_stores.get(schema)
         if hit is not None:
             return hit
-
-    with _build_lock:
-        with _cache_lock:   # 双检:排队期间可能已被同指纹线程建好
-            hit = _cached_stores.get(fp)
-            if hit is not None:
-                return hit
-        try:
-            store = build()
-        except Exception:
-            with _cache_lock:
-                _cached_stores.pop(fp, None)
-            raise
-        with _cache_lock:
-            _cached_stores[fp] = store
-        return store
+    store = PgGraphStore(schema)
+    with _cache_lock:
+        return _cached_stores.setdefault(schema, store)
 
 
 def reset_graph_store_cache() -> None:
-    """测试辅助:清单例(关闭全部指纹槽的连接)。"""
+    """测试辅助:清单例(共享池不在此关闭)。"""
     with _cache_lock:
-        stores = list(_cached_stores.values())
         _cached_stores.clear()
-    for s in stores:
-        try:
-            s.close()
-        except Exception:
-            pass

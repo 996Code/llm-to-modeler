@@ -2,16 +2,6 @@
 # 基础设施组已删——向量走平台 DATABASE_URL(pgvector),无独立连接配置
 version: 1
 groups:
-  - key: security
-    title: 凭据加密
-    fields:
-      - key: fernet_key
-        type: secret
-        label: Fernet 密钥
-        env: FERNET_KEY
-        required: true
-        placeholder: openssl rand -hex 32 生成
-        help: 数据源密码加密存储;更换后已存密码无法解密(需重新录入)
   - key: query
     title: 查询执行
     fields:

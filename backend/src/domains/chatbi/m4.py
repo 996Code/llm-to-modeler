@@ -180,7 +180,7 @@ async def run_saved_query(sq_id: str, request: Request):
     from domains.chatbi import semantic as _sem
     from domains.chatbi.retrieval import extract_allowed_columns
     _content = _sem.load_current_content(db, q["data_source_id"])
-    ds = datasources.get_datasource(db, q["data_source_id"], decrypt=True)
+    ds = datasources.get_datasource(db, q["data_source_id"])
     if _content is None and (ds is None or ds.db_type != "mcp"):
         raise HTTPException(422, "该数据源无语义层, 无法校验列白名单, 拒绝执行(fail-closed)")
     _allowed = extract_allowed_columns(_content) if _content else set()
@@ -225,7 +225,7 @@ async def export_saved_query_csv(sq_id: str, request: Request):
     _allowed = extract_allowed_columns(_content) if _content else set()
 
     # 重跑 SQL(关系库三层校验;mcp 走语义层白名单重放)
-    ds = datasources.get_datasource(db, q["data_source_id"], decrypt=True)
+    ds = datasources.get_datasource(db, q["data_source_id"])
     if not ds:
         raise HTTPException(404, "数据源不存在")
     if not ds.is_active:
@@ -451,7 +451,7 @@ async def refresh_widget(did: str, wid: str, request: Request):
     if not validation.ok:
         raise HTTPException(400, f"SQL 校验失败: {validation.reason}")
 
-    ds = datasources.get_datasource(db, w["datasource_id"], decrypt=True)
+    ds = datasources.get_datasource(db, w["datasource_id"])
     if not ds or not ds.is_active:
         raise HTTPException(403, "数据源不存在或已禁用")
     result = datasources.execute_readonly(ds, w["query_sql"])

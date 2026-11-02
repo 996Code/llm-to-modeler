@@ -26,7 +26,7 @@ def wiring(monkeypatch):
     """替身装配: 数据源解析 + SDK 调用点(不发真实网络)。"""
     calls = {"mcp": []}
 
-    def fake_get_datasource(db, ds_id, decrypt=False):
+    def fake_get_datasource(db, ds_id):
         return wiring.info
 
     def fake_call_tool(code, tool, args):
@@ -136,7 +136,7 @@ def test_preflight_failures_send_no_mcp(wiring):
 
 def test_datasource_missing(wiring, monkeypatch):
     monkeypatch.setattr("domains.chatbi.datasources.get_datasource",
-                        lambda db, ds_id, decrypt=False: None)
+                        lambda db, ds_id: None)
     r = controlled.execute_controlled(None, "nope", "query_progress", {})
     assert r.ok is False and r.status == "invalid_input"
 

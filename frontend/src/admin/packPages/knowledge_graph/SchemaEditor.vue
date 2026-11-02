@@ -9,7 +9,7 @@
       </a-radio-group>
       <span class="se-label" style="margin-left: 16px">向量</span>
       <a-tag :color="kbVector ? 'cyan' : 'default'">
-        {{ kbVector ? `启用 dim=${kbDim}` : '未启用(导入时探测 LLM_EMBED_MODEL)' }}
+        {{ kbVector ? (kbDim ? `启用 dim=${kbDim}` : '启用(维度待确定)') : '未启用' }}
       </a-tag>
       <div class="se-spacer" />
       <a-button @click="doInduce"><BulbOutlined /> LLM 归纳本体</a-button>

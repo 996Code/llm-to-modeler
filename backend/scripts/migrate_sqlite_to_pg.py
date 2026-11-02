@@ -2,15 +2,13 @@
 """SQLite → PostgreSQL 一次性迁移脚本(幂等,可重复执行)。
 
 【用途】
-引擎存储层换 PG(services/db.py 双后端)后,把老 SQLite 库
-(默认 data/conversations.db)里的存量数据搬进 PG。连上服务器后直接跑
-(**建议停服后迁移**:源库以只读方式打开,对带活跃 WAL 的在线库读到的是
-移动快照;只读挂载/远端副本场景 ro 打开可能直接失败):
+平台存储使用 PostgreSQL，本脚本将显式指定的旧 SQLite 文件中的
+存量数据搬进 PG。建议停服后迁移：源库以只读方式打开，对带活跃
+WAL 的在线库读到的是移动快照；只读挂载或远端副本可能无法打开。
 
-    # 1. 停 app 容器(防在线写)  2. 迁移  3. 起服务
     cd backend
     DATABASE_URL=postgresql://llm:密码@localhost:15432/llm_modeler \
-        python scripts/migrate_sqlite_to_pg.py
+        python scripts/migrate_sqlite_to_pg.py --sqlite /path/to/conversations.db
 
 【幂等性】
 全部走 INSERT ... ON CONFLICT (主键) DO NOTHING——已迁过的行自动跳过,
@@ -146,8 +144,8 @@ def copy_table(sq: sqlite3.Connection, pg, table: str, pk: list[str],
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="SQLite → PG 存量迁移(幂等)")
-    parser.add_argument("--sqlite", default=os.getenv("DATABASE_PATH", "data/conversations.db"),
-                        help="源 SQLite 文件(默认 data/conversations.db)")
+    parser.add_argument("--sqlite", required=True,
+                        help="源 SQLite 文件的显式路径")
     parser.add_argument("--url", default=os.getenv("DATABASE_URL", ""),
                         help="目标 PG 连接串(默认 env DATABASE_URL)")
     parser.add_argument("--dry-run", action="store_true",

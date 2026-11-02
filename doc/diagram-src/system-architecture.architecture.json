@@ -9,7 +9,7 @@
     "views": [
       { "id": "request-path", "label": "主请求路径", "focus": ["users", "frontend", "api", "engine", "sdk", "packs"], "note": "跟随一次对话请求从前端经 Engine 到插件执行。" },
       { "id": "state-and-llm", "label": "状态与模型", "focus": ["engine", "pg", "llm", "embedder"], "note": "隔离 checkpoint 存储、LLM 网关与本地向量三条依赖。" },
-      { "id": "optional-stores", "label": "可选插件存储", "focus": ["packs", "neo4j", "pgvector", "upstream"], "note": "Neo4j / pgvector / 上游服务按插件依赖按需接入。" }
+      { "id": "optional-stores", "label": "可选插件存储", "focus": ["packs", "pg_graph", "pgvector", "upstream"], "note": "图存储(PG 图表)/ pgvector / 上游服务按插件依赖按需接入。" }
     ]
   },
   "components": [
@@ -23,12 +23,12 @@
     { "id": "llm", "type": "cloud", "label": "LLM 网关", "sublabel": "OpenAI 兼容", "pos": [880, 300], "size": [140, 60] },
     { "id": "embedder", "type": "backend", "label": "bge-m3", "sublabel": "本地 onnx", "pos": [880, 480], "size": [140, 60] },
     { "id": "upstream", "type": "external", "label": "上游服务", "sublabel": "services 寻址", "pos": [420, 480], "size": [130, 60] },
-    { "id": "neo4j", "type": "database", "label": "Neo4j", "sublabel": "图谱·可选", "pos": [1090, 560], "size": [110, 56] },
+    { "id": "pg_graph", "type": "database", "label": "PG 图表", "sublabel": "图谱·PG 同库", "pos": [1090, 560], "size": [110, 56] },
     { "id": "pgvector", "type": "database", "label": "pgvector", "sublabel": "向量·PG 同库", "pos": [1090, 660], "size": [110, 56] }
   ],
   "boundaries": [
     { "kind": "region", "label": "Python 后端进程（lifespan 装配）", "wraps": ["api", "engine", "sdk", "packs", "embedder"] },
-    { "kind": "security-group", "label": "可选插件依赖（缺失仅跳过对应 pack）", "wraps": ["neo4j", "pgvector"] }
+    { "kind": "security-group", "label": "可选插件依赖（缺失仅跳过对应 pack）", "wraps": ["pg_graph", "pgvector"] }
   ],
   "connections": [
     { "id": "users-frontend", "from": "users", "to": "frontend", "label": "HTTPS", "variant": "emphasis" },
@@ -40,7 +40,7 @@
     { "id": "sdk-llm", "from": "sdk", "to": "llm", "label": "LLMClient 出口", "variant": "emphasis" },
     { "id": "llm-embedder", "from": "llm", "to": "embedder", "label": "embeddings 本地后端", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
     { "id": "packs-upstream", "from": "packs", "to": "upstream", "label": "AssetClient", "fromSide": "left", "toSide": "right", "labelDy": -37 },
-    { "id": "packs-neo4j", "from": "packs", "to": "neo4j", "label": "Cypher", "variant": "dashed", "fromSide": "right", "toSide": "left", "via": [[840, 515], [840, 588]] },
+    { "id": "packs-pg_graph", "from": "packs", "to": "pg_graph", "label": "图查询", "variant": "dashed", "fromSide": "right", "toSide": "left", "via": [[840, 515], [840, 588]] },
     { "id": "packs-pgvector", "from": "packs", "to": "pgvector", "label": "向量检索", "variant": "dashed", "fromSide": "bottom", "toSide": "left", "via": [[700, 688]] }
   ],
   "cards": [
@@ -58,7 +58,7 @@
       "title": "存储分工",
       "items": [
         "PostgreSQL 必填：会话事件流、checkpoint、call_logs",
-        "Neo4j / pgvector 按插件依赖门控：探针不满足时仅跳过对应插件（向量存 PG pgvector,与平台同库）",
+        "图存储 / pgvector 均在平台 PG（knowledge_graph schema + pgvector 扩展），按插件依赖门控：探针不满足时仅跳过对应插件",
         "上游地址由宿主 services 表按请求下发，fail-closed 不猜地址"
       ]
     },

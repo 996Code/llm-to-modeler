@@ -2,12 +2,11 @@
 
 【职责】
 SDK 图/向量存储(graph_store/vector_store)的调用参数由调用方注入;
-本模块把"插件设置解析链"与"SDK 构造"接在一起,给 runtime/pack 提供
-三个稳定入口。KG 插件的存储命名空间前缀在这里声明并登记:
+本模块把"插件存储装配"接在一起,给 runtime/pack 提供稳定入口。
+KG 插件的存储命名空间前缀在这里声明并登记:
 
-  - Neo4j 约束/索引前缀 "kg_"(存量约束 kg_entity_key/kg_entity_name
-    原样兼容,数据无缝);
-  - 向量表前缀 "kg"(存量 kg_{kb_id}_v1 原样兼容)。
+  - 图存储前缀 "kg"(PG 图表在插件 schema 内,前缀登记保留为命名空间
+    声明;向量表前缀 "kg" 与存量 kg_{kb_id}_v1 原样兼容)。
 
 前缀登记是幂等的(同 owner 重复登记合法),装配/热切换反复经过这里
 不会炸;撞前缀(别的插件声明了 kg)会在装配期 fail-fast。
@@ -17,34 +16,23 @@ from sdk import vector_store as sdk_vector
 from sdk.scope_registry import register_prefix, unregister_prefix
 
 PACK_NAME = "knowledge_graph"
-GRAPH_PREFIX = "kg_"     # Neo4j 约束/索引名前缀(与存量数据一致)
 VECTOR_PREFIX = "kg"     # 向量存储表/collection 名前缀(与存量数据一致)
-# KG 图模型(SDK 已无领域默认值,这里显式声明)
-NODE_LABEL = "Entity"
-REL_TYPE = "RELATES"
-SCOPE_PROP = "kb_id"
 
 
 def _ensure_prefix_registered() -> None:
     register_prefix("kg", owner=PACK_NAME)
 
 
-def get_graph(app_state) -> sdk_graph.Neo4jGraphStore:
-    """Neo4j 图存储单例(连接配置来自设置解析链;指纹含前缀)。"""
+def get_graph(app_state) -> sdk_graph.PgGraphStore:
+    """图存储单例(PostgreSQL;图表在本插件 schema,连接走平台共享池)。"""
     from domains.knowledge_graph import runtime
     _ensure_prefix_registered()
-    settings = runtime.settings_reader(app_state).all()
-    return sdk_graph.get_graph_store(
-        settings,
-        prefix=GRAPH_PREFIX,
-        node_label=NODE_LABEL,
-        rel_type=REL_TYPE,
-        scope_prop=SCOPE_PROP,
-    )
+    runtime.get_kg_store(app_state)   # 确保插件 schema 就绪(图图表同域)
+    return sdk_graph.get_graph_store(PACK_NAME)
 
 
 def get_vector(app_state) -> sdk_vector.VectorStore:
-    """向量存储单例(pg/pgvector;Milvus 后端已下线)。"""
+    """向量存储单例(pg/pgvector)。"""
     from domains.knowledge_graph import runtime
     _ensure_prefix_registered()
     settings = runtime.settings_reader(app_state).all()
@@ -57,19 +45,18 @@ def get_vector(app_state) -> sdk_vector.VectorStore:
 def reset_caches() -> None:
     """释放 SDK 存储连接(pack unload 钩子调用)。
 
-    在途导入任务持有 driver 引用继续跑——粗暴 close 会让任务以
-    "Driver closed" 失败。有在途任务时跳过释放(连接随进程退出回收,
-    或下次 unload 再试);禁用插件的主要收益(路由下线/任务类型拒收)
-    不受影响。
+    在途导入任务持有 store 引用继续跑——粗暴清理会让任务中途失败。
+    有在途任务时跳过释放(连接随进程退出回收,或下次 unload 再试);
+    禁用插件的主要收益(路由下线/任务类型拒收)不受影响。
     """
     from domains.knowledge_graph import tasks as kg_tasks
     # 在途导入数:框架 dedupe 表只读聚合(kg.import:* 前缀的任务数)
     mgr = getattr(kg_tasks._app_state, "task_manager", None)
     busy = mgr.active_dedupe_count("kg.import:") if mgr else 0
     if busy:
-        # 连接与前缀登记都留给在途任务:在途任务仍持有 prefix="kg_" 的
-        # store 在写数据,此刻注销前缀会打开抢注窗口(另一插件登记 kg,
-        # 两边共用命名空间直到冲突在数据互踩后才暴露)。下次 unload 再清。
+        # 连接与前缀登记都留给在途任务:在途任务仍在写数据,此刻注销
+        # 前缀会打开抢注窗口(另一插件登记 kg,两边共用命名空间直到
+        # 冲突在数据互踩后才暴露)。下次 unload 再清。
         import logging
         logging.getLogger(__name__).warning(
             f"unload 跳过连接释放与前缀注销:{busy} 个导入任务在途(随任务结束/进程退出回收)")

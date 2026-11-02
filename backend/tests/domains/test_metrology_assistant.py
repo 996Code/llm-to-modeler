@@ -76,6 +76,7 @@ def explicit_legacy_demo(monkeypatch):
     from domains.metrology_assistant import capability_import as ci
     monkeypatch.setattr(mta, '_current_scenarios', demo_scenarios)
     monkeypatch.setattr(ci, 'resolve_scenarios', lambda table: table)
+    monkeypatch.setattr(ci, 'resolve_datasource_for_tool', lambda server, tool: None)
     from domains.chatbi import datasources
     monkeypatch.setattr(datasources, 'get_datasource', lambda db, ds: SimpleNamespace(
         host='metrology', database='', is_active=True, db_type='mcp'))
@@ -332,7 +333,7 @@ def test_missing_order_asks(tool):
 
 
 def test_progress_ok(tool, monkeypatch):
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -368,7 +369,7 @@ def test_notice_does_not_shadow_artifact_with_reply(status):
 
 
 def test_progress_forbidden_reply(tool, monkeypatch):
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -390,7 +391,7 @@ def test_progress_forbidden_reply(tool, monkeypatch):
 
 
 def test_progress_not_found_reply(tool, monkeypatch):
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -413,7 +414,7 @@ def test_progress_not_found_reply(tool, monkeypatch):
 
 def test_progress_timeout_reports_error_not_empty(tool, monkeypatch):
     """接口故障如实报错,不冒充无数据(故事 5/演示④)。"""
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -429,7 +430,7 @@ def test_progress_timeout_reports_error_not_empty(tool, monkeypatch):
 
 def test_progress_empty_record_not_fake_success(tool, monkeypatch):
     """信封 ok 但 record 空 → 不装成功(实测教训:BJ0000 曾返回空状态卡)。"""
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -442,12 +443,11 @@ def test_progress_empty_record_not_fake_success(tool, monkeypatch):
 
 
 def test_progress_datasource_unconfigured(tool, monkeypatch):
-    monkeypatch.delenv("METROLOGY_PROGRESS_DATASOURCE_ID", raising=False)
     ctx = FakeCtx(FakeLLM(extract={"scenario": "progress", "instrument": "",
                                    "purpose": "", "order_no": "BJ2026"}))
     r = _run(tool, ctx, "查 BJ2026")
     assert r.error_for_llm is not None
-    assert "METROLOGY_PROGRESS_DATASOURCE_ID" in r.error_for_llm
+    assert "数据源未配置" in r.error_for_llm
 
 
 def test_other_scenario_honest_scope(tool):
@@ -472,7 +472,7 @@ def test_format_result_legacy_kg_fields_unchanged(tool):
 
 
 def test_progress_execution_exception_returns_safe_error(tool, monkeypatch, caplog):
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
 
     def fail(*a, **kw):
         raise RuntimeError("password=secret /internal/path")
@@ -517,7 +517,7 @@ def test_invalid_conclusion_propagates_without_artifact(tool, monkeypatch):
 
 @pytest.mark.parametrize("status", ["unavailable", "transport", "credential", "invalid_input", "error"])
 def test_progress_technical_failure_returns_error(tool, monkeypatch, status):
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -532,7 +532,7 @@ def test_progress_technical_failure_returns_error(tool, monkeypatch, status):
 
 
 def test_progress_failure_without_diagnostic_returns_error(tool, monkeypatch):
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(ok=False, status="invalid_input"))
@@ -558,7 +558,7 @@ def test_real_engine_routes_failure_and_notice(tool, monkeypatch, status):
     monkeypatch.setattr(
         "domains.knowledge_graph.runtime.get_kg_store",
         lambda app: SimpleNamespace(list_kbs=lambda: []))
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-1")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-1')
 
     def controlled(*a, **kw):
         if status == "exception":
@@ -621,11 +621,11 @@ def test_unexpected_knowledge_service_exception_is_safe(tool, monkeypatch, caplo
 
 def test_preflight_only_checks_assembly(tool, monkeypatch):
     """自动路由后本域承载 MCP 工具查询:preflight 不再硬卡知识库
-    (Neo4j 故障不应挡住 workload 类问题);kg 故障在执行层如实报错
+    (图存储故障不应挡住 workload 类问题);kg 故障在执行层如实报错
     (上一测试锁死);未装配仍前置拦截。"""
 
     def fail(*a, **kw):
-        raise RuntimeError("neo4j down")
+        raise RuntimeError("graph store down")
 
     monkeypatch.setattr("domains.knowledge_graph.runtime.get_kg_store", fail)
     assert tool.preflight({}, FakeCtx(FakeLLM())) is None
@@ -643,7 +643,7 @@ def test_auto_optional_param_extracted_and_sent(tool, monkeypatch):
         "required": {"slot": "name", "header": "名称",
                      "question": "请提供名称:", "options": []},
         "action": {"kind": "chatbi", "server": "metrology",
-                   "datasource_id": "", "env": "", "tool": "query_rich",
+                   "datasource_id": "", "tool": "query_rich",
                    "params": {"name": "name", "model": "model"},
                    "stage": "调用 query_rich 查询…", "error_noun": "富查询",
                    "notices": {}, "card": "_table_card"},
@@ -700,7 +700,7 @@ _KERATOMETER_ROWS = {"columns": ["name", "model", "measure_range", "accuracy",
 
 
 def test_instrument_info_card(tool, monkeypatch):
-    monkeypatch.setenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", "ds-fee")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-fee')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -719,7 +719,7 @@ def test_instrument_info_card(tool, monkeypatch):
 
 
 def test_instrument_info_multi_row_keeps_all(tool, monkeypatch):
-    monkeypatch.setenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", "ds-fee")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-fee')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -734,7 +734,7 @@ def test_instrument_info_multi_row_keeps_all(tool, monkeypatch):
 
 
 def test_instrument_info_not_found_notice(tool, monkeypatch):
-    monkeypatch.setenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", "ds-fee")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-fee')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -756,16 +756,15 @@ def test_instrument_info_missing_name_asks(tool):
 
 
 def test_instrument_info_unconfigured(tool, monkeypatch):
-    monkeypatch.delenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", raising=False)
     ctx = FakeCtx(FakeLLM(extract={"scenario": "instrument_info",
                                    "instrument": "电子秤", "purpose": "", "order_no": ""}))
     r = _run(tool, ctx, "电子秤检测费")
     assert r.error_for_llm is not None
-    assert "METROLOGY_INSTRUMENT_DATASOURCE_ID" in r.error_for_llm
+    assert "数据源未配置" in r.error_for_llm
 
 
 def test_instrument_info_transport_failure_is_error(tool, monkeypatch):
-    monkeypatch.setenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", "ds-fee")
+    monkeypatch.setattr('domains.metrology_assistant.capability_import.resolve_datasource_for_tool', lambda server, tool: 'ds-fee')
     monkeypatch.setattr(
         "domains.chatbi.controlled.execute_controlled",
         lambda *a, **kw: ControlledResult(
@@ -786,7 +785,7 @@ _FRESH_AUTO = {
     "required": {"slot": "keyword", "header": "关键词",
                  "question": "请提供关键词:", "options": []},
     "action": {"kind": "chatbi", "server": "metrology",
-               "datasource_id": "", "env": "", "tool": "query_fresh",
+               "datasource_id": "", "tool": "query_fresh",
                "params": {"keyword": "keyword", "note": "note"},
                "stage": "调用 query_fresh 查询…",
                "error_noun": "活动", "notices": {},
@@ -840,6 +839,8 @@ def test_auto_scenarios_skips_edited_and_unexecutable(monkeypatch):
     monkeypatch.setattr(bi_ds, "list_datasources",
                         lambda db, active_only=False: [fake_info])
     monkeypatch.setattr(bi_runtime, "get_pack_db", lambda: object())
+    monkeypatch.setattr(ci, 'resolve_datasource_for_tool',
+                        lambda server, tool: 'ds-9' if server == 'metrology' else None)
 
     table = mta._current_scenarios()
     auto = ci.auto_scenarios(table)

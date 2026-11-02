@@ -11,7 +11,7 @@
   GET    /kbs/{id}                     库详情 + 图谱实时计数
   PUT    /kbs/{id}                     改库 {name?, description?, schema?}
   PUT    /kbs/{id}/move                移动节点 {parent_id: string|null}
-  DELETE /kbs/{id}                     删库(联动 Neo4j/向量/文件/元数据;
+  DELETE /kbs/{id}                     删库(联动图存储/向量/文件/元数据;
                                        folder 需空,有子节点 422)
   GET    /kbs/{id}/documents           文档列表
   POST   /kbs/{id}/documents           上传(multipart files,多文件;查重跳过)
@@ -68,8 +68,8 @@ def _graph(request: Request):
     try:
         return runtime.get_graph(request.app.state)
     except Exception as e:
-        logger.exception("neo4j 连接失败")
-        raise HTTPException(503, f"Neo4j 连接失败: {e}")
+        logger.exception("图存储连接失败")
+        raise HTTPException(503, f"图存储连接失败: {e}")
 
 
 # ── D33 建库向导:分段参数(库级,键与插件设置同名;范围与
@@ -630,10 +630,7 @@ async def create_kb(request: Request, payload: Dict[str, Any]):
         )
     except ValueError as e:
         raise HTTPException(422, str(e))
-    # 向量口径建库预填:本地 bge-m3 定死 dim=1024(10-15 裁决),新库
-    # 建好即显示"向量 dim=1024"不再"待导入探测";其它模型(api 嵌入/
-    # 测试替身)维度未知,留空由首次导入探测回填(与 _prepare_vector
-    # 同一套模型口径,不会误触模型一致性降级)
+    # 固定本地 bge-m3 建库预填 1024 维；测试注入的其他模型留待导入探测。
     try:
         from domains.knowledge_graph import tasks as kg_tasks
         if kind == "kb" and kb.get("vectorEnabled"):
@@ -732,7 +729,7 @@ async def delete_kb(kb_id: str, request: Request):
     try:
         _graph(request).delete_scope(kb_id)
     except Exception as e:
-        logger.warning(f"kb delete: neo4j cleanup failed, kb retained: {kb_id} ({e})")
+        logger.warning(f"kb delete: graph cleanup failed, kb retained: {kb_id} ({e})")
         raise HTTPException(503, f"图谱清理失败,知识库已保留,可重试删除: {e}")
     try:
         if kb.get("vectorEnabled"):
@@ -987,7 +984,7 @@ def delete_document_full(request: Request, kb_id: str, doc_id: str) -> Dict[str,
         try:
             _graph(request).delete_document(kb_id, doc_id)
         except Exception as e:
-            errors.append(f"neo4j: {e}")
+            errors.append(f"graph: {e}")
     # 向量清理(向量启用且导入过的库)
     kb = store.get_kb(kb_id)
     try:
@@ -1152,7 +1149,9 @@ async def update_chunk(kb_id: str, doc_id: str, chunk_id: str,
     kb = store.get_kb(kb_id)
     warning = None
     vector_updated = False
-    if kb and kb.get("vectorEnabled"):
+    if kb and kb.get("vectorEnabled") and not runtime.vector_model_matches(request.app.state, kb):
+        warning = "文本已保存,但向量模型不兼容,未重建向量;请清空重建该库"
+    elif kb and kb.get("vectorEnabled"):
         try:
             vector_updated = await asyncio.to_thread(
                 _reembed_chunk, request.app.state, kb, doc_id, chunk_id, text)
@@ -1176,6 +1175,8 @@ def _reembed_chunk(app_state, kb: Dict[str, Any], doc_id: str,
     import time as _time
     from domains.knowledge_graph import tasks as kg_tasks
     from sdk.doc_parser import sub_chunks_for_embedding
+    if not runtime.vector_model_matches(app_state, kb):
+        raise RuntimeError("向量模型不兼容,禁止增量写入;请清空重建该库")
     t0 = _time.monotonic()
     sub_size = max(300, kg_tasks.chunk_params_for(app_state, kb)["vector_subchunk_chars"])
     vector = runtime.get_vector(app_state)

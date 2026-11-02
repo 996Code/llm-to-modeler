@@ -30,7 +30,7 @@ Jinja2>=3.1,<3.2                       # PromptLoader 模板渲染(阶段 2)
 PyYAML>=6.0,<6.1                       # pack config.yaml 解析(阶段 1)
 
 # ── 知识图谱插件(knowledge_graph pack)自有依赖 ──
-neo4j>=5.0                             # 图谱存储 driver(Neo4j 5 服务端)
+# 图存储=PostgreSQL(knowledge_graph schema,走 psycopg),无独立图数据库驱动。
 pypdf>=4.0                             # PDF 文档解析
 python-docx>=1.1                       # DOCX 文档解析
 pypdfium2>=4.30                        # PDF 页面渲染(扫描件 OCR 兜底)
@@ -43,7 +43,7 @@ loguru>=0.7,<0.8                       # 集中式日志:控制台+轮转文件(
 pytest>=9.1,<9.2
 pytest-asyncio>=1.4,<1.5
 
-# ── 本地 embedding(EMBEDDING_BACKEND=local;onnx 推理,无 torch) ──
+# ── 本地 embedding(固定 bge-m3;ONNX 推理,无 torch) ──
 onnxruntime>=1.20,<1.22                # CPU 推理(bge-m3 int8 ~543MB)
 tokenizers>=0.21,<0.22                 # HF tokenizer(纯 Rust 实现,无重依赖)
 

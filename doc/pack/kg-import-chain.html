@@ -5607,7 +5607,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>文档解析与 OCR（doc_parser.py·tasks.py）</h3>
         </div>
         <ul>
-          <li>&bull; 无文字层页渲染成图 → OCR 兜底,引擎下拉可切:rapidocr(本地 PP-OCR)或 llm(全局多模态模型逐页逐字转录,随 LLM_MODEL 配置)</li>
+          <li>&bull; 无文字层页渲染成图 → OCR 兜底,引擎下拉可切:rapidocr(本地 PP-OCR)或 llm(模型供应商配置的多模态模型逐页转录)</li>
           <li>&bull; 任务日志与逐页进度均带引擎标签(如 OCR(llm:qwen3.7-plus))——换引擎可感知</li>
           <li>&bull; 资源治理:模型进程级单例、推理线程封顶、逐页推理锁、渲染长边封顶 2000px</li>
         </ul>

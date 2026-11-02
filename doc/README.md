@@ -17,7 +17,8 @@
 | 文档 | 内容 |
 |---|---|
 | [backend/src/domains/ARCHITECTURE.md](../backend/src/domains/ARCHITECTURE.md) | pack 全部钩子（工具/HTTP API/后台任务/依赖门控/管理页）+ SDK 存储设施 |
-| [technical-reference.md](technical-reference.md) | **README 的深度展开**：架构大图 / LangGraph 流程与 GraphState / Tool 协议 / 插件全能力表 / 环境变量全集 / 目录树 / 设计亮点 |
+| [technical-reference.md](technical-reference.md) | **README 的深度展开**：架构大图 / LangGraph 流程与 GraphState / Tool 协议 / 插件全能力表 / 当前配置入口 / 目录树 / 设计亮点 |
+| [configuration-audit.md](configuration-audit.md) | 配置及代码消费者审计：固定能力、保留边界、待验证问题与 PostgreSQL 承接图存储评估 |
 | [backend/src/domains/README.md](../backend/src/domains/README.md) | 域目录导览 |
 | [backend/src/domains/chatbi/README.md](../backend/src/domains/chatbi/README.md) | ChatBI 插件结构 |
 | [嵌入模式总体设计.md](嵌入模式总体设计.md) | 嵌入模式（IM 聊天窗 + SDK）总体设计 |
@@ -30,7 +31,7 @@
 | 文档 | 链路 |
 |---|---|
 | [flows/engine.md](flows/engine.md) | 对话引擎：SSE 入口→归属校验→意图路由→LangGraph 工具调度→追问中断/恢复（question_id 令牌）→SSE 事件流 |
-| [flows/knowledge-graph.md](flows/knowledge-graph.md) | 导入向：文档→解析分段→bge-m3 向量化(pgvector)→LLM 图谱抽取(Neo4j,断点续跑)；检索向：意图解析→图谱种子三层匹配→文档实体收敛→向量/全文路→D15/D17→answer.j2 提示词→引用校验 |
+| [flows/knowledge-graph.md](flows/knowledge-graph.md) | 导入向：文档→解析分段→bge-m3 向量化(pgvector)→LLM 图谱抽取(图存储=PG,断点续跑)；检索向：意图解析→图谱种子三层匹配→文档实体收敛→向量/全文路→D15/D17→answer.j2 提示词→引用校验 |
 | [flows/chatbi.md](flows/chatbi.md) | 智能问数：两阶段选表→SQL/MCP 工具调用生成(提示词 sections)→三层校验/受控执行(自愈门)→图表→记忆/反馈回流 |
 | [flows/customer-service.md](flows/customer-service.md) | 智能客服：路由表合成(server::tool 身份/声明门禁)→两段式提取→追问令牌→prepare_plan→受控执行→结论(引用校验) |
 
@@ -42,7 +43,7 @@
 | [agents/collaboration-rules.md](agents/collaboration-rules.md) | 协作规约 16 条（用户裁决沉淀） |
 | [agents/testing.md](agents/testing.md) | 测试环境与纪律（.venv/Docker/命令） |
 | [agents/branch-and-release.md](agents/branch-and-release.md) | 分支模型、双远程、worktree 出包纪律 |
-| [agents/deploy-99-22.md](agents/deploy-99-22.md) | 99.22 部署手册：形态/守卫/内存红线/排查 |
+| [agents/deploy-99-22.md](agents/deploy-99-22.md) | 历史部署存档：99.22 已停更，不用于日常操作 |
 | [agents/work-in-progress.md](agents/work-in-progress.md) | 在途工作快照（带日期，接手先核对） |
 | [agents/pitfalls.md](agents/pitfalls.md) | 惯发坑清单（踩过的别再踩） |
 

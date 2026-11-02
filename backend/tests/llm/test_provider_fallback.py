@@ -223,6 +223,156 @@ def test_unconfigured_chain_empty_and_gate(monkeypatch):
         client.chat([{"role": "user", "content": "q"}])
 
 
+def test_default_client_ignores_endpoint_env_and_builds_nothing(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "http://env-default/v1")
+    monkeypatch.setenv("LLM_API_KEY", "env-secret")
+    monkeypatch.setenv("LLM_MODEL", "env-model")
+    monkeypatch.setattr("llm.client.OpenAI",
+                        lambda **kw: pytest.fail("eager SDK construction"))
+    client = LLMClient()
+    assert client.config.base_url == ""
+    assert client.config.api_key == ""
+    assert client.config.model == ""
+    assert client.client is None
+    with pytest.raises(RuntimeError, match="模型供应商"):
+        client.chat([{"role": "user", "content": "q"}])
+
+
+@pytest.mark.parametrize("role", ["primary", "fallback"])
+def test_missing_provider_model_never_uses_explicit_config(monkeypatch, role):
+    from llm.client import LLMConfig
+    active = {"primary": {"base_url": "http://primary/v1", "model": "primary"}}
+    active[role] = {"base_url": f"http://{role}/v1", "model": ""}
+    monkeypatch.setattr(store, "resolve_active", lambda: active)
+    client = LLMClient(LLMConfig(base_url="http://explicit/v1", model="explicit"))
+    def client_for(cfg):
+        if not cfg.model:
+            pytest.fail("invalid provider reached SDK")
+        def create(**kw):
+            raise _status_err(502)
+        return SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(client, "_client_for", client_for)
+    with pytest.raises(RuntimeError, match="model"):
+        client.chat([{"role": "user", "content": "q"}])
+
+
+def test_explicit_client_contract_and_endpoint_reuse():
+    from llm.client import LLMConfig
+    cfg = LLMConfig(base_url="http://explicit/v1", api_key="key", model="explicit")
+    client = LLMClient(cfg)
+    try:
+        assert client.config is cfg
+        assert str(client.client.base_url) == "http://explicit/v1/"
+        assert client._client_for(cfg) is client.client
+    finally:
+        client.close()
+
+
+def test_fallback_uses_its_own_model(monkeypatch):
+    _save_default()
+    seen = []
+    client = LLMClient()
+
+    def client_for(cfg):
+        def create(**kw):
+            seen.append(dict(kw))
+            if cfg.model == "m-primary":
+                raise _status_err(502)
+            return _ok_response()
+        return SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create)))
+
+    monkeypatch.setattr(client, "_client_for", client_for)
+    assert client.chat([{"role": "user", "content": "q"}]) == "hi"
+    assert [kw["model"] for kw in seen] == ["m-primary", "m-fallback"]
+
+
+def test_chat_model_tracks_active_provider_without_sdk(monkeypatch):
+    monkeypatch.setattr("llm.client.OpenAI",
+                        lambda **kw: pytest.fail("model inspection created SDK"))
+    client = LLMClient()
+    assert client.chat_model == ""
+    _save_default()
+    assert client.chat_model == "m-primary"
+    store.save_providers({"primary": {
+        "base_url": "http://changed/v1", "model": "changed-model"}}, "test")
+    assert client.chat_model == "changed-model"
+    store.save_providers({"primary": {
+        "base_url": "http://changed/v1", "model": "changed-model",
+        "enabled": False}}, "test")
+    assert client.chat_model == ""
+
+
+def test_cached_chat_follows_db_updates_and_disable(monkeypatch):
+    monkeypatch.setenv("LLM_CACHE_ENABLED", "1")
+    _save_default()
+    client = LLMClient()
+    seen = []
+
+    def client_for(cfg):
+        def create(**kw):
+            seen.append((cfg.base_url, kw["model"]))
+            return _ok_response(f"{cfg.base_url}:{kw['model']}")
+        return SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create)))
+
+    monkeypatch.setattr(client, "_client_for", client_for)
+    messages = [{"role": "user", "content": "q"}]
+    first = client.chat(messages)
+    assert client.chat(messages) == first
+    assert len(seen) == 1
+    store.save_providers({"primary": {
+        "base_url": "http://primary.test/v1", "model": "changed-model"}}, "test")
+    assert client.chat(messages) != first
+    store.save_providers({"primary": {
+        "base_url": "http://changed.test/v1", "model": "changed-model"}}, "test")
+    assert client.chat(messages) == "http://changed.test/v1:changed-model"
+    store.save_providers({"primary": {
+        "base_url": "http://changed.test/v1", "model": "changed-model",
+        "enabled": False}}, "test")
+    with pytest.raises(RuntimeError, match="模型供应商"):
+        client.chat(messages)
+    assert len(seen) == 3
+
+
+def test_lazy_endpoint_clients_reused_and_closed(monkeypatch):
+    _save_default()
+    client = LLMClient()
+    assert client.client is None
+    chain = client._resolve_endpoints()
+    primary = client._client_for(chain[0][1])
+    fallback = client._client_for(chain[1][1])
+    assert client._client_for(chain[0][1]) is primary
+    assert client._client_for(chain[1][1]) is fallback
+    client.close()
+    assert primary.is_closed()
+    assert fallback.is_closed()
+
+
+def test_fallback_does_not_inherit_primary_thinking(monkeypatch):
+    store.save_providers({
+        "primary": {"base_url": "http://primary/v1", "model": "qwen3-primary"},
+        "fallback": {"base_url": "http://fallback/v1", "model": "deepseek-chat"},
+    }, "test")
+    client = LLMClient()
+    seen = []
+
+    def client_for(cfg):
+        def create(**kw):
+            seen.append(dict(kw))
+            if cfg.model == "qwen3-primary":
+                raise _status_err(502)
+            return _ok_response()
+        return SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create)))
+
+    monkeypatch.setattr(client, "_client_for", client_for)
+    assert client.chat([{"role": "user", "content": "q"}]) == "hi"
+    assert seen[0]["extra_body"] == {"enable_thinking": False}
+    assert "extra_body" not in seen[1]
+
+
 def test_max_tokens_clamped_on_gateway_400(monkeypatch):
     """400 且文案带 max_tokens 合法区间 → 截到上限同端点重试成功。
 
@@ -300,6 +450,101 @@ def test_api_put_direct_and_keep_key(api):
     assert again.status_code == 200
     assert again.json()["revision"] == 3
     assert store.resolve_active()["primary"]["model"] == "new-model"
+
+
+def _provider_http(monkeypatch, primary_fails=False):
+    """Use the real OpenAI SDK; replace only its HTTP transport."""
+    from openai import OpenAI
+    seen = []
+
+    def handle(request):
+        import json
+        seen.append((request.url.host, request.url.path))
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": []})
+        assert json.loads(request.content)["model"] == "m-primary"
+        if primary_fails:
+            return httpx.Response(502, json={"error": {"message": "unavailable"}})
+        return httpx.Response(200, json={
+            "id": "test", "object": "chat.completion", "created": 0,
+            "model": "m-primary", "choices": [{"index": 0,
+                "message": {"role": "assistant", "content": "primary-ok"},
+                "finish_reason": "stop"}]})
+
+    def build(**kw):
+        kw["http_client"].close()
+        kw["http_client"] = httpx.Client(transport=httpx.MockTransport(handle))
+        kw["max_retries"] = 0
+        return OpenAI(**kw)
+
+    monkeypatch.setattr("llm.client.OpenAI", build)
+    return seen
+
+
+def test_put_rejects_enabled_empty_fallback_preserving_working_chat(api, monkeypatch):
+    _save_default()
+    before = store.load_providers()
+    response = api.put("/api/admin/llm-providers", json={
+        "primary": {"base_url": "http://primary.test/v1", "model": "m-primary"},
+        "fallback": {"base_url": "http://fallback.test/v1", "model": "  ",
+                     "enabled": True}})
+    assert response.status_code == 400
+    assert "fallback" in response.json()["detail"]
+    assert store.load_providers() == before
+    seen = _provider_http(monkeypatch)
+    client = LLMClient()
+    try:
+        assert client.chat([{"role": "user", "content": "q"}]) == "primary-ok"
+        assert [host for host, _ in seen] == ["primary.test"]
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("legacy,primary_fails", [(False, False), (True, False), (True, True)])
+def test_saved_empty_fallback_does_not_block_primary(api, monkeypatch, legacy, primary_fails):
+    import asyncio
+    import json
+    payload = {
+        "primary": {"base_url": "http://primary.test/v1", "model": "m-primary"},
+        "fallback": {"base_url": "http://fallback.test/v1", "model": "",
+                     "enabled": False}}
+    response = api.put("/api/admin/llm-providers", json=payload)
+    assert response.status_code == 200
+    saved = store.load_providers()
+    assert saved["fallback"]["model"] == ""
+    if legacy:
+        # Simulate a row accepted by the old PUT validation, not a resolver mock.
+        payload["fallback"]["enabled"] = True
+        with store._conn() as conn:
+            conn.execute("UPDATE llm_providers SET content=?, revision=revision+1 WHERE scope=?",
+                         (json.dumps(payload), store.SCOPE))
+        store.invalidate_cache()
+    seen = _provider_http(monkeypatch, primary_fails)
+    client = LLMClient()
+    try:
+        assert client.chat_model == "m-primary"
+        if primary_fails:
+            with pytest.raises(RuntimeError, match="fallback.*model"):
+                client.chat([{"role": "user", "content": "q"}])
+        else:
+            assert client.chat([{"role": "user", "content": "q"}]) == "primary-ok"
+        assert [host for host, _ in seen] == ["primary.test"]
+        async def probe_http(self, url, **kw):
+            assert url == "http://primary.test/v1/models"
+            return httpx.Response(200)
+        monkeypatch.setattr(httpx.AsyncClient, "get", probe_http)
+        assert asyncio.run(client.probe()) == ("ok", "model=m-primary · /models HTTP 200")
+        if legacy:
+            result = api.post("/api/admin/llm-providers/probe")
+            assert result.status_code == 200
+            primary, fallback = result.json()["results"]
+            assert primary["role"] == "primary"
+            assert primary["ok"] is not primary_fails
+            assert fallback["role"] == "fallback" and fallback["ok"] is False
+            assert "model" in fallback["error"]
+            assert all(host == "primary.test" for host, _ in seen)
+    finally:
+        client.close()
 
 
 def test_api_invalid_save_preserves_config(api):

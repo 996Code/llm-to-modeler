@@ -309,8 +309,7 @@ class AskDataTool(CompositeTool):
             state["_error"] = str(e)
             return
         except Exception as e:
-            # 解密失败(FERNET_KEY 轮换)/存储故障等: 不让异常炸穿管线
-            # (此前只捕 ValueError, RuntimeError 直接冒泡 → 用户只见"查询未完成")
+            # 存储故障不让异常炸穿查询管线。
             logger.warning("数据源解析失败: %s", e)
             state["_need_clarify"] = True
             state["_error"] = f"数据源暂不可用: {e}"

@@ -1,12 +1,10 @@
-"""统一认证：SECRET_KEY → Token 签发 + 全局中间件。
+"""统一认证：ADMIN_TOKEN 访问口令 + Token 签发 + 全局中间件。
 
-【定位】
-- 独立模式：auth.html 门禁页输入密钥 → 获取 token → 进入应用
-- 嵌入模式：宿主调 /api/auth/token 获取 token → embed SDK headers 透传
-- 未配 SECRET_KEY → 全额开放（向后兼容）
+- 独立模式：auth.html 输入访问口令后获取 token。
+- 嵌入模式：宿主调用 /ai-modeler/api/auth/token 获取 token，再由 SDK 透传。
+- 未配 ADMIN_TOKEN 时开放访问。
 
-Token 算法：base64(expire_at.HMAC-SHA256(secret, expire_at))
-24h 有效期，服务端无状态，不存 token。
+Token 使用启动时随机签名密钥，24h 有效，重启后失效；服务端不存 token。
 """
 import base64
 import hashlib

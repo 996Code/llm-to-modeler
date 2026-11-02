@@ -18,24 +18,16 @@
 # 容器管理：docker compose（仓库根 docker-compose.yml）——版本经 TAG 切换，
 # 数据卷/健康检查声明式维护；回滚 = 旧 TAG 再 up。
 #
-# ⚠ 服务器侧拉码加速（国内服务器直连 GitHub 慢且常失败，fetch 3-4 分钟
-# 还会静默吞错导致"发布成功"实为旧码）。服务器 repo 的 origin 应指向
-# gh-proxy 镜像（只读拉取；本机 push 仍直连 GitHub）：
-#   git remote set-url origin \
-#     https://gh-proxy.org/https://github.com/996Code/llm-to-modeler.git
-# 实测：直连 fetch 3-4 分钟/常失败 → 代理 1-3 秒。
 # =============================================================================
 set -euo pipefail
 
 # ── 可配置项（环境变量覆盖）──────────────────────────────────────────────
-IMAGE_NAME="${IMAGE_NAME:-llm-modeler}"
-HOST_PORT="${HOST_PORT:-19090}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
 GIT_BRANCH="${GIT_BRANCH:-main}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
 MIRROR="${MIRROR:-docker.m.daocloud.io/library}"
 NODE_IMAGE="${NODE_IMAGE:-node:20-alpine}"
-PY_IMAGE="${PY_IMAGE:-python:3.12-slim}"
+PY_IMAGE="${PY_IMAGE:-python:3.12-slim-trixie}"
 
 COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
 
@@ -51,6 +43,33 @@ err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2;
 cd "$WORKDIR"
 
 dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
+# Compose owns dotenv parsing; never execute .env or print rendered secrets.
+command -v docker >/dev/null || { err "docker 未安装"; exit 1; }
+command -v python3 >/dev/null || { err "需要 python3 解析 Compose JSON"; exit 1; }
+if ! _compose_values=$(dc config --format json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    config = json.load(sys.stdin)
+    service = config["services"]["app"]
+    ports = service["ports"]
+    port = next(str(p["published"]) for p in ports if p["target"] == 80)
+    image = service["image"]
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise ValueError()
+    if ":" not in image or not image.rsplit(":", 1)[1]:
+        raise ValueError()
+except Exception:
+    sys.exit(1)
+print(port + "\t" + image.rsplit(":", 1)[0])
+'); then
+  err "Compose 配置解析失败，请检查根 .env、HOST_PORT、IMAGE_NAME 和必填配置（未输出配置内容）"
+  exit 1
+fi
+IFS="$(printf '\t')" read -r HOST_PORT IMAGE_NAME <<EOF
+$_compose_values
+EOF
+export HOST_PORT IMAGE_NAME
+
 switch_services() {
   if [ "${SKIP_BUILD:-0}" = "1" ]; then
     dc up -d --no-deps app metrology-mcp
@@ -83,14 +102,12 @@ for arg in "$@"; do
 done
 
 # ── ⓪ 导入队列守卫:有知识库导入任务在跑/排队时拒绝部署 ──────────────
-# 10-19 两次事故:构建容器与导入队列(OCR 渲染+LLM 抽取)并发,宿主机
-# 负载 338 / 彻底失联。队列排空再发;确要强发 FORCE_DEPLOY=1。
-# (重启后中断导入会自动续跑,但别在跑着的时候叠加构建)
+# 等待导入队列排空，避免与构建争用资源；FORCE_DEPLOY=1 显式跳过守卫。
 if [ "${FORCE_DEPLOY:-0}" != "1" ] && command -v curl >/dev/null; then
   _active=$(curl -sf --max-time 5 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/tasks?status=running" 2>/dev/null | grep -c 'kg.import_document' || true)
   _queued=$(curl -sf --max-time 5 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/tasks?status=pending" 2>/dev/null | grep -c 'kg.import_document' || true)
   if [ "${_active:-0}" -gt 0 ] || [ "${_queued:-0}" -gt 0 ]; then
-    err "知识库导入任务进行中(运行 ${_active} / 排队 ${_queued})——与构建并发会压垮宿主机(10-19 两次事故)。等队列排空再部署,或 FORCE_DEPLOY=1 强制"
+    err "知识库导入任务进行中(运行 ${_active} / 排队 ${_queued})。等队列排空再部署,或 FORCE_DEPLOY=1 强制"
     exit 1
   fi
 fi
@@ -100,8 +117,7 @@ docker info >/dev/null 2>&1 || { err "docker daemon 未运行"; exit 1; }
 [ -f .env ] || { err "缺少 .env（后端 LLM/上游配置）"; exit 1; }
 
 # ── SKIP_BUILD 模式:镜像已在本地(由开发机 build 后 docker save|load 推入)──
-# 99.22 内存/磁盘受限场景:重构建(pnpm/pip/docker build)全在开发机做,
-# 本脚本只做 ④ compose 切换 + ⑤ 四层健康验证/回滚。
+# 镜像已预先构建并载入时，只做 ④ compose 切换 + ⑤ 四层健康验证/回滚。
 if [ "${SKIP_BUILD:-0}" = "1" ]; then
   : "${IMAGE_TAG:?SKIP_BUILD=1 需要 IMAGE_TAG(已 load 的镜像 tag)}"
   GIT_TAG="$IMAGE_TAG"
@@ -112,18 +128,14 @@ else
 if [ "$SKIP_PULL" -eq 0 ] && [ -d .git ]; then
   log "① 拉取代码（${GIT_REMOTE}/${GIT_BRANCH}）..."
   git fetch "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null || true
-  # dirty 只看 tracked 改动:untracked(运维手工放的文件/构建产物)不阻断
-  # 发布——真实事故:服务器一个 untracked Dockerfile 让 pull 永远跳过,
-  # 连续多次"发布成功"实际全程构建旧代码
+  # 只用 tracked 改动判断 dirty；untracked 构建产物不阻断发布。
   if ! git diff --quiet -- || ! git diff --cached --quiet; then
     log "   tracked 文件有未提交改动，按当前工作区构建（dirty）"
     GIT_TAG="dirty-$(date '+%m%d%H%M')"
   else
     rm -f frontend/pnpm-workspace.yaml  # pnpm 新版遇 ignored-builds 会自动生成残缺模板,清掉防污染
     git pull --ff-only "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null || true
-    # 自更新保护：本次提交改了 deploy.sh 本体时，当前进程读的仍是旧文件
-    # 偏移——交给磁盘上的新脚本从 --skip-pull 重新跑（真实事故：错位执行
-    # 跳过了 dist 同步步骤导致构建失败）
+    # 脚本本体更新后重新执行，避免 bash 继续按旧字节偏移读取新文件。
     NEW_HASH="$(sha256sum "$SCRIPT_PATH" 2>/dev/null | cut -d' ' -f1)"
     if [ -n "$SELF_HASH" ] && [ "$SELF_HASH" != "$NEW_HASH" ]; then
       log "   deploy.sh 已被本次更新修改，切换到新脚本继续"
@@ -145,6 +157,7 @@ ensure_image() {
 }
 ensure_image "$NODE_IMAGE"
 ensure_image "$PY_IMAGE"
+PY_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "$PY_IMAGE")
 ensure_image nginx:stable-alpine
 
 # ── ②a 前端构建（docker run 容器内 pnpm，npmmirror 源 + 持久 store 卷）──
@@ -177,8 +190,9 @@ log "   dist 就绪（$(du -sh frontend/dist | awk '{print $1}')）"
 log "②b 安装后端依赖（python 容器内 pip -t）..."
 REQ_SHA=$(sha256sum backend/requirements.txt | awk '{print $1}')
 if [ "${FORCE_DEPS:-0}" != "1" ] && [ -d backend/.deps/fastapi ] \
-   && [ "$(cat backend/.deps/.requirements.sha256 2>/dev/null)" = "$REQ_SHA" ]; then
-  log "   .deps 缓存命中（requirements 未变），跳过安装"
+   && [ "$(cat backend/.deps/.requirements.sha256 2>/dev/null)" = "$REQ_SHA" ] \
+   && [ "$(cat backend/.deps/.python-image-id 2>/dev/null)" = "$PY_IMAGE_ID" ]; then
+  log "   .deps 缓存命中（requirements 与基础镜像未变），跳过安装"
 else
 rm -rf backend/.deps && mkdir -p backend/.deps
 docker run --rm -v "$PWD/backend:/app" -v llm_pip_cache:/root/.cache/pip \
@@ -196,6 +210,7 @@ docker run --rm -v "$PWD/backend:/app" -v llm_pip_cache:/root/.cache/pip \
 ls -d backend/.deps/opencv_python_headless-*.dist-info >/dev/null 2>&1 \
   || { err "opencv-headless 覆盖失败(OCR 将不可用)"; exit 1; }
 echo "$REQ_SHA" > backend/.deps/.requirements.sha256
+printf '%s\n' "$PY_IMAGE_ID" > backend/.deps/.python-image-id
 log "   .deps 就绪（$(du -sh backend/.deps | awk '{print $1}')）"
 fi
 
@@ -205,9 +220,9 @@ fi
 # update，已下载的 deb 不重复拉）。全部失败即退出——debs 缺失时 Dockerfile
 # 里 dpkg -i 也会失败，这里更早暴露问题。
 log "②c 预下载 nginx deb..."
-# 缓存命中即跳过(FORCE_DEBS=1 强刷):nginx/curl 的 deb 与基础镜像基本
-# 不联动,每次重下是发布最大耗时(清华源 apt 实测 9~14 分钟)
+# deb 缓存绑定实际基础镜像 ID（含 OS/架构）；FORCE_DEBS=1 强刷。
 if [ "${FORCE_DEBS:-0}" != "1" ] \
+   && [ "$(cat backend/debs/.python-image-id 2>/dev/null)" = "$PY_IMAGE_ID" ] \
    && [ "$(ls backend/debs/*.deb 2>/dev/null | wc -l)" -ge 2 ]; then
   log "   debs 缓存命中（$(ls backend/debs/*.deb | wc -l) 个包），跳过下载"
 else
@@ -216,9 +231,7 @@ debs_ok=0
 for attempt in 1 2 3; do
   docker run --rm -v "$PWD/backend:/app" -w /app \
     "$PY_IMAGE" sh -c "
-      # Debian 换清华源：默认官方源在国内极慢（apt 步骤曾是发布耗时大头）
-      echo 'deb https://mirrors.aliyun.com/debian/ bookworm main' > /etc/apt/sources.list &&
-      echo 'deb https://mirrors.aliyun.com/debian/ bookworm-updates main' >> /etc/apt/sources.list &&
+      # 使用基础镜像自带 apt 源，不混用其他 Debian 发行版。
       apt-get update -qq &&
       apt-get install -y --download-only --no-install-recommends nginx curl >/dev/null &&
       cp /var/cache/apt/archives/*.deb /app/debs/
@@ -227,6 +240,7 @@ for attempt in 1 2 3; do
 done
 [ "$debs_ok" -eq 1 ] && [ "$(ls backend/debs/*.deb 2>/dev/null | wc -l)" -ge 1 ] \
   || { err "nginx deb 下载失败"; exit 1; }
+printf '%s\n' "$PY_IMAGE_ID" > backend/debs/.python-image-id
 log "   debs 就绪（$(ls backend/debs | wc -l) 个包）"
 fi
 
@@ -261,31 +275,26 @@ fi
 
 # ── ③ 打镜像（纯 COPY，零联网 build）───────────────────────────────────
 log "③ 打镜像 ${IMAGE_NAME}:${GIT_TAG}（纯 COPY,仓库根上下文）..."
-# ⚠ dist 必须从 frontend/ 同步过来:Dockerfile 的 COPY backend/dist/ 需要
-# 缺这步时镜像会一直打进 backend/ 下的陈旧 dist（真实事故:线上前端
-# 停在 8-21 的手工拷贝,管理页缺失、新功能两周未上线）
+# Dockerfile 读取 backend/dist，打包前必须从本次前端构建产物同步。
 rm -rf backend/dist && cp -R frontend/dist backend/dist
 # Dockerfile 路径以仓库根为基准（COPY backend/... deploy/single/...）
-docker build -f deploy/single/Dockerfile -t "${IMAGE_NAME}:${GIT_TAG}" -t "${IMAGE_NAME}:latest" .
+docker build -f deploy/single/Dockerfile --build-arg PY_IMAGE="$PY_IMAGE" -t "${IMAGE_NAME}:${GIT_TAG}" -t "${IMAGE_NAME}:latest" .
 fi
 
 # ── ④ compose 切换容器（记录旧 TAG 供回滚）────────────────────────────
-# 只取 app 服务的镜像 tag(栈内多服务,{{.Image}} 多行直接拼接会得到
-# 跨行垃圾 TAG——真实事故:回滚 dc up 报 invalid reference format)
+# 只取 app 服务镜像的 TAG，避免多服务镜像名混入回滚值。
 OLD_TAG=$(dc ps --format '{{.Service}} {{.Image}}' 2>/dev/null \
   | awk '$1=="app"{print $2}' | sed 's/.*://' || true)
 log "④ compose 切换（旧：${OLD_TAG:-无} → 新：${GIT_TAG}）..."
 TAG="$GIT_TAG" HOST_PORT="$HOST_PORT" switch_services
 
-# ── ⑤ 健康验证（四层探测,失败自动回滚旧 TAG）─────────────────────────
-# 分层:基础设施(pg/neo4j,compose healthcheck 收敛) → mock 业务平台
+# ── ⑤ 健康验证（三层探测,失败自动回滚旧 TAG）─────────────────────────
+# 分层:基础设施(pg,compose healthcheck 收敛) → mock 业务平台
 # (metrology-mcp,compose healthcheck 收敛) → 应用(app,两层:容器
 # healthcheck 收敛 + 宿主端口端到端 curl——后者穿过 nginx 反代,是
 # 用户真实路径)。探测用 docker inspect 而非重复实现检查逻辑:compose
 # 文件里的 healthcheck 是唯一事实源,这里只等它收敛。
-# 容器经 dc ps -q <service> 按 compose 服务名解析——各部署点的
-# container_name 可能不同(本地 llm-modeler-* / 99.22 llm-modeler-kg-*),
-# 服务名(postgres/neo4j/metrology-mcp/app)才是稳定标识。
+# 容器经 dc ps -q <service> 按 compose 服务名解析，不依赖 container_name。
 svc_container() {  # $1=compose 服务名 → 容器 ID(空=未起)
   dc ps -q "$1" 2>/dev/null | head -1
 }
@@ -316,29 +325,23 @@ rollback_to_old_tag() {  # 回滚 = 旧 TAG 重新 up(app 与 metrology-mcp 同�
   fi
 }
 
-log "⑤ 健康探测（pg → neo4j → metrology-mcp → app,各最长 ${HEALTH_TIMEOUT}s）..."
+log "⑤ 健康探测（pg → metrology-mcp → app,各最长 ${HEALTH_TIMEOUT}s）..."
 DEPLOY_FAILED=0
 
-# ⑤a PostgreSQL(平台存储+pgvector):pg_isready 健康检查收敛
-log "   [1/4] postgres..."
+# ⑤a PostgreSQL(平台存储+图谱+pgvector):pg_isready 健康检查收敛
+log "   [1/3] postgres..."
 wait_container_healthy postgres || DEPLOY_FAILED=1
 
-# ⑤b Neo4j(KG 图谱):HTTP :7474 健康检查收敛
-if [ "$DEPLOY_FAILED" -eq 0 ]; then
-  log "   [2/4] neo4j..."
-  wait_container_healthy neo4j || DEPLOY_FAILED=1
-fi
-
-# ⑤c mock 计量业务平台(客服 Demo):/mcp 端点可达(200/406 均算活——
+# ⑤b mock 计量业务平台(客服 Demo):/mcp 端点可达(200/406 均算活——
 #    streamable HTTP 对无协议头 GET 返回 406 是协商拒绝,证明服务在)
 if [ "$DEPLOY_FAILED" -eq 0 ]; then
-  log "   [3/4] metrology-mcp..."
+  log "   [2/3] metrology-mcp..."
   wait_container_healthy metrology-mcp || DEPLOY_FAILED=1
 fi
 
-# ⑤d 应用:容器 healthcheck(容器内 curl)+ 宿主端口端到端(穿 nginx)
+# ⑤c 应用:容器 healthcheck(容器内 curl)+ 宿主端口端到端(穿 nginx)
 if [ "$DEPLOY_FAILED" -eq 0 ]; then
-  log "   [4/4] app（容器健康 + 端到端 ${HOST_PORT}）..."
+  log "   [3/3] app（容器健康 + 端到端 ${HOST_PORT}）..."
   if wait_container_healthy app; then
     elapsed=0
     until curl -sf --max-time 3 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/health" | grep -q '"status": *"healthy"'; do
@@ -358,16 +361,44 @@ if [ "$DEPLOY_FAILED" -ne 0 ]; then
   rollback_to_old_tag
   exit 1
 fi
-log "   全栈健康就绪 ✓（postgres / neo4j / metrology-mcp / app）"
+log "   全栈健康就绪 ✓（postgres / metrology-mcp / app）"
 
-# LLM 供应商就绪探测(非阻断):base_url/api_key/model 已迁 DB(llm_providers
-# 表,管理端「插件页→模型供应商」维护,env 端点变量已废弃)。未配置时所有
-# LLM 调用前置闸报错——新库/新部署最常见的事故,这里显式提醒而非静默
-if command -v curl >/dev/null; then
-  _prov=$(curl -sf --max-time 5 "http://127.0.0.1:${HOST_PORT}/api/admin/llm-providers" 2>/dev/null || true)
-  if [ -n "$_prov" ] && ! printf '%s' "$_prov" | grep -q '"configured": *true'; then
-    log "   ⚠ LLM 供应商未配置——LLM 调用将失败。请到管理端「插件页→模型供应商」配置(或迁移旧 .env 的 LLM_* 值入库)"
-  fi
+# Probe the gateway without copying credentials. Admin-gated responses are
+# expected; reuse its storage service inside app and emit only configured.
+probe_provider_config() {
+  local code configured
+  code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' \
+    "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/admin/llm-providers") || return 1
+  case "$code" in
+    200|401|403) ;;
+    *) return 1 ;;
+  esac
+  configured=$(dc exec -T app python -c '
+import json, sys
+try:
+    from services.llm_providers import load_providers
+    configured = load_providers() is not None
+except Exception:
+    sys.exit(1)
+print(json.dumps({"configured": configured}))
+' 2>/dev/null) || return 1
+  printf '%s' "$configured" | python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin)["configured"]
+    if type(value) is not bool:
+        raise ValueError()
+except Exception:
+    sys.exit(1)
+print("true" if value else "false")
+'
+}
+if ! _configured=$(probe_provider_config); then
+  err "供应商配置探测失败（HTTP/容器内配置读取异常）；应用已切换，请检查管理接口与数据库"
+  exit 1
+fi
+if [ "$_configured" = "false" ]; then
+  log "   LLM 供应商未配置，LLM 调用将失败。请到管理端「插件页→模型供应商」配置"
 fi
 
 log "发布完成："

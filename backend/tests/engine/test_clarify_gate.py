@@ -138,11 +138,10 @@ def _restore_nodes():
 
 
 @pytest.fixture
-def graph_bundle(tmp_path, monkeypatch, _restore_nodes):
-    """真实 build_graph(真 SqliteSaver checkpoint)+ 探针工具 + mock LLM。"""
+def graph_bundle(_restore_nodes):
+    """真实 build_graph(真 PostgresSaver checkpoint)+ 探针工具 + mock LLM。"""
     from engine.graph import build_graph
 
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "ckpt-test.db"))
     tool = _ProbeTool()
     registry = ToolRegistry()
     registry.register(tool, pack_name="probe")

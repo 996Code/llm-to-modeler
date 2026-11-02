@@ -14,7 +14,7 @@
 | ChatBI 受控执行 | `backend/src/domains/chatbi/controlled.py` | 先判业务信封再归一(forbidden 不装成功行) |
 | 演示文档 | 本目录两个 `*-demo.md` | 强检目录条款 + 检定规程(合成资料,不外发当真实依据) |
 | 环境准备 | `setup_demo.py` | 幂等:注册 server/建库/传文档/等导入/建数据源 |
-| 演示前检查 | `check_env.py` | 只读体检:三端口/.env/MCP 注册/两库导入/数据源,全 ✓ 才开演 |
+| 演示前检查 | `check_env.py` | 只读体检:三端口/场景绑定/MCP 注册/两库导入/数据源 |
 
 ## 启动顺序
 
@@ -22,17 +22,17 @@
 # 1. 计量假 server
 cd backend && .venv/bin/python ../tools/mcp-e2e/metrology_server.py
 
-# 2. 后端(.env 已配 DATABASE_URL/LLM_*)
+# 2. 后端(.env 已配 DATABASE_URL，模型供应商在管理页配置)
 PYTHONPATH=src .venv/bin/python -m uvicorn main:app --port 18080
 
 # 3. 环境准备(首次)
 .venv/bin/python ../tools/bid-demo/setup_demo.py
 
-# 4. 把输出的数据源 ID 配进 .env 并重启后端
-#    METROLOGY_PROGRESS_DATASOURCE_ID=<id>
+# 4. 在管理端核对场景的 datasource_id 或 server/tool 绑定
+#    初始化脚本写显式绑定，不需要环境变量或重启
 
 # 5. 前端聊天页打开(URL 加 packs 参数,直进客服插件)
-#    http://localhost:13081/?packs=metrology_assistant
+#    http://localhost:13080/ai-modeler/?packs=metrology_assistant
 ```
 
 ## 演示口径(如实)

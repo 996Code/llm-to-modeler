@@ -5,8 +5,8 @@
   PYTHONPATH=src python -m pytest tests/sdk/test_pg_vector_store.py -q
 
 覆盖:建表(含 HNSW 索引/扩展幂等)/维度守卫/写入覆盖/余弦检索语义/
-doc 过滤/缺口判定/删除/计数/表删除/scope 契约/工厂后端切换。
-不依赖 Milvus;Fake 替身测试(tests/domains/)不经本文件。
+doc 过滤/缺口判定/删除/计数/表删除/scope 契约/固定 PG 工厂。
+Fake 替身测试(tests/domains/)不经本文件。
 """
 import os
 
@@ -204,45 +204,35 @@ class TestScopeContract:
 
 
 class TestFactoryBackend:
-    """VECTOR_BACKEND 切换:默认 pg,milvus 保留;缓存键含 backend。"""
+    """向量存储固定 PG,缓存按连接与前缀隔离。"""
 
-    def test_default_backend_is_pg(self, monkeypatch):
-        monkeypatch.delenv("VECTOR_BACKEND", raising=False)
-        assert vs.resolve_vector_backend() == "pg"
-
-    def test_unknown_backend_fails_fast(self, monkeypatch):
-        monkeypatch.setenv("VECTOR_BACKEND", "redis")
-        with pytest.raises(ValueError, match="VECTOR_BACKEND"):
-            vs.resolve_vector_backend()
-
-    def test_factory_builds_pg_and_caches_by_prefix(self, monkeypatch):
-        monkeypatch.delenv("VECTOR_BACKEND", raising=False)
-        vs._cached_stores.clear()
+    def test_factory_builds_pg_and_caches_by_prefix(self):
+        vs.reset_vector_store_cache()
         try:
             s1 = vs.get_vector_store({}, collection_prefix="kg")
             s2 = vs.get_vector_store({}, collection_prefix="bi")
             assert isinstance(s1, PgVectorStore) and s1._prefix == "kg"
             assert isinstance(s2, PgVectorStore) and s2._prefix == "bi"
             assert s1 is not s2
-            assert vs.get_vector_store({}, collection_prefix="kg") is s1  # 命中缓存
+            assert vs.get_vector_store({}, collection_prefix="kg") is s1
         finally:
             vs.reset_vector_store_cache()
 
-    def test_factory_backend_milvus_failfast(self, monkeypatch):
-        """VECTOR_BACKEND=milvus(已下线)→ fail-fast 报错指引改 pg,
-        而非静默落回 pg 让"以为在用 Milvus"的部署继续蒙着跑。"""
-        monkeypatch.setenv("VECTOR_BACKEND", "milvus")
-        vs._cached_stores.clear()
+    @pytest.mark.parametrize("legacy_value", ["milvus", "redis", " pg "])
+    def test_factory_ignores_removed_backend_selector(self, monkeypatch, legacy_value):
+        monkeypatch.setenv("VECTOR_BACKEND", legacy_value)
+        vs.reset_vector_store_cache()
         try:
-            with pytest.raises(ValueError, match="pgvector 单后端"):
-                vs.get_vector_store({}, collection_prefix="kg")
+            store = vs.get_vector_store({}, collection_prefix="kg")
+            assert isinstance(store, PgVectorStore)
+            monkeypatch.setenv("VECTOR_BACKEND", "another-removed-backend")
+            assert vs.get_vector_store({}, collection_prefix="kg") is store
         finally:
             vs.reset_vector_store_cache()
-            monkeypatch.delenv("VECTOR_BACKEND", raising=False)
 
 
 class TestPgConnectionSelfHeal:
-    """连接自愈(功能对齐审查:Milvus 有 _with_reconnect,PG 补齐同款)。"""
+    """PG 连接故障自愈。"""
 
     def test_reconnects_on_operational_error(self, monkeypatch):
         from sdk.pg_vector_store import PgVectorStore

@@ -178,6 +178,10 @@ def prepare_plan(cfg, slots, user_input=''):
                        'header': spec.get('header', slot)[:12], 'options': spec.get('options') or []}
     action = cfg['action']
     plan = {'slots': clean, 'will_ask': ask, 'kind': action['kind']}
+    if 'env' in action or 'datasource_env' in action:
+        plan['error'] = '不支持 env/datasource_env，请使用 server/tool 或 datasource_id/tool'
+        plan['will_ask'] = None
+        return plan
     if ask:
         return plan
     if action['kind'] == 'kg':
@@ -208,7 +212,7 @@ def prepare_plan(cfg, slots, user_input=''):
         if mapping is None:
             mapping = {s['name']: s['slot'] for s in parameter_specs(cfg)}
         plan.update(tool=action['tool'], datasource_id=action.get('datasource_id') or '',
-                    datasource_env=action.get('env') or '', server=action.get('server') or '',
+                    server=action.get('server') or '',
                     params={name: clean[slot] for name, slot in mapping.items() if slot in clean})
         if 'input_schema' in action:
             from domains.chatbi.controlled import validate_against_schema
@@ -219,8 +223,9 @@ def prepare_plan(cfg, slots, user_input=''):
 
 
 def resolve_datasource(plan):
-    import os
-    ds = str(plan.get('datasource_id') or os.getenv(plan.get('datasource_env') or '', '')).strip()
+    if 'env' in plan or 'datasource_env' in plan:
+        raise ValueError('不支持 env/datasource_env，请使用 server/tool 或 datasource_id/tool')
+    ds = str(plan.get('datasource_id') or '').strip()
     if not ds and plan.get('server'):
         from domains.metrology_assistant.capability_import import resolve_datasource_for_tool
         ds = resolve_datasource_for_tool(plan['server'], plan['tool']) or ''

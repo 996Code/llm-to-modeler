@@ -57,9 +57,13 @@
       </aside>
       <section class="et-conversation" aria-label="知识库嵌入测试">
         <div class="et-preview">
-          <iframe v-if="frameKey" :key="frameKey" title="知识库测试对话" class="et-frame" :src="frameSrc" />
+          <iframe v-if="frameKey && frameOpen" :key="frameKey" title="知识库测试对话" class="et-frame" :src="frameSrc" />
           <div v-else class="et-preview-status" :role="error ? 'alert' : 'status'">
             <template v-if="error"><CloseCircleFilled /><span>嵌入预览未加载</span></template>
+            <template v-else-if="!frameOpen">
+              <span>对话窗口已收起</span>
+              <button type="button" class="et-reopen" @click="reopenFrame">重新打开</button>
+            </template>
             <template v-else><LoadingOutlined spin /><span>正在加载嵌入预览</span></template>
           </div>
         </div>
@@ -69,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import axios from 'axios'
 import { Empty } from 'ant-design-vue'
 import {
@@ -96,6 +100,7 @@ const userId = ref<string | undefined>(undefined)
 const pickedRoles = ref<string[]>([])
 const dirty = ref(false)
 const frameKey = ref('')
+const frameOpen = ref(true)
 const loading = ref(false)
 const error = ref('')
 const activeTab = ref('identity')
@@ -163,6 +168,19 @@ async function load() {
     loading.value = false
   }
 }
+// 宿主侧 CLOSE 处理:iframe 内点 ✕ 发 postMessage(hostless 无 SDK 宿主,
+// 测试页自己充当宿主)——收起预览并提供重新打开入口
+function reopenFrame() {
+  frameOpen.value = true
+}
+function onChildMessage(e: MessageEvent) {
+  const d = e.data as { src?: string; type?: string } | null
+  if (d && d.src === 'child' && d.type === 'CLOSE') frameOpen.value = false
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', onChildMessage)
+  onBeforeUnmount(() => window.removeEventListener('message', onChildMessage))
+}
 onMounted(load)
 </script>
 
@@ -202,6 +220,8 @@ onMounted(load)
 .et-preview { flex: 1; min-height: 0; display: flex; justify-content: flex-end; padding: 20px 24px; overflow: hidden; }
 .et-frame { display: block; flex: 0 1 420px; width: 420px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
 .et-preview-status { display: flex; flex: 0 1 420px; min-width: 0; align-items: center; justify-content: center; gap: 8px; color: #7d8592; }
+.et-reopen { border: 1px solid #dfe3e9; border-radius: 6px; background: #fff; color: #3370ff; padding: 4px 12px; cursor: pointer; }
+.et-reopen:hover { border-color: #3370ff; }
 @media (max-width: 980px) {
   .et { padding: 16px; }
   .et-workspace { grid-template-columns: 244px minmax(0, 1fr); }

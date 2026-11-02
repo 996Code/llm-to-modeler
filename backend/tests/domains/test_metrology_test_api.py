@@ -28,8 +28,11 @@ def _unavailable(*args, **kwargs):
 
 @pytest.fixture
 def env(monkeypatch):
+    from domains.metrology_assistant import runtime
+    runtime.reset_runtime_cache()
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
-    monkeypatch.delenv(api.cfg.PROGRESS_DATASOURCE_ENV, raising=False)
+    table = {}
+    monkeypatch.setattr(api.cfg, '_current_scenarios', lambda: table)
     kg = KGStore()
     db = PackRelationalDB("chatbi")
     datasources.init_store(db)
@@ -40,7 +43,7 @@ def env(monkeypatch):
     app.include_router(api.router, prefix="/api/packs/metrology_assistant")
     app.state.mcp_server_store = mcp
     with TestClient(app) as client:
-        yield SimpleNamespace(client=client, app=app, kg=kg, db=db, mcp=mcp)
+        yield SimpleNamespace(client=client, app=app, kg=kg, db=db, mcp=mcp, table=table)
 
 
 def _seed_kbs(env):
@@ -63,9 +66,10 @@ def _seed_progress(env, monkeypatch):
         "query_progress", "private-user", "")
     with env.db.connect() as conn:
         conn.execute(
-            "UPDATE chatbi_data_sources SET encrypted_password = ? WHERE id = ?",
+            "UPDATE chatbi_data_sources SET password = ? WHERE id = ?",
             (SECRET, ds.id))
-    monkeypatch.setenv(api.cfg.PROGRESS_DATASOURCE_ENV, f"  {ds.id}  ")
+    env.table['progress'] = {'action': {'kind': 'chatbi', 'server': 'metrology',
+                                        'tool': 'query_progress', 'datasource_id': ds.id}}
     monkeypatch.setattr(env.mcp, "apply_probe", lambda sid: None)
     env.mcp.create_server(
         "metrology", "metrology", f"https://user:{SECRET}@internal/mcp",
@@ -103,7 +107,7 @@ def test_env_real_store_fields_and_allowlisted_response(env, monkeypatch):
         for name in (api.cfg.MANDATORY_CHECK_KB, api.cfg.REGULATION_KB)
     ]
     assert body["progress"] == {
-        "env_configured": True,
+        "binding_configured": True,
         "datasource": {"name": "progress", "active": True, "dbType": "mcp",
                        "host": "metrology", "tool": "query_progress"},
         "datasourceStatus": "ok",
@@ -123,14 +127,15 @@ def test_env_missing_resources_are_not_dependency_errors(env):
     assert all(kb["status"] == "missing" and kb["exists"] is False
                and kb["docs"] == kb["imported"] == 0 for kb in body["kbs"])
     assert body["progress"] == {
-        "env_configured": False, "datasource": None,
+        "binding_configured": False, "datasource": None,
         "datasourceStatus": "not_configured", "mcp": None, "mcpStatus": "missing"}
 
 
-def test_env_configured_datasource_missing(env, monkeypatch):
-    monkeypatch.setenv(api.cfg.PROGRESS_DATASOURCE_ENV, "unknown-id")
+def test_binding_configured_datasource_missing(env, monkeypatch):
+    env.table['progress'] = {'action': {'kind': 'chatbi', 'datasource_id': 'unknown-id',
+                                        'server': 'metrology', 'tool': 'query_progress'}}
     body = _body(env)
-    assert body["progress"]["env_configured"] is True
+    assert body["progress"]["binding_configured"] is True
     assert body["progress"]["datasource"] is None
     assert body["progress"]["datasourceStatus"] == "missing"
     assert body["errors"] == []
@@ -259,7 +264,9 @@ def test_order_fixtures_survive_askoption_rehydration(env, monkeypatch):
     from domains.metrology_assistant.legacy_demo import SCENARIOS
     from domains.metrology_assistant import store, runtime
     content = _jsonable({'scenarios': SCENARIOS})
+    from domains.metrology_assistant.scenario_config import load_scenarios
     store.seed_config_if_absent(runtime.get_pack_db(), content)
+    monkeypatch.setattr(api.cfg, '_runtime_scenarios', load_scenarios)
     response = env.client.get('/api/packs/metrology_assistant/test/env')
     assert response.status_code == 200
     orders = [f['order'] for f in response.json()['orderFixtures']]

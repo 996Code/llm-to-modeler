@@ -115,7 +115,7 @@
         <div v-if="healthDetail" class="dep-line">
           <a-tag v-for="(c, k) in healthDetail.components" :key="k"
                  :color="c.status === 'ok' ? 'green' : (c.status === 'unconfigured' ? 'default' : 'red')">
-            {{ { pg: '向量库(PG)', llm: 'LLM 网关', fernet: '加密' }[k] || k }}: {{ c.status }}
+            {{ { pg: '向量库(PG)', llm: 'LLM 网关' }[k] || k }}: {{ c.status }}
           </a-tag>
           <a-tooltip :title="Object.values(healthDetail.components).map((c: any) => c.detail).join('\n')">
             <span class="muted" style="font-size:12px;cursor:help">详情</span>

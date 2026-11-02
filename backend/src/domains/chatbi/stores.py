@@ -3,9 +3,8 @@
 【移植来源】自 chat-bi backend/app/services/ 移植的检索栈存储底座:
   - VectorRecord/SearchResult ← chat-bi vector_store.py 的数据结构(1:1 保留,
     调用方 indexing/retrieval/fewshot 维持源码形态);
-  - Embedder 缓存/批处理逻辑 ← chat-bi embedder.py LocalEmbedder
-    (文本→向量 LRU 缓存 + 空列表直返;加载逻辑被引擎 llm.embeddings 取代,
-    EMBEDDING_BACKEND 由引擎 env 决定,pack 不再关心 local/api);
+  - Embedder 提供文本→向量 LRU 缓存、批处理和空列表直返；
+    模型编码统一调用引擎 llm.embeddings，固定使用本地 bge-m3。
   - ChatBI 源系统的向量封装不移植——SDK 已有等价设施
     (sdk.vector_store / pg_vector_store),本模块只做"记录模型 ↔ chunk 模型"适配。
 

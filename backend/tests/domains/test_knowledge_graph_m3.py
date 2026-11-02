@@ -2,7 +2,7 @@
 
 覆盖:成功全流程 / 幂等跳过 / force 重导清理 / chunk 级断点续跑 /
 连续失败熔断 / 并发导入守卫 / 向量模式启用与降级 / 本体归纳任务。
-真实 Neo4j/Milvus/LLM 的端到端由脚本化验收完成(不走 pytest)。
+真实图存储(PG)/pgvector/LLM 的端到端由脚本化验收完成(不走 pytest)。
 """
 import time
 from types import SimpleNamespace
@@ -43,7 +43,7 @@ class MockLLM:
 
     def chat_json(self, messages, temperature=None, conv_id=None, stage=None, model=None):
         self.models_seen = getattr(self, "models_seen", [])
-        if stage == "kg.extract" and model:
+        if model:
             self.models_seen.append(model)
         content = messages[0]["content"]
         if stage == "kg.extract":
@@ -211,7 +211,7 @@ class FakeGraph:
         return {}
 
     def counts(self, kb_id):
-        # 关系按 (source,type,target) 去重(平行边=块级留痕,与 Neo4j 实现同语义)
+        # 关系按 (source,type,target) 去重(平行边=块级留痕,与图存储实现同语义)
         uniq = {(e["source"], e.get("type"), e["target"])
                 for e in self.edges if e["kb"] == kb_id}
         return {"entities": sum(1 for k in self.nodes if k[0] == kb_id),
@@ -263,10 +263,8 @@ class FakeVector:
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
-    """临时环境:独立 SQLite + 文件目录 + 小参数配置 + 纯图谱模式。"""
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "kg.db"))
+    """临时环境:专用 PG 测试库 + 文件目录 + 小参数 + 内存图/向量。"""
     monkeypatch.setenv("KG_FILES_DIR", str(tmp_path / "files"))
-    monkeypatch.delenv("LLM_EMBED_MODEL", raising=False)
     runtime.reset_runtime_cache()
     import services.task_manager as tm_mod
     _ = tm_mod  # noqa
@@ -761,27 +759,70 @@ class TestImportPipeline:
         assert t2["result"].get("skipped") is True
         assert env.llm.extract_calls == calls_before  # 没有重复烧 LLM
 
-    def test_extraction_model_override(self, env):
-        """extraction_model 设置 → kg.extract 调用带模型覆盖;不设 = 不传。"""
-        kb, doc = _make_doc(env, "模型覆盖", ["[E:甲] [E:乙]", "[E:丙] [E:丁]"])
-        env.settings.save_values("knowledge_graph", {"extraction_model": "qwen-plus"})
+    def test_removed_extraction_model_is_ignored(self, env, monkeypatch):
+        """旧 DB/env 覆盖无效,抽取只跟随供应商模型。"""
+        kb, doc = _make_doc(env, "模型统一", ["[E:甲] [E:乙]", "[E:丙] [E:丁]"])
+        env.settings.save_values("knowledge_graph", {"extraction_model": "removed-model"})
+        monkeypatch.setenv("KG_EXTRACTION_MODEL", "removed-env-model")
+        env.llm.chat_model = "provider-model"
         t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t["status"] == "succeeded", t["error"]
-        # 每次抽取调用都带了覆盖模型
-        assert env.llm.models_seen == ["qwen-plus"] * env.llm.extract_calls
-        # 任务日志的抽取配置行留痕了覆盖模型
-        logs = env.manager.store.list_logs(t["id"])
-        cfg_log = next(l for l in logs if "抽取配置" in l["message"])
-        assert "qwen-plus(覆盖)" in cfg_log["message"]
-        assert cfg_log["data"].get("model_override") == "qwen-plus"
-
-        # 清掉设置再导:不再传覆盖
-        env.llm.models_seen = []
-        env.settings.save_values("knowledge_graph", {"extraction_model": ""})
-        kb2, doc2 = _make_doc(env, "默认模型", ["[E:戊] [E:己]"])
-        t2 = _wait(env.manager, tasks.submit_import(env.app_state, kb2["id"], doc2["id"])["id"])
-        assert t2["status"] == "succeeded", t2["error"]
         assert env.llm.models_seen == []
+        cfg_log = next(l for l in env.manager.store.list_logs(t["id"])
+                       if "抽取配置" in l["message"])
+        assert cfg_log["data"]["llm_model"] == "provider-model"
+        assert "model_override" not in cfg_log["data"]
+
+    @pytest.mark.parametrize("provider_model", ["active-primary", "hot-reloaded-primary", None])
+    def test_extraction_model_log_uses_public_chat_model(self, env, provider_model):
+        """任务留痕消费公共模型属性,不读取出厂配置或平台数据库服务。"""
+        env.llm.config = SimpleNamespace(model="stale-config-default")
+        env.llm.chat_model = provider_model or ""
+        kb, doc = _make_doc(env, "供应商模型", ["[E:甲]"])
+        task = _wait(env.manager, tasks.submit_import(
+            env.app_state, kb["id"], doc["id"])["id"])
+        assert task["status"] == "succeeded", task.get("error")
+        log = next(log for log in env.manager.store.list_logs(task["id"])
+                   if "抽取配置" in log["message"])
+        assert log["data"]["llm_model"] == (provider_model or "")
+        assert "stale-config-default" not in log["message"]
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    @pytest.mark.parametrize("stored_dim", [3, 1024])
+    def test_model_mismatch_stays_protected_across_imports(self, env, enabled, stored_dim):
+        """同维不同模型也不可比;反复导入不能给旧向量重贴当前模型标签。"""
+        env.llm.embed_model = "bge-m3"
+        env.llm.chat = lambda *args, **kwargs: "文档摘要"
+        kb, doc = _make_doc(env, "旧模型库", ["[E:甲]"])
+        env.store.set_kb_vector_info(kb["id"], "legacy-embedding", stored_dim, enabled)
+        for _ in range(2):
+            task = _wait(env.manager, tasks.submit_import(
+                env.app_state, kb["id"], doc["id"], force=True)["id"])
+            assert task["status"] == "succeeded", task.get("error")
+            fresh = env.store.get_kb(kb["id"])
+            assert fresh["vectorEnabled"] is False
+            assert fresh["embeddingModel"] == "legacy-embedding"
+            assert fresh["vectorDim"] == stored_dim
+            assert env.llm.embed_calls == 0
+            assert kb["id"] not in env.vector.collections
+            logs = env.manager.store.list_logs(task["id"])
+            warning = next(log for log in logs if "向量不兼容" in log["message"])
+            assert "清空重建" in warning["message"]
+        assert "切回原模型" not in warning["message"]
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_legacy_kb_without_model_is_probed(self, env, enabled):
+        env.llm.embed_model = "bge-m3"
+        kb, doc = _make_doc(env, "无历史模型", ["[E:甲]"])
+        env.store.set_kb_vector_info(kb["id"], "", 3, enabled)
+        task = _wait(env.manager, tasks.submit_import(
+            env.app_state, kb["id"], doc["id"])["id"])
+        assert task["status"] == "succeeded", task.get("error")
+        fresh = env.store.get_kb(kb["id"])
+        assert fresh["vectorEnabled"] is True
+        assert fresh["embeddingModel"] == "bge-m3"
+        assert fresh["vectorDim"] == 3
+        assert env.llm.embed_calls >= 2  # 维度探测 + 内容向量化
 
     def test_force_reimport_cleans_and_redoes(self, env):
         kb, doc = _make_doc(env, "重导", ["[E:甲] [E:乙]", "[E:丙]"])
@@ -955,8 +996,7 @@ class TestImportPipeline:
         t = tasks.submit_import(env.app_state, kb1["id"], doc1["id"])
         assert _wait(env.manager, t["id"])["status"] == "succeeded"
 
-    def test_vector_mode_enabled_and_upserted(self, env, monkeypatch):
-        monkeypatch.setenv("LLM_EMBED_MODEL", "mock-embed")
+    def test_vector_mode_enabled_and_upserted(self, env):
         kb, doc = _make_doc(env, "向量", ["[E:甲] [E:乙]", "[E:丙]"])
         t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t["status"] == "succeeded"
@@ -966,13 +1006,12 @@ class TestImportPipeline:
         assert env.vector.collections.get(kb["id"]) == 3
         assert env.vector.count(kb["id"]) == len(env.store.list_chunks(doc["id"]))
 
-    def test_vector_backfill_on_rerun(self, env, monkeypatch):
+    def test_vector_backfill_on_rerun(self, env):
         """向量缺口补偿:done 块缺向量时,重跑不得被幂等跳过挡住,须补写。
 
         场景:向量当批写入失败只告警(done 块重跑会被跳过)→ 缺口原本
         永久留存;修复后重跑已成功文档应走补偿路径(不重抽,只补向量)。
         """
-        monkeypatch.setenv("LLM_EMBED_MODEL", "mock-embed")
         kb, doc = _make_doc(env, "向量补偿", ["[E:甲] [E:乙]", "[E:丙]"])
         _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         chunk_ids = [c["id"] for c in env.store.list_chunks(doc["id"])]
@@ -995,12 +1034,11 @@ class TestImportPipeline:
         t3 = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t3["result"].get("skipped") is True
 
-    def test_startup_backfill_before_new_chunks(self, env, monkeypatch):
+    def test_startup_backfill_before_new_chunks(self, env):
         """启动期对账:续跑任务先补历史向量缺口,再跑新块(用户诉求:
         重启时先检查已处理的是否正确、不正确补全,而不是最后才弄)。
         场景:首次跑到中途被杀(块0 done 但向量缺失,块1 pending)→
         重跑时块0 的向量在批循环之前就被补上。"""
-        monkeypatch.setenv("LLM_EMBED_MODEL", "mock-embed")
         kb, doc = _make_doc(env, "启动对账", ["[E:甲] [E:乙]", "[E:丙] [E:丁]"])
         # 手工制造"中途被杀"状态:块0 done 且图谱有贡献,但向量全缺;块1 pending
         store = env.store
@@ -1024,10 +1062,9 @@ class TestImportPipeline:
         logs = env.manager._store.list_logs(t["id"]) if hasattr(env.manager, "_store") else []
         assert any("启动期对账" in (l.get("message") or "") for l in logs)
 
-    def test_vector_subchunked_for_long_chapter(self, env, monkeypatch):
+    def test_vector_subchunked_for_long_chapter(self, env):
         """长章块按段子切后入库:抽取按章(一块),向量按段(多子段)——
         本地 bge-m3 实际 4096 token 截断,长块尾部对向量是隐形的。"""
-        monkeypatch.setenv("LLM_EMBED_MODEL", "mock-embed")
         kb, doc = _make_doc(env, "长章向量", ["# 巨章\n" + "张小凡修行大梵般若。" * 400])
         _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         # 抽取一块(整章),向量多子段(cid#0/cid#1/…)
@@ -1060,12 +1097,9 @@ class TestImportPipeline:
         assert len(env.graph.delete_calls) == deletes_before    # 未清理图谱
         assert all(c["status"] == "done" for c in env.store.list_chunks(doc["id"]))
 
-    def test_vector_probes_and_enables_by_default(self, env, monkeypatch):
-        """默认启用语义:api 后端无 LLM_EMBED_MODEL 也不再"静默纯图谱"——
-        探测走 llm_client 能力(MockLLM 可用即开启);真正不可用
+    def test_vector_probes_and_enables_by_default(self, env):
+        """探测走 llm_client 公共能力;真正不可用
         (embeddings 抛错)则任务失败进重试,不假可用。"""
-        monkeypatch.setenv("EMBEDDING_BACKEND", "api")
-        monkeypatch.delenv("LLM_EMBED_MODEL", raising=False)
         kb, doc = _make_doc(env, "默认探测", ["[E:甲]"])
         t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t["status"] == "succeeded", t.get("error")
@@ -1084,11 +1118,14 @@ class TestImportPipeline:
 
 class TestInduceSchema:
 
-    def test_induce_stores_pending_proposal(self, env):
+    def test_induce_stores_pending_proposal(self, env, monkeypatch):
+        env.settings.save_values("knowledge_graph", {"extraction_model": "removed-model"})
+        monkeypatch.setenv("KG_EXTRACTION_MODEL", "removed-env-model")
         kb, doc = _make_doc(env, "归纳", ["[E:甲] [E:乙]", "[E:丙]"])
         _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         t = _wait(env.manager, tasks.submit_induce_schema(env.app_state, kb["id"])["id"])
         assert t["status"] == "succeeded", t["error"]
+        assert env.llm.models_seen == []
         assert t["result"]["entityTypes"] == 1
         schema = env.store.get_kb(kb["id"])["schema"]
         assert schema["pending_schema_induction"]["entity_types"][0]["key"] == "widget"
@@ -1503,8 +1540,10 @@ class TestLLMConsolidation:
         env.llm.consolidate_result = [
             {"a": "齐天大圣", "b": "孙悟空", "reason": "同物"}]
         kb, doc = _make_doc(env, "复合", ["[E:玉帝]宣[E:齐天大圣]做个官[E:孙悟空]应了"])
+        env.settings.save_values("knowledge_graph", {"extraction_model": "removed-model"})
         t = _wait(env.manager, tasks.submit_import(env.app_state, kb["id"], doc["id"])["id"])
         assert t["status"] == "succeeded", t["error"]
+        assert env.llm.models_seen == []
         q = t["result"]["quality"]
         assert q["llmMergeProposals"] == 1 and q["llmMergeApplied"] == 1
         # 合并对收敛为一,第三实体(玉帝)保留;canonical 取谁由入库序

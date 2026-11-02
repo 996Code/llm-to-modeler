@@ -111,7 +111,6 @@ class RetrievalFakeVector:
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("KG_FILES_DIR", str(tmp_path / "files"))
-    monkeypatch.delenv("LLM_EMBED_MODEL", raising=False)
     runtime.reset_runtime_cache()
 
     llm = MockLLM()
@@ -137,7 +136,7 @@ KB1 = {"id": "kb1", "name": "一号库", "description": "", "schema": {"relation
 
 
 def _ctx(env, with_memory=False, mem_conv=None):
-    """构造工具上下文;with_memory=True 时挂真实会话记忆(临时 SQLite)。
+    """构造工具上下文;with_memory=True 时挂真实 PG 会话记忆。
 
     mem_conv:传入 (store, conv_id) 复用同一会话(模拟"同一会话的下一轮");
     不传则新建会话。
@@ -168,13 +167,25 @@ def _mem_conv(env):
 
 class TestRetrieval:
 
+    def test_legacy_model_is_not_searched_before_reimport(self, env, monkeypatch):
+        kb = dict(KB1, embeddingModel="legacy-model", vectorDim=1024)
+        def forbidden(*args, **kwargs):
+            pytest.fail("incompatible vectors must not be encoded or searched")
+        monkeypatch.setattr(env.llm, "embeddings", forbidden)
+        monkeypatch.setattr(env.vector, "search", forbidden)
+        result = retrieval.hybrid_retrieve(env.app_state, kb, "甲在哪个部门?")
+        assert result["subgraph"]["nodes"]
+        assert result["diagnostics"]["vectorDegraded"] is True
+        assert result["diagnostics"]["vectorModelMismatch"] is True
+        assert not result["chunks"]
+
     def test_vector_failure_single_degraded_log(self, env, monkeypatch):
         """【回归锚】向量路失败只落一条降级日志(search 失败与前置失败均单条)。"""
         from domains.knowledge_graph import retrieval
 
         class BoomVector:
             def search(self, *a, **k):
-                raise RuntimeError("milvus down")
+                raise RuntimeError("pgvector down")
 
         monkeypatch.setattr(env, "vector", BoomVector())
         monkeypatch.setattr(retrieval.runtime, "get_vector", lambda state: BoomVector())

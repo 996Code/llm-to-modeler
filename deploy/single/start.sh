@@ -1,7 +1,6 @@
 #!/bin/sh
-# 一体容器入口：后台 uvicorn + 前台 nginx。
-# 任一进程退出 → wait -n 返回 → 容器退出 → docker restart 策略整体拉起
-# （比 supervisord 轻：不引入额外进程管理器，崩溃恢复语义相同）。
+# 一体容器入口：后台 uvicorn + nginx，shell 监视两个子进程。
+# 任一进程退出则容器退出，由 docker restart 策略整体拉起。
 set -e
 
 # 后台拉起后端（单进程;并发由线程池承担,存储为 PG(DATABASE_URL 必填)）
@@ -18,7 +17,7 @@ until curl -sf http://127.0.0.1:8000/api/health >/dev/null 2>&1; do
   sleep 1
 done
 
-# 前台 nginx（主进程）
+# nginx 不 daemonize，shell 同时监视它与 uvicorn。
 nginx -g 'daemon off;' &
 NGX_PID=$!
 

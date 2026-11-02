@@ -333,7 +333,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 })
             diagnostics["termDetail"] = list(_term_detail)
             _log_retrieval_call(
-                app_state, "graph", "neo4j:find_entities",
+                app_state, "graph", "graph:find_entities",
                 request_data={"stage": "kg.find_entities", "kbId": kb["id"],
                               "kb": kb.get("name"), "terms": terms, "limit": 10,
                               "intent": {"entities": intent["entities"],
@@ -365,7 +365,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 edgesTruncated=len(_edges) >= _max_edges,
                 maxNodes=_max_nodes, maxEdges=_max_edges)
             _log_retrieval_call(
-                app_state, "graph", "neo4j:subgraph_around",
+                app_state, "graph", "graph:subgraph_around",
                 request_data={"stage": "kg.subgraph", "kbId": kb["id"],
                               "kb": kb.get("name"), "seeds": [s.get("normalized") for s in seeds],
                               "hops": _hops, "maxNodes": _max_nodes, "maxEdges": _max_edges},
@@ -480,9 +480,18 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 error=_err, conv_id=conv_id)
     diagnostics["fulltextHits"] = len(fulltext_hits)
 
-    # 向量路:query embedding → top-k chunk(embedding 本身已由 llm/client
-    # 记为 call_type='llm';这里记向量检索的召回量与匹配度)
-    if kb.get("vectorEnabled"):
+    # 向量路只使用与当前编码器同模型的集合,不能等再次导入才保护。
+    vector_enabled = bool(kb.get("vectorEnabled"))
+    if vector_enabled and not runtime.vector_model_matches(app_state, kb):
+        vector_enabled = False
+        diagnostics["vectorDegraded"] = True
+        diagnostics["vectorModelMismatch"] = True
+        _log_retrieval_call(
+            app_state, CT_VECTOR, f"{_vector_backend()}:search",
+            request_data={"stage": "kg.vector_search", "kbId": kb["id"],
+                          "degraded": True}, response_data={"hits": 0, "degraded": True},
+            duration_ms=0, error="向量模型不兼容,请清空重建该库向量", conv_id=conv_id)
+    if vector_enabled:
         _stage("kb_search.vector", "向量检索相似文档片段…")
         _t0 = time.monotonic()
         _err = None
@@ -582,7 +591,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
     # 文档实体收敛后零召回:实体指向的文档已删/未解析,或语义查询与
     # 该文档全部片段都不相似——放开范围全库重查一轮,不能空手而归
     # (标注短路/答案生成在 kb_search 层,这里保证 chunks 有料)。
-    if auto_doc_scope is not None and not chunks and kb.get("vectorEnabled"):
+    if auto_doc_scope is not None and not chunks and vector_enabled:
         _stage("kb_search.vector", "指定文档内零召回,放开范围全库检索…")
         diagnostics["docScopeRelaxed"] = True
         _t0 = time.monotonic()
@@ -1136,8 +1145,5 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
 
 def _vector_backend() -> str:
     """观测 endpoint 前缀(向量检索统一 pg:search)。"""
-    try:
-        from sdk.vector_store import resolve_vector_backend
-        return resolve_vector_backend()
-    except Exception:
-        return "vector"
+    from sdk.vector_store import backend_display_name
+    return backend_display_name()

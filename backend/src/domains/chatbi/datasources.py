@@ -1,8 +1,7 @@
-"""数据源管理 —— 注册表 CRUD + Fernet 凭据加密 + 双方言执行器 + 健康检查。
+"""数据源管理 —— 注册表 CRUD + 双方言执行器 + 健康检查。
 
 移植来源: chat-bi
   - backend/app/db/models.py DataSource/SemanticModel 表结构 → chatbi schema DDL(models.py CHATBI_DDL)
-  - backend/app/core/security.py Fernet 数据源密码加密(#38/#44 教训保留)
   - backend/app/services/sql_executor.py 执行器(READ ONLY 事务/DB 侧超时/行数上限三层防护)
   - backend/app/services/datasource_health.py 健康检查
 适配: SQLAlchemy async → psycopg3/pymysql 同步;JWT/租户删除;registry 走 PackRelationalDB。
@@ -16,66 +15,23 @@ from __future__ import annotations
 
 import logging
 import json
-import os
 import time
 import uuid
 from datetime import datetime, timezone
 
-from cryptography.fernet import Fernet, InvalidToken
-
-from domains.chatbi.models import CHATBI_DDL, DataSourceInfo
+from domains.chatbi.models import DataSourceInfo
 from sdk.tool import PackInvokeError
 
 logger = logging.getLogger(__name__)
-
-# ── Fernet 凭据加密(#38: 密钥与密文同机有风险,生产建议 KMS;至少不硬编码 #44)──
-
-_fernet: Fernet | None = None
-_fernet_key: str = ""
-
-
-def configure_encryption(fernet_key: str) -> None:
-    """注入 Fernet 密钥(宿主 env FERNET_KEY / 测试显式注入)。
-
-    未配置时首次 encrypt/decrypt 抛错——数据源密码必须加密存储,不做明文降级。
-    """
-    global _fernet, _fernet_key
-    if fernet_key and fernet_key != _fernet_key:
-        _fernet = Fernet(fernet_key.encode())
-        _fernet_key = fernet_key
-
-
-def _ensure_fernet() -> None:
-    """懒初始化:显式注入优先,否则读 env FERNET_KEY(settings.schema 声明的兜底源)。
-
-    仍未配置 → 保持 None,由调用方 fail-closed 报错。
-    """
-    if _fernet is None:
-        configure_encryption(os.getenv("FERNET_KEY", ""))
-
-
-def encrypt_password(plain: str) -> str:
-    _ensure_fernet()
-    if _fernet is None:
-        raise RuntimeError("FERNET_KEY 未配置——数据源密码必须加密存储(fail-closed,"
-                           "在 .env 配置 FERNET_KEY=openssl rand -hex 32 生成)")
-    return _fernet.encrypt(plain.encode()).decode()
-
-
-def decrypt_password(encrypted: str) -> str:
-    _ensure_fernet()
-    if _fernet is None:
-        raise RuntimeError("FERNET_KEY 未配置——无法解密数据源密码(fail-closed)")
-    try:
-        return _fernet.decrypt(encrypted.encode()).decode()
-    except InvalidToken as e:
-        raise ValueError("数据源密码解密失败(密钥不匹配或密文损坏)") from e
-
 
 # ── 注册表 CRUD(chatbi_data_sources) ─────────────────────────
 
 # mcp: host=server code, database=tool_name(可空), port=0, 密码空串直存
 _SUPPORTED_DB_TYPES = ("mysql", "postgresql", "mcp")
+_DATASOURCE_COLUMNS = (
+    'id, name, db_type, host, port, "database", username, password, is_active, '
+    'scan_status, scan_progress, scan_stage, scan_error, scanned_at, created_at, updated_at'
+)
 
 
 def _now() -> str:
@@ -84,14 +40,15 @@ def _now() -> str:
 
 def init_store(db) -> None:
     """幂等建表(db = PackRelationalDB("chatbi"))。"""
-    db.init_schema(CHATBI_DDL)
+    from domains.chatbi.runtime import _init_pack_schema
+    _init_pack_schema(db)
 
 
 def _row_to_info(row: dict) -> DataSourceInfo:
     return DataSourceInfo(
         id=row["id"], name=row["name"], db_type=row["db_type"],
         host=row["host"], port=int(row["port"]), database=row["database"],
-        username=row["username"], encrypted_password=row["encrypted_password"],
+        username=row["username"], password=row["password"],
         is_active=bool(row["is_active"]),
         scan_status=row.get("scan_status") or "idle",
         scan_progress=int(row.get("scan_progress") or 0),
@@ -106,46 +63,37 @@ def _row_to_info(row: dict) -> DataSourceInfo:
 def create_datasource(db, name: str, db_type: str, host: str, port: int,
                       database: str, username: str, password: str,
                       is_active: bool = True) -> DataSourceInfo:
-    """新建数据源(密码 Fernet 加密落库;密文永不回传)。
-
-    mcp 例外: 无凭据可加密, 密码空串直存空串(跳过 Fernet);
-    host 必填(=server code)。
-    """
+    """新建数据源,密码仅供内部连接使用,管理 API 不回显。"""
     if db_type not in _SUPPORTED_DB_TYPES:
         raise ValueError(f"不支持的数据库类型: {db_type}")
     if db_type == "mcp" and not (host or "").strip():
         raise ValueError("mcp 数据源 host 必填(=MCP server code)")
-    encrypted = ("" if (db_type == "mcp" and not password)
-                 else encrypt_password(password))
     ds_id = str(uuid.uuid4())
     now = _now()
     with db.connect() as conn:
         conn.execute(
             """INSERT INTO chatbi_data_sources
                (id, name, db_type, host, port, database, username,
-                encrypted_password, is_active, scan_status, scan_progress, created_at, updated_at)
+                password, is_active, scan_status, scan_progress, created_at, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'idle', 0, ?, ?)""",
             (ds_id, name, db_type, host, int(port), database, username,
-             encrypted, 1 if is_active else 0, now, now))
-    return get_datasource(db, ds_id, decrypt=True)
+             password, 1 if is_active else 0, now, now))
+    return get_datasource(db, ds_id)
 
 
-def get_datasource(db, ds_id: str, decrypt: bool = False) -> DataSourceInfo | None:
-    """按 id 取数据源;decrypt=True 时解密密码到 password_plain(运行时用)。"""
+def get_datasource(db, ds_id: str) -> DataSourceInfo | None:
+    """按 id 取内部连接信息。"""
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT * FROM chatbi_data_sources WHERE id = ?", (ds_id,)).fetchone()
+            f"SELECT {_DATASOURCE_COLUMNS} FROM chatbi_data_sources WHERE id = ?", (ds_id,)).fetchone()
     if not row:
         return None
-    info = _row_to_info(dict(row))
-    if decrypt and info.encrypted_password:
-        info.password_plain = decrypt_password(info.encrypted_password)
-    return info
+    return _row_to_info(dict(row))
 
 
 def list_datasources(db, active_only: bool = False) -> list:
     with db.connect() as conn:
-        sql = "SELECT * FROM chatbi_data_sources"
+        sql = f"SELECT {_DATASOURCE_COLUMNS} FROM chatbi_data_sources"
         if active_only:
             sql += " WHERE is_active = 1"
         rows = conn.execute(f"{sql} ORDER BY created_at DESC").fetchall()
@@ -160,10 +108,7 @@ def _current_db_type(db, ds_id: str) -> str:
 
 
 def update_datasource(db, ds_id: str, **fields) -> bool:
-    """更新可变字段。password 特殊处理:明文 → Fernet 加密;列名白名单防注入。
-
-    mcp 行密码空串直存空串(与 create 同契约);db_type 值同 create 白名单。
-    """
+    """更新白名单字段;未提供 password 时保留当前密码。"""
     if "db_type" in fields and fields["db_type"] not in _SUPPORTED_DB_TYPES:
         raise ValueError(f"不支持的数据库类型: {fields['db_type']}")
     allowed = {"name", "db_type", "host", "port", "database", "username",
@@ -172,11 +117,8 @@ def update_datasource(db, ds_id: str, **fields) -> bool:
     cols, params = [], []
     for k, v in fields.items():
         if k == "password":
-            cols.append("encrypted_password = ?")
-            if v == "" and (fields.get("db_type") or _current_db_type(db, ds_id)) == "mcp":
-                params.append("")  # mcp 无凭据: 空串直存
-            else:
-                params.append(encrypt_password(v))
+            cols.append("password = ?")
+            params.append(v)
         elif k in allowed:
             cols.append(f"{k} = ?")
             params.append(int(v) if k in ("port", "is_active", "scan_progress") else v)
@@ -200,14 +142,13 @@ def delete_datasource(db, ds_id: str) -> bool:
         return cur.rowcount > 0
 
 
-def resolve_datasource(db, ds_id: str | None = None,
-                       decrypt: bool = True) -> DataSourceInfo:
+def resolve_datasource(db, ds_id: str | None = None) -> DataSourceInfo:
     """解析目标数据源:显式 id > 会话绑定(调用方) > 第一个 active(fail-fast)。
 
     运行时入口:工具管线用它拿到带明文密码的连接信息。
     """
     if ds_id:
-        info = get_datasource(db, ds_id, decrypt=decrypt)
+        info = get_datasource(db, ds_id)
         if not info:
             raise ValueError(f"数据源不存在: {ds_id}")
         if not info.is_active:
@@ -216,7 +157,7 @@ def resolve_datasource(db, ds_id: str | None = None,
     actives = list_datasources(db, active_only=True)
     if not actives:
         raise ValueError("尚无可用数据源——请在管理端添加并扫描数据源")
-    return get_datasource(db, actives[0].id, decrypt=decrypt)
+    return get_datasource(db, actives[0].id)
 
 
 # ── 执行器(双方言;READ ONLY + DB 侧超时 + 行数上限) ────────────
@@ -242,7 +183,7 @@ def _pg_connect(info: DataSourceInfo, timeout_seconds: int,
     import psycopg
     return psycopg.connect(
         host=info.host, port=info.port, user=info.username,
-        password=info.password_plain, dbname=info.database,
+        password=info.password, dbname=info.database,
         connect_timeout=connect_timeout, autocommit=False,
         options=f"-c statement_timeout={timeout_seconds * 1000}")
 
@@ -251,7 +192,7 @@ def _mysql_connect(info: DataSourceInfo, connect_timeout: int = 5):
     import pymysql
     return pymysql.connect(
         host=info.host, port=info.port, user=info.username,
-        password=info.password_plain, database=info.database,
+        password=info.password, database=info.database,
         connect_timeout=connect_timeout, charset="utf8mb4",
         cursorclass=pymysql.cursors.Cursor)
 
@@ -324,15 +265,19 @@ def execute_readonly(info: DataSourceInfo, sql: str,
         raise ValueError(f"不支持的数据库类型: {info.db_type}")
     except Exception as e:
         duration = int((time.monotonic() - started) * 1000)
-        logger.warning("数据源执行失败(%s, %dms): %s", info.db_type, duration, str(e)[:160])
-        return ExecuteResult(False, error=_clean_db_error(e), duration_ms=duration)
+        error = _clean_db_error(e, info.password)
+        logger.warning("数据源执行失败(%s, %dms): %s", info.db_type, duration, error[:160])
+        return ExecuteResult(False, error=error, duration_ms=duration)
 
 
-def _clean_db_error(e: Exception) -> str:
+def _clean_db_error(e: Exception, password: str = "") -> str:
     """执行错误 → 用户可读文本(去连接串等敏感细节)。"""
+    import re
     text = str(e)
-    for token in ("password=", "user=", "dbname=", "host="):
-        text = text.replace(token, "***")
+    if password:
+        text = text.replace(password, "***")
+    text = re.sub(r"(?i)(password|user|dbname|host)\s*=\s*('[^']*'|\"[^\"]*\"|\S+)", r"\1=***", text)
+    text = re.sub(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S+", "[connection redacted]", text)
     # psycopg 异常很长,首行通常是核心信息
     return text.splitlines()[0][:300] if text else "执行失败"
 
@@ -453,8 +398,8 @@ def check_health(info: DataSourceInfo, timeout_seconds: int = 5) -> dict:
         return {"healthy": True, "latency_ms": int((time.monotonic() - started) * 1000),
                 "server_version": version}
     except Exception as e:
-        error = (f"MCP server {info.host} 探测失败: {_clean_db_error(e)}"
-                 if info.db_type == "mcp" else _clean_db_error(e))
+        error = (f"MCP server {info.host} 探测失败: {_clean_db_error(e, info.password)}"
+                 if info.db_type == "mcp" else _clean_db_error(e, info.password))
         return {"healthy": False, "latency_ms": int((time.monotonic() - started) * 1000),
                 "error": error}
 
@@ -477,25 +422,7 @@ def check_all_health(db, max_failures: int = HEALTH_MAX_FAILURES) -> dict:
                "recovered": 0, "newly_deactivated": 0, "items": []}
     for row in list_datasources(db, active_only=False):
         summary["checked"] += 1
-        # 解密密码再探测: list_datasources 不带 decrypt, password_plain 为空,
-        # 直接 ping 必失败 → 15 分钟内所有数据源被误停用(真实事故)。
-        # 单源解密失败(密钥轮换后旧密文)只标记该源 unhealthy,不拖垮
-        # 整轮巡检——巡检是逐源独立的,一个坏源 500 掉全部观测不可接受
-        try:
-            info = get_datasource(db, row.id, decrypt=True) or row
-        except Exception as e:  # noqa: BLE001
-            logger.warning("数据源 %s 密码解密失败(密钥不匹配或密文损坏), "
-                           "标记 unhealthy: %s", row.name, e)
-            summary["unhealthy"] += 1
-            _health_fail_counts[row.id] = _health_fail_counts.get(row.id, 0) + 1
-            if (_health_fail_counts[row.id] >= max_failures
-                    and row.is_active):
-                update_datasource(db, row.id, is_active=False)
-                summary["newly_deactivated"] += 1
-            summary["items"].append({
-                "id": row.id, "name": row.name, "healthy": False,
-                "error": "密码解密失败(密钥不匹配或密文损坏),请编辑数据源重存密码"})
-            continue
+        info = row
         result = check_health(info)
         ds_id = info.id
         if result.get("healthy"):

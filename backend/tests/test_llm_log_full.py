@@ -74,8 +74,8 @@ def _make_client(store, monkeypatch, log_full):
     from services import llm_providers as _providers
     _providers.save_providers({
         "primary": {"base_url": "http://x/v1", "api_key": "k",
-                    "model": LLMConfig().model}}, updated_by="test")
-    client = LLMClient(config=LLMConfig(base_url="http://x/v1", api_key="k"), conversation_store=store)
+                    "model": "test-chat"}}, updated_by="test")
+    client = LLMClient(config=LLMConfig(base_url="http://x/v1", api_key="k", model="test-chat"), conversation_store=store)
     return client
 
 
@@ -277,7 +277,7 @@ def test_call_context_fallback_llm_logs(store, monkeypatch):
     from sdk.call_context import bind_conversation, clear_conversation
 
     monkeypatch.setenv("LLM_LOG_FULL", "1")
-    client = LLMClient(config=LLMConfig(base_url="http://x/v1", api_key="k"), conversation_store=store)
+    client = LLMClient(config=LLMConfig(base_url="http://x/v1", api_key="k", model="test-chat"), conversation_store=store)
 
     bind_conversation("conv-llm")
     try:

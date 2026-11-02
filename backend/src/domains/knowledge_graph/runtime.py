@@ -2,11 +2,11 @@
 
 【职责】
   把"平台组件(app.state 上的 settings_store / llm_client) + 插件自有存储
-  (KGStore / Neo4jGraphStore / 向量存储)"收敛成一组简单取用函数,
+  (KGStore / 图存储(PG) / 向量存储)"收敛成一组简单取用函数,
   供 api.py / tasks.py 共用,避免各自拼装。
 
 【连接生命周期】
-  KGStore:懒建单例(按 DATABASE_PATH 指纹);
+  KGStore:懒建单例(按 DATABASE_URL 指纹);
   Graph/Vector:走 graph_store / vector_store 里的指纹缓存单例——设置页热改
   连接配置后下一次取用即重建连接。
 """
@@ -49,7 +49,7 @@ def get_kg_store(app_state) -> KGStore:
 
 
 def get_graph(app_state):
-    """Neo4j 图存储(SDK 单例,经 stores 适配层注入 kg 前缀)。"""
+    """图存储(PostgreSQL;SDK 单例,经 stores 适配层注入 kg 前缀)。"""
     from domains.knowledge_graph import stores
     return stores.get_graph(app_state)
 
@@ -58,6 +58,19 @@ def get_vector(app_state):
     """向量存储(pgvector;同上)。"""
     from domains.knowledge_graph import stores
     return stores.get_vector(app_state)
+
+
+def embedding_model(app_state) -> str:
+    """当前编码器的模型身份,供导入、检索与增量写入共用。"""
+    from sdk.embedding import LOCAL_EMBED_MODEL
+    model = getattr(getattr(app_state, "llm_client", None), "embed_model", "")
+    return (model or "").strip() or LOCAL_EMBED_MODEL
+
+
+def vector_model_matches(app_state, kb) -> bool:
+    """有历史身份时必须匹配;无记录旧库沿用现有恢复契约。"""
+    stored = (kb.get("embeddingModel") or "").strip()
+    return not stored or stored == embedding_model(app_state)
 
 
 def files_root() -> Path:

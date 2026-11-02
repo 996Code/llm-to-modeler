@@ -164,10 +164,10 @@ def test_pg_pack_settings_merge():
     from services.pack_settings import PackSettingsStore
     st = PackSettingsStore()
     pack = f"pg_probe_{uuid.uuid4().hex[:6]}"
-    st.save_values(pack, {"neo4j_uri": "bolt://x", "top_k": 5})
+    st.save_values(pack, {"search_url": "http://x", "top_k": 5})
     st.save_values(pack, {"top_k": 8})            # 未提供键保持
-    assert st.get_values(pack) == {"neo4j_uri": "bolt://x", "top_k": 8}
-    st.save_values(pack, {"neo4j_uri": None})     # None = 显式清除
+    assert st.get_values(pack) == {"search_url": "http://x", "top_k": 8}
+    st.save_values(pack, {"search_url": None})    # None = 显式清除
     assert st.get_values(pack) == {"top_k": 8}
     st.delete(pack)
 

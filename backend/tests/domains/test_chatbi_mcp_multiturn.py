@@ -35,7 +35,7 @@ TOOLS = [
 def _info(code="srv_a", database=""):
     return DataSourceInfo(id="ds1", name="外部", db_type="mcp",
                           host=code, port=0, database=database,
-                          username="", password_plain="")
+                          username="", password="")
 
 
 @pytest.fixture()

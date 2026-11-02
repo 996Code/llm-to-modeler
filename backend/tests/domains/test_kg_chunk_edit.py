@@ -56,6 +56,22 @@ def _imported_doc(env, name: str, paragraphs: list):
 
 class TestChunkEdit:
 
+    def test_legacy_model_is_not_reembedded_before_reimport(self, client):
+        c, env = client
+        kb, doc, chunks = _imported_doc(env, "旧模型编辑", ["[E:甲] 内容。"])
+        env.store.set_kb_vector_info(kb["id"], "legacy-model", 1024, True)
+        old_rows = dict(env.vector.rows[kb["id"]])
+        embed_calls = env.llm.embed_calls
+        response = c.put(
+            f"/api/packs/knowledge_graph/kbs/{kb['id']}/documents/"
+            f"{doc['id']}/chunks/{chunks[0]['id']}", json={"text": "修改后的文本"})
+        assert response.status_code == 200
+        assert response.json()["vectorUpdated"] is False
+        assert "模型不兼容" in response.json()["warning"]
+        assert env.llm.embed_calls == embed_calls
+        assert env.vector.rows[kb["id"]] == old_rows
+        assert env.store.get_kb(kb["id"])["embeddingModel"] == "legacy-model"
+
     def test_edit_updates_text_and_reembeds(self, client):
         """编辑:文本落库 + 该块子段向量重建(新文本可召回)。"""
         c, env = client

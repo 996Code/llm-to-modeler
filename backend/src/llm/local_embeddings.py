@@ -1,37 +1,20 @@
-"""进程内本地 embedding —— ONNX 推理(零外部服务,零 API 费用)。
+"""进程内 bge-m3 embedding：ONNX + tokenizers 推理，无外部 API。
 
-【定位】LLMClient.embeddings 的 local 后端:与云端 API(text-embedding-v3)
-同一调用契约(等长等序向量列表),调用方(KG 导入/检索)无感知切换。
+模型固定 Xenova/bge-m3 ONNX 量化版，输出 1024 维向量，编码长度
+上限 4096 token；查询与文档均不添加 instruction 前缀。
 
-【为什么是 onnxruntime 而不是 sentence-transformers】
-- sentence-transformers 拉起 torch(~800MB 镜像增量)——为一个 543MB 的
-  embedding 模型背这个体积不划算;onnxruntime + tokenizers + numpy
-  合计 ~70MB,int8 量化模型 ~543MB,CPU 单条编码毫秒级
-- 模型: Xenova/bge-m3 的 onnx 量化版(BAAI 旗舰多语言模型,1024 维,
-  与云端 text-embedding-v3 维度一致,4096 token 上下文窗口)
+部署脚本准备 data/models/embedding/，Compose 挂载到
+/app/models/embedding/。裸机通过 EMBEDDING_MODEL_DIR 指定模型目录，
+或从 HF_ENDPOINT 下载固定模型并缓存到 EMBEDDING_CACHE_DIR。
 
-【为什么选 bge-m3 而不是 bge-large-zh-v1.5】
-- bge-large-zh-v1.5: 512 token 上限,我们的 chunk 目标 1200 字/max 3000 字,
-  截断率 67%-87%,长篇小说段落后半段信息对向量检索完全不可见
-- bge-m3: 4096 token 上限(实测 ONNX 支持),完整编码 3000 字 chunk 无截断;
-  1024 维与云端一致,向量表维度兼容;XLM-RoBERTa tokenizer,
-  不需要 token_type_ids;543MB 比 bge-large 多 232MB,但换来了
-  不做截断的完整语义表示
-
-【模型分发】
-- 生产环境: deploy.sh 在首次部署时从 hf-mirror 下载模型到
-  deploy/models/embedding/,docker-compose 挂载到容器内
-  /app/models/embedding/,EMBEDDING_MODEL_DIR 指向该路径
-- 本地开发: 设置 EMBEDDING_MODEL_DIR 指向本地模型目录,或首次调用时
-  从 HF_ENDPOINT(默认 hf-mirror)在线拉取,缓存到 ~/.cache/llm-embeddings
-
-【线程安全】懒加载单例 + 双重检查锁;encode 内部 onnxruntime 自带
-线程安全(一个 session 多线程共享)。
+进程级懒加载单例由锁保护；ONNX session 可在多线程间共享。
 """
 import logging
 import os
 import threading
 from typing import List, Optional
+
+from sdk.embedding import LOCAL_EMBED_DIM as _DIM
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +23,6 @@ _MODEL_REPO = "Xenova/bge-m3"
 # 量化版优先(~543MB,CPU 上比 fp32 快 2-3 倍,精度损失 <1%)
 _ONNX_FILES = ["onnx/model_quantized.onnx", "onnx/model.onnx"]
 _TOKENIZER_FILES = ["tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"]
-
-_DIM = 1024  # bge-m3 与云端 text-embedding-v3 一致,切换后端无需重建集合
 
 
 class _LocalEmbedder:
@@ -107,9 +88,6 @@ class _LocalEmbedder:
 
     # ── 推理 ─────────────────────────────────────────────
 
-    # bge-m3 官方检索用法:查询侧加 instruction 前缀,文档侧无前缀
-    _QUERY_PREFIX = "为这个句子生成表示以用于检索相关文章："
-
     def encode(self, texts: List[str]) -> List[List[float]]:
         """批量编码:tokenize → onnx 前向 → CLS pooling → L2 归一化。
 
@@ -155,16 +133,7 @@ class _LocalEmbedder:
         return (cls_vec / norm).tolist()
 
     def encode_queries(self, texts: List[str]) -> List[List[float]]:
-        """查询侧编码。**默认不加前缀**——bge-m3 官方模型卡明确
-        "不再需要为查询添加 instruction"(前缀属 bge-*-zh-v1.5 系列)。
-
-        EMBED_QUERY_PREFIX=1 时启用前缀(换 v1.5 系列本地模型或其他
-        需要 instruction 的模型用;存量 m3 库两侧口径一致,勿开)。
-        """
-        import os as _os
-        if _os.getenv("EMBED_QUERY_PREFIX", "0").strip().lower() in (
-                "1", "true", "yes", "on"):
-            return self.encode([self._QUERY_PREFIX + t for t in texts])
+        """bge-m3 查询侧直接编码原文,不添加 instruction。"""
         return self.encode(texts)
 
 

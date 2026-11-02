@@ -58,16 +58,7 @@ class SwitchChartTool(Tool):
 
         ds_id = sess.get("datasource_id") if sess else None
         db = self._db or _lazy_db()
-        # D6 错误契约信封试点:数据源密码解密失败是凭据/配置类错误
-        # (FERNET_KEY 不匹配)——按性质声明,引擎终止并提示检查配置,
-        # 而非笼统"执行失败"让用户反复重试
-        from sdk.tool import PackInvokeError
-        try:
-            ds = datasources.resolve_datasource(db, ds_id)
-        except ValueError as e:
-            if "解密失败" in str(e):
-                raise PackInvokeError(str(e), PackInvokeError.CREDENTIAL)
-            raise
+        ds = datasources.resolve_datasource(db, ds_id)
         settings = self._settings or _lazy_settings(ctx)
 
         # ── mcp 分支: prev_sql 是工具调用 JSON(与 ask_data state["sql"]

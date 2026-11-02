@@ -85,9 +85,7 @@ def env(test_url=""):
 
     from sdk.relational_store import PackRelationalDB
     db = PackRelationalDB("chatbi")
-    from domains.chatbi.datasources import init_store, configure_encryption
-    from cryptography.fernet import Fernet
-    configure_encryption(Fernet.generate_key().decode())
+    from domains.chatbi.datasources import init_store
     init_store(db)
     ds = datasources.create_datasource(
         db, "演示库", "postgresql", "127.0.0.1", 5432,

@@ -239,7 +239,7 @@ class TestQueryStatsTool:
         from domains.chatbi import datasources as ds_mod, query_stats as qs_mod
 
         monkeypatch.setattr(ds_mod, "resolve_datasource",
-                            lambda db, ds_id, decrypt=True: SimpleNamespace(
+                            lambda db, ds_id: SimpleNamespace(
                                 id="ds1", name="销售库"))
         metrics = [{"data_source_id": "ds1", "query_count": 42, "avg_ms": 123,
                     "max_ms": 900, "error_count": 1, "error_rate": 2.4,
@@ -266,7 +266,7 @@ class TestQueryStatsTool:
         from domains.chatbi import datasources as ds_mod, query_stats as qs_mod
 
         monkeypatch.setattr(ds_mod, "resolve_datasource",
-                            lambda db, ds_id, decrypt=True: SimpleNamespace(
+                            lambda db, ds_id: SimpleNamespace(
                                 id="ds1", name="空库"))
         monkeypatch.setattr(qs_mod, "datasource_metrics", lambda db, **kw: [])
 

@@ -277,8 +277,7 @@ def is_fatal_llm_error(exc: Exception) -> bool:
         "401", "403", "invalid api key", "incorrect api key",
         "insufficient", "quota exceeded", "billing", "欠费", "余额不足",
         "unauthorized", "forbidden", "model not found", "api key",
-        # 国产网关常见的"模型不存在"文案(dashscope 等):不补的话配错
-        # extraction_model 会空转三轮自动续跑(~15 分钟)
+        # 网关的模型配置错误不可通过自动重试恢复。
         "model not exist", "model doesn't exist", "no such model",
         "invalid model", "unknown model", "模型不存在", "不存在的模型",
     )

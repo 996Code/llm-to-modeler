@@ -99,7 +99,7 @@ class DatasourceCreate(BaseModel):
     port: int = 5432
     database: str = ""
     username: str = ""
-    password: str = ""
+    password: str = Field(default="", repr=False)
 
     @model_validator(mode="after")
     def _non_mcp_requires_credentials(self) -> "DatasourceCreate":
@@ -120,7 +120,7 @@ class DatasourceUpdate(BaseModel):
     port: int | None = None
     database: str | None = None
     username: str | None = None
-    password: str | None = None       # 提供则重加密
+    password: str | None = Field(default=None, repr=False)  # 提供则更新
     is_active: bool | None = None
 
 
@@ -244,7 +244,7 @@ async def health_check_all(request: Request):
 
 @router.post("/datasources/{ds_id}/health", dependencies=[Depends(admin_required)])
 async def datasource_health(ds_id: str):
-    info = datasources.get_datasource(_db(), ds_id, decrypt=True)
+    info = datasources.get_datasource(_db(), ds_id)
     if not info:
         raise HTTPException(404, "数据源不存在")
     import asyncio
@@ -547,7 +547,7 @@ async def health_detail_ep(request: Request):
     """系统状态详情(对标源 T050 /health/detail)。
 
     组件各自独立探测, 一个挂了不影响其他组件上报: 向量库(pgvector)/
-    LLM 网关/数据源加密凭据 + 各业务库最近健康状态。
+    LLM 网关 + 各业务库最近健康状态。
     """
     from sdk.vector_store import backend_display_name
     vector_key = backend_display_name()  # P0-5: 键名单一事实源在 SDK
@@ -598,15 +598,6 @@ async def health_detail_ep(request: Request):
         components["llm"] = {"status": status, "detail": detail[:200]}
     except Exception as e:
         components["llm"] = {"status": "fail", "detail": str(e)[:200]}
-    # 加密凭据
-    try:
-        from sdk.pack_api import settings_reader
-        has_key = bool(settings_reader(request.app.state, "chatbi")
-                       .get("fernet_key"))
-        components["fernet"] = {"status": "ok" if has_key else "unconfigured",
-                                "detail": "数据源密码加密存储"}
-    except Exception as e:
-        components["fernet"] = {"status": "fail", "detail": str(e)[:200]}
     # 各业务库概览(健康即时探测走「健康检查」按钮/巡检, 此处不重复探测)
     from domains.chatbi import datasources
     ds_list = [

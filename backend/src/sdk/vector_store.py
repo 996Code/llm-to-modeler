@@ -1,9 +1,5 @@
 """SDK 通用向量存储 —— pgvector 单后端(PG 内向量列 + HNSW)。
 
-【演进】向量存储曾为 Milvus(独立服务)→ N1 切 PG(pgvector)→ Milvus
-服务下线后切换后端一并移除(死路径不留)。VECTOR_BACKEND env 仍被
-读取但仅接受 "pg"(存量 .env 带旧值时启动报错提示,而非静默漂移)。
-
 存储形态:每 scope 一张表 {prefix}_{scope 去 - 换 _}_v1
   (chunk_id 主键 / doc_id 分区 / seq / text / embedding VECTOR 列 + HNSW),
 与 KG chunk / ChatBI 语义模型索引共用本 Protocol。
@@ -49,20 +45,6 @@ _cached_stores: Dict[tuple, Any] = {}   # 指纹 → store(按前缀多槽)
 _cache_lock = threading.Lock()     # 只保护缓存指针读写(锁内零网络 IO)
 _build_lock = threading.Lock()     # 串行化连接构建
 
-def resolve_vector_backend() -> str:
-    """解析向量后端:仅 pg(Milvus 后端已随服务下线移除)。
-
-    env 仍读取——存量 .env 带 VECTOR_BACKEND=milvus 时 fail-fast 报错
-    指引改 pg,而非静默落回 pg 让"以为在用 Milvus"的部署继续蒙着跑。
-    """
-    backend = (os.getenv("VECTOR_BACKEND", "") or "pg").strip().lower()
-    if backend != "pg":
-        raise ValueError(
-            f"未知 VECTOR_BACKEND: {backend!r}——向量存储现为 pgvector 单后端"
-            "(Milvus 已下线),请将 .env 的 VECTOR_BACKEND 删除或设为 pg。")
-    return "pg"
-
-
 def backend_display_name() -> str:
     """向量后端展示名(分层治理 P0-5: 健康组件/观测键单一事实源)。
 
@@ -87,7 +69,6 @@ def get_vector_store(settings: Dict[str, Any],
     锁纪律/失败纪律同 graph_store.get_graph_store:命中路径轻锁,构建
     在锁外,构建失败清缓存不留坏连接。
     """
-    resolve_vector_backend()  # 仅校验(非 pg 报错);后端固定 pg
     from sdk.pg_vector_store import PgVectorStore
     dsn = (settings.get("pg_vector_url")
            or os.getenv("DATABASE_URL", "") or "").strip()

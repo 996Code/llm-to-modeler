@@ -138,9 +138,7 @@ from llm.embed_cache import EmbedCache, embed_cache_key  # noqa: E402
 
 
 class LLMConfig(BaseModel):
-    """LLM 配置（Pydantic 模型，从环境变量加载）。
-
-    类比 Java 的 @ConfigurationProperties，用环境变量注入配置。
+    """LLM 调用配置;端点由供应商 DB 解析,也可显式注入配置。
 
     关键配置项：
         base_url: LLM API 地址（OpenAI/Qwen/本地 LM Studio）
@@ -149,9 +147,9 @@ class LLMConfig(BaseModel):
         max_tokens: 最大输出 token 数（200000 给推理模型足够的思考空间）
         timeout: 请求超时秒数（本地模型可能很慢，300 秒兜底）
     """
-    base_url: str = "http://127.0.0.1:1234/v1"
+    base_url: str = ""
     api_key: str = ""
-    model: str = "qwen/qwen3.6-35b-a3b"
+    model: str = ""
     temperature: float = 0.1
     max_tokens: int = 200000  # 推理模型需要大的 token 空间
     timeout: int = 300       # 本地模型推理慢，超时给足
@@ -202,13 +200,14 @@ class LLMClient:
             return "fail", f"{detail} · 探针失败: {str(e)[:120]}"
 
     @property
-    def embed_model(self) -> str:
-        """当前 embeddings 后端的实际出站模型名(P1-1 单一口径)。
+    def chat_model(self) -> str:
+        """当前生效的主对话模型;未配置返回空,不创建 SDK 或发起网络请求。"""
+        chain = self._resolve_endpoints()
+        return chain[0][1].model if chain else ""
 
-        解析收敛在 sdk/embedding(单一事实源):local 恒 bge-m3;api 取
-        LLM_EMBED_MODEL。插件(如 KG 导入的向量索引指纹)据此判断
-        "模型是否变了",不再各自读平台 env。
-        """
+    @property
+    def embed_model(self) -> str:
+        """实际嵌入模型名,供向量索引指纹与一致性校验使用。"""
         from sdk.embedding import embed_model as _embed_model
         return _embed_model()
 
@@ -235,16 +234,11 @@ class LLMClient:
         """初始化 LLM 客户端。
 
         Args:
-            config: LLM 配置，为 None 时从环境变量加载
+            config: 显式配置;为 None 时只加载温度/超时等非端点参数
             conversation_store: 会话存储，用于持久化 LLM 调用日志
         """
         if config is None:
-            # 从环境变量加载配置，类比 Spring @Value("${LLM_MODEL:默认值}")
-            # float()/int() 转换：因为 getenv 返回 str，类比 Java Integer.parseInt
             config = LLMConfig(
-                base_url=os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1"),
-                api_key=os.getenv("LLM_API_KEY", ""),
-                model=os.getenv("LLM_MODEL", "qwen/qwen3.6-35b-a3b"),
                 temperature=float(os.getenv("LLM_TEMPERATURE", "0.1")),
                 max_tokens=int(os.getenv("LLM_MAX_TOKENS", "200000")),
                 timeout=int(os.getenv("LLM_TIMEOUT", "300")),
@@ -273,44 +267,16 @@ class LLMClient:
         self._chat_cache = EmbedCache(
             max_entries=int(os.getenv("EMBED_CACHE_MAX", "4096")))
 
-        # OpenAI SDK 客户端，兼容所有 OpenAI 兼容 API
-        # 类比 Java 的 OkHttpClient 单例，全程复用底层连接
-        # api_key 为空时给占位字符串：OpenAI SDK 要求非空，本地模型不校验
-        # max_retries 可配(env LLM_MAX_RETRIES, 默认 2 = SDK 默认):
-        # 5xx/连接失败时 SDK 自动指数退避重试。LLM 网关整体不可达的部署
-        # (重试注定失败, 只拖慢路由兜底)可调 0 让失败快速冒泡到上层降级。
-        # httpx 传输层保活(线上实证修复 2026-10-17):SDK 默认连接池养空闲
-        # 长连接,而网关侧负载均衡约 60s 掐空闲连接——池里复用死连接时
-        # 请求无限挂到 LLM_TIMEOUT 超时(民法典导入卡死 1h+ 全 300s
-        # timeout 的根因;容器内新连接直连同款请求 62s 成功)。keepalive
-        # 探测让死连接在写前被 TCP 层发现,空闲 30s 回收让池不养陈连接
-        import httpx as _httpx
-        self.client = OpenAI(
-            base_url=config.base_url,
-            api_key=config.api_key or "placeholder-key",  # 占位 key，本地模型忽略
-            timeout=config.timeout,
-            max_retries=int(os.getenv("LLM_MAX_RETRIES", "2")),
-            http_client=_httpx.Client(
-                timeout=config.timeout,
-                limits=_httpx.Limits(
-                    max_connections=20, max_keepalive_connections=4,
-                    keepalive_expiry=30.0),
-                transport=_httpx.HTTPTransport(retries=1),
-            ),
-        )
+        # 显式端点保留 self.client 契约;默认实例不构造空端点 SDK。
+        # DB 端点在真正调用时经 _client_for 按需创建并复用连接池。
+        self.client = None
+        self._endpoint_clients: Dict[Any, Any] = {}
+        if config.base_url.strip():
+            self.client = self._client_for(config)
 
         logger.info(
-            f"LLM client: model={config.model}, base_url={config.base_url}, "
-            f"max_tokens={config.max_tokens}"
-        )
-
-        # ── 主备切换(C8/设计 8.6):DB 供应商配置是端点唯一来源 ──
-        # 每个端点一个 OpenAI 客户端(缓存复用,同款 httpx 保活参数);
-        # 生效配置经 services.llm_providers.resolve_active() 热读
-        # (revision 比对缓存)。未配置不回退 env——chat 出站前置闸
-        # 直接报错引导去「插件管理 → 模型供应商」配置。
-        self._endpoint_clients: Dict[Any, Any] = {self._ep_key(config): self.client}
-        self._ep_http: Optional[Any] = None  # 惰性持有的共享 httpx Client
+            "LLM client: explicit_endpoint=%s, max_tokens=%s",
+            bool(config.base_url), config.max_tokens)
 
     # ── 主备切换(C8)────────────────────────────────────────────
 
@@ -322,7 +288,7 @@ class LLMClient:
     def _client_for(self, cfg: "LLMConfig"):
         """按端点配置取缓存的 OpenAI 客户端(没有则同款参数现建)。
 
-        env 默认端点直接复用构造器的 self.client(含保活参数与测试
+        显式端点复用构造器的 self.client(含保活参数与测试
         替身);缓存字典惰性初始化(测试常用 __new__ 造裸对象)。
         """
         default = getattr(self, "client", None)
@@ -407,18 +373,20 @@ class LLMClient:
         chain: list = []
         p = active.get("primary")
         if p:
-            chain.append(("primary", self._cfg_with(base,
-                base_url=p["base_url"],
-                api_key=p.get("api_key") or "",
-                model=p.get("model") or base.model,
-            ), p.get("price_in"), p.get("price_out")))
-            f = active.get("fallback")
-            if f:
-                chain.append(("fallback", self._cfg_with(base,
-                    base_url=f["base_url"],
-                    api_key=f.get("api_key") or "",
-                    model=f.get("model") or base.model,
-                ), f.get("price_in"), f.get("price_out")))
+            for role in ("primary", "fallback"):
+                provider = active.get(role)
+                if not provider:
+                    continue
+                for field in ("base_url", "model"):
+                    if role == "primary" and not (provider.get(field) or "").strip():
+                        raise RuntimeError(
+                            f"LLM 供应商 {role} 缺少 {field}:"
+                            "请在管理端「插件管理 → 模型供应商」补全配置")
+                chain.append((role, self._cfg_with(base,
+                    base_url=(provider.get("base_url") or "").strip(),
+                    api_key=provider.get("api_key") or "",
+                    model=(provider.get("model") or "").strip(),
+                ), provider.get("price_in"), provider.get("price_out")))
         return chain
 
     # 网关 max_tokens 上限自描述(如 dashscope: Range of max_tokens
@@ -476,20 +444,19 @@ class LLMClient:
                 "维护主端点(base_url/api_key/model)并保存,保存即热生效;"
                 "配置完成前的对话与抽取请求无法处理。")
         last_exc: Optional[Exception] = None
+        requested_kwargs = create_kwargs
         for idx, (role, cfg, price_in, price_out) in enumerate(chain):
+            # 存量无效备用只在真正切换时失败,不阻断健康主端点。
+            for field in ("base_url", "model"):
+                if not (getattr(cfg, field, "") or "").strip():
+                    raise RuntimeError(
+                        f"LLM 供应商 {role} 缺少 {field}:"
+                        "请在管理端「插件管理 → 模型供应商」补全配置")
             client = self._client_for(cfg)
             endpoint = f"{cfg.base_url}/chat/completions"
-            # 模型随端点:调用方未显式指定模型时,用该角色自己的 model
-            # (供应商页配置)——页面配置的模型才是该端点真正服务的模型,
-            # 构造器默认(config.model,env)只对未填 model 的角色兜底。
-            # 避免"DB 端点 + env 删除后的默认模型名"组合打到网关不
-            # 存在的通道(线上 503 model_not_found 实证)。
-            # 显式 model 传参(批量抽取换便宜模型)仍然最高优先。
-            role_model = (getattr(cfg, "model", "") or "").strip()
-            if not (create_kwargs.get("model") or "").strip():
-                # 显式传参 > 角色模型(供应商页配置)> 构造器兜底
-                create_kwargs = {**create_kwargs,
-                                  "model": role_model or self.config.model}
+            # 每次从原始参数派生,不能把主模型或其方言参数带到备用端点。
+            create_kwargs = {**requested_kwargs,
+                             "model": requested_kwargs.get("model") or cfg.model}
             # qwen3 关思考随最终模型判定(模型可能到端点解析才确定,
             # 调用方基于显式传参的预注入与此处幂等——同值覆盖无害)
             create_kwargs.update(self._thinking_off_kwargs(
@@ -555,8 +522,15 @@ class LLMClient:
         连接池里的 socket 要等 GC 才释放。关闭失败只记 warning，
         不阻断其余组件的清理（@PreDestroy 链式调用不应互相影响）。
         """
-        client = getattr(self, "client", None)
-        if client is not None:
+        clients = list(getattr(self, "_endpoint_clients", {}).values())
+        default = getattr(self, "client", None)
+        if default is not None:
+            clients.append(default)
+        closed = set()
+        for client in clients:
+            if id(client) in closed:
+                continue
+            closed.add(id(client))
             try:
                 client.close()
             except Exception as e:
@@ -658,9 +632,15 @@ class LLMClient:
             try:
                 sig = json.dumps([[m.get("role"), m.get("content")]
                                   for m in messages], ensure_ascii=False)
+                chain = self._resolve_endpoints()
+                # DB 热切/停用立即影响缓存,不以构造期 config.model 代替。
+                provider_key = json.dumps([
+                    [role, cfg.base_url, cfg.api_key, cfg.model]
+                    for role, cfg, _, _ in chain], ensure_ascii=False)
                 cache_key = embed_cache_key(
-                    model or self.config.model,
-                    "chat|t{}|m{}".format(
+                    provider_key,
+                    "chat|model{}|t{}|m{}".format(
+                        model or "",
                         self.config.temperature if temperature is None
                         else temperature,
                         # max_tokens 入键:截断口径不同的回复不得互相复用
@@ -692,7 +672,7 @@ class LLMClient:
         _rate_wait = get_rate_limiter().acquire(_est)
         # 单次调用级模型覆盖(None = 配置默认)
         # 未显式指定时留 None:由 _completion_with_fallback 按端点
-        # 解析模型(供应商页配置;未填的角色回落构造器默认)
+        # 解析模型(供应商页配置,缺模型直接报错)
         use_model = model or None
         # 构造请求参数快照（用于日志）：参数为 None 时回落到配置默认值
         # 类比 Java：Optional.ofNullable(temperature).orElse(config.temperature)
@@ -884,7 +864,7 @@ class LLMClient:
         _rate_wait = get_rate_limiter().acquire(_est)
         # 单次调用级模型覆盖(None = 配置默认)
         # 未显式指定时留 None:由 _completion_with_fallback 按端点
-        # 解析模型(供应商页配置;未填的角色回落构造器默认)
+        # 解析模型(供应商页配置,缺模型直接报错)
         use_model = model or None
         request_data = {
             "model": use_model,
@@ -989,39 +969,14 @@ class LLMClient:
         stage: Optional[str] = None,
         mode: str = "document",
     ) -> List[List[float]]:
-        """批量向量化;后端由 EMBEDDING_BACKEND 决定(同步)。
+        """固定本地 bge-m3 编码;document/query 独立缓存并保留观测。
 
-        - local(默认): 进程内 onnx 推理(bge-m3,见 local_embeddings),
-          零外部依赖零费用;``LLM_EMBED_MODEL`` 默认 bge-m3
-        - api: OpenAI 兼容 /v1/embeddings,模型由 ``LLM_EMBED_MODEL``
-          指定;未配置直接抛 RuntimeError,由调用方降级(纯图谱模式)
-
-        mode 只影响 local 后端(bge-m3 检索前缀,非对称检索对):
-        - ``document``(默认): 直传编码——入库/文档侧,现行为不变
-        - ``query``: 查询侧加官方 instruction 前缀(encode_queries)
-        - api 后端无官方查询/文档区分,mode 忽略(直传,debug 留痕)
-
-        注意:两种后端维度一致(云端 1024 / 本地 1024),切换后端
-        无需重建知识库向量;但 bge-m3 与 text-embedding-v3
-        语义空间不同,检索结果可能有差异,建议固定一种后端使用。
-
-        Returns:
-            与输入等长等序的向量列表。
-
-        Failure:
-            ValueError: mode 非 document/query。
-            RuntimeError: 模型未配置/本地初始化失败。
-            SDK 原生异常: 网络/鉴权/模型不存在(调用方决定重试或降级)。
+        非 document/query 的 mode 抛 ValueError,本地模型失败原样上抛。
         """
         if mode not in ("document", "query"):
             raise ValueError(f"未知 embeddings mode: {mode}")
-        from sdk.embedding import embed_backend, embed_cache_label
-        backend = embed_backend()
+        from sdk.embedding import embed_cache_label
         texts = [str(t) for t in texts]
-        # 缓存键 model 口径 = 该后端实际出站模型(sdk/embedding 单一源):
-        # api 用 LLM_EMBED_MODEL(切模型键即变,旧向量不串味);local 用
-        # 常量标签——不用 config.model,那是 chat 模型名,切 chat 模型
-        # 不应冲掉嵌入缓存
         key_model = embed_cache_label()
         cache_key = embed_cache_key(key_model, mode, texts)
         hit = self._embed_cache.get(cache_key)
@@ -1036,15 +991,8 @@ class LLMClient:
                 response_data={"count": len(hit)},
                 status_code=None, duration_ms=0, conv_id=conv_id)
             return hit
-        if backend == "local":
-            result = self._embeddings_local(
-                texts, conv_id=conv_id, stage=stage, query=(mode == "query"))
-        else:
-            if mode == "query":
-                logger.debug(
-                    "embeddings mode=query ignored on api backend "
-                    f"(stage={stage}): OpenAI 兼容端点无查询/文档区分,直传")
-            result = self._embeddings_api(texts, conv_id=conv_id, stage=stage)
+        result = self._embeddings_local(
+            texts, conv_id=conv_id, stage=stage, query=(mode == "query"))
         # 只有成功返回才回填(异常路径不缓存坏值)
         self._embed_cache.put(cache_key, result)
         return result
@@ -1056,10 +1004,9 @@ class LLMClient:
         stage: Optional[str] = None,
         query: bool = False,
     ) -> List[List[float]]:
-        """本地 onnx 推理后端(观测与 api 后端同规格:耗时/条数入调用日志)。
+        """本地 onnx 推理,耗时/条数与编码 mode 进入调用日志。
 
-        query=True 走 encode_queries(查询侧加 bge-m3 检索前缀),
-        观测 request_data 记 mode 字段区分两侧。
+        query=True 走 encode_queries,两侧均直接编码原文。
         """
         from llm.local_embeddings import get_local_embedder
         texts = [str(t) for t in texts]
@@ -1097,59 +1044,6 @@ class LLMClient:
             )
             raise
 
-    def _embeddings_api(
-        self,
-        texts: List[str],
-        conv_id: Optional[str] = None,
-        stage: Optional[str] = None,
-    ) -> List[List[float]]:
-        """云端 API 后端(OpenAI 兼容 /v1/embeddings)。"""
-        from sdk.embedding import embed_model_or_raise
-        model = embed_model_or_raise()
-        texts = [str(t) for t in texts]
-        start = time.monotonic()
-        error = None
-        vectors: List[List[float]] = []
-        # 全局限速(嵌入调用也占 TPM 配额;RPM 已在 chat 出口收敛)
-        _est = estimate_tokens(" ".join(texts))
-        _rate_wait = get_rate_limiter().acquire(_est)
-        try:
-            resp = self.client.embeddings.create(model=model, input=texts)
-            # 按 index 归位(SDK 不保证返回有序)
-            ordered = sorted(resp.data, key=lambda d: d.index)
-            vectors = [list(item.embedding) for item in ordered]
-            if len(vectors) != len(texts):
-                raise ValueError(f"embeddings 数量不符: {len(vectors)} != {len(texts)}")
-            get_rate_limiter().on_success(
-                # embeddings 响应多数网关带 usage;没有就只清退避不校准
-                usage=getattr(resp, "usage", None) and {
-                    "prompt_tokens": getattr(resp.usage, "prompt_tokens", 0) or 0,
-                    "completion_tokens": 0,
-                    "total_tokens": getattr(resp.usage, "total_tokens", 0) or 0,
-                } or None,
-                est_tokens=_est)
-            return vectors
-        except Exception as e:
-            error = str(e)
-            if is_rate_limit_error(e):
-                get_rate_limiter().on_rate_limited()
-            raise
-        finally:
-            # 与 chat 同款观测:入 call_logs(文本量大时只记条数/字符量,不记全文)
-            self._log_call(
-                endpoint=f"embeddings:{model}",
-                request_data={
-                    "stage": stage or "embeddings",
-                    "count": len(texts),
-                    "chars": sum(len(t) for t in texts),
-                },
-                response_data={"dim": len(vectors[0]) if vectors else None, "count": len(vectors)},
-                status_code=None if not error else 500,
-                duration_ms=int((time.monotonic() - start) * 1000),
-                error_message=error,
-                conv_id=conv_id,
-            )
-
     # ── rerank(外部 API,Cohere/Jina 协议) ─────────────────────
 
     _rerank_client: Optional["httpx.Client"] = None
@@ -1167,7 +1061,7 @@ class LLMClient:
         POST {base_url}/rerank {model, query, documents, top_n}
         → {"results": [{"index", "relevance_score"}, ...] 按分数降序}
 
-        配置(env,与 embeddings 的 LLM_EMBED_MODEL 同款按调用读取):
+        配置(env,按调用读取):
             RERANK_BASE_URL / RERANK_MODEL / RERANK_API_KEY
             RERANK_TIMEOUT(默认 3——排序增强不值得长等,超时即降级)
         未配置抛 RuntimeError;失败抛原异常。降级决策归调用方

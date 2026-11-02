@@ -13,8 +13,11 @@ import os
 
 def test_chat_writes_trace_points_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setenv("PACK_STATE_PATH", str(tmp_path / "p.json"))
-    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:9/v1")  # 不可达:走 fallback
-    monkeypatch.setenv("LLM_API_KEY", "x")
+    from services.llm_providers import load_providers, save_providers
+    providers = load_providers() or {}
+    providers["primary"] = {"base_url": "http://127.0.0.1:9/v1", "api_key": "x",
+                            "model": "trace-test"}
+    save_providers(providers)
 
     # conftest 已把 backend/src 放进 sys.path，直接 import main 即可；
     # 此前 sys.path.insert(0, ".") 会把 cwd（backend/ 根目录）也放进

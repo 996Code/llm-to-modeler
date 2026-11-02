@@ -25,15 +25,7 @@ def client(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fresh_pack(monkeypatch):
-    """每测试清 metrology 单例与缓存(表由 conftest 清)。
-
-    根 .env 的 METROLOGY_PROGRESS_DATASOURCE_ID 会随 main.py 的
-    load_dotenv 进入进程环境,全量跑时把 legacy progress 的数据源
-    解析成真实 id→强校验 None→blocked,单跑(不加载 .env)才过——
-    在此显式清掉,根治"全量偶发"。
-    """
-    monkeypatch.delenv("METROLOGY_PROGRESS_DATASOURCE_ID", raising=False)
-    monkeypatch.delenv("METROLOGY_INSTRUMENT_DATASOURCE_ID", raising=False)
+    """每测试清 metrology 单例与缓存(表由 conftest 清)。"""
     from domains.metrology_assistant import runtime
     runtime.reset_runtime_cache()
     yield
@@ -285,11 +277,7 @@ def test_dry_run_draft_config_diff(client, monkeypatch, legacy_demo_config):
 
 
 def test_dry_run_execute_prefers_explicit_datasource_id(client, monkeypatch, legacy_demo_config):
-    """真实执行:显式 datasource_id 优先于 env 缺省(能力导入的绑定形态)。
-
-    env 未配置时,显式绑定仍能执行——env 只是部署层缺省,不是唯一来源
-    (此前 dry-run 只读 env,导入场景勾真实执行必报"数据源未配置")。
-    """
+    """联调预演按显式 datasource_id 执行，绑定必须属于同一 MCP 服务。"""
     from domains.chatbi import controlled as bi_controlled
 
     calls = {}
@@ -300,7 +288,6 @@ def test_dry_run_execute_prefers_explicit_datasource_id(client, monkeypatch, leg
                                               data={"columns": [], "rows": []})
 
     monkeypatch.setattr(bi_controlled, "execute_controlled", _fake_exec)
-    monkeypatch.delenv("METROLOGY_PROGRESS_DATASOURCE_ID", raising=False)
 
     # 显式绑定必须是真实存在且属于该服务的 MCP 数据源——生产按
     # host/固定工具强校验,假 ID 会被正确拒绝(不再"任选一个源")

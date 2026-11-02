@@ -132,10 +132,10 @@ class SemanticModelContent(BaseModel):
 class DataSourceInfo:
     """数据源连接信息(datasource_to_url/引擎/健康检查/扫描的统一入参)。
 
-    password 以 Fernet 密文存储(security.encrypt_password),运行时解密使用;
+    password 直接存储,仅供内部连接使用,不进入 repr 或管理 API 响应。
     db_type: mysql | postgresql | mcp。
     mcp 映射: host=MCP server code, database=tool_name(可空), port=0,
-    username/password 为空串(encrypted_password 直存空串,不经 Fernet)。
+    username/password 为空串。
     """
     id: str = ""
     name: str = ""
@@ -144,8 +144,7 @@ class DataSourceInfo:
     port: int = 5432
     database: str = ""
     username: str = ""
-    password_plain: str = ""       # 运行时明文(解密后);序列化/落库前必须清空
-    encrypted_password: str = ""
+    password: str = field(default="", repr=False)
     is_active: bool = True
     scan_status: str = "idle"      # idle/scanning/done/failed
     scan_progress: int = 0
@@ -159,7 +158,7 @@ class DataSourceInfo:
         """按 db_type 产出 psycopg3 / pymysql 的连接参数。"""
         return {
             "host": self.host, "port": self.port, "user": self.username,
-            "password": self.password_plain, "database": self.database,
+            "password": self.password, "database": self.database,
         }
 
 
@@ -174,7 +173,7 @@ CHATBI_DDL = [
         port INTEGER NOT NULL,
         database TEXT NOT NULL,
         username TEXT NOT NULL,
-        encrypted_password TEXT NOT NULL,
+        password TEXT NOT NULL DEFAULT '',
         is_active INTEGER NOT NULL DEFAULT 1,
         scan_status TEXT NOT NULL DEFAULT 'idle',
         scan_progress INTEGER NOT NULL DEFAULT 0,

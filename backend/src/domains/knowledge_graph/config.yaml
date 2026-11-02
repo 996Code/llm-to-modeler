@@ -26,22 +26,12 @@ admin:
   settings_side_effects:
     - {type: rate_limit, rpm: llm_rpm_limit, tpm: llm_tpm_limit}
 
-# 基础设施依赖:字段引用 settings.schema.yaml 的 key(解析链 设置页 > env > 默认)。
-# 未配置 → 插件中心"依赖未配置"不可加载;配好 env 或设置页补配后"重新检测"热加载。
+# 基础设施依赖:图与向量均存平台 PG(图存储=knowledge_graph schema,
+# 向量=pgvector;走平台 DATABASE_URL),探针用平台内置
+# kind: pg_vector(实现下沉 SDK,分层治理 P0-1——换后端插件零改)。
 dependencies:
-  neo4j:
-    required: true
-    fields:
-      - neo4j_uri
-      - neo4j_user
-      - neo4j_password
-    probe:
-      module: domains.knowledge_graph.probes
-      fn: neo4j
-  # 向量后端 pg(pgvector,走平台 DATABASE_URL);探针用平台内置
-  # kind: pg_vector(实现下沉 SDK,分层治理 P0-1——换向量后端插件零改)。
   pg_vector:
-    required: false
+    required: true
     probe:
       kind: pg_vector
 

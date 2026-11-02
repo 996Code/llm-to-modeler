@@ -1642,9 +1642,7 @@ class TestCrossWriterConsistency:
 
     def _seed_with_ds_row(self, pg_engine):
         """seed 语义层 + 数据源行(FOR UPDATE 需要真实行)."""
-        from domains.chatbi.datasources import init_store, configure_encryption
-        from cryptography.fernet import Fernet
-        configure_encryption(Fernet.generate_key().decode())
+        from domains.chatbi.datasources import init_store
         init_store(pg_engine)
         from domains.chatbi import datasources
         info = datasources.create_datasource(

@@ -39,7 +39,7 @@ class QueryStatsTool(Tool):
         sess = ctx.session_state
         ds_id = sess.get("datasource_id") if sess else None
         try:
-            ds = datasources.resolve_datasource(db, ds_id, decrypt=False)
+            ds = datasources.resolve_datasource(db, ds_id)
         except ValueError as e:
             return ToolResult(artifact_type="data",
                               error_for_llm=str(e),

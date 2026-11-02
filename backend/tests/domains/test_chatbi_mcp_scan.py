@@ -140,7 +140,7 @@ def test_task_scan_mcp_branch(db, monkeypatch):
     assert content is not None
     assert [m.name for m in content.models] == ["query_orders", "query_gmv"]
     # 终态: done + 进度 100
-    info = get_datasource(db, ds_id, decrypt=True)
+    info = get_datasource(db, ds_id)
     assert info.scan_status == "done"
     assert info.scan_progress == 100
     # 进度回写确实发生(复用既有机制)
@@ -174,7 +174,7 @@ def test_task_scan_mcp_failure_marks_failed(db, monkeypatch):
     monkeypatch.setattr(mcp_client, "list_tools", boom)
     with pytest.raises(RuntimeError):
         tasks._task_scan_datasource(_Handle(info.id), None)
-    got = get_datasource(db, info.id, decrypt=True)
+    got = get_datasource(db, info.id)
     assert got.scan_status == "failed"
 
 

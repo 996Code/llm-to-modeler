@@ -2,7 +2,7 @@
 
 【模块定位】
 图/向量存储下沉 SDK 后,多个插件(knowledge_graph、未来的 NL2BI、
-RAG、记忆库…)共用同一套 Neo4j/PG 实例。隔离从"巧合"(恰好
+RAG、记忆库…)共用同一套 PG 实例(图存储/向量均在其中)。隔离从"巧合"(恰好
 kb_id 是 UUID、恰好 collection 叫 kg_*)升级为"机制":
 
   1. 前缀登记:每个使用 SDK 存储的插件声明一个全局唯一前缀,登记进
@@ -40,7 +40,7 @@ def register_prefix(prefix: str, owner: str) -> None:
 
     Args:
         prefix: 前缀标识(建议短小、全小写,如 "kg" / "bi" / "rag")。
-            它会出现在 Neo4j 约束/索引名与向量表名里,
+            它会出现在图存储约束/索引名与向量表名里,
             是该插件全部存储对象的命名空间边界。
         owner: 声明方标识(约定传 pack 名,报错信息可定位)。
 

@@ -25,7 +25,7 @@ from domains.chatbi.tools.ask_data import AskDataTool
 def _info(code="srv_a", database=""):
     return DataSourceInfo(id="ds1", name="外部", db_type="mcp",
                           host=code, port=0, database=database,
-                          username="", password_plain="")
+                          username="", password="")
 
 
 # ── execute_mcp_tool: 结果形状映射 ─────────────────────────────

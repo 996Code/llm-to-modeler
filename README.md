@@ -3,7 +3,7 @@
 **LLM 驱动的多插件智能助手引擎** — LangGraph StateGraph 编排意图识别、工具执行与追问恢复，自然语言驱动多种业务能力（表单配置、知识图谱问答、智能问数、计量智能客服等），Engine 层零领域知识。
 
 > 📖 **新入手必读**：[doc/README.md](doc/README.md) —— 全项目文档总目录（书的目录指南）。
-> 🔧 **技术细节**：[doc/technical-reference.md](doc/technical-reference.md) —— 架构大图 / LangGraph 流程 / 插件协议与全能力表 / 环境变量全集 / 目录树。
+> 🔧 **技术细节**：[doc/technical-reference.md](doc/technical-reference.md) —— 架构大图 / LangGraph 流程 / 插件协议与全能力表 / 当前配置入口 / 目录树。
 > `AGENTS.md` —— AI agent / 开发者操作手册入口（规约/测试/发布/部署索引）。
 
 ## 界面一览
@@ -43,8 +43,8 @@
 |----|------|
 | 前端 | Vue 3 + TypeScript + Vite + Ant Design Vue + Pinia + AntV G6（图谱可视化） |
 | 后端 | Python 3.12 + FastAPI + LangGraph StateGraph |
-| LLM | OpenAI 兼容接口（Qwen3 / GPT / 任意兼容模型；embedding 同协议） |
-| 存储 | PostgreSQL（对话/审计/任务/checkpoint + 向量 pgvector，必填）+ Neo4j（图谱，可选） |
+| LLM | 管理端配置的 OpenAI 兼容供应商（Qwen3 / GPT / 任意兼容模型）；向量编码固定本地 bge-m3（1024 维） |
+| 存储 | PostgreSQL（对话/审计/任务/checkpoint + 向量 pgvector + 图谱 knowledge_graph schema，必填） |
 | 上游 | AssetClient 抽象（HTTP 适配；地址请求级解析：宿主 services 表按请求下发） |
 
 ## 核心架构：三层六边形
@@ -93,25 +93,23 @@ Adapters(HttpAssetClient) → 上游业务 API / LLM 推理服务
 
 ## 快速开始
 
-**环境要求**：Python 3.12+、Node.js 20+。完整环境变量说明见 `.env.example` 与
-[技术参考 §六](doc/technical-reference.md)。
+**环境要求**：Python 3.12+、Node.js 20+、PostgreSQL + pgvector（图谱与向量均在平台 PG，无独立图数据库）。
+环境变量以 [.env.example](.env.example) 为准。LLM 端点、密钥和主备模型在
+管理端「插件 → 模型供应商」配置，未配置时 LLM 调用明确报错。
 
 ```env
-# .env 关键项（必填）
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_API_KEY=sk-xxxx
-LLM_MODEL=qwen-max
-HOST_PORT=19090                 # 应用入口 http://IP:19090/ai-modeler/
-NEO4J_PASSWORD=change-me        # compose 内 Neo4j（图谱插件依赖）
+# 裸机开发：必填，不能与 pytest 专用测试库共用
+DATABASE_URL=postgresql://llm:密码@localhost:5432/llm_modeler
 # 可选：ADMIN_TOKEN（公网部署必须配置，否则管理端开放访问）
 ```
 
-```bash
-# 后端
-cd backend && source venv/bin/activate
-uvicorn src.main:app --reload --host 0.0.0.0 --port 18080
+后端优先加载根目录 `.env`，仅在根文件不存在时加载 `backend/.env`；进程环境变量优先。
 
-# 前端
+```bash
+# 在仓库根目录启动后端（使用 backend/.venv）
+bash start_dev.sh --backend-only
+
+# 另开终端启动前端
 cd frontend && npm install && npm run dev
 ```
 
@@ -123,9 +121,9 @@ cd frontend && npm install && npm run dev
 | http://localhost:18080/docs | API 文档（Swagger） |
 | http://localhost:18080/health | 健康检查（`/api/health` 为嵌入探测别名） |
 
-Docker 一键部署：`cp .env.example .env && vim .env && ./deploy.sh`（详见
-[doc/agents/deploy-99-22.md](doc/agents/deploy-99-22.md)）。数据落盘 `./data/`
-（PG 含向量表 / 上传文件 / Neo4j / embedding 模型跨版本复用）。
+Compose 完整栈说明见 [deploy/single/README.md](deploy/single/README.md)，
+数据落盘 `./data/`（PG 数据卷含向量/图谱表 / 上传文件 / embedding 模型跨版本复用）。
+日常验证使用上面的本地开发栈；99.22 已停更，历史部署手册仅作存档。
 
 ## API 一览
 
@@ -160,10 +158,10 @@ Docker 一键部署：`cp .env.example .env && vim .env && ./deploy.sh`（详见
 
 | 文档 | 内容 |
 |---|---|
-| [doc/technical-reference.md](doc/technical-reference.md) | 架构大图 / LangGraph 流程与 GraphState / Tool 协议 / 插件全能力表 / 环境变量全集 / 目录树 / 设计亮点 |
+| [doc/technical-reference.md](doc/technical-reference.md) | 架构大图 / LangGraph 流程与 GraphState / Tool 协议 / 插件全能力表 / 当前配置入口 / 目录树 / 设计亮点 |
 | [doc/README.md](doc/README.md) | 全项目文档总目录 |
 | [doc/插件开发与嵌入指南.md](doc/插件开发与嵌入指南.md) | 从零写一个插件 + 嵌入契约协议全文 |
 | [backend/src/domains/ARCHITECTURE.md](backend/src/domains/ARCHITECTURE.md) | pack 全部钩子 + SDK 存储设施契约 |
 | [doc/嵌入模式总体设计.md](doc/嵌入模式总体设计.md) | 嵌入模式总体设计 |
-| [doc/agents/deploy-99-22.md](doc/agents/deploy-99-22.md) | 部署手册（守卫/内存红线/排查） |
+| [doc/agents/deploy-99-22.md](doc/agents/deploy-99-22.md) | 历史部署存档（99.22 已停更，不用于日常操作） |
 | [doc/test-evidence/](doc/test-evidence/) | 界面截图库（按日期归档，线上实测） |

@@ -9,15 +9,14 @@
 
 【manifest 声明格式】(dependencies 段,块风格)
     dependencies:
-      neo4j:
+      vector_db:                     # 设施名自定义(展示用)
         required: true
         fields:                      # 引用 settings.schema.yaml 的字段 key
-          - neo4j_uri                #   (解析链:设置页保存值 > env > 默认)
-          - neo4j_user
-          - neo4j_password
+          - vector_uri                #   (解析链:设置页保存值 > env > 默认)
+          - vector_api_key
         probe:                       # 可选连通性探针(配置齐全才执行)
-          module: domains.knowledge_graph.probes
-          fn: neo4j
+          module: domains.some_pack.probes
+          fn: vector_db
       legacy_pack_dep:               # 无 settings schema 的 pack 可直接声明 env 名
         required: true
         env:
@@ -27,7 +26,7 @@
         required: true               #    集合,管理侧=pack_state;平台零插件名)
 
 【铁律:平台零领域知识】
-本模块不认识 neo4j/pgvector/任何具体设施。探针有两种表达:
+本模块不认识 pg 图存储/pgvector/任何具体设施。探针有两种表达:
   1. module + fn:pack 自己提供的探针函数(懒加载——只在配置齐全后 import,
      签名 fn(resolved_settings: dict) -> None,异常即失败);
   2. kind: http + url_field:通用 HTTP GET 探针(2xx 即通过)。
@@ -149,12 +148,17 @@ def evaluate_pack_dependency(
 
     fields = _dependency_fields(dep)
     if not fields:
-        # 声明了依赖但既无 fields 也无 env:视为声明不完整,按缺失处理
-        return {
-            "status": STATUS_MISSING,
-            "missing": [f"{dep_name}(声明缺少 fields/env)"],
-            "detail": "依赖声明不完整",
-        }
+        if dep.get("probe"):
+            # 平台级依赖(如 pg_vector):无自有配置字段,配置走平台
+            # DATABASE_URL——跳过字段存在性检查,直接进入探针
+            fields = []
+        else:
+            # 声明了依赖但既无 fields 也无 env 也无探针:声明不完整
+            return {
+                "status": STATUS_MISSING,
+                "missing": [f"{dep_name}(声明缺少 fields/env)"],
+                "detail": "依赖声明不完整",
+            }
 
     missing_labels: List[str] = []
     for f in fields:

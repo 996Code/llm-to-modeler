@@ -69,7 +69,7 @@
 │  │  ├── observability.py 观测常量+log_pack_call 通用打点        │   │
 │  │  │                                                            │   │
 │  │  ├── scope_registry.py  ★ 存储命名空间隔离(前缀登记+scope签发)│   │
-│  │  ├── graph_store.py     ★ Neo4j 图存储(GraphStore Protocol)  │   │
+│  │  ├── graph_store.py     ★ 图存储(PG,GraphStore Protocol)    │   │
 │  │  ├── vector_store.py    ★ 向量存储工厂(VectorStore Protocol)│   │
 │  │  └── doc_parser.py      ★ md/txt/pdf/docx 解析+切块          │   │
 │  └──────────────────────────┬───────────────────────────────────┘   │
@@ -288,21 +288,21 @@ prompt——新增插件后"我能做什么"自动更新，无需修改 Engine �
 
 ### 4.3 knowledge_graph — 知识图谱 + 向量检索（全能力插件）
 
-自然语言驱动的知识库：上传文档 → LLM 抽取实体/关系入 Neo4j、切块向量化入 PG(pgvector)
+自然语言驱动的知识库：上传文档 → LLM 抽取实体/关系入图存储(PostgreSQL,knowledge_graph schema)、切块向量化入 PG(pgvector)
 → 对话里直接命中（`kb_search`），答案带三元组证据与原文引用。
 
 | 组成 | 说明 |
 |------|------|
 | 导入流水线（后台任务） | 解析→切块→批内并行 LLM 抽取→本体约束→图+向量双写;**断点续跑**（块级 checkpoint）、连续失败熔断、进度心跳;收尾生成**摘要块**（D14:LLM 概括首尾节选 200 字,seq=-1 入索引——"主要讲什么"式抽象问法零召回兜底,重导幂等,失败降级不阻断） |
 | 实体消歧（别名合并） | 同一实体跨块不同写法不再裂成多节点:抽取词表播种既有实体+别名,收尾按"别名指认+类型一致"合并碎片;大库名录先类型分桶+编辑距离预筛,仅可疑对送 LLM。零猜测:正文没指认的永不并。诛仙实测 563 实体收敛至 397 |
-| 长文档导入 | 全局 LLM 限速（RPM/TPM 双令牌桶 + 429 全局退避）;`extraction_model` 可单独给导入换更快的模型;失败自动续跑（5 分钟退避,预算跨续跑链封顶,重启不再卡 retry_scheduled 中间态）;滑窗 ETA 预估 |
-| 混合检索问答 | 意图解析→图谱子图 + 向量双路召回→LLM 组织答案（带证据链）;**父子回带**（向量子段命中后回带所属整章前后各 ~2000 字窗口,句读对齐,单块 5000 字/总预算 24000 字护栏;定位失败降级子段原文不静默丢内容）;**奇偶重排**（D15:lost-in-middle 缓解,高分占头尾,纯顺序变换默认开）;**图谱零命中时全文兜底**（tsvector+GIN,2-gram,默认开,命中标 `source='fulltext'`）;embedding 未配置时自动降级纯图谱 |
+| 长文档导入 | 全局 LLM 限速（RPM/TPM 双令牌桶 + 429 全局退避）;所有抽取使用模型供应商配置;失败自动续跑（5 分钟退避,预算跨续跑链封顶,重启不再卡 retry_scheduled 中间态）;滑窗 ETA 预估 |
+| 混合检索问答 | 意图解析→图谱子图 + 向量双路召回→LLM 组织答案（带证据链）;**父子回带**（向量子段命中后回带所属整章前后各 ~2000 字窗口,句读对齐,单块 5000 字/总预算 24000 字护栏;定位失败降级子段原文不静默丢内容）;**奇偶重排**（D15:lost-in-middle 缓解,高分占头尾,纯顺序变换默认开）;**图谱零命中时全文兜底**（tsvector+GIN,2-gram,默认开,命中标 `source='fulltext'`）;embedding 固定本地 bge-m3；导入阶段模型初始化或向量准备失败会使任务失败，历史模型不兼容时保护性停用该库向量检索 |
 | 块命中统计（D29） | 回答中被引用的块 `hit_count`+1,管理端"N 次引用"列——治理数据;失败静默 |
 | 检索可观测 | 三路库调用入 `call_logs`（graph/vector/fulltext）:逐词种子命中、子图召回量+截断水位、向量逐条相似度、全文兜底明细 |
 | 插件 HTTP API | 知识库树 CRUD/文档上传/导入/图谱查询/增量展开/检索问答/检索测试/建库向导（分段配置+实时预览,与导入同一条切块代码路径）/块编辑（改文本仅重嵌该块向量）/分段重配;`GET /dependency-status` 探针 |
 | 检索数据权限（嵌入模式） | 每库可配置允许检索的**用户/角色**;不配置=全开放。生效条件:宿主传入身份（`X-User-Id`）或角色（chat 走 `pack_params`,REST 走 body `roles`）才过滤;显式指定无权库=403 诚实拒绝,跨库自动过滤。管理端各页不受限 |
 | 管理页 | 左右分栏:左侧库树（文件夹/子库层级,建/移/删）+ 右侧四子页——文档导入 / G6 图谱浏览（单击详情/双击展开邻居/悬停高亮一阶邻域）/ 本体设置 / 检索测试 |
-| 依赖门控 | manifest 声明 neo4j/pg_vector 依赖与探针;未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
+| 依赖门控 | manifest 声明 pg_vector 依赖与探针(图与向量均在平台 PG);未配置 → 插件中心"依赖未配置"不可启用,补配后热加载 |
 
 **升级注意**:首次启动建全文索引对存量 kg_chunks 全表重写（一次性,迁移已放开 600s
 超时）;存量文档的全文索引按旧文本计算——重点 PDF 建议重导入。
@@ -388,45 +388,30 @@ RESIZE`，带 requestId 关联与 capabilities 能力协商，配置读写走宿
 嵌入模式下主系统请求头（X-User-Id / X-Tenant-Id / Authorization…）经
 `forward_headers` 全链路透传到上游 API，零侵入身份传递。
 
-## 七、环境变量全集
+## 七、环境配置
 
-```env
-# ── LLM 推理服务 (必填;OpenAI 兼容接口) ──
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-LLM_API_KEY=sk-xxxx
-LLM_MODEL=qwen-max
-LLM_MAX_TOKENS=4096
+完整配置与默认值以 [.env.example](../.env.example) 为准，避免多份全集漂移。
+后端进程环境变量优先；根目录 `.env` 存在时只加载根文件，否则加载 `backend/.env`。
+Compose 从根 `.env` 读取插值参数并注入容器；前端 `VITE_*` 使用 `frontend/.env`
+或构建进程环境，不由后端 `.env` 加载。
 
-# ── Docker 部署(compose 变量) ──
-HOST_PORT=19090                # 应用入口 http://IP:19090/ai-modeler/
-NEO4J_PASSWORD=change-me       # compose 内 Neo4j 密码(必填)
-APP_MEM_LIMIT=8g               # 应用容器内存护栏
+| 类别 | 当前配置入口与约束 |
+|------|------|
+| LLM 端点 / 密钥 / 主备模型 | 管理端「插件 → 模型供应商」，数据库唯一来源，热生效；未配置时调用报错 |
+| LLM 调用行为 | `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TIMEOUT` / `LLM_MAX_RETRIES`；限速为 `LLM_RPM_LIMIT` / `LLM_TPM_LIMIT` |
+| 平台存储与向量 | `DATABASE_URL` 必填；固定 PostgreSQL + pgvector，目标实例需安装 vector 扩展 |
+| 本地向量编码 | 固定 bge-m3 / 1024 维 / ONNX int8；`EMBEDDING_MODEL_DIR` 定位模型，`EMBEDDING_CPU_THREADS` 控制推理线程，`EMBED_CACHE_MAX` 控制缓存 |
+| 首次模型下载 | 未指定已有模型时使用 `EMBEDDING_CACHE_DIR` 与 `HF_ENDPOINT`；Compose 模型由部署脚本准备并挂载 |
+| 图谱 | 图存储=PostgreSQL(knowledge_graph schema),走 `DATABASE_URL`；无独立图数据库配置 |
+| 插件与任务 | `PACKS_ENABLED` 是部署上限，名单内可热启停；`PACKS_CRITICAL` 指定加载失败阻断启动的插件；`TASK_WORKERS` 控制任务池 |
+| 管理与嵌入 | `ADMIN_TOKEN` 未配置为开放访问；配置后支持 Bearer token / `X-Admin-Token`。`CORS_ALLOWED_ORIGINS` 配置宿主来源 |
+| 外置重排 | 独立 `RERANK_BASE_URL` / `RERANK_MODEL` / `RERANK_API_KEY` / `RERANK_TIMEOUT`，与本地向量模型无关 |
+| Compose | `HOST_PORT` / `IMAGE_NAME` / `POSTGRES_*` / 应用及 MCP 资源限制，详见部署指南 |
 
-# ── 知识图谱插件（可选；不配则插件中心显示"依赖未配置"不可启用） ──
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USER=neo4j
+离线 SQLite 迁移必须用 `backend/scripts/migrate_sqlite_to_pg.py --sqlite <文件>`
+显式选择源文件。当前运行与测试均使用 PostgreSQL，测试必须使用独立 `TEST_DATABASE_URL`。
 
-# ── 向量存储（pgvector 单后端;Milvus 已下线移除） ──
-# VECTOR_BACKEND=pg            # 默认且唯一;走 DATABASE_URL 同库,建表自动
-#                              # CREATE EXTENSION vector(目标 PG 需装 pgvector)
-LLM_EMBED_MODEL=bge-m3         # 默认本地 ONNX(零 API 费用)
-EMBEDDING_BACKEND=local        # local(默认)/api(云端 /v1/embeddings)
-
-# ── 管理端口令（可选加固；不配=开放访问，公网部署必须配置） ──
-# ADMIN_TOKEN=
-
-# ── 检索增强（可选；默认全关，管理端插件设置里也有开关） ──
-# RERANK_BASE_URL=             # 外置 rerank API(Cohere/Jina 协议)
-# RERANK_MODEL=                # 两变量都配才生效
-# RERANK_API_KEY=
-# RERANK_TIMEOUT=3             # 超时降级原召回序不阻断
-# EMBED_QUERY_PREFIX=0         # 仅 bge-*-zh-v1.5 系需要;bge-m3 勿开
-# EMBED_CACHE_MAX=4096         # 嵌入缓存 LRU(TTL 24h)
-# LLM_CACHE_ENABLED=0          # chat 结果缓存(对话场景慎开)
-```
-
-健康检查：根路径 `GET /health`（运维/K8s 探针）与 `GET /api/health`（嵌入代理链
-别名）双端点。
+健康探针通过网关访问 `GET /ai-modeler/api/health`。
 
 ### 上游地址请求级解析（重要）
 
@@ -521,8 +506,8 @@ llm-to-modler/
 
 ## 十一、Docker 部署细节
 
-前后端合并一体容器（nginx 伺服静态/反代 + uvicorn 跑 API）+ Neo4j；向量存 PG
-（pgvector 与平台同库同容器）。
+前后端合并一体容器（nginx 伺服静态/反代 + uvicorn 跑 API）；图谱与向量均存 PG
+（pgvector 与 knowledge_graph schema 同库同容器）。
 
 ```bash
 cp .env.example .env && vim .env   # 注意:DATABASE_URL 保持注释(compose 自动拼装)
@@ -530,8 +515,8 @@ cp .env.example .env && vim .env   # 注意:DATABASE_URL 保持注释(compose �
 ./deploy.sh --status | --logs | --down | --rollback
 ```
 
-- 数据落盘：`./data/postgres`（PG 数据含向量表）、`./data/app`（上传文件）、
-  `./data/neo4j`、`./data/models/embedding`（bge-m3 ~543MB 跨版本复用）
+- 数据落盘：`./data/postgres`（PG 数据含向量/图谱表）、`./data/app`（上传文件）、
+  `./data/models/embedding`（bge-m3 ~543MB 跨版本复用）
 - 镜像构建在 docker run 容器内预构建（前端 dist/后端 .deps/nginx deb），
   `docker build` 只做纯 COPY，规避构建容器 DNS 坑
 - **存量升级（SQLite→PG，一次性）**：见 `backend/scripts/migrate_sqlite_to_pg.py`

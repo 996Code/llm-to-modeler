@@ -79,7 +79,7 @@ class TestErrorClassification:
         assert is_fatal_llm_error(RuntimeError("403 forbidden"))
         assert is_fatal_llm_error(RuntimeError("insufficient quota / billing"))
         assert is_fatal_llm_error(RuntimeError("模型余额不足"))
-        # 国产网关"模型不存在"文案:配错 extraction_model 时不空转自动续跑
+        # 网关模型配置错误不应空转自动续跑。
         assert is_fatal_llm_error(RuntimeError("Model not exist!"))
         assert is_fatal_llm_error(RuntimeError("请求的模型不存在"))
         assert is_fatal_llm_error(RuntimeError("invalid model: qwen-pluss"))

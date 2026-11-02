@@ -1,7 +1,7 @@
 """mcp 类型数据源: CRUD 全链路 + 密码空串兼容 + resolve 可选中。
 
 契约: db_type="mcp", host=server code, database=tool_name(可空), port=0,
-username/encrypted_password=空串——密码空串跳过 Fernet 直存(无凭据可加密)。
+username/password=空串——密码空串直存。
 
 跑法: cd backend && .venv/bin/python -m pytest tests/domains/test_chatbi_mcp_datasource.py -v
 """
@@ -33,11 +33,11 @@ def _create_mcp(db, name="外部报表", host="srv_a"):
 def test_create_and_get_mcp(db):
     info = _create_mcp(db)
     assert info.db_type == "mcp" and info.host == "srv_a"
-    got = get_datasource(db, info.id, decrypt=True)
+    got = get_datasource(db, info.id)
     assert got.db_type == "mcp" and got.host == "srv_a"
-    # 密码空串直存: 不经 Fernet, 解密往返仍为空串
-    assert got.encrypted_password == ""
-    assert got.password_plain == ""
+    # 密码空串往返仍为空串
+    assert got.password == ""
+    assert got.password == ""
 
 
 def test_mcp_requires_server_code(db):
@@ -58,8 +58,8 @@ def test_mcp_in_list_and_resolve(db):
 def test_update_mcp_password_empty_stays_plain(db):
     info = _create_mcp(db)
     assert update_datasource(db, info.id, name="外部报表2", password="")
-    got = get_datasource(db, info.id, decrypt=True)
-    assert got.name == "外部报表2" and got.encrypted_password == ""
+    got = get_datasource(db, info.id)
+    assert got.name == "外部报表2" and got.password == ""
 
 
 def test_update_rejects_unknown_db_type(db):

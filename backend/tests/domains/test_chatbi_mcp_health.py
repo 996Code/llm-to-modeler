@@ -13,7 +13,7 @@ from domains.chatbi.datasources import DataSourceInfo, check_health
 def _mcp_info(code="srv_a"):
     return DataSourceInfo(id="x", name="外部", db_type="mcp",
                           host=code, port=0, database="",
-                          username="", password_plain="")
+                          username="", password="")
 
 
 def test_healthy(monkeypatch):

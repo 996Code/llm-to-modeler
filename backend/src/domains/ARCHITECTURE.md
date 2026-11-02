@@ -383,11 +383,11 @@ fail-fast。每个 pack 的原子完整性要求由自身 manifest 的 `runtime_
 
 配套机制：
 
-- **依赖门控**：manifest `dependencies` 声明外部设施（neo4j/pg_vector）+ 探针,
-  未配置 fail-closed 不可启用;配置解析链 设置页 > env > 默认,补配后热加载
-  （`services/pack_dependency.py`）。pg_vector 探针为平台内置
+- **依赖门控**：manifest `dependencies` 声明外部设施（pg_vector——图与向量均在
+  平台 PG）+ 探针,未配置 fail-closed 不可启用;配置解析链 设置页 > env > 默认,
+  补配后热加载（`services/pack_dependency.py`）。pg_vector 探针为平台内置
   `kind: pg_vector`（实现下沉 `sdk/vector_store.probe_pg_vector`,换向量
-  后端插件零改）;插件自有探针只留领域专属设施（如 KG 的 neo4j）
+  后端插件零改）;领域专属设施才自写探针模块
 - **检索可观测**：插件对图/向量库的每次调用自行写 `call_logs`
   （call_type=graph/vector,与 llm/upstream 同表同视图）——请求含参数
   （种子词/hops/topK）,响应含结果与质量指标（逐词命中/召回量/截断水位/
@@ -496,7 +496,7 @@ RAG、记忆库…)复用。**SDK 零领域知识**:不认识 LLM/embedding/知�
 | 模块 | 能力 | 关键约束 |
 |---|---|---|
 | `sdk/scope_registry.py` | 前缀登记 + scope 签发(隔离机制核心) | 撞前缀装配期 fail-fast |
-| `sdk/graph_store.py` | Neo4j 图存储(`GraphStore` Protocol) | 标签/属性/约束名参数化 |
+| `sdk/graph_store.py` | 图存储(PostgreSQL,`GraphStore` Protocol) | 表/列/约束名参数化 |
 | `sdk/vector_store.py` | pgvector 向量存储(`VectorStore` Protocol,实现 `pg_vector_store.py`;Milvus 后端已移除) | collection 前缀参数化;`probe_pg_vector`/`backend_display_name` 供依赖门控与健康键复用 |
 | `sdk/doc_parser.py` | md/txt/pdf/docx 解析 + 结构感知切块 | 纯函数,零存储概念 |
 | `sdk/relational_store.py` | pack 关系型存储通道(PG,pack 独立 schema,共享平台连接池) | pack 名白名单校验,DDL 落 pack schema |
@@ -556,7 +556,7 @@ vector.ensure_collection(scope_id, dim=embedding_dim)
 | 关注点 | 机制 | 设置项 |
 |---|---|---|
 | 吞吐 | 批内并行 LLM 调用;批次 = 并行与断点单位 | `llm_concurrency`(默认2)/ `llm_batch_size`(默认4) |
-| 模型分层 | 导入抽取可单独用快/便宜模型,对话与检索链路不受影响;`LLMClient.chat/chat_json` 的 `model` 参数为单次调用级覆盖 | `extraction_model`(留空 = 全局模型) |
+| 供应商模型 | 导入抽取、实体合并、本体归纳与对话均使用平台供应商配置 | 管理端「模型供应商」 |
 | 服务商限额 | 全局 RPM/TPM 双令牌桶(所有 LLM 出站路径统一取配额,含 json_object 直连路径);429 触发全局指数退避(30s→60s→120s→240s,上限600s),成功即清;TPM 估算系数按响应真实 usage EMA 校准——换模型(不同 tokenizer)后自动收敛,无需手动留余量 | `llm_rpm_limit` / `llm_tpm_limit`(0 = 不限) |
 | 失败恢复 | 块级 checkpoint(done = 已入图,续跑只补剩余块);任务级自动续跑(非欠费/鉴权/永久性校验错误,5 分钟退避后重新入队,可取消;预算跨续跑链封顶) | `import_max_auto_retry`(默认3) |
 | 命名一致性 | **实体消歧**:启动把图内存量实体(+别名)播种进抽取词表;收尾按"名字∈对方aliases+同类型"的文本指认并查集合并(关系边真迁移、碎片名保留进别名)——跨块不同写法(张小凡/鬼厉)不裂成多节点 | — |
@@ -571,8 +571,7 @@ vector.ensure_collection(scope_id, dim=embedding_dim)
 
 **经验值**(诛仙 156 万字/276 块实测):qwen3.7-plus + 并行 2 + 批 4,
 全程 6.7 小时(词表带别名后单块 LLM 耗时 60~110s);瓶颈排序:
-抽取模型速度 > 并行度 > 限速配额。给导入换快模型(`extraction_model`)
-是第一优化项。
+模型响应速度 > 并行度 > 限速配额。模型统一在供应商配置中维护。
 
 **关思考(线上性能根因,2026-10-17 实证)**:客户端层对模型名含
 `qwen3` 的出站自动注入 `extra_body={"enable_thinking": False}`

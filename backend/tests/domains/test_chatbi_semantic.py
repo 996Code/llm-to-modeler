@@ -111,12 +111,10 @@ def env():
                  [列注释'订单总金额'], status VARCHAR(20), created_at TIMESTAMP,
                  remark TEXT; 表注释'业务订单表')
     """
-    from cryptography.fernet import Fernet
 
     from sdk.relational_store import PackRelationalDB
-    from domains.chatbi.datasources import configure_encryption, init_store
+    from domains.chatbi.datasources import init_store
 
-    configure_encryption(Fernet.generate_key().decode())
     db = PackRelationalDB("chatbi")
     init_store(db)
     # 业务表务必写 public. 前缀(search_path 定向在 chatbi schema)

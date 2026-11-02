@@ -7,7 +7,7 @@ pack_settings 表。运行时与依赖检测都从这里解析最终值。
 
 【配置优先级】(高 → 低)
   1. 管理端设置页保存值(pack_settings 表)
-  2. 环境变量(字段声明的 env 名,如 NEO4J_URI)
+  2. 环境变量(字段声明的 env 名,如 KG_OCR_ENGINE)
   3. schema 声明的 default
 
 【与依赖检测的关系】
@@ -21,8 +21,8 @@ pack_settings 表。运行时与依赖检测都从这里解析最终值。
       - key: connection
         title: 连接配置
         fields:
-          - {key: neo4j_uri, type: string, label: Neo4j 地址, env: NEO4J_URI, required: true}
-          - {key: neo4j_password, type: secret, label: Neo4j 密码, env: NEO4J_PASSWORD, required: true}
+          - {key: search_url, type: string, label: 搜索服务地址, env: SEARCH_URL, required: true}
+          - {key: search_api_key, type: secret, label: 搜索服务密钥, env: SEARCH_API_KEY, required: true}
           - {key: retrieval_top_k, type: int, label: 检索条数, default: 5, min: 1, max: 50}
           - {key: schema_mode, type: enum, label: 模式, options: [strict, semi_open], default: semi_open}
 
@@ -326,7 +326,7 @@ class PackSettingsReader:
 
     pack.py 装配时构造并注入自己的 client/工具:
         reader = PackSettingsReader("knowledge_graph", settings_store)
-        uri = reader.get("neo4j_uri", "bolt://localhost:7687")
+        top_k = reader.get("vector_top_k", 5)
     """
 
     def __init__(self, pack_name: str, store: Optional[PackSettingsStore] = None):

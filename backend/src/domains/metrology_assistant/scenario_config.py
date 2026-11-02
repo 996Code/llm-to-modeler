@@ -121,6 +121,8 @@ def validate_config(config: Dict[str, Any], strict: bool = False) -> Dict[str, A
         action = cfg.get("action")
         if not isinstance(action, dict) or action.get("kind") not in _ACTION_KINDS:
             fail("action.kind 必须是 kg/chatbi")
+        if "env" in action or "datasource_env" in action:
+            fail("不支持 env/datasource_env，请使用 server/tool 或 datasource_id/tool")
         params = action.get("params", {})
         if not isinstance(params, dict) or any(
                 not isinstance(p, str) or not isinstance(v, str) or not v.strip()
@@ -131,8 +133,8 @@ def validate_config(config: Dict[str, Any], strict: bool = False) -> Dict[str, A
         if action["kind"] == "chatbi":
             if not isinstance(action.get("tool"), str) or not action["tool"].strip():
                 fail("动作缺少 tool")
-            if not any(str(action.get(f) or "").strip() for f in ("server", "datasource_id", "env")):
-                fail("动作需绑定 server/datasource_id 或 env")
+            if not any(str(action.get(f) or "").strip() for f in ("server", "datasource_id")):
+                fail("动作需绑定 server/datasource_id")
             schema = action.get("input_schema")
             if schema is not None:
                 _validate_schema(schema)

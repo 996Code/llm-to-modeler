@@ -1,15 +1,12 @@
 """管理端 API —— 会话审计、调用日志、插件启停的统一入口。
 
 【模块定位】
-本服务的常规 API 无登录态(身份由上游透传 X-User-Id),但"看所有用户的
-对话 / 拉全量调用日志 / 切换插件启停"是运维能力。本路由把这组能力收拢到
-/api/admin 前缀下,访问模式由 ADMIN_TOKEN 决定:
+本路由提供跨用户会话审计、全量调用日志和插件启停能力，
+访问模式由 ADMIN_TOKEN 决定；全局中间件负责应用 API 的认证。
 
-  - 未配置 ADMIN_TOKEN(默认)→ 管理端**开放访问**,无口令直接用
-    (内网/网关后部署的取舍;启动日志会打醒目警告)
-  - 配置 ADMIN_TOKEN → 请求必须带 X-Admin-Token 头且常量时间比对相等
-  - conversations.py 里 user_id == "admin" 的越权分支与管理端同模式:
-    开放模式下 admin 用户名即可跨用户,口令模式下须带合法口令
+  - 未配置 ADMIN_TOKEN 时开放访问，启动日志给出警告。
+  - 配置后接受 auth.html 签发的 Bearer token 或匹配的 X-Admin-Token。
+  - conversations.py 的 admin 跨用户操作使用同一管理权限判断。
 
 【端点清单】
   GET    /api/admin/stats                     → 概览统计(会话/用户/调用)
@@ -50,7 +47,7 @@ logger = logging.getLogger(__name__)
 # ── 鉴权 ──────────────────────────────────────────────────────
 
 def get_admin_token() -> Optional[str]:
-    """读取管理端口令(env ADMIN_TOKEN)。未配置返回 None = 管理端整体关闭。"""
+    """读取管理端口令；未配置返回 None，使用开放访问模式。"""
     raw = os.getenv("ADMIN_TOKEN", "").strip()
     return raw or None
 

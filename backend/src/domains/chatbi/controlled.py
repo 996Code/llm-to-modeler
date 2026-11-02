@@ -260,12 +260,9 @@ def execute_controlled(app_state, datasource_id: str, tool: str,
     if not isinstance(args, dict):
         return _err("invalid_input", "调用参数必须是 JSON 对象", started)
 
-    # 数据源加载失败(PG 不可达等)→ unavailable,不把内部异常原文
-    # (可能含连接串)发给用户(设计 7.5);MCP 传输只用 server code,
-    # 不需要解密密码(decrypt=False)
+    # 数据源加载失败不向用户暴露内部连接信息。
     try:
-        info = datasources.get_datasource(get_pack_db(), datasource_id,
-                                          decrypt=False)
+        info = datasources.get_datasource(get_pack_db(), datasource_id)
     except Exception:
         return _err("unavailable", "数据源服务暂不可用,请稍后重试", started)
     source = {"datasource": (info.name if info else datasource_id), "tool": tool}

@@ -24,7 +24,7 @@ function readyEnv() {
       { name: '检定规程', exists: true, docs: 3, imported: 3 },
     ],
     progress: {
-      env_configured: true,
+      binding_configured: true,
       datasource: { name: '进度查询', active: true, dbType: 'mcp', host: 'metrology', tool: 'query_progress' },
       mcp: { code: 'metrology', status: 'connected', enabled: true, tools: ['query_progress'] },
     },
@@ -41,6 +41,8 @@ type State = {
   dependencies: Ref<Array<{ name: string; ok: boolean; detail: string }>>
   environmentReady: Ref<boolean>
   environmentStatus: Ref<string>
+  frameOpen: Ref<boolean>
+  reopenFrame: () => void
   load: () => Promise<void>
   copyQuestion: (question: string) => Promise<void>
 }
@@ -74,6 +76,7 @@ beforeEach(() => {
   scope = effectScope()
   writeText.mockReset().mockResolvedValue(undefined)
   vi.stubGlobal('navigator', { clipboard: { writeText } })
+  vi.stubGlobal('window', new EventTarget())
 })
 afterEach(() => {
   boundary.unmounting.forEach(callback => callback())
@@ -82,6 +85,22 @@ afterEach(() => {
 })
 
 describe('MetrologyTestApp dependency readiness', () => {
+  it('collapses the embed preview when the child window sends CLOSE', async () => {
+    const state = await loaded()
+    expect(state.frameOpen.value).toBe(true)
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { v: 1, src: 'child', type: 'CLOSE', payload: {} },
+    }))
+    expect(state.frameOpen.value).toBe(false)
+    state.reopenFrame()
+    expect(state.frameOpen.value).toBe(true)
+    expect(boundary.unmounting.length).toBeGreaterThan(0)
+    boundary.unmounting.forEach(fn => fn())
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { v: 1, src: 'child', type: 'CLOSE', payload: {} },
+    }))
+    expect(state.frameOpen.value).toBe(true)
+  })
   it('starts unchecked without requesting before mount', () => {
     const state = setup()
     expect(state.environmentReady.value).toBe(false)
@@ -89,7 +108,8 @@ describe('MetrologyTestApp dependency readiness', () => {
     expect(state.dependencies.value).toEqual([])
     expect(boundary.get).not.toHaveBeenCalled()
     expect(boundary.mounted).toHaveLength(1)
-    expect(boundary.unmounting).toHaveLength(1)
+    // 卸载钩子 = 请求 abort + CLOSE 监听移除(顺序契约:前者在前)
+    expect(boundary.unmounting).toHaveLength(2)
   })
   it('requires both imported KBs, the MCP tool, and a matching active datasource', async () => {
     const state = await loaded()
@@ -165,7 +185,7 @@ describe('MetrologyTestApp dependency readiness', () => {
   })
   it('explains an unconfigured datasource', async () => {
     const data = readyEnv()
-    const state = await loaded({ ...data, progress: { ...data.progress, env_configured: false, datasource: null } })
+    const state = await loaded({ ...data, progress: { ...data.progress, binding_configured: false, datasource: null } })
     expect(state.dependencies.value[3]).toMatchObject({ ok: false, detail: '未配置数据源' })
     expect(state.environmentReady.value).toBe(false)
   })

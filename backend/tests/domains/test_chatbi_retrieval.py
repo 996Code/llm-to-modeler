@@ -210,7 +210,7 @@ def _make_ds(db, ds_id, name):
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO chatbi_data_sources (id, name, db_type, host, port, "
-            "database, username, encrypted_password, is_active, created_at, "
+            "database, username, password, is_active, created_at, "
             "updated_at) VALUES (?, ?, 'postgresql', 'h', 5432, 'd', 'u', 'x', "
             "1, ?, ?)",
             (ds_id, name, now, now),

@@ -87,6 +87,16 @@ def _init_pack_schema(db: PackRelationalDB) -> None:
         # 基础 DDL(全部 CREATE ... IF NOT EXISTS, 幂等)
         for stmt in ddl:
             conn.execute(stmt)
+        conn.execute("ALTER TABLE chatbi_data_sources ADD COLUMN IF NOT EXISTS "
+                     "password TEXT NOT NULL DEFAULT ''")
+        # Preserve legacy data without reading it; new inserts use only password.
+        legacy = conn.execute(
+            "SELECT 1 FROM pg_attribute WHERE attrelid = "
+            "to_regclass('chatbi_data_sources') AND attname = 'encrypted_password' "
+            "AND attnum > 0 AND NOT attisdropped").fetchone()
+        if legacy:
+            conn.execute("ALTER TABLE chatbi_data_sources ALTER COLUMN "
+                         "encrypted_password SET DEFAULT ''")
         # 十一审 7.1 P0: 先建表再做存量迁移(此前迁移在建表前,
         # 全新库查不存在的表直接 UndefinedTable 崩启动)
         _migrate_single_current_on_conn(conn)

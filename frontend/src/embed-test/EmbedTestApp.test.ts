@@ -6,6 +6,7 @@ const boundary = vi.hoisted(() => ({
   get: vi.fn(),
   authorize: vi.fn(),
   mounted: [] as Array<() => Promise<void>>,
+  unmounting: [] as Array<() => void>,
 }))
 vi.mock('axios', () => ({ default: { create: () => ({
   get: boundary.get,
@@ -15,6 +16,7 @@ vi.mock('vue', async importOriginal => ({
   ...await importOriginal<typeof import('vue')>(),
   useSSRContext: () => ({ modules: new Set<string>() }),
   onMounted: (callback: () => Promise<void>) => boundary.mounted.push(callback),
+  onBeforeUnmount: (callback: () => void) => boundary.unmounting.push(callback),
 }))
 
 type KbAcl = { id: string; name: string; users: string[]; roles: string[] }
@@ -27,6 +29,8 @@ type State = {
   dirty: Ref<boolean>
   frameKey: Ref<string>
   frameSrc: Ref<string>
+  frameOpen: Ref<boolean>
+  reopenFrame: () => void
   loading: Ref<boolean>
   error: Ref<string>
   activeTab: Ref<string>
@@ -71,8 +75,10 @@ function deferredRequest() {
 beforeEach(() => {
   vi.resetAllMocks()
   boundary.mounted.length = 0
+  boundary.unmounting.length = 0
   scope = effectScope()
   vi.stubGlobal('localStorage', { getItem: vi.fn(() => 'test-token') })
+  vi.stubGlobal('window', new EventTarget())
 })
 afterEach(() => {
   scope.stop()
@@ -81,6 +87,23 @@ afterEach(() => {
 })
 
 describe('EmbedTestApp identity and ACL preview', () => {
+  it('collapses the embed preview when the child window sends CLOSE', async () => {
+    const state = await loaded()
+    expect(state.frameOpen.value).toBe(true)
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { v: 1, src: 'child', type: 'CLOSE', payload: {} },
+    }))
+    expect(state.frameOpen.value).toBe(false)
+    state.reopenFrame()
+    expect(state.frameOpen.value).toBe(true)
+    // 卸载时移除监听(不泄漏到其他页面)
+    expect(boundary.unmounting.length).toBeGreaterThan(0)
+    boundary.unmounting.forEach(fn => fn())
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { v: 1, src: 'child', type: 'CLOSE', payload: {} },
+    }))
+    expect(state.frameOpen.value).toBe(true)
+  })
   it('starts on the identity tab without loading before mount', () => {
     const state = setup()
     expect(state.activeTab.value).toBe('identity')

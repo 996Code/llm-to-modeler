@@ -9,7 +9,7 @@ from domains.metrology_assistant.capability_plan import (
 from domains.metrology_assistant.legacy_demo import (
     SCENARIOS, PURPOSE_HEADER, ORDER_HEADER, INSTRUMENT_HEADER, PURPOSE_OPTIONS,
     DEMO_ORDER_OPTIONS, STRONG_INSPECTION_PURPOSES, MANDATORY_CHECK_KB, REGULATION_KB,
-    PROGRESS_DATASOURCE_ENV, INSTRUMENT_DATASOURCE_ENV, LegacyCardsMixin,
+    LegacyCardsMixin,
     _format_progress_reply, _format_instrument_reply,
 )
 
@@ -414,7 +414,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         except ValueError as error:
             return ToolResult(error_for_llm=str(error))
         if not ds_id:
-            return ToolResult(error_for_llm=f"{noun}查询数据源未配置: 请绑定数据源或设置环境变量 {action.get('env', '')}")
+            return ToolResult(error_for_llm=f"{noun}查询数据源未配置: 请绑定 datasource_id 或唯一匹配的 server/tool")
         stage('assistant.retrieve', (action.get('stage') or '查询业务数据…').format(**merged))
         try:
             result = execute_controlled(self._app_state, ds_id, plan['tool'], plan['params'])

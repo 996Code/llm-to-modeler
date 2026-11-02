@@ -56,7 +56,6 @@ def _fresh(monkeypatch):
     from domains.metrology_assistant import capability_import as ci
     monkeypatch.setattr(mta, '_current_scenarios', demo_scenarios)
     monkeypatch.setattr(ci, 'resolve_scenarios', lambda table: table)
-    monkeypatch.delenv("METROLOGY_PROGRESS_DATASOURCE_ID", raising=False)
     yield
     runtime.reset_runtime_cache()
 
@@ -139,11 +138,7 @@ def test_successful_execution_marks_flow_done():
     ctx.llm_client = FakeLLM(extract={"scenario": "progress",
                                       "instrument": "", "purpose": "",
                                       "order_no": "BJ2026"})
-    os.environ["METROLOGY_PROGRESS_DATASOURCE_ID"] = "ds-missing"
-    try:
-        tool.execute({"user_input": "查 BJ2026 进度"}, ctx)
-    finally:
-        os.environ.pop("METROLOGY_PROGRESS_DATASOURCE_ID", None)
+    tool.execute({"user_input": "查 BJ2026 进度"}, ctx)
     # 数据源不存在 → error_for_llm;flow 未 done(失败不写终态)
     flow = store.get_flow(_db(), "conv-flow")
     assert flow is None or flow["status"] == "running"
@@ -344,11 +339,13 @@ def test_dynamic_slot_extraction_from_scenario_table():
     assert (norm, err) == ("2026-10-01", None)
 
 
-def test_datasource_id_in_table_overrides_env(monkeypatch):
-    """数据源绑定入库(设计 §8.1):场景表 datasource_id 优先,env 只是缺省。"""
-    import os
+def test_explicit_datasource_binding_executes(monkeypatch):
+    """显式绑定独立于进程环境，执行既定数据源。"""
+    from types import SimpleNamespace
     from domains.chatbi.controlled import ControlledResult
-    monkeypatch.setenv("METROLOGY_PROGRESS_DATASOURCE_ID", "ds-env")
+    from domains.chatbi import datasources
+    monkeypatch.setattr(datasources, 'get_datasource', lambda *a: SimpleNamespace(
+        host='metrology', database='', is_active=True, db_type='mcp'))
     captured = {}
 
     def fake_exec(app_state, ds_id, tool, args):

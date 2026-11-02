@@ -121,9 +121,9 @@ def validate_providers(content: Dict[str, Any]) -> Dict[str, Any]:
                     norm[pf] = float(v)
                 except (TypeError, ValueError):
                     raise ProviderConfigError(f"{role}.{pf} 必须是数值(元/千token)")
+        if not norm["model"] and (role == "primary" or norm["enabled"]):
+            raise ProviderConfigError(f"{role} 缺少 model")
         out[role] = norm
-    if out["primary"].get("model") == "":
-        raise ProviderConfigError("primary 缺少 model")
     return out
 
 

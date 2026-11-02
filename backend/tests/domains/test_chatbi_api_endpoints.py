@@ -30,15 +30,16 @@ def client(monkeypatch):
 
     # 测试库替换单例(api._db 走 runtime.get_pack_db)
     from sdk.relational_store import PackRelationalDB
-    from domains.chatbi.datasources import init_store, configure_encryption
-    from cryptography.fernet import Fernet
-    configure_encryption(Fernet.generate_key().decode())
+    from domains.chatbi.datasources import init_store
     test_db = PackRelationalDB("chatbi")
     init_store(test_db)
     monkeypatch.setattr(runtime, "get_pack_db", lambda: test_db)
     monkeypatch.setattr(chatbi_api, "get_pack_db", lambda: test_db)
 
     app = FastAPI()
+    # 与 main.py 同款装配:校验错误脱敏(422 不回显密码等输入)
+    from api.validation_redaction import install as _install_redaction
+    _install_redaction(app)
     app.include_router(chatbi_api.router)
     app.state.llm_client = object()
     with TestClient(app) as c:
@@ -305,6 +306,16 @@ class TestDatasourceCreateContract:
             "name": "pg缺库名", "db_type": "postgresql", "host": "localhost",
             "port": 5432, "username": "u", "password": "p"})
         assert r.status_code == 422, r.text
+
+    def test_validation_error_never_echoes_password(self, client):
+        """422 校验错误详情不得回显请求体里的密码。"""
+        c, _ = client
+        secret = "super-secret-pw-422"
+        r = c.post("/datasources", json={
+            "name": "pg缺库名", "db_type": "postgresql", "host": "localhost",
+            "port": 5432, "username": "u", "password": secret})
+        assert r.status_code == 422, r.text
+        assert secret not in r.text, r.text
 
     def test_postgresql_empty_password_422(self, client):
         """postgresql 显式空串密码 → 同 422(默认空串不得绕过必填)。"""

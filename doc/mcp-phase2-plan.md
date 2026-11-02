@@ -6,7 +6,7 @@
 
 **Architecture:** 复用 ChatBI 全管线，只加两个分支：generate 步产出工具调用 JSON（mcp 变体 prompt）、execute 步走 `sdk.mcp_client.call_tool` 并映射成 `ExecuteResult`（columns+rows 形状不变，check_result/visualize/finalize/switch_chart 零改动）。**隔离性铁律：chatbi 只 import `sdk.mcp_client`，零 services import**（server 配置经注册表+loader 注入，一期已就绪）。
 
-**Tech Stack:** 既有栈；无新依赖。mcp 数据源契约：`chatbi_data_sources` 行 `db_type="mcp"`，`host`=server code，`database`=tool_name（空=全部工具），`port`=0，`username`/`encrypted_password`=空串（DDL NOT NULL 兼容）。
+**Tech Stack:** 既有栈；无新依赖。mcp 数据源契约：`chatbi_data_sources` 行 `db_type="mcp"`，`host`=server code，`database`=tool_name（空=全部工具），`port`=0，`username`/`password`=空串（DDL NOT NULL 兼容）。
 
 **Spec:** `doc/mcp-integration-design.md` §3.5（出口标准四条：管理端建 mcp 数据源/ask_data 取数出图/外部停机如实报错/全量绿）
 
@@ -62,7 +62,7 @@ def test_create_and_get_mcp(db):
                             username="", password="")
     info = get_datasource(db, row["id"], decrypt=True)
     assert info.db_type == "mcp" and info.host == "srv_a"
-    assert info.password_plain == ""
+    assert info.password == ""
 
 
 def test_mcp_requires_server_code(db):
@@ -110,7 +110,7 @@ from domains.chatbi.datasources import DataSourceInfo, check_health
 def _mcp_info(code="srv_a"):
     return DataSourceInfo(id="x", name="外部", db_type="mcp",
                           host=code, port=0, database="",
-                          username="", password_plain="")
+                          username="", password="")
 
 
 def test_healthy(monkeypatch):
@@ -218,7 +218,7 @@ from domains.chatbi.datasources import DataSourceInfo, execute_mcp_tool
 def _info(code="srv_a"):
     return DataSourceInfo(id="ds1", name="外部", db_type="mcp",
                           host=code, port=0, database="",
-                          username="", password_plain="")
+                          username="", password="")
 
 
 def test_execute_mcp_dict_columns_rows(monkeypatch):

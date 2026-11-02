@@ -1,7 +1,6 @@
 """MCP 声明目录、能力覆盖绑定及客服配置投影。"""
 import copy
 import logging
-import os
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -34,8 +33,7 @@ def _snapshots() -> Dict[str, List[dict]]:
 
 def _action_identity(action: dict, hosts: Optional[dict] = None) -> tuple:
     server = str(action.get("server") or "").strip()
-    ds = str(action.get("datasource_id") or "").strip() \
-        or os.getenv(str(action.get("env") or ""), "").strip()
+    ds = str(action.get("datasource_id") or "").strip()
     if not server and ds:
         if hosts is None:
             from domains.chatbi import datasources, runtime
@@ -174,7 +172,7 @@ def _synthesize_auto(server_code: str, decl: dict, slots: list) -> dict:
     return {"label": decl.get("title") or desc, "intent": desc,
             "required": required,
             "action": {"kind": "chatbi", "server": server_code,
-                       "datasource_id": "", "env": "", "tool": decl["name"],
+                       "datasource_id": "", "tool": decl["name"],
                        "params": {slot["name"]: slot["name"] for slot in slots},
                        "input_schema": schema,
                        "output_schema": copy.deepcopy(decl.get("outputSchema")),
@@ -301,7 +299,6 @@ def routing_overview() -> Dict[str, Any]:
                 try:
                     ds_id = str(_resolve_plan_ds({
                         "datasource_id": override[1]["action"].get("datasource_id") or "",
-                        "datasource_env": override[1]["action"].get("env") or "",
                         "server": code, "tool": tool}) or "")
                 except Exception:  # noqa: BLE001
                     logger.exception("路由总览:覆盖绑定数据源校验失败")
@@ -332,7 +329,7 @@ def routing_overview() -> Dict[str, Any]:
                          "label": cfg.get("label") or tool,
                          "datasource": {"datasource_id": bound_ds,
                                         "datasource_name": ds_names.get(bound_ds, ""),
-                                        "env": action.get("env") or "", "server": code},
+                                        "server": code},
                          "ask": {k: req.get(k) for k in ("slot", "header", "question")} if req else None,
                          "input_schema": copy.deepcopy(decl.get("inputSchema")),
                          "card": action.get("card")})

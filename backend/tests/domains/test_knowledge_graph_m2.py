@@ -1,8 +1,8 @@
-"""knowledge_graph 插件 M2 阶段单测 —— 纯逻辑层(不依赖真实 Neo4j/Milvus)。
+"""knowledge_graph 插件 M2 阶段单测 —— 纯逻辑层(不依赖真实图存储/向量库)。
 
 覆盖:名称归一化 / 结构感知切块 / 文档解析 / 元数据存储 / 本体模板 /
 API 层(Fake 图存储 + 临时库)。
-真实基础设施的联通与 Cypher 语义由 M2-6 脚本化验收完成(见提交记录)。
+真实基础设施的联通与图查询语义由 M2-6 脚本化验收完成(见提交记录)。
 """
 import io
 
@@ -23,13 +23,13 @@ from domains.knowledge_graph.store import KGStore
 class TestNormalizeName:
 
     def test_basic(self):
-        assert normalize_name("  Neo4j ") == "neo4j"
+        assert normalize_name("  Postgres ") == "postgres"
         assert normalize_name("") == ""
 
     def test_fullwidth(self):
         # 全角字母/数字 → 半角;全角空格与半角空格都去掉(标准号匹配:
         # "JJF 1092-2002" 与 "JJF1092-2002" 归一化后必须相等)
-        assert normalize_name("Ｎｅｏ４ｊ") == "neo4j"
+        assert normalize_name("Ｐｏｓｔｇｒｅｓ16") == "postgres16"
         assert normalize_name("知识　图谱") == "知识图谱"
         assert normalize_name("JJF 1092-2002") == normalize_name("JJF1092-2002")
 
@@ -38,7 +38,7 @@ class TestNormalizeName:
 
     def test_merge_anchor_stability(self):
         # 同一实体的不同书写应归一到同一锚点
-        assert normalize_name("Ｎｅｏ4ｊ") == normalize_name("neo4j ")
+        assert normalize_name("Ｐｏｓｔgres16") == normalize_name("postgres16 ")
 
 
 # ── 结构感知切块 ─────────────────────────────────────────────
@@ -475,15 +475,15 @@ class TestKbDeleteCleanup:
         assert self._residue_counts(store, kb["id"]) == (0, 0)
         assert kb["id"] not in fake.entities
 
-    def test_delete_kb_neo4j_failure_retains_kb(self, kg_client):
+    def test_delete_kb_graph_failure_retains_kb(self, kg_client):
         client, fake = kg_client
         kb, store = self._mk_kb_with_residue(client)
 
         def _boom(kb_id):
-            raise RuntimeError("neo4j down")
+            raise RuntimeError("graph store down")
 
         # 实例级遮蔽类方法;不用 monkeypatch——undo 会连 fixture 的
-        # get_graph 补丁一起撤掉,重删就打真 Neo4j 了
+        # get_graph 补丁一起撤掉,重删就打真图存储了
         fake.delete_scope = _boom
         r = client.delete(f"/api/packs/knowledge_graph/kbs/{kb['id']}")
         assert r.status_code == 503 and "可重试删除" in r.json()["detail"]

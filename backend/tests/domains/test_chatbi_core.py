@@ -208,14 +208,11 @@ class TestChartEngine:
         assert not result.ok and result.option is None
 
 
-# ── 数据源管理(注册表/加密/执行/健康) ─────────────────────────
+# ── 数据源管理(注册表/密码/执行/健康) ─────────────────────────
 
 @pytest.fixture()
 def chatbi_db():
     from sdk.relational_store import PackRelationalDB
-    from domains.chatbi.datasources import configure_encryption
-    from cryptography.fernet import Fernet as _F
-    configure_encryption(_F.generate_key().decode())
     db = PackRelationalDB("chatbi")
     from domains.chatbi.datasources import init_store
     init_store(db)
@@ -223,25 +220,25 @@ def chatbi_db():
 
 
 class TestDatasources:
-    def test_crud_and_password_encryption(self, chatbi_db):
+    def test_crud_and_password_storage(self, chatbi_db):
         from domains.chatbi import datasources
         info = datasources.create_datasource(
             chatbi_db, "电商库", "postgresql", "127.0.0.1", 5432,
             "bizdb", "reader", "secret-pass")
         assert info.id and info.is_active
-        # 密文落库(非明文)
+        # 明文存储, API 不回显
         with chatbi_db.connect() as conn:
-            row = conn.execute("SELECT encrypted_password FROM chatbi_data_sources "
+            row = conn.execute("SELECT password FROM chatbi_data_sources "
                                "WHERE id = ?", (info.id,)).fetchone()
-        assert "secret-pass" not in row["encrypted_password"]
-        # 解密往返
-        got = datasources.get_datasource(chatbi_db, info.id, decrypt=True)
-        assert got.password_plain == "secret-pass"
-        # 更新(重加密)与删除
+        assert row["password"] == "secret-pass"
+        # 密码往返
+        got = datasources.get_datasource(chatbi_db, info.id)
+        assert got.password == "secret-pass"
+        # 更新与删除
         assert datasources.update_datasource(chatbi_db, info.id, name="电商库2",
                                              password="new-pass")
-        got = datasources.get_datasource(chatbi_db, info.id, decrypt=True)
-        assert got.name == "电商库2" and got.password_plain == "new-pass"
+        got = datasources.get_datasource(chatbi_db, info.id)
+        assert got.name == "电商库2" and got.password == "new-pass"
         assert datasources.delete_datasource(chatbi_db, info.id)
 
     def test_resolve_fail_closed(self, chatbi_db):

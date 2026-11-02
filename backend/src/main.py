@@ -242,7 +242,7 @@ async def lifespan(app: FastAPI):
         await shutdown_mcp(app)
     except Exception:
         logger.warning("mcp shutdown failed", exc_info=True)
-    # pack 卸载钩子:释放各插件自持的连接(Neo4j/向量库等)——与热切换
+    # pack 卸载钩子:释放各插件自持的连接(图存储/向量库等)——与热切换
     # 禁用 pack 走同一个 unload() 契约
     try:
         import importlib
@@ -290,6 +290,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 校验错误脱敏:Pydantic 422 的 detail 会携带原始输入(input),密码等
+# 凭证字段绝不能随错误回显——处理器实现与测试应用共用(见该模块)。
+from api.validation_redaction import install as _install_validation_redaction
+_install_validation_redaction(app)
+
 # CORS 中间件：允许跨域来源。
 # 允许列表由环境变量 CORS_ALLOWED_ORIGINS 配置（逗号分隔）。
 # - 未配置时允许所有来源（开发期宽松默认，与旧行为一致）；
@@ -305,7 +310,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 统一认证中间件（SECRET_KEY 配置后生效；未配置=开放模式）
+# 统一认证中间件（ADMIN_TOKEN 配置后生效；未配置=开放模式）
 from api.auth import AuthMiddleware
 app.add_middleware(AuthMiddleware)
 
@@ -361,7 +366,7 @@ app.include_router(conversations_router)
 app.include_router(meta_router)
 # 用户级设置路由(平台级显示设置只读;独立/嵌入对话页共读)
 app.include_router(settings_router)
-# 管理端路由（X-Admin-Token 守门,ADMIN_TOKEN 未配置时整组 503）
+# 管理端路由（Bearer token 或 X-Admin-Token 守门；未配置口令时开放访问）
 app.include_router(admin_router)
 # 任务中心路由（同 admin 口令守门;SSE 实时进度/日志）
 app.include_router(tasks_router)

@@ -16,7 +16,7 @@
           "vector_store",
           "doc_parser"
         ],
-        "note": "插件经 SDK 存储设施访问 Neo4j、pgvector 与文档解析。"
+        "note": "插件经 SDK 存储设施访问图存储(PG)、pgvector 与文档解析。"
       },
       {
         "id": "namespace",
@@ -73,8 +73,8 @@
     {
       "id": "graph_store",
       "type": "database",
-      "label": "Neo4jGraphStore",
-      "sublabel": "MERGE 幂等写",
+      "label": "PgGraphStore",
+      "sublabel": "幂等 upsert",
       "pos": [
         520,
         120
@@ -127,10 +127,10 @@
       ]
     },
     {
-      "id": "neo4j",
+      "id": "pg_graph",
       "type": "external",
-      "label": "Neo4j",
-      "sublabel": "图数据库",
+      "label": "PostgreSQL 图表",
+      "sublabel": "图谱表·平台同库",
       "pos": [
         1000,
         120
@@ -224,10 +224,10 @@
       "variant": "default"
     },
     {
-      "id": "graph-neo4j",
+      "id": "graph-pg_graph",
       "from": "graph_store",
-      "to": "neo4j",
-      "label": "Cypher",
+      "to": "pg_graph",
+      "label": "upsert / BFS 查询",
       "variant": "emphasis"
     },
     {
@@ -269,7 +269,7 @@
       "dot": "emerald",
       "title": "图存储语义（graph_store.py）",
       "items": [
-        "MERGE 锚点 = (scope, normalized_name)，单事务幂等写",
+        "upsert 锚点 = (scope, normalized_name)，单事务幂等写",
         "merge_entities 五步合并：自环删除 → 边迁移 → 属性并集",
         "查询三级降级：精确 → 前缀 → 子串；BFS 逐跳限量子图"
       ]

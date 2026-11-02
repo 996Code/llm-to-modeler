@@ -3,13 +3,13 @@
 【导入流水线(kg.import_document)】
   解析 → 结构感知切块 → 向量准备(可选) → 逐批 LLM 抽取(批内并行,
   批间串行:更新已知实体词表 + 落 checkpoint) → 本体约束过滤 →
-  Neo4j 幂等 MERGE + PG 向量 upsert → 统计回写
+  图存储(PG)幂等 upsert + PG 向量 upsert → 统计回写
 
 【防护机制】(全部可配,见 settings.schema.yaml"抽取与批次"组)
   - 单块重试 llm_max_retries;连续失败熔断 failure_threshold
   - 协作式取消(每批次检查点);文档被并发删除检测(每批次校验存在)
   - chunk 级 checkpoint(status=done 的块重跑跳过 → 断点续跑)
-  - 幂等:重导先清理该 doc 旧数据(Neo4j 引用计数 + 向量按 doc 删)
+  - 幂等:重导先清理该 doc 旧数据(图表引用计数 + 向量按 doc 删)
 
 【观测】
   - LLM 抽取/向量化调用 conv_id 记 task:{id} → 现有调用日志界面可追溯
@@ -236,7 +236,7 @@ def _cfg(app_state, key: str, default):
 def _ocr_engine_config(app_state) -> str:
     """读 OCR 引擎设置(ocr_engine:rapidocr 默认/llm)。
 
-    llm 模式用全局 LLM 模型(随 LLM_MODEL 环境变量/平台配置),不单独
+    llm 模式用全局生效供应商模型,不单独
     配模型——中转站/网关换模型时 OCR 自动跟随。
     """
     return str(_cfg(app_state, "ocr_engine", "rapidocr") or "rapidocr")
@@ -316,14 +316,9 @@ def embed_model_for(app_state) -> str:
     """当前 embedding 模型口径(建库预填与 _prepare_vector 校验同源)。
 
     解析收敛在 sdk/embedding(单一事实源):平台 client 属性(替身可
-    注入)优先,fallback 到 sdk 口径(local 恒 bge-m3/api 读 env)。
+    注入)优先,fallback 到固定的本地 bge-m3。
     """
-    _llm_c = getattr(app_state, "llm_client", None)
-    m = (getattr(_llm_c, "embed_model", "") or "").strip()
-    if m:
-        return m
-    from sdk.embedding import embed_model
-    return embed_model()
+    return runtime.embedding_model(app_state)
 
 
 # bge-m3 定死维度(本地 ONNX int8 量化输出恒 1024;建库即可预填,
@@ -406,7 +401,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     else:
         handle.set_progress(_W_PARSE, "解析文档")
         # OCR 引擎按插件设置:rapidocr(默认,本地)/llm(全局多模态模型,
-        # 逐页图片调用;模型随 LLM_MODEL 配置,不单独设)
+        # 逐页图片调用;模型随全局生效供应商,不单独设)
         ocr_engine = _ocr_engine_config(app_state)
         page_ocr = None
         if ocr_engine == "llm":
@@ -477,7 +472,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
 
     # 1) 清理旧贡献。
     #    只有"全量重导"(force / 首次导入 / 无任何已完成块的失败重跑)才清理;
-    #    续跑路径(resume=True)严禁清理——已完成块的贡献只存在于 Neo4j/向量表
+    #    续跑路径(resume=True)严禁清理——已完成块的贡献只存在于图表/向量表
     #    里,清了又不重抽(done 块被跳过)等于永久丢数据。
     graph = runtime.get_graph(app_state)   # 抽取批写入/收尾统计都要用,无条件获取
     if resume:
@@ -488,15 +483,16 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             handle.log(f"清理旧图谱贡献: 删 {removed.get('edges', 0)} 边 / "
                        f"{removed.get('orphanEntities', 0)} 孤立实体(幂等重导)")
         except Exception as e:
-            raise RuntimeError(f"Neo4j 清理失败: {e}")
+            raise RuntimeError(f"图存储清理失败: {e}")
         if kb.get("vectorEnabled"):
             try:
                 runtime.get_vector(app_state).delete_by_doc(kb_id, doc_id)
             except Exception as e:
                 handle.log(f"旧向量清理失败(继续导入,完成后可重试): {e}", level="warn")
 
-    # 3) 向量准备(模型未配置 → 纯图谱模式,不阻断)
+    # 3) 向量准备(模型不兼容时保持纯图谱保护,故障上抛)
     vector_ready = _prepare_vector(handle, app_state, store, kb, conv_id)
+    kb["vectorEnabled"] = vector_ready  # 摘要等后续写入同样遵守模型保护。
 
     # 4) 逐批抽取(批间串行:词表 + checkpoint;批内并行:LLM 调用)
     from sdk.prompt_loader import PromptLoader
@@ -510,9 +506,6 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     threshold = max(1, int(_cfg(app_state, "failure_threshold", 5)))
     glossary_top_k = max(0, int(_cfg(app_state, "glossary_top_k", 100)))
     temperature = int(_cfg(app_state, "extraction_temperature", 10)) / 100.0
-    # 抽取模型覆盖(空 = 全局模型):长文档导入换快模型的开关,
-    # 只影响 kg.extract 调用,对话/检索链路不变
-    extraction_model = str(_cfg(app_state, "extraction_model", "") or "").strip()
 
     # 待处理 = pending + failed(失败块重跑时必须重抽;done 块跳过 = 断点)
     pending = [c for c in store.list_chunks(doc_id)
@@ -544,17 +537,15 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
     if vector_ready and done_before and not targeted:
         _backfill_vectors(handle, app_state, store, kb, doc_id, conv_id,
                           stage_label="启动期对账")
-    _eff_model = extraction_model or (
-        llm.config.model if getattr(llm, "config", None) else "")
+    _eff_model = getattr(llm, "chat_model", "")
     handle.log(
         f"抽取配置: 批大小 {batch_size} / 批内并行 {concurrency} / 单块重试 {max_retries} "
         f"/ 熔断阈值 {threshold} / 词表 top-{glossary_top_k} / 温度 {temperature:.2f}"
-        f" / 向量{'开' if vector_ready else '关'} / 模型 {_eff_model}"
-        + ("(覆盖)" if extraction_model else ""),
+        f" / 向量{'开' if vector_ready else '关'} / 模型 {_eff_model}",
         batch_size=batch_size, concurrency=concurrency, max_retries=max_retries,
         failure_threshold=threshold, glossary_top_k=glossary_top_k,
         temperature=temperature, vector=vector_ready, todo_chunks=len(pending),
-        llm_model=_eff_model, model_override=extraction_model or None)
+        llm_model=_eff_model)
 
     glossary: Dict[str, str] = {}   # normalized_name -> type(本轮抽取累积)
     # 关系类型约束表(key → {domain, range}),端点类型校验用(prompt 建议的代码强制)
@@ -625,7 +616,7 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
                 executor.submit(
                     _extract_chunk, loader, llm, kb, chunk, glossary,
                     graph_alias_table, glossary_top_k,
-                    temperature, max_retries, conv_id, extraction_model,
+                    temperature, max_retries, conv_id,
                 ): chunk
                 for chunk in batch
             }
@@ -897,7 +888,6 @@ def _run_import(handle, app_state, store, kb_id: str, doc_id: str, force: bool,
             consolidation = _run_consolidation(
                 handle, loader, llm, graph, store, kb_id, doc_id,
                 temperature=temperature, conv_id=conv_id,
-                model_override=extraction_model or "",
                 eligible_types={t.strip() for t in merge_types.split(",") if t.strip()})
             if consolidation.get("applied") or consolidation.get("rejected"):
                 handle.log(
@@ -1058,51 +1048,38 @@ def _generate_summary_chunk(handle, app_state, store, kb: Dict, doc: Dict,
 
 
 def _prepare_vector(handle, app_state, store, kb: Dict, conv_id: str) -> bool:
-    """向量模式准备:已启用 → 校验模型一致性 + 确保 collection;未决 → 探测。
+    """先校验历史模型身份,再恢复旧库或确保当前向量 collection。
 
     Returns:
-        True = 本库向量可用(后续按批 upsert);False = 纯图谱模式。
+        True = 本库向量可用(后续按批 upsert);False = 模型不兼容保护。
     """
     handle.set_progress(_W_PARSE + 1, "准备向量存储")
     try:
-        if kb.get("vectorEnabled"):
-            # 模型口径:平台 client 属性(替身可注入)> sdk/embedding 单一源
-            current_model = embed_model_for(app_state)
-            stored_model = (kb.get("embeddingModel") or "").strip()
-            # 模型一致性校验:换 embedding 模型 = 换维度,旧 collection 里
-            # 的向量与新模型不可比。不校验的话后续 upsert/search 全部静默
-            # 失败(每批 warn 一条),导入却仍报成功——向量检索"悄悄消失"。
-            if stored_model and current_model and stored_model != current_model:
-                handle.log(
-                    f"embedding 模型已变更(库建立时 {stored_model},当前 {current_model}),"
-                    f"向量不兼容——本库降级纯图谱模式。如需向量检索,请清空重建该库"
-                    f"或在设置中切回原模型", level="warn",
-                    stored_model=stored_model, current_model=current_model)
-                store.set_kb_vector_info(kb["id"], stored_model, kb.get("vectorDim"), False)
-                return False
-            dim = kb.get("vectorDim")
-            if not dim:
-                # 默认启用后新库无历史探测记录——首次导入补一次维度探测
-                probe = app_state.llm_client.embeddings(
-                    ["维度探测"], conv_id=conv_id, stage="kg.embed_probe",
-                    mode="query")
-                dim = len(probe[0])
-                store.set_kb_vector_info(kb["id"], current_model, dim, True)
-            handle.log(f"向量模式: 沿用库配置 dim={dim}(模型 {stored_model or '未记录'})",
-                       dim=dim, model=stored_model or "")
+        current_model = embed_model_for(app_state)
+        stored_model = (kb.get("embeddingModel") or "").strip()
+        # 相同维度不代表模型空间可比;停用态同样必须保留历史身份。
+        if not runtime.vector_model_matches(app_state, kb):
+            handle.log(
+                f"embedding 模型不兼容(库建立时 {stored_model},当前 {current_model}),"
+                "向量不兼容——本库保持纯图谱模式。如需向量检索,请清空重建该库",
+                level="warn", stored_model=stored_model, current_model=current_model)
+            store.set_kb_vector_info(kb["id"], stored_model, kb.get("vectorDim"), False)
+            return False
+
+        dim = kb.get("vectorDim")
+        if not kb.get("vectorEnabled") or not stored_model or not dim:
+            # 无历史模型的旧库仍走真实探测,不能只按旧维度补贴模型标签。
+            probe = app_state.llm_client.embeddings(
+                ["维度探测"], conv_id=conv_id, stage="kg.embed_probe", mode="query")
+            dim = len(probe[0])
             runtime.get_vector(app_state).ensure_collection(kb["id"], dim)
-            return True
-        # vectorEnabled=False 只有两种合法态:模型变更保护(上面已处理)或
-        # 极旧库未迁移——本地 bge-m3 是定死能力(10-15 裁决:默认启用),
-        # 这里兜底补开并走一次维度探测,不再留"未决探测"分支。
-        embed_model = embed_model_for(app_state)
-        probe = app_state.llm_client.embeddings(
-            ["维度探测"], conv_id=conv_id, stage="kg.embed_probe", mode="query")
-        dim = len(probe[0])
-        store.set_kb_vector_info(kb["id"], embed_model, dim, True)
-        runtime.get_vector(app_state).ensure_collection(kb["id"], dim)
-        handle.log(f"向量模式开启: 模型 {embed_model},dim={dim}",
-                   model=embed_model, dim=dim)
+            store.set_kb_vector_info(kb["id"], current_model, dim, True)
+            handle.log(f"向量模式开启: 模型 {current_model},dim={dim}",
+                       model=current_model, dim=dim)
+        else:
+            runtime.get_vector(app_state).ensure_collection(kb["id"], dim)
+            handle.log(f"向量模式: 沿用库配置 dim={dim}(模型 {stored_model})",
+                       dim=dim, model=stored_model)
         return True
     except Exception as e:
         # 失败不再静默降级关闭(10-15 裁决:假可用比报错更有害)——上抛让
@@ -1208,12 +1185,8 @@ class _ExtractionError(RuntimeError):
 def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
                    graph_aliases: Dict[str, Dict[str, Any]], glossary_top_k: int,
                    temperature: float,
-                   max_retries: int, conv_id: str,
-                   model_override: str = "") -> Tuple[List[Dict], List[Dict], Dict]:
+                   max_retries: int, conv_id: str) -> Tuple[List[Dict], List[Dict], Dict]:
     """单块抽取(在批内工作线程执行):渲染 prompt → chat_json → 规范化。
-
-    model_override: 抽取模型覆盖(空 = 客户端配置默认)。长文档导入
-    换快模型,不影响对话/检索链路。
 
     graph_aliases: 图谱已存实体的别名表(normalized -> [aliases])。词表
     渲染时把"同一实体的其他名字"显式列出来,引导 LLM 复用到 canonical
@@ -1262,7 +1235,6 @@ def _extract_chunk(loader, llm, kb: Dict, chunk: Dict, glossary: Dict,
             data = llm.chat_json(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature, conv_id=conv_id, stage="kg.extract",
-                model=model_override or None,
             )
             entities, relations = _normalize_extraction(data)
             # 原文锚定过滤(prompt 规则的代码强制):示例词幻觉(类型表
@@ -1667,7 +1639,6 @@ def _find_pair_evidence(a: str, b: str, e_a: Dict, e_b: Dict,
 
 def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
                        doc_id: str, temperature: float, conv_id: str,
-                       model_override: str = "",
                        eligible_types: Optional[Set[str]] = None) -> Dict[str, int]:
     """收尾 LLM 身份复合:名录分批给 LLM 提案,代码接地验证后合并。
 
@@ -1780,7 +1751,7 @@ def _run_consolidation(handle, loader, llm, graph, store, kb_id: str,
             data = llm.chat_json(
                 [{"role": "user", "content": prompt}],
                 temperature=temperature, conv_id=conv_id,
-                stage="kg.consolidate", model=model_override or None)
+                stage="kg.consolidate")
         except Exception as e:
             if handle:
                 handle.log(f"身份复合批次失败(跳过): {e}", level="warn",
@@ -2250,12 +2221,9 @@ def run_induce_schema(handle) -> Dict[str, Any]:
     loader = PromptLoader(packs_root=packs_root)
     prompt = loader.render("knowledge_graph", "induce_schema",
                            samples=samples, sample_count=len(samples))
-    # 归纳与抽取同为批量离线链路,共用模型覆盖设置
-    model_override = str(_cfg(app_state, "extraction_model", "") or "").strip()
     data = app_state.llm_client.chat_json(
         [{"role": "user", "content": prompt}],
         temperature=0.2, conv_id=conv_id, stage="kg.induce_schema",
-        model=model_override or None,
     )
     if not isinstance(data, dict):
         # chat_json 的三级容错可能返回 list/str——与 _normalize_extraction

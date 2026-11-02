@@ -5,7 +5,6 @@ Demo 阶段仅一个只读端点 GET /test/env:供管理端「智能客服-测�
 单号夹具。P1 配置化后改读 DB 场景配置(设计 §9 Tab3 联调预演的基础)。
 """
 import logging
-import os
 
 from fastapi import APIRouter, Depends, Request
 
@@ -13,7 +12,7 @@ from sdk.pack_api import admin_required
 
 from domains.metrology_assistant.legacy_demo import (
     STRONG_INSPECTION_PURPOSES, MANDATORY_CHECK_KB, REGULATION_KB,
-    PROGRESS_DATASOURCE_ENV, DEMO_ORDER_OPTIONS,
+    DEMO_ORDER_OPTIONS,
 )
 from domains.metrology_assistant.tools import assistant as cfg
 
@@ -103,11 +102,16 @@ async def _legacy_test_env(request: Request) -> dict:
                 errors.append(f"知识库「{item['name']}」状态读取失败，请查看服务日志")
 
     # ── 进度数据源 + MCP server(进度查询链的执行来源) ──
-    ds_id = os.getenv(cfg.PROGRESS_DATASOURCE_ENV, "").strip()
+    action = (cfg._current_scenarios().get('progress') or {}).get('action') or {}
     progress: dict = {
-        "env_configured": bool(ds_id), "datasource": None, "mcp": None,
+        "binding_configured": bool(action.get('datasource_id') or action.get('server')),
+        "datasource": None, "mcp": None,
         "datasourceStatus": "not_configured", "mcpStatus": "error"}
     try:
+        ds_id = str(action.get('datasource_id') or '').strip()
+        if not ds_id and action.get('server') and action.get('tool'):
+            from domains.metrology_assistant.capability_import import resolve_datasource_for_tool
+            ds_id = resolve_datasource_for_tool(action['server'], action['tool']) or ''
         if ds_id:
             from domains.chatbi import datasources
             from domains.chatbi.runtime import get_pack_db
@@ -117,6 +121,8 @@ async def _legacy_test_env(request: Request) -> dict:
                  "dbType": info.db_type, "host": info.host,
                  "tool": info.database} if info else None)
             progress["datasourceStatus"] = "ok" if info else "missing"
+        elif progress['binding_configured']:
+            progress['datasourceStatus'] = 'missing'
     except Exception:
         logger.exception("Metrology test environment: datasource read failed")
         progress["datasourceStatus"] = "error"

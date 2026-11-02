@@ -91,9 +91,9 @@ def _ensure_default_kb(app_state) -> None:
 
 
 def unload() -> None:
-    """卸载钩子(平台热切换/停机时调用):释放 Neo4j/向量连接单例。
+    """卸载钩子(平台热切换/停机时调用):释放图存储(PG)/向量连接单例。
 
-    没有这个钩子的话,禁用插件后 driver/gRPC channel 会一直挂到进程
+    没有这个钩子的话,禁用插件后连接池会一直挂到进程
     退出;重新启用时按设置指纹复用或重建,不影响正确性。
     """
     global _RECOVERY_DONE

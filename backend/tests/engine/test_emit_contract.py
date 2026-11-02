@@ -88,8 +88,6 @@ def test_kb_search_real_call_uses_positional(captured):
     tmp = tempfile.mkdtemp()
     os.environ.setdefault("PACK_STATE_PATH", os.path.join(tmp, "p.json"))
     os.environ.setdefault("ADMIN_TOKEN", "")
-    os.environ.setdefault("LLM_BASE_URL", "http://127.0.0.1:9/v1")
-    os.environ.setdefault("LLM_API_KEY", "x")
 
     from domains.knowledge_graph.tools.kb_search import KbSearchTool
 

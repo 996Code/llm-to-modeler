@@ -1,34 +1,9 @@
 # 知识图谱插件配置 schema(管理端"插件设置"渲染为通用表单)
 # 优先级:设置页保存值 > 环境变量(env) > 默认值(default)
+# 存储连接无独立配置:图存储与向量均在平台 PG(knowledge_graph schema +
+# pgvector,走平台 DATABASE_URL),无需 env/设置页补配。
 version: 1
 groups:
-  - key: connection
-    title: 存储连接
-    fields:
-      - key: neo4j_uri
-        type: string
-        label: Neo4j 地址
-        env: NEO4J_URI
-        required: true
-        placeholder: bolt://localhost:7687
-        help: 图谱存储;本机 docker 可用 kg-neo4j 容器
-      - key: neo4j_user
-        type: string
-        label: Neo4j 用户
-        env: NEO4J_USER
-        default: neo4j
-      - key: neo4j_password
-        type: secret
-        label: Neo4j 密码
-        env: NEO4J_PASSWORD
-        required: true
-      - key: neo4j_database
-        type: string
-        label: Neo4j 数据库
-        env: NEO4J_DATABASE
-        default: neo4j
-        help: 社区版只有默认库 neo4j
-
   - key: extraction
     title: 抽取与批次
     fields:
@@ -72,12 +47,6 @@ groups:
         min: 1
         max: 16
         help: 批次 = 并行与断点单位(批次间串行更新实体词表 + 落 checkpoint)
-      - key: extraction_model
-        type: string
-        label: 抽取模型覆盖
-        env: KG_EXTRACTION_MODEL
-        placeholder: 留空用全局模型
-        help: 长文档导入建议配更快的模型(如 qwen-plus),对话/检索链路仍用全局模型;留空 = 不覆盖
       - key: llm_concurrency
         type: int
         label: 批内并行度
@@ -156,7 +125,7 @@ groups:
         options: [rapidocr, llm]
         default: rapidocr
         env: KG_OCR_ENGINE
-        help: PDF 无文字层页的识别引擎;llm = 逐页图片走全局 LLM 网关的多模态模型(随 LLM_MODEL 环境变量),识别更全但耗时/费用高于本地 rapidocr
+        help: PDF 无文字层页的识别引擎;llm = 逐页图片走模型供应商页面配置的多模态模型,识别更全但耗时/费用高于本地 rapidocr
 
   - key: display
     title: 展示配置

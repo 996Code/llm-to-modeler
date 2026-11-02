@@ -77,7 +77,6 @@
                   <span v-else-if="record.datasource?.datasource_id" class="cap-mono">
                     {{ record.datasource.datasource_id.slice(0, 8) }}
                   </span>
-                  <span v-else-if="record.datasource?.env" class="cap-dim">默认数据源</span>
                   <span v-else class="cap-dim">—</span>
                 </template>
               </a-table-column>
@@ -502,7 +501,7 @@ interface RoutingCap {
   issues?: string[] | null
   scenario_key: string | null
   label?: string
-  datasource?: { datasource_id: string; datasource_name?: string; env: string; server: string } | null
+  datasource?: { datasource_id: string; datasource_name?: string; server: string } | null
   ask?: { slot: string; header: string; question: string } | null
 }
 interface ServerProfile {
@@ -605,7 +604,7 @@ function setEnum(cfg: MetrologyScenario, ev: Event) {
   ;(cfg.required as any).enum_options = text.split('\n').map((l) => l.trim()).filter(Boolean)
 }
 
-// ── ChatBI 数据源下拉(动作绑定写显式 datasource_id;env 只是出厂缺省) ──
+// ── ChatBI 数据源下拉(显式 datasource_id 或 server/tool 唯一匹配) ──
 interface ChatbiDs { id: string; name: string; dbType: string; host: string; database?: string }
 const datasources = ref<ChatbiDs[]>([])
 
@@ -622,8 +621,8 @@ function dsOptionSuffix(d: ChatbiDs): string {
 
 function dsBindingHint(cfg: MetrologyScenario): string {
   if (cfg.action.datasource_id) return ''
-  return cfg.action.env
-    ? '使用默认数据源'
+  return cfg.action.server && cfg.action.tool
+    ? '按服务和工具唯一匹配'
     : '请选择数据源'
 }
 

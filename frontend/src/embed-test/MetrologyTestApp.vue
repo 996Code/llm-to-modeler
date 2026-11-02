@@ -55,7 +55,13 @@
         </a-tabs>
       </aside>
       <section class="mt-conversation" aria-label="客服嵌入测试">
-        <div class="mt-preview"><iframe title="计量智能客服测试对话" class="mt-frame" :src="frameSrc" /></div>
+        <div class="mt-preview">
+          <iframe v-if="frameOpen" title="计量智能客服测试对话" class="mt-frame" :src="frameSrc" />
+          <div v-else class="mt-frame mt-frame-closed" role="status">
+            <span>对话窗口已收起</span>
+            <button type="button" class="mt-reopen" @click="reopenFrame">重新打开</button>
+          </div>
+        </div>
       </section>
     </div>
   </div>
@@ -71,7 +77,7 @@ interface EnvPayload {
   kbMapping: { purposes: string[]; mandatoryCheckKb: string; regulationKb: string }
   kbs: { name: string; exists: boolean; docs: number; imported: number }[]
   progress: {
-    env_configured: boolean
+    binding_configured: boolean
     datasource: { name: string; active: boolean; dbType: string; host: string; tool: string } | null
     mcp: { code: string; status: string; enabled: boolean; tools: string[] } | null
   }
@@ -89,6 +95,16 @@ const error = ref('')
 const checkedAt = ref('')
 const activeTab = ref('cases')
 const frameSrc = '/ai-modeler/?embed=true&hostless=1&packs=metrology_assistant'
+const frameOpen = ref(true)
+// 宿主侧 CLOSE 处理:iframe 内点 ✕ 发 postMessage(hostless 无 SDK 宿主,
+// 测试页自己充当宿主)——收起预览并提供重新打开入口
+function reopenFrame() {
+  frameOpen.value = true
+}
+function onChildMessage(e: MessageEvent) {
+  const d = e.data as { src?: string; type?: string } | null
+  if (d && d.src === 'child' && d.type === 'CLOSE') frameOpen.value = false
+}
 let controller: AbortController | undefined
 
 const dependencies = computed(() => {
@@ -99,7 +115,7 @@ const dependencies = computed(() => {
   return [
     ...kbs.map(kb => ({ name: kb.name, ok: kb.exists && kb.imported > 0, detail: kb.exists ? `${kb.imported} / ${kb.docs} 篇文档已导入` : '知识库未创建' })),
     { name: '业务平台 MCP', ok: !!mcp && mcp.status === 'connected' && mcp.enabled && mcp.tools.includes('query_progress'), detail: !mcp ? '未注册或状态不可用' : `${mcp.code} · ${mcp.enabled ? mcp.status : '已停用'}` },
-    { name: '进度查询数据源', ok: !!ds && ds.active && ds.dbType === 'mcp' && ds.host === 'metrology' && ds.tool === 'query_progress', detail: !progress.env_configured ? '未配置数据源' : !ds ? '数据源不存在或不可用' : `${ds.name} · ${ds.active ? ds.tool : '已停用'}` },
+    { name: '进度查询数据源', ok: !!ds && ds.active && ds.dbType === 'mcp' && ds.host === 'metrology' && ds.tool === 'query_progress', detail: !progress.binding_configured ? '未配置数据源' : !ds ? '数据源不存在或不可用' : `${ds.name} · ${ds.active ? ds.tool : '已停用'}` },
   ]
 })
 const environmentReady = computed(() => !!env.value && !error.value && !env.value.errors?.length && dependencies.value.length === 4 && dependencies.value.every(item => item.ok))
@@ -124,6 +140,12 @@ async function load() {
 }
 onMounted(load)
 onBeforeUnmount(() => controller?.abort())
+// 宿主 CLOSE 监听注册放最后:unmounting[0] 保持为请求 abort(既有契约),
+// 监听移除在其后
+if (typeof window !== 'undefined') {
+  window.addEventListener('message', onChildMessage)
+  onBeforeUnmount(() => window.removeEventListener('message', onChildMessage))
+}
 </script>
 
 <style scoped>
@@ -174,6 +196,9 @@ onBeforeUnmount(() => controller?.abort())
 .mt-conversation { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #f5f6f8; }
 .mt-preview { flex: 1; min-height: 0; display: flex; justify-content: flex-end; padding: 20px 24px; overflow: hidden; background: #f5f6f8; }
 .mt-frame { display: block; flex: 0 1 420px; width: 420px; max-width: 100%; height: 100%; min-width: 0; background: #fff; border: 1px solid #dfe3e9; border-radius: 8px; box-shadow: 0 6px 20px rgb(31 35 41 / 8%); }
+.mt-frame-closed { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: #7d8592; }
+.mt-reopen { border: 1px solid #dfe3e9; border-radius: 6px; background: #fff; color: #3370ff; padding: 4px 12px; cursor: pointer; }
+.mt-reopen:hover { border-color: #3370ff; }
 @media (max-width: 980px) {
   .mt { padding: 16px; }
   .mt-workspace { grid-template-columns: 244px minmax(0, 1fr); }

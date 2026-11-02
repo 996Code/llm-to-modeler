@@ -14,9 +14,7 @@ from domains.chatbi.models import M4_DDL
 @pytest.fixture()
 def db():
     from sdk.relational_store import PackRelationalDB
-    from domains.chatbi.datasources import init_store, configure_encryption
-    from cryptography.fernet import Fernet
-    configure_encryption(Fernet.generate_key().decode())
+    from domains.chatbi.datasources import init_store
     d = PackRelationalDB("chatbi")
     init_store(d)
     d.init_schema(M4_DDL)

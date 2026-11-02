@@ -567,9 +567,9 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
             err_text = f"{result_data.get('error', '')} {summary} " \
                        f"{result_data.get('message', '')}".lower()
             # 存储设施关键词优先于通用连接词(与前端 errorDiag.ts 同口径:
-            # 向量库/neo4j 的 connection 错误归检索设施,不是 LLM 上游)
-            if any(k in err_text for k in ("neo4j", "vector", "pgvector",
-                                             "graph", "检索")):
+            # 向量库/图存储(PG) 的 connection 错误归检索设施,不是 LLM 上游)
+            if any(k in err_text for k in ("vector", "pgvector",
+                                             "graph", "图存储", "检索")):
                 cat = "retrieval"
             elif any(k in err_text for k in ("llm", "chat", "completion", "500",
                                               "502", "timeout", "connection", "embed")):

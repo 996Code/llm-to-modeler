@@ -3,7 +3,7 @@
 # 单容器单端口（容器内 80 → 宿主映射），宿主网关按 /ai-modeler 前缀反代。
 #
 # 零联网构建（对齐 njmind 镜像习惯）：
-#   前端 dist / 后端 .deps / nginx+supervisor 的 .deb 都在宿主侧经
+#   前端 dist / 后端 .deps / nginx+curl 的 .deb 都在宿主侧经
 #   docker run 预备（deploy.sh ②a/②b/②c）——docker run 的容器网络正常，
 #   不在 docker build 里做联网 RUN（规避构建容器 DNS 依赖 daemon resolv.conf
 #   快照的坑）。
@@ -11,11 +11,12 @@
 # 构建上下文 = 仓库根目录（deploy.sh 从仓库根执行 docker build）
 #   COPY 路径以仓库根为基准：backend/、deploy/single/
 #
-# 进程模型：启动脚本后台拉起 uvicorn（127.0.0.1:8000），前台 exec nginx。
+# 进程模型：启动脚本后台拉起 uvicorn（127.0.0.1:8000）和 nginx 并监视。
 # nginx 伺服静态（/ai-modeler/）+ 反代 API（/ai-modeler/api → 127.0.0.1:8000，
 # SSE 关缓冲）；任一进程退出容器退出，由 docker restart 策略拉起。
 # =============================================================================
-FROM python:3.12-slim-trixie
+ARG PY_IMAGE=python:3.12-slim-trixie
+FROM ${PY_IMAGE}
 
 # nginx 及依赖 deb（宿主侧 docker run apt-get --download-only 预下载）
 COPY backend/debs/ /tmp/debs/
@@ -28,7 +29,7 @@ COPY backend/.deps/ /app/deps/
 # 后端源码
 COPY backend/src/ /app/src/
 # mock 业务平台 MCP server（南京院客服 Demo；compose 的 metrology-mcp
-# 服务复用本镜像，command 覆盖运行——mcp SDK 已在 deps 里，零额外依赖）
+# 服务复用本镜像，以 entrypoint 覆盖运行；mcp SDK 已在 deps 里）
 COPY tools/mcp-e2e/ /app/mcp-e2e/
 # 前端构建产物（平铺 dist；nginx root 直指）
 COPY backend/dist/ /usr/share/nginx/html/ai-modeler/

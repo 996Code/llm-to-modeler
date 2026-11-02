@@ -25,14 +25,12 @@ class _StubEmbedder:
         return [[0.1, 0.2] for _ in texts]
 
     def encode_queries(self, texts):
-        # 镜像真实 LocalEmbedder.encode_queries 默认口径:直传(bge-m3
-        # 官方明确查询侧无需 instruction;EMBED_QUERY_PREFIX 开关另测)
+        # 保留 query/document 独立入口,固定 bge-m3 查询直接编码原文。
         _StubEmbedder.last_texts = list(texts)
         return [[0.9, 0.9] for _ in texts]
 
 
 def _local_client(monkeypatch):
-    monkeypatch.setenv("EMBEDDING_BACKEND", "local")
     monkeypatch.setattr("llm.local_embeddings.get_local_embedder",
                         lambda: _StubEmbedder())
     return LLMClient(config=None, conversation_store=_FakeStore())
@@ -47,15 +45,13 @@ class TestEmbedModes:
         assert out == [[0.1, 0.2]]
         assert _StubEmbedder.last_texts == ["员工表"]
 
-    def test_query_mode_prefixes_locally(self, monkeypatch):
-        """mode=query 走 encode_queries:默认(bge-m3)不加前缀直传;
-        EMBED_QUERY_PREFIX=1 时注入检索前缀(审查修正:m3 官方明确
-        查询侧无需 instruction,前缀属 v1.5 系列)。"""
+    def test_query_mode_never_adds_prefix(self, monkeypatch):
+        """mode=query 保留独立编码入口,旧前缀开关不影响 bge-m3。"""
         client = _local_client(monkeypatch)
         out = client.embeddings(["员工表"], stage="x", mode="query")
         assert out == [[0.9, 0.9]]
         assert _StubEmbedder.last_texts == ["员工表"]   # 默认无前缀
-        # 开关开:真实 encode_queries 注入前缀(裸实例绕 __init__)
+        # 旧开关存在时仍由真实 encode_queries 直传(裸实例绕 __init__)
         from llm.local_embeddings import _LocalEmbedder
         emb = object.__new__(_LocalEmbedder)
         seen = {}
@@ -63,31 +59,24 @@ class TestEmbedModes:
                             lambda self, ts: seen.update(texts=ts))
         monkeypatch.setenv("EMBED_QUERY_PREFIX", "1")
         emb.encode_queries(["员工表"])
-        assert seen["texts"] == ["为这个句子生成表示以用于检索相关文章：员工表"]
+        assert seen["texts"] == ["员工表"]
         # 开关关(默认):直传
         monkeypatch.delenv("EMBED_QUERY_PREFIX")
         emb.encode_queries(["员工表"])
         assert seen["texts"] == ["员工表"]
 
-    def test_api_backend_ignores_mode(self, monkeypatch):
-        """API 后端无官方查询/文档区分:mode 忽略不报错。"""
+    def test_legacy_api_env_still_uses_local_embedding(self, monkeypatch):
+        client = _local_client(monkeypatch)
         monkeypatch.setenv("EMBEDDING_BACKEND", "api")
         monkeypatch.setenv("LLM_EMBED_MODEL", "text-embedding-v3")
-        client = LLMClient(config=None, conversation_store=_FakeStore())
-        captured = {}
-
-        class FakeResp:
-            data = [SimpleNamespace(index=0, embedding=[0.5, 0.5])]
-
-        def fake_create(model, input):
-            captured["input"] = input
-            return FakeResp()
-
-        monkeypatch.setattr(type(client.client.embeddings), "create",
-                            staticmethod(fake_create))
-        out = client.embeddings(["q"], mode="query", stage="x")
-        assert out == [[0.5, 0.5]]
-        assert captured["input"] == ["q"]   # 无前缀
+        monkeypatch.setattr(client, "_embeddings_api",
+                            lambda *a, **kw: pytest.fail("API embedding used"),
+                            raising=False)
+        assert client.embeddings(["q"], mode="query", stage="x") == [[0.9, 0.9]]
+        assert client.embed_model == "bge-m3"
+        log = client._conversation_store.calls[-1]
+        assert log["endpoint"] == "embeddings:local/bge-m3"
+        assert log["request_data"]["mode"] == "query"
 
     def test_invalid_mode_raises(self, monkeypatch):
         client = _local_client(monkeypatch)
@@ -173,7 +162,7 @@ class TestChatCache:
         from services import llm_providers as _providers
         from llm.client import LLMConfig
         _providers.reset_runtime_cache_for_tests()
-        d = LLMConfig()
+        d = LLMConfig(base_url="http://test/v1", model="test-chat")
         _providers.save_providers({
             "primary": {"base_url": d.base_url, "api_key": d.api_key,
                         "model": d.model}}, updated_by="test")
@@ -183,7 +172,9 @@ class TestChatCache:
     def test_disabled_by_default(self, monkeypatch):
         """默认关:两次同参 chat 都出站。"""
         monkeypatch.delenv("LLM_CACHE_ENABLED", raising=False)
-        client = LLMClient(config=None, conversation_store=_FakeStore())
+        from llm.client import LLMConfig
+        client = LLMClient(config=LLMConfig(base_url="http://test/v1", model="test-chat"),
+                           conversation_store=_FakeStore())
         n = []
 
         class FakeChat:
@@ -207,7 +198,9 @@ class TestChatCache:
     def test_enabled_hits_cache(self, monkeypatch):
         """开启:全同 messages+temperature 二次零出站;temperature 不同不命中。"""
         monkeypatch.setenv("LLM_CACHE_ENABLED", "1")
-        client = LLMClient(config=None, conversation_store=_FakeStore())
+        from llm.client import LLMConfig
+        client = LLMClient(config=LLMConfig(base_url="http://test/v1", model="test-chat"),
+                           conversation_store=_FakeStore())
         n = []
 
         class FakeChat:

@@ -15,7 +15,7 @@
      ② chunk_text(结构感知分段:标题成块/整章优先/句读兜底)
      ③ 每批: LLM 抽实体关系(kg.extract,本体 schema 驱动)
         └ 同批: 子段切分→embedding(kg.embed)→pgvector
-        └ Neo4j upsert_batch(实体 MERGE/关系带 chunk_id)
+        └ 图存储(PG) upsert_batch(实体 MERGE/关系带 chunk_id)
         └ 成功才 mark_chunk done(断点续跑)
      ⑤ 收尾: 摘要块/提案合并/身份复合/文件名实体化
 ```
@@ -55,16 +55,16 @@ dim=1024，**批 4 段**——16 段批曾 OOM 的事故保险丝）→
 索引，主键 chunk_id）。模型一致性预检（`_prepare_vector`）：库的 embedding
 模型变了→降级纯图谱并关向量位；缺口补偿两处触发（任务开头对账+收尾）。
 
-### 图谱抽取（LLM → Neo4j）
+### 图谱抽取（LLM → 图存储 PG）
 
 批循环（批 4 块/并发 2/失败熔断 5）：`_extract_chunk` 用**本体驱动的提示词**
 （`kb.schema` 的 entity_types/relation_types + 库内既有别名词表 glossary，
 模板 `prompts/extract.j2`，stage=`kg.extract`）→ 后处理链：归一锚定
 （实体名必须逐字出现在原文；`normalize_name` 统一全角/空格/破折号）→
 schema 强弱校验（strict 丢类型外；semi_open 进提案待管理端确认）→ 悬空
-关系/端点域校验 → `graph.upsert_batch` 单事务写 Neo4j：
+关系/端点域校验 → `graph.upsert_batch` 单事务写图存储(PG)：
 
-- 实体 `MERGE (e:Entity {kb_id, normalized_name})`：type last-write-win、
+- 实体 `MERGE (e:Entity {kb_id, normalized_name})` 语义（PG 唯一键等价实现）：type last-write-win、
   别名并集、`sourceDocs/sourceChunks` 逐块累积——**同一实体跨文档共享**
   （这是检索向"同模板文档互相召回"的根源）。
 - 关系 MERGE 键含 chunk_id（跨块同三元组是不同证据边）。
@@ -136,7 +136,7 @@ query
 导入向：PDF 字节 → `parse_to_text` 纯文本 → `chunk_text` `[{seq, text}]` →
 子段 `[{chunkId: "<父id>#0", embedding: [1024 floats]}]` → pgvector 行；
 LLM 抽取 `{"entities": [{name, type, aliases}], "relations": [{source, target, type}]}` →
-Neo4j `MERGE (:Entity {kb_id, normalized_name})`。
+图存储(PG) 实体行（唯一键 `kb_id + normalized_name`）。
 
 检索向：「JJF 1381 的实验环境」→ 意图 `{entities: ["JJF 1381-2012 …大纲"], keywords: ["实验环境"], hop: 1}` →
 种子（normalized 三层匹配）→ 收敛 `{docScopeFromEntity: [docId]}` →

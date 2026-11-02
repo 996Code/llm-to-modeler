@@ -838,7 +838,7 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
 
     db = runtime.get_pack_db()
     llm = runtime.get_llm(app_state) if app_state else None
-    info = datasources.get_datasource(db, ds_id, decrypt=True)
+    info = datasources.get_datasource(db, ds_id)
     if not info:
         raise ValueError(f"数据源不存在: {ds_id}")
 
@@ -962,9 +962,11 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
                 raise RuntimeError(rb.error)
             indexed = rb.indexed_count
         except Exception as e:
-            logger.warning("向量索引重建失败(降级, 不阻塞扫描): %s", e)
+            _safe = datasources._clean_db_error(e, info.password)
+            logger.warning("向量索引重建失败(降级, 不阻塞扫描): %s", _safe)
             index_status = "degraded"
-            index_warning = f"扫描完成但索引重建失败——RAG 检索将降级, 重扫可修复: {str(e)[:120]}"
+            index_warning = (f"扫描完成但索引重建失败——RAG 检索将降级, "
+                             f"重扫可修复: {_safe[:120]}")
             handle.log(index_warning)
         scan_stage = f"完成: {len(content.models)} 张表, 索引 {indexed} 条"
         if index_warning:
@@ -1011,9 +1013,12 @@ def _task_scan_datasource(handle, app_state=None) -> dict:
         # 通用分支, warning 态永远到不了生产终态)
         raise
     except Exception as e:
+        # 驱动异常可能携带 DSN/密码——入库与上抛前统一脱敏(明文存储
+        # 裁决不改变"错误不回显凭证"的约束)
+        _safe = datasources._clean_db_error(e, info.password)
         datasources.update_datasource(db, ds_id, scan_status="failed",
-                                      scan_error=str(e)[:500])
-        raise
+                                      scan_error=_safe[:500])
+        raise RuntimeError(_safe) from e
     finally:
         lease.release()   # 十九审 6.4: 终态释放(成功/失败都执行)
 
@@ -1133,10 +1138,8 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
             from sdk.pack_api import PermanentTaskError
             raise PermanentTaskError(
                 "刷新执行期租约被其他实例接管(本任务停滞超时)——中止剩余数据源")
-        # list_datasources 不带 decrypt(password_plain 为空)——同健康巡检
-        # 的既有教训: 不解密直连必失败(fe_sendauth: no password supplied)。
-        # 此前定时刷新自迁移以来一直在任务层静默失败(脚本验证绕过了本层)。
-        info = datasources.get_datasource(db, row.id, decrypt=True) or row
+        # 列表已包含内部连接密码。
+        info = row
         # mcp: 无业务库可结构内省——自动刷新对 mcp 无意义(工具清单由
         # server 提供, 变化靠手动重扫);不跳过会每轮必报
         # "不支持的数据库类型: mcp" 假失败
@@ -1314,8 +1317,9 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
             except Exception as e:
                 # 二十审 7.4: 索引落后不能伪装纯成功——任务日志可见 +
                 # 数据源结果 ok=False(任务中心不再是"已成功 100%")
-                logger.warning("刷新后索引重建失败: %s", e)
-                handle.log(f"⚠ 索引重建失败 ds={info.id[:8]}…: {str(e)[:160]}")
+                _safe = datasources._clean_db_error(e, info.password)
+                logger.warning("刷新后索引重建失败: %s", _safe)
+                handle.log(f"⚠ 索引重建失败 ds={info.id[:8]}…: {_safe[:160]}")
                 index_status = "degraded"
                 index_warning = f"语义已写 v{final_version}, 索引落后——手动重扫可修复"
             # 6.4 修复: 索引期间若 current 被并发变更(人工编辑/回滚), 刚建的
@@ -1338,7 +1342,8 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                                          f"索引对齐失败——重扫可修复")
             except Exception as e:
                 index_status = "conflict"
-                index_warning = f"并发校验失败: {str(e)[:120]}"
+                index_warning = (f"并发校验失败: "
+                                 f"{datasources._clean_db_error(e, info.password)[:120]}")
             if index_warning:
                 logger.warning("刷新索引降级 ds=%s: %s", info.id, index_warning)
             # 二十审 7.4 根本修复: 索引 degraded = 本轮"语义已发布但
@@ -1360,8 +1365,10 @@ def _refresh_all_datasources(handle, app_state, db, settings, results,
                             **({"report_warning": True}
                                if report_state == REPORT_FAILED else {})})
         except Exception as e:
-            logger.warning("自动刷新失败 %s: %s", info.name, e)
-            results.append({"datasource_id": info.id, "ok": False, "error": str(e)[:200]})
+            _safe = datasources._clean_db_error(e, info.password)
+            logger.warning("自动刷新失败 %s: %s", info.name, _safe)
+            results.append({"datasource_id": info.id, "ok": False,
+                            "error": _safe[:200]})
         finally:
             write_lease.release()   # 二十审 9.2: 每数据源写租约终态释放
     # 九审 7.5: 汇总 partial failure——有失败时任务不能显示 succeeded

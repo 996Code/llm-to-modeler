@@ -26,10 +26,6 @@ DEMO_ORDER_OPTIONS = [
 ]
 _ORDER_RE = re.compile(r"([A-Z]{2}\d{3,})")
 
-# 数据源绑定的 env 键(部署接口,保持稳定;值=数据源 ID,DB 缺位的演示替身)
-PROGRESS_DATASOURCE_ENV = "METROLOGY_PROGRESS_DATASOURCE_ID"
-INSTRUMENT_DATASOURCE_ENV = "METROLOGY_INSTRUMENT_DATASOURCE_ID"
-
 # 价目记录字段(上游契约)与制品驼峰键映射(与进度卡/前端 data_labels 同风格)
 _INSTRUMENT_FIELDS = ("name", "model", "measure_range", "accuracy", "fee_yuan",
                       "mandatory_l1", "mandatory_l2", "period_months", "regulation")
@@ -49,7 +45,7 @@ _PIPELINE_STEPS = [
 # required: 缺该槽位时追问(question 支持 {subject} 占位,取 subject_slot
 #   的值包「」,缺省用 subject_default);normalize 对槽位值归一。
 # action.kind=kg: 知识库证据链(见 _run_kg);
-# action.kind=chatbi: 受控执行——env 指向数据源 ID 环境变量(DB 替身),
+# action.kind=chatbi: 受控执行——server/tool 唯一匹配启用数据源,
 #   tool 固定白名单工具,params 是 工具参数←槽位 映射,notices 是
 #   业务状态→通知卡文案模板,card 是结果卡构建函数。
 
@@ -95,7 +91,7 @@ SCENARIOS = {
         },
         "action": {
             "kind": "chatbi",
-            "env": PROGRESS_DATASOURCE_ENV,
+            "server": "metrology",
             "ds_name": "计量业务平台",
             "tool": "query_progress",
             "params": {"order_no": "order_no"},
@@ -188,7 +184,7 @@ SCENARIOS = {
         },
         "action": {
             "kind": "chatbi",
-            "env": INSTRUMENT_DATASOURCE_ENV,
+            "server": "metrology",
             "ds_name": "计量器具价目",
             "tool": "query_instrument",
             "params": {"name": "instrument"},
