@@ -757,6 +757,24 @@ class ConversationStore:
                 (title, conv_id),
             )
 
+    def get_title(self, conv_id: str) -> str:
+        """读会话标题(单列 SELECT,标题生成守卫用)。
+
+        已有非空标题 → 引擎跳过本轮标题生成(每轮省一次 LLM 调用);
+        不存在/空标题返回空串。读取异常按空处理(fail-open,守卫
+        失效最多退化为旧行为=每轮生成,不影响主流程)。
+        """
+        try:
+            with self._get_conn() as conn:
+                row = conn.execute(
+                    "SELECT title FROM session_meta WHERE conv_id = ?",
+                    (conv_id,),
+                ).fetchone()
+            return (row["title"] or "") if row else ""
+        except Exception as e:
+            logger.warning(f"get_title failed for {conv_id}: {e}")
+            return ""
+
     # ── Messages(events 表,append-only) ───────────────────────
 
     def add_message(

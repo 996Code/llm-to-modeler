@@ -137,6 +137,27 @@ from llm.rate_limit import (  # noqa: E402
 from llm.embed_cache import EmbedCache, embed_cache_key  # noqa: E402
 
 
+# ── chat 结果缓存 stage 白名单(2026-11 降频) ─────────────────────────
+# 只缓存 temperature=0 的确定性小任务:同 prompt 必得同结论,缓存零风险。
+# 大生成(conclude/answer/generate_sql/compress 等)不入列——同问题在
+# 不同上下文应产出新答案,缓存会错层。LLM_CACHE_ENABLED=0 整体禁用
+# (逃生门,默认开)。
+_CHAT_CACHE_STAGES = frozenset({
+    "route_pack", "route_tool", "conversation_title",
+    "assistant.select", "assistant.extract",
+    "kg.query", "kg.sufficiency",
+    "chatbi.retrieve.refine", "chatbi.think", "chatbi.chart",
+})
+
+
+def _stage_cacheable(stage: Optional[str]) -> bool:
+    """该 stage 的 chat 结果是否可缓存(白名单 + 全局开关)。"""
+    if os.getenv("LLM_CACHE_ENABLED", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return False
+    return stage in _CHAT_CACHE_STAGES
+
+
 class LLMConfig(BaseModel):
     """LLM 调用配置;端点由供应商 DB 解析,也可显式注入配置。
 
@@ -577,15 +598,16 @@ class LLMClient:
         """
         start_time = time.time()  # 计时起点，用于算 duration_ms
         endpoint = f"{self.config.base_url}/chat/completions"
-        # chat 结果缓存(P1#8 T3):LLM_CACHE_ENABLED 默认关——chat 是混用途
-        # 出口(路由/抽取/生成共用),缓存错层风险高,只对全同参数命中
-        # (messages 逐项 role/content + model 显式覆盖优先 + temperature)。
-        # 查在限速 acquire 之前:命中零出站,不应占 RPM/TPM 配额。
-        # 多模态 content(list)的 sig 构造可能失败——失败跳过缓存,
-        # 不阻断主链路(裁决:缓存是增强项,主链路永远直通)。
+        # chat 结果缓存(2026-11 降频改造):按 stage 白名单启用——只缓存
+        # temperature=0 的确定性小任务(路由/抽取/判定类),大生成
+        # (conclude/answer/generate_sql 等)永不缓存(同问题不同上下文
+        # 应产出新答案)。LLM_CACHE_ENABLED=0 可整体禁用(逃生门)。
+        # 命中条件仍是全同参数(messages 逐项 role/content + model 覆盖 +
+        # temperature + max_tokens),查在限速 acquire 之前:命中零出站,
+        # 不占 RPM/TPM 配额。多模态 content(list)的 sig 构造可能失败——
+        # 失败跳过缓存,不阻断主链路(裁决:缓存是增强项,主链路永远直通)。
         cache_key = None
-        if os.getenv("LLM_CACHE_ENABLED", "0").strip().lower() in (
-                "1", "true", "yes", "on") and messages:
+        if _stage_cacheable(stage) and messages:
             try:
                 sig = json.dumps([[m.get("role"), m.get("content")]
                                   for m in messages], ensure_ascii=False)
@@ -810,6 +832,40 @@ class LLMClient:
                 ),
             })
 
+        # chat 缓存(2026-11 降频):chat_json 是小任务主力出口(路由/抽取/
+        # 判定全走这里),白名单 stage 在出站前查缓存——命中零出站零等待。
+        # 键构造与 chat() 同源(guided_messages+model+temperature+max_tokens
+        # 全同才命中;guided 追加的 JSON 指令对同 prompt 恒定,不影响命中)。
+        # 命中记 chat:cache 日志(与 chat() 口径一致)。
+        _cache_key_json = None
+        if _stage_cacheable(stage) and messages:
+            try:
+                sig = json.dumps([[m.get("role"), m.get("content")]
+                                  for m in guided_messages], ensure_ascii=False)
+                endpoint_cfg = self._resolve_endpoint()
+                provider_key = json.dumps([
+                    endpoint_cfg[0].base_url, endpoint_cfg[0].api_key,
+                    endpoint_cfg[0].model]
+                    if endpoint_cfg else [], ensure_ascii=False)
+                _ck = embed_cache_key(
+                    provider_key,
+                    "chat|model{}|t{}|m{}".format(
+                        model or "", temp, self.config.max_tokens),
+                    [sig])
+                _hit = self._chat_cache.get(_ck)
+                if _hit is not None:
+                    self._log_call(
+                        endpoint="chat:cache",
+                        request_data={
+                            "stage": stage, "cache_hit": True,
+                            "count": len(guided_messages)},
+                        response_data={}, status_code=None, duration_ms=0,
+                        conv_id=conv_id)
+                    return _hit
+                _cache_key_json = _ck
+            except (TypeError, ValueError):
+                _cache_key_json = None
+
         # Try json_object mode first (only for text-only messages)
         start_time = time.time()
         endpoint = f"{self.config.base_url}/chat/completions"
@@ -889,6 +945,10 @@ class LLMClient:
                 conv_id=conv_id,
                 stage=stage,
             )
+
+            # 白名单 stage 成功回填缓存(异常路径不缓存坏值)
+            if _cache_key_json is not None:
+                self._chat_cache.put(_cache_key_json, result)
 
             return result
         except Exception as _e:

@@ -273,8 +273,11 @@ def classify_intent_node(state: GraphState) -> dict:
     # 而是在识别意图的当轮顺带让 LLM 取一个简短标题。与路由共用
     # conversation_id/stage 打点, 链路可追溯; 失败静默降级为空(前端
     # 仍可回退 displayTitle 推导, 不阻塞主流程)。
+    # 降频守卫(2026-11): 已有非空标题的会话不再重复生成——标题是
+    # 会话级产物,第 N 轮重生成是纯浪费的 LLM 调用。守卫读库失败
+    # fail-open(退化为旧行为=每轮生成)。
     conversation_title = ""
-    if conversation_id:
+    if conversation_id and not _conversation_has_title(conversation_id):
         conversation_title = _generate_conversation_title(
             user_input, conversation_id=conversation_id)
 
@@ -877,6 +880,20 @@ def _append_trace(state: GraphState, payload: Dict[str, Any]) -> None:
         _conversation.append(conv_id, "trace", payload)
     except Exception as e:
         logger.warning(f"trace write failed ({payload.get('stage')}): {e}")
+
+
+def _conversation_has_title(conversation_id: str) -> bool:
+    """会话是否已有非空标题(标题生成降频守卫)。
+
+    读库失败按"无标题"处理(fail-open):守卫失效最多退化为旧行为
+    =每轮重新生成标题,不影响主流程。
+    """
+    if _conversation is None:
+        return False
+    try:
+        return bool(_conversation.get_title(conversation_id))
+    except Exception:
+        return False
 
 
 def _generate_conversation_title(user_input: str, conversation_id: str) -> str:

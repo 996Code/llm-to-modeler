@@ -1,15 +1,56 @@
 """chatbi pack 装配入口 —— 平台钩子实现集合(契约对照 knowledge_graph/pack.py)。
 
   create_registry()    必须: 注册 ask_data / switch_chart 工具
+  create_router()      可选: 确定性二级路由(零 LLM,2026-11 降频)
   create_api_router()  可选: 数据源管理/语义层/图谱/记忆/健康 HTTP API
   register_tasks()     可选: 元数据定时刷新(后台任务框架)
   unload()             可选: 释放运行时单例
 """
 import logging
 
+from sdk.pack_router import DefaultPackRouter
 from sdk.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+class ChatBIKeywordRouter(DefaultPackRouter):
+    """关键词确定性路由:三工具的 when 语义全是关键词式,不值得烧 LLM。
+
+    规则(与各工具 when 声明同源):
+      - 图表切换词(换成饼图/折线/柱状/表格/指标卡…) → switch_chart
+      - 查询质量/统计词(查询质量/慢查询/查询统计) → query_stats
+      - 其余一律 ask_data(主工具,超范围由其 clarify/兜底链路处理)
+
+    误路由代价可控:switch_chart 无 prev_sql 会引导先提问;
+    query_stats 是只读统计。对比 LLM 路由每轮 ~4s+ 延迟,收益远大于风险。
+    """
+
+    _SWITCH_WORDS = ("换成", "切换", "改用", "换成饼图", "饼图", "折线", "柱状",
+                     "条形", "表格", "指标卡", "散点")
+    _STATS_WORDS = ("查询质量", "查询统计", "慢查询", "查询性能", "数据源质量",
+                    "查询历史统计")
+
+    def route(self, user_input: str, artifact=None, history: str = "",
+              llm_client=None, conv_id: str = None) -> tuple:
+        text = (user_input or "").strip()
+        if text and any(w in text for w in self._STATS_WORDS):
+            for t in self._registry.all():
+                if t.name == "query_stats":
+                    return ("query_stats", 1.0)
+        if text and any(w in text for w in self._SWITCH_WORDS):
+            for t in self._registry.all():
+                if t.name == "switch_chart":
+                    return ("switch_chart", 1.0)
+        for t in self._registry.all():
+            if t.name == "ask_data":
+                return ("ask_data", 1.0)
+        tools = self._registry.all()
+        return (tools[0].name if tools else None, 1.0)
+
+
+def create_router(registry=None):
+    return ChatBIKeywordRouter(registry)
 
 
 def create_registry(app_state=None) -> ToolRegistry:

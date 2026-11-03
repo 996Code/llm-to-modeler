@@ -170,8 +170,9 @@ class TestChatCache:
         _providers.reset_runtime_cache_for_tests()
 
     def test_disabled_by_default(self, monkeypatch):
-        """默认关:两次同参 chat 都出站。"""
-        monkeypatch.delenv("LLM_CACHE_ENABLED", raising=False)
+        """LLM_CACHE_ENABLED=0 整体禁用:两次同参 chat 都出站(逃生门)。
+        (2026-11 起白名单 stage 默认开,本用例显式关掉验证逃生门。)"""
+        monkeypatch.setenv("LLM_CACHE_ENABLED", "0")
         from llm.client import LLMConfig
         client = LLMClient(config=LLMConfig(base_url="http://test/v1", model="test-chat"),
                            conversation_store=_FakeStore())
@@ -196,8 +197,8 @@ class TestChatCache:
         assert r1 == r2 == "答" and len(n) == 2
 
     def test_enabled_hits_cache(self, monkeypatch):
-        """开启:全同 messages+temperature 二次零出站;temperature 不同不命中。"""
-        monkeypatch.setenv("LLM_CACHE_ENABLED", "1")
+        """白名单 stage:全同 messages+temperature 二次零出站;temperature
+        不同不命中。(2026-11 起白名单 stage 默认开,不再需要 env=1。)"""
         from llm.client import LLMConfig
         client = LLMClient(config=LLMConfig(base_url="http://test/v1", model="test-chat"),
                            conversation_store=_FakeStore())
@@ -216,8 +217,62 @@ class TestChatCache:
         fake = FakeChat()
         monkeypatch.setattr(type(client.client.chat.completions),
                             "create", lambda self, **kw: fake.create(**kw))
-        client.chat([{"role": "user", "content": "q"}], temperature=0.1)
-        client.chat([{"role": "user", "content": "q"}], temperature=0.1)
+        client.chat([{"role": "user", "content": "q"}], temperature=0.1,
+                    stage="route_pack")
+        client.chat([{"role": "user", "content": "q"}], temperature=0.1,
+                    stage="route_pack")
         assert len(n) == 1, "全同参数二次应命中"
-        client.chat([{"role": "user", "content": "q"}], temperature=0.9)
+        client.chat([{"role": "user", "content": "q"}], temperature=0.9,
+                    stage="route_pack")
         assert len(n) == 2, "temperature 不同不得命中"
+
+    def test_non_whitelisted_stage_never_cached(self, monkeypatch):
+        """非白名单 stage(大生成)永不缓存——同参两次都出站。"""
+        from llm.client import LLMConfig
+        client = LLMClient(config=LLMConfig(base_url="http://test/v1", model="test-chat"),
+                           conversation_store=_FakeStore())
+        n = []
+
+        class FakeChat:
+            def create(self, **kw):
+                n.append(1)
+                m = SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content="答", reasoning_content=None))],
+                    usage=None)
+                return m
+        fake = FakeChat()
+        monkeypatch.setattr(type(client.client.chat.completions),
+                            "create", lambda self, **kw: fake.create(**kw))
+        client.chat([{"role": "user", "content": "q"}], stage="assistant.conclude")
+        client.chat([{"role": "user", "content": "q"}], stage="assistant.conclude")
+        assert len(n) == 2, "大生成 stage 不得命中缓存"
+
+    def test_chat_json_whitelisted_stage_hits_cache(self, monkeypatch):
+        """chat_json 白名单 stage:同参二次零出站(json_object 直连路径)。"""
+        from llm.client import LLMConfig
+        client = LLMClient(config=LLMConfig(base_url="http://test/v1", model="test-chat"),
+                           conversation_store=_FakeStore())
+        n = []
+
+        class FakeChat:
+            def create(self, **kw):
+                n.append(1)
+                m = SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content='{"pack": "x"}', reasoning_content=None))],
+                    usage=None)
+                return m
+        fake = FakeChat()
+        monkeypatch.setattr(type(client.client.chat.completions),
+                            "create", lambda self, **kw: fake.create(**kw))
+        r1 = client.chat_json([{"role": "user", "content": "q"}],
+                              stage="assistant.select")
+        r2 = client.chat_json([{"role": "user", "content": "q"}],
+                              stage="assistant.select")
+        assert r1 == r2 == {"pack": "x"}
+        assert len(n) == 1, "chat_json 白名单 stage 二次应命中"

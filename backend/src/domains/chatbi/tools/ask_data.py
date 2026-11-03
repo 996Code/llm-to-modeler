@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from sdk.tool import CompositeTool, ToolResult, ToolContext, AskOption, AskQuestion, AskSpec
 from sdk.relational_store import PackRelationalDB
@@ -36,6 +37,10 @@ from domains.chatbi.healer import (extract_sql_text, get_circuit_breaker,
 from domains.chatbi.security.sql_validator import validate_sql
 
 logger = logging.getLogger(__name__)
+
+# 记忆提炼后台线程池(单工作线程足够:提炼是低频旁路任务,串行化还避免
+# 并发写记忆表的锁竞争;daemon=随进程退出,不阻塞关停)。
+_MEMORY_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chatbi-mem")
 
 # ── SQL 生成 prompt (T029 分层;移植自 sql_agent.py,文本原样) ──
 _SQL_SYSTEM_PROMPT = """你是 BI 系统的 SQL 生成器。根据用户问题和数据库 schema 生成 PostgreSQL 查询。
@@ -1182,17 +1187,29 @@ class AskDataTool(CompositeTool):
         # LLM 判定该轮是否值得记;失败/不该记静默跳过(fail-open 不阻塞)。
         # B1 修复: result_summary 先组装(此前未定义, NameError 被 except 吞掉
         # → 记忆抽取链路全死, 走查发现)
+        # 降频(2026-11): 提炼丢后台线程——结果已生成,用户不该为"要不要记"
+        # 白等一次 LLM 延迟(线上网关 ~4s+)。参数快照防 state 后续突变;
+        # 失败 fail-open 语义不变(后台日志可见)。
+        # 提交失败(线程池拒绝等)仍走 _persist_warnings 可见路径。
         result_summary = f"查询完成, 返回 {result.rowcount} 行; SQL: {state['sql'][:200]}"
+        _mem_snapshot = (state.get("user_input", ""), state["sql"],
+                         list(state.get("current_tables") or []),
+                         result_summary, ctx.conv_id,
+                         ctx.user_id or None, state["ds"].id)
         try:
             from domains.chatbi.memory import extract_and_save_memory
-            extract_and_save_memory(
-                self._get_llm(ctx), self._get_db(), state.get("user_input", ""),
-                state["sql"], state.get("current_tables") or [],
-                result_summary, conv_id=ctx.conv_id,
-                user_id=ctx.user_id or None,
-                data_source_id=state["ds"].id)
+
+            def _bg_extract_memory(llm, db, args):
+                try:
+                    extract_and_save_memory(llm, db, *args)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("后台记忆抽取失败(不阻塞): %s", e)
+
+            _MEMORY_EXECUTOR.submit(
+                _bg_extract_memory, self._get_llm(ctx), self._get_db(),
+                _mem_snapshot)
         except Exception as e:
-            logger.warning("记忆抽取失败(不阻塞): %s", e)
+            logger.warning("记忆抽取提交失败(不阻塞): %s", e)
             state.setdefault("_persist_warnings", []).append(f"记忆未沉淀: {e}")
 
         # linkage 记忆 (E1 Task 2.1;源 chat_stream 成功查询后调

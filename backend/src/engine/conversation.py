@@ -255,6 +255,12 @@ class ConversationManager:
             return []
         return self._store.get_messages(conv_id)
 
+    def get_title(self, conv_id: str) -> str:
+        """读会话标题(标题生成降频守卫用;无 store 返回空)。"""
+        if not self._store:
+            return ""
+        return self._store.get_title(conv_id)
+
     # ── 会话级插件状态(工具跨轮记忆;委托 store,SessionStateHandle 消费) ──
 
     def get_pack_state(self, conv_id: str, scope: str) -> Dict[str, Any]:

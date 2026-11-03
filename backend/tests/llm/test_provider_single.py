@@ -270,7 +270,8 @@ def test_chat_model_tracks_active_provider_without_sdk(monkeypatch):
 
 
 def test_cached_chat_follows_db_updates_and_disable(monkeypatch):
-    monkeypatch.setenv("LLM_CACHE_ENABLED", "1")
+    # 2026-11 起白名单 stage 默认开;本用例验证缓存随 DB 热切失效,
+    # 用白名单 stage 触发缓存路径(不再依赖 env 开关)。
     _save_default()
     client = LLMClient()
     seen = []
@@ -284,8 +285,8 @@ def test_cached_chat_follows_db_updates_and_disable(monkeypatch):
 
     monkeypatch.setattr(client, "_client_for", client_for)
     messages = [{"role": "user", "content": "q"}]
-    first = client.chat(messages)
-    assert client.chat(messages) == first
+    first = client.chat(messages, stage="route_pack")
+    assert client.chat(messages, stage="route_pack") == first
     assert len(seen) == 1
     store.save_providers({"primary": {
         "base_url": "http://primary.test/v1", "model": "changed-model"}}, "test")

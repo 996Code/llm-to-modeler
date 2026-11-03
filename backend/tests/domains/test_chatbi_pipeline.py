@@ -564,7 +564,9 @@ class TestPersistWarnings:
         })
 
     @pytest.mark.parametrize("target,fragment", [
-        ("domains.chatbi.memory.extract_and_save_memory", "记忆未沉淀"),
+        # 记忆抽取已后台化(2026-11 降频):失败在后台线程消化,不再进
+        # persist_warnings——它的"可见性"断言改为后台日志路径,此处只
+        # 验证提交链路不炸。其余三段仍是同步 fail-open 可见。
         ("domains.chatbi.memory.persist_linkage_memory", "JOIN经验未沉淀"),
         ("domains.chatbi.m4.save_query", "查询未自动保存"),
         ("domains.chatbi.fewshot.index_fewshot_example", "经验未回流"),
@@ -587,6 +589,19 @@ class TestPersistWarnings:
         formatted = env["tool"].format_result(result.artifact)
         assert any(fragment in w
                    for w in formatted.get("persistWarnings") or [])
+
+    def test_memory_extraction_failure_is_backgrounded(self, env, monkeypatch):
+        """记忆抽取后台化:函数抛错不阻塞主流程,也不进 persist_warnings
+        (后台日志消化);查询结果正常返回。"""
+        import domains.chatbi.memory as mem_mod
+        monkeypatch.setattr(
+            mem_mod, "extract_and_save_memory",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+        result, _ = _run(env, "各城市的订单数量", self._llm())
+        assert result.error_for_llm is None
+        assert result.artifact["rowcount"] >= 1
+        warnings = result.artifact.get("persist_warnings") or []
+        assert not any("记忆未沉淀" in w for w in warnings), warnings
 
     def test_no_unexpected_warnings(self, env, monkeypatch):
         # 三段注入 no-op(记忆/linkage/保存查询); fewshot 在无向量配置的
