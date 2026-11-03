@@ -220,7 +220,7 @@ function relativeTime(iso?: string): string {
 .brand-logo {
   width: 32px; height: 32px;
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, var(--color-primary), #5b8cff);
+  background: var(--color-primary-ink);
   color: #fff;
   display: flex; align-items: center; justify-content: center;
   font-size: 16px;

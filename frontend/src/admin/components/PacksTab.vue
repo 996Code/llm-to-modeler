@@ -160,7 +160,6 @@ const helpByTab: Record<string, { title: string; html: string }> = {
     title: '模型供应商说明',
     html: rules([
       '填写主供应商的接口地址、密钥和模型,<b>保存后生效</b>;密钥留空时保留原值。',
-      '备用供应商为可选项,在主供应商连接失败或服务不可用时接管。',
       '单价用于费用统计,可以不填;「连通性检测」使用已保存的配置。',
     ]),
   },
@@ -235,12 +234,14 @@ onMounted(load)
 </script>
 
 <style scoped>
+/* 精装层(2026-11 重设计):令牌见 shared/design-tokens.css,规格对齐 design-demos/polished-packs.html。
+   卡片圆角/微影/hover 轻抬由 admin.css 全局 .pk-card 提供,此处不再覆盖 hover。 */
 .pk-tabs-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .pk-tabs :deep(.ant-tabs-nav) { margin: 0 0 0 -12px; }
 .pk-tabs :deep(.ant-tabs-tab) { padding: 6px 12px; font-weight: 500; }
 .pk-tab-count {
-  margin-left: 6px; font-size: 11px; font-weight: 500; color: #2f54eb;
-  background: #f0f5ff; border: 1px solid #d6e4ff; border-radius: 999px; padding: 0 7px;
+  margin-left: 6px; font-size: 12px; font-weight: 500; color: var(--brand-ink);
+  background: var(--brand-tint); border-radius: 999px; padding: 1px 8px;
 }
 /* 行标题(左) + 说明入口(右)同一行; 说明不独占一行 */
 .pk-toolbar {
@@ -248,45 +249,57 @@ onMounted(load)
   margin: 10px 2px 2px;
 }
 .pk-toolbar-title {
-  font-size: 14px; font-weight: 600; color: #334155;
+  font-size: 14px; font-weight: 600; color: var(--ink);
   display: inline-flex; align-items: center; gap: 8px;
 }
 .pk-toolbar-count { margin-left: 2px; font-weight: 400; }
-.pk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+.pk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+/* 卡面/圆角/微影/hover 抬升走 admin.css 全局 .pk-card;这里只保留令牌一致的描边底色与过渡 */
 .pk-card {
-  border: 1px solid #e6ebf2; border-radius: 12px; padding: 16px 18px; background: #fff;
-  transition: box-shadow 0.15s, opacity 0.15s;
+  border: 1px solid var(--line-soft); border-radius: var(--radius-card);
+  padding: 16px 18px 14px; background: var(--card);
+  transition: box-shadow .18s, transform .18s, border-color .18s, opacity .2s, background .2s;
 }
-.pk-card:hover { box-shadow: 0 6px 18px rgba(30, 41, 82, 0.08); }
-.pk-card.off { opacity: 0.72; background: #fbfcfe; }
+.pk-card.off { opacity: 0.72; background: var(--bg); }
 .pk-head { display: flex; align-items: center; gap: 12px; }
 .pk-icon {
-  width: 40px; height: 40px; border-radius: 10px; font-size: 18px;
-  display: flex; align-items: center; justify-content: center;
-  background: #f1f5f9; color: #94a3b8;
+  width: 40px; height: 40px; border-radius: 10px; font-size: 20px;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  background: var(--bg); color: var(--ink-3);
+  transition: background .2s, color .2s;
 }
-.pk-icon.on {
-  background: linear-gradient(135deg, #eef2ff, #e0e7ff); color: #4f46e5;
-}
+.pk-icon.on { background: var(--brand-tint); color: var(--brand); }
 .pk-name-block { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.pk-key { font-size: 11px; color: #94a3b8; line-height: 1.3; }
-.pk-name { font-weight: 700; font-size: 14px; color: #1f2937; font-family: 'SF Mono', Menlo, Consolas, monospace; }
-.pk-tags { display: flex; gap: 6px; }
-.pk-state { font-size: 11px; }
+/* 标题不再用等宽字体;插件标识(key)为常规字重次要色 */
+.pk-name { font-size: 15px; font-weight: 650; color: var(--ink); overflow-wrap: anywhere; }
+.pk-key { font-size: 12px; font-weight: 400; color: var(--ink-2); line-height: 1.3; }
+.pk-tags { display: flex; gap: 6px; flex-wrap: wrap; }
 .pk-desc {
-  margin-top: 10px; font-size: 13px; color: #6b7280; line-height: 1.6;
-  min-height: 40px; word-break: break-all;
+  margin-top: 10px; font-size: 14px; color: var(--ink-2); line-height: 1.65;
+  min-height: 48px; word-break: break-all;
 }
 .pk-dep-detail {
-  margin-top: 4px; font-size: 12px; color: #dc2626; line-height: 1.5; word-break: break-all;
+  margin-top: 4px; font-size: 12px; color: var(--danger); line-height: 1.5; word-break: break-all;
 }
-.pk-foot { margin-top: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.pk-meta { display: inline-flex; gap: 4px; flex-wrap: wrap; min-width: 0; }
-.pk-actions { white-space: nowrap; font-size: 13px; }
-.pk-actions a { color: #2f54eb; }
-.pk-grid { gap: 16px; }
-.pk-card { padding: 16px; }
-.pk-foot { flex-wrap: wrap; gap: 12px; }
-.pk-name { overflow-wrap: anywhere; }
+.pk-foot { margin-top: 8px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.pk-meta { display: inline-flex; gap: 5px; flex-wrap: wrap; min-width: 0; }
+.pk-actions { display: inline-flex; align-items: center; white-space: nowrap; font-size: 14px; }
+.pk-actions a { color: var(--brand-ink); }
+.pk-actions a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+/* a-tag 胶囊化并把 antd 预设色归一到语义令牌(启用 ok / 停用 ink-3+bg / 异常 danger / 连接失败 warn) */
+.pk-state, .pk-meta :deep(.ant-tag) {
+  border-radius: 999px; font-size: 12px; line-height: 18px; padding: 0 9px;
+}
+.pk-state { color: var(--ink-3); background: var(--bg); border-color: var(--bg); }
+.pk-state.ant-tag-success { color: var(--ok); background: var(--ok-tint); border-color: var(--ok-tint); }
+.pk-state.ant-tag-error { color: var(--danger); background: var(--danger-tint); border-color: var(--danger-tint); }
+.pk-state.ant-tag-orange { color: var(--warn); background: var(--warn-tint); border-color: var(--warn-tint); }
+.pk-meta :deep(.ant-tag-purple) { color: var(--violet); background: var(--violet-tint); border-color: var(--violet-tint); }
+.pk-meta :deep(.ant-tag-geekblue) { color: var(--brand-ink); background: var(--brand-tint); border-color: var(--brand-tint); }
+.pk-meta :deep(.ant-tag-cyan) { color: var(--cyan); background: var(--cyan-tint); border-color: var(--cyan-tint); }
+.pk-meta :deep(.ant-tag:not(.ant-tag-purple):not(.ant-tag-geekblue):not(.ant-tag-cyan)) {
+  color: var(--ink-3); background: var(--bg); border-color: var(--bg);
+}
 @media (max-width: 700px) { .pk-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>

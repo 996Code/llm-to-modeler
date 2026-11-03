@@ -196,7 +196,7 @@
           <a-descriptions-item label="会话">{{ detail.conv_id || '-' }}</a-descriptions-item>
           <a-descriptions-item label="时间" :span="2">{{ fmtTime(detail.created_at) }}</a-descriptions-item>
           <a-descriptions-item v-if="detail.error_message" label="错误" :span="2">
-            <span style="color: #dc2626">{{ detail.error_message }}</span>
+            <span style="color: var(--danger)">{{ detail.error_message }}</span>
           </a-descriptions-item>
         </a-descriptions>
         <div style="display: flex; justify-content: flex-end; margin-bottom: 6px">
@@ -462,28 +462,36 @@ function onAuditTableChange(pag: { current?: number; pageSize?: number }) {
 
 <style scoped>
 .cl-toolbar { display: flex; align-items: center; gap: 10px; margin: 14px 0 16px; flex-wrap: wrap; }
-.cl-count { margin-left: auto; color: #9ca3af; font-size: 12px; }
+.cl-count { margin-left: auto; color: var(--ink-3); font-size: 12px; }
 .cl-type { font-weight: 600; }
-.cl-endpoint { color: #374151; font-size: 13px; font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; }
-.cl-dur { font-weight: 600; color: #374151; }
-.dur-orange { color: #ea580c; }
-.dur-red { color: #dc2626; }
-.cl-recall { font-size: 12.5px; color: #2563eb; font-variant-numeric: tabular-nums; }
-.cl-conv { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: #6b7280; }
-.cl-time { font-size: 12.5px; color: #4b5563; }
-.cl-tokens { font-weight: 600; color: #374151; font-variant-numeric: tabular-nums; }
-.cl-tokens-sub { font-size: 11.5px; color: #9ca3af; margin-left: 6px; }
-.cl-detail-summary { font-size: 12px; color: #4b5563; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; display: inline-block; }
+.cl-endpoint { color: var(--ink-2); font-size: 12.5px; font-family: 'SF Mono', Menlo, Consolas, monospace; }
+.cl-dur { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.dur-orange { color: var(--warn); }
+.dur-red { color: var(--danger); }
+.cl-recall { font-size: 12.5px; color: var(--brand-ink); font-variant-numeric: tabular-nums; }
+.cl-conv { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: var(--ink-3); }
+.cl-time { font-size: 14px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.cl-tokens { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.cl-tokens-sub { font-size: 12px; color: var(--ink-3); margin-left: 6px; }
+.cl-detail-summary { font-size: 12px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; display: inline-block; }
 
 .cl-detail-click { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
-.cl-detail-click:hover { color: #1677ff; }
-.cl-conv-none { color: #bbb; font-size: 12px; }
-.cl-raw-toggle { font-size: 12px; color: #3370ff; cursor: pointer; }
+.cl-detail-click:hover { color: var(--brand-ink); }
+.cl-conv-none { color: var(--ink-3); font-size: 12px; }
+.cl-raw-toggle { font-size: 12px; color: var(--brand-ink); cursor: pointer; }
+.cl-raw-toggle:hover { color: var(--brand-press); }
+/* 分页当前页:品牌蓝深阶底白字(对齐精装稿) */
+:deep(.ant-pagination-item-active) {
+  background: var(--brand-ink);
+  border-color: var(--brand-ink);
+  border-radius: var(--radius-ctrl);
+}
+:deep(.ant-pagination-item-active a) { color: #fff; }
 </style>
 <style>
 .audit-detail-popover .audit-detail-full {
   max-width: 520px; max-height: 340px; overflow: auto; margin: 0;
   font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all;
-  background: #f7f8fa; padding: 10px 12px; border-radius: 6px;
+  background: var(--bg); padding: 10px 12px; border-radius: var(--radius-ctrl);
 }
 </style>

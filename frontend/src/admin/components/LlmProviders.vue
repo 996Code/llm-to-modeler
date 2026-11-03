@@ -23,26 +23,6 @@
           <label class="lp-field"><span>输出单价(元/千token)</span><input v-model="form.primary.price_out" placeholder="可空" @input="dirty = true" /></label>
         </div>
       </section>
-
-      <section class="lp-card">
-        <header class="lp-card-head">
-          <strong>备用供应商</strong>
-          <a-switch v-model:checked="form.fallback.enabled" :disabled="!hasFallback" checked-children="启用" un-checked-children="停用" size="small" @change="dirty = true" />
-        </header>
-        <template v-if="hasFallback || addingFallback">
-          <label class="lp-field"><span>Base URL</span><input v-model="form.fallback.base_url" @input="dirty = true" /></label>
-          <label class="lp-field"><span>API Key <em class="lp-hint">{{ hasFallbackKey ? '已配置(留空=不修改)' : '未配置' }}</em></span>
-            <input v-model="form.fallback.api_key" type="password" placeholder="留空 = 沿用已存密钥" @input="dirty = true" /></label>
-          <label class="lp-field"><span>模型</span><input v-model="form.fallback.model" @input="dirty = true" /></label>
-          <div class="lp-row">
-            <label class="lp-field"><span>输入单价(元/千token)</span><input v-model="form.fallback.price_in" placeholder="可空" @input="dirty = true" /></label>
-            <label class="lp-field"><span>输出单价(元/千token)</span><input v-model="form.fallback.price_out" placeholder="可空" @input="dirty = true" /></label>
-          </div>
-        </template>
-        <a-button v-else class="lp-empty" @click="addingFallback = true; dirty = true">
-          <template #icon><PlusOutlined /></template>添加备用供应商
-        </a-button>
-      </section>
     </div>
 
     <div class="lp-foot">
@@ -67,7 +47,7 @@
 <script setup lang="ts">
 // embedded 用于集成页内嵌，避免重复标题。
 import { onMounted, reactive, ref } from 'vue'
-import { ApiOutlined, PlusOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons-vue'
+import { ApiOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { adminApi } from '../api'
 
@@ -81,12 +61,9 @@ function emptyRole(): Role {
   return { base_url: '', api_key: '', model: '', enabled: true, price_in: null, price_out: null }
 }
 
-const form = reactive<{ primary: Role; fallback: Role }>({ primary: emptyRole(), fallback: emptyRole() })
+const form = reactive<{ primary: Role }>({ primary: emptyRole() })
 const configured = ref(false)
 const hasPrimaryKey = ref(false)
-const hasFallbackKey = ref(false)
-const hasFallback = ref(false)
-const addingFallback = ref(false)
 const dirty = ref(false)
 const saving = ref(false)
 const probing = ref(false)
@@ -103,17 +80,6 @@ async function reload() {
   })
   form.primary = mapIn(data.primary)
   hasPrimaryKey.value = !!data.primary?.has_key
-  if (data.fallback) {
-    form.fallback = mapIn(data.fallback)
-    hasFallbackKey.value = !!data.fallback.has_key
-    hasFallback.value = true
-    addingFallback.value = true
-  } else {
-    form.fallback = emptyRole()
-    hasFallbackKey.value = false
-    hasFallback.value = false
-    addingFallback.value = false
-  }
   dirty.value = false
   errorText.value = ''
 }
@@ -123,7 +89,6 @@ async function save() {
   errorText.value = ''
   try {
     const body: any = { primary: { ...form.primary } }
-    if (addingFallback.value) body.fallback = { ...form.fallback }
     await adminApi.put('/llm-providers', body)
     message.success('已保存,下一次 LLM 调用生效')
     await reload()
@@ -152,31 +117,48 @@ onMounted(reload)
 </script>
 
 <style scoped>
+/* 精装层(2026-11 重设计):令牌见 shared/design-tokens.css,规格对齐 design-demos/polished-packs.html */
 .lp { display: flex; flex-direction: column; gap: 16px; }
 .lp-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
-.lp-title { font-size: 16px; font-weight: 600; }
-.lp-sub { color: #7a8491; font-size: 12px; margin-top: 6px; max-width: 680px; line-height: 1.8; }
+.lp-title { font-size: 16px; font-weight: 600; color: var(--ink); }
 .lp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.lp-card { min-width: 0; border-top: 1px solid #e3e7ee; padding: 16px 0; display: flex; flex-direction: column; gap: 16px; }
+.lp-card {
+  min-width: 0; max-width: 640px;
+  border: 1px solid var(--line-soft); border-radius: var(--radius-card);
+  box-shadow: var(--shadow-rest); background: var(--card);
+  padding: 18px 20px; display: flex; flex-direction: column; gap: 14px;
+  transition: box-shadow .18s;
+}
+.lp-card:hover { box-shadow: var(--shadow-lift); }
 .lp-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
-.lp-provider-heading { display: flex; align-items: center; gap: 10px; }
-.lp-provider-heading :deep(.ant-badge-status-text) { color: #86909c; font-size: 12px; }
-.lp-pending { color: #ad6800; font-size: 12px; }
-.lp-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #4a5568; }
-.lp-field input { border: 1px solid #d9dde3; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
-.lp-hint { font-style: normal; color: #9aa4b2; margin-left: 6px; }
-.lp-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.lp-empty { border: 1px dashed #d9dde3; border-radius: 8px; padding: 18px; text-align: center; color: #7a8491; cursor: pointer; }
-.lp-empty:hover { border-color: #91caff; color: #1677ff; }
-.lp-foot { display: flex; align-items: center; gap: 12px; border-top: 1px solid #edf0f3; padding-top: 12px; }
-.lp-error { color: #d4380d; font-size: 12px; }
+.lp-provider-heading { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 650; color: var(--ink); }
+.lp-provider-heading :deep(.ant-badge-status-text) { color: var(--ink-3); font-size: 12px; }
+.lp-pending { color: var(--warn); font-size: 12px; }
+.lp-field { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--ink-2); }
+/* 原生 input 不在 admin.css 的 .ant-input focus 选择器内,这里补齐同一款 focus 态(品牌蓝描边+淡蓝光环) */
+.lp-field input {
+  border: 1px solid var(--line); border-radius: var(--radius-ctrl);
+  padding: 8px 12px; font-size: 14px; color: var(--ink); background: var(--card);
+  min-width: 0; width: 100%;
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+  transition: border-color .15s, box-shadow .15s;
+}
+.lp-field input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-tint); }
+.lp-hint { font-style: normal; color: var(--ink-3); margin-left: 6px; }
+.lp-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.lp-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; border-top: 1px solid var(--line-soft); padding-top: 14px; }
+.lp-error { color: var(--danger); font-size: 12px; }
 .lp-probe { display: flex; flex-direction: column; gap: 6px; }
-.lp-probe-row { display: flex; justify-content: space-between; font-size: 13px; padding: 8px 12px; border-radius: 6px; background: #f6f7f9; }
-.lp-probe-row.ok span:last-child { color: #389e0d; }
-.lp-probe-row.no span:last-child { color: #d4380d; }
-.lp-field input { min-width: 0; width: 100%; }
-.lp-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.lp-foot, .lp-probe-row { flex-wrap: wrap; gap: 12px; }
-.lp-probe-row { overflow-wrap: anywhere; }
-@media (max-width: 700px) { .lp-grid { grid-template-columns: minmax(0, 1fr); } }
+.lp-probe-row {
+  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+  font-size: 13px; color: var(--ink-2);
+  padding: 9px 12px; border-radius: var(--radius-ctrl); background: var(--bg);
+  overflow-wrap: anywhere;
+}
+.lp-probe-row.ok span:last-child { color: var(--ok); font-weight: 500; }
+.lp-probe-row.no span:last-child { color: var(--danger); }
+@media (max-width: 700px) {
+  .lp-grid { grid-template-columns: minmax(0, 1fr); }
+  .lp-row { grid-template-columns: minmax(0, 1fr); }
+}
 </style>

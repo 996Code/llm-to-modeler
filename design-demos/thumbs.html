@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>六候选方向 · 缩略图总览</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#E8E8E4; font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif; padding:32px; }
+  h1 { font-size:18px; color:#333; margin-bottom:4px; }
+  .sub { font-size:13px; color:#777; margin-bottom:24px; }
+  .grid { display:grid; grid-template-columns:repeat(3, 480px); gap:28px; }
+  .cell { width:480px; }
+  .frame { width:480px; height:300px; overflow:hidden; border-radius:6px; box-shadow:0 4px 20px rgba(0,0,0,.12); position:relative; }
+  .cap { margin-top:10px; font-size:13px; color:#444; line-height:1.5; }
+  .cap b { font-size:14px; }
+  .tag { display:inline-block; font-size:11px; padding:1px 8px; border-radius:99px; border:1px solid #bbb; color:#666; margin-left:8px; vertical-align:1px; }
+  .tag.pick { background:#1f2937; color:#fff; border-color:#1f2937; }
+
+  /* ── A1 仪器控制台 ── */
+  .a1 { background:#EDEBE6; color:#26241F; padding:14px 18px; }
+  .a1 .bar { display:flex; align-items:center; gap:10px; border-bottom:1.5px solid #C9C5BB; padding-bottom:8px; }
+  .a1 .mark { width:22px; height:22px; background:#26241F; color:#EDEBE6; font-weight:700; font-size:11px; display:flex; align-items:center; justify-content:center; }
+  .a1 nav { font-size:10.5px; color:#6B675E; letter-spacing:.06em; }
+  .a1 nav span { color:#26241F; font-weight:600; }
+  .a1 .gauge { display:flex; gap:14px; margin-top:14px; }
+  .a1 .meter { flex:1; background:#F6F5F1; border:1px solid #D8D4CA; padding:10px 12px 8px; position:relative; }
+  .a1 .meter .num { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; letter-spacing:-.02em; line-height:1; }
+  .a1 .meter.hot .num { color:#C24E0C; }
+  .a1 .meter .lbl { font-size:10px; color:#7A766C; margin-top:6px; letter-spacing:.08em; }
+  .a1 .ticks { display:flex; margin-top:8px; height:5px; background:repeating-linear-gradient(90deg,#B9B4A8 0 1px,transparent 1px 8px); }
+  .a1 .strip { margin-top:12px; font-size:10px; color:#6B675E; display:flex; gap:12px; }
+  .a1 .strip .on { color:#C24E0C; font-weight:600; }
+
+  /* ── A2 数据肖像 ── */
+  .a2 { background:#FAF7F0; color:#2A2620; padding:16px 20px; }
+  .a2 .hd { font-size:12px; font-family:"Songti SC",Georgia,serif; color:#8A8474; letter-spacing:.12em; }
+  .a2 .row { display:flex; gap:10px; margin-top:16px; }
+  .a2 .glyph { width:44px; height:44px; border:2px solid #4A66B0; border-radius:50%; position:relative; flex:none; }
+  .a2 .glyph.g2 { border-color:#4E8A5A; } .a2 .glyph.g3 { border-color:#B06A4A; }
+  .a2 .glyph i { position:absolute; top:-5px; left:50%; width:2px; height:8px; background:currentColor; }
+  .a2 .glyph b { position:absolute; inset:6px; border-radius:50%; background:currentColor; opacity:.28; }
+  .a2 .note { font-size:10.5px; color:#6A6456; margin-top:14px; font-family:"Kaiti SC","STKaiti",serif; }
+
+  /* ── B1 暗色链路 ── */
+  .b1 { background:#101112; color:#E8E9EA; padding:0; display:flex; }
+  .b1 .side { width:64px; border-right:1px solid #26282A; padding:12px 0; }
+  .b1 .side i { display:block; width:26px; height:26px; margin:0 auto 14px; background:linear-gradient(135deg,#6C8CFF,#4661CC); border-radius:6px; }
+  .b1 .side s { display:block; width:34px; height:3px; margin:9px auto 0; background:#2C2E31; text-decoration:none; }
+  .b1 .side s.on { background:#6C8CFF; }
+  .b1 .main { flex:1; padding:14px 16px; }
+  .b1 .k { font-size:9.5px; color:#7E8286; letter-spacing:.14em; font-family:Menlo,"SF Mono",monospace; }
+  .b1 h3 { font-size:15px; font-weight:600; margin:4px 0 12px; }
+  .b1 .trace { display:flex; height:26px; border-radius:5px; overflow:hidden; margin-bottom:12px; }
+  .b1 .trace i { height:100%; }
+  .b1 .cards { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  .b1 .card { border:1px solid #26282A; border-radius:8px; padding:8px 10px; }
+  .b1 .card .n { font-size:17px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .b1 .card .l { font-size:9.5px; color:#7E8286; margin-top:3px; }
+
+  /* ── B2 Stripe 仪表盘 ── */
+  .b2 { background:#FFFFFF; color:#1A1F36; padding:14px 18px; }
+  .b2 .hd { display:flex; justify-content:space-between; font-size:11px; color:#697386; }
+  .b2 .bal { font-size:26px; font-weight:700; margin-top:6px; letter-spacing:-.02em; }
+  .b2 .bal span { font-size:11px; color:#3ECF8E; background:#E6F8F1; padding:2px 6px; border-radius:4px; margin-left:8px; vertical-align:4px; }
+  .b2 svg { margin-top:8px; }
+  .b2 table { width:100%; border-collapse:collapse; font-size:10.5px; margin-top:8px; }
+  .b2 td { padding:5px 0; border-top:1px solid #F0F2F5; color:#3C4257; }
+  .b2 td:last-child { text-align:right; font-variant-numeric:tabular-nums; }
+
+  /* ── C1 运行报告 ── */
+  .c1 { background:#F7F2E9; color:#201D1A; padding:16px 22px; }
+  .c1 .masthead { display:flex; justify-content:space-between; align-items:baseline; border-bottom:2.5px solid #201D1A; padding-bottom:7px; }
+  .c1 .masthead b { font-family:"Songti SC",Georgia,serif; font-size:17px; letter-spacing:.05em; }
+  .c1 .masthead span { font-size:10px; color:#8A8272; }
+  .c1 .sec { margin-top:10px; }
+  .c1 .sec .t { font-family:"Songti SC",Georgia,serif; font-size:12.5px; font-weight:700; }
+  .c1 .big { font-family:Georgia,"Songti SC",serif; font-size:34px; font-weight:700; letter-spacing:-.01em; line-height:1.15; }
+  .c1 .big em { font-style:normal; color:#B4531F; }
+  .c1 .sec p { font-size:10.5px; color:#6B6456; line-height:1.55; margin-top:3px; }
+  .c1 .rule { border:none; border-top:1px solid #D9D0BE; margin:9px 0 0; }
+
+  /* ── C2 数据曼荼罗 ── */
+  .c2 { background:#171310; color:#E9DFC8; display:flex; align-items:center; gap:14px; padding:12px 18px; }
+  .c2 svg { flex:none; }
+  .c2 .txt .k { font-size:10px; letter-spacing:.2em; color:#A69674; }
+  .c2 .txt h4 { font-family:"Songti SC",serif; font-size:15px; margin:5px 0 8px; color:#E9DFC8; }
+  .c2 .txt p { font-size:10px; color:#8A7D63; line-height:1.6; }
+</style>
+</head>
+<body>
+<h1>六候选方向 · 缩略图</h1>
+<div class="sub">A/B/C = 最佳设计师 / 现实参照 / 秒数轮盘；深色标签 = 入选完整版的三张</div>
+
+<div class="grid">
+
+  <div class="cell">
+    <div class="frame a1">
+      <div class="bar">
+        <div class="mark">量</div>
+        <nav><span>概览</span> · 集成 · 记录 · 智能问数 · 知识库</nav>
+      </div>
+      <div class="gauge">
+        <div class="meter"><div class="num">16</div><div class="lbl">会话总数</div><div class="ticks"></div></div>
+        <div class="meter hot"><div class="num">423</div><div class="lbl">LLM 调用</div><div class="ticks"></div></div>
+        <div class="meter"><div class="num">158</div><div class="lbl">链路打点</div><div class="ticks"></div></div>
+      </div>
+      <div class="strip"><span class="on">● 智能问数</span><span class="on">● 知识库</span><span class="on">● 智能客服</span><span>○ 其余 4 项停用</span></div>
+    </div>
+    <div class="cap"><b>A1 仪器控制台</b><span class="tag pick">完整版</span><br>Braun/Rams 仪器传统 · 暖灰面板+刻度线+量具橙 · 管理台=仪器面板</div>
+  </div>
+
+  <div class="cell">
+    <div class="frame a2">
+      <div class="hd">每一条会话，都是一个人的问题</div>
+      <div class="row">
+        <div class="glyph" style="color:#4A66B0"><b></b><i></i></div>
+        <div class="glyph g2" style="color:#4E8A5A"><b></b></div>
+        <div class="glyph g3" style="color:#B06A4A"><b></b><i></i></div>
+        <div class="glyph" style="color:#4A66B0"></div>
+        <div class="glyph g2" style="color:#4E8A5A"><b></b><i></i></div>
+        <div class="glyph" style="color:#4A66B0"><b></b></div>
+        <div class="glyph g3" style="color:#B06A4A"></div>
+      </div>
+      <div class="note">○ 外环=插件 · 填充=消息量 · 刺=含工具调用 —— 16 条会话的肖像</div>
+    </div>
+    <div class="cap"><b>A2 数据肖像</b><span class="tag">备选</span><br>Giorgia Lupi 数据人文 · 符号编码+图例解码 · 会话即人</div>
+  </div>
+
+  <div class="cell">
+    <div class="frame b1">
+      <div class="side"><i></i><s class="on"></s><s></s><s></s><s></s><s></s></div>
+      <div class="main">
+        <div class="k">OVERVIEW · 10-27 → 10-31</div>
+        <h3>平台运行概览</h3>
+        <div class="trace">
+          <i style="flex:423; background:#6C8CFF"></i><i style="flex:73; background:#3EA98E"></i><i style="flex:39; background:#C9A06A"></i><i style="flex:5; background:#5A5E63"></i>
+        </div>
+        <div class="cards">
+          <div class="card"><div class="n">16</div><div class="l">会话总数</div></div>
+          <div class="card"><div class="n">423</div><div class="l">LLM 调用</div></div>
+          <div class="card"><div class="n">3/7</div><div class="l">启用插件</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>B1 暗色链路</b><span class="tag pick">完整版</span><br>Linear 式近黑+发丝线+单靛蓝 · 首屏=按真实占比的调用链路带 · 侧栏骨架</div>
+  </div>
+
+  <div class="cell">
+    <div class="frame b2">
+      <div class="hd"><span>概览</span><span>2026-10-27 ~ 10-31</span></div>
+      <div class="bal">16<span>+3 用户</span></div>
+      <svg width="100%" height="46" viewBox="0 0 400 46" preserveAspectRatio="none">
+        <path d="M0,38 C40,36 60,20 100,24 C140,28 160,10 200,16 C240,22 260,8 300,14 C340,20 370,6 400,10" fill="none" stroke="#635BFF" stroke-width="2.5"/>
+        <path d="M0,38 C40,36 60,20 100,24 C140,28 160,10 200,16 C240,22 260,8 300,14 C340,20 370,6 400,10 L400,46 L0,46 Z" fill="#635BFF" opacity=".08"/>
+      </svg>
+      <table>
+        <tr><td>压力表用于贸易结算需强检吗</td><td>2 条</td></tr>
+        <tr><td>查询委托单 BJ2026 检测进度</td><td>6 条</td></tr>
+        <tr><td>车间工艺监视压力表需强检吗</td><td>2 条</td></tr>
+      </table>
+    </div>
+    <div class="cap"><b>B2 Stripe 仪表盘</b><span class="tag">备选</span><br>金融级信任 · 白底密表格+单渐变图表 · 与 A1 温度撞车故留备选</div>
+  </div>
+
+  <div class="cell">
+    <div class="frame c1">
+      <div class="masthead"><b>LLM Form Modeler · 运行报告</b><span>第 5 日 · No.041</span></div>
+      <div class="sec">
+        <div class="t">一、会话与消息</div>
+        <div class="big">16 <em>条会话</em> · 114 条消息</div>
+        <p>3 位用户在平台上完成了 16 次问答，其中委托单进度查询 3 次、压力表强检咨询 3 次。</p>
+      </div>
+      <hr class="rule">
+      <div class="sec">
+        <div class="t">二、模型调用</div>
+        <div class="big">423 次 <em>· 均耗 6.7 秒</em></div>
+      </div>
+    </div>
+    <div class="cap"><b>C1 运行报告</b><span class="tag">备选完整稿</span><br>轮盘#12 暖色出版物 · 纸底+衬线+朱砂橙 · 因与 A1 同暖纸色族降为备选（backup-report.html）；三席替补见 C1′ 包豪斯</div>
+  </div>
+
+  <div class="cell">
+    <div class="frame c2">
+      <svg width="150" height="150" viewBox="0 0 150 150">
+        <circle cx="75" cy="75" r="70" fill="none" stroke="#3A3226" stroke-width="1"/>
+        <circle cx="75" cy="75" r="58" fill="none" stroke="#5A4E38" stroke-width="8" stroke-dasharray="264 100" stroke-dashoffset="-20" transform="rotate(-90 75 75)"/>
+        <circle cx="75" cy="75" r="44" fill="none" stroke="#C9A24A" stroke-width="6" stroke-dasharray="180 96" transform="rotate(140 75 75)"/>
+        <circle cx="75" cy="75" r="30" fill="none" stroke="#8A4B32" stroke-width="4" stroke-dasharray="60 129" transform="rotate(30 75 75)"/>
+        <circle cx="75" cy="75" r="9" fill="#B43A26"/>
+        <g stroke="#6A5C42" stroke-width=".8">
+          <line x1="75" y1="5" x2="75" y2="14"/><line x1="124" y1="26" x2="118" y2="32"/>
+          <line x1="145" y1="75" x2="136" y2="75"/><line x1="26" y1="124" x2="32" y2="118"/>
+        </g>
+      </svg>
+      <div class="txt">
+        <div class="k">INFORMATION MANDALA</div>
+        <h4>运行曼荼罗</h4>
+        <p>外环 7 日 · 中环调用类型<br>内环插件启停 · 心点=服务<br>78.3% 为 LLM 调用</p>
+      </div>
+    </div>
+    <div class="cap"><b>C2 数据曼荼罗</b><span class="tag">备选</span><br>轮盘 east#8 杉浦康平 · 同心环编码+引线注解 · 用力过头留备选</div>
+  </div>
+
+</div>
+</body>
+</html>

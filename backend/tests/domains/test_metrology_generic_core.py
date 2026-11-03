@@ -176,25 +176,14 @@ def test_kg_generic_question_and_trusted_identity(monkeypatch):
     monkeypatch.setattr('domains.knowledge_graph.service.retrieve_evidence', retrieve)
     ctx = context({'scenario': 'warehouse::stock'})
     result = tool.execute({'user_input': 'How many leave days?', 'pack_params': {
-        'knowledge_graph': {'user_roles': ['staff'], 'doc_filter': {'team': 'sales'}}}}, ctx)
+        'knowledge_graph': {'doc_filter': {'team': 'sales'}}}}, ctx)
     assert seen['query'] == 'How many leave days?'
-    assert seen['user_id'] == 'alice' and seen['roles'] == ['staff']
     assert seen['metadata_filter'] == {'team': 'sales'}
     assert result.artifact['answer_kind'] == 'answer'
     table['warehouse::stock']['action'].pop('kb')
     result = tool.execute({'user_input': 'policy'}, ctx)
     assert result.error_for_llm and '知识库' in result.error_for_llm
 
-
-def test_kg_permission_denied_is_business_notice(monkeypatch):
-    tool, _, _ = setup_tool(monkeypatch, {'label': 'HR', 'intent': 'policy', 'required': {},
-                                         'action': {'kind': 'kg', 'kb': 'HR'}})
-    def denied(*a, **kw):
-        raise PermissionError('denied')
-    monkeypatch.setattr('domains.knowledge_graph.service.retrieve_evidence', denied)
-    result = tool.execute({'user_input': 'policy'}, context({'scenario': 'warehouse::stock'}))
-    assert result.artifact['status'] == 'forbidden'
-    assert store.get_flow(runtime.get_pack_db(), 'generic-core') is None
 
 
 def test_demo_export_is_explicit_pure_json_and_independent():

@@ -8,7 +8,7 @@
 
     <div class="ov-grid">
       <div class="ov-card">
-        <div class="ov-icon" style="background: #eff6ff; color: #2563eb"><MessageOutlined /></div>
+        <div class="ov-icon" style="background: var(--brand-tint); color: var(--brand)"><MessageOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.conversations ?? 0 }}</div>
           <div class="ov-label">会话总数</div>
@@ -16,7 +16,7 @@
         </div>
       </div>
       <div class="ov-card">
-        <div class="ov-icon" style="background: #f0fdf4; color: #16a34a"><CommentOutlined /></div>
+        <div class="ov-icon" style="background: var(--ok-tint); color: var(--ok)"><CommentOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.messages ?? 0 }}</div>
           <div class="ov-label">消息数</div>
@@ -24,7 +24,7 @@
         </div>
       </div>
       <div class="ov-card">
-        <div class="ov-icon" style="background: #f5f3ff; color: #7c3aed"><RobotOutlined /></div>
+        <div class="ov-icon" style="background: var(--violet-tint); color: var(--violet)"><RobotOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.calls.llm ?? 0 }}</div>
           <div class="ov-label">LLM 调用</div>
@@ -32,7 +32,7 @@
         </div>
       </div>
       <div class="ov-card">
-        <div class="ov-icon" style="background: #ecfeff; color: #0891b2"><CloudServerOutlined /></div>
+        <div class="ov-icon" style="background: var(--cyan-tint); color: var(--cyan)"><CloudServerOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.calls.upstream ?? 0 }}</div>
           <div class="ov-label">上游调用</div>
@@ -40,7 +40,7 @@
         </div>
       </div>
       <div class="ov-card" v-if="(stats?.calls?.byType?.graph?.count ?? 0) > 0">
-        <div class="ov-icon" style="background: #eff6ff; color: #2563eb"><NodeIndexOutlined /></div>
+        <div class="ov-icon" style="background: var(--brand-tint); color: var(--brand)"><NodeIndexOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.calls.byType?.graph?.count ?? 0 }}</div>
           <div class="ov-label">图谱检索</div>
@@ -48,7 +48,7 @@
         </div>
       </div>
       <div class="ov-card" v-if="(stats?.calls?.byType?.vector?.count ?? 0) > 0">
-        <div class="ov-icon" style="background: #f0fdf4; color: #16a34a"><DatabaseOutlined /></div>
+        <div class="ov-icon" style="background: var(--ok-tint); color: var(--ok)"><DatabaseOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.calls.byType?.vector?.count ?? 0 }}</div>
           <div class="ov-label">向量检索</div>
@@ -56,7 +56,7 @@
         </div>
       </div>
       <div class="ov-card" v-if="(stats?.calls?.byType?.fulltext?.count ?? 0) > 0">
-        <div class="ov-icon" style="background: #fff7ed; color: #ea580c"><FileSearchOutlined /></div>
+        <div class="ov-icon" style="background: var(--orange-tint); color: var(--orange)"><FileSearchOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.calls.byType?.fulltext?.count ?? 0 }}</div>
           <div class="ov-label">全文检索</div>
@@ -64,7 +64,7 @@
         </div>
       </div>
       <div class="ov-card">
-        <div class="ov-icon" style="background: #fff7ed; color: #ea580c"><AppstoreOutlined /></div>
+        <div class="ov-icon" style="background: var(--orange-tint); color: var(--orange)"><AppstoreOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.packs?.enabled ?? 0 }}<span class="ov-dim">/​{{ stats?.packs?.discovered ?? 0 }}</span></div>
           <div class="ov-label">启用插件</div>
@@ -72,7 +72,7 @@
         </div>
       </div>
       <div class="ov-card">
-        <div class="ov-icon" style="background: #fdf2f8; color: #db2777"><NodeIndexOutlined /></div>
+        <div class="ov-icon" style="background: var(--pink-tint); color: var(--pink)"><NodeIndexOutlined /></div>
         <div class="ov-body">
           <div class="ov-value">{{ stats?.traceEvents ?? 0 }}</div>
           <div class="ov-label">链路打点</div>
@@ -106,27 +106,33 @@ onMounted(load)
 </script>
 
 <style scoped>
-.ov-toolbar { display: flex; align-items: center; gap: 14px; margin: 14px 0 18px; }
-.ov-title { font-size: 16px; font-weight: 600; color: #1f2937; }
-.ov-range { flex: 1; color: #9ca3af; font-size: 12px; }
+/* 精装层(2026-11 重设计):令牌见 shared/design-tokens.css,规格对齐 design-demos/polished-v1.html */
+.ov-toolbar { display: flex; align-items: center; gap: 14px; margin: 16px 0 18px; }
+.ov-title { font-size: 18px; font-weight: 650; color: var(--ink); letter-spacing: .01em; }
+.ov-range { flex: 1; color: var(--ink-3); font-size: 14px; font-variant-numeric: tabular-nums; }
 .ov-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 14px;
 }
 .ov-card {
   display: flex; gap: 14px; align-items: center;
-  border: 1px solid #eef0f4; border-radius: 12px; padding: 18px 16px;
-  background: linear-gradient(180deg, #ffffff, #fbfcfe);
-  transition: box-shadow 0.15s;
+  border: 1px solid var(--line-soft); border-radius: var(--radius-card); padding: 20px 18px;
+  background: var(--card);
+  box-shadow: var(--shadow-rest);
+  transition: box-shadow 0.18s, transform 0.18s, border-color 0.18s;
 }
-.ov-card:hover { box-shadow: 0 6px 18px rgba(30, 41, 82, 0.08); }
+.ov-card:hover {
+  box-shadow: var(--shadow-lift);
+  transform: translateY(-2px);
+  border-color: #DFE3EA;
+}
 .ov-icon {
   width: 44px; height: 44px; border-radius: 10px; font-size: 20px;
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
-.ov-value { font-size: 24px; font-weight: 700; color: #111827; line-height: 1.1; }
-.ov-dim { font-size: 14px; color: #9ca3af; font-weight: 500; }
-.ov-label { font-size: 13px; color: #4b5563; margin-top: 3px; }
-.ov-extra { font-size: 11px; color: #9ca3af; margin-top: 2px; }
+.ov-value { font-size: 26px; font-weight: 700; color: var(--ink); line-height: 1.1; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.ov-dim { font-size: 16px; color: var(--ink-3); font-weight: 500; }
+.ov-label { font-size: 13.5px; color: var(--ink-2); margin-top: 4px; }
+.ov-extra { font-size: 12.5px; color: var(--ink-3); margin-top: 3px; font-variant-numeric: tabular-nums; }
 .ov-ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
 </style>

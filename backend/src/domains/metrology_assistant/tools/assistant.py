@@ -459,10 +459,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         try:
             evidence = service.retrieve_evidence(
                 self._app_state, kb_name, plan['query'], conv_id=getattr(ctx, 'conv_id', None),
-                user_id=getattr(ctx, 'user_id', None), roles=trusted.get('user_roles'),
                 metadata_filter=doc_filter if isinstance(doc_filter, dict) else None)
-        except PermissionError:
-            return _notice('forbidden', '无权访问知识库', f'当前身份无权访问「{kb_name}」知识库。')
         except ValueError as error:
             return ToolResult(error_for_llm=str(error))
         except Exception:
@@ -489,25 +486,20 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                           formatted={'kb': kb_name, 'conclusion': summary[:40], 'chunkCount': len(chunks)})
 
     def _fallback_answer(self, table, user_input, ctx, state, stage):
-        """未命中任何能力时的知识库链路兜底:跨可访问库检索,有证据才答。
+        """未命中任何能力时的知识库链路兜底:跨库检索,有证据才答。
 
         与 kb_search 同一条检索链(意图→图谱种子→向量/全文→综合回答,
-        用户裁决:不做指定库兜底,未命中直接走知识库链路)。按当前身份
-        ACL 过滤参与库——被拒库静默跳过,不向客户透拒权话术;无可用库/
-        无证据落引导卡;引用校验由检索层保证(与 /search REST 同一道红线)。
+        用户裁决:不做指定库兜底,未命中直接走知识库链路)。
+        无可用库/无证据落引导卡;引用校验由检索层保证(与 /search REST
+        同一道红线)。
         """
         trusted = (state.get('pack_params') or {}).get('knowledge_graph') or {}
         doc_filter_raw = trusted.get('doc_filter')
-        from domains.knowledge_graph import acl as kg_acl
         from domains.knowledge_graph import retrieval as kg_retrieval
         from domains.knowledge_graph import runtime as kg_runtime
         store = kg_runtime.get_kg_store(self._app_state)
-        user, roles = kg_acl.request_identity(
-            getattr(ctx, 'user_id', None), trusted.get('user_roles'))
         try:
             kbs = [k for k in store.list_kbs() if k.get('kind') != 'folder']
-            if kg_acl.has_identity(user, roles):
-                kbs, _denied = kg_acl.filter_kbs(store, kbs, user, roles)
         except Exception:  # noqa: BLE001
             logger.exception('兜底:知识库目录读取失败')
             return ToolResult(error_for_llm='知识库检索失败,请稍后重试。')

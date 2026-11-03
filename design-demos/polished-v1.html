@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>概览 · LLM Form Modeler 管理端（精装稿 v1）</title>
+<style>
+  /* ============================================================
+     精装稿 v1 · 飞书式企业风 · 原布局 1:1
+     结构复刻自 frontend/src/admin/AdminApp.vue + OverviewTab.vue
+     数据来自 2026-11-03 17:26 真实 /api/admin/stats
+     视觉变化只做四件事：
+     ① 全站收敛为唯一品牌蓝 #3370FF（现状 8 个蓝）
+     ② 恢复空间层级：卡片静态微影 + hover 轻抬（现状被抹平）
+     ③ 字级重建：正文 14px 基准、大数字 26px、标题 18px（现状全局 13px）
+     ④ 图标统一 1.8px 线性手绘 SVG + 飞书式 10% 淡彩底
+     ============================================================ */
+  :root {
+    --blue: #3370FF;          /* 唯一品牌蓝（图标/装饰/交互色） */
+    --blue-ink: #2B5FE0;      /* 品牌蓝·文字深阶（白底/淡底上保 4.5:1） */
+    --blue-hover: #2B5FE0;
+    --blue-tint: #EAF0FF;
+    --blue-tint-2: #F2F6FF;
+    --ink: #1F2329;           /* 主文字 */
+    --ink-2: #4E5969;         /* 次要 */
+    --ink-3: #6B7480;         /* 弱化（白底 4.55:1） */
+    --line: #E5E6EB;
+    --line-soft: #EFF1F4;
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --green: #2EA121; --green-tint: #E8F6EC;
+    --violet: #7B61FF; --violet-tint: #F0EBFF;
+    --cyan: #0A8C94;   --cyan-tint: #E4F5F7;
+    --orange: #E67E22; --orange-tint: #FDF0E1;
+    --pink: #D6409F;   --pink-tint: #FCE9F4;
+    --radius: 12px;
+    --shadow-rest: 0 1px 2px rgba(31, 35, 41, .04);
+    --shadow-lift: 0 6px 16px rgba(31, 35, 41, .09);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ── 顶部导航（复刻 .shell-header，56px 白底吸顶） ── */
+  .shell-header {
+    background: #fff;
+    border-bottom: 1px solid var(--line);
+    padding: 0 24px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .shell-brand { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .brand-mark {
+    width: 34px; height: 34px;
+    border-radius: 10px;
+    background: var(--blue-ink);          /* 原渐变 #3b82f6→#6366f1 收敛为品牌蓝（文字深阶保证对比度） */
+    color: #fff;
+    font-size: 15px; font-weight: 700; letter-spacing: .02em;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .shell-title { font-size: 15px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+  .ver { font-size: 12px; color: var(--ink-3); font-weight: 400; margin-left: 4px; }
+
+  .top-nav { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; }
+  .nav-item {
+    display: flex; align-items: center; gap: 6px;
+    border: none; background: transparent;
+    color: var(--ink-2);
+    font-size: 14px;
+    padding: 7px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    min-height: 34px;
+    transition: color .15s, background .15s;
+  }
+  .nav-item svg { width: 15px; height: 15px; }
+  .nav-item:hover { color: var(--blue); background: var(--blue-tint-2); }
+  .nav-item.active { color: var(--blue-ink); background: var(--blue-tint); font-weight: 600; }
+
+  .shell-actions { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+  .svc {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 13px; color: var(--ink-2);
+    background: var(--green-tint);
+    border-radius: 999px;
+    padding: 4px 12px 4px 10px;
+  }
+  .svc i {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 3px rgba(46, 161, 33, .14);
+    animation: pulse 2.8s ease-out infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 3px rgba(46, 161, 33, .18); }
+    70% { box-shadow: 0 0 0 6px rgba(46, 161, 33, 0); }
+    100% { box-shadow: 0 0 0 3px rgba(46, 161, 33, 0); }
+  }
+
+  /* ── 主体（复刻 .shell-main：1760 限宽居中） ── */
+  .shell-main { max-width: 1760px; width: 100%; margin: 0 auto; padding: 16px 20px 0; }
+  .page-card {
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-rest);
+    padding: 8px 20px 20px;
+    min-height: calc(100vh - 140px);
+    min-width: 0;
+  }
+
+  /* ── 概览工具栏（复刻 .ov-toolbar） ── */
+  .ov-toolbar { display: flex; align-items: center; gap: 14px; margin: 16px 0 18px; }
+  .ov-title { font-size: 18px; font-weight: 650; color: var(--ink); letter-spacing: .01em; }
+  .ov-range {
+    flex: 1;
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--ink-3);
+    font-size: 14px;
+  }
+  .ov-range svg { width: 13px; height: 13px; }
+  .btn-refresh {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--line);
+    background: #fff;
+    color: var(--ink-2);
+    font-size: 13px;
+    border-radius: 8px;
+    padding: 6px 14px;
+    min-height: 32px;
+    cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .btn-refresh:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-tint-2); }
+  .btn-refresh svg { width: 13px; height: 13px; }
+  .btn-refresh.spinning svg { animation: rot .55s linear; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+  .refreshed-at { font-size: 12.5px; color: var(--ink-3); margin-right: 10px; }
+
+  /* ── 九宫格统计卡（复刻 .ov-grid / .ov-card，元素一一对应） ── */
+  .ov-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+  .ov-card {
+    display: flex; gap: 14px; align-items: center;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    padding: 20px 18px;
+    background: var(--card);
+    box-shadow: var(--shadow-rest);
+    transition: box-shadow .18s, transform .18s, border-color .18s;
+  }
+  .ov-card:hover {
+    box-shadow: var(--shadow-lift);
+    transform: translateY(-2px);
+    border-color: #DFE3EA;
+  }
+  .ov-icon {
+    width: 42px; height: 42px;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .ov-icon svg { width: 21px; height: 21px; }
+  .ov-value { font-size: 26px; font-weight: 700; color: var(--ink); line-height: 1.1; letter-spacing: -.01em; }
+  .ov-dim { font-size: 16px; color: var(--ink-3); font-weight: 500; }
+  .ov-label { font-size: 13.5px; color: var(--ink-2); margin-top: 4px; }
+  .ov-extra { font-size: 12.5px; color: var(--ink-3); margin-top: 3px; }
+
+  /* ── 页脚（复刻 .shell-footer） ── */
+  .shell-footer { text-align: center; color: #5F6870; font-size: 12.5px; padding: 18px 0 10px; }
+
+  @media (max-width: 700px) {
+    .shell-header { height: auto; padding: 10px 12px; gap: 10px; flex-wrap: wrap; }
+    .top-nav { order: 3; flex-basis: 100%; }
+    .shell-main { padding: 10px 8px 0; }
+    .page-card { padding: 8px 10px 12px; }
+    .svc { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .svc i { animation: none; }
+    .btn-refresh.spinning svg { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="shell-header">
+  <div class="shell-brand">
+    <div class="brand-mark">AI</div>
+    <div class="shell-title">LLM Form Modeler <span class="ver">管理端</span></div>
+  </div>
+  <nav class="top-nav" aria-label="主导航">
+    <button class="nav-item active" type="button" aria-current="page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="9" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="5.5" rx="1.5"/><rect x="13.5" y="12" width="7.5" height="9" rx="1.5"/><rect x="3" y="15.5" width="7.5" height="5.5" rx="1.5"/></svg>
+      <span>概览</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.5v5.5M14.5 17.2h5.5"/></svg>
+      <span>集成</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.14-2.9-.4L4 21l1.2-3.6C3.8 16.1 3 13.9 3 11.5 3 7.4 7 4 12 4s9 3.4 9 7.5z"/></svg>
+      <span>记录</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M6.3 6.3l2.8 2.8M3 12h4M17.7 6.3l-2.8 2.8M21 12h-4"/><circle cx="12" cy="15" r="5.5"/><path d="M9.8 14.8a2.6 2.6 0 0 1 2-2.2M12 20.5v.01"/></svg>
+      <span>智能问数</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="6" r="2"/><circle cx="18.5" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><path d="M7.3 7.2 10 10.2M16.8 6.3l-3 4M13.8 13.6l3.2 3.4"/><circle cx="18.5" cy="19" r="2"/></svg>
+      <span>知识库</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v10.5H9.5L5 19.5v-4H4z"/><path d="M8.5 10.2h.01M12 10.2h.01M15.5 10.2h.01"/></svg>
+      <span>智能客服</span>
+    </button>
+    <button class="nav-item" type="button">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c1.6 2.1 4 3.2 6.5 3-.3 3.6-1.5 10.4-6.5 14-5-3.6-6.2-10.4-6.5-14 2.5.2 4.9-.9 6.5-3z"/></svg>
+      <span>智能客服-测试</span>
+    </button>
+  </nav>
+  <div class="shell-actions">
+    <span class="svc"><i></i>服务运行中</span>
+  </div>
+</header>
+
+<main class="shell-main">
+  <div class="page-card">
+
+    <div class="ov-toolbar">
+      <span class="ov-title">数据概览</span>
+      <span class="ov-range num">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/></svg>
+        数据范围 2026-10-27 15:59 ~ 2026-10-31 15:26
+      </span>
+      <span class="refreshed-at num" id="refreshedAt"></span>
+      <button class="btn-refresh" type="button" id="refreshBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>
+        刷新
+      </button>
+    </div>
+
+    <div class="ov-grid">
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--blue-tint); color:var(--blue)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.14-2.9-.4L4 21l1.2-3.6C3.8 16.1 3 13.9 3 11.5 3 7.4 7 4 12 4s9 3.4 9 7.5z"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">16</div>
+          <div class="ov-label">会话总数</div>
+          <div class="ov-extra num">3 个用户</div>
+        </div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--green-tint); color:var(--green)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.14-2.9-.4L4 21l1.2-3.6C3.8 16.1 3 13.9 3 11.5 3 7.4 7 4 12 4s8 3.4 8 7.5z"/><path d="M8 10h.01M12 10h.01M16 10h.01M8.5 13.2h7"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">114</div>
+          <div class="ov-label">消息数</div>
+          <div class="ov-extra num">288 条事件</div>
+        </div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--violet-tint); color:var(--violet)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="10.5" rx="3"/><path d="M12 8V5.2M12 5.2h.01"/><circle cx="12" cy="3.8" r="1.4"/><path d="M9.3 12.4h.01M14.7 12.4h.01M9.5 15.4c1.5 1 3.5 1 5 0"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">423</div>
+          <div class="ov-label">LLM 调用</div>
+          <div class="ov-extra num">平均 6657 ms</div>
+        </div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--cyan-tint); color:var(--cyan)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18a4.2 4.2 0 0 1-.6-8.36A6 6 0 0 1 18 9.7 3.8 3.8 0 0 1 17.4 18H7z"/><path d="M12 12.5v4M10 14.5l2-2 2 2"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">0</div>
+          <div class="ov-label">上游调用</div>
+          <div class="ov-extra num">合计 0 ms</div>
+        </div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--blue-tint); color:var(--blue)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5.5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><circle cx="18.5" cy="19" r="2"/><path d="M7.7 6.9 10.2 10M16.5 6.4l-3 4M13.7 13.7l3.4 3.6M7.5 13.2 5.8 17.6"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">73</div>
+          <div class="ov-label">图谱检索</div>
+          <div class="ov-extra num">合计 1980 ms</div>
+        </div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--green-tint); color:var(--green)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.55 3.36 2.8 7.5 2.8s7.5-1.25 7.5-2.8v-13"/><path d="M4.5 12c0 1.55 3.36 2.8 7.5 2.8s7.5-1.25 7.5-2.8"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">39</div>
+          <div class="ov-label">向量检索</div>
+          <div class="ov-extra num">合计 11718 ms</div>
+        </div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--orange-tint); color:var(--orange)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><circle cx="11.5" cy="13.5" r="3"/><path d="M13.8 15.8 16 18"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">5</div>
+          <div class="ov-label">全文检索</div>
+          <div class="ov-extra num">合计 33 ms</div>
+        </div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--orange-tint); color:var(--orange)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.8v5M14.7 17.3h5"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">3<span class="ov-dim">/7</span></div>
+          <div class="ov-label">启用插件</div>
+          <div class="ov-extra">热切换即时生效</div>
+        </div>
+      </div>
+      <div class="ov-card">
+        <div class="ov-icon" style="background:var(--pink-tint); color:var(--pink)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h4l2.5-6 4 12L17 12h3"/></svg>
+        </div>
+        <div class="ov-body">
+          <div class="ov-value num">158</div>
+          <div class="ov-label">链路打点</div>
+          <div class="ov-extra">引擎自动 + 插件上报</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <footer class="shell-footer">LLM Form Modeler Admin · v0.4.0</footer>
+</main>
+
+<script>
+  // 刷新交互：图标旋转 + 更新时刻（演示稿本地行为，与真实按钮语义一致）
+  var btn = document.getElementById('refreshBtn');
+  var at = document.getElementById('refreshedAt');
+  function stamp() {
+    var d = new Date();
+    var p = function (n) { return String(n).padStart(2, '0'); };
+    at.textContent = '已刷新 ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  btn.addEventListener('click', function () {
+    btn.classList.add('spinning');
+    btn.disabled = true;
+    setTimeout(function () {
+      btn.classList.remove('spinning');
+      btn.disabled = false;
+      stamp();
+    }, 560);
+  });
+</script>
+</body>
+</html>

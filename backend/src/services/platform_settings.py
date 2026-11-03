@@ -30,58 +30,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ── 显示设置(display 键的领域逻辑,admin/settings 两路由共用) ──
-
-# platform_settings 表里的键名
-DISPLAY_KEY = "display"
-
-# 默认值:两个开关都开(需求原文「默认开启 / 默认显示」)
-DISPLAY_DEFAULTS: Dict[str, bool] = {"show_pipeline": True, "show_retrieval": True}
-
-
-def get_display_settings(store: Optional["PlatformSettingsStore"]) -> Dict[str, bool]:
-    """读显示设置:库里没有/字段缺失/类型不对时逐字段回默认值。
-
-    读取永远不抛异常——显示开关挂了不该连累聊天页渲染。
-    """
-    saved = store.get(DISPLAY_KEY) if store is not None else None
-    saved = saved if isinstance(saved, dict) else {}
-    return {
-        "show_pipeline": saved.get("show_pipeline")
-        if isinstance(saved.get("show_pipeline"), bool)
-        else DISPLAY_DEFAULTS["show_pipeline"],
-        "show_retrieval": saved.get("show_retrieval")
-        if isinstance(saved.get("show_retrieval"), bool)
-        else DISPLAY_DEFAULTS["show_retrieval"],
-    }
-
-
-def save_display_settings(
-    store: "PlatformSettingsStore", payload: Dict[str, Any]
-) -> Tuple[Dict[str, bool], List[Dict[str, str]]]:
-    """校验并合并保存显示设置(部分更新:只提交要改的键)。
-
-    Returns:
-        (merged, errors)。errors 非空时调用方应整体拒绝(不落半截配置)。
-        只认两个布尔键,未知键/非布尔值都报错——防止拼写错误的键静默沉库。
-    """
-    errors: List[Dict[str, str]] = []
-    clean: Dict[str, Any] = {}
-    for key, raw in (payload or {}).items():
-        if key not in DISPLAY_DEFAULTS:
-            errors.append({"field": key, "message": "未知配置项(只支持 show_pipeline/show_retrieval)"})
-            continue
-        if not isinstance(raw, bool):
-            errors.append({"field": key, "message": "必须是布尔值(true/false)"})
-            continue
-        clean[key] = raw
-    if errors:
-        return get_display_settings(store), errors
-    merged = get_display_settings(store)
-    merged.update(clean)
-    store.set(DISPLAY_KEY, merged)
-    return merged, []
-
 
 # ── MCP 接入设置(mcp 键;对外 MCP 端点的全局单 key) ──
 

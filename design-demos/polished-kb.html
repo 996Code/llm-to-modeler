@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知识库 · LLM Form Modeler 管理端（精装稿）</title>
+<style>
+  /* ============================================================
+     精装稿 · 知识库页（knowledge_graph 插件管理页）
+     结构复刻自 frontend/src/admin/packPages/knowledge_graph/index.vue
+     风格令牌与 polished-v1.html（已批准 style canon）完全一致：
+     唯一蓝 #3370FF / 文字深阶 #2B5FE0 / 底 #F5F6F8 / 卡 12px 圆角微影
+     正文 14px / 1.8px 线性 SVG / 10% 淡彩底 / 顶栏无退出按钮
+     数据：本地栈 18080 真实 API 快照（2026-11-03）
+       GET /api/packs/knowledge_graph/kbs/tree
+       GET /api/packs/knowledge_graph/kbs/{id}/documents
+     时间按本地时区 UTC+8 显示；左侧「业务分组」为示意节点。
+     ============================================================ */
+  :root {
+    --blue: #3370FF;
+    --blue-ink: #2B5FE0;
+    --blue-hover: #2B5FE0;
+    --blue-tint: #EAF0FF;
+    --blue-tint-2: #F2F6FF;
+    --ink: #1F2329;
+    --ink-2: #4E5969;
+    --ink-3: #6B7480;
+    --line: #E5E6EB;
+    --line-soft: #EFF1F4;
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --green: #2EA121; --green-tint: #E8F6EC; --green-deep: #1F7A1A;
+    --amber: #B7741A; --amber-tint: #FDF0E1; --amber-deep: #8F4E00;
+    --red: #D83030;  --red-hover: #B42318;
+    --violet: #7B61FF; --violet-tint: #F0EBFF;
+    --cyan: #0A8C94;   --cyan-tint: #E4F5F7;
+    --radius: 12px;
+    --shadow-rest: 0 1px 2px rgba(31, 35, 41, .04);
+    --shadow-lift: 0 6px 16px rgba(31, 35, 41, .09);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; }
+  button:focus-visible, input:focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 2px;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ── 顶部导航（与 polished-v1 完全一致，激活=知识库） ── */
+  .shell-header {
+    background: #fff;
+    border-bottom: 1px solid var(--line);
+    padding: 0 24px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .shell-brand { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .brand-mark {
+    width: 34px; height: 34px;
+    border-radius: 10px;
+    background: var(--blue-ink);
+    color: #fff;
+    font-size: 15px; font-weight: 700; letter-spacing: .02em;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .shell-title { font-size: 15px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+  .ver { font-size: 12px; color: var(--ink-3); font-weight: 400; margin-left: 4px; }
+  .top-nav { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; }
+  .nav-item {
+    display: flex; align-items: center; gap: 6px;
+    border: none; background: transparent;
+    color: var(--ink-2);
+    font-size: 14px;
+    padding: 7px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    min-height: 44px;
+    transition: color .15s, background .15s;
+  }
+  .nav-item svg { width: 15px; height: 15px; }
+  .nav-item:hover { color: var(--blue); background: var(--blue-tint-2); }
+  .nav-item.active { color: var(--blue-ink); background: var(--blue-tint); font-weight: 600; }
+  .shell-actions { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+  .svc {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 13px; color: var(--ink-2);
+    background: var(--green-tint);
+    border-radius: 999px;
+    padding: 4px 12px 4px 10px;
+  }
+  .svc i {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 3px rgba(46, 161, 33, .14);
+    animation: pulse 2.8s ease-out infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 3px rgba(46, 161, 33, .18); }
+    70% { box-shadow: 0 0 0 6px rgba(46, 161, 33, 0); }
+    100% { box-shadow: 0 0 0 3px rgba(46, 161, 33, 0); }
+  }
+
+  /* ── 主体（1440 限宽居中） ── */
+  .shell-main { max-width: 1440px; width: 100%; margin: 0 auto; padding: 16px 20px 0; }
+  .page-card {
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-rest);
+    padding: 8px 20px 20px;
+    min-height: calc(100vh - 140px);
+    min-width: 0;
+  }
+
+  /* ── 页标题行 ── */
+  .pg-toolbar { display: flex; align-items: baseline; gap: 14px; margin: 16px 0 14px; flex-wrap: wrap; }
+  .pg-title { font-size: 18px; font-weight: 650; color: var(--ink); letter-spacing: .01em; }
+  .pg-meta { font-size: 13px; color: var(--ink-3); }
+  .pg-count {
+    font-size: 12px; color: var(--blue-ink);
+    background: var(--blue-tint);
+    border-radius: 999px; padding: 2px 10px;
+  }
+
+  /* ── 左右分栏（复刻 .kg-split） ── */
+  .kb-split { display: flex; gap: 18px; align-items: stretch; }
+  .kb-side {
+    flex: 0 0 240px; min-width: 0;
+    border-right: 1px solid var(--line-soft);
+    padding-right: 14px;
+  }
+  .kb-main { flex: 1; min-width: 0; }
+
+  /* 左侧树头：标题 + 新建按钮 */
+  .side-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding-bottom: 10px; margin-bottom: 10px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .side-title { display: flex; align-items: center; gap: 7px; font-weight: 600; color: var(--ink); }
+  .side-title svg { width: 15px; height: 15px; color: var(--blue); }
+  .btn-primary-sm {
+    position: relative;
+    display: inline-flex; align-items: center; gap: 4px;
+    border: none; background: #2B5FE0; color: #fff;
+    font-size: 12.5px; font-weight: 500;
+    border-radius: 8px; padding: 0 10px;
+    min-height: 32px; cursor: pointer;
+    transition: background .15s;
+  }
+  .btn-primary-sm:hover { background: #2450C4; }
+  .btn-primary-sm:active { background: #2450C4; }
+  .btn-primary-sm svg { width: 12px; height: 12px; }
+  .btn-primary-sm::after { content: ''; position: absolute; inset: -6px; } /* 热区扩到 44px */
+
+  /* ── 树节点（复刻 a-tree show-line 语义） ── */
+  .tnode {
+    display: flex; align-items: center; gap: 6px;
+    width: 100%; min-width: 0;
+    background: transparent; text-align: left;
+    border-radius: 8px;
+    padding: 5px 6px;
+    min-height: 44px;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .tnode + .tnode { margin-top: 2px; }
+  .tnode:hover { background: var(--blue-tint-2); }
+  .tnode.selected { background: var(--blue-tint); }
+  .tnode-arrow {
+    flex: 0 0 16px; display: flex; align-items: center; justify-content: center;
+    color: var(--ink-3); width: 16px; height: 16px;
+    transition: transform .15s;
+  }
+  .tnode-arrow svg { width: 12px; height: 12px; display: block; }
+  .tnode.expanded > .tnode-arrow { transform: rotate(90deg); }
+  .tnode-arrow.leaf { visibility: hidden; }
+  .tnode-icon { flex-shrink: 0; display: flex; width: 16px; height: 16px; }
+  .tnode-icon svg { width: 16px; height: 16px; display: block; }
+  .tnode-icon.folder { color: var(--amber); }
+  .tnode-icon.kb { color: var(--blue); }
+  .tnode-label { flex: 1; min-width: 0; }
+  .tnode-name {
+    font-size: 14px; font-weight: 600; color: var(--ink);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.3;
+  }
+  .tnode-meta { font-size: 12px; color: var(--ink-3); margin-top: 1px; line-height: 1.3; }
+  .tnode.selected .tnode-name { color: var(--blue-ink); }
+  .tnode.selected .tnode-meta { color: var(--ink-2); }
+  /* hover 操作：kb=移动；folder=重命名/删除（复刻 index.vue） */
+  .tnode-acts { display: none; align-items: center; gap: 2px; flex-shrink: 0; }
+  .tnode:hover .tnode-acts, .tnode.selected .tnode-acts { display: inline-flex; }
+  .icon-act {
+    position: relative;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px;
+    border: none; background: transparent; border-radius: 6px;
+    color: var(--ink-3); cursor: pointer;
+    transition: color .15s, background .15s;
+  }
+  .icon-act svg { width: 14px; height: 14px; }
+  .icon-act:hover { color: var(--blue-ink); background: var(--blue-tint); }
+  .icon-act.danger:hover { color: var(--red-hover); background: #FDECEC; }
+  .icon-act::after { content: ''; position: absolute; inset: -8px; } /* 热区 44px */
+  /* 子层：1px 树线（#EFF1F4）+ 缩进 */
+  .tnode-children {
+    margin-left: 13px; padding-left: 7px;
+    border-left: 1px solid var(--line-soft);
+  }
+  .tnode-empty { font-size: 12px; color: var(--ink-3); padding: 4px 6px 6px 28px; }
+
+  /* ── 右侧信息条（复刻 .kg-info） ── */
+  .kb-info { border-bottom: 1px solid var(--line-soft); padding: 12px 0 12px; }
+  .kb-info-row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .kb-chip {
+    width: 36px; height: 36px; flex-shrink: 0;
+    border-radius: 10px; background: var(--blue-tint); color: var(--blue);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .kb-chip svg { width: 19px; height: 19px; }
+  .kb-name { font-size: 16px; font-weight: 650; color: var(--ink); }
+  .tag-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 500;
+    border-radius: 999px; padding: 3px 10px;
+  }
+  .tag-pill i { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .tag-pill.cyan { background: var(--cyan-tint); color: var(--ink-2); }
+  .tag-pill.cyan i { background: var(--cyan); }
+  .tag-pill.violet { background: var(--violet-tint); color: var(--ink-2); }
+  .tag-pill.violet i { background: var(--violet); }
+  .kb-desc {
+    font-size: 12.5px; color: var(--ink-3);
+    max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .kb-info-acts { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .btn-sm {
+    position: relative;
+    display: inline-flex; align-items: center; gap: 5px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink-2);
+    font-size: 13px; border-radius: 8px; padding: 0 12px;
+    min-height: 34px; cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .btn-sm svg { width: 13px; height: 13px; }
+  .btn-sm:hover { color: var(--blue-ink); border-color: var(--blue); background: var(--blue-tint-2); }
+  .btn-sm.danger { color: var(--red); }
+  .btn-sm.danger:hover { color: var(--red-hover); border-color: var(--red-hover); background: #FDECEC; }
+  .btn-sm.spinning svg { animation: rot .55s linear; }
+  .btn-sm::after { content: ''; position: absolute; inset: -5px; } /* 热区 44px */
+  @keyframes rot { to { transform: rotate(360deg); } }
+  .refreshed-at { font-size: 12px; color: var(--ink-3); }
+  /* 统计徽章行 */
+  .kb-info-row2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; padding-left: 46px; }
+  .stat-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    border-radius: 8px; padding: 4px 10px;
+    font-size: 12px; color: var(--ink-2);
+  }
+  .stat-pill svg { width: 13px; height: 13px; }
+  .stat-pill b { font-size: 13px; color: var(--ink); font-weight: 650; }
+  .stat-pill.p-doc { background: var(--blue-tint); }   .stat-pill.p-doc svg { color: var(--blue); }
+  .stat-pill.p-ent { background: var(--violet-tint); } .stat-pill.p-ent svg { color: var(--violet); }
+  .stat-pill.p-rel { background: var(--cyan-tint); }   .stat-pill.p-rel svg { color: var(--cyan); }
+  .stat-pill.p-time { background: #F2F3F5; }           .stat-pill.p-time svg { color: var(--ink-3); }
+
+  /* ── flat-tabs（复刻 .flat-tabs：一层页签） ── */
+  .tabs-wrap { position: relative; border-bottom: 1px solid var(--line); }
+  .flat-tabs { display: flex; align-items: stretch; gap: 4px; overflow-x: auto; }
+  .tab-item {
+    position: relative;
+    display: flex; align-items: center; gap: 6px;
+    border: none; background: transparent;
+    color: var(--ink-2); font-size: 14px;
+    padding: 0 14px; min-height: 44px;
+    cursor: pointer; white-space: nowrap;
+    transition: color .15s;
+  }
+  .tab-item svg { width: 15px; height: 15px; }
+  .tab-item:hover { color: var(--blue); }
+  .tab-item.active { color: var(--blue-ink); font-weight: 600; }
+  .tab-item.active::after {
+    content: ''; position: absolute; left: 10px; right: 10px; bottom: -1px;
+    height: 2px; border-radius: 2px; background: var(--blue);
+  }
+  .tab-help {
+    position: relative;
+    margin-left: auto;
+    display: inline-flex; align-items: center; gap: 5px;
+    border: none; background: transparent;
+    color: var(--ink-3); font-size: 12.5px;
+    padding: 0 10px; min-height: 44px; cursor: pointer;
+    transition: color .15s;
+  }
+  .tab-help svg { width: 14px; height: 14px; }
+  .tab-help:hover { color: var(--blue-ink); }
+  .help-pop {
+    position: absolute; right: 0; top: calc(100% + 8px); z-index: 30;
+    width: 340px; background: #fff;
+    border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: var(--shadow-lift);
+    padding: 12px 14px;
+    font-size: 13px; color: var(--ink-2); line-height: 1.7;
+    display: none;
+  }
+  .help-pop.open { display: block; }
+  .help-pop b { color: var(--ink); }
+
+  /* ── 文档面板 ── */
+  .dm-toolbar { display: flex; align-items: center; gap: 12px; margin: 14px 0 10px; flex-wrap: wrap; }
+  .dm-summary { font-size: 13px; color: var(--ink-2); }
+  .dm-summary b { color: var(--ink); font-weight: 650; }
+  .dm-search {
+    margin-left: auto;
+    display: inline-flex; align-items: center; gap: 7px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: #fff; padding: 0 10px;
+    min-height: 36px; min-width: 220px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .dm-search:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(51, 112, 255, .12); }
+  .dm-search svg { width: 14px; height: 14px; color: var(--ink-3); flex-shrink: 0; }
+  .dm-search input {
+    border: none; outline: none; background: transparent;
+    font-size: 13px; color: var(--ink); min-width: 0; flex: 1;
+  }
+  .dm-search input::placeholder { color: var(--ink-3); }
+
+  /* 文档表（列：文档名｜分块数｜状态｜更新时间｜操作） */
+  .doc-table { width: 100%; border-collapse: collapse; }
+  .doc-table th {
+    text-align: left; font-size: 12.5px; font-weight: 500; color: var(--ink-3);
+    padding: 8px 10px; border-bottom: 1px solid var(--line);
+    white-space: nowrap; letter-spacing: .02em;
+  }
+  .doc-table td { padding: 11px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+  .doc-table tbody tr { transition: background .12s; }
+  .doc-table tbody tr:hover { background: var(--blue-tint-2); }
+  .doc-table tbody tr:last-child td { border-bottom: none; }
+  .th-num, .td-num { text-align: right; }
+  .doc-chip {
+    width: 28px; height: 28px; flex-shrink: 0;
+    border-radius: 8px; background: var(--blue-tint); color: var(--blue);
+    display: inline-flex; align-items: center; justify-content: center;
+    vertical-align: middle; margin-right: 10px;
+  }
+  .doc-chip svg { width: 15px; height: 15px; }
+  .doc-name { font-size: 14px; font-weight: 600; color: var(--ink); vertical-align: middle; }
+  .td-chunks { font-size: 14px; color: var(--ink); }
+  .td-chunks small { font-size: 12px; color: var(--ink-3); font-weight: 400; margin-left: 2px; }
+  .td-time { font-size: 13.5px; color: var(--ink-2); white-space: nowrap; }
+  /* 状态胶囊：绿=已就绪 / 琥珀=处理中（真实数据当前全部已导入） */
+  .cap {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 500;
+    border-radius: 999px; padding: 3px 10px;
+    white-space: nowrap;
+  }
+  .cap i { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .cap.ok { background: var(--green-tint); color: var(--green-deep); }
+  .cap.ok i { background: var(--green); }
+  .cap.run { background: var(--amber-tint); color: var(--amber-deep); }
+  .cap.run i { background: var(--amber); animation: blink 1.4s ease-in-out infinite; }
+  .cap.bad { background: #FDECEC; color: var(--red-hover); }
+  .cap.bad i { background: var(--red); }
+  @keyframes blink { 50% { opacity: .35; } }
+  .td-ops { text-align: right; white-space: nowrap; }
+  .link-btn {
+    position: relative;
+    display: inline-flex; align-items: center; gap: 4px;
+    border: none; background: transparent;
+    color: var(--ink-2); font-size: 13px;
+    padding: 6px 8px; min-height: 32px;
+    border-radius: 6px; cursor: pointer;
+    transition: color .15s, background .15s;
+  }
+  .link-btn svg { width: 13px; height: 13px; }
+  .link-btn:hover { color: var(--blue-ink); background: var(--blue-tint); }
+  .link-btn.danger { color: var(--red); }
+  .link-btn.danger:hover { color: var(--red-hover); background: #FDECEC; }
+  .link-btn::after { content: ''; position: absolute; inset: -6px; } /* 热区 44px */
+  .row-empty { text-align: center; color: var(--ink-3); font-size: 13px; padding: 34px 0 !important; }
+
+  /* ── 其余页签：占位面板（本稿仅展开「文档导入」） ── */
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .ph {
+    padding: 56px 20px; text-align: center;
+    border: 1.5px dashed var(--line); border-radius: 10px;
+    background: #FAFBFD; margin-top: 14px;
+  }
+  .ph-chip {
+    width: 44px; height: 44px; margin: 0 auto 12px;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .ph-chip svg { width: 22px; height: 22px; }
+  .ph-title { font-size: 15px; font-weight: 600; color: var(--ink); }
+  .ph-desc { font-size: 13px; color: var(--ink-2); margin-top: 6px; line-height: 1.7; }
+  .ph-note { font-size: 12px; color: var(--ink-3); margin-top: 14px; }
+  .ph-types { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+  .type-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--ink-2);
+    background: #fff; border: 1px solid var(--line-soft);
+    border-radius: 999px; padding: 4px 11px;
+  }
+  .type-pill i { width: 8px; height: 8px; border-radius: 50%; }
+
+  /* ── toast ── */
+  .toast {
+    position: fixed; left: 50%; bottom: 32px; z-index: 200;
+    transform: translate(-50%, 12px);
+    background: rgba(31, 35, 41, .92); color: #fff;
+    font-size: 13px; border-radius: 8px;
+    padding: 9px 16px;
+    opacity: 0; pointer-events: none;
+    transition: opacity .2s, transform .2s;
+    max-width: 70vw;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  /* ── 页脚 ── */
+  .shell-footer { text-align: center; color: #5F6870; font-size: 12.5px; padding: 18px 0 10px; line-height: 1.8; }
+
+  @media (max-width: 900px) {
+    .shell-header { height: auto; padding: 10px 12px; gap: 10px; flex-wrap: wrap; }
+    .top-nav { order: 3; flex-basis: 100%; }
+    .shell-main { padding: 10px 8px 0; }
+    .page-card { padding: 8px 10px 12px; }
+    .svc { display: none; }
+    .kb-split { flex-direction: column; }
+    .kb-side { border-right: 0; border-bottom: 1px solid var(--line-soft); padding: 0 0 12px; flex: 1 1 auto; }
+    .kb-info-row2 { padding-left: 0; }
+    .kb-info-acts { margin-left: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .svc i, .cap.run i, .btn-sm.spinning svg { animation: none; }
+    .tnode-arrow, .toast { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="shell-header">
+  <div class="shell-brand">
+    <div class="brand-mark">AI</div>
+    <div class="shell-title">LLM Form Modeler <span class="ver">管理端</span></div>
+  </div>
+  <nav class="top-nav" aria-label="主导航">
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="9" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="5.5" rx="1.5"/><rect x="13.5" y="12" width="7.5" height="9" rx="1.5"/><rect x="3" y="15.5" width="7.5" height="5.5" rx="1.5"/></svg>
+      <span>概览</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.5v5.5M14.5 17.2h5.5"/></svg>
+      <span>集成</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.14-2.9-.4L4 21l1.2-3.6C3.8 16.1 3 13.9 3 11.5 3 7.4 7 4 12 4s9 3.4 9 7.5z"/></svg>
+      <span>记录</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M6.3 6.3l2.8 2.8M3 12h4M17.7 6.3l-2.8 2.8M21 12h-4"/><circle cx="12" cy="15" r="5.5"/><path d="M9.8 14.8a2.6 2.6 0 0 1 2-2.2M12 20.5v.01"/></svg>
+      <span>智能问数</span>
+    </button>
+    <button class="nav-item active" type="button" aria-current="page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="6" r="2"/><circle cx="18.5" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><path d="M7.3 7.2 10 10.2M16.8 6.3l-3 4M13.8 13.6l3.2 3.4"/><circle cx="18.5" cy="19" r="2"/></svg>
+      <span>知识库</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v10.5H9.5L5 19.5v-4H4z"/><path d="M8.5 10.2h.01M12 10.2h.01M15.5 10.2h.01"/></svg>
+      <span>智能客服</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c1.6 2.1 4 3.2 6.5 3-.3 3.6-1.5 10.4-6.5 14-5-3.6-6.2-10.4-6.5-14 2.5.2 4.9-.9 6.5-3z"/></svg>
+      <span>智能客服-测试</span>
+    </button>
+  </nav>
+  <div class="shell-actions">
+    <span class="svc"><i></i>服务运行中</span>
+  </div>
+</header>
+
+<main class="shell-main">
+  <div class="page-card">
+
+    <div class="pg-toolbar">
+      <span class="pg-title">知识库</span>
+      <span class="pg-count num" id="kbCount"></span>
+      <span class="pg-meta">层级树管理文档、分块与知识图谱 · 选中左侧库查看详情</span>
+    </div>
+
+    <div class="kb-split">
+
+      <!-- 左侧：知识库树 -->
+      <aside class="kb-side" aria-label="知识库树">
+        <div class="side-head">
+          <span class="side-title">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="6" r="2"/><circle cx="18.5" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><path d="M7.3 7.2 10 10.2M16.8 6.3l-3 4M13.8 13.6l3.2 3.4"/><circle cx="18.5" cy="19" r="2"/></svg>
+            知识库
+          </span>
+          <button class="btn-primary-sm" type="button" data-act="new-kb">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            新建知识库
+          </button>
+        </div>
+        <div id="kbTree" role="tree" aria-label="知识库层级树"></div>
+      </aside>
+
+      <!-- 右侧：库信息条 + 一层页签 -->
+      <section class="kb-main">
+
+        <div class="kb-info" id="kbInfo"><!-- JS 渲染 --></div>
+
+        <div class="tabs-wrap">
+          <div class="flat-tabs" role="tablist" aria-label="知识库子页" id="tabBar">
+            <button class="tab-item active" type="button" role="tab" aria-selected="true" data-tab="docs">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 16.5h6"/></svg>
+              文档导入
+            </button>
+            <button class="tab-item" type="button" role="tab" aria-selected="false" data-tab="graph">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5.5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><circle cx="18.5" cy="19" r="2"/><path d="M7.7 6.9 10.2 10M16.5 6.4l-3 4M13.7 13.7l3.4 3.6M7.5 13.2 5.8 17.6"/></svg>
+              图谱浏览
+            </button>
+            <button class="tab-item" type="button" role="tab" aria-selected="false" data-tab="schema">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="4.5" rx="1"/><rect x="3.5" y="15" width="6" height="4.5" rx="1"/><rect x="14.5" y="15" width="6" height="4.5" rx="1"/><path d="M12 7.5v4M6.5 15v-2h11v2"/></svg>
+              本体设置
+            </button>
+            <button class="tab-item" type="button" role="tab" aria-selected="false" data-tab="retrieval">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3h5M10 3v5.2l-5.2 8.4A2.2 2.2 0 0 0 6.7 20h10.6a2.2 2.2 0 0 0 1.9-3.4L14 8.2V3"/><path d="M7.5 15.5h9"/></svg>
+              检索测试
+            </button>
+            <button class="tab-item" type="button" role="tab" aria-selected="false" data-tab="annotations">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v16.5H6.5A2.5 2.5 0 0 0 4 21z"/><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/></svg>
+              标注回复
+            </button>
+            <button class="tab-help" type="button" id="helpBtn" aria-expanded="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.9.6c0 1.7-2.5 2.1-2.5 3.5M12 16.8h.01"/></svg>
+              说明
+            </button>
+          </div>
+          <div class="help-pop" id="helpPop" role="note"></div>
+        </div>
+
+        <!-- 文档导入（当前页签） -->
+        <div class="panel active" id="panel-docs" role="tabpanel">
+          <div class="dm-toolbar">
+            <span class="dm-summary" id="dmSummary"></span>
+            <label class="dm-search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="11" r="6.5"/><path d="M15.5 15.5 20 20"/></svg>
+              <input type="text" id="docSearch" placeholder="按文档名称搜索" aria-label="按文档名称搜索">
+            </label>
+          </div>
+          <table class="doc-table">
+            <thead>
+              <tr>
+                <th scope="col">文档名</th>
+                <th scope="col" class="th-num">分块数</th>
+                <th scope="col">状态</th>
+                <th scope="col">更新时间</th>
+                <th scope="col" class="td-ops">操作</th>
+              </tr>
+            </thead>
+            <tbody id="docBody"><!-- JS 渲染 --></tbody>
+          </table>
+        </div>
+
+        <!-- 其余页签占位（说明文案取自 index.vue helpHtmlMap） -->
+        <div class="panel" id="panel-graph" role="tabpanel">
+          <div class="ph">
+            <div class="ph-chip" style="background:var(--blue-tint); color:var(--blue);">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5.5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><circle cx="18.5" cy="19" r="2"/><path d="M7.7 6.9 10.2 10M16.5 6.4l-3 4M13.7 13.7l3.4 3.6M7.5 13.2 5.8 17.6"/></svg>
+            </div>
+            <div class="ph-title">图谱浏览</div>
+            <div class="ph-desc">浏览知识图谱抽取出的实体与关系；支持检索定位、点开节点看详情。</div>
+            <div class="ph-note">本稿仅展开「文档导入」页签 · 当前库实体 <span class="num" id="phEnt">-</span> · 关系 <span class="num" id="phRel">-</span></div>
+          </div>
+        </div>
+        <div class="panel" id="panel-schema" role="tabpanel">
+          <div class="ph">
+            <div class="ph-chip" style="background:var(--violet-tint); color:var(--violet);">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="4.5" rx="1"/><rect x="3.5" y="15" width="6" height="4.5" rx="1"/><rect x="14.5" y="15" width="6" height="4.5" rx="1"/><path d="M12 7.5v4M6.5 15v-2h11v2"/></svg>
+            </div>
+            <div class="ph-title">本体设置</div>
+            <div class="ph-desc">定义实体/关系类型约束，指导文档抽取与图谱展示；修改后对新解析生效。</div>
+            <div class="ph-types" id="phTypes"><!-- JS 渲染（真实 schema） --></div>
+            <div class="ph-note">实体类型与关系类型来自该库真实 schema（general 模板 · semi_open）</div>
+          </div>
+        </div>
+        <div class="panel" id="panel-retrieval" role="tabpanel">
+          <div class="ph">
+            <div class="ph-chip" style="background:var(--cyan-tint); color:var(--cyan);">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3h5M10 3v5.2l-5.2 8.4A2.2 2.2 0 0 0 6.7 20h10.6a2.2 2.2 0 0 0 1.9-3.4L14 8.2V3"/><path d="M7.5 15.5h9"/></svg>
+            </div>
+            <div class="ph-title">检索测试</div>
+            <div class="ph-desc">输入一句话验证该库的检索召回与引用片段，不写入任何数据。</div>
+            <div class="ph-note">本稿仅展开「文档导入」页签</div>
+          </div>
+        </div>
+        <div class="panel" id="panel-annotations" role="tabpanel">
+          <div class="ph">
+            <div class="ph-chip" style="background:var(--green-tint); color:var(--green);">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v16.5H6.5A2.5 2.5 0 0 0 4 21z"/><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/></svg>
+            </div>
+            <div class="ph-title">标注回复</div>
+            <div class="ph-desc">录入问题和标准答案；相似提问达到匹配阈值时，直接返回已启用的答案。</div>
+            <div class="ph-note">本稿仅展开「文档导入」页签</div>
+          </div>
+        </div>
+
+      </section>
+    </div>
+
+  </div>
+  <footer class="shell-footer">
+    LLM Form Modeler Admin · v0.4.0<br>
+    数据快照：本地栈 18080 真实 API（2026-11-03 拉取 /api/packs/knowledge_graph/kbs/tree 及各库 documents）· 时间按 UTC+8 显示 · 左侧「业务分组」为示意节点（当前库树暂无分组）
+  </footer>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* ── 图标（1.8px 线性，与全站一致） ── */
+var I = {
+  chevron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5.5 15.5 12 9 18.5"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7a2 2 0 0 1 2-2h4l2 2.5h7a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>',
+  partition: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="6" r="2"/><circle cx="18.5" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><path d="M7.3 7.2 10 10.2M16.8 6.3l-3 4M13.8 13.6l3.2 3.4"/><circle cx="18.5" cy="19" r="2"/></svg>',
+  swap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v13.5M7 4 4.5 6.5M7 4l2.5 2.5M17 20V6.5M17 20l2.5-2.5M17 20l-2.5-2.5"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M13.5 6.5l3 3"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l1 13h9l1-13M10 11v5.5M14 11v5.5"/></svg>',
+  redo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>',
+  file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 16.5h6"/></svg>',
+  node: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="5" cy="5" r="1.8"/><circle cx="19" cy="5" r="1.8"/><circle cx="5" cy="19" r="1.8"/><circle cx="19" cy="19" r="1.8"/><path d="M6.6 6.2 9.8 9.8M17.4 6.2l-3.2 3.6M6.6 17.8l3.2-3.6M17.4 17.8l-3.2-3.6"/></svg>',
+  rel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="9.5" width="5" height="5" rx="1.2"/><rect x="15.5" y="9.5" width="5" height="5" rx="1.2"/><path d="M8.5 12h7M13.5 10.2l2 1.8-2 1.8"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>'
+};
+
+/* ── 真实数据（本地栈 18080 API 快照，2026-11-03；时间已转 UTC+8） ──
+   「业务分组」为示意节点：当前真实库树均为顶层库、无文件夹分组 */
+var TREE = [
+  { id: 'folder-demo', kind: 'folder', name: '业务分组（示意）', children: [] },
+  {
+    id: 'e21d055d-a87a-4fc7-9e4b-47b270c3cd15', kind: 'kb',
+    name: '大文档验收-20261102', desc: '大文档导入质量验收（只读验收，勿删）',
+    dim: 1024, tpl: 'general', docCount: 1, entityTotal: 238, relationTotal: 369,
+    updated: '2026-11-02 17:08',
+    docs: [ { filename: 'technical-reference.md', chunks: 48, status: 'succeeded', updated: '2026-11-02 17:28' } ]
+  },
+  {
+    id: '6dd570f8-9097-4bf0-8b39-aaecfd5be6a2', kind: 'kb',
+    name: '强检目录', desc: '强制检定工作计量器具目录资料',
+    dim: 1024, tpl: 'general', docCount: 1, entityTotal: 37, relationTotal: 42,
+    updated: '2026-10-28 11:11',
+    docs: [ { filename: '强制检定工作计量器具实施目录_演示版_.md', chunks: 9, status: 'succeeded', updated: '2026-10-27 16:55' } ]
+  },
+  {
+    id: 'c70943f1-6f8a-49bc-b442-53d10105e993', kind: 'kb',
+    name: '检定规程', desc: '检定规程演示资料（南京院客服Demo）',
+    dim: 1024, tpl: 'general', docCount: 1, entityTotal: 23, relationTotal: 21,
+    updated: '2026-10-27 16:51',
+    docs: [ { filename: '计量器具检定规程与周期要点_演示版_.md', chunks: 7, status: 'succeeded', updated: '2026-10-27 16:54' } ]
+  },
+  {
+    id: 'c51818a7-838a-4b65-8d07-07f39ef0c8b9', kind: 'kb',
+    name: '配置清理验收-20261102', desc: '临时真实API功能验收；仅合成非敏感样本；请勿自动删除。',
+    dim: 1024, tpl: 'general', docCount: 1, entityTotal: 8, relationTotal: 8,
+    updated: '2026-11-02 14:21',
+    docs: [ { filename: 'acceptance-synthetic.md', chunks: 1, status: 'succeeded', updated: '2026-11-02 14:22' } ]
+  }
+];
+
+/* 状态胶囊（真实 STATUS 表：succeeded/importing/uploaded/partial/failed；当前数据全部 succeeded） */
+var STATUS = {
+  succeeded: { label: '已导入', cls: 'ok' },
+  importing: { label: '导入中', cls: 'run' },
+  uploaded:  { label: '待导入', cls: 'run' },
+  partial:   { label: '部分成功', cls: 'run' },
+  failed:    { label: '失败', cls: 'bad' }
+};
+
+/* 真实 schema（general 模板）实体类型：取自 /kbs/tree schema.entity_types */
+var ENTITY_TYPES = [
+  { label: '人物', color: '#5470c6' }, { label: '组织', color: '#91cc75' },
+  { label: '地点', color: '#fac858' }, { label: '产品', color: '#ee6666' },
+  { label: '事件', color: '#73c0de' }, { label: '概念', color: '#3ba272' },
+  { label: '文档', color: '#fc8452' }
+];
+
+/* 页签说明（文案取自 index.vue helpHtmlMap，去标记） */
+var HELP = {
+  docs: '<b>文档导入说明</b><br>上传文档自动解析分段入库；已开始解析的库锁定分段参数。状态筛选用于定位解析失败的文档——中断的导入会自动重排续跑。',
+  graph: '<b>图谱浏览说明</b><br>浏览知识图谱抽取出的实体与关系；支持检索定位、点开节点看详情。',
+  schema: '<b>本体设置说明</b><br>定义实体/关系类型约束，指导文档抽取与图谱展示；修改后对新解析生效。',
+  retrieval: '<b>检索测试说明</b><br>输入一句话验证该库的检索召回与引用片段，不写入任何数据。',
+  annotations: '<b>标注回复说明</b><br>录入问题和标准答案；相似提问达到匹配阈值时，直接返回已启用的答案。'
+};
+
+/* ── 状态 ── */
+var currentKbId = TREE[1].id;   /* 默认选中第一个库（真实页：仅一个库时自动选中） */
+var currentTab = 'docs';
+var expandedFolders = { 'folder-demo': true };  /* 真实页默认展开全部目录 */
+
+/* ── 渲染：左侧树 ── */
+function nodeActs(n) {
+  if (n.kind === 'kb') {
+    return '<span class="tnode-acts"><button class="icon-act" type="button" title="移动到…" aria-label="移动到…" data-act="move" data-name="' + n.name + '">' + I.swap + '</button></span>';
+  }
+  return '<span class="tnode-acts">' +
+    '<button class="icon-act" type="button" title="重命名" aria-label="重命名" data-act="rename" data-name="' + n.name + '">' + I.edit + '</button>' +
+    '<button class="icon-act danger" type="button" title="删除该文件夹？需先清空其下子节点" aria-label="删除文件夹" data-act="folder-del" data-name="' + n.name + '">' + I.trash + '</button></span>';
+}
+
+function renderTree() {
+  var html = '';
+  TREE.forEach(function (n) {
+    if (n.kind === 'folder') {
+      var open = !!expandedFolders[n.id];
+      html += '<div class="tnode folder' + (open ? ' expanded' : '') + '" role="button" tabindex="0" data-folder="' + n.id + '" aria-expanded="' + open + '">' +
+        '<span class="tnode-arrow">' + I.chevron + '</span>' +
+        '<span class="tnode-icon folder">' + I.folder + '</span>' +
+        '<span class="tnode-label"><span class="tnode-name">' + n.name + '</span></span>' +
+        nodeActs(n) + '</div>';
+      html += '<div class="tnode-children">' +
+        (open ? '<div class="tnode-empty">空目录 · 可将库移动至此（示意）</div>' : '') + '</div>';
+    } else {
+      html += '<div class="tnode kb' + (n.id === currentKbId ? ' selected' : '') + '" role="treeitem" tabindex="0" aria-selected="' + (n.id === currentKbId) + '" data-kb="' + n.id + '">' +
+        '<span class="tnode-arrow leaf">' + I.chevron + '</span>' +
+        '<span class="tnode-icon kb">' + I.partition + '</span>' +
+        '<span class="tnode-label">' +
+          '<span class="tnode-name">' + n.name + '</span>' +
+          '<span class="tnode-meta num">' + n.docCount + ' 文档 / ' + n.entityTotal + ' 实体</span>' +
+        '</span>' + nodeActs(n) + '</div>';
+    }
+  });
+  document.getElementById('kbTree').innerHTML = html;
+  var kbs = TREE.filter(function (n) { return n.kind === 'kb'; });
+  var el = document.getElementById('kbCount');
+  el.textContent = kbs.length + ' 个知识库 · ' + kbs.reduce(function (s, k) { return s + k.docCount; }, 0) + ' 个文档';
+}
+
+/* ── 渲染：右侧信息条 ── */
+function renderInfo(kb) {
+  document.getElementById('kbInfo').innerHTML =
+    '<div class="kb-info-row1">' +
+      '<span class="kb-chip">' + I.partition + '</span>' +
+      '<span class="kb-name">' + kb.name + '</span>' +
+      '<span class="tag-pill cyan num"><i></i>向量 dim=' + kb.dim + '</span>' +
+      '<span class="tag-pill violet"><i></i>本体：' + kb.tpl + '</span>' +
+      '<span class="kb-desc">' + kb.desc + '</span>' +
+      '<span class="kb-info-acts">' +
+        '<span class="refreshed-at num" id="refreshedAt"></span>' +
+        '<button class="btn-sm" type="button" data-act="edit-kb" data-name="' + kb.name + '">' + I.edit + '编辑</button>' +
+        '<button class="btn-sm danger" type="button" data-act="del-kb" data-name="' + kb.name + '">' + I.trash + '删除</button>' +
+        '<button class="btn-sm" type="button" id="infoRefresh">' + I.redo + '刷新</button>' +
+      '</span>' +
+    '</div>' +
+    '<div class="kb-info-row2">' +
+      '<span class="stat-pill p-doc"><span>' + I.doc + '</span>文档 <b class="num">' + kb.docCount + '</b></span>' +
+      '<span class="stat-pill p-ent"><span>' + I.node + '</span>实体 <b class="num">' + kb.entityTotal + '</b></span>' +
+      '<span class="stat-pill p-rel"><span>' + I.rel + '</span>关系 <b class="num">' + kb.relationTotal + '</b></span>' +
+      '<span class="stat-pill p-time"><span>' + I.clock + '</span>更新时间 <b class="num">' + kb.updated + '</b></span>' +
+    '</div>';
+  bindRefresh();
+  document.getElementById('phEnt').textContent = kb.entityTotal;
+  document.getElementById('phRel').textContent = kb.relationTotal;
+}
+
+/* ── 渲染：文档表 ── */
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderDocs(kb, filter) {
+  var q = (filter || '').trim().toLowerCase();
+  var rows = (kb.docs || []).filter(function (d) { return !q || d.filename.toLowerCase().indexOf(q) >= 0; });
+  var html = '';
+  if (!rows.length) {
+    html = '<tr><td colspan="5" class="row-empty">' + (q ? '无匹配文档' : '暂无文档') + '</td></tr>';
+  } else {
+    rows.forEach(function (d) {
+      var st = STATUS[d.status] || { label: d.status, cls: 'run' };
+      html += '<tr>' +
+        '<td><span class="doc-chip">' + I.file + '</span><span class="doc-name">' + esc(d.filename) + '</span></td>' +
+        '<td class="td-num"><span class="td-chunks num">' + d.chunks + '<small>块</small></span></td>' +
+        '<td><span class="cap ' + st.cls + '"><i></i>' + st.label + '</span></td>' +
+        '<td class="td-time num">' + d.updated + '</td>' +
+        '<td class="td-ops">' +
+          '<button class="link-btn" type="button" data-act="rechunk" data-name="' + esc(d.filename) + '">' + I.redo + '重新分块</button>' +
+          '<button class="link-btn danger" type="button" data-act="doc-del" data-name="' + esc(d.filename) + '">' + I.trash + '删除</button>' +
+        '</td></tr>';
+    });
+  }
+  document.getElementById('docBody').innerHTML = html;
+  var okCount = (kb.docs || []).filter(function (d) { return d.status === 'succeeded'; }).length;
+  document.getElementById('dmSummary').innerHTML =
+    '共 <b class="num">' + (kb.docs || []).length + '</b> 个文档 · 已导入 <b class="num">' + okCount + '</b>';
+}
+
+function currentKb() {
+  for (var i = 0; i < TREE.length; i++) if (TREE[i].id === currentKbId && TREE[i].kind === 'kb') return TREE[i];
+  return null;
+}
+
+function renderAll() {
+  renderTree();
+  var kb = currentKb();
+  if (kb) { renderInfo(kb); renderDocs(kb, document.getElementById('docSearch').value); }
+}
+
+/* ── 交互：树（点选高亮 / 目录展开 / hover 操作走 data-act；支持键盘） ── */
+function onTreeActivate(e) {
+  var act = e.target.closest('[data-act]');
+  if (act) { toast(actMsg(act)); return; }
+  var folderBtn = e.target.closest('[data-folder]');
+  if (folderBtn) {
+    var fid = folderBtn.getAttribute('data-folder');
+    expandedFolders[fid] = !expandedFolders[fid];
+    renderTree();
+    return;
+  }
+  var kbBtn = e.target.closest('[data-kb]');
+  if (kbBtn) {
+    currentKbId = kbBtn.getAttribute('data-kb');
+    document.getElementById('docSearch').value = '';
+    renderAll();
+  }
+}
+document.getElementById('kbTree').addEventListener('click', onTreeActivate);
+document.getElementById('kbTree').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') {
+    var row = e.target.closest('.tnode');
+    if (row && row.contains(e.target) && !e.target.closest('[data-act]')) {
+      e.preventDefault();
+      onTreeActivate(e);
+    }
+  }
+});
+
+/* ── 交互：页签切换 ── */
+var tabBtns = document.querySelectorAll('.tab-item');
+var helpBtn = document.getElementById('helpBtn');
+var helpPop = document.getElementById('helpPop');
+tabBtns.forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    currentTab = btn.getAttribute('data-tab');
+    tabBtns.forEach(function (b) {
+      var on = b === btn;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on);
+    });
+    document.querySelectorAll('.panel').forEach(function (p) {
+      p.classList.toggle('active', p.id === 'panel-' + currentTab);
+    });
+    updateHelp();
+    closeHelp();
+  });
+});
+function updateHelp() { helpPop.innerHTML = HELP[currentTab] || HELP.docs; }
+updateHelp();
+function closeHelp() { helpPop.classList.remove('open'); helpBtn.setAttribute('aria-expanded', 'false'); }
+helpBtn.addEventListener('click', function (e) {
+  e.stopPropagation();
+  var open = helpPop.classList.toggle('open');
+  helpBtn.setAttribute('aria-expanded', open);
+});
+document.addEventListener('click', function (e) {
+  if (helpPop.classList.contains('open') && !e.target.closest('.help-pop')) closeHelp();
+});
+
+/* ── 交互：搜索（真实过滤） ── */
+document.getElementById('docSearch').addEventListener('input', function () {
+  var kb = currentKb();
+  if (kb) renderDocs(kb, this.value);
+});
+
+/* ── 交互：信息条按钮（编辑/删除 toast；刷新=旋转+时刻，同 polished-v1） ── */
+function bindRefresh() {
+  var btn = document.getElementById('infoRefresh');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    btn.classList.add('spinning');
+    btn.disabled = true;
+    setTimeout(function () {
+      btn.classList.remove('spinning');
+      btn.disabled = false;
+      stamp();
+    }, 560);
+  });
+}
+function stamp() {
+  var el = document.getElementById('refreshedAt');
+  if (!el) return;
+  var d = new Date(), p = function (n) { return String(n).padStart(2, '0'); };
+  el.textContent = '已刷新 ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+/* ── toast（演示动作反馈） ── */
+var toastEl = document.getElementById('toast'), toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2200);
+}
+function actMsg(btn) {
+  var act = btn.getAttribute('data-act'), name = btn.getAttribute('data-name') || '';
+  var m = {
+    'new-kb': '演示稿：新建知识库三步向导未包含在本稿中',
+    'move': '演示稿：移动「' + name + '」未包含在本稿中',
+    'rename': '演示稿：重命名「' + name + '」未包含在本稿中',
+    'folder-del': '演示稿：删除文件夹未包含在本稿中',
+    'edit-kb': '演示稿：编辑「' + name + '」未包含在本稿中',
+    'del-kb': '演示稿：删除库「' + name + '」未包含在本稿中（数据只读）',
+    'rechunk': '演示稿：重新分块未实现，快照数据只读',
+    'doc-del': '演示稿：删除「' + name + '」未实现，快照数据只读'
+  };
+  return m[act] || '演示稿：该操作未包含在本稿中';
+}
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('[data-act]');
+  if (b && !b.closest('#kbTree')) toast(actMsg(b));
+});
+
+/* ── 初始化 ── */
+renderAll();
+(function renderTypes() {
+  document.getElementById('phTypes').innerHTML = ENTITY_TYPES.map(function (t) {
+    return '<span class="type-pill"><i style="background:' + t.color + '"></i>' + t.label + '</span>';
+  }).join('');
+})();
+</script>
+</body>
+</html>

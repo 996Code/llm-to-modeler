@@ -1,35 +1,38 @@
+/* =============================================================================
+ * 管理端全站样式层 —— 建立在 shared/design-tokens.css 之上（2026-11 精装重设计）
+ * 变量一律引用令牌，不再出现裸色值（语义色淡彩底等令牌已备齐）。
+ * ========================================================================== */
 .shell {
-  --admin-text: #1f2937;
-  --admin-muted: #6b7280;
-  --admin-border: #e5e7eb;
-  --admin-accent: #2563eb;
+  --admin-text: var(--ink);
+  --admin-muted: var(--ink-2);
+  --admin-border: var(--line);
+  --admin-accent: var(--brand);
   --admin-header-gap: 12px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--admin-text);
   letter-spacing: 0;
+  background: var(--bg);
 }
 
+/* ── 一级页签（flat-tabs） ── */
 .shell .flat-tabs > .ant-tabs-nav {
   margin: 0 0 var(--admin-header-gap);
 }
-
 .shell .flat-tabs > .ant-tabs-nav .ant-tabs-tab {
   padding: 8px 0;
-  font-size: 13px;
+  font-size: 14px;
 }
-
 .shell .flat-tabs > .ant-tabs-nav .ant-tabs-tab + .ant-tabs-tab {
   margin-left: 24px;
 }
-
 .shell .flat-tabs > .ant-tabs-nav .ant-tabs-tab-active .ant-tabs-tab-btn {
   font-weight: 600;
 }
-
 .shell .flat-tabs > .ant-tabs-nav .ant-tabs-extra-content {
   margin-left: 16px;
 }
 
+/* ── 工具栏 ── */
 .shell :is(.cv-toolbar, .tk-toolbar, .cl-toolbar, .ov-toolbar) {
   display: flex;
   align-items: center;
@@ -37,7 +40,6 @@
   gap: 12px;
   margin: 0 0 var(--admin-header-gap);
 }
-
 .shell :is(.cv-toolbar, .tk-toolbar, .cl-toolbar, .ov-toolbar) > * {
   max-width: 100%;
 }
@@ -61,62 +63,83 @@
   z-index: 3;
   margin-bottom: 0;
   padding: 8px 0;
-  background: #fff;
+  background: var(--card);
 }
 
+/* ── 表格精装：浅灰表头 / 行 hover 淡蓝 / 弱分隔线 ── */
 .shell .ant-table {
-  font-size: 13px;
+  font-size: 14px;
 }
-
 .shell .ant-table-thead > tr > th {
-  color: #4b5563;
+  color: var(--ink-2);
   font-weight: 500;
-  background: #f8fafc;
+  font-size: 13px;
+  background: #F7F8FA;
 }
-
+.shell .ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--line-soft);
+}
+.shell .ant-table-tbody > tr:hover > td {
+  background: #F7F9FF;
+}
 .shell .ant-table-cell {
   overflow-wrap: anywhere;
 }
 
+/* ── 控件统一：8px 圆角 / 14px 字号 / focus 品牌蓝 ── */
 .shell :is(.ant-btn, .ant-input, .ant-select-selector, .ant-input-number) {
-  border-radius: 6px;
-  font-size: 13px;
+  border-radius: var(--radius-ctrl);
+  font-size: 14px;
+}
+.shell .ant-input:focus,
+.shell .ant-input-affix-wrapper:focus-within,
+.shell .ant-select-focused .ant-select-selector {
+  border-color: var(--brand) !important;
+  box-shadow: 0 0 0 3px rgba(51, 112, 255, .12) !important;
+}
+.shell .ant-btn-primary {
+  background: var(--brand-ink);
+  border-color: var(--brand-ink);
+}
+.shell .ant-btn-primary:hover {
+  background: var(--brand) !important;
+  border-color: var(--brand) !important;
 }
 
 .shell :is(.lp-foot, .metro-admin-foot) .ant-space {
   flex-wrap: wrap;
 }
 
+/* ── 统计/插件卡：微影常驻 + hover 轻抬（替代历史上被抹平的阴影） ── */
 .shell :is(.ov-card, .pk-card) {
-  border-radius: 8px;
-  box-shadow: none;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--line-soft);
+  box-shadow: var(--shadow-rest);
+  transition: box-shadow .18s, transform .18s, border-color .18s;
 }
-
 .shell :is(.ov-card, .pk-card):hover {
-  box-shadow: none;
-  border-color: #cbd5e1;
+  box-shadow: var(--shadow-lift);
+  transform: translateY(-2px);
+  border-color: #DFE3EA;
 }
 
 .shell :is(.et, .mt) {
   padding: 0;
-  font-size: 13px;
+  font-size: 14px;
 }
-
 .shell :is(.et-heading, .mt-heading) h1 {
-  font-size: 16px;
+  font-size: 18px;
+  font-weight: 650;
 }
-
 .shell :is(.et-header, .mt-header) {
   margin-bottom: var(--admin-header-gap);
   flex-wrap: wrap;
 }
-
 .shell :is(.et-workspace, .mt-workspace) {
   border-radius: 0;
   border-left: 0;
   border-right: 0;
 }
-
 .shell :is(.et-preview, .mt-preview) {
   padding: 16px;
 }
@@ -125,7 +148,6 @@
   .shell .flat-tabs > .ant-tabs-nav .ant-tabs-tab + .ant-tabs-tab {
     margin-left: 20px;
   }
-
   .shell :is(.cv-toolbar, .tk-toolbar, .cl-toolbar, .ov-toolbar) {
     gap: 8px;
   }
@@ -134,20 +156,20 @@
 /* ── 说明弹窗统一样式(rightExtra「说明」内容经 v-html 注入 popover 门户,须全局) ──
    用法:容器 <div class="help-pop" v-html="...">,内容多加 help-pop-wide。
    配套构造器见 src/admin/helpHtml.ts(chip/iconBtn/rules)。 */
-.help-pop { max-width: 360px; font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; }
+.help-pop { max-width: 360px; font-size: 13px; line-height: 1.9; overflow-wrap: anywhere; }
 .help-pop-wide { max-width: 460px; }
-.help-pop b { color: #1f2937; }
+.help-pop b { color: var(--ink); }
 .help-pop .chip { display: inline-flex; align-items: center; padding: 0 6px; border-radius: 4px;
-  font-size: 11px; font-style: normal; line-height: 18px; margin: 0 2px; white-space: nowrap; }
-.help-pop .chip-blue { background: #e6f4ff; color: #1677ff; border: 1px solid #91caff; }
-.help-pop .chip-green { background: #f6ffed; color: #389e0d; border: 1px solid #b7eb8f; }
-.help-pop .chip-red { background: #fff2f0; color: #cf1322; border: 1px solid #ffa39e; }
-.help-pop .chip-orange { background: #fff7e6; color: #d46b08; border: 1px solid #ffd591; }
-.help-pop .chip-plain { background: #f5f5f5; color: #595959; border: 1px solid #d9d9d9; }
+  font-size: 12px; font-style: normal; line-height: 18px; margin: 0 2px; white-space: nowrap; }
+.help-pop .chip-blue { background: var(--brand-tint); color: var(--brand-ink); border: 1px solid #C9D9FF; }
+.help-pop .chip-green { background: var(--ok-tint); color: var(--ok); border: 1px solid #BFE5C4; }
+.help-pop .chip-red { background: var(--danger-tint); color: var(--danger); border: 1px solid #F5C6C2; }
+.help-pop .chip-orange { background: var(--warn-tint); color: var(--warn); border: 1px solid #F0D9B0; }
+.help-pop .chip-plain { background: var(--bg); color: var(--ink-2); border: 1px solid var(--line); }
 .help-pop .chip-btn svg { width: 12px; height: 12px; margin-right: 4px; fill: currentColor; flex: none; }
 /* 各页 rightExtra「说明」入口按钮(统一外观,配 .help-pop 弹窗内容) */
-.help-link { color: #94a3b8; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
-.help-link:hover { color: #2f54eb; }
+.help-link { color: var(--ink-3); font-size: 14px; display: inline-flex; align-items: center; gap: 4px; }
+.help-link:hover { color: var(--brand-ink); }
 
 /* ── 筛选栏统一模式(记录页各 tab):浅卡片条 + 带标签的条件组 + 操作靠右 ──
    用法:<div class="filter-bar"><div class="filter-item"><span class="filter-label">用户</span><a-input …/></div>…
@@ -155,10 +177,20 @@
 .filter-bar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
   margin: 14px 0 16px; padding: 10px 14px;
-  background: #f8fafc; border: 1px solid #eef2f7; border-radius: 10px;
+  background: #F8FAFC; border: 1px solid var(--line-soft); border-radius: var(--radius-card);
 }
 .filter-item { display: flex; align-items: center; gap: 6px; }
-.filter-label { font-size: 12px; color: #64748b; white-space: nowrap; }
+.filter-label { font-size: 13px; color: var(--ink-2); white-space: nowrap; }
 .filter-item .ant-select, .filter-item .ant-input, .filter-item .ant-input-affix-wrapper { min-width: 0; }
 .filter-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-.filter-count { font-size: 12px; color: #94a3b8; white-space: nowrap; }
+.filter-count { font-size: 13px; color: var(--ink-3); white-space: nowrap; }
+
+/* ── 状态胶囊（各页通用小件） ── */
+.stat-pill {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 13px; border-radius: 999px; padding: 3px 12px 3px 10px;
+}
+.stat-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.stat-pill.is-ok { color: var(--ok); background: var(--ok-tint); }
+.stat-pill.is-off { color: var(--ink-3); background: var(--bg); }
+.stat-pill.is-busy { color: var(--warn); background: var(--warn-tint); }

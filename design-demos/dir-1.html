@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Form Modeler · 管理端 — 仪器控制台（方向 A1）</title>
+<style>
+/* ============ 仪器控制台 A1 · 设计语言 tokens ============ */
+:root{
+  --bg:#ECEDEB;          /* 机身银灰（石墨仪器面板） */
+  --panel:#F7F8F6;       /* 面板层 */
+  --panel-deep:#E0E2DE;  /* 深一层 */
+  --recess:#EEF0ED;      /* 读数窗凹槽 */
+  --lit:#FCFDFB;         /* 点亮槽位 */
+  --ink:#232628;         /* 石墨近黑 */
+  --ink-2:#5C6367;       /* 次要 */
+  --ink-3:#83898D;       /* 弱注释（仅装饰性） */
+  --hair:#D5D9D6;        /* 发丝线 */
+  --hair-soft:#E5E8E5;
+  --tick:#CBCFCC;        /* 刻度·细 */
+  --tick-major:#A4ABA7;  /* 刻度·粗 */
+  --signal:#C24E0C;      /* 信号橙：主读数/激活态/主按钮 */
+  --signal-deep:#A8430A;
+  --signal-press:#8F3908;
+  --ok:#2E7D4F; --ok-bg:#E2EDE4; --ok-ink:#1E5B38;
+  --warn-ink:#7A5200; --warn-bg:#F3EBD3;
+  --danger:#B3362B; --danger-deep:#96291F;
+  --mono:Menlo,"SF Mono",Consolas,"Courier New",monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  background:var(--bg);color:var(--ink);
+  font:14px/1.6 -apple-system,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif;
+  font-variant-numeric:tabular-nums;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:#F0DCC8}
+a{color:inherit;text-decoration:none}
+ul{list-style:none}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--signal);outline-offset:2px;border-radius:2px}
+
+/* ============ 通用件 ============ */
+.console{max-width:1440px;margin:0 auto;padding:0 40px}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.label{font-size:13px;font-weight:500;color:var(--ink-2);letter-spacing:.08em}
+/* 发丝刻度尺：细刻度 8px / 粗刻度 48px，底部基线 */
+.ruler{
+  height:12px;
+  background-image:
+    repeating-linear-gradient(90deg,var(--tick-major) 0 1px,transparent 1px 48px),
+    repeating-linear-gradient(90deg,var(--tick) 0 1px,transparent 1px 8px),
+    linear-gradient(var(--tick-major),var(--tick-major));
+  background-size:100% 100%,100% 58%,100% 1px;
+  background-position:0 100%,0 100%,0 100%;
+  background-repeat:no-repeat;
+}
+.ruler--bezel{height:10px;margin:0 -40px;opacity:.75}
+.panel{background:var(--panel);border:1px solid var(--panel-deep);border-radius:3px;padding:22px 24px}
+.panel-head{display:flex;align-items:baseline;gap:12px;margin-bottom:18px;flex-wrap:wrap}
+.panel-head h2,.panel-head h3{font-size:16px;font-weight:600;display:flex;align-items:center;gap:9px;letter-spacing:.02em}
+.panel-head h3{font-size:15px}
+.panel-head h2::before,.panel-head h3::before{content:"";width:7px;height:7px;background:var(--ink);flex:none}
+.head-note{font-size:13px;color:var(--ink-2);letter-spacing:.04em}
+.push{margin-left:auto}
+.tag{display:inline-block;padding:2px 9px;border:1px solid var(--panel-deep);border-radius:999px;font-size:12px;color:var(--ink-2);letter-spacing:.06em;transform:translateY(-1px)}
+
+/* ============ 顶部仪表带 ============ */
+.topband{display:flex;align-items:stretch;gap:26px;min-height:64px;background:var(--panel);border-bottom:1px solid var(--panel-deep);padding:0 24px}
+.brand{display:flex;align-items:center;gap:12px;padding-right:8px}
+.mark{width:34px;height:34px;flex:none}
+.brand-name{font-size:15px;font-weight:700;letter-spacing:.01em;line-height:1.25}
+.brand-name small{display:block;font-size:12px;font-weight:500;color:var(--ink-2);letter-spacing:.14em}
+.mainnav{display:flex;align-items:stretch}
+.navlink{position:relative;display:flex;align-items:center;padding:0 11px;font-size:14px;color:var(--ink-2);letter-spacing:.02em;transition:color .15s}
+.navlink:hover{color:var(--ink)}
+.navlink:hover::after{content:"";position:absolute;left:11px;right:11px;bottom:0;height:1px;background:var(--tick-major)}
+.navlink.is-active{color:var(--signal-deep);font-weight:600}
+.navlink.is-active::after{content:"";position:absolute;left:11px;right:11px;bottom:0;height:2px;background:var(--signal)}
+.band-ops{margin-left:auto;display:flex;align-items:center;gap:12px}
+.svc{display:flex;align-items:center;gap:8px;font-size:13px;letter-spacing:.05em;padding:0 8px}
+.led{width:8px;height:8px;border-radius:50%;background:var(--ok);animation:pulse 2.6s ease-out infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(46,125,79,.30)}70%{box-shadow:0 0 0 6px rgba(46,125,79,0)}100%{box-shadow:0 0 0 0 rgba(46,125,79,0)}}
+.btn-ghost{display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:0 15px;background:transparent;border:1px solid #A9A498;border-radius:3px;font-size:13px;font-weight:500;letter-spacing:.06em;cursor:pointer;transition:border-color .15s,background .15s}
+.btn-ghost:hover{border-color:var(--ink);background:var(--panel-deep)}
+.btn-ghost:active{background:var(--panel-deep);transform:translateY(1px)}
+.btn-ghost svg{width:15px;height:15px}
+
+/* ============ 数据范围条 ============ */
+.rangebar{display:flex;align-items:center;gap:14px;padding:13px 2px;border-bottom:1px solid var(--hair);margin-bottom:36px;flex-wrap:wrap}
+.rangebar time{font-family:var(--mono);font-size:14px;color:var(--ink);letter-spacing:.02em}
+.rangebar .btn-ghost{min-height:44px;margin-left:auto}
+#refreshIcon{display:block}
+#refreshIcon.spin{animation:spin .6s cubic-bezier(.4,.1,.3,1)}
+@keyframes spin{to{transform:rotate(360deg)}}
+#rangeTime.flash{animation:flash .8s ease}
+@keyframes flash{0%{opacity:.25}100%{opacity:1}}
+
+/* ============ 主读数区：三大表盘 ============ */
+main{display:flex;flex-direction:column;gap:44px}
+.gauges{display:grid;grid-template-columns:1fr 1fr 1.35fr;gap:26px}
+.gauge .label{display:block;margin-bottom:10px}
+.readout{
+  background:var(--recess);border:1px solid #DDD8CC;border-radius:3px;
+  box-shadow:inset 0 1px 3px rgba(38,36,31,.07),inset 0 -1px 0 rgba(255,255,255,.7);
+  padding:16px 20px 0;
+}
+.g-value{display:flex;align-items:baseline;gap:9px}
+.num{font-family:var(--mono);font-weight:500;font-size:56px;line-height:1.05;letter-spacing:-.01em}
+.g-unit{font-size:14px;color:var(--ink-2);letter-spacing:.06em}
+.readout .ruler{margin:14px -20px 0}
+.gauge--main .num{font-size:78px;color:var(--signal)}
+.gauge--main .readout{border-color:#DCD2C2;box-shadow:inset 0 1px 4px rgba(38,36,31,.09),inset 0 -1px 0 rgba(255,255,255,.7)}
+.g-note{margin-top:10px;font-size:13px;color:var(--ink-2);letter-spacing:.04em}
+.g-note .mono{color:var(--ink)}
+
+/* ============ 次级统计 + 图表 ============ */
+.midgrid{display:grid;grid-template-columns:5fr 7fr;gap:24px;align-items:stretch}
+.sg-head{font-size:13px;font-weight:600;color:var(--ink-2);letter-spacing:.08em;margin-bottom:14px}
+.sg-head .mono{color:var(--ink)}
+.sg-row{display:grid;grid-template-columns:repeat(3,1fr)}
+.stat{padding:2px 18px 4px 0}
+.stat + .stat{border-left:1px solid var(--hair-soft);padding-left:18px}
+.stat .label{display:block;margin-bottom:6px}
+.stat-v{font-family:var(--mono);font-size:30px;font-weight:500;line-height:1.1}
+.stat-v small{font-size:13px;color:var(--ink-2);font-weight:400;margin-left:3px}
+.stat .ruler{height:9px;margin:8px 0 7px;background-size:100% 100%,100% 55%,100% 1px}
+.stat-note{font-size:13px;color:var(--ink-2)}
+.stat-note .mono{color:var(--ink)}
+.ledger{margin-top:20px;border-top:1px solid var(--hair-soft)}
+.ledger-row{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--hair-soft)}
+.ledger-row:last-child{border-bottom:0}
+.ledger-main{font-size:14px;font-weight:500}
+.ledger-sub{font-size:13px;color:var(--ink-2)}
+.ledger-row .val{margin-left:auto;font-family:var(--mono);font-size:22px;font-weight:500}
+.ledger-row .val small{font-size:13px;color:var(--ink-2);font-weight:400;margin-left:2px}
+
+/* 占比刻度条 */
+.scalebar{display:flex;height:30px;border-radius:2px;overflow:hidden;box-shadow:inset 0 0 0 1px var(--panel-deep)}
+.seg{height:100%;position:relative}
+.seg + .seg{border-left:2px solid var(--panel)}
+.seg--kg{width:62.4%;background:#2B2923}
+.seg--vec{width:33.3%;background:#6B675E}
+.seg--ft{width:4.3%;background:#B7B2A5}
+.seg em{position:absolute;left:9px;top:50%;transform:translateY(-50%);font-style:normal;font-size:12px;letter-spacing:.04em;color:#F1EFE9;white-space:nowrap}
+.seg--vec em{color:#F1EFE9}
+.axis{position:relative;height:24px;margin-top:8px}
+.axis i{position:absolute;top:0;width:1px;height:7px;background:var(--tick-major)}
+.axis span{position:absolute;top:11px;font-family:var(--mono);font-size:12px;color:var(--ink-2);transform:translateX(-50%)}
+.axis .p0{left:0}.axis .p25{left:25%}.axis .p50{left:50%}.axis .p75{left:75%}.axis .p100{left:100%}
+.axis span.p0{transform:none}.axis span.p100{transform:translateX(-100%)}
+.legend{display:flex;gap:24px;margin-top:12px;flex-wrap:wrap}
+.legend li{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2)}
+.sw{width:10px;height:10px;border-radius:2px;flex:none}
+.legend .mono{color:var(--ink);font-size:13px}
+.subhead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-top:22px;padding-top:18px;border-top:1px solid var(--hair-soft);font-size:13px;color:var(--ink-2);letter-spacing:.06em}
+.subhead strong{font-size:14px;font-weight:600;color:var(--ink);letter-spacing:.02em}
+.mixbar{display:flex;height:24px;border-radius:2px;overflow:hidden;margin-top:12px;box-shadow:inset 0 0 0 1px var(--panel-deep)}
+.mixbar .seg--llm{width:78.3%;background:#2B2923}
+.mixbar .seg--ret{width:21.7%;background:#B7B2A5}
+.mixbar .seg--ret em{color:#26241F}
+
+/* ============ 插件槽位 ============ */
+.bay-count{margin-left:auto;font-size:13px;color:var(--ink-2);letter-spacing:.08em;display:flex;align-items:baseline;gap:6px}
+.bay-count b{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--signal)}
+.bay-count .total{font-family:var(--mono);font-size:14px}
+.slots{display:grid;grid-template-columns:repeat(7,1fr);gap:14px}
+.slot{
+  position:relative;display:flex;flex-direction:column;gap:5px;
+  min-height:150px;padding:14px 13px 9px;
+  background:var(--bg);border:1px solid var(--panel-deep);border-radius:3px;
+  transition:background .18s,border-color .18s;
+}
+.slot.is-on{background:var(--lit);border-color:#D3CEC2}
+.slot-led{position:absolute;top:13px;right:13px;width:7px;height:7px;border-radius:50%;background:#C7C2B6;transition:background .18s,box-shadow .18s}
+.slot.is-on .slot-led{background:var(--signal);box-shadow:0 0 0 2px rgba(194,78,12,.14),0 0 6px rgba(194,78,12,.45)}
+.slot-icon{width:26px;height:26px;color:#A8A395;margin-bottom:6px;transition:color .18s}
+.slot.is-on .slot-icon{color:var(--ink)}
+.slot-name{font-size:14px;font-weight:500;color:var(--ink-2);letter-spacing:.02em}
+.slot.is-on .slot-name{font-weight:600;color:var(--ink)}
+.slot-code{font-family:var(--mono);font-size:12px;color:var(--ink-2);word-break:break-all;line-height:1.5}
+.slot-state{font-size:12px;color:var(--ink-2);letter-spacing:.08em;margin-top:2px}
+.slot.is-on .slot-state{color:var(--ink);font-weight:600}
+.slot .switch{margin-top:auto;align-self:flex-start}
+.switch{width:44px;height:44px;display:grid;place-items:center;background:none;border:0;border-radius:6px;cursor:pointer}
+.track{position:relative;width:38px;height:21px;border:1px solid #B4AFA2;border-radius:999px;background:var(--panel-deep);transition:background .18s,border-color .18s}
+.track::after{content:"";position:absolute;top:2.5px;left:3px;width:14px;height:14px;border-radius:50%;background:#8F8A7E;transition:transform .18s cubic-bezier(.3,.8,.4,1.1),background .18s}
+.slot.is-on .track{border-color:var(--signal);background:#F3E3D7}
+.slot.is-on .track::after{transform:translateX(16px);background:var(--signal)}
+
+/* ============ 组件样张带 ============ */
+.band-title{font-size:17px;font-weight:700;display:flex;align-items:center;gap:10px;letter-spacing:.02em;margin-bottom:18px}
+.band-title::before{content:"";width:8px;height:8px;background:var(--ink)}
+.samples{display:flex;flex-direction:column;gap:24px}
+.sample-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:stretch}
+/* 表格 */
+table{width:100%;border-collapse:collapse}
+th{font-size:13px;font-weight:500;color:var(--ink-2);letter-spacing:.08em;text-align:left;padding:0 12px 10px;border-bottom:1px solid var(--hair)}
+td{font-size:15px;padding:14px 12px;border-bottom:1px solid var(--hair-soft)}
+tbody tr{transition:background .12s}
+tbody tr:hover{background:var(--recess)}
+tbody tr:last-child td{border-bottom:0}
+.t-title{font-weight:600;letter-spacing:.01em}
+td.num-cell,th.num-cell{font-family:var(--mono);font-variant-numeric:tabular-nums}
+td.num-cell{font-size:14px}
+td .plug{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--ink-2)}
+td .plug i{width:5px;height:5px;background:var(--tick-major);flex:none}
+/* 聊天延展 */
+.chat{display:grid;gap:20px;padding-top:2px}
+.chat-user{justify-self:end;max-width:78%;background:var(--ink);color:#F3F1EC;padding:12px 16px;border-radius:12px 12px 3px 12px;font-size:15px;line-height:1.6;letter-spacing:.01em}
+.chat-bot{max-width:94%}
+.bot-meta{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2);letter-spacing:.08em;margin-bottom:9px}
+.bot-meta::before{content:"";width:6px;height:6px;background:var(--ink)}
+.chat-bot p{font-size:15px;line-height:1.78;letter-spacing:.01em}
+.bot-ref{margin-top:12px;padding-top:9px;border-top:1px solid var(--hair-soft);font-size:13px;color:var(--ink-2);letter-spacing:.03em}
+/* 按钮与状态 */
+.controls{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:44px;padding:0 22px;border-radius:3px;border:1px solid transparent;font-size:14px;font-weight:600;letter-spacing:.04em;cursor:pointer;transition:background .15s,border-color .15s,transform .05s}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--signal);color:#FDF9F4}
+.btn-primary:hover{background:var(--signal-deep)}
+.btn-primary:active{background:var(--signal-press)}
+.btn-secondary{background:transparent;border-color:#A9A498;color:var(--ink)}
+.btn-secondary:hover{border-color:var(--ink);background:var(--panel-deep)}
+.btn-secondary:active{background:var(--panel-deep)}
+.btn-danger{background:var(--danger);color:#FDF6F4}
+.btn-danger:hover{background:var(--danger-deep)}
+.caps{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px;padding-top:18px;border-top:1px solid var(--hair-soft)}
+.cap{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 14px;border-radius:999px;font-size:13px;letter-spacing:.05em;border:1px solid transparent}
+.cap i{width:7px;height:7px;border-radius:50%;flex:none}
+.cap--run{background:var(--ok-bg);color:var(--ok-ink)} .cap--run i{background:var(--ok)}
+.cap--off{background:#E9E6DE;color:#5F5B52} .cap--off i{background:#A8A395}
+.cap--test{background:var(--warn-bg);color:var(--warn-ink)} .cap--test i{background:#C08A1E}
+
+/* ============ 页脚 ============ */
+footer{margin-top:56px}
+.foot-row{display:flex;justify-content:space-between;gap:16px;padding:16px 2px 40px;font-size:12px;color:var(--ink-2);letter-spacing:.05em;flex-wrap:wrap}
+.foot-row .mono{letter-spacing:.08em}
+
+/* ============ 载入：一次编排 ============ */
+@media (prefers-reduced-motion: no-preference){
+  .console{animation:boot .5s cubic-bezier(.2,.7,.3,1) both}
+  @keyframes boot{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+}
+@media (prefers-reduced-motion: reduce){
+  .led{animation:none}
+  #refreshIcon.spin,#rangeTime.flash{animation:none}
+}
+
+/* ============ 响应式兜底 ============ */
+@media (max-width:1120px){
+  .gauges{grid-template-columns:1fr 1fr}
+  .gauge--main{grid-column:1 / -1;order:-1}
+  .midgrid,.sample-grid{grid-template-columns:1fr}
+  .slots{grid-template-columns:repeat(4,1fr)}
+  .topband{flex-wrap:wrap;padding:8px 16px}
+  .mainnav{order:3;width:100%;overflow-x:auto;scrollbar-width:none}
+  .mainnav::-webkit-scrollbar{display:none}
+  .navlink{padding:12px 11px}
+}
+@media (max-width:720px){
+  .console{padding:0 20px}
+  .ruler--bezel{margin:0 -20px}
+  .gauges{grid-template-columns:1fr}
+  .sg-row{grid-template-columns:1fr}
+  .stat + .stat{border-left:0;padding-left:0;border-top:1px solid var(--hair-soft)}
+  .slots{grid-template-columns:repeat(2,1fr)}
+  td,th{padding:12px 8px}
+}
+</style>
+</head>
+<body>
+<div class="console">
+
+  <!-- 1 · 顶部仪表带 -->
+  <header class="topband">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 36 36" aria-hidden="true">
+        <rect x="2.5" y="2.5" width="31" height="31" fill="none" stroke="#26241F" stroke-width="2"/>
+        <circle cx="18" cy="18" r="8.5" fill="none" stroke="#6B675E" stroke-width="1.2"/>
+        <line x1="18" y1="18" x2="23.6" y2="10.8" stroke="#C24E0C" stroke-width="2.2" stroke-linecap="round"/>
+        <circle cx="18" cy="18" r="1.7" fill="#26241F"/>
+      </svg>
+      <div class="brand-name">LLM Form Modeler<small>管理端</small></div>
+    </div>
+    <nav class="mainnav" aria-label="主导航">
+      <a class="navlink is-active" href="#" aria-current="page">概览</a>
+      <a class="navlink" href="#">集成</a>
+      <a class="navlink" href="#">记录</a>
+      <a class="navlink" href="#">智能问数</a>
+      <a class="navlink" href="#">知识库</a>
+      <a class="navlink" href="#">智能客服</a>
+      <a class="navlink" href="#">智能客服-测试</a>
+    </nav>
+    <div class="band-ops">
+      <div class="svc"><span class="led" aria-hidden="true"></span>服务运行中</div>
+      <button class="btn-ghost" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
+        </svg>退出
+      </button>
+    </div>
+  </header>
+  <div class="ruler ruler--bezel" aria-hidden="true"></div>
+
+  <!-- 2 · 数据范围条 -->
+  <div class="rangebar">
+    <span class="label">数据范围</span>
+    <time id="rangeTime" datetime="2026-10-27T15:59">2026-10-27 15:59 — 2026-10-31 15:26</time>
+    <button class="btn-ghost" id="refreshBtn" type="button">
+      <svg id="refreshIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="23 4 23 10 17 10"/>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>刷新
+    </button>
+  </div>
+
+  <main>
+    <!-- 3 · 主读数区：三大表盘 -->
+    <section class="gauges" aria-label="主要读数">
+      <article class="gauge">
+        <span class="label">会话总数</span>
+        <div class="readout">
+          <div class="g-value"><span class="num" data-n="16">16</span><span class="g-unit">个</span></div>
+          <div class="ruler" aria-hidden="true"></div>
+        </div>
+        <p class="g-note"><span class="mono">3</span> 个用户参与</p>
+      </article>
+      <article class="gauge">
+        <span class="label">消息数</span>
+        <div class="readout">
+          <div class="g-value"><span class="num" data-n="114">114</span><span class="g-unit">条</span></div>
+          <div class="ruler" aria-hidden="true"></div>
+        </div>
+        <p class="g-note"><span class="mono">288</span> 条事件</p>
+      </article>
+      <article class="gauge gauge--main">
+        <span class="label">LLM 调用</span>
+        <div class="readout">
+          <div class="g-value"><span class="num" data-n="423">423</span><span class="g-unit">次</span></div>
+          <div class="ruler" aria-hidden="true"></div>
+        </div>
+        <p class="g-note">平均 <span class="mono">6657</span> ms · 约 <span class="mono">6.7</span> s / 次</p>
+      </article>
+    </section>
+
+    <!-- 4 · 次级统计 + 5 · 真实数据图 -->
+    <div class="midgrid">
+      <section class="panel" aria-label="运行明细">
+        <div class="panel-head">
+          <h2>运行明细</h2><span class="head-note push">窗口内累计</span>
+        </div>
+        <p class="sg-head">检索通道 · 合计 <span class="mono">117</span> 次</p>
+        <div class="sg-row">
+          <div class="stat">
+            <span class="label">图谱检索</span>
+            <div class="stat-v">73<small>次</small></div>
+            <div class="ruler" aria-hidden="true"></div>
+            <p class="stat-note">合计 <span class="mono">1980</span> ms</p>
+          </div>
+          <div class="stat">
+            <span class="label">向量检索</span>
+            <div class="stat-v">39<small>次</small></div>
+            <div class="ruler" aria-hidden="true"></div>
+            <p class="stat-note">合计 <span class="mono">11718</span> ms</p>
+          </div>
+          <div class="stat">
+            <span class="label">全文检索</span>
+            <div class="stat-v">5<small>次</small></div>
+            <div class="ruler" aria-hidden="true"></div>
+            <p class="stat-note">合计 <span class="mono">33</span> ms</p>
+          </div>
+        </div>
+        <div class="ledger">
+          <div class="ledger-row">
+            <div><span class="ledger-main">上游调用</span>&nbsp;&nbsp;<span class="ledger-sub">合计 0 ms</span></div>
+            <span class="val">0<small>次</small></span>
+          </div>
+          <div class="ledger-row">
+            <div><span class="ledger-main">链路打点</span>&nbsp;&nbsp;<span class="ledger-sub">引擎自动 + 插件上报</span></div>
+            <span class="val">158</span>
+          </div>
+          <div class="ledger-row">
+            <div><span class="ledger-main">启用插件</span>&nbsp;&nbsp;<span class="ledger-sub">热切换即时生效</span></div>
+            <span class="val" id="statPlugins">3<small>/ 7</small></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" aria-label="检索类型占比">
+        <div class="panel-head">
+          <h2>检索类型占比</h2><span class="head-note push">刻度 0–100%</span>
+        </div>
+        <div class="scalebar" role="img" aria-label="检索类型占比：图谱检索 73 次，占 62.4%；向量检索 39 次，占 33.3%；全文检索 5 次，占 4.3%">
+          <div class="seg seg--kg"><em>图谱 73</em></div>
+          <div class="seg seg--vec"><em>向量 39</em></div>
+          <div class="seg seg--ft"></div>
+        </div>
+        <div class="axis" aria-hidden="true">
+          <i class="p0"></i><span class="p0">0</span>
+          <i class="p25"></i><span class="p25">25</span>
+          <i class="p50"></i><span class="p50">50</span>
+          <i class="p75"></i><span class="p75">75</span>
+          <i class="p100"></i><span class="p100">100%</span>
+        </div>
+        <ul class="legend">
+          <li><span class="sw" style="background:#2B2923"></span>图谱检索 <span class="mono">73 · 62.4%</span></li>
+          <li><span class="sw" style="background:#6B675E"></span>向量检索 <span class="mono">39 · 33.3%</span></li>
+          <li><span class="sw" style="background:#B7B2A5"></span>全文检索 <span class="mono">5 · 4.3%</span></li>
+        </ul>
+        <div class="subhead"><strong>调用构成</strong><span>合计 <span class="mono">540</span> 次 = LLM <span class="mono">423</span> + 检索 <span class="mono">117</span></span></div>
+        <div class="mixbar" role="img" aria-label="调用构成 540 次：LLM 调用 423 次占 78.3%，检索 117 次占 21.7%">
+          <div class="seg seg--llm"><em>LLM 423 · 78.3%</em></div>
+          <div class="seg seg--ret"><em>检索 117</em></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- 6 · 插件槽位 -->
+    <section class="panel" aria-label="插件槽位">
+      <div class="panel-head">
+        <h2>插件槽位</h2>
+        <span class="head-note">点击开关切换 · 热切换即时生效</span>
+        <span class="bay-count">启用 <b id="bayOn">3</b><span class="total">/ 7</span></span>
+      </div>
+      <ul class="slots">
+        <li class="slot is-on">
+          <span class="slot-led" aria-hidden="true"></span>
+          <svg class="slot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+            <path d="M5.5 19.5v-5"/><path d="M12 19.5V9"/><path d="M18.5 19.5v-8"/><path d="M3.5 19.5h17"/>
+          </svg>
+          <h3 class="slot-name">智能问数</h3>
+          <span class="slot-code">chatbi</span>
+          <span class="slot-state">已启用</span>
+          <button class="switch" type="button" role="switch" aria-checked="true" aria-label="切换插件：智能问数"><span class="track"></span></button>
+        </li>
+        <li class="slot is-on">
+          <span class="slot-led" aria-hidden="true"></span>
+          <svg class="slot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="6.5" cy="7" r="2.3"/><circle cx="17.5" cy="8.5" r="2.3"/><circle cx="11.5" cy="17.5" r="2.3"/>
+            <path d="M8.5 7.6l6.9.4M7.7 9.1l2.8 6.3M16.3 10.5l-3.3 5.2"/>
+          </svg>
+          <h3 class="slot-name">知识库</h3>
+          <span class="slot-code">knowledge_graph</span>
+          <span class="slot-state">已启用</span>
+          <button class="switch" type="button" role="switch" aria-checked="true" aria-label="切换插件：知识库"><span class="track"></span></button>
+        </li>
+        <li class="slot is-on">
+          <span class="slot-led" aria-hidden="true"></span>
+          <svg class="slot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
+            <path d="M4.5 17a7.5 7.5 0 0 1 15 0"/><path d="M12 17l4.4-6.2"/><circle cx="12" cy="17" r="1.4"/>
+          </svg>
+          <h3 class="slot-name">智能客服</h3>
+          <span class="slot-code">metrology_assistant</span>
+          <span class="slot-state">已启用</span>
+          <button class="switch" type="button" role="switch" aria-checked="true" aria-label="切换插件：智能客服"><span class="track"></span></button>
+        </li>
+        <li class="slot">
+          <span class="slot-led" aria-hidden="true"></span>
+          <svg class="slot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="4" y="6" width="16" height="14" rx="1.5"/><path d="M8 3.5V7M16 3.5V7M4 11h16M8.5 15.5h4"/>
+          </svg>
+          <h3 class="slot-name">请假申请</h3>
+          <span class="slot-code">leave_application</span>
+          <span class="slot-state">已停用</span>
+          <button class="switch" type="button" role="switch" aria-checked="false" aria-label="切换插件：请假申请"><span class="track"></span></button>
+        </li>
+        <li class="slot">
+          <span class="slot-led" aria-hidden="true"></span>
+          <svg class="slot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="8.8" width="6.5" height="6.4" rx="1"/><rect x="14.5" y="8.8" width="6.5" height="6.4" rx="1"/>
+            <path d="M9.5 12h3.4"/><path d="M11.4 10.3l1.9 1.7-1.9 1.7"/>
+          </svg>
+          <h3 class="slot-name">流程配置</h3>
+          <span class="slot-code">njmind_bpm</span>
+          <span class="slot-state">已停用</span>
+          <button class="switch" type="button" role="switch" aria-checked="false" aria-label="切换插件：流程配置"><span class="track"></span></button>
+        </li>
+        <li class="slot">
+          <span class="slot-led" aria-hidden="true"></span>
+          <svg class="slot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="4" y="4.5" width="16" height="15" rx="1.5"/><rect x="7" y="8" width="3.2" height="3.2"/>
+            <path d="M12.5 9.6h4.5M7 16.5h10M12.5 13h4.5"/>
+          </svg>
+          <h3 class="slot-name">表单建模</h3>
+          <span class="slot-code">njmind_form</span>
+          <span class="slot-state">已停用</span>
+          <button class="switch" type="button" role="switch" aria-checked="false" aria-label="切换插件：表单建模"><span class="track"></span></button>
+        </li>
+        <li class="slot">
+          <span class="slot-led" aria-hidden="true"></span>
+          <svg class="slot-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="4.5" y="6" width="2.8" height="2.8"/><rect x="4.5" y="10.6" width="2.8" height="2.8"/><rect x="4.5" y="15.2" width="2.8" height="2.8"/>
+            <path d="M10 7.4h9.5M10 12h9.5M10 16.6h9.5"/>
+          </svg>
+          <h3 class="slot-name">列表配置</h3>
+          <span class="slot-code">njmind_list</span>
+          <span class="slot-state">已停用</span>
+          <button class="switch" type="button" role="switch" aria-checked="false" aria-label="切换插件：列表配置"><span class="track"></span></button>
+        </li>
+      </ul>
+    </section>
+
+    <!-- 7 · 组件样张带 -->
+    <section class="samples" aria-label="组件样张带">
+      <h2 class="band-title">组件样张带</h2>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h3>会话记录 · 表格行</h3><span class="head-note push">2026 年 10 月 · 5 条样张</span>
+        </div>
+        <table>
+          <thead>
+            <tr><th>会话标题</th><th class="num-cell">消息数</th><th>所属插件</th><th class="num-cell">日期</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="t-title">压力表用于贸易结算需强检吗</td><td class="num-cell">2 条</td><td><span class="plug"><i></i>智能客服</span></td><td class="num-cell">10-31</td></tr>
+            <tr><td class="t-title">查询委托单BJ2026检测进度</td><td class="num-cell">6 条</td><td><span class="plug"><i></i>智能客服</span></td><td class="num-cell">10-29</td></tr>
+            <tr><td class="t-title">车间工艺监视压力表需强检吗</td><td class="num-cell">2 条</td><td><span class="plug"><i></i>智能客服</span></td><td class="num-cell">10-28</td></tr>
+            <tr><td class="t-title">贸易结算压力表需强检吗</td><td class="num-cell">2 条</td><td><span class="plug"><i></i>智能客服</span></td><td class="num-cell">10-28</td></tr>
+            <tr><td class="t-title">查询BJ2026进度</td><td class="num-cell">4 条</td><td><span class="plug"><i></i>智能问数</span></td><td class="num-cell">10-28</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="sample-grid">
+        <div class="panel">
+          <div class="panel-head">
+            <h3>聊天消息对</h3><span class="tag">聊天端延展 · 示意</span>
+          </div>
+          <div class="chat">
+            <div class="chat-user">压力表用于贸易结算需强检吗</div>
+            <div class="chat-bot">
+              <div class="bot-meta">智能客服 · 助手</div>
+              <p>依据 JJG 52-2013《弹性元件式一般压力表、压力真空表和真空表检定规程》，用于贸易结算的压力表已列入强制检定工作计量器具目录，须由法定计量检定机构按周期实施检定，检定合格后方可投入使用。</p>
+              <p class="bot-ref">关联依据 · JJG 52-2013 · 强制检定工作计量器具目录</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h3>操作与状态</h3><span class="head-note push">按钮 · 状态胶囊</span>
+          </div>
+          <div class="controls">
+            <button class="btn btn-primary" type="button">立即刷新</button>
+            <button class="btn btn-secondary" type="button">导出记录</button>
+            <button class="btn btn-danger" type="button">停用服务</button>
+          </div>
+          <div class="caps">
+            <span class="cap cap--run"><i></i>运行中</span>
+            <span class="cap cap--off"><i></i>已停用</span>
+            <span class="cap cap--test"><i></i>检测中</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="ruler ruler--bezel" aria-hidden="true"></div>
+    <div class="foot-row">
+      <span class="mono">LLM Form Modeler Admin · v0.4.0</span>
+      <span>设计方向 A1 · 仪器控制台 Instrument Console</span>
+    </div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  /* 载入动效：三大表盘读数一次性编排滚动（尊重系统减弱动效设置） */
+  if (!matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    document.querySelectorAll('.num[data-n]').forEach(function(el, i){
+      var target = +el.dataset.n, t0 = null, delay = 140 * i, dur = 760;
+      el.textContent = '0';
+      requestAnimationFrame(function step(ts){
+        if (t0 === null) t0 = ts;
+        var p = Math.min(1, Math.max(0, (ts - t0 - delay) / dur));
+        el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3)));
+        if (p < 1) requestAnimationFrame(step);
+        else el.textContent = target;
+      });
+    });
+  }
+
+  /* 插件槽位开关：切换亮灭，并同步「启用 n/7」读数 */
+  var slots = Array.prototype.slice.call(document.querySelectorAll('.slot'));
+  var bayOn = document.getElementById('bayOn');
+  var statPlugins = document.getElementById('statPlugins');
+  function sync(){
+    var n = slots.filter(function(s){ return s.classList.contains('is-on'); }).length;
+    bayOn.textContent = n;
+    statPlugins.innerHTML = n + '<small>/ 7</small>';
+  }
+  document.querySelectorAll('.slot .switch').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var slot = btn.closest('.slot');
+      var on = slot.classList.toggle('is-on');
+      btn.setAttribute('aria-checked', on);
+      slot.querySelector('.slot-state').textContent = on ? '已启用' : '已停用';
+      sync();
+    });
+  });
+
+  /* 刷新：图标旋转一圈 + 时间读数闪断回显 */
+  var refreshBtn = document.getElementById('refreshBtn');
+  var refreshIcon = document.getElementById('refreshIcon');
+  var rangeTime = document.getElementById('rangeTime');
+  refreshBtn.addEventListener('click', function(){
+    refreshIcon.classList.remove('spin');  void refreshIcon.getBoundingClientRect();  refreshIcon.classList.add('spin');
+    rangeTime.classList.remove('flash');   void rangeTime.offsetWidth;                rangeTime.classList.add('flash');
+  });
+})();
+</script>
+</body>
+</html>

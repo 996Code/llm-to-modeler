@@ -190,7 +190,7 @@ onBeforeUnmount(() => {
   background: none; border: none; cursor: pointer; padding: 0;
   color: #6b7280; font-size: 12px;
 }
-.prov-toggle:hover { color: #2f54eb; }
+.prov-toggle:hover { color: var(--color-primary-ink); }
 .prov-body { margin-top: 6px; }
 .prov-table { background: #f9fafb; border-radius: 6px; padding: 6px 10px; margin-bottom: 6px; }
 .prov-table-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
@@ -213,7 +213,7 @@ onBeforeUnmount(() => {
 }
 .persist-warn { color: #d46b08; font-size: 12px; margin-bottom: 8px; }
 .kpi-view { text-align: center; padding: 18px 0; }
-.kpi-value { font-size: 40px; font-weight: 700; color: #1677ff; }
+.kpi-value { font-size: 40px; font-weight: 700; color: var(--color-primary-ink); }
 .kpi-name { margin-top: 4px; color: #888; font-size: 14px; }
 .table-view { overflow-x: auto; }
 .table-view table { width: 100%; border-collapse: collapse; font-size: 13px; }

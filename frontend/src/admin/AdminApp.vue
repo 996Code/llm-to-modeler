@@ -20,35 +20,8 @@
         </button>
       </nav>
       <div class="shell-actions">
-        <!-- 服务运行中徽标 hover 弹「系统配置」面板:平台级显示设置
-             (独立/嵌入对话页共读;配置入口只在管理界面,对话界面不支持配置) -->
-        <a-popover trigger="hover" placement="bottomRight" overlay-class-name="sys-config-popover">
-          <template #title>系统配置</template>
-          <template #content>
-            <div class="sys-config-panel">
-              <!-- 开关 1:对话时的链路/路径/思考信息 -->
-              <div class="config-row">
-                <div class="config-text">
-                  <div class="config-label">显示链路与思考信息</div>
-                  <div class="config-desc">关闭后对话仅显示「正在处理…」与最终结果(独立/嵌入对话页生效)</div>
-                </div>
-                <a-switch size="small" :checked="displaySettings.showPipeline"
-                          @change="(v: boolean | string | number) => saveDisplay('showPipeline', !!v)" />
-              </div>
-              <!-- 开关 2:对话界面的检索结果 -->
-              <div class="config-row">
-                <div class="config-text">
-                  <div class="config-label">显示检索结果</div>
-                  <div class="config-desc">关闭后对话中不显示知识图谱检索结果卡</div>
-                </div>
-                <a-switch size="small" :checked="displaySettings.showRetrieval"
-                          @change="(v: boolean | string | number) => saveDisplay('showRetrieval', !!v)" />
-              </div>
-            </div>
-          </template>
-          <a-badge status="processing" text="服务运行中" />
-        </a-popover>
-        <a-button size="small" ghost @click="doLogout"><template #icon><LogoutOutlined /></template>退出</a-button>
+        <!-- 内网系统不放退出入口(2026-11-03 裁决);服务状态=绿点呼吸胶囊 -->
+        <span class="svc-pill"><i></i>服务运行中</span>
       </div>
     </header>
 
@@ -92,7 +65,7 @@
           </template>
         </a-tabs>
         <!-- pack 自定义管理页(v-if 切换:离开即卸载, 图谱类重资源页不留后台实例);
-             知识库-测试也走此通道(loadPackPages 动态追加,跟随插件启停) -->
+             知识库-测试/智能客服-测试也走此通道(loadPackPages 动态追加,跟随插件启停) -->
         <template v-else-if="packPageMap[tab]">
           <component :is="packPageMap[tab]" />
         </template>
@@ -106,7 +79,7 @@
 import { computed, onMounted, provide, ref, shallowRef } from 'vue'
 import { message } from 'ant-design-vue'
 import type { Component } from 'vue'
-import {ApiOutlined, AppstoreOutlined, AuditOutlined, BarChartOutlined, CloudServerOutlined, DashboardOutlined, LogoutOutlined, MessageOutlined, PartitionOutlined, QuestionCircleOutlined} from '@ant-design/icons-vue'
+import {ApiOutlined, AppstoreOutlined, AuditOutlined, BarChartOutlined, CloudServerOutlined, DashboardOutlined, MessageOutlined, PartitionOutlined, QuestionCircleOutlined} from '@ant-design/icons-vue'
 import { rules } from './helpHtml'
 import OverviewTab from './components/OverviewTab.vue'
 import ConversationsTab from './components/ConversationsTab.vue'
@@ -117,7 +90,7 @@ import KbEmbedTest from '../embed-test/EmbedTestApp.vue'
 import MetrologyTestApp from '../embed-test/MetrologyTestApp.vue'
 import { hasPackPage, packPageRegistry } from './packPages/registry'
 import {
-  apiErrorMessage, fetchDisplaySettings, fetchPacks, saveDisplaySettings,
+  apiErrorMessage, fetchPacks,
   UnauthorizedError,
 } from './api'
 
@@ -195,7 +168,7 @@ async function loadPackPages() {
     if (kg?.enabled && kg.dependency?.status === 'ok') {
       packPages.value.push({ pageKey: '__kb_embed_test', title: '知识库-测试', component: KbEmbedTest })
     }
-    // 智能客服-测试:同款跟随 metrology_assistant 插件启停
+    // 智能客服-测试:跟随 metrology_assistant 插件启停
     const metro = data.items.find((p) => p.name === 'metrology_assistant')
     if (metro?.enabled && metro.dependency?.status === 'ok') {
       packPages.value.push({ pageKey: '__metrology_test', title: '智能客服-测试', component: MetrologyTestApp })
@@ -226,37 +199,8 @@ provide('loadSafely', async (fn: () => Promise<void>) => {
   }
 })
 
-function doLogout() {
-  localStorage.removeItem('auth_token')
-  window.location.href = '/ai-modeler/auth.html?page=admin'
-}
-
-// ── 平台级显示设置(右上角徽标 hover 面板) ──────────────────────
-// 独立/嵌入对话页经用户级端点 GET /api/settings/display 共读这一份配置;
-// 默认两开关全开(与后端默认值同口径),挂载后拉服务端真实值。
-const displaySettings = ref<{ showPipeline: boolean; showRetrieval: boolean }>({
-  showPipeline: true,
-  showRetrieval: true,
-})
-
-/** 切开关 → PUT 落库(乐观更新,失败回滚并提示)。 */
-async function saveDisplay(key: 'showPipeline' | 'showRetrieval', value: boolean) {
-  const prev = { ...displaySettings.value }
-  displaySettings.value = { ...displaySettings.value, [key]: value }
-  try {
-    displaySettings.value = await saveDisplaySettings({ [key]: value })
-  } catch (e) {
-    displaySettings.value = prev
-    if (e instanceof UnauthorizedError) { onAuthFail(); return }
-    message.error(apiErrorMessage(e))
-  }
-}
-
-onMounted(async () => {
+onMounted(() => {
   loadPackPages()
-  try {
-    displaySettings.value = await fetchDisplaySettings()
-  } catch { /* 拉取失败保持默认值;面板开关仍可切(切时再落库) */ }
 })
 </script>
 
@@ -265,11 +209,11 @@ onMounted(async () => {
 .merged-tabs-row { display: flex; }
 .shell {
   min-height: 100vh;
-  background: #f0f2f5;
+  background: var(--bg);
 }
 .shell-header {
   background: #fff;
-  border-bottom: 1px solid #e5e6eb;
+  border-bottom: 1px solid var(--line);
   padding: 0 24px;
   height: 56px;
   display: flex;
@@ -289,10 +233,11 @@ onMounted(async () => {
   width: 34px;
   height: 34px;
   border-radius: 10px;
-  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  background: var(--brand-ink);
   color: #fff;
-  font-size: 17px;
-  font-weight: 800;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: .02em;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -300,12 +245,12 @@ onMounted(async () => {
 .shell-title {
   font-size: 15px;
   font-weight: 600;
-  color: #1f2329;
+  color: var(--ink);
   white-space: nowrap;
 }
 .ver {
   font-size: 12px;
-  color: #86909c;
+  color: var(--ink-3);
   font-weight: 400;
   margin-left: 4px;
 }
@@ -334,16 +279,16 @@ onMounted(async () => {
   transition: all 0.15s;
 }
 .nav-item:hover {
-  color: #3370ff;
-  background: #f2f6ff;
+  color: var(--brand-ink);
+  background: var(--brand-tint-2);
 }
 .nav-item.active {
-  color: #3370ff;
-  background: #eaf0ff;
+  color: var(--brand-ink);
+  background: var(--brand-tint);
   font-weight: 600;
 }
 .nav-icon {
-  font-size: 14px;
+  font-size: 15px;
 }
 .shell-actions {
   display: flex;
@@ -351,67 +296,54 @@ onMounted(async () => {
   gap: 16px;
   flex-shrink: 0;
 }
-/* 徽标 hover 目标:扩大热区,让 popover 稳定触发 */
-.shell-actions :deep(.ant-badge) {
-  cursor: default;
-  padding: 2px 4px;
-  border-radius: 6px;
-  transition: background 0.2s;
+/* 服务状态:绿点呼吸胶囊(替代旧 antd 蓝色转圈徽标) */
+.svc-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--ok-tint);
+  border-radius: 999px;
+  padding: 4px 12px 4px 10px;
 }
-.shell-actions :deep(.ant-badge:hover) {
-  background: #f2f6ff;
+.svc-pill i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(46, 161, 33, .14);
+  animation: svc-pulse 2.8s ease-out infinite;
+}
+@keyframes svc-pulse {
+  0% { box-shadow: 0 0 0 3px rgba(46, 161, 33, .18); }
+  70% { box-shadow: 0 0 0 6px rgba(46, 161, 33, 0); }
+  100% { box-shadow: 0 0 0 3px rgba(46, 161, 33, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .svc-pill i { animation: none; }
 }
 
-/* ===== 系统配置面板(popover content) ===== */
-.sys-config-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 260px;
-}
-.config-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 8px 4px;
-}
-.config-row + .config-row {
-  border-top: 1px solid #f0f0f0;
-}
-.config-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.config-label {
-  font-size: 13px;
-  font-weight: 500;
-  color: #1f2329;
-}
-.config-desc {
-  font-size: 12px;
-  color: #86909c;
-  line-height: 1.4;
-}
 .shell-main {
   max-width: 1760px;   /* 宽屏自适应:1400 在 2K+ 显示器两侧各留 ~580px 空白(用户 10-15 报"间距太大") */
   width: 100%;
   margin: 0 auto;
-  padding: 12px 20px;
+  padding: 16px 20px 0;
 }
 .page-card {
-  background: #fff;
-  padding: 8px 16px 16px;
-  min-height: calc(100vh - 160px);
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-rest);
+  padding: 8px 20px 20px;
+  min-height: calc(100vh - 140px);
   min-width: 0;
 }
 .shell-footer {
   text-align: center;
-  color: #c9cdd4;
-  font-size: 12px;
-  padding: 16px 0 8px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  padding: 18px 0 10px;
 }
 @media (max-width: 700px) {
   .shell-header { height: auto; padding: 10px 12px; gap: 10px; flex-wrap: wrap; }
@@ -419,8 +351,8 @@ onMounted(async () => {
   .shell-brand { min-width: 0; flex: 1; }
   .shell-title { font-size: 12px; }
   .shell-actions { gap: 8px; }
-  .shell-actions :deep(.ant-badge) { display: none; }
+  .svc-pill { display: none; }
   .shell-main { padding: 10px 8px; }
-  .page-card { padding: 8px; }
+  .page-card { padding: 8px 10px 12px; }
 }
 </style>

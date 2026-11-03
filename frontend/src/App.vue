@@ -91,44 +91,45 @@ onMounted(() => {
   类比 Java 的 application.yml 全局配置，或设计系统的基础变量。
 -->
 <style>
-/* ===== 设计令牌（Design tokens，参考 MaxKB 风格）===== */
-/* :root 选择器对应 <html> 根元素，定义的 CSS 变量全局可见 */
+/* ===== 聊天端令牌（重映射到全站唯一源 shared/design-tokens.css，2026-11 重设计）=====
+   这里只保留历史变量名做兼容层，值全部引用全站令牌——改设计只动 design-tokens.css。 */
 :root {
   /* 主题色 */
-  --color-primary: #3370ff;
-  --color-primary-hover: #2860e6;
-  --color-primary-light: #eaf0ff;
-  --color-primary-bg: #f0f4ff;
-  --color-success: #00a870;
-  --color-danger: #f54a45;
-  --color-warning: #ff9e29;
+  --color-primary: var(--brand);
+  --color-primary-ink: var(--brand-ink);   /* 承载文字/深底白字用（白底 4.9:1） */
+  --color-primary-hover: var(--brand-hover);
+  --color-primary-light: var(--brand-tint);
+  --color-primary-bg: var(--brand-tint-2);
+  --color-success: var(--ok);
+  --color-danger: var(--danger);
+  --color-warning: var(--warn);
 
   /* 文字色阶 */
-  --text-primary: #1f2329;
-  --text-regular: #4e5969;
-  --text-secondary: #86909c;
-  --text-placeholder: #c9cdd4;
+  --text-primary: var(--ink);
+  --text-regular: var(--ink-2);
+  --text-secondary: var(--ink-3);
+  --text-placeholder: #8A919C;
 
   /* 边框色阶 */
-  --border-color: #e5e6eb;
-  --border-color-light: #f0f1f3;
-  --border-color-lighter: #f7f8fa;
+  --border-color: var(--line);
+  --border-color-light: var(--line-soft);
+  --border-color-lighter: #F7F8FA;
 
   /* 背景色 */
-  --bg-page: #f5f6f8;
-  --bg-container: #ffffff;
-  --bg-hover: #f7f8fa;
-  --bg-active: var(--color-primary-light);
+  --bg-page: var(--bg);
+  --bg-container: var(--card);
+  --bg-hover: #F7F9FF;
+  --bg-active: var(--brand-tint);
 
   /* 圆角 */
   --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-md: var(--radius-ctrl);
+  --radius-lg: var(--radius-card);
   --radius-xl: 16px;
 
   /* 阴影 */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --shadow-sm: var(--shadow-rest);
+  --shadow-md: var(--shadow-lift);
   --shadow-input: 0 2px 12px rgba(51, 112, 255, 0.08);
 
   /* 字体 */
@@ -148,15 +149,15 @@ html, body, #app { height: 100%; font-family: var(--font-family); color: var(--t
 ::-webkit-scrollbar-thumb { background: #d5d7db; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #b8babe; }
 
-/* 覆盖 Ant Design 主色，使其与 MaxKB 品牌色一致。
-   !important 用于强制覆盖组件库默认样式（优先级最高） */
+/* 覆盖 Ant Design 主色，与全站品牌蓝一致。
+   按钮白字必须压深阶（--color-primary-ink）保证对比度，hover 更深不走浅。 */
 .ant-btn-primary {
-  background: var(--color-primary) !important;
-  border-color: var(--color-primary) !important;
+  background: var(--color-primary-ink) !important;
+  border-color: var(--color-primary-ink) !important;
 }
 .ant-btn-primary:not(:disabled):hover {
-  background: var(--color-primary-hover) !important;
-  border-color: var(--color-primary-hover) !important;
+  background: var(--brand-press) !important;
+  border-color: var(--brand-press) !important;
 }
 .ant-tag {
   border-radius: var(--radius-md) !important;

@@ -25,6 +25,14 @@
       <div class="filter-actions">
         <a-button type="primary" @click="search"><template #icon><SearchOutlined /></template>查询</a-button>
         <a-button @click="load"><template #icon><ReloadOutlined /></template>刷新</a-button>
+        <a-popconfirm
+          :title="`确认取消选中的 ${cancellableCount} 个任务?(已终态的会跳过)`"
+          :disabled="!cancellableCount" @confirm="doBatchCancel"
+        >
+          <a-button danger :disabled="!cancellableCount" :loading="batchCancelling">
+            <template #icon><StopOutlined /></template>批量取消{{ cancellableCount ? `(${cancellableCount})` : '' }}
+          </a-button>
+        </a-popconfirm>
         <a-switch v-model:checked="autoRefresh" checked-children="自动刷新" un-checked-children="暂停" size="small" />
         <span class="filter-count">共 {{ total }} 条{{ lastDays ? `（近 ${lastDays} 天）` : '' }}</span>
       </div>
@@ -37,6 +45,7 @@
       :loading="loading"
       row-key="id"
       size="middle"
+      :row-selection="rowSelection"
       @change="onTableChange"
     >
       <template #bodyCell="{ column, record }">
@@ -192,10 +201,10 @@
 import { packOptionsFrom, packLabel, packTitle } from '../packDisplay'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import {AppstoreOutlined, BarsOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, ReloadOutlined, SearchOutlined} from '@ant-design/icons-vue'
+import {AppstoreOutlined, BarsOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, ReloadOutlined, SearchOutlined, StopOutlined} from '@ant-design/icons-vue'
 import {
   TaskItem, TaskLogItem, TaskStatus,
-  cancelTask, fetchTask, fetchTaskLogs, fetchPacks, fetchTasks, fmtTime, streamTaskEvents,
+  batchCancelTasks, cancelTask, fetchTask, fetchTaskLogs, fetchPacks, fetchTasks, fmtTime, streamTaskEvents,
 } from '../api'
 import type { LoadSafely } from './loadSafely'
 
@@ -215,6 +224,36 @@ const packOpts = ref<{ label: string; value: string }[]>([])
 const autoRefresh = ref(true)
 
 const page = reactive({ current: 1, pageSize: 20 })
+
+// ── 多选批量取消 ──
+const selectedIds = ref<string[]>([])
+const rowSelection = computed(() => ({
+  selectedRowKeys: selectedIds.value,
+  onChange: (keys: (string | number)[]) => { selectedIds.value = keys.map(String) },
+}))
+/** 选中且还可取消的(非终态)任务数——终态行勾了也不计数,按钮文案如实 */
+const cancellableCount = computed(() =>
+  rows.value.filter(t => selectedIds.value.includes(t.id) && !FINAL.includes(t.status)).length)
+const batchCancelling = ref(false)
+async function doBatchCancel() {
+  const ids = rows.value
+    .filter(t => selectedIds.value.includes(t.id) && !FINAL.includes(t.status))
+    .map(t => t.id)
+  if (!ids.length) return
+  batchCancelling.value = true
+  try {
+    await loadSafely(async () => {
+      const items = await batchCancelTasks(ids)
+      const okN = items.filter(i => i.ok).length
+      const notFound = items.filter(i => i.error === 'not_found').length
+      message.info(`批量取消已受理 ${okN} 个${notFound ? `,${notFound} 个不存在` : ''}`)
+      selectedIds.value = []
+    })
+  } finally {
+    batchCancelling.value = false
+  }
+  load()
+}
 const pagination = computed(() => ({
   total: total.value,
   current: page.current,
@@ -602,32 +641,33 @@ function openLogs(record: TaskItem) {
 
 <style scoped>
 .tk-toolbar { display: flex; align-items: center; gap: 10px; margin: 14px 0 16px; }
-.tk-count { margin-left: auto; color: #9ca3af; font-size: 12px; }
-.tk-title { color: #374151; font-size: 13px; }
-.tk-time { font-size: 12.5px; color: #4b5563; }
-.tk-done { color: #16a34a; font-weight: 600; font-size: 12px; }
+.tk-count { margin-left: auto; color: var(--ink-3); font-size: 12px; }
+.tk-title { color: var(--ink); font-size: 14px; }
+.tk-time { font-size: 14px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.tk-done { color: var(--ok); font-weight: 600; font-size: 12px; }
 .tk-drawer-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.tk-msg { color: #6b7280; font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tk-msg { color: var(--ink-2); font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tk-logs-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
-.tk-logs-count { color: #9ca3af; font-size: 12px; margin-left: auto; }
+.tk-logs-count { color: var(--ink-3); font-size: 12px; margin-left: auto; }
 .tk-truncate-note {
   padding: 6px 10px; margin-bottom: 6px;
-  background: #fffbeb; color: #b45309; font-size: 12px; border-radius: 6px;
+  background: var(--warn-tint); color: var(--warn); font-size: 12px; border-radius: var(--radius-ctrl);
 }
 .tk-live-dot {
   display: inline-flex; align-items: center; gap: 5px;
-  color: #16a34a; font-size: 12px;
+  color: var(--ok); font-size: 12px;
 }
 .tk-live-pulse {
-  width: 7px; height: 7px; border-radius: 50%; background: #16a34a;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
   animation: tk-pulse 1.6s ease-in-out infinite;
 }
 @keyframes tk-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.35; transform: scale(0.75); }
 }
+/* 终端风日志面板:深色底为既有暗色终端配色(令牌未含暗色面,保留原值) */
 .tk-logs {
-  background: #0f172a; border-radius: 10px; padding: 12px 14px;
+  background: #0f172a; border-radius: var(--radius-card); padding: 12px 14px;
   max-height: calc(100vh - 260px); overflow-y: auto; font-size: 12.5px;
 }
 
@@ -640,18 +680,18 @@ function openLogs(record: TaskItem) {
 .tk-group-title { font-weight: 700; font-size: 12.5px; color: #93c5fd; }
 .tk-group-badge {
   font-size: 11px; color: #cbd5e1; background: #1e293b;
-  border-radius: 8px; padding: 1px 8px;
+  border-radius: var(--radius-ctrl); padding: 1px 8px;
 }
 .tk-group-time { margin-left: auto; color: #64748b; font-size: 11px; font-family: 'SF Mono', Menlo, Consolas, monospace; }
 .tk-row { padding: 3px 0 3px 10px; border-left: 2px solid #1e293b; margin-left: 2px; }
-.tk-row-warn { border-left-color: #f59e0b; }
-.tk-row-error { border-left-color: #dc2626; }
+.tk-row-warn { border-left-color: var(--warn); }
+.tk-row-error { border-left-color: var(--danger); }
 .tk-line { display: flex; align-items: center; gap: 6px; color: #cbd5e1; }
 .tk-line-msg { white-space: pre-wrap; word-break: break-all; }
 .tk-metrics { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
 .tk-metric {
   display: inline-flex; align-items: center; gap: 4px;
-  background: #16233b; border: 1px solid #24344f; border-radius: 6px;
+  background: #16233b; border: 1px solid #24344f; border-radius: var(--radius-ctrl);
   padding: 1px 7px; font-size: 11px;
 }
 .tk-metric-k { color: #7c8aa5; font-family: 'SF Mono', Menlo, Consolas, monospace; }
@@ -663,14 +703,14 @@ function openLogs(record: TaskItem) {
 }
 .tk-chunk-metric { color: #cbd5e1; font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace; flex-shrink: 0; }
 .tk-chunk-dur-badge {
-  color: #6b7280; font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace;
-  background: #f3f4f6; border-radius: 4px; padding: 1px 8px; flex-shrink: 0;
+  color: var(--ink-2); font-size: 11.5px; font-family: 'SF Mono', Menlo, Consolas, monospace;
+  background: var(--bg); border-radius: var(--radius-ctrl); padding: 1px 8px; flex-shrink: 0;
 }
-.tk-chunk-dur-slow { color: #b45309; background: #fffbeb; }
-.tk-chunk-running { color: #2563eb; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
-.tk-chunk-ok { color: #16a34a; }
-.tk-chunk-bad { color: #dc2626; }
-.tk-chunk-err { color: #dc2626; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tk-chunk-dur-slow { color: var(--warn); background: var(--warn-tint); }
+.tk-chunk-running { color: var(--brand); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
+.tk-chunk-ok { color: var(--ok); }
+.tk-chunk-bad { color: var(--danger); }
+.tk-chunk-err { color: var(--danger); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 原始视图 ── */
 .tk-log-line { display: flex; align-items: baseline; padding: 2px 0; color: #cbd5e1; }
@@ -681,4 +721,11 @@ function openLogs(record: TaskItem) {
   margin-left: 8px; opacity: 0.85;
 }
 .tk-log-line:has(.tk-log-level) { align-items: center; }
+/* 分页当前页:品牌蓝深阶底白字(对齐精装稿) */
+:deep(.ant-pagination-item-active) {
+  background: var(--brand-ink);
+  border-color: var(--brand-ink);
+  border-radius: var(--radius-ctrl);
+}
+:deep(.ant-pagination-item-active a) { color: #fff; }
 </style>

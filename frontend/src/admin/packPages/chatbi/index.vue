@@ -155,8 +155,8 @@ onMounted(() => { /* Tab 均懒渲染(切到才挂载), 无需全局初始化 */
 </script>
 
 <style scoped>
-.chatbi-admin { display: flex; flex-direction: column; min-width: 0; font-size: 13px; }
+/* 页签/表格/按钮质感由全局层(admin.css flat-tabs 等,14px 基准)接管;
+   此处不再覆盖字号,只保留容器骨架与页签下方间距 */
+.chatbi-admin { display: flex; flex-direction: column; min-width: 0; font-size: 14px; }
 .chatbi-admin :deep(.flat-tabs > .ant-tabs-nav) { margin-bottom: var(--admin-header-gap, 12px); }
-.chatbi-admin :deep(.ant-tabs-tab) { font-size: 13px; }
-.chatbi-admin :deep(.ant-table) { font-size: 13px; }
 </style>

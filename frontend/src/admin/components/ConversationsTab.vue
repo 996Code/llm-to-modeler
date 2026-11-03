@@ -196,23 +196,38 @@ onMounted(() => { loadPackOptions(); load() })
 
 <style scoped>
 .cv-toolbar { display: flex; align-items: center; gap: 10px; margin: 14px 0 16px; }
-.cv-count { margin-left: auto; color: #9ca3af; font-size: 12px; }
-/* 标题主列:占满剩余宽度,超长省略,悬停 tooltip 看全文 */
+.cv-count { margin-left: auto; color: var(--ink-3); font-size: 12px; }
+/* 标题主列:15px/600 品牌蓝链接(精装稿),占满剩余宽度,超长省略,悬停 tooltip 看全文 */
 .cv-title-cell { display: flex; align-items: center; gap: 8px; min-width: 0; width: 100%; }
 .cv-title {
   flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   display: block;
+  font-size: 15px; font-weight: 600; line-height: 22px;
+  color: var(--brand-ink);
+  transition: color .12s;
 }
+.cv-title:hover { color: var(--brand-press); text-decoration: underline; text-underline-offset: 3px; }
 .cv-ctx { flex-shrink: 0; font-size: 11px; }
 .cv-user {
   display: inline-block; max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: #4b5563; font-size: 13px;
+  color: var(--ink); font-size: 14px;
 }
-.cv-pack { font-size: 11.5px; max-width: 100%; }
-.cv-pack-other { color: #9ca3af; font-size: 12px; }
-.cv-count-tag { min-width: 30px; text-align: center; }
-.cv-time { font-size: 12.5px; color: #374151; white-space: nowrap; }
-.cv-danger { color: #ef4444; }
+.cv-pack { font-size: 12px; font-weight: 500; max-width: 100%; }
+.cv-pack-other { color: var(--ink-3); font-size: 13px; }
+.cv-count-tag { min-width: 32px; text-align: center; font-weight: 600; }
+.cv-time { font-size: 14px; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* 行内「链路」链接统一品牌蓝文字深阶;危险操作红由 .cv-danger 覆盖 */
+.ant-table-cell a:not(.cv-title):not(.cv-danger) { color: var(--brand-ink); }
+.ant-table-cell a:not(.cv-title):not(.cv-danger):hover { color: var(--brand-press); }
+.cv-danger { color: var(--danger); }
+.cv-danger:hover { color: var(--danger); }
+/* 分页当前页:品牌蓝深阶底白字(对齐精装稿,admin.css 令牌层无此项) */
+:deep(.ant-pagination-item-active) {
+  background: var(--brand-ink);
+  border-color: var(--brand-ink);
+  border-radius: var(--radius-ctrl);
+}
+:deep(.ant-pagination-item-active a) { color: #fff; }
 </style>

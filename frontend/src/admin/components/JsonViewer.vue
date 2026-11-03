@@ -109,7 +109,7 @@ async function copy() {
 .jv-label { font-weight: 600; color: #374151; }
 .jv-meta { color: #9ca3af; flex: 1; }
 .jv-btn {
-  border: none; background: transparent; color: #2563eb; cursor: pointer;
+  border: none; background: transparent; color: var(--brand-ink); cursor: pointer;
   font-size: 12px; padding: 1px 6px; border-radius: 4px;
 }
 .jv-btn:hover { background: #dbeafe; }

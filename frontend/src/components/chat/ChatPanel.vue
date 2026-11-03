@@ -228,7 +228,7 @@
                 <a-tag color="processing" class="card-tag">已完成</a-tag>
               </div>
               <div class="data-card-body">
-                <component v-if="resultRenderer(msg)" :is="resultRenderer(msg)" :ref="(el: any) => setBiChartRef(i, el)" :artifact="msg.dataResult" :summary="msg.content" :detail="msg.formattedData" :labels="resultLabels(msg.dataResult, packDisplays)" :render-markdown="renderMarkdown" :compact="!sysConfig.showRetrieval" :cited-chunks="kgCitedChunks(msg)" @click="onMdRefClick" />
+                <component v-if="resultRenderer(msg)" :is="resultRenderer(msg)" :ref="(el: any) => setBiChartRef(i, el)" :artifact="msg.dataResult" :summary="msg.content" :detail="msg.formattedData" :labels="resultLabels(msg.dataResult, packDisplays)" :render-markdown="renderMarkdown" :compact="false" :cited-chunks="kgCitedChunks(msg)" @click="onMdRefClick" />
                 <!-- chatbi 图表卡(ECharts/kpi/table + 命中指标标签) -->
                 <BiChartCard
                   v-else-if="msg.formattedData?.chart"
@@ -244,7 +244,7 @@
                   v-else-if="msg.dataResult?.type === 'kg_search_result'"
                   :result="msg.dataResult"
                   :cited-chunks="kgCitedChunks(msg)"
-                  :compact="!sysConfig.showRetrieval"
+                  :compact="false"
                 />
                 <!-- 遍历「提取后的可显示字段」（getDataDisplayFields 已做中文化与过滤） -->
                 <div v-else v-for="(value, key) in getDataDisplayFields(msg.dataResult)" :key="key" class="data-field">
@@ -263,9 +263,8 @@
                     <DownloadOutlined /> 导出 Excel
                   </a-button>
                 </template>
-                <!-- 本轮链路(通用能力:引擎级打点,任何 pack 的工具轮可看)。
-                     showPipeline 关闭时隐藏(用户只要"正在处理…"+结果) -->
-                <a-button v-if="sysConfig.showPipeline" size="small" type="link"
+                <!-- 本轮链路(通用能力:引擎级打点,任何 pack 的工具轮可看) -->
+                <a-button size="small" type="link"
                           :disabled="!store.currentConversation?.id"
                           @click.stop="openTurnTrace(i)">
                   <NodeIndexOutlined /> 本轮链路
@@ -296,9 +295,8 @@
       </template>
 
       <!-- ===== Pipeline 进度卡片（流式生成中显示） ===== -->
-      <!-- 仅在 store.streaming=true（后端正在处理）时渲染；
-           showPipeline 关闭时不渲染进度卡与步骤链路，只显示简单处理文案 -->
-      <div v-if="store.streaming && sysConfig.showPipeline" class="pipeline-card">
+      <!-- 仅在 store.streaming=true（后端正在处理）时渲染 -->
+      <div v-if="store.streaming" class="pipeline-card">
         <div class="pipeline-header">
           <!-- 思考动画：三个圆点依次闪烁，纯视觉反馈 -->
           <div class="thinking-dots">
@@ -325,11 +323,6 @@
           </div>
         </div>
       </div>
-      <!-- showPipeline 关闭时的极简反馈：一行「正在处理…」（有阶段文案则
-           显示阶段文案），结果出来照常渲染——用户要的就是"别给我看过程" -->
-      <div v-else-if="store.streaming" class="processing-simple">
-        {{ store.stageMessage || '正在处理…' }}
-      </div>
     </div>
 
     <ChatInput
@@ -345,19 +338,6 @@
                     :turn-index="traceTurnIndex"
                     :title="traceTitle" />
 
-    <!-- 引用浮层:检索卡精简档(compact)时,[片段N] 徽标点击弹片段原文;
-         下载统一走卡片底部的参考文档清单,浮层不再放下载入口 -->
-    <template v-if="citePop">
-      <div class="cite-pop-overlay" @click="citePop = null"></div>
-      <div class="cite-pop" :style="{ left: citePop.x + 'px', top: citePop.y + 'px' }">
-        <div class="cite-pop-head">
-          <FileTextOutlined />
-          <span class="cite-pop-doc">{{ citePop.chunk.docName || '文档' }}</span>
-          <span v-if="citePop.chunk.kbName" class="cite-pop-kb">{{ citePop.chunk.kbName }}</span>
-        </div>
-        <div class="cite-pop-text">{{ citePop.chunk.text || '(无原文)' }}</div>
-      </div>
-    </template>
   </div>
 </template>
 
@@ -398,9 +378,6 @@ import { exportQueryToExcel } from '../../utils/exportExcel'
 import TurnTraceModal from './TurnTraceModal.vue'
 // HostPort 单例：UI 只依赖 hostPort 抽象，不直接碰 postMessage
 import { getHostPort } from '../../composables/hostPort'
-// 系统配置只读单例：showPipeline(链路思考显示)/showRetrieval(检索结果显示)
-// 两开关——数据源是后端平台级设置(管理界面配置,独立/嵌入对话共读)
-import { useSysConfig, refresh as refreshSysConfig } from '../../composables/sysConfig'
 import { getPackManifests } from '../../services/api'
 // Markdown 渲染(marked 解析 + DOMPurify 消毒防 XSS)
 import { marked } from 'marked'
@@ -454,8 +431,7 @@ function renderMarkdown(text: string): string {
 }
 
 /** md-content 容器事件委托:[片段N] 徽标点击 → 滚动到本条消息的
- *  KgGraphCard 对应片段手风琴并展开;卡片精简档(compact,showRetrieval
- *  关闭)时片段手风琴不渲染,改弹引用浮层看片段原文(下载走参考文档清单)。
+ *  KgGraphCard 对应片段手风琴并展开。
  *  徽标是 v-html 注入的纯 DOM,无法逐个绑监听——容器统一接 click,
  *  按 class 识别。双界过滤:编号 <1(如 [片段:0])或 > chunks.length
  *  (如 [片段:99],LLM 编造)时数据不存在,一律静默忽略不动作。 */
@@ -468,10 +444,6 @@ function onMdRefClick(e: MouseEvent) {
   // 向上找 .msg-body 再查锚点,避免命中别的消息的片段
   const scope = el.closest('.msg-body') as HTMLElement | null
   if (!scope) return
-  if (!sysConfig.showRetrieval) {
-    openCitePopover(e, scope, idx)
-    return
-  }
   const anchor = scope.querySelector(`[data-chunk-anchor="${idx}"]`) as HTMLElement | null
   if (!anchor) return  // 越界编号:锚点只对有效片段渲染(1..chunks.length)
   anchor.scrollIntoView({ block: 'center', behavior: 'smooth' })
@@ -481,19 +453,6 @@ function onMdRefClick(e: MouseEvent) {
   }))
 }
 
-// ── 引用浮层(检索卡隐藏时的 [片段N] 交互) ──
-const citePop = ref<{ x: number; y: number; chunk: any } | null>(null)
-
-function openCitePopover(e: MouseEvent, scope: HTMLElement, idx: number) {
-  const msgIdx = Number(scope.dataset.msgIndex)
-  const chunk = store.messages[msgIdx]?.dataResult?.sources?.chunks?.[idx - 1]
-  if (!chunk) return
-  const r = (e.target as HTMLElement).getBoundingClientRect()
-  // 左/上边界钳制:嵌入模式 iframe 窄容器里不让浮层出屏
-  const x = Math.min(Math.max(8, r.left), window.innerWidth - 356)
-  const y = r.bottom + 6 > window.innerHeight - 240 ? Math.max(8, r.top - 236) : r.bottom + 6
-  citePop.value = { x, y, chunk }
-}
 
 /** 从回答文本提取被引用的片段编号([片段N] 徽标;KG 回答专用)。
  *  手风琴据此区分"已引用/已召回未引用"——回答只引相关片段是设计
@@ -531,9 +490,6 @@ defineProps<{ embedded?: boolean }>()
 const store = useConversationStore()
 // HostPort 单例：能力决定按钮是否可用（宿主无 apply → 自动退化复制 JSON）
 const port = getHostPort()
-// 系统配置（响应式只读单例）：管理界面配置的两个显示开关，独立/嵌入对话共读
-const sysConfig = useSysConfig()
-
 // pack 的展示声明（data_labels/data_hidden/welcome_examples）——领域词住 manifest，
 // 本组件只按通用字段渲染。拉取失败回退空（不显示示例卡、key 不翻译）
 const packDisplay = ref<Record<string, any> | null>(null)
@@ -543,9 +499,6 @@ const packArtifactType = ref<string | undefined>(undefined)
 // 交互不同，按钮由声明驱动而非组件硬编码
 const packActions = ref<string[]>([])
 onMounted(async () => {
-  // 挂载时从服务端刷新系统配置（管理端改了显示开关，新会话/刷新即生效；
-  // 失败回退 localStorage 缓存再回退默认，见 sysConfig composable）
-  refreshSysConfig()
   try {
     const manifests = await getPackManifests()
     packDisplays.value = Object.fromEntries(manifests.map((manifest: any) => [manifest.name, manifest.artifact?.display || {}]))
@@ -1146,11 +1099,10 @@ watch(() => store.currentConversation?.id, (convId) => {
   width: 64px; height: 64px;
   margin: 0 auto 20px;
   border-radius: var(--radius-xl);
-  background: linear-gradient(135deg, var(--color-primary), #5b8cff);
+  background: var(--color-primary-ink);
   color: #fff;
   display: flex; align-items: center; justify-content: center;
   font-size: 30px;
-  box-shadow: 0 8px 24px rgba(51, 112, 255, 0.25);
 }
 /* 欢迎页主标题 */
 .welcome-title {
@@ -1233,7 +1185,7 @@ watch(() => store.currentConversation?.id, (convId) => {
   color: #b0b3b8; font-size: 13px; padding: 3px 5px;
   border-radius: 4px; line-height: 1;
 }
-.msg-act-btn:hover { background: rgba(0, 0, 0, 0.06); color: #2f54eb; }
+.msg-act-btn:hover { background: rgba(0, 0, 0, 0.06); color: var(--color-primary-ink); }
 .msg-act-btn:disabled { cursor: not-allowed; opacity: 0.4; }
 
 .user-row {
@@ -1249,7 +1201,7 @@ watch(() => store.currentConversation?.id, (convId) => {
   flex-shrink: 0;
 }
 .user-avatar {
-  background: var(--color-primary);
+  background: var(--color-primary-ink);
   color: #fff;
 }
 .assistant-avatar {
@@ -1268,9 +1220,10 @@ watch(() => store.currentConversation?.id, (convId) => {
   word-break: break-word;
 }
 .user-bubble {
-  background: var(--color-primary);
+  background: var(--color-primary-ink);
   color: #fff;
   border-top-right-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
 }
 .msg-body {
   flex: 1;
@@ -1286,7 +1239,8 @@ watch(() => store.currentConversation?.id, (convId) => {
   padding: 12px 16px;
   border-radius: var(--radius-lg);
   border-top-left-radius: var(--radius-sm);
-  border: 1px solid var(--border-color-lighter);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-sm);
 }
 
 /* ===== Markdown 内容排版(助手消息) ===== */
@@ -1328,31 +1282,34 @@ watch(() => store.currentConversation?.id, (convId) => {
 .md-content :deep(th) { background: rgba(0, 0, 0, 0.03); font-weight: 500; }
 .md-content :deep(a) { color: var(--color-primary); text-decoration: none; }
 .md-content :deep(strong) { font-weight: 600; }
-/* KG 回答的来源引用徽标——按证据类型配色,与图谱卡手风琴对照 */
+/* KG 回答的来源引用徽标——按证据类型配色,与图谱卡手风琴对照。
+   样式同时复制到三个插件 ResultCard(md-ref 样式共享:卡片组件是
+   scoped,ChatPanel 的 :deep 命中不了它们内部的 .md-content) */
 .md-content :deep(.md-ref) {
   display: inline-block;
-  padding: 0 6px;
-  margin: 0 1px;
-  border-radius: 4px;
+  padding: 0 7px;
+  margin: 0 2px;
+  border: 1px solid currentColor;
+  border-radius: 10px;
   font-size: 12px;
   font-weight: 500;
-  line-height: 1.6;
+  line-height: 1.7;
   vertical-align: baseline;
   white-space: nowrap;
 }
 /* 片段(向量召回原文)→ 紫,与图谱卡手风琴 chip 同族;可点击跳转对应片段 */
 .md-content :deep(.md-ref-chunk) {
-  background: rgba(114, 46, 209, 0.1);
+  background: #f9f0ff;
   color: #722ed1;
   cursor: pointer;
 }
-.md-content :deep(.md-ref-chunk:hover) { background: rgba(114, 46, 209, 0.2); }
+.md-content :deep(.md-ref-chunk:hover) { background: #efdbff; }
 /* 实体(图谱节点)→ 蓝 */
-.md-content :deep(.md-ref-entity) { background: rgba(47, 84, 235, 0.1); color: #2f54eb; }
+.md-content :deep(.md-ref-entity) { background: var(--color-primary-bg); color: var(--color-primary-ink); }
 /* 三元组(图谱边)→ 青 */
-.md-content :deep(.md-ref-triple) { background: rgba(19, 194, 194, 0.12); color: #08979c; }
+.md-content :deep(.md-ref-triple) { background: #e6fffb; color: #08979c; }
 /* 关系链路箭头标签 →[位于]→ 橙 */
-.md-content :deep(.md-ref-rel) { background: rgba(250, 140, 22, 0.14); color: #d46b08; }
+.md-content :deep(.md-ref-rel) { background: #fff7e6; color: #d46b08; }
 /* LLM 误写的关系链接降级样式:不可点,视觉上接近行内代码 */
 .md-content :deep(.md-fake-link) {
   background: rgba(0, 0, 0, 0.06);
@@ -1367,7 +1324,10 @@ watch(() => store.currentConversation?.id, (convId) => {
   border: 1px solid var(--border-color-light);
   border-radius: var(--radius-lg);
   background: var(--bg-container);
-  overflow: hidden;
+  /* 不能 overflow:hidden:KG 图谱卡的 G6 tooltip 是 absolute 定位、
+     悬停时溢出卡片边界,裁掉会显示不全(用户实测痛点)。
+     圆角由子内容自行处理 */
+  overflow: visible;
   transition: all 0.2s;
 }
 .data-card:hover {
@@ -1430,11 +1390,11 @@ watch(() => store.currentConversation?.id, (convId) => {
   transition: color 0.2s, background 0.2s;
 }
 .fb-btn:hover:not(:disabled) {
-  color: #2f54eb;
-  background: #f0f5ff;
+  color: var(--color-primary-ink);
+  background: var(--color-primary-bg);
 }
 .fb-btn.active {
-  color: #2f54eb;
+  color: var(--color-primary-ink);
 }
 .fb-btn:disabled {
   opacity: 0.5;
@@ -1548,14 +1508,6 @@ watch(() => store.currentConversation?.id, (convId) => {
 }
 
 /* ===== Pipeline 进度条样式（流式生成中显示） ===== */
-/* showPipeline 关闭时的极简处理文案：与消息行同宽的一行灰字 */
-.processing-simple {
-  max-width: 880px;
-  margin: 0 auto 24px;
-  padding: 0 24px;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
 .pipeline-card {
   max-width: 880px;
   margin: 0 auto 24px;
@@ -1648,7 +1600,6 @@ watch(() => store.currentConversation?.id, (convId) => {
   .examples { grid-template-columns: 1fr; }
   .message-row { padding: 0 12px; }
   .pipeline-card { padding: 0 12px; }
-  .processing-simple { padding: 0 12px; }
 }
 
 /* JSON 查看器内容区：撑满全屏 Modal 的 body（内部 diff 自行滚动） */
@@ -1691,31 +1642,8 @@ watch(() => store.currentConversation?.id, (convId) => {
 }
 .resume-icon { color: #a9b0ba; }
 .resume-link {
-  color: var(--color-primary, #3370ff); cursor: pointer;
+  color: var(--color-primary-ink); cursor: pointer;
   display: inline-flex; align-items: center; gap: 4px; margin-left: 4px;
 }
 .resume-link:hover { opacity: 0.8; }
-
-/* ── 引用浮层(检索卡隐藏时的片段徽标交互) ── */
-.cite-pop-overlay { position: fixed; inset: 0; z-index: 60; }
-.cite-pop {
-  position: fixed; z-index: 61; width: min(340px, 86vw);
-  background: #fff; border: 1px solid #e5e7eb; border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14); padding: 10px 12px;
-}
-.cite-pop-head {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 13px; font-weight: 600; color: #1f2937;
-}
-.cite-pop-doc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cite-pop-kb {
-  flex: none; font-weight: 400; font-size: 11px; color: #6b7280;
-  background: #f3f4f6; border-radius: 6px; padding: 0 6px;
-}
-.cite-pop-text {
-  margin: 8px 0; max-height: 180px; overflow: auto;
-  font-size: 12px; line-height: 1.6; color: #374151;
-  white-space: pre-wrap; word-break: break-all;
-}
-.cite-pop-foot { text-align: right; }
 </style>

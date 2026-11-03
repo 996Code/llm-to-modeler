@@ -376,7 +376,7 @@ onBeforeUnmount(() => {
 .gv-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .gv-toolbar > :deep(.ant-select), .gv-toolbar > :deep(.ant-input-search) { max-width: 100%; }
 .gv-tip { color: #9ca3af; font-size: 12px; margin-left: auto; }
-.gv-expanding { color: #2563eb; font-size: 12px; white-space: nowrap; }
+.gv-expanding { color: var(--brand-ink); font-size: 12px; white-space: nowrap; }
 /* 显式高度(不用 flex:1):G6 canvas 会反向撑大容器,flex 高度构成
    "canvas 变大 → 容器变大 → resize 更大" 的失控反馈(实测打满 2^24) */
 .gv-chart {
@@ -386,6 +386,6 @@ onBeforeUnmount(() => {
 .gv-hidden { visibility: hidden; }
 .gv-empty { height: 420px; display: flex; align-items: center; justify-content: center; }
 .gv-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.gv-evidence { color: #2f54eb; margin-bottom: 2px; }
+.gv-evidence { color: var(--brand-ink); margin-bottom: 2px; }
 .gv-support-hint { color: #9ca3af; font-size: 12px; margin-left: 4px; }
 </style>

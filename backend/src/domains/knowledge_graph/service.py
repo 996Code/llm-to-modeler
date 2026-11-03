@@ -5,9 +5,6 @@
   1. 显式指定知识库(不存在即报错,不默认全库、不猜唯一库);
   2. 元数据白名单(空集=零结果,不回退全库);
   3. 返回依据(chunks/subgraph/诊断),不生成答案——业务结论归调用方。
-
-身份与库级授权复用 kb_search 的 ACL 契约:匿名无角色开放,具名身份
-按库 ACL 校验;授权参数只接受可信调用方传入,不由检索模型决定。
 """
 from typing import Any, Dict, Optional
 
@@ -17,30 +14,23 @@ def retrieve_evidence(app_state, kb_name: str, query: str,
                       top_k: Optional[int] = None,
                       on_stage=None,
                       metadata_filter: Optional[Dict[str, Any]] = None,
-                      *, user_id: Optional[str] = None,
-                      roles: Any = None,
                       ) -> Dict[str, Any]:
     """显式库+范围 → 混合检索 → 依据。失败抛异常,不静默降级。
 
-    user_id/roles/metadata_filter 必须来自可信宿主上下文,不能采用模型参数。
-    roles 接受列表或逗号串;省略身份仍沿用匿名开放模式。无权抛
-    PermissionError,在元数据查询、LLM 或实际检索前拒绝。
+    metadata_filter 必须来自可信宿主上下文,不能采用模型参数。
 
     返回 {kb, subgraph, chunks, diagnostics}:
       kb         {"id", "name"}
       subgraph   {"nodes", "edges"}(图谱路命中,前端图谱卡用)
       chunks     检索片段(已按用户级口径瘦身,childText/parentChars 不出域)
-      diagnostics 范围与召回观测(docFilterCount/chunkCount),不含未授权信息
+      diagnostics 范围与召回观测(docFilterCount/chunkCount)
     """
-    from domains.knowledge_graph import acl, retrieval, runtime
+    from domains.knowledge_graph import retrieval, runtime
 
     store = runtime.get_kg_store(app_state)
     kb = store.get_kb_by_name(kb_name)
     if not kb:
         raise ValueError(f"知识库「{kb_name}」不存在——请检查资料库配置")
-    perm_user, perm_roles = acl.request_identity(user_id, roles)
-    if not acl.kb_allowed(store, kb["id"], perm_user, perm_roles):
-        raise PermissionError(f"您没有访问知识库「{kb_name}」的权限")
 
     doc_filter = None
     if metadata_filter:

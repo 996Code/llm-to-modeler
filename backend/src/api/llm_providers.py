@@ -2,7 +2,7 @@
 
 GET  /api/admin/llm-providers   当前配置(api_key 不回显,has_key 布尔)
 PUT  /api/admin/llm-providers   整档直存(api_key 留空沿用旧值,revision 用于缓存失效)
-POST /api/admin/llm-providers/probe  连通性探测(主/备各发一次 1-token 请求)
+POST /api/admin/llm-providers/probe  连通性探测(主端点发一次 1-token 请求)
 """
 import logging
 import time
@@ -30,23 +30,21 @@ class ProviderRoleIn(BaseModel):
 
 class ProvidersSaveBody(BaseModel):
     primary: ProviderRoleIn
-    fallback: ProviderRoleIn | None = None
     comment: str = ""
 
 
 def _masked(content: Dict[str, Any]) -> Dict[str, Any]:
     """对外视图:api_key 换 has_key 布尔(明文不出管理 API)。"""
     view: Dict[str, Any] = {"revision": content.get("_revision", 0)}
-    for role in ("primary", "fallback"):
-        cfg = content.get(role)
-        if cfg is None:
-            view[role] = None
-            continue
-        c = dict(cfg)
-        c.pop("api_key", None)
-        c.pop("_revision", None)
-        c["has_key"] = bool(cfg.get("api_key"))
-        view[role] = c
+    cfg = content.get("primary")
+    if cfg is None:
+        view["primary"] = None
+        return view
+    c = dict(cfg)
+    c.pop("api_key", None)
+    c.pop("_revision", None)
+    c["has_key"] = bool(cfg.get("api_key"))
+    view["primary"] = c
     return view
 
 
@@ -54,7 +52,7 @@ def _masked(content: Dict[str, Any]) -> Dict[str, Any]:
 async def get_providers() -> dict:
     content = store.load_providers()
     if content is None:
-        return {"revision": 0, "primary": None, "fallback": None,
+        return {"revision": 0, "primary": None,
                 "configured": False}
     return {**_masked(content), "configured": True}
 
@@ -62,15 +60,12 @@ async def get_providers() -> dict:
 @router.put("")
 async def put_providers(body: ProvidersSaveBody, request: Request) -> dict:
     content: Dict[str, Any] = {"primary": body.primary.model_dump()}
-    if body.fallback is not None:
-        content["fallback"] = body.fallback.model_dump()
     # 留空 key 沿用旧值:把库中旧档的明文 key 并入(_existing_key 通道)
     old = store.load_providers() or {}
-    for role in ("primary", "fallback"):
-        if role in content and not (content[role].get("api_key") or "").strip():
-            old_key = (old.get(role) or {}).get("api_key") or ""
-            if old_key:
-                content[role]["_existing_key"] = old_key
+    if not (content["primary"].get("api_key") or "").strip():
+        old_key = (old.get("primary") or {}).get("api_key") or ""
+        if old_key:
+            content["primary"]["_existing_key"] = old_key
     try:
         new_rev = store.save_providers(
             content,
@@ -91,28 +86,29 @@ async def probe_providers() -> dict:
     try:
         from llm.client import LLMClient
         client = LLMClient()
-        chain = client._resolve_endpoints()
-        if not chain:
+        endpoint_cfg = client._resolve_endpoint()
+        if endpoint_cfg is None:
             # 未配置也要给出可行动结果(而非空列表让前端白屏)
             results.append({"role": "primary", "ok": False,
                             "base_url": "",
                             "error": "未配置——填写主端点并保存后再探测"})
-        for role, cfg, _, _ in chain:
+        else:
+            cfg = endpoint_cfg[0]
             t0 = time.time()
             try:
                 for field in ("base_url", "model"):
                     if not (getattr(cfg, field, "") or "").strip():
-                        raise RuntimeError(f"LLM 供应商 {role} 缺少 {field}")
+                        raise RuntimeError(f"LLM 供应商 primary 缺少 {field}")
                 c = client._client_for(cfg)
                 c.chat.completions.create(
                     model=cfg.model,
                     messages=[{"role": "user", "content": "ping"}],
                     max_tokens=1, temperature=0.0)
-                results.append({"role": role, "ok": True,
+                results.append({"role": "primary", "ok": True,
                                 "base_url": cfg.base_url,
                                 "latency_ms": int((time.time() - t0) * 1000)})
             except Exception as e:  # noqa: BLE001
-                results.append({"role": role, "ok": False,
+                results.append({"role": "primary", "ok": False,
                                 "base_url": cfg.base_url,
                                 "error": str(e)[:200]})
     except Exception as e:  # noqa: BLE001

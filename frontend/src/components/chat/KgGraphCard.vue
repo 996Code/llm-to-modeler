@@ -260,9 +260,18 @@ onMounted(async () => {
           : `<div><b>${_esc(d.name)}</b></div><div>${_esc(d.type)}</div>${d.desc ? `<div>${_esc(d.desc)}</div>` : ''}`
         return `<div style="background:rgba(0,0,0,0.78);color:#fff;padding:7px 10px;border-radius:6px;font-size:12px;line-height:1.6;max-width:280px;word-break:break-all">${body}</div>`
       },
+      // 悬停提示不被 240px 画布容器裁剪:G6 tooltip 默认 bounding=画布
+      // 尺寸,靠边节点/边的提示会被切掉——放大判定边界(画布外仍显示)
+      bounding: null,
     }],
     behaviors: [
-      { type: 'drag-canvas' }, { type: 'zoom-canvas' }, { type: 'drag-element' },
+      { type: 'drag-canvas' },
+      // 缩放只认 Ctrl/Cmd+滚轮:对话页滚动是主操作,裸滚轮被图谱吞掉
+      // 会"滚不动页面+图自己缩放"(用户实测痛点)。FederatedWheelEvent
+      // 构造时透传了原生 ctrlKey/metaKey,这里直接读
+      { type: 'zoom-canvas', enable: (e: { ctrlKey?: boolean; metaKey?: boolean }) =>
+        !!(e.ctrlKey || e.metaKey) },
+      { type: 'drag-element' },
       { type: 'hover-activate', degree: 1, state: 'highlight', inactiveState: 'dim',
         enable: (e: { targetType: string }) => e.targetType === 'node' },
     ],
@@ -296,7 +305,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .kgc { width: 100%; }
 .kgc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.kgc-icon { color: #2f54eb; }
+.kgc-icon { color: var(--color-primary-ink); }
 .kgc-title { font-weight: 600; font-size: 13px; color: #1f2937; }
 .kgc-tag { font-size: 11px; }
 .kgc-chart { width: 100%; height: 240px; margin-top: 8px; border: 1px solid #eef1f6; border-radius: 10px; background: #fff; }
@@ -325,9 +334,9 @@ onBeforeUnmount(() => {
 .kgc-chunk-trigger:hover:not(:disabled) { border-color: #c3d0f5; background: #f0f4ff; }
 .kgc-chunk-trigger:disabled { cursor: default; opacity: 0.55; }
 .kgc-chunk-trigger.active {
-  border-color: #2f54eb;
+  border-color: var(--brand);
   background: #eef2ff;
-  color: #2f54eb;
+  color: var(--color-primary-ink);
   border-bottom-left-radius: 0;
   border-bottom-right-radius: 0;
 }
@@ -337,13 +346,13 @@ onBeforeUnmount(() => {
   padding: 0 6px;
   border-radius: 4px;
   background: rgba(47, 84, 235, 0.1);
-  color: #2f54eb;
+  color: var(--color-primary-ink);
   font-size: 11px;
   font-weight: 500;
 }
-.kgc-chunk-trigger.active .kgc-chunk-num { background: #2f54eb; color: #fff; }
+.kgc-chunk-trigger.active .kgc-chunk-num { background: var(--color-primary-ink); color: #fff; }
 /* 被回答引用的片段:左侧细边条标识 */
-.kgc-chunk-trigger.cited { border-left: 3px solid #2f54eb; }
+.kgc-chunk-trigger.cited { border-left: 3px solid var(--brand); }
 /* 未引用标识(召回但 LLM 未采用) */
 .kgc-chunk-uncited {
   flex-shrink: 0;
@@ -359,21 +368,21 @@ onBeforeUnmount(() => {
   padding: 0 6px;
   border-radius: 4px;
   background: rgba(47, 84, 235, 0.08);
-  color: #2f54eb;
+  color: var(--color-primary-ink);
   font-size: 10px;
 }
 /* 展开面板里的回带说明 */
-.kgc-callback-note { color: #2f54eb; font-size: 11px; }
+.kgc-callback-note { color: var(--color-primary-ink); font-size: 11px; }
 .kgc-chunk-trigger-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kgc-chunk-arrow { font-size: 10px; color: #9ca3af; transition: transform 0.2s; }
-.kgc-chunk-arrow.expanded { transform: rotate(180deg); color: #2f54eb; }
+.kgc-chunk-arrow.expanded { transform: rotate(180deg); color: var(--color-primary-ink); }
 
 /* 片段分数(相似度) */
 .kgc-score { margin-left: 4px; opacity: 0.65; font-size: 10px; }
 
 /* 展开的片段原文面板(紧贴 chip 下方) */
 .kgc-chunk-text {
-  border: 1px solid #2f54eb;
+  border: 1px solid var(--brand);
   border-top: none;
   border-radius: 0 0 8px 8px;
   background: #fff;
@@ -413,7 +422,7 @@ onBeforeUnmount(() => {
   margin-left: auto; border: none; background: transparent; cursor: pointer;
   color: #6b7280; padding: 2px 6px; border-radius: 6px; line-height: 1;
 }
-.kgc-dl-btn:hover { background: #f0f5ff; color: #2563eb; }
+.kgc-dl-btn:hover { background: var(--color-primary-bg); color: var(--color-primary-ink); }
 
 /* ── 参考文档清单(下载统一入口,两档常驻) ── */
 .kgc-refdocs { margin-top: 10px; }

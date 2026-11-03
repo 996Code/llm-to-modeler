@@ -153,7 +153,7 @@ if (typeof window !== 'undefined') {
 .mt-header, .mt-heading, .mt-actions, .mt-toolbar, .mt-chat-label { display: flex; align-items: center; }
 .mt-header { justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .mt-heading { gap: 10px; min-width: 0; flex-wrap: wrap; }
-.mt-heading > .anticon { color: #2563eb; font-size: 20px; }
+.mt-heading > .anticon { color: var(--brand); font-size: 20px; }
 .mt-heading h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .mt-heading :deep(.ant-tag) { margin: 0; color: #8c651a; background: #fff8e8; border-color: #f3e3bf; }
 .mt-actions { gap: 14px; flex-shrink: 0; }

@@ -40,6 +40,8 @@ NEO4J_* 已删）；旧 kg-neo4j 容器与数据卷保留作回退备份，未�
 
 ## 知识库用户/角色同步 API（2026-10-29）
 
+> **已整体下线（2026-11-03）**：知识库不再做数据隔离，用户/角色目录同步、库级 ACL、AclEditor 管理页、嵌入测试页与相关测试全部删除（用户裁决）。以下为历史记录。
+
 源系统经 HTTP 同步用户/角色进知识库目录（ACL 候选字典）：全量（整体
 替换+diff 计数+幂等）/增量（upserts 合并+deletes 如实报 missing）/单条
 CRUD（PUT 建改合一）/`GET /sync/status` 对账；kg_subjects 扩 status/

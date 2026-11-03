@@ -179,7 +179,7 @@ function clearHistory() {
   border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;
   color: #64748b; font-size: 12px; padding: 2px 10px; cursor: pointer;
 }
-.rt-history-chip:hover { border-color: #2f54eb; color: #2f54eb; }
+.rt-history-chip:hover { border-color: var(--brand); color: var(--brand-ink); }
 .rt-history-clear { font-size: 12px; color: #cbd5e1; }
 .rt-history-clear:hover { color: #ef4444; }
 .rt-tip { color: #94a3b8; font-size: 12px; }
@@ -194,7 +194,7 @@ function clearHistory() {
 .rt-score { margin-left: auto; color: #7c3aed; font-weight: 600; font-family: monospace; }
 .rt-chunk-text { color: #4b5563; font-size: 12px; margin-top: 4px; white-space: pre-wrap; max-height: 96px; overflow: hidden; }
 .rt-chunk-text.expanded { max-height: none; overflow: visible; }
-.rt-expand { display: inline-block; margin-top: 4px; font-size: 12px; color: #6366f1; cursor: pointer; }
+.rt-expand { display: inline-block; margin-top: 4px; font-size: 12px; color: var(--brand-ink); cursor: pointer; }
 .rt-empty { color: #9ca3af; font-size: 12px; }
 .rt-type { color: #6b7280; font-weight: 400; }
 </style>

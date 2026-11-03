@@ -16,6 +16,8 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 // 导入 Ant Design 的全局样式重置表
 import 'ant-design-vue/dist/reset.css'
+// 设计令牌（全站唯一视觉变量源，2026-11 重设计）
+import './shared/design-tokens.css'
 // 导入根组件 App.vue（单文件组件 SFC，相当于 Java 的主控制器/根 Bean）
 import App from './App.vue'
 import { installMainAntd } from './plugins/antdMain'

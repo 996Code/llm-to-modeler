@@ -176,7 +176,7 @@ async function save() {
 .ps-group { margin-bottom: 18px; }
 .ps-group-title {
   font-weight: 600; font-size: 13px; color: #1f2937;
-  border-left: 3px solid #2f54eb; padding-left: 8px; margin-bottom: 12px;
+  border-left: 3px solid var(--brand); padding-left: 8px; margin-bottom: 12px;
 }
 .ps-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
 </style>

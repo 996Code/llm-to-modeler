@@ -88,6 +88,11 @@ def _recover_stale_importing(manager) -> bool:
     重跑只补剩余部分;防循环:永久失败的文档终态是 failed,不会被
     下次重启重排(只有 importing 状态才触发)。
 
+    续跑形态(2026-11-03 用户裁决):有 interrupted 旧任务行的文档
+    **原位复用该行**(manager.revive,日志追加"服务重启,复用本任务
+    续跑")——不再新开任务行+关闭旧行,任务中心不随重启次数膨胀;
+    纯文档驱动的孤儿(没有可复用的行)才提交新任务。
+
     返回是否完成本次检查；失败不抛出到启动编排，但返回 False 让 pack
     下次装配时重试，而不是被 once guard 永久跳过。
     """
@@ -118,23 +123,45 @@ def _recover_stale_importing(manager) -> bool:
             orphans = []
         for d in orphans:
             resubmit.setdefault(d["id"], d["kbId"])
-        # ③ 先重提、后关旧行(顺序即真相:旧行标注"已重新入队"只能发生在
-        #    新任务真实存在之后;中途崩溃时旧行保持 interrupted,下次自愈)
-        queued = set()
+        # ③ 重提:优先原位复用 interrupted 旧行(不新增任务行);
+        #    没有旧行的(纯文档驱动孤儿)才提交新任务
+        interrupted, _ = manager.store.list_tasks(
+            status="interrupted", task_type="kg.import_document", limit=1000)
+        row_by_doc: Dict[str, Dict[str, Any]] = {}
+        for t in interrupted:
+            doc_id = str((t.get("payload") or {}).get("doc_id") or "")
+            if doc_id:
+                row_by_doc.setdefault(doc_id, t)
+        queued, revived = set(), set()
+
+        def _revive_row(task_id: str, doc_id: str) -> bool:
+            try:
+                manager.revive(task_id, dedupe_key=f"kg.import:{doc_id}")
+                revived.add(doc_id)
+                return True
+            except Exception as e:  # noqa: BLE001
+                # 复用失败(如文档已有活任务占 dedupe):文档按无行路径自愈
+                logger.warning(f"中断任务原位复用失败(task={task_id}): {e}")
+                return False
+
         for doc_id, kb_id in resubmit.items():
+            old = row_by_doc.get(doc_id)
+            if old is not None and _revive_row(old["id"], doc_id):
+                queued.add(doc_id)
+                continue
             try:
                 submit_import(_app_state, kb_id, doc_id, force=False)
                 queued.add(doc_id)
             except Exception as e:  # noqa: BLE001
                 # 入队失败(如文档已删/重复任务):文档保持 failed,人工仍可重排
                 logger.warning(f"中断文档重提失败(doc={doc_id}): {e}")
-        # ④ 关闭 interrupted 旧行,注记与实际状态一致(不说谎)
-        interrupted, _ = manager.store.list_tasks(
-            status="interrupted", task_type="kg.import_document", limit=1000)
+        # ④ 处置剩余 interrupted 行:成功取代/文档已删的关闭;其余原位
+        #    复用(排队期被打断的文档——行驱动补提,可能刚上传在 ② 宽限
+        #    期内,兜底扫不覆盖,任务行就是它的重提信号)
         for t in interrupted:
             p = t.get("payload") or {}
             doc_id, kb_id = str(p.get("doc_id") or ""), str(p.get("kb_id") or "")
-            if not doc_id:
+            if not doc_id or doc_id in revived:
                 continue
             doc = store.get_document(doc_id)
             if doc is None:
@@ -142,17 +169,9 @@ def _recover_stale_importing(manager) -> bool:
             elif doc.get("importStatus") == "succeeded":
                 note = "(已由成功导入取代)"
             else:
-                # 行驱动补提:排队期被打断的文档(可能刚上传,在 ② 宽限期内,
-                # 兜底扫不覆盖——任务行就是它的重提信号)。此刻真实提交,
-                # 成功才标"已重新入队",失败如实标注,旧行统一关闭防残留
-                if doc_id not in queued:
-                    try:
-                        submit_import(_app_state, kb_id, doc_id, force=False)
-                        queued.add(doc_id)
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(f"中断文档重提失败(doc={doc_id}): {e}")
-                note = ("(已重新入队续跑)" if doc_id in queued
-                        else "(重提未成,待下次启动自愈)")
+                if _revive_row(t["id"], doc_id):
+                    queued.add(doc_id)
+                continue  # 复用成功(行回 pending)或失败(保持 interrupted 待下次自愈)
             # 逐行隔离:单行更新失败(如列白名单拒收)不中断整轮扫描
             try:
                 manager.store.update_task(
@@ -160,8 +179,10 @@ def _recover_stale_importing(manager) -> bool:
                     title=f"{t.get('title') or ''}{note}")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"中断任务关闭标注失败(task={t.get('id')}): {e}")
-        if resubmit:
-            logger.info(f"启动自动续跑: {len(resubmit)} 个待导文档,重新入队 {len(queued)} 个")
+        if resubmit or revived:
+            logger.info(
+                f"启动自动续跑:重提 {len(queued)} 个文档"
+                f"(原位复用 {len(revived)} 个任务行,新开 {len(queued) - len(revived)} 个)")
         return True
     except Exception:
         logger.exception("启动收敛 importing 文档失败(不影响服务启动)")

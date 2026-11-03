@@ -115,12 +115,11 @@ const store = useConversationStore()
 .brand-logo {
   width: 30px; height: 30px;
   border-radius: var(--radius-md);
-  /* 渐变背景 */
-  background: linear-gradient(135deg, var(--color-primary), #5b8cff);
+  /* 品牌蓝单一平涂（白字对比度走深阶），不再用渐变 */
+  background: var(--color-primary-ink);
   color: #fff;
   display: flex; align-items: center; justify-content: center;
   font-size: 15px;
-  box-shadow: 0 2px 8px rgba(51, 112, 255, 0.3);
 }
 .brand-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
 .new-btn { width: 100%; border-radius: var(--radius-md) !important; height: 36px; }
@@ -129,7 +128,7 @@ const store = useConversationStore()
 .conv-list { flex: 1; overflow-y: auto; padding: 8px; }
 .conv-list-title {
   font-size: 12px;
-  color: var(--text-placeholder);
+  color: var(--text-secondary);
   padding: 8px 8px 6px;
   font-weight: 500;
 }
@@ -139,7 +138,7 @@ const store = useConversationStore()
   padding: 9px 10px;
   border-radius: var(--radius-md);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-regular);
   margin-bottom: 2px;
   /* 过渡动画（hover 时背景色平滑变化） */
@@ -147,7 +146,7 @@ const store = useConversationStore()
 }
 .conv-item:hover { background: var(--bg-hover); }
 /* 选中态（active 类由 :class 动态绑定） */
-.conv-item.active { background: var(--bg-active); color: var(--color-primary); font-weight: 500; }
+.conv-item.active { background: var(--bg-active); color: var(--color-primary-ink); font-weight: 500; }
 .conv-icon { font-size: 14px; flex-shrink: 0; opacity: 0.7; }
 /* 单行省略（超长标题用 ... 表示） */
 .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

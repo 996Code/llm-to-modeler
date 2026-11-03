@@ -51,7 +51,6 @@ from api.config import router as config_router
 from api.conversations import router as conversations_router
 from api.health import router as health_router
 from api.meta import router as meta_router
-from api.settings import router as settings_router
 from api.tasks import router as tasks_router
 from api.llm_providers import router as llm_providers_router
 # LLM 客户端：调用 OpenAI 兼容 API（Qwen/本地模型）做意图识别和配置生成
@@ -339,12 +338,6 @@ from api.admin import require_admin as _require_admin
 from sdk.pack_api import register_admin_auth
 register_admin_auth(_require_admin)
 
-# 平台 MCP 密钥解析注册进 SDK(知识库同步接口的 X-Api-Key 接受分支:
-# 与 /api/mcp 同一把密钥,管理端 MCP 设置里生成/轮换;复用 mcp_server
-# 的读取链路,轮换 5s 内生效两边同源)
-from services.mcp_server import _cached_key as _mcp_key_of
-from sdk.pack_api import register_mcp_key_resolver
-register_mcp_key_resolver(_mcp_key_of)
 
 # 插件配置读取器工厂注册进 SDK(同款依赖倒置:插件经
 # sdk.pack_api.settings_reader 取 reader,不 import services 层)
@@ -365,7 +358,6 @@ app.include_router(config_router)
 app.include_router(conversations_router)
 app.include_router(meta_router)
 # 用户级设置路由(平台级显示设置只读;独立/嵌入对话页共读)
-app.include_router(settings_router)
 # 管理端路由（Bearer token 或 X-Admin-Token 守门；未配置口令时开放访问）
 app.include_router(admin_router)
 # 任务中心路由（同 admin 口令守门;SSE 实时进度/日志）

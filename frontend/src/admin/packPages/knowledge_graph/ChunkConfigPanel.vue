@@ -151,7 +151,7 @@ watch(() => props.files.length, (n) => {
   display: flex; gap: 8px; align-items: baseline; padding: 4px 0;
   border-bottom: 1px dashed #f0f0f0; font-size: 12px;
 }
-.ccp-chunk-seq { color: #2f54eb; font-weight: 600; flex-shrink: 0; }
+.ccp-chunk-seq { color: var(--brand-ink); font-weight: 600; flex-shrink: 0; }
 .ccp-chunk-meta { color: #94a3b8; flex-shrink: 0; }
 .ccp-chunk-text {
   color: #4b5563; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

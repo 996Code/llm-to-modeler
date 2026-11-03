@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>概览页精装 · 前后对照（飞书式企业风）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#141518; font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:#E8E9EA; padding:36px 44px 72px; }
+  header { max-width:1240px; margin:0 auto 24px; }
+  header h1 { font-size:24px; font-weight:700; }
+  header p { font-size:14.5px; color:#9BA0A5; margin-top:8px; line-height:1.75; }
+  header p b { color:#E8E9EA; font-weight:600; }
+  .bar { max-width:1240px; margin:0 auto 16px; display:flex; align-items:center; gap:16px; }
+  .seg { display:inline-flex; border:1px solid #33383D; border-radius:10px; overflow:hidden; }
+  .seg button { border:none; background:transparent; color:#9BA0A5; font-size:14.5px; padding:10px 26px; cursor:pointer; min-height:44px; transition:background .15s,color .15s; font-family:inherit; }
+  .seg button.on { background:#2B5FE0; color:#fff; font-weight:600; }
+  .hint { font-size:14px; color:#9BA0A5; }
+  .stage { max-width:1240px; margin:0 auto; border:1px solid #2A2D30; border-radius:12px; overflow:hidden; background:#0C0D0E; position:relative; }
+  .scaler { width:1440px; height:900px; transform-origin:0 0; position:relative; }
+  .scaler iframe { width:1440px; height:900px; border:0; display:block; background:#fff; }
+  .col { display:flex; flex-wrap:wrap; gap:12px; margin-top:14px; max-width:1240px; margin-left:auto; margin-right:auto; }
+  .col a { color:#8FB0FF; font-size:14px; text-decoration:none; border:1px solid #33383D; padding:8px 16px; border-radius:8px; }
+  .col a:hover { border-color:#8FB0FF; }
+  .notes { max-width:1240px; margin:40px auto 0; display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
+  .note { border:1px solid #2A2D30; border-radius:10px; padding:16px 18px; }
+  .note h3 { font-size:15px; margin-bottom:6px; color:#E8E9EA; }
+  
+  .note p { font-size:14px; color:#A9AEB4; line-height:1.7; }
+  .note p code { color:#C9D4E8; font-family:Menlo,monospace; font-size:12.5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>管理端 · 概览页精装稿（飞书式企业风）</h1>
+  <p>布局、功能、数据与真实系统<b>一比一</b>（同一张九卡统计、同一个顶栏导航、真实统计数据）。左键在「现在的系统」和「精装后」之间切换对比；风格确认后我把这套皮肤铺到全部管理页与聊天端。</p>
+</header>
+
+<div class="bar">
+  <div class="seg" role="tablist">
+    <button type="button" id="btnBefore" role="tab">现在的系统</button>
+    <button type="button" id="btnAfter" class="on" role="tab" aria-selected="true">精装后</button>
+  </div>
+  <span class="hint">左侧「现在的系统」需要本地 13080 dev server 在跑；若加载失败说明服务没起</span>
+</div>
+
+<div class="stage"><div class="scaler" id="scaler">
+  <iframe id="frame" src="polished-v1.html" title="精装后的概览页"></iframe>
+</div></div>
+
+<div class="col">
+  <a href="polished-v1.html" target="_blank">全屏打开精装稿</a>
+  <a href="http://localhost:13080/ai-modeler/admin.html" target="_blank">全屏打开真实系统</a>
+</div>
+
+<div class="notes">
+  <div class="note"><h3>一个蓝</h3><p>全站收敛为唯一品牌蓝 <code>#3370FF</code>（现状 8 个蓝并存，出现最多的甚至不是主色）。logo 方块、激活态、hover、链接从此同色。</p></div>
+  <div class="note"><h3>空间层级</h3><p>恢复卡片深度：静态微影 <code>0 1px 2px</code> + hover 轻抬 2px（现状阴影被样式表整体抹掉，所有元素贴在同一平面——「单调」的第一根因）。</p></div>
+  <div class="note"><h3>字级重建</h3><p>正文 14px 基准（现状全局压到 13px）；页面标题 16→18px，统计数字 24→26px，卡片圆角统一 12px，间距统一 4/8/14/20 节奏。</p></div>
+  <div class="note"><h3>组件质感</h3><p>九卡图标统一为 1.8px 线性手绘 SVG + 飞书式 10% 淡彩底；「服务运行中」改为绿点呼吸胶囊；数据范围加日历小图标；刷新按钮有真实旋转反馈。</p></div>
+</div>
+
+<script>
+  var before = 'http://localhost:13080/ai-modeler/admin.html';
+  var after = 'polished-v1.html';
+  var frame = document.getElementById('frame');
+  var b = document.getElementById('btnBefore');
+  var a = document.getElementById('btnAfter');
+  function show(which) {
+    frame.src = which === 'before' ? before : after;
+    b.classList.toggle('on', which === 'before');
+    a.classList.toggle('on', which === 'after');
+    a.setAttribute('aria-selected', which === 'after');
+    b.setAttribute('aria-selected', which === 'before');
+  }
+  b.addEventListener('click', function () { show('before'); });
+  a.addEventListener('click', function () { show('after'); });
+  function fit() {
+    var stage = document.querySelector('.stage');
+    var s = stage.clientWidth / 1440;
+    document.getElementById('scaler').style.transform = 'scale(' + s + ')';
+    stage.style.height = (900 * s) + 'px';
+  }
+  window.addEventListener('resize', fit);
+  fit();
+</script>
+</body>
+</html>

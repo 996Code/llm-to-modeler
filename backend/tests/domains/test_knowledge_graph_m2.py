@@ -429,12 +429,12 @@ class TestKnowledgeGraphApi:
 class TestKbDeleteCleanup:
     """删库联动清理——五面零残留 + 清理失败保留 KB 行可重试。
 
-    线上事故背景:kg_annotations/kg_kb_acl 曾不在级联清理里(孤儿行);
+    线上事故背景:kg_annotations 曾不在级联清理里(孤儿行);
     图/向量清理失败时 KB 行照删,重删 404,图谱残料变永久孤儿。
     """
 
     def _mk_kb_with_residue(self, client):
-        """建库 + 直插一条标注(含向量列)与一条 ACL(绕开 embeddings/宿主同步)。"""
+        """建库 + 直插一条标注(含向量列)(绕开 embeddings)。"""
         kb = client.post("/api/packs/knowledge_graph/kbs",
                          json={"name": "清理验证库"}).json()
         from domains.knowledge_graph import annotations as kg_annotations
@@ -448,10 +448,6 @@ class TestKbDeleteCleanup:
                 "question_vec, enabled, source, created_at, updated_at) "
                 "VALUES ('ann1', ?, '标准问题', '标准答案', '[0.1,0.2,0.3]', 1, '', "
                 "'2026-10-26T00:00:00', '2026-10-26T00:00:00')", (kb["id"],))
-            conn.execute(
-                "INSERT INTO kg_kb_acl (id, kb_id, subject_type, subject_id, "
-                "created_at) VALUES ('acl1', ?, 'user', 'u1', "
-                "'2026-10-26T00:00:00')", (kb["id"],))
         return kb, store
 
     def _residue_counts(self, store, kb_id):
@@ -459,20 +455,17 @@ class TestKbDeleteCleanup:
             ann = conn.execute(
                 "SELECT count(*) AS n FROM kg_annotations WHERE kb_id = ?",
                 (kb_id,)).fetchone()["n"]
-            acl = conn.execute(
-                "SELECT count(*) AS n FROM kg_kb_acl WHERE kb_id = ?",
-                (kb_id,)).fetchone()["n"]
-        return ann, acl
+        return ann
 
-    def test_delete_cleans_annotations_and_acl(self, kg_client):
+    def test_delete_cleans_annotations(self, kg_client):
         client, fake = kg_client
         kb, store = self._mk_kb_with_residue(client)
-        assert self._residue_counts(store, kb["id"]) == (1, 1)
+        assert self._residue_counts(store, kb["id"]) == 1
 
         r = client.delete(f"/api/packs/knowledge_graph/kbs/{kb['id']}")
         assert r.status_code == 200 and r.json() == {"success": True, "cleanupErrors": []}
         assert store.get_kb(kb["id"]) is None
-        assert self._residue_counts(store, kb["id"]) == (0, 0)
+        assert self._residue_counts(store, kb["id"]) == 0
         assert kb["id"] not in fake.entities
 
     def test_delete_kb_graph_failure_retains_kb(self, kg_client):
@@ -489,14 +482,14 @@ class TestKbDeleteCleanup:
         assert r.status_code == 503 and "可重试删除" in r.json()["detail"]
         # KB 行保留 + 残料保留(整链可重试),而非行删残料永孤
         assert store.get_kb(kb["id"]) is not None
-        assert self._residue_counts(store, kb["id"]) == (1, 1)
+        assert self._residue_counts(store, kb["id"]) == 1
 
         # 恢复后重删成功,五面全清
         del fake.delete_scope
         r = client.delete(f"/api/packs/knowledge_graph/kbs/{kb['id']}")
         assert r.status_code == 200
         assert store.get_kb(kb["id"]) is None
-        assert self._residue_counts(store, kb["id"]) == (0, 0)
+        assert self._residue_counts(store, kb["id"]) == 0
 
     def test_delete_kb_vector_failure_retains_kb(self, kg_client, monkeypatch):
         client, _ = kg_client

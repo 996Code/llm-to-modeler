@@ -335,10 +335,14 @@ def test_startup_auto_resumes_interrupted_imports(monkeypatch, env):
          "payload": {"doc_id": doc2["id"], "kb_id": kb2["id"]}},
     ]
     closed = []
-    manager = SimpleNamespace(store=SimpleNamespace(
-        list_tasks=lambda status, task_type, limit:
-            (interrupted_tasks, len(interrupted_tasks)) if status == "interrupted" else ([], 0),
-        update_task=lambda task_id, **fields: closed.append((task_id, fields)) or True))
+    revived = []
+    manager = SimpleNamespace(
+        store=SimpleNamespace(
+            list_tasks=lambda status, task_type, limit:
+                (interrupted_tasks, len(interrupted_tasks)) if status == "interrupted" else ([], 0),
+            update_task=lambda task_id, **fields: closed.append((task_id, fields)) or True),
+        revive=lambda task_id, dedupe_key=None:
+            revived.append((task_id, dedupe_key)) or {"id": task_id})
     monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
     submitted = []
     monkeypatch.setattr(tasks, "submit_import",
@@ -346,13 +350,12 @@ def test_startup_auto_resumes_interrupted_imports(monkeypatch, env):
                         submitted.append((kb_id, doc_id)) or {"id": "t1"})
 
     assert tasks._recover_stale_importing(manager) is True
-    # 两类都自动入队:importing 中断 + pending 期中断
-    assert submitted == [(kb["id"], doc["id"]), (kb2["id"], doc2["id"])]
+    # 两类都自动入队:importing 中断(无旧行→新任务) + pending 期中断(有旧行→原位复用)
+    assert submitted == [(kb["id"], doc["id"])]
+    assert revived == [("t2", f"kg.import:{doc2['id']}")]
     assert env.store.get_document(doc["id"])["importStatus"] == "failed"  # 收敛语义不变
-    # 重新入队后旧 interrupted 行关闭标注,不再残留
-    assert closed and closed[0][0] == "t2"
-    assert closed[0][1]["status"] == "cancelled"
-    assert "已重新入队续跑" in closed[0][1]["title"]
+    # 原位复用后旧行不再关闭标注——同一任务行继续跑(用户裁决:重启不再多出行)
+    assert closed == []
 
 
 def test_startup_recovery_heals_orphan_docs_after_crash(monkeypatch, env):
@@ -397,7 +400,8 @@ def test_startup_recovery_heals_orphan_docs_after_crash(monkeypatch, env):
 
 def test_startup_recovery_skips_succeeded_interrupted(monkeypatch, env):
     """历史 interrupted 分流:文档已 succeeded → 不重放(防任务中心刷满幂等
-    空转记录),关闭标注"已由成功导入取代";文档已删 → 关闭"文档已删除"。"""
+    空转记录),关闭标注"已由成功导入取代";文档已删 → 关闭"文档已删除";
+    仍在待导的文档 → 原位复用该行(不新开任务)。"""
     kb = env.store.create_kb("分流测试库")
     done_doc = env.store.create_document(kb["id"], "done.md", "text/markdown",
                                          3, "", "hash-superseded")
@@ -411,10 +415,12 @@ def test_startup_recovery_skips_succeeded_interrupted(monkeypatch, env):
          "payload": {"doc_id": "not-exist-doc", "kb_id": kb["id"]}},
     ]
     closed = []
-    manager = SimpleNamespace(store=SimpleNamespace(
-        list_tasks=lambda status, task_type, limit:
-            (rows, len(rows)) if status == "interrupted" else ([], 0),
-        update_task=lambda task_id, **fields: closed.append((task_id, fields)) or True))
+    manager = SimpleNamespace(
+        store=SimpleNamespace(
+            list_tasks=lambda status, task_type, limit:
+                (rows, len(rows)) if status == "interrupted" else ([], 0),
+            update_task=lambda task_id, **fields: closed.append((task_id, fields)) or True),
+        revive=lambda task_id, dedupe_key=None: pytest.fail("不应复用:无待导文档"))
     monkeypatch.setattr(runtime, "get_kg_store", lambda state: env.store)
     submitted = []
     monkeypatch.setattr(tasks, "submit_import",
@@ -1869,33 +1875,3 @@ class TestDeleteDocumentGraphSlim:
         assert "独苗" not in names
 
 
-def test_download_rechecks_user_acl(env, monkeypatch):
-    """引用下载出口当前用户重验(设计 7.2):知道 doc_id 不等于授权。"""
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from domains.knowledge_graph import api as kg_api
-
-    kb = env.store.create_kb("下载重验库")
-    env.store.set_kb_acl(kb["id"], users=["alice"], roles=[])
-    doc = env.store.create_document(
-        kb["id"], "secret.pdf", "application/pdf", 1, "/no.pdf", "h-dl")
-    monkeypatch.setattr("domains.knowledge_graph.runtime.get_kg_store",
-                        lambda state: env.store)
-    app = FastAPI()
-    app.include_router(kg_api.router)
-    client = TestClient(app)
-
-    # 有身份但不在白名单 → 403(此前知道 id 就能下,旁路)
-    r = client.get(f"/kbs/{kb['id']}/documents/{doc['id']}/download",
-                   headers={"X-User-Id": "bob"})
-    assert r.status_code == 403
-    # 白名单用户放行(文件本身不存在 → 404 文件层,不是 403 权限层)
-    r2 = client.get(f"/kbs/{kb['id']}/documents/{doc['id']}/download",
-                    headers={"X-User-Id": "alice"})
-    assert r2.status_code == 404
-    assert "原始文件" in r2.json()["detail"]
-    # 无 admin 后门:admin 身份不在白名单同样拒(设计 7.2 无后门;
-    # 管理员需要时把自己加进 ACL)
-    r3 = client.get(f"/kbs/{kb['id']}/documents/{doc['id']}/download",
-                    headers={"X-User-Id": "admin"})
-    assert r3.status_code == 403

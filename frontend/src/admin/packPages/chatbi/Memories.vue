@@ -325,7 +325,7 @@ onMounted(() => {
   display: block; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; font-size: 12px; color: #4e5969; cursor: pointer;
 }
-.mem-content:hover { color: #1677ff; }
+.mem-content:hover { color: var(--brand-ink); }
 .mem-form .form-row { display: flex; gap: 12px; }
 .mem-form .half { flex: 1; min-width: 0; }
 @media (max-width: 600px) {

@@ -1,25 +1,34 @@
 <template>
   <section class="mcp-panel">
-    <div class="mcp-key-row">
-      <span class="mcp-key-label">对外接入(外部 AI 工具连 <code>{{ mcpEndpoint }}</code>)</span>
-      <a-tag :color="keyConfigured ? 'green' : 'red'">
-        {{ keyConfigured ? '已启用' : '未配置 Key' }}
-      </a-tag>
-      <a-input-password v-if="keyConfigured" :value="apiKey" size="small"
-                        style="width: 260px" readonly />
-      <a-tooltip v-if="keyConfigured" title="复制 Key">
-        <a-button size="small" type="text" @click="copyKey">
-        <template #icon><CopyOutlined /></template>
-        </a-button>
-      </a-tooltip>
-      <a-tooltip :title="keyConfigured ? '刷新 Key(旧 Key 约 5 秒内失效)' : '生成 Key'">
-        <a-button size="small" type="text" :loading="rotatingKey" @click="rotateKey">
-          <template #icon><SyncOutlined /></template>
-        </a-button>
-      </a-tooltip>    </div>
-
     <div class="mcp-toolbar">
-      <span class="mcp-count">共 {{ servers.length }} 个服务</span>
+      <span class="mcp-count">
+        共 {{ servers.length }} 个服务
+        <a-tag class="mcp-key-tag" :color="keyConfigured ? 'green' : 'red'">
+          {{ keyConfigured ? '对外 MCP 已启用' : '对外 MCP 未配置 Key' }}
+        </a-tag>
+        <template v-if="keyConfigured">
+          <a-tooltip title="对外接入端点(外部 AI 工具连本系统)">
+            <code class="mcp-endpoint">{{ mcpEndpoint }}</code>
+          </a-tooltip>
+          <a-input-password :value="apiKey" size="small"
+                            style="width: 220px" readonly />
+          <a-tooltip title="复制 Key">
+            <a-button size="small" type="text" @click="copyKey">
+            <template #icon><CopyOutlined /></template>
+            </a-button>
+          </a-tooltip>
+          <a-tooltip title="刷新 Key(旧 Key 约 5 秒内失效)">
+            <a-button size="small" type="text" :loading="rotatingKey" @click="rotateKey">
+              <template #icon><SyncOutlined /></template>
+            </a-button>
+          </a-tooltip>
+        </template>
+        <a-tooltip v-else title="生成对外 MCP 接入 Key">
+          <a-button size="small" type="text" :loading="rotatingKey" @click="rotateKey">
+            <template #icon><SyncOutlined /></template>
+          </a-button>
+        </a-tooltip>
+      </span>
       <a-button type="primary" size="small" @click="openCreate">
         <template #icon><PlusOutlined /></template>注册外部服务
       </a-button>
@@ -316,44 +325,51 @@ async function toggleEnabled(rec: McpServer, on: boolean) {
 </script>
 
 <style scoped>
+/* 精装层(2026-11 重设计):令牌见 shared/design-tokens.css,规格对齐 design-demos/polished-packs.html */
 .mcp-panel { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.mcp-toolbar { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
-.mcp-count { font-size: 13px; color: #6b7280; }
+.mcp-toolbar { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin: 0 2px 12px; }
+.mcp-count { font-size: 14px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mcp-key-tag { margin: 0 4px; }
+.mcp-endpoint {
+  background: var(--brand-tint); padding: 3px 8px; border-radius: var(--radius-ctrl);
+  font-size: 12px; color: var(--brand-ink);
+  font-family: 'SF Mono', Menlo, Consolas, monospace;
+}
 /* 标题行(独立顶级页形态) */
 .pk-toolbar {
   display: flex; align-items: center; justify-content: space-between;
   margin: 2px 2px 14px;
 }
 .pk-toolbar-title {
-  font-size: 14px; font-weight: 600; color: #334155;
+  font-size: 14px; font-weight: 600; color: var(--ink);
   display: inline-flex; align-items: center; gap: 8px;
 }
 .pk-toolbar-count { margin-left: 2px; font-weight: 400; }
-.pk-help-link { color: #94a3b8; font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
-.pk-help-link:hover { color: #2f54eb; }
-.pk-help-title { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; color: #2f54eb; }
-.pk-help-body { font-size: 12px; color: #64748b; line-height: 1.7; max-width: 380px; }
+.pk-help-link { color: var(--ink-3); font-size: 13px; display: inline-flex; align-items: center; gap: 4px; }
+.pk-help-link:hover { color: var(--brand-ink); }
+.pk-help-title { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; color: var(--brand-ink); }
+.pk-help-body { font-size: 12px; color: var(--ink-2); line-height: 1.7; max-width: 380px; }
 .pk-help-body code {
-  background: #f0f5ff; padding: 1px 6px; border-radius: 4px; font-size: 12px; color: #2f54eb;
+  background: var(--brand-tint); padding: 1px 6px; border-radius: 4px; font-size: 12px; color: var(--brand-ink);
 }
 
-.mcp-key-row {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  margin: 0 2px 12px; font-size: 13px; color: #475569;
-}
-.mcp-key-row code {
-  background: #f0f5ff; padding: 1px 6px; border-radius: 4px; font-size: 12px; color: #2f54eb;
-}
 .mcp-ops { display: inline-flex; gap: 2px; }
 .mcp-name-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.mcp-name { font-weight: 500; }
-.mcp-name-warn { font-size: 12px; color: #d4380d; }
+.mcp-name { font-weight: 600; color: var(--ink); }
+.mcp-name-warn { font-size: 12px; color: var(--danger); }
 .mcp-tools { display: flex; flex-direction: column; gap: 4px; }
 .mcp-tool { display: flex; gap: 10px; font-size: 12px; line-height: 1.6; }
 .mcp-tool-name {
-  font-family: 'SF Mono', Menlo, Consolas, monospace; color: #4f46e5;
+  font-family: 'SF Mono', Menlo, Consolas, monospace; color: var(--violet);
   white-space: nowrap;
 }
-.mcp-tool-desc { color: #64748b; word-break: break-all; }
-.mcp-tools-empty { font-size: 12px; color: #94a3b8; }
+.mcp-tool-desc { color: var(--ink-2); word-break: break-all; }
+.mcp-tools-empty { font-size: 12px; color: var(--ink-3); }
+
+/* 状态/标记 a-tag 胶囊化并把 antd 预设色归一到语义令牌(已连接 ok / 待连接 warn / 声明不完整 danger / 工具数 violet) */
+.mcp-panel :deep(.ant-tag) { border-radius: 999px; font-size: 12px; line-height: 18px; padding: 0 9px; }
+.mcp-panel :deep(.ant-tag-green) { color: var(--ok); background: var(--ok-tint); border-color: var(--ok-tint); }
+.mcp-panel :deep(.ant-tag-red) { color: var(--danger); background: var(--danger-tint); border-color: var(--danger-tint); }
+.mcp-panel :deep(.ant-tag-orange) { color: var(--warn); background: var(--warn-tint); border-color: var(--warn-tint); }
+.mcp-panel :deep(.ant-tag-purple) { color: var(--violet); background: var(--violet-tint); border-color: var(--violet-tint); }
 </style>

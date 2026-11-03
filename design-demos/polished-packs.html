@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>集成 · LLM Form Modeler 管理端（精装稿 · 插件）</title>
+<style>
+  /* ============================================================
+     精装稿 · 集成页（插件 / MCP 服务 / 模型供应商）
+     风格规范 1:1 承接 polished-v1.html（唯一蓝 #3370FF、卡片微影
+     + hover 轻抬、正文 14px、1.8px 线性手绘 SVG + 10% 淡彩底）
+     结构复刻 frontend/src/admin/components/PacksTab.vue
+     数据来自 2026-11-03 真实 /api/admin/packs · /mcp/servers ·
+     /llm-providers · /settings/mcp
+     ============================================================ */
+  :root {
+    --blue: #3370FF;          /* 唯一品牌蓝（图标/装饰/交互色） */
+    --blue-ink: #2B5FE0;      /* 品牌蓝·文字深阶（白底/淡底上保 4.5:1） */
+    --blue-hover: #2B5FE0;
+    --blue-tint: #EAF0FF;
+    --blue-tint-2: #F2F6FF;
+    --ink: #1F2329;           /* 主文字 */
+    --ink-2: #4E5969;         /* 次要 */
+    --ink-3: #6B7480;         /* 弱化（白底 4.55:1） */
+    --line: #E5E6EB;
+    --line-soft: #EFF1F4;
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --green: #2EA121; --green-tint: #E8F6EC;
+    --violet: #7B61FF; --violet-tint: #F0EBFF;
+    --cyan: #0A8C94;   --cyan-tint: #E4F5F7;
+    --orange: #E67E22; --orange-tint: #FDF0E1;
+    --pink: #D6409F;   --pink-tint: #FCE9F4;
+    --radius: 12px;
+    --shadow-rest: 0 1px 2px rgba(31, 35, 41, .04);
+    --shadow-lift: 0 6px 16px rgba(31, 35, 41, .09);
+    /* 状态胶囊文字深阶（12px 小字在 10% 淡底上保 4.5:1） */
+    --green-ink: #1F7A14; --violet-ink: #5B44E0; --cyan-ink: #067278;
+    --orange-ink: #9E4E00; --red: #C22B1E; --red-tint: #FDECEC;
+    --gray-tint: #F2F3F5;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+  button { font-family: inherit; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ── 顶部导航（与 polished-v1 完全一致，激活=集成） ── */
+  .shell-header {
+    background: #fff;
+    border-bottom: 1px solid var(--line);
+    padding: 0 24px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .shell-brand { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  .brand-mark {
+    width: 34px; height: 34px;
+    border-radius: 10px;
+    background: var(--blue-ink);
+    color: #fff;
+    font-size: 15px; font-weight: 700; letter-spacing: .02em;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .shell-title { font-size: 15px; font-weight: 600; color: var(--ink); white-space: nowrap; }
+  .ver { font-size: 12px; color: var(--ink-3); font-weight: 400; margin-left: 4px; }
+  .top-nav { display: flex; align-items: center; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; }
+  .nav-item {
+    display: flex; align-items: center; gap: 6px;
+    border: none; background: transparent;
+    color: var(--ink-2);
+    font-size: 14px;
+    padding: 7px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+    min-height: 34px;
+    position: relative;
+    transition: color .15s, background .15s;
+  }
+  /* 视觉不变，点击热区扩到 44px（伪元素参与命中） */
+  .nav-item::after { content: ""; position: absolute; inset: -5px -3px; }
+  .nav-item svg { width: 15px; height: 15px; }
+  .nav-item:hover { color: var(--blue); background: var(--blue-tint-2); }
+  .nav-item.active { color: var(--blue-ink); background: var(--blue-tint); font-weight: 600; }
+  .shell-actions { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
+  .svc {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 13px; color: var(--ink-2);
+    background: var(--green-tint);
+    border-radius: 999px;
+    padding: 4px 12px 4px 10px;
+  }
+  .svc i {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 0 3px rgba(46, 161, 33, .14);
+    animation: pulse 2.8s ease-out infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 3px rgba(46, 161, 33, .18); }
+    70% { box-shadow: 0 0 0 6px rgba(46, 161, 33, 0); }
+    100% { box-shadow: 0 0 0 3px rgba(46, 161, 33, 0); }
+  }
+
+  /* ── 主体 / 页卡（与 polished-v1 一致） ── */
+  .shell-main { max-width: 1760px; width: 100%; margin: 0 auto; padding: 16px 20px 0; }
+  .page-card {
+    background: var(--card);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-rest);
+    padding: 8px 20px 20px;
+    min-height: calc(100vh - 140px);
+    min-width: 0;
+  }
+
+  /* ── 一层 flat-tabs（复刻 a-tabs flat 形态 + 右侧「说明」） ── */
+  .tabs-row { display: flex; align-items: flex-end; gap: 16px; position: relative; margin-top: 8px; }
+  .flat-tabs { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); min-width: 0; overflow-x: auto; }
+  .tab {
+    display: inline-flex; align-items: center; gap: 7px;
+    border: none; background: transparent;
+    font-size: 14px; color: var(--ink-2);
+    padding: 0 12px;
+    min-height: 46px;
+    cursor: pointer; white-space: nowrap;
+    position: relative;
+    transition: color .15s;
+  }
+  .tab svg { width: 15px; height: 15px; }
+  .tab:hover { color: var(--blue); }
+  .tab.active { color: var(--blue-ink); font-weight: 600; }
+  .tab.active::after {
+    content: ""; position: absolute; left: 10px; right: 10px; bottom: -1px;
+    height: 2px; border-radius: 2px; background: var(--blue);
+  }
+  .tab-count {
+    font-size: 12px; font-weight: 500;
+    color: var(--blue-ink); background: var(--blue-tint);
+    border-radius: 999px; padding: 1px 8px;
+  }
+  .tabs-right { margin-left: auto; position: relative; flex-shrink: 0; padding-bottom: 9px; }
+  .help-link {
+    display: inline-flex; align-items: center; gap: 5px;
+    border: none; background: transparent;
+    font-size: 13px; color: var(--ink-3);
+    padding: 9px 8px; cursor: pointer; position: relative;
+    border-radius: 8px;
+    transition: color .15s, background .15s;
+  }
+  .help-link::after { content: ""; position: absolute; inset: 0 -6px -6px; }
+  .help-link svg { width: 14px; height: 14px; }
+  .help-link:hover { color: var(--blue); background: var(--blue-tint-2); }
+  .help-pop {
+    position: absolute; right: 0; top: calc(100% + 6px);
+    width: 384px; max-width: calc(100vw - 48px);
+    background: #fff;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lift);
+    padding: 14px 16px 12px;
+    z-index: 60;
+    text-align: left;
+  }
+  .help-pop h3 { font-size: 14px; font-weight: 600; color: var(--blue-ink); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .help-pop h3 svg { width: 14px; height: 14px; }
+  .help-pop ol { list-style: none; counter-reset: hr; }
+  .help-pop li {
+    counter-increment: hr;
+    font-size: 13px; color: var(--ink-2); line-height: 1.75;
+    padding-left: 20px; position: relative;
+  }
+  .help-pop li + li { margin-top: 4px; }
+  .help-pop li::before {
+    content: counter(hr);
+    position: absolute; left: 0; top: 3px;
+    width: 14px; height: 14px; border-radius: 50%;
+    background: var(--blue-tint); color: var(--blue-ink);
+    font-size: 10.5px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .help-pop b { color: var(--ink); font-weight: 600; }
+
+  /* ── 通用状态胶囊（10% 淡彩底 + 文字深阶保对比度） ── */
+  .pill {
+    display: inline-flex; align-items: center;
+    font-size: 12px; font-weight: 500; line-height: 1;
+    border-radius: 999px; padding: 4px 9px;
+    white-space: nowrap;
+  }
+  .pill.st { gap: 5px; }
+  .pill.st::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill-green  { color: var(--green-ink);  background: var(--green-tint); }
+  .pill-gray   { color: var(--ink-2);      background: var(--gray-tint); }
+  .pill-violet { color: var(--violet-ink); background: var(--violet-tint); }
+  .pill-blue   { color: var(--blue-ink);   background: var(--blue-tint); }
+  .pill-cyan   { color: var(--cyan-ink);   background: var(--cyan-tint); }
+  .pill-orange { color: var(--orange-ink); background: var(--orange-tint); }
+  .pill-red    { color: var(--red);        background: var(--red-tint); }
+
+  /* ── 插件卡网格（复刻 .pk-grid：真实 minmax(340px,1fr)） ── */
+  .pk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; margin-top: 18px; }
+  .pk-card {
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    padding: 16px 18px 14px;
+    background: var(--card);
+    box-shadow: var(--shadow-rest);
+    transition: box-shadow .18s, transform .18s, border-color .18s, opacity .2s, background .2s;
+  }
+  .pk-card:hover { box-shadow: var(--shadow-lift); transform: translateY(-2px); border-color: #DFE3EA; }
+  .pk-card.off { opacity: .72; background: #FBFCFE; }
+  .pk-head { display: flex; align-items: center; gap: 12px; }
+  .pk-icon {
+    width: 40px; height: 40px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    background: var(--blue-tint); color: var(--blue);
+    transition: background .2s, color .2s;
+  }
+  .pk-icon svg { width: 21px; height: 21px; }
+  .pk-card.off .pk-icon { background: var(--gray-tint); color: var(--ink-3); }
+  .pk-name-block { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .pk-name { font-size: 15px; font-weight: 650; color: var(--ink); overflow-wrap: anywhere; }
+  .pk-key {
+    font-size: 12px; color: var(--ink-3); line-height: 1.3;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  .pk-tags { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pk-desc {
+    margin-top: 10px; font-size: 14px; color: var(--ink-2);
+    line-height: 1.65; min-height: 48px; word-break: break-all;
+  }
+  .pk-foot { margin-top: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .pk-meta { display: inline-flex; gap: 5px; flex-wrap: wrap; min-width: 0; }
+  .pk-actions { display: inline-flex; align-items: center; white-space: nowrap; }
+  .pk-act {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 14px; color: var(--blue-ink);
+    text-decoration: none; cursor: pointer;
+    padding: 12px 5px; margin: -10px 0;          /* 热区≥44px，视觉不撑高 */
+    border-radius: 6px;
+  }
+  .pk-act + .pk-act { margin-left: 8px; }
+  .pk-act svg { width: 13px; height: 13px; }
+  .pk-act:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .pk-act svg.spinning { animation: rot .7s linear; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  /* ── 开关（真切换：卡片灰化 + tab 计数联动） ── */
+  .pk-switch {
+    position: relative; flex-shrink: 0;
+    width: 40px; height: 22px;
+    border: none; border-radius: 999px;
+    background: #C9CDD4;
+    cursor: pointer;
+    transition: background .18s;
+  }
+  .pk-switch::after { content: ""; position: absolute; inset: -11px -8px; }  /* 热区 44px+ */
+  .pk-switch .knob {
+    position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(31, 35, 41, .22);
+    transition: transform .18s;
+  }
+  .pk-switch[aria-checked="true"] { background: var(--blue); }
+  .pk-switch[aria-checked="true"] .knob { transform: translateX(18px); }
+  .pk-switch.sm { width: 34px; height: 20px; }
+  .pk-switch.sm .knob { width: 14px; height: 14px; }
+  .pk-switch.sm[aria-checked="true"] .knob { transform: translateX(16px); }
+
+  /* ── MCP 服务面板（复刻 McpServersPanel：工具栏 + 表格） ── */
+  .mcp-toolbar { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin: 18px 2px 4px; }
+  .mcp-count { font-size: 14px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .mcp-endpoint {
+    background: var(--blue-tint); padding: 3px 8px; border-radius: 6px;
+    font-size: 12px; color: var(--blue-ink);
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  .mcp-key-box { display: inline-flex; align-items: center; gap: 2px; }
+  .mcp-key-input {
+    width: 190px; border: 1px solid var(--line); border-radius: 8px;
+    padding: 6px 10px; font-size: 12.5px; color: var(--ink-2);
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    background: #fff;
+  }
+  .btn-primary {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: none; background: var(--blue-ink); color: #fff;
+    font-size: 13.5px; font-weight: 500;
+    border-radius: 8px; padding: 8px 16px; min-height: 36px;
+    cursor: pointer; position: relative;
+    transition: background .15s;
+  }
+  .btn-primary::after { content: ""; position: absolute; inset: -4px; }
+  .btn-primary:hover { background: #2450C4; }
+  .btn-primary svg { width: 13px; height: 13px; }
+  .btn-ghost {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: 1px solid var(--line); background: #fff; color: var(--ink-2);
+    font-size: 13.5px; border-radius: 8px;
+    padding: 8px 16px; min-height: 36px;
+    cursor: pointer; position: relative;
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .btn-ghost::after { content: ""; position: absolute; inset: -4px; }
+  .btn-ghost:hover:not(:disabled) { color: var(--blue); border-color: var(--blue); background: var(--blue-tint-2); }
+  .btn-ghost:disabled { color: var(--ink-3); cursor: not-allowed; background: var(--gray-tint); }
+  .btn-ghost svg { width: 13px; height: 13px; }
+  .btn-ghost.danger-hover:hover:not(:disabled) { color: var(--red); border-color: var(--red); background: var(--red-tint); }
+  .btn-ghost svg.spinning { animation: rot .7s linear; }
+  .mcp-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  .mcp-table th {
+    font-size: 12.5px; font-weight: 500; color: var(--ink-3);
+    text-align: left; padding: 10px 12px;
+    border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  .mcp-table td { padding: 13px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+  .mcp-table tbody tr { transition: background .15s, opacity .2s; }
+  .mcp-table tbody tr:hover { background: var(--blue-tint-2); }
+  .mcp-table tbody tr.off { opacity: .6; }
+  .mcp-name { font-weight: 600; color: var(--ink); }
+  .mcp-code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; color: var(--ink-3); }
+  .mcp-url { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; color: var(--ink-3); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mcp-cell-tools { display: inline-flex; gap: 5px; flex-wrap: wrap; }
+  .mcp-ops { display: inline-flex; align-items: center; gap: 8px; }
+  .icon-group { display: inline-flex; gap: 2px; }
+  .icon-btn {
+    width: 32px; height: 32px; border: none; border-radius: 8px;
+    background: transparent; color: var(--ink-3);
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; position: relative;
+    transition: color .15s, background .15s;
+  }
+  .icon-btn::after { content: ""; position: absolute; inset: -6px; }
+  .icon-btn svg { width: 15px; height: 15px; }
+  .icon-btn:hover { color: var(--blue); background: var(--blue-tint-2); }
+  .icon-btn.danger:hover { color: var(--red); background: var(--red-tint); }
+  .icon-btn svg.spinning { animation: rot .7s linear; }
+
+  /* ── 模型供应商面板（复刻 LlmProviders embedded 形态） ── */
+  .lp-card {
+    max-width: 640px;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-rest);
+    padding: 18px 20px;
+    margin-top: 18px;
+    display: flex; flex-direction: column; gap: 14px;
+    transition: box-shadow .18s;
+  }
+  .lp-card:hover { box-shadow: var(--shadow-lift); }
+  .lp-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .lp-provider-heading { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 650; color: var(--ink); }
+  .lp-provider-heading .pill { font-weight: 500; }
+  .lp-field { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--ink-2); }
+  .lp-field input {
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 12px; font-size: 14px; color: var(--ink);
+    background: #fff; min-width: 0; width: 100%;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .lp-field input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-tint); }
+  .lp-hint { font-style: normal; color: var(--ink-3); margin-left: 6px; }
+  .lp-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+  .lp-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  .lp-pending { color: #8A5A00; font-size: 12.5px; }
+  .lp-probe { margin-top: 12px; display: none; flex-direction: column; gap: 6px; }
+  .lp-probe.show { display: flex; }
+  .lp-probe-row {
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    font-size: 13px; color: var(--ink-2);
+    padding: 9px 12px; border-radius: 8px; background: var(--gray-tint);
+  }
+  .lp-probe-row .ok { color: var(--green-ink); font-weight: 500; }
+
+  /* ── 轻提示（操作反馈） ── */
+  #toast {
+    position: fixed; left: 50%; bottom: 34px;
+    transform: translateX(-50%) translateY(10px);
+    background: rgba(31, 35, 41, .92); color: #fff;
+    font-size: 13.5px; line-height: 1.5;
+    padding: 9px 18px; border-radius: 999px;
+    opacity: 0; pointer-events: none;
+    transition: opacity .25s, transform .25s;
+    z-index: 200; max-width: calc(100vw - 48px);
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%); }
+
+  /* ── 页脚（与 polished-v1 一致） ── */
+  .shell-footer { text-align: center; color: #5F6870; font-size: 12.5px; padding: 18px 0 10px; }
+
+  @media (max-width: 900px) {
+    .mcp-url { max-width: 180px; }
+    .tabs-row { flex-wrap: wrap; align-items: flex-start; }
+    .flat-tabs { order: 1; flex-basis: 100%; }
+    .tabs-right { order: 2; padding-bottom: 0; }
+  }
+  @media (max-width: 700px) {
+    .shell-header { height: auto; padding: 10px 12px; gap: 10px; flex-wrap: wrap; }
+    .top-nav { order: 3; flex-basis: 100%; }
+    .shell-main { padding: 10px 8px 0; }
+    .page-card { padding: 8px 10px 12px; }
+    .svc { display: none; }
+    .pk-grid { grid-template-columns: minmax(0, 1fr); }
+    .lp-row { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .svc i, .pk-act svg.spinning, .icon-btn svg.spinning, .btn-ghost svg.spinning { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="shell-header">
+  <div class="shell-brand">
+    <div class="brand-mark">AI</div>
+    <div class="shell-title">LLM Form Modeler <span class="ver">管理端</span></div>
+  </div>
+  <nav class="top-nav" aria-label="主导航">
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="9" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="5.5" rx="1.5"/><rect x="13.5" y="12" width="7.5" height="9" rx="1.5"/><rect x="3" y="15.5" width="7.5" height="5.5" rx="1.5"/></svg>
+      <span>概览</span>
+    </button>
+    <button class="nav-item active" type="button" aria-current="page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.5v5.5M14.5 17.2h5.5"/></svg>
+      <span>集成</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.14-2.9-.4L4 21l1.2-3.6C3.8 16.1 3 13.9 3 11.5 3 7.4 7 4 12 4s9 3.4 9 7.5z"/></svg>
+      <span>记录</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M6.3 6.3l2.8 2.8M3 12h4M17.7 6.3l-2.8 2.8M21 12h-4"/><circle cx="12" cy="15" r="5.5"/><path d="M9.8 14.8a2.6 2.6 0 0 1 2-2.2M12 20.5v.01"/></svg>
+      <span>智能问数</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="6" r="2"/><circle cx="18.5" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><path d="M7.3 7.2 10 10.2M16.8 6.3l-3 4M13.8 13.6l3.2 3.4"/><circle cx="18.5" cy="19" r="2"/></svg>
+      <span>知识库</span>
+    </button>
+    <button class="nav-item" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v10.5H9.5L5 19.5v-4H4z"/><path d="M8.5 10.2h.01M12 10.2h.01M15.5 10.2h.01"/></svg>
+      <span>智能客服</span>
+    </button>
+    <button class="nav-item" type="button">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5c1.6 2.1 4 3.2 6.5 3-.3 3.6-1.5 10.4-6.5 14-5-3.6-6.2-10.4-6.5-14 2.5.2 4.9-.9 6.5-3z"/></svg>
+      <span>智能客服-测试</span>
+    </button>
+  </nav>
+  <div class="shell-actions">
+    <span class="svc"><i></i>服务运行中</span>
+  </div>
+</header>
+
+<main class="shell-main">
+  <div class="page-card">
+
+    <!-- 一层 flat-tabs：插件 n/n ｜ MCP 服务 ｜ 模型供应商 + 右侧「说明」 -->
+    <div class="tabs-row">
+      <div class="flat-tabs" role="tablist" aria-label="集成分区">
+        <button class="tab active" type="button" role="tab" aria-selected="true" data-tab="packs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.5v5.5M14.5 17.2h5.5"/></svg>
+          <span>插件</span><span class="tab-count num" id="packCount">3/7</span>
+        </button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="mcp">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5V8M15 3.5V8"/><path d="M5.8 8h12.4v3.2a6.2 6.2 0 0 1-12.4 0z"/><path d="M12 17.4v3.1"/></svg>
+          <span>MCP 服务</span><span class="tab-count num" id="mcpCount">2/2</span>
+        </button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="llm">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18a4.2 4.2 0 0 1-.6-8.36A6 6 0 0 1 18 9.7 3.8 3.8 0 0 1 17.4 18H7z"/></svg>
+          <span>模型供应商</span>
+        </button>
+      </div>
+      <div class="tabs-right">
+        <button class="help-link" type="button" id="helpBtn" aria-expanded="false" aria-label="本页说明">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.9.6c0 1.7-2.5 2-2.5 3.6"/><path d="M12 17h.01"/></svg>
+          说明
+        </button>
+        <div class="help-pop" id="helpPop" hidden role="note">
+          <div id="help-packs">
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.5v5.5M14.5 17.2h5.5"/></svg>插件说明</h3>
+            <ol>
+              <li>卡片开关启停插件，<b>热切换即时生效</b>，无需重启服务。</li>
+              <li>状态标签 <span class="pill st pill-green">已启用</span> <span class="pill st pill-gray">已停用</span> 与开关同步；启用后自动装配工具。</li>
+              <li>连接异常时：打开「设置」检查连接信息，再点「重新检测」。</li>
+            </ol>
+          </div>
+          <div id="help-mcp" hidden>
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5V8M15 3.5V8"/><path d="M5.8 8h12.4v3.2a6.2 6.2 0 0 1-12.4 0z"/><path d="M12 17.4v3.1"/></svg>MCP 服务说明</h3>
+            <ol>
+              <li>登记业务平台的服务地址与认证信息，连接成功后可查看工具清单（行内刷新快照）。</li>
+              <li>「服务说明」要写清该系统提供什么业务——它将作为智能客服里<b>能力分组的标题</b>；工具声明不完整的不会进入对话路由。</li>
+              <li>停用服务即停止调用；对外接入密钥仅用于其他应用连接本系统，请妥善保管。</li>
+            </ol>
+          </div>
+          <div id="help-llm" hidden>
+            <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 18a4.2 4.2 0 0 1-.6-8.36A6 6 0 0 1 18 9.7 3.8 3.8 0 0 1 17.4 18H7z"/></svg>模型供应商说明</h3>
+            <ol>
+              <li>填写主供应商的接口地址、密钥和模型，<b>保存后生效</b>；密钥留空时保留原值。</li>
+              <li>单价用于费用统计，可以不填；「连通性检测」使用已保存的配置。</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Tab 1 · 插件（完整复刻，数据为真实 /api/admin/packs） ═══ -->
+    <section id="panel-packs" role="tabpanel">
+
+      <div class="pk-grid">
+
+        <article class="pk-card" data-on="1" data-title="智能问数">
+          <div class="pk-head">
+            <div class="pk-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 20h15"/><path d="M8 20v-6.5M12 20V9.5M16 20v-4"/></svg>
+            </div>
+            <div class="pk-name-block">
+              <div class="pk-name">智能问数</div>
+              <div class="pk-key">chatbi</div>
+              <div class="pk-tags"><span class="pill st pill-green pk-state">已启用</span></div>
+            </div>
+            <button class="pk-switch" type="button" role="switch" aria-checked="true" aria-label="启停插件：智能问数"><span class="knob"></span></button>
+          </div>
+          <p class="pk-desc">业务数据查询与分析（“查一下上个月 GMV”“各城市订单量对比”“画个趋势图”“换成饼图”等）类需求；需要连接业务数据库做统计分析时路由到本域。追问继承上一轮的查询维度（如“年度呢？”“按日对比”）。</p>
+          <div class="pk-foot">
+            <span class="pk-meta">
+              <span class="pill pill-violet num" title="ask_data、switch_chart、query_stats">3 个工具</span>
+              <span class="pill pill-blue">data</span>
+            </span>
+            <span class="pk-actions">
+              <a class="pk-act" href="#" data-toast="演示：打开「智能问数」设置（声明式表单抽屉）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 7l1.3-2.5A1.8 1.8 0 0 1 6.9 3.5h10.2a1.8 1.8 0 0 1 1.6 1L20 7"/><path d="M6.5 7l1 12.2a1.8 1.8 0 0 0 1.8 1.6h5.4a1.8 1.8 0 0 0 1.8-1.6l1-12.2"/><path d="M10 11.2v5M14 11.2v5"/></svg>设置</a>
+              <a class="pk-act recheck" href="#" data-toast="依赖检测通过：「智能问数」运行正常">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>重新检测</a>
+              <a class="pk-act" href="#" data-toast="演示：跳转「智能问数」管理页">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.8v5M14.7 17.3h5"/></svg>管理页</a>
+            </span>
+          </div>
+        </article>
+
+        <article class="pk-card" data-on="1" data-title="知识库">
+          <div class="pk-head">
+            <div class="pk-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2.1"/><circle cx="5" cy="18" r="2.1"/><circle cx="19" cy="18" r="2.1"/><path d="M10.9 6.8 6.1 16.1M13.1 6.8l4.8 9.3M7.3 18h9.4"/></svg>
+            </div>
+            <div class="pk-name-block">
+              <div class="pk-name">知识库</div>
+              <div class="pk-key">knowledge_graph</div>
+              <div class="pk-tags"><span class="pill st pill-green pk-state">已启用</span></div>
+            </div>
+            <button class="pk-switch" type="button" role="switch" aria-checked="true" aria-label="启停插件：知识库"><span class="knob"></span></button>
+          </div>
+          <p class="pk-desc">知识库/知识图谱的检索与问答（“查一下知识库里”“XX 和 YY 是什么关系”“根据产品手册回答…”）类需求；需要基于已导入文档回答事实性问题时路由到本域。</p>
+          <div class="pk-foot">
+            <span class="pk-meta">
+              <span class="pill pill-violet num" title="kb_search">1 个工具</span>
+              <span class="pill pill-blue">data</span>
+            </span>
+            <span class="pk-actions">
+              <a class="pk-act" href="#" data-toast="演示：打开「知识库」设置（声明式表单抽屉）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 7l1.3-2.5A1.8 1.8 0 0 1 6.9 3.5h10.2a1.8 1.8 0 0 1 1.6 1L20 7"/><path d="M6.5 7l1 12.2a1.8 1.8 0 0 0 1.8 1.6h5.4a1.8 1.8 0 0 0 1.8-1.6l1-12.2"/><path d="M10 11.2v5M14 11.2v5"/></svg>设置</a>
+              <a class="pk-act recheck" href="#" data-toast="依赖检测通过：「知识库」运行正常（pg_vector 就绪）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>重新检测</a>
+              <a class="pk-act" href="#" data-toast="演示：跳转「知识库」管理页">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.8v5M14.7 17.3h5"/></svg>管理页</a>
+            </span>
+          </div>
+        </article>
+
+        <article class="pk-card" data-on="0" data-title="请假申请">
+          <div class="pk-head">
+            <div class="pk-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M9 14.6l2.1 2.1 3.9-4"/></svg>
+            </div>
+            <div class="pk-name-block">
+              <div class="pk-name">请假申请</div>
+              <div class="pk-key">leave_application</div>
+              <div class="pk-tags"><span class="pill st pill-gray pk-state">已停用</span></div>
+            </div>
+            <button class="pk-switch" type="button" role="switch" aria-checked="false" aria-label="启停插件：请假申请"><span class="knob"></span></button>
+          </div>
+          <p class="pk-desc">请假申请的提交与审批状态查询（“帮我请假/查审批进度”类需求）。</p>
+          <div class="pk-foot">
+            <span class="pk-meta">
+              <span class="pill pill-gray" title="插件当前未加载，启用后可见工具清单">-</span>
+              <span class="pill pill-blue">config</span>
+              <span class="pill pill-cyan">leave-system</span>
+            </span>
+            <span class="pk-actions">
+              <a class="pk-act recheck" href="#" data-toast="依赖检测通过（插件处于停用态，打开开关即可启用）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>重新检测</a>
+            </span>
+          </div>
+        </article>
+
+        <article class="pk-card" data-on="1" data-title="智能客服">
+          <div class="pk-head">
+            <div class="pk-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="10.5" rx="3"/><path d="M12 8V5.4"/><circle cx="12" cy="3.9" r="1.3"/><path d="M9.4 12.3h.01M14.6 12.3h.01M9.6 15.3c1.4 1 3.4 1 4.8 0"/></svg>
+            </div>
+            <div class="pk-name-block">
+              <div class="pk-name">智能客服</div>
+              <div class="pk-key">metrology_assistant</div>
+              <div class="pk-tags"><span class="pill st pill-green pk-state">已启用</span></div>
+            </div>
+            <button class="pk-switch" type="button" role="switch" aria-checked="true" aria-label="启停插件：智能客服"><span class="knob"></span></button>
+          </div>
+          <p class="pk-desc">智能客服：根据已接入能力进行知识问答与业务查询，答案遵守资料证据与访问权限。</p>
+          <div class="pk-foot">
+            <span class="pk-meta">
+              <span class="pill pill-violet num" title="metrology_assistant">1 个工具</span>
+              <span class="pill pill-blue">data</span>
+            </span>
+            <span class="pk-actions">
+              <a class="pk-act recheck" href="#" data-toast="依赖检测通过：「智能客服」运行正常（知识库、智能问数就绪）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>重新检测</a>
+              <a class="pk-act" href="#" data-toast="演示：跳转「智能客服」管理页">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.8v5M14.7 17.3h5"/></svg>管理页</a>
+            </span>
+          </div>
+        </article>
+
+        <article class="pk-card" data-on="0" data-title="流程配置">
+          <div class="pk-head">
+            <div class="pk-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="12" r="2.4"/><rect x="14.5" y="3.5" width="6" height="6" rx="1.5"/><rect x="14.5" y="14.5" width="6" height="6" rx="1.5"/><path d="M7.7 10.9l5.5-3.6M7.7 13.1l5.5 3.6"/></svg>
+            </div>
+            <div class="pk-name-block">
+              <div class="pk-name">流程配置</div>
+              <div class="pk-key">njmind_bpm</div>
+              <div class="pk-tags"><span class="pill st pill-gray pk-state">已停用</span></div>
+            </div>
+            <button class="pk-switch" type="button" role="switch" aria-checked="false" aria-label="启停插件：流程配置"><span class="knob"></span></button>
+          </div>
+          <p class="pk-desc">流程/审批流/BPM 流程配置的创建与修改（“做个请假审批流/加个审批节点/改分支条件”类需求）。</p>
+          <div class="pk-foot">
+            <span class="pk-meta">
+              <span class="pill pill-gray" title="插件当前未加载，启用后可见工具清单">-</span>
+              <span class="pill pill-blue">bpm-process</span>
+              <span class="pill pill-cyan">njmind-modeler</span>
+            </span>
+            <span class="pk-actions">
+              <a class="pk-act recheck" href="#" data-toast="依赖检测通过（插件处于停用态，打开开关即可启用）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>重新检测</a>
+            </span>
+          </div>
+        </article>
+
+        <article class="pk-card" data-on="0" data-title="表单建模">
+          <div class="pk-head">
+            <div class="pk-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.8 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h5.4"/><path d="M13.8 3.5V8h4.4"/><path d="M8.5 12h3M8.5 15h2"/><path d="M14.2 20.6l-3.2.9.9-3.2 6.6-6.6 2.3 2.3z"/></svg>
+            </div>
+            <div class="pk-name-block">
+              <div class="pk-name">表单建模</div>
+              <div class="pk-key">njmind_form</div>
+              <div class="pk-tags"><span class="pill st pill-gray pk-state">已停用</span></div>
+            </div>
+            <button class="pk-switch" type="button" role="switch" aria-checked="false" aria-label="启停插件：表单建模"><span class="knob"></span></button>
+          </div>
+          <p class="pk-desc">表单/低代码表单的创建、修改、查询、复制（“加个字段/改必填/做个表单”类需求）。</p>
+          <div class="pk-foot">
+            <span class="pk-meta">
+              <span class="pill pill-gray" title="插件当前未加载，启用后可见工具清单">-</span>
+              <span class="pill pill-blue">form-config</span>
+              <span class="pill pill-cyan">njmind-modeler</span>
+            </span>
+            <span class="pk-actions">
+              <a class="pk-act recheck" href="#" data-toast="依赖检测通过（插件处于停用态，打开开关即可启用）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>重新检测</a>
+            </span>
+          </div>
+        </article>
+
+        <article class="pk-card" data-on="0" data-title="列表配置">
+          <div class="pk-head">
+            <div class="pk-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M3.5 9.2h17"/><path d="M7 12.6h10M7 15.8h6"/></svg>
+            </div>
+            <div class="pk-name-block">
+              <div class="pk-name">列表配置</div>
+              <div class="pk-key">njmind_list</div>
+              <div class="pk-tags"><span class="pill st pill-gray pk-state">已停用</span></div>
+            </div>
+            <button class="pk-switch" type="button" role="switch" aria-checked="false" aria-label="启停插件：列表配置"><span class="knob"></span></button>
+          </div>
+          <p class="pk-desc">列表页配置/列表设计（“做个设备台账列表/加一列/加导出按钮/只看今年数据”类需求）。</p>
+          <div class="pk-foot">
+            <span class="pk-meta">
+              <span class="pill pill-gray" title="插件当前未加载，启用后可见工具清单">-</span>
+              <span class="pill pill-blue">list-config</span>
+              <span class="pill pill-cyan">njmind-modeler</span>
+            </span>
+            <span class="pk-actions">
+              <a class="pk-act recheck" href="#" data-toast="依赖检测通过（插件处于停用态，打开开关即可启用）">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>重新检测</a>
+            </span>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- ═══ Tab 2 · MCP 服务（结构复刻，数据为真实 /api/admin/mcp/servers） ═══ -->
+    <section id="panel-mcp" role="tabpanel" hidden>
+      <div class="mcp-toolbar">
+        <span class="mcp-count">
+          <span class="num">共 2 个服务</span>
+          <span class="pill st pill-green">对外 MCP 已启用</span>
+          <code class="mcp-endpoint" title="对外接入端点（外部 AI 工具连本系统）">http://localhost:13080/ai-modeler/api/mcp</code>
+          <span class="mcp-key-box">
+            <input class="mcp-key-input" type="password" value="EZ0gzEy2douRvRIwn86G6iwUYssF86xp" readonly aria-label="对外接入 Key（已脱敏）">
+            <button class="icon-btn" type="button" data-toast="已复制接入 Key" title="复制 Key" aria-label="复制 Key">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M5.5 15.5h-1a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+            <button class="icon-btn" type="button" data-toast="演示：已生成新 Key（旧 Key 约 5 秒内失效）" title="刷新 Key（旧 Key 约 5 秒内失效）" aria-label="刷新 Key">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>
+            </button>
+          </span>
+        </span>
+        <button class="btn-primary" type="button" data-toast="演示：注册 MCP 服务（名称 / 标识 / URL / 认证头）">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+          注册外部服务
+        </button>
+      </div>
+
+      <table class="mcp-table">
+        <thead>
+          <tr><th>名称</th><th>标识</th><th>URL</th><th>状态</th><th>工具数</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+          <tr data-on="1" data-title="计量业务平台(演示)">
+            <td><div class="mcp-name">计量业务平台(演示)</div></td>
+            <td class="mcp-code">metrology</td>
+            <td class="mcp-url" title="http://127.0.0.1:9771/mcp">http://127.0.0.1:9771/mcp</td>
+            <td><span class="pill st pill-orange" title="上次探测失败，保持待连接">待连接</span></td>
+            <td>
+              <span class="mcp-cell-tools">
+                <span class="pill pill-violet num" title="query_progress、query_instrument、query_turnaround 等 14 个工具">14 个工具</span>
+                <span class="pill pill-red num" title="query_legacy_entry、query_tmp_debug 描述缺失，不进入对话路由">2 声明不完整</span>
+              </span>
+            </td>
+            <td>
+              <span class="mcp-ops">
+                <button class="pk-switch sm" type="button" role="switch" aria-checked="true" aria-label="启停服务：计量业务平台(演示)"><span class="knob"></span></button>
+                <span class="icon-group">
+                  <button class="icon-btn" type="button" data-toast="演示：刷新快照（重新探测）" title="刷新快照（重新探测）" aria-label="刷新快照">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>
+                  </button>
+                  <button class="icon-btn" type="button" data-toast="演示：编辑「计量业务平台(演示)」" title="编辑" aria-label="编辑">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.2 20.6l-3.2.9.9-3.2 6.6-6.6 2.3 2.3z"/><path d="M4 20h5"/></svg>
+                  </button>
+                  <button class="icon-btn danger" type="button" data-toast="演示：删除「计量业务平台(演示)」确认框" title="删除" aria-label="删除">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 7l1.3-2.5A1.8 1.8 0 0 1 6.9 3.5h10.2a1.8 1.8 0 0 1 1.6 1L20 7"/><path d="M6.5 7l1 12.2a1.8 1.8 0 0 0 1.8 1.6h5.4a1.8 1.8 0 0 0 1.8-1.6l1-12.2"/><path d="M10 11.2v5M14 11.2v5"/></svg>
+                  </button>
+                </span>
+              </span>
+            </td>
+          </tr>
+          <tr data-on="1" data-title="设备管理平台">
+            <td><div class="mcp-name">设备管理平台</div></td>
+            <td class="mcp-code">equipment</td>
+            <td class="mcp-url" title="http://127.0.0.1:9772/mcp">http://127.0.0.1:9772/mcp</td>
+            <td><span class="pill st pill-orange" title="上次探测失败，保持待连接">待连接</span></td>
+            <td>
+              <span class="mcp-cell-tools">
+                <span class="pill pill-violet num" title="query_equipment_status、query_equipment_list、query_calibration_due">3 个工具</span>
+              </span>
+            </td>
+            <td>
+              <span class="mcp-ops">
+                <button class="pk-switch sm" type="button" role="switch" aria-checked="true" aria-label="启停服务：设备管理平台"><span class="knob"></span></button>
+                <span class="icon-group">
+                  <button class="icon-btn" type="button" data-toast="演示：刷新快照（重新探测）" title="刷新快照（重新探测）" aria-label="刷新快照">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.4-5.7"/><path d="M20 3.8V8h-4.2"/></svg>
+                  </button>
+                  <button class="icon-btn" type="button" data-toast="演示：编辑「设备管理平台」" title="编辑" aria-label="编辑">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.2 20.6l-3.2.9.9-3.2 6.6-6.6 2.3 2.3z"/><path d="M4 20h5"/></svg>
+                  </button>
+                  <button class="icon-btn danger" type="button" data-toast="演示：删除「设备管理平台」确认框" title="删除" aria-label="删除">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 7l1.3-2.5A1.8 1.8 0 0 1 6.9 3.5h10.2a1.8 1.8 0 0 1 1.6 1L20 7"/><path d="M6.5 7l1 12.2a1.8 1.8 0 0 0 1.8 1.6h5.4a1.8 1.8 0 0 0 1.8-1.6l1-12.2"/><path d="M10 11.2v5M14 11.2v5"/></svg>
+                  </button>
+                </span>
+              </span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ═══ Tab 3 · 模型供应商（结构复刻，数据为真实 /api/admin/llm-providers） ═══ -->
+    <section id="panel-llm" role="tabpanel" hidden>
+      <div class="lp-card">
+        <header class="lp-card-head">
+          <div class="lp-provider-heading">主供应商 <span class="pill st pill-green">已配置</span></div>
+          <button class="pk-switch" type="button" role="switch" aria-checked="true" aria-label="启停主供应商" id="lpSwitch"><span class="knob"></span></button>
+        </header>
+        <label class="lp-field"><span>Base URL</span>
+          <input type="text" class="lp-input" data-init="http://996code.top:18080/v1" value="http://996code.top:18080/v1" placeholder="https://api.example.com/v1">
+        </label>
+        <label class="lp-field"><span>API Key <em class="lp-hint">已配置（留空 = 不修改）</em></span>
+          <input type="password" class="lp-input" data-init="" value="" placeholder="留空 = 沿用已存密钥">
+        </label>
+        <label class="lp-field"><span>模型</span>
+          <input type="text" class="lp-input" data-init="qwen3.7-plus" value="qwen3.7-plus" placeholder="qwen3.7-plus">
+        </label>
+        <div class="lp-row">
+          <label class="lp-field"><span>输入单价（元/千 token）</span>
+            <input type="text" class="lp-input" data-init="" value="" placeholder="可空">
+          </label>
+          <label class="lp-field"><span>输出单价（元/千 token）</span>
+            <input type="text" class="lp-input" data-init="" value="" placeholder="可空">
+          </label>
+        </div>
+        <div class="lp-foot" style="border-top:1px solid var(--line-soft); padding-top:14px;">
+          <button class="btn-primary" type="button" id="lpSave" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5.5A1.5 1.5 0 0 1 6.5 4h9L19 7.5v11A1.5 1.5 0 0 1 17.5 20h-11A1.5 1.5 0 0 1 5 18.5z"/><path d="M8.5 4v4H15"/><path d="M8.5 13.5h7M8.5 16.5h4"/></svg>
+            保存
+          </button>
+          <button class="btn-ghost" type="button" id="lpDiscard" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.4-5.7"/><path d="M4 3.8V8h4.2"/></svg>
+            放弃修改
+          </button>
+          <button class="btn-ghost" type="button" id="lpProbe">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3.5V8M15 3.5V8"/><path d="M5.8 8h12.4v3.2a6.2 6.2 0 0 1-12.4 0z"/><path d="M12 17.4v3.1"/></svg>
+            检测连接
+          </button>
+          <span class="lp-pending" id="lpPending" hidden>有未保存修改</span>
+        </div>
+        <div class="lp-probe" id="lpProbeResult">
+          <div class="lp-probe-row"><span class="num">primary · http://996code.top:18080/v1</span><span class="ok num">可达 236 ms</span></div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+  <footer class="shell-footer">LLM Form Modeler Admin · v0.4.0</footer>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+
+  /* ── 轻提示 ── */
+  var toastEl = $('toast'), toastTimer = null;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2000);
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-toast]');
+    if (t) { e.preventDefault(); toast(t.getAttribute('data-toast')); }
+  });
+
+  /* ── Tab 切换 ── */
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('.flat-tabs .tab'));
+  var panels = { packs: $('panel-packs'), mcp: $('panel-mcp'), llm: $('panel-llm') };
+  var helps = { packs: $('help-packs'), mcp: $('help-mcp'), llm: $('help-llm') };
+  var pop = $('helpPop'), helpBtn = $('helpBtn');
+  var activeTab = 'packs';
+
+  function closeHelp() { pop.hidden = true; helpBtn.setAttribute('aria-expanded', 'false'); }
+  function switchTab(key) {
+    activeTab = key;
+    tabs.forEach(function (t) {
+      var on = t.dataset.tab === key;
+      t.classList.toggle('active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    Object.keys(panels).forEach(function (k) { panels[k].hidden = k !== key; });
+    Object.keys(helps).forEach(function (k) { helps[k].hidden = k !== key; });
+  }
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () { switchTab(t.dataset.tab); });
+  });
+
+  helpBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    pop.hidden = !pop.hidden;
+    helpBtn.setAttribute('aria-expanded', pop.hidden ? 'false' : 'true');
+  });
+  pop.addEventListener('click', function (e) { e.stopPropagation(); });
+  document.addEventListener('click', function (e) {
+    if (!pop.hidden && !pop.contains(e.target)) closeHelp();
+  });
+
+  /* ── 插件开关：卡片灰化 + 状态胶囊 + tab 计数联动 ── */
+  var packCount = $('packCount');
+  function refreshPackCount() {
+    var cards = document.querySelectorAll('#panel-packs .pk-card');
+    var on = 0;
+    cards.forEach(function (c) { if (c.dataset.on === '1') on++; });
+    packCount.textContent = on + '/' + cards.length;
+  }
+  document.querySelectorAll('#panel-packs .pk-switch').forEach(function (sw) {
+    sw.addEventListener('click', function () {
+      var on = sw.getAttribute('aria-checked') !== 'true';
+      sw.setAttribute('aria-checked', on ? 'true' : 'false');
+      var card = sw.closest('.pk-card');
+      card.dataset.on = on ? '1' : '0';
+      card.classList.toggle('off', !on);
+      var pill = card.querySelector('.pk-state');
+      pill.textContent = on ? '已启用' : '已停用';
+      pill.className = 'pill st pk-state ' + (on ? 'pill-green' : 'pill-gray');
+      refreshPackCount();
+      toast((on ? '已启用' : '已停用') + '「' + card.dataset.title + '」，热切换即时生效');
+    });
+  });
+
+  /* ── MCP 行内开关：行灰化 + 计数联动 ── */
+  var mcpCount = $('mcpCount');
+  function refreshMcpCount() {
+    var rows = document.querySelectorAll('#panel-mcp tbody tr');
+    var on = 0;
+    rows.forEach(function (r) { if (r.dataset.on === '1') on++; });
+    mcpCount.textContent = on + '/' + rows.length;
+  }
+  document.querySelectorAll('#panel-mcp .pk-switch').forEach(function (sw) {
+    sw.addEventListener('click', function () {
+      var on = sw.getAttribute('aria-checked') !== 'true';
+      sw.setAttribute('aria-checked', on ? 'true' : 'false');
+      var row = sw.closest('tr');
+      row.dataset.on = on ? '1' : '0';
+      row.classList.toggle('off', !on);
+      refreshMcpCount();
+      toast((on ? '已启用' : '已停用') + '「' + row.dataset.title + '」，' + (on ? '恢复调用' : '停止调用'));
+    });
+  });
+
+  /* ── 重新检测：图标旋转反馈 ── */
+  document.querySelectorAll('a.recheck').forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      var svg = a.querySelector('svg');
+      svg.classList.remove('spinning');
+      void svg.offsetWidth;             /* 重启动画 */
+      svg.classList.add('spinning');
+    });
+  });
+
+  /* ── 模型供应商：脏标记 + 放弃/保存/检测 ── */
+  var lpSave = $('lpSave'), lpDiscard = $('lpDiscard'), lpPending = $('lpPending');
+  var lpInputs = document.querySelectorAll('#panel-llm .lp-input');
+  function setDirty(d) {
+    lpSave.disabled = !d;
+    lpDiscard.disabled = !d;
+    lpPending.hidden = !d;
+  }
+  lpInputs.forEach(function (inp) {
+    inp.addEventListener('input', function () { setDirty(true); });
+  });
+  lpDiscard.addEventListener('click', function () {
+    lpInputs.forEach(function (inp) { inp.value = inp.dataset.init; });
+    setDirty(false);
+    $('lpProbeResult').classList.remove('show');
+    toast('已放弃修改');
+  });
+  lpSave.addEventListener('click', function () {
+    setDirty(false);
+    toast('已保存，下一次 LLM 调用生效');
+  });
+  $('lpProbe').addEventListener('click', function () {
+    var btn = $('lpProbe'), svg = btn.querySelector('svg');
+    btn.disabled = true;
+    svg.classList.remove('spinning');
+    void svg.offsetWidth;
+    svg.classList.add('spinning');
+    setTimeout(function () {
+      btn.disabled = false;
+      $('lpProbeResult').classList.add('show');
+      toast('连通性检测完成');
+    }, 700);
+  });
+  $('lpSwitch').addEventListener('click', function () {
+    var on = this.getAttribute('aria-checked') !== 'true';
+    this.setAttribute('aria-checked', on ? 'true' : 'false');
+    setDirty(true);
+    toast(on ? '主供应商已启用（未保存）' : '主供应商已停用（未保存）');
+  });
+})();
+</script>
+</body>
+</html>

@@ -11,13 +11,14 @@
   GET  /api/tasks/{id}                → 任务详情(进度/结果/错误)
   GET  /api/tasks/{id}/logs?after=    → 日志回放(id 游标,断线补齐)
   POST /api/tasks/{id}/cancel         → 请求取消(pending 直接取消;running 协作式)
+  POST /api/tasks/batch-cancel        → 批量取消(逐个走同一取消语义,幂等)
   GET  /api/tasks/{id}/events         → SSE 实时事件流(snapshot/progress/log/status)
 """
 import asyncio
 import logging
 import queue
 import threading
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -92,6 +93,37 @@ async def cancel_task(task_id: str, request: Request):
     if task is None:
         raise HTTPException(404, "Task not found")
     return task
+
+
+@router.post("/batch-cancel")
+async def batch_cancel_tasks(request: Request, payload: Dict[str, Any]):
+    """批量取消:逐个走 manager.cancel(同单取消语义:pending 直接收尾,
+    running 置协作标志,已终态幂等跳过)。单次上限 200 个。
+
+    Body: {ids: [task_id, ...]} → {items: [{id, ok, status}]}
+    """
+    ids = (payload or {}).get("ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(422, "ids 必须是非空数组")
+    if len(ids) > 200:
+        raise HTTPException(422, "单次最多取消 200 个任务")
+    if any(not isinstance(i, str) or not i.strip() for i in ids):
+        raise HTTPException(422, "ids 必须是任务 id 数组")
+    manager = request.app.state.task_manager
+    items: List[Dict[str, Any]] = []
+    for task_id in dict.fromkeys(ids):  # 去重保序
+        try:
+            task = manager.cancel(task_id)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"batch cancel failed for {task_id}")
+            items.append({"id": task_id, "ok": False, "error": str(e)[:120]})
+            continue
+        if task is None:
+            items.append({"id": task_id, "ok": False, "error": "not_found"})
+        else:
+            # 终态=无需取消(幂等成功);pending/running/retry_scheduled=已受理
+            items.append({"id": task_id, "ok": True, "status": task["status"]})
+    return {"items": items}
 
 
 @router.get("/{task_id}/events")

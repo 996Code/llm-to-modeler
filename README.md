@@ -33,7 +33,7 @@
 
 ![委托单进度](doc/test-evidence/2026-10-31-9922-full-test/13-progress-normal.png)
 
-**知识库管理** —— 库树/文档导入/图谱浏览/检索测试/数据权限，任务中心断点续跑：
+**知识库管理** —— 库树/文档导入/图谱浏览/检索测试，任务中心断点续跑：
 
 ![知识库管理页](doc/test-evidence/2026-10-31-9922-full-test/18-kb-page.png)
 
@@ -83,7 +83,7 @@ Adapters(HttpAssetClient) → 上游业务 API / LLM 推理服务
 | 插件 | 能力 |
 |---|---|
 | njmind_form | 自然语言 → 表单配置：创建（6 步）/ 增量修改（指令集主路径 ~4s）/ 图片识别 / 克隆 / 查询 |
-| knowledge_graph | 文档导入 → 图谱+向量双写；混合检索问答带片段引用；实体消歧；检索 ACL（全能力形态示范） |
+| knowledge_graph | 文档导入 → 图谱+向量双写；混合检索问答带片段引用；实体消歧 |
 | chatbi | NL2SQL+图表：语义层/SQL 自愈/三层校验/记忆/反馈闭环（全能力形态） |
 | metrology_assistant | 计量智能客服：场景表（DB 覆盖∪MCP 声明自动合成）路由，价目/检测时限/资质/强检判定/进度查询 |
 | njmind_bpm / njmind_list | 审批流 / 列表页配置（上游走 njmind-modeler 纯计算端点） |
@@ -94,8 +94,8 @@ Adapters(HttpAssetClient) → 上游业务 API / LLM 推理服务
 ## 快速开始
 
 **环境要求**：Python 3.12+、Node.js 20+、PostgreSQL + pgvector（图谱与向量均在平台 PG，无独立图数据库）。
-环境变量以 [.env.example](.env.example) 为准。LLM 端点、密钥和主备模型在
-管理端「插件 → 模型供应商」配置，未配置时 LLM 调用明确报错。
+环境变量以 [.env.example](.env.example) 为准。LLM 端点、密钥和模型在
+管理端「插件 → 模型供应商」配置（单主端点），未配置时 LLM 调用明确报错。
 
 ```env
 # 裸机开发：必填，不能与 pytest 专用测试库共用

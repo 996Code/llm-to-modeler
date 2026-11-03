@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>精装稿 · 全站铺开（飞书式企业风）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#141518; font-family:-apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:#E8E9EA; padding:36px 44px 72px; }
+  header { max-width:1360px; margin:0 auto 26px; }
+  header h1 { font-size:24px; font-weight:700; }
+  header p { font-size:14.5px; color:#9BA0A5; margin-top:8px; line-height:1.75; }
+  header p b { color:#E8E9EA; font-weight:600; }
+  .layout { max-width:1360px; margin:0 auto; display:grid; grid-template-columns:240px 1fr; gap:20px; align-items:start; }
+  .pages { display:flex; flex-direction:column; gap:8px; }
+  .pg { text-align:left; border:1px solid #2A2D30; background:#1A1C1F; color:#9BA0A5; border-radius:10px; padding:14px 16px; cursor:pointer; font-family:inherit; transition:border-color .15s,color .15s,background .15s; }
+  .pg:hover { color:#E8E9EA; border-color:#3A3E42; }
+  .pg.on { border-color:#3370FF; background:#1B2437; color:#fff; }
+  .pg b { display:block; font-size:15px; font-weight:600; color:inherit; }
+  .pg span { display:block; font-size:12.5px; margin-top:3px; color:#7E8286; }
+  .pg.on span { color:#A9C0F5; }
+  .pg .ok { display:inline-block; font-size:11.5px; color:#5BD07A; border:1px solid #2C5E3B; border-radius:99px; padding:1px 8px; margin-left:6px; vertical-align:1px; }
+  .stage { border:1px solid #2A2D30; border-radius:12px; overflow:hidden; background:#0C0D0E; position:relative; }
+  .scaler { width:1440px; height:900px; transform-origin:0 0; }
+  .scaler iframe { width:1440px; height:900px; border:0; display:block; background:#fff; }
+  .openbar { display:flex; align-items:center; gap:12px; margin-top:12px; }
+  .openbar a { color:#8FB0FF; font-size:14px; text-decoration:none; border:1px solid #33383D; padding:8px 16px; border-radius:8px; }
+  .openbar a:hover { border-color:#8FB0FF; }
+  .openbar span { font-size:13.5px; color:#7E8286; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>精装稿 · 全站铺开</h1>
+  <p>同一套已通过的风格（唯一品牌蓝、卡片微影层级、14px 字级、线性图标+淡彩底），铺到其余真实页面——<b>每页布局、功能、数据与现有系统一比一</b>，只动皮肤。左侧选页面，右侧实时预览。</p>
+</header>
+
+<div class="layout">
+  <nav class="pages" aria-label="页面选择">
+    <button class="pg on" data-src="polished-v1.html" type="button"><b>管理端 · 概览<i class="ok">已确认</i></b><span>九卡统计 · 风格基准页</span></button>
+    <button class="pg" data-src="polished-packs.html" type="button"><b>管理端 · 集成</b><span>插件卡网格 / MCP / 供应商</span></button>
+    <button class="pg" data-src="polished-records.html" type="button"><b>管理端 · 记录</b><span>筛选栏 + 会话表格</span></button>
+    <button class="pg" data-src="polished-kb.html" type="button"><b>管理端 · 知识库</b><span>库树 + 文档管理</span></button>
+    <button class="pg" data-src="polished-chat.html" type="button"><b>聊天端 · 主界面</b><span>三栏：会话 / 对话流 / 结果面板</span></button>
+  </nav>
+
+  <div>
+    <div class="stage"><div class="scaler" id="scaler">
+      <iframe id="frame" src="polished-v1.html" title="页面预览"></iframe>
+    </div></div>
+    <div class="openbar">
+      <a id="openLink" href="polished-v1.html" target="_blank">全屏打开当前页</a>
+      <span id="openNote">概览页已确认；其余四页确认后铺到 frontend/src 真实代码</span>
+    </div>
+  </div>
+</div>
+
+<script>
+  var notes = {
+    'polished-v1.html': '概览页已确认；其余四页确认后铺到 frontend/src 真实代码',
+    'polished-packs.html': '插件卡：每插件独立线性图标，开关热启停并联动计数',
+    'polished-records.html': '表格页范式：筛选栏 + 表头 + 行 hover + sticky 分页',
+    'polished-kb.html': '树 + 表双栏范式：库树高亮、文档状态胶囊',
+    'polished-chat.html': '聊天端：助手消息去卡片框改文档流，气泡用品牌蓝深阶保对比'
+  };
+  var frame = document.getElementById('frame');
+  var link = document.getElementById('openLink');
+  var note = document.getElementById('openNote');
+  document.querySelectorAll('.pg').forEach(function (b) {
+    b.addEventListener('click', function () {
+      document.querySelectorAll('.pg').forEach(function (x) { x.classList.remove('on'); });
+      b.classList.add('on');
+      frame.src = b.dataset.src;
+      link.href = b.dataset.src;
+      note.textContent = notes[b.dataset.src] || '';
+    });
+  });
+  function fit() {
+    var stage = document.querySelector('.stage');
+    var s = stage.clientWidth / 1440;
+    document.getElementById('scaler').style.transform = 'scale(' + s + ')';
+    stage.style.height = (900 * s) + 'px';
+  }
+  window.addEventListener('resize', fit);
+  fit();
+</script>
+</body>
+</html>

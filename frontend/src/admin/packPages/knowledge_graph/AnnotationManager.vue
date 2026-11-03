@@ -144,7 +144,7 @@ async function remove(r: KgAnnotation) {
 .anno-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
 .anno-title { font-weight: 600; font-size: 16px; color: #1f2937; }
 .anno-info { color: #94a3b8; cursor: pointer; }
-.anno-info:hover { color: #2f54eb; }
+.anno-info:hover { color: var(--brand-ink); }
 .anno-tip { max-width: 330px; font-size: 12px; line-height: 1.8; color: #4b5563; }
 .anno-tip p { margin: 0; }
 .anno-q { color: #1f2937; font-weight: 500; }

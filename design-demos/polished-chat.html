@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智能助手 · LLM Form Modeler 聊天端（精装复刻稿）</title>
+<style>
+  /* ============================================================
+     聊天端精装复刻稿 · 与 polished-v1.html 同一风格体系
+     结构复刻自 StandaloneLayout.vue + ChatPanel.vue + ChatInput.vue
+     布局：左 248px 会话侧栏 | 中间聊天区 | 右 40%（≤560px）结果面板
+     会话标题与消息内容均为 127.0.0.1:18080 真实数据（2026-11-03 抓取）
+     ============================================================ */
+  :root {
+    --blue: #3370FF;          /* 唯一品牌蓝（图标/装饰/交互色） */
+    --blue-ink: #2B5FE0;      /* 品牌蓝·文字深阶（白字承载面用此底，保 4.5:1） */
+    --blue-deep: #1E4FC4;     /* 主色按钮 hover 深阶 */
+    --blue-tint: #EAF0FF;
+    --blue-tint-2: #F2F6FF;
+    --ink: #1F2329;           /* 主文字 */
+    --ink-2: #4E5969;         /* 次要 */
+    --ink-3: #626B75;         /* 弱化（白/浅灰底均 ≥4.5:1） */
+    --line: #E5E6EB;
+    --line-soft: #EFF1F4;
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --radius: 12px;
+    --shadow-rest: 0 1px 2px rgba(31, 35, 41, .04);
+    --shadow-lift: 0 6px 16px rgba(31, 35, 41, .09);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    color: var(--ink);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  button { font-family: inherit; }
+  button:focus-visible, textarea:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .num { font-variant-numeric: tabular-nums; }
+  svg { display: block; }
+
+  .app { height: 100vh; min-width: 1220px; display: flex; }
+
+  /* ══════════════ 左侧栏 248px（复刻 .sider） ══════════════ */
+  .sider {
+    width: 248px; flex-shrink: 0;
+    background: var(--card);
+    border-right: 1px solid var(--line);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .sider-header { padding: 16px 16px 14px; border-bottom: 1px solid var(--line-soft); }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .brand-mark {
+    width: 34px; height: 34px; border-radius: 10px;
+    background: var(--blue-ink);
+    color: #fff;
+    font-size: 15px; font-weight: 700; letter-spacing: .02em;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .brand-name { font-size: 15px; font-weight: 600; color: var(--ink); }
+  .new-btn {
+    width: 100%; height: 44px;
+    border: none; border-radius: 10px;
+    background: var(--blue-ink);
+    color: #fff;
+    font-size: 14.5px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center; gap: 7px;
+    cursor: pointer;
+    transition: background .15s, box-shadow .15s, transform .15s;
+  }
+  .new-btn svg { width: 15px; height: 15px; }
+  .new-btn:hover { background: var(--blue-deep); box-shadow: 0 4px 12px rgba(43, 95, 224, .28); }
+  .new-btn:active { transform: translateY(1px); box-shadow: none; }
+
+  .conv-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .conv-list::-webkit-scrollbar { width: 6px; }
+  .conv-list::-webkit-scrollbar-thumb { background: #D8DBE0; border-radius: 3px; }
+  .conv-list-title {
+    font-size: 12px; color: var(--ink-3);
+    padding: 8px 10px 6px; font-weight: 500;
+  }
+  .conv-item {
+    padding: 8px 10px 7px;
+    border-radius: 10px;
+    cursor: pointer;
+    min-height: 48px;
+    margin-bottom: 2px;
+    transition: background .15s;
+  }
+  .conv-item:hover { background: var(--blue-tint-2); }
+  .conv-item.active { background: var(--blue-tint); }
+  .conv-line1 { display: flex; align-items: center; gap: 8px; }
+  .conv-line1 > svg { width: 14px; height: 14px; flex-shrink: 0; color: var(--ink-3); }
+  .conv-item.active .conv-line1 > svg { color: var(--blue-ink); }
+  .conv-title {
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 14px; color: var(--ink-2);
+  }
+  .conv-item.active .conv-title { color: var(--blue-ink); font-weight: 600; }
+  .conv-del {
+    border: none; background: transparent; padding: 3px;
+    color: var(--ink-3); border-radius: 6px;
+    display: flex; cursor: pointer;
+    opacity: 0; transition: opacity .15s, color .15s, background .15s;
+  }
+  .conv-item:hover .conv-del { opacity: .75; }
+  .conv-del:hover { opacity: 1; color: #D83931; background: #FDEDED; }
+  .conv-del svg { width: 13px; height: 13px; }
+  .conv-time { font-size: 12px; color: var(--ink-3); margin: 3px 0 0 22px; }
+
+  /* ══════════════ 中间聊天区（复刻 .main-area / .chat-panel） ══════════════ */
+  .chat-area {
+    flex: 1; min-width: 0;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+  }
+  .chat-top {
+    height: 56px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--line-soft);
+    background: rgba(255, 255, 255, .6);
+  }
+  .chat-title {
+    font-size: 15px; font-weight: 650; color: var(--ink);
+    letter-spacing: .01em;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .plugin-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    flex-shrink: 0;
+    font-size: 12.5px; font-weight: 500;
+    color: var(--blue-ink);
+    background: var(--blue-tint);
+    border: 1px solid #DCE6FF;
+    border-radius: 999px;
+    padding: 4px 12px 4px 9px;
+  }
+  .plugin-pill svg { width: 13px; height: 13px; }
+
+  .msg-flow { flex: 1; overflow-y: auto; }
+  .msg-flow::-webkit-scrollbar { width: 8px; }
+  .msg-flow::-webkit-scrollbar-thumb { background: #DDDFE4; border-radius: 4px; border: 2px solid var(--bg); }
+  .msg-col { max-width: 880px; margin: 0 auto; padding: 28px 32px 20px; }
+
+  /* 用户消息：品牌蓝（深阶底保对比度）气泡白字，右上角小直角 */
+  .message-row { display: flex; margin-bottom: 26px; }
+  .user-row { justify-content: flex-end; }
+  .user-bubble {
+    max-width: 76%;
+    background: var(--blue-ink);
+    color: #fff;
+    font-size: 14.5px; line-height: 1.7;
+    padding: 10px 14px;
+    border-radius: 12px;
+    border-top-right-radius: 4px;
+    box-shadow: var(--shadow-rest);
+    word-break: break-word;
+  }
+
+  /* 助手消息：白色气泡（与原系统卡片感同源、精装化）+ 28px 机器人头像 */
+  .assistant-row { align-items: flex-start; gap: 12px; }
+  .bot-avatar {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: var(--blue-tint); color: var(--blue);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .bot-avatar svg { width: 16px; height: 16px; }
+  .bot-bubble {
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    border-top-left-radius: 4px;
+    box-shadow: var(--shadow-rest);
+    padding: 12px 16px;
+    max-width: 100%;
+    display: inline-block;
+    vertical-align: top;
+    text-align: left;
+  }
+  .msg-body { flex: 1; min-width: 0; }
+  .msg-text { font-size: 14.5px; line-height: 1.75; color: var(--ink); }
+  .msg-text p + p { margin-top: 10px; }
+  .line-label { font-weight: 650; color: var(--blue-ink); margin-right: 2px; }
+  .chunk-badge {
+    display: inline-flex; align-items: center;
+    font-size: 12px; line-height: 1;
+    color: var(--blue-ink);
+    background: var(--blue-tint);
+    border-radius: 4px;
+    padding: 3px 6px;
+    margin: 0 2px;
+    vertical-align: 1px;
+    cursor: default;
+  }
+  .demo-badge {
+    display: inline-flex; align-items: center;
+    font-size: 12px; line-height: 1;
+    color: #8A5A00;
+    background: #FDF0E1;
+    border-radius: 4px;
+    padding: 3px 6px;
+    margin-right: 6px;
+    vertical-align: 1px;
+  }
+
+  /* 消息底部小操作行（复制/链路） */
+  .msg-acts {
+    display: flex; align-items: center; gap: 4px;
+    margin-top: 8px;
+  }
+  .act-btn {
+    display: inline-flex; align-items: center; gap: 5px;
+    border: none; background: transparent;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    padding: 6px 9px; min-height: 32px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: color .15s, background .15s;
+  }
+  .act-btn:hover { color: var(--blue-ink); background: var(--blue-tint-2); }
+  .act-btn svg { width: 13px; height: 13px; }
+
+  /* 打字中指示 */
+  .typing-dots { display: inline-flex; gap: 4px; padding: 8px 0 4px; }
+  .typing-dots i {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #A8B0BC;
+    animation: bounce 1.1s ease-in-out infinite;
+  }
+  .typing-dots i:nth-child(2) { animation-delay: .15s; }
+  .typing-dots i:nth-child(3) { animation-delay: .3s; }
+  @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-4px); opacity: 1; } }
+
+  /* 欢迎态（复刻 .welcome，文案取 ChatPanel 缺省值） */
+  .welcome {
+    padding: 108px 24px 40px;
+    text-align: center;
+  }
+  .welcome-logo {
+    width: 56px; height: 56px; border-radius: 16px;
+    background: var(--blue-tint); color: var(--blue);
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 18px;
+  }
+  .welcome-logo svg { width: 28px; height: 28px; }
+  .welcome-title { font-size: 22px; font-weight: 700; color: var(--ink); letter-spacing: .01em; }
+  .welcome-subtitle { font-size: 14px; color: var(--ink-2); margin-top: 8px; }
+
+  /* ══════════════ 底部输入区（复刻 .chat-input-wrap） ══════════════ */
+  .composer { flex-shrink: 0; padding: 12px 32px 10px; }
+  .composer-box {
+    max-width: 880px; margin: 0 auto;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-rest);
+    padding: 6px 8px 8px 6px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .composer-box:focus-within {
+    border-color: var(--blue);
+    box-shadow: 0 0 0 3px rgba(51, 112, 255, .12), var(--shadow-rest);
+  }
+  .composer-box textarea {
+    display: block; width: 100%;
+    border: none; outline: none; resize: none;
+    font-family: inherit;
+    font-size: 14.5px; line-height: 1.6;
+    color: var(--ink);
+    padding: 9px 10px 2px;
+    min-height: 44px;
+    max-height: 120px;
+    background: transparent;
+  }
+  .composer-box textarea::placeholder { color: var(--ink-3); }
+  .composer-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 2px 4px 0 10px;
+  }
+  .enter-hint { font-size: 13px; color: var(--ink-3); }
+  .enter-hint kbd {
+    font-family: inherit; font-size: 12px;
+    background: var(--line-soft); border-radius: 4px;
+    padding: 1px 5px; margin: 0 1px;
+  }
+  .send-btn {
+    width: 44px; height: 44px;
+    border: none; border-radius: 10px;
+    background: var(--blue-ink);
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: background .15s, transform .12s, box-shadow .15s;
+  }
+  .send-btn svg { width: 17px; height: 17px; margin-left: 2px; }
+  .send-btn:hover:not(:disabled) { background: var(--blue-deep); box-shadow: 0 4px 12px rgba(43, 95, 224, .3); }
+  .send-btn:active:not(:disabled) { transform: scale(.96); }
+  .send-btn:disabled { background: #C9CED6; cursor: not-allowed; }
+  .composer-foot {
+    max-width: 880px; margin: 8px auto 0;
+    display: flex; justify-content: space-between;
+    font-size: 12.5px; color: var(--ink-2);
+    padding: 0 6px;
+  }
+
+  /* ══════════════ 右侧结果面板（复刻 .json-area，40% ≤560px） ══════════════ */
+  .result-panel {
+    width: 40%; max-width: 560px; flex-shrink: 0;
+    background: var(--card);
+    border-left: 1px solid var(--line);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .rp-head {
+    height: 56px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 16px 0 20px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .rp-icon {
+    width: 26px; height: 26px; border-radius: 8px;
+    background: var(--blue-tint); color: var(--blue);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .rp-icon svg { width: 14px; height: 14px; }
+  .rp-title { font-size: 14px; font-weight: 650; color: var(--ink); }
+  .rp-meta { font-size: 12px; color: var(--ink-3); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rp-copy {
+    display: inline-flex; align-items: center; gap: 5px;
+    border: 1px solid var(--line);
+    background: #fff;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    border-radius: 7px;
+    padding: 5px 10px; min-height: 30px;
+    cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .rp-copy:hover { color: var(--blue-ink); border-color: var(--blue); background: var(--blue-tint-2); }
+  .rp-copy svg { width: 12px; height: 12px; }
+  .rp-body {
+    flex: 1; overflow: auto;
+    padding: 14px 16px 20px;
+  }
+  .rp-body::-webkit-scrollbar { width: 8px; height: 8px; }
+  .rp-body::-webkit-scrollbar-thumb { background: #DDDFE4; border-radius: 4px; }
+  .rp-body.flash { animation: flashbg 1s ease-out; }
+  @keyframes flashbg { 0% { background: var(--blue-tint-2); } 100% { background: #fff; } }
+
+  /* JSON 折叠树：等宽 12.5px，键深蓝、值墨色，缩进连线 */
+  .json-tree {
+    font-family: "SF Mono", Menlo, Consolas, Monaco, "PingFang SC", "Microsoft YaHei", monospace;
+    font-size: 12.5px; line-height: 1.9;
+  }
+  .jt-row {
+    display: flex; align-items: baseline;
+    border: none; background: transparent;
+    font: inherit; color: inherit;
+    width: 100%; text-align: left;
+    padding: 0 4px; border-radius: 5px;
+    cursor: pointer;
+  }
+  .jt-row:hover { background: var(--blue-tint-2); }
+  .jt-caret {
+    width: 14px; height: 14px; flex-shrink: 0;
+    color: #98A0AC;
+    align-self: center;
+    transition: transform .15s;
+  }
+  .jt-node.closed > .jt-row .jt-caret { transform: rotate(-90deg); }
+  .jt-key { color: var(--blue-ink); }
+  .jt-brace { color: var(--ink-3); }
+  .jt-ell { color: var(--ink-3); display: none; padding: 0 3px; }
+  .jt-node.closed > .jt-row .jt-ell { display: inline; }
+  .jt-kids {
+    margin-left: 7px;
+    padding-left: 14px;
+    border-left: 1px solid var(--line-soft);
+  }
+  .jt-node.closed > .jt-kids { display: none; }
+  .jt-leaf { padding: 0 4px 0 18px; display: flex; align-items: baseline; }
+  .jt-leaf .jt-key { flex-shrink: 0; }
+  .jt-val { color: var(--ink); word-break: break-all; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .typing-dots i, .rp-body.flash { animation: none; }
+    .jt-caret { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ══ 左侧栏 ══ -->
+  <aside class="sider">
+    <div class="sider-header">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div class="brand-name">智能助手</div>
+      </div>
+      <button class="new-btn" id="newBtn" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        新建对话
+      </button>
+    </div>
+    <div class="conv-list" id="convList">
+      <div class="conv-list-title">历史对话</div>
+    </div>
+  </aside>
+
+  <!-- ══ 中间聊天区 ══ -->
+  <main class="chat-area">
+    <header class="chat-top">
+      <div class="chat-title" id="chatTitle">查询委托单BJ2026检测进度</div>
+      <span class="plugin-pill">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><path d="M17.2 14.8v5M14.7 17.3h5"/></svg>
+        计量检定助手
+      </span>
+    </header>
+
+    <div class="msg-flow" id="msgFlow">
+      <div class="msg-col" id="msgCol"></div>
+    </div>
+
+    <div class="composer">
+      <div class="composer-box" id="composerBox">
+        <textarea id="inputBox" rows="1" placeholder="用自然语言描述你的需求，我来帮你完成"></textarea>
+        <div class="composer-row">
+          <span class="enter-hint"><kbd>Enter</kbd> 发送 <kbd>Shift + Enter</kbd> 换行</span>
+          <button class="send-btn" id="sendBtn" type="button" disabled aria-label="发送">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="composer-foot">
+        <span>内容由 AI 生成，请核对后再使用</span>
+        <span class="num" id="convMeta">6 条消息</span>
+      </div>
+    </div>
+  </main>
+
+  <!-- ══ 右侧结果面板 ══ -->
+  <aside class="result-panel" id="resultPanel">
+    <div class="rp-head">
+      <div class="rp-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H6a2 2 0 0 0-2 2v3c0 .8-.32 1.56-.88 2.12L2 12l1.12.88C3.68 13.44 4 14.2 4 15v3a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v3c0 .8.32 1.56.88 2.12L22 12l-1.12.88c-.56.56-.88 1.32-.88 2.12v3a2 2 0 0 1-2 2h-2"/></svg>
+      </div>
+      <span class="rp-title">运行结果</span>
+      <span class="rp-meta num">dataArtifact · 真实数据简化片段</span>
+      <button class="rp-copy" id="rpCopy" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <span id="rpCopyText">复制</span>
+      </button>
+    </div>
+    <div class="rp-body" id="rpBody">
+      <div class="json-tree" id="jsonTree"></div>
+    </div>
+  </aside>
+
+</div>
+
+<script>
+/* ============================================================
+   真实数据：127.0.0.1:18080 /api/admin/conversations（2026-11-03 抓取）
+   时间为北京时间（API 存 UTC，+8 与 dataArtifact.queriedAt 口径一致）
+   ============================================================ */
+var CONVS = [
+  { id: 'c01', title: '压力表用于贸易结算需强检吗', time: '10-31 15:25', msgs: [
+    ['user', '压力表用于贸易结算,需要强制检定吗'],
+    ['assistant', '结论: 用于贸易结算的压力表属于强制检定。\n依据: 用于贸易结算的压力表(如 CNG 加气机压力表、油库交接计量压力表)列入强制检定目录,检定周期不超过 1 年。 [片段:1]\n依据: 示例一:压力表用于贸易结算——属于强制检定,周期不超过 1 年。 [片段:2]\n建议: 检定周期不超过1年，建议按期向法定计量检定机构申请强制检定。']
+  ]},
+  { id: 'c02', title: '查询委托单BJ2026检测进度', time: '10-29 13:28', msgs: [
+    ['user', '检定规程里压力表的检定方法是怎么规定的'],
+    ['assistant', '结论: 提供的资料仅介绍了压力表的适用范围、检定周期及强制检定管理要求，未包含具体的检定方法（如外观检查、示值误差检定步骤等）规定。\n依据: 本文档为演示测试资料，参照JJG体例介绍计量器具检定规程与周期要点。主要涵盖一般压力表、精密压力表及数字压力计的适用范围、检定周期（通常为1年）及强制检定要求 [片段:1]\n依据: 演示测试资料:本文件为南京院智能客服竞标演示合成的测试文档,体例参照 JJG 检定规程编写,内容不作为真实检定依据。 [片段:5]\n建议: 建议查阅正式的《JJG 52-2013 弹性元件式一般压力表、压力真空表和真空表》或相关精密压力表检定规程原文以获取具体的检定方法步骤。'],
+    ['user', '你们公司年会什么时候开'],
+    ['assistant', '结论: 资料中未包含关于公司年会时间的信息。\n依据: 在「检定规程」库中未检索到相关依据\n建议: 请查阅公司内部通知、行政公告或咨询人力资源部门以获取年会具体时间。'],
+    ['user', '帮我查一下委托单 BJ2026 的检测进度'],
+    ['assistant', '委托单 BJ2026(数字压力计(0~2.5MPa))当前状态: 检测中;进度 3/5,当前环节 压力示值误差检定,预计完成 2026-10-30(查询时间 2026-10-29 13:32)']
+  ]},
+  { id: 'c03', title: '车间工艺监视压力表需强检吗', time: '10-28 19:41', msgs: [
+    ['user', '压力表仅用于车间内部工艺监视,需要强制检定吗'],
+    ['assistant', '结论: 用于内部使用的压力表不属于强制检定\n依据: 非强检用途(内部管理、工艺控制)的压力表,由使用单位参照本周期自行安排检定或校准。 [片段:3]\n建议: 由使用单位参照最长不超过1年的周期自行安排检定或校准']
+  ]},
+  { id: 'c04', title: '贸易结算压力表需强检吗', time: '10-28 19:32', msgs: [
+    ['user', '压力表用于贸易结算需要强制检定吗'],
+    ['assistant', '结论: 用于贸易结算的压力表属于强制检定\n依据: 用于贸易结算的计量器具实行强制检定: 压力表:用于贸易结算的压力表(如 CNG 加气机压力表、油库交接计量压力表)列入强制检定目录,检定周期不超过 1 年。 [片段:1]\n建议: 建议送检周期不超过 1 年，请联系法定计量检定机构进行强制检定。']
+  ]},
+  { id: 'c05', title: '查询委托单BJ2026检测进度', time: '10-28 19:11', msgs: [
+    ['user', '查一下委托单 BJ2026 的检测进度'],
+    ['assistant', '委托单 BJ2026(数字压力计(0~2.5MPa))当前状态: 检测中;进度 3/5,当前环节 压力示值误差检定,预计完成 2026-10-30(查询时间 2026-10-28 19:11)']
+  ]},
+  { id: 'c06', title: '查询BJ2026进度', time: '10-28 19:01', msgs: [
+    ['user', '压力表用于贸易结算，需要强制检定吗？'],
+    ['assistant', '结论: 用于贸易结算的压力表属于强制检定\n依据: 用于贸易结算的压力表(如 CNG 加气机压力表、油库交接计量压力表)列入强制检定目录,检定周期不超过 1 年。 [片段:1]\n建议: 建议检定周期不超过 1 年，请联系法定计量检定机构进行送检。'],
+    ['user', '帮我查一下BJ2026的进度'],
+    ['assistant', '委托单 BJ2026(数字压力计(0~2.5MPa))当前状态: 检测中;进度 3/5,当前环节 压力示值误差检定,预计完成 2026-10-30(查询时间 2026-10-28 19:03)']
+  ]},
+  { id: 'c07', title: '贸易结算压力表需强检吗', time: '10-28 18:15', msgs: [
+    ['user', '压力表用于贸易结算,需要强制检定吗?'],
+    ['assistant', '结论: 用于贸易结算的压力表属于强制检定\n依据: 用于贸易结算的压力表(如 CNG 加气机压力表、油库交接计量压力表)列入强制检定目录,检定周期不超过 1 年。 [片段:1]\n建议: 建议送法定计量检定机构进行强制检定，检定周期不超过 1 年。']
+  ]},
+  { id: 'c08', title: '贸易结算压力表需强检吗', time: '10-28 18:07', msgs: [
+    ['user', '压力表用于贸易结算,需要强制检定吗?'],
+    ['assistant', '结论: 无法确定(资料不足以支撑)\n依据: 资料不足以支撑\n建议: 请提供具体的计量器具名称，以便结合“用于贸易结算”的用途依据《实施强制管理的计量器具目录》进行判定。']
+  ]},
+  { id: 'c09', title: '贸易结算压力表需强检吗', time: '10-28 18:05', msgs: [
+    ['user', '压力表用于贸易结算,需要强制检定吗?'],
+    ['assistant', '结论: 无法确定(资料不足以支撑)\n依据: 资料不足以支撑\n建议: 请提供具体的计量器具名称，以便结合“器具+用途”原则依据《实施强制管理的计量器具目录》进行准确判定。']
+  ]},
+  { id: 'c10', title: '贸易结算压力表需强检吗', time: '10-28 17:52', msgs: [
+    ['user', '压力表用于贸易结算,需要强制检定吗?'],
+    ['assistant', '结论: 无法确定(资料不足以支撑)\n依据: 资料不足以支撑\n建议: 请提供具体的计量器具名称，以便结合“用于贸易结算”的用途进行判定。']
+  ]}
+];
+
+/* 右侧面板 JSON：会话 c02 最后一条助手消息的真实 dataArtifact（简化，剔除空字段） */
+var RUN_RESULT = {
+  messageId: '0f850e49 · msg#6',
+  role: 'assistant',
+  createdAt: '2026-10-29T05:32:44Z',
+  artifact: {
+    type: 'metrology_progress',
+    pack: 'metrology_assistant',
+    orderNo: 'BJ2026',
+    instrument: '数字压力计(0~2.5MPa)',
+    status: '检测中',
+    progress: '3/5',
+    currentStep: '压力示值误差检定',
+    eta: '2026-10-30',
+    queriedAt: '2026-10-29 13:32',
+    source: {
+      datasource: '计量业务平台',
+      tool: 'query_progress'
+    }
+  }
+};
+
+var SVG_MSG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5c0 4.1-4 7.5-9 7.5-1 0-2-.14-2.9-.4L4 21l1.2-3.6C3.8 16.1 3 13.9 3 11.5 3 7.4 7 4 12 4s9 3.4 9 7.5z"/></svg>';
+var SVG_TRASH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2M6.5 7l.8 12a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9l.8-12"/><path d="M10 11v6M14 11v6"/></svg>';
+var SVG_BOT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="10.5" rx="3"/><path d="M12 8V5.2"/><circle cx="12" cy="3.8" r="1.4"/><path d="M9.3 12.4h.01M14.7 12.4h.01M9.5 15.4c1.5 1 3.5 1 5 0"/></svg>';
+var SVG_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+var SVG_TRACE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5.5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="12" cy="12" r="2.5"/><circle cx="18.5" cy="19" r="2"/><path d="M7.7 6.9 10.2 10M16.5 6.4l-3 4M13.7 13.7l3.4 3.6M7.5 13.2 5.8 17.6"/></svg>';
+var SVG_CARET = '<svg class="jt-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
+
+var state = { convId: 'c02' };
+var $ = function (id) { return document.getElementById(id); };
+var convList = $('convList'), msgCol = $('msgCol'), msgFlow = $('msgFlow');
+var chatTitle = $('chatTitle'), convMeta = $('convMeta');
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/* ── 侧栏渲染 ── */
+function renderSidebar() {
+  var old = convList.querySelectorAll('.conv-item');
+  for (var i = 0; i < old.length; i++) old[i].remove();
+  CONVS.forEach(function (c) {
+    var item = document.createElement('div');
+    item.className = 'conv-item' + (c.id === state.convId ? ' active' : '');
+    item.setAttribute('data-id', c.id);
+    item.setAttribute('role', 'button');
+    item.setAttribute('tabindex', '0');
+    item.innerHTML =
+      '<div class="conv-line1">' + SVG_MSG +
+      '<span class="conv-title">' + escapeHtml(c.title) + '</span>' +
+      '<button class="conv-del" type="button" title="删除会话" aria-label="删除会话">' + SVG_TRASH + '</button>' +
+      '</div><div class="conv-time num">' + c.time + ' · ' + c.msgs.length + ' 条消息</div>';
+    convList.appendChild(item);
+  });
+}
+
+convList.addEventListener('click', function (e) {
+  var del = e.target.closest('.conv-del');
+  var item = e.target.closest('.conv-item');
+  if (!item) return;
+  var id = item.getAttribute('data-id');
+  if (del) {
+    CONVS = CONVS.filter(function (c) { return c.id !== id; });
+    if (state.convId === id) { state.convId = null; renderWelcome(); }
+    renderSidebar();
+    return;
+  }
+  if (id !== state.convId) selectConv(id);
+});
+
+/* ── 消息渲染 ── */
+function fmtAssistant(text, isDemo) {
+  var badge = isDemo ? '<span class="demo-badge">示意</span>' : '';
+  return text.split('\n').map(function (line) {
+    var esc = escapeHtml(line.trim());
+    var m = esc.match(/^(结论|依据|建议):\s*/);
+    var body = m ? '<span class="line-label">' + m[1] + '</span>' + esc.slice(m[0].length) : esc;
+    body = body.replace(/\[片段[:：](\d+)\]/g, '<span class="chunk-badge">片段 $1</span>');
+    return '<p>' + badge + body + '</p>';
+  }).join('');
+}
+
+function assistantNode(text, isDemo) {
+  var row = document.createElement('div');
+  row.className = 'message-row assistant-row';
+  row.innerHTML =
+    '<div class="bot-avatar">' + SVG_BOT + '</div>' +
+    '<div class="msg-body"><div class="bot-bubble"><div class="msg-text">' + fmtAssistant(text, isDemo) + '</div></div>' +
+    '<div class="msg-acts">' +
+    '<button class="act-btn" type="button" data-act="copy">' + SVG_COPY + '<span>复制</span></button>' +
+    '<button class="act-btn" type="button" data-act="trace">' + SVG_TRACE + '<span>链路</span></button>' +
+    '</div></div>';
+  return row;
+}
+
+function renderMessages(conv) {
+  msgCol.innerHTML = '';
+  conv.msgs.forEach(function (m) {
+    if (m[0] === 'user') {
+      var row = document.createElement('div');
+      row.className = 'message-row user-row';
+      var b = document.createElement('div');
+      b.className = 'user-bubble';
+      b.textContent = m[1];
+      row.appendChild(b);
+      msgCol.appendChild(row);
+    } else {
+      msgCol.appendChild(assistantNode(m[1], false));
+    }
+  });
+  msgFlow.scrollTop = msgFlow.scrollHeight;
+}
+
+function renderWelcome() {
+  chatTitle.textContent = '新对话';
+  convMeta.textContent = '0 条消息';
+  msgCol.innerHTML =
+    '<div class="welcome">' +
+    '<div class="welcome-logo">' + SVG_BOT + '</div>' +
+    '<h1 class="welcome-title">智能助手</h1>' +
+    '<p class="welcome-subtitle">用自然语言描述你的需求，我来帮你完成</p>' +
+    '</div>';
+}
+
+function selectConv(id) {
+  state.convId = id;
+  var conv = CONVS.find(function (c) { return c.id === id; });
+  renderSidebar();
+  chatTitle.textContent = conv.title;
+  convMeta.textContent = conv.msgs.length + ' 条消息 · ' + conv.time;
+  renderMessages(conv);
+}
+
+$('newBtn').addEventListener('click', function () {
+  state.convId = null;
+  renderSidebar();
+  renderWelcome();
+});
+
+/* 复制 / 链路（事件委托） */
+msgCol.addEventListener('click', function (e) {
+  var btn = e.target.closest('.act-btn');
+  if (!btn) return;
+  var act = btn.getAttribute('data-act');
+  var label = btn.querySelector('span');
+  if (act === 'copy') {
+    var text = btn.closest('.msg-body').querySelector('.msg-text').innerText;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(function () {});
+    }
+    label.textContent = '已复制';
+    setTimeout(function () { label.textContent = '复制'; }, 1200);
+  } else if (act === 'trace') {
+    var body = $('rpBody');
+    body.classList.remove('flash');
+    void body.offsetWidth;
+    body.classList.add('flash');
+    $('resultPanel').scrollIntoView({ inline: 'start', block: 'nearest' });
+  }
+});
+
+/* ── 输入区：自增高、发送态、Enter 发送 ── */
+var inputBox = $('inputBox'), sendBtn = $('sendBtn');
+
+function toggleSend() { sendBtn.disabled = !inputBox.value.trim(); }
+
+inputBox.addEventListener('input', function () {
+  inputBox.style.height = 'auto';
+  inputBox.style.height = Math.min(inputBox.scrollHeight, 120) + 'px';
+  toggleSend();
+});
+inputBox.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (!sendBtn.disabled) doSend();
+  }
+});
+sendBtn.addEventListener('click', doSend);
+
+function appendUser(text) {
+  var row = document.createElement('div');
+  row.className = 'message-row user-row';
+  var b = document.createElement('div');
+  b.className = 'user-bubble';
+  b.textContent = text;
+  row.appendChild(b);
+  msgCol.appendChild(row);
+  msgFlow.scrollTop = msgFlow.scrollHeight;
+}
+
+var DEMO_REPLY = '结论: 本页为视觉复刻稿，未接入后端服务。\n依据: 发送动作在浏览器本地完成，不产生真实请求。\n建议: 在真实环境中提问可获得智能回答。';
+
+function doSend() {
+  var text = inputBox.value.trim();
+  if (!text) return;
+  appendUser(text);
+  inputBox.value = '';
+  inputBox.style.height = 'auto';
+  toggleSend();
+
+  var typing = document.createElement('div');
+  typing.className = 'message-row assistant-row';
+  typing.innerHTML = '<div class="bot-avatar">' + SVG_BOT + '</div>' +
+    '<div class="msg-body"><div class="bot-bubble"><div class="msg-text"><span class="typing-dots"><i></i><i></i><i></i></span></div></div></div>';
+  msgCol.appendChild(typing);
+  msgFlow.scrollTop = msgFlow.scrollHeight;
+
+  setTimeout(function () {
+    if (!typing.isConnected) return; /* 等待期间已切换/新建会话，丢弃本次演示回复 */
+    typing.replaceWith(assistantNode(DEMO_REPLY, true));
+    msgFlow.scrollTop = msgFlow.scrollHeight;
+    convMeta.textContent = (currentCount() + 2) + ' 条消息';
+  }, 700);
+}
+
+function currentCount() {
+  var conv = CONVS.find(function (c) { return c.id === state.convId; });
+  return conv ? conv.msgs.length : 0;
+}
+
+/* ── JSON 折叠树 ── */
+function el(tag, cls, html) {
+  var n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (html !== undefined) n.innerHTML = html;
+  return n;
+}
+
+function buildNode(key, val, isRoot) {
+  var isObj = val !== null && typeof val === 'object';
+  if (!isObj) return buildLeaf(key, val);
+
+  var isArr = Array.isArray(val);
+  var open = isArr ? '[' : '{';
+  var close = isArr ? ']' : '}';
+  var node = el('div', 'jt-node');
+  var row = el('button', 'jt-row');
+  row.type = 'button';
+  row.innerHTML = SVG_CARET +
+    (key !== null ? '<span class="jt-key">' + escapeHtml(key) + ':</span> ' : '') +
+    '<span class="jt-brace">' + open + '</span>' +
+    '<span class="jt-ell">… ' + Object.keys(val).length + ' 项 ' + close + '</span>';
+  node.appendChild(row);
+
+  var kids = el('div', 'jt-kids');
+  Object.keys(val).forEach(function (k) {
+    kids.appendChild(buildNode(k, val[k], false));
+  });
+  node.appendChild(kids);
+  return node;
+}
+
+function buildLeaf(key, val) {
+  var leaf = el('div', 'jt-leaf');
+  var v = typeof val === 'string' ? '"' + escapeHtml(val) + '"' : String(val);
+  leaf.innerHTML = (key !== null ? '<span class="jt-key">' + escapeHtml(key) + ':</span> ' : '') +
+    '<span class="jt-val">' + v + '</span>';
+  return leaf;
+}
+
+$('jsonTree').appendChild(buildNode(null, RUN_RESULT, true));
+$('jsonTree').addEventListener('click', function (e) {
+  var row = e.target.closest('.jt-row');
+  if (row) row.parentElement.classList.toggle('closed');
+});
+
+/* 复制 JSON */
+$('rpCopy').addEventListener('click', function () {
+  var t = $('rpCopyText');
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(JSON.stringify(RUN_RESULT, null, 2)).catch(function () {});
+  }
+  t.textContent = '已复制';
+  setTimeout(function () { t.textContent = '复制'; }, 1200);
+});
+
+/* 初始渲染：默认选中消息最多的真实会话 */
+renderSidebar();
+selectConv('c02');
+</script>
+</body>
+</html>

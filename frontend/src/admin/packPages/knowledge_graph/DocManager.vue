@@ -29,6 +29,14 @@
       </p>
     </a-upload-dragger>
 
+    <!-- 上传进度:大文件秒级以上的传输不再是"无反馈卡住" -->
+    <div v-if="uploading || uploadPercent !== null" class="dm-upload-progress">
+      <a-progress
+        :percent="uploadPercent ?? 0" size="small" status="active"
+        :format="(p: number) => (p >= 100 ? '处理中…' : `${p}%`)"
+      />
+    </div>
+
     <!-- 上传结果反馈 -->
     <a-alert
       v-if="uploadResults.length" type="info" closable show-icon style="margin-top: 10px"
@@ -120,9 +128,9 @@
         </template>
         <template v-else-if="column.key === 'importStatus'">
           <a-tooltip v-if="record.error" :title="record.error">
-            <a-tag :color="statusColor(record.importStatus)">{{ statusLabel(record.importStatus) }} !</a-tag>
+            <a-tag class="dm-st" :color="statusColor(record.importStatus)">{{ statusLabel(record.importStatus) }} !</a-tag>
           </a-tooltip>
-          <a-tag v-else :color="statusColor(record.importStatus)">{{ statusLabel(record.importStatus) }}</a-tag>
+          <a-tag v-else class="dm-st" :color="statusColor(record.importStatus)">{{ statusLabel(record.importStatus) }}</a-tag>
         </template>
         <template v-else-if="column.key === 'counts'">
           <span class="dm-counts">
@@ -315,6 +323,8 @@ const loadSafely = inject<LoadSafely>('loadSafely')!
 const docs = ref<KgDocument[]>([])
 const loading = ref(false)
 const uploading = ref(false)
+// 上传进度(0-99;100 在响应到达时置满)——大文件不再"卡住无反馈"
+const uploadPercent = ref<number | null>(null)
 const importingAll = ref(false)
 const uploadResults = ref<{ filename: string; ok: boolean; reason?: string; document?: KgDocument }[]>([])
 const taskByDoc = ref<Record<string, TaskItem>>({})
@@ -500,9 +510,13 @@ async function onFilesPicked(info: UploadChangeParam) {
   if (key === lastUploadKey) return
   lastUploadKey = key
   uploading.value = true
+  uploadPercent.value = 0
   try {
     await loadSafely(async () => {
-      uploadResults.value = await uploadKgDocuments(props.kbId, files)
+      uploadResults.value = await uploadKgDocuments(props.kbId, files, (p) => {
+        uploadPercent.value = p
+      })
+      uploadPercent.value = 100
       const okItems = uploadResults.value.filter(
         (r): r is { filename: string; ok: boolean; document: KgDocument } =>
           Boolean(r.ok && r.document?.id))
@@ -521,6 +535,8 @@ async function onFilesPicked(info: UploadChangeParam) {
     })
   } finally {
     uploading.value = false
+    // 进度条留一拍再收(成功提示先出,视觉不跳变)
+    setTimeout(() => { uploadPercent.value = null }, 600)
     // 签名无论成败都要复位:失败(如网关 413/网络错误)后重选同一批文件
     // 必须能重试——不复位会命中上面的签名去重被静默吞掉,表现为
     // "报错之后再上传没反应"。多文件并发去重由 uploading 标志兜底
@@ -790,49 +806,71 @@ onBeforeUnmount(() => window.clearInterval(timer))
 </script>
 
 <style scoped>
-.dm-upload-icon { font-size: 36px; color: #2f54eb; margin: 14px 0 6px; }
-.dm-upload-text { font-size: 14px; color: #1f2937; margin: 0 0 6px; }
-.dm-upload-hint { font-size: 12px; color: #9ca3af; margin-bottom: 14px; }
-.dm-chunk-link { color: #6b7280; font-size: 12px; margin-left: 10px; cursor: pointer; }
-.dm-chunk-link:hover { color: #2f54eb; }
+.dm-upload-progress { margin-top: 8px; padding: 0 2px; }
+.dm-upload-icon { font-size: 36px; color: var(--brand); margin: 14px 0 6px; }
+.dm-upload-text { font-size: 14px; color: var(--ink); margin: 0 0 6px; }
+.dm-upload-hint { font-size: 12px; color: var(--ink-3); margin-bottom: 14px; }
+.dm-chunk-link { color: var(--ink-3); font-size: 12px; margin-left: 10px; cursor: pointer; }
+.dm-chunk-link:hover { color: var(--brand-ink); }
 .dm-chunk-pop { max-width: 420px; }
-.dm-chunk-pop-title { font-weight: 600; color: #1f2937; margin-bottom: 4px; font-size: 12px; }
-.dm-chunk-list { margin: 0; padding-left: 16px; color: #6b7280; font-size: 12px; line-height: 1.9; }
-.dm-upload-line { font-size: 12px; color: #4b5563; display: flex; align-items: center; gap: 6px; }
-.dm-ok { color: #16a34a; }
-.dm-bad { color: #dc2626; }
-.dm-reason { color: #dc2626; }
+.dm-chunk-pop-title { font-weight: 600; color: var(--ink); margin-bottom: 4px; font-size: 12px; }
+.dm-chunk-list { margin: 0; padding-left: 16px; color: var(--ink-2); font-size: 12px; line-height: 1.9; }
+.dm-upload-line { font-size: 12px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
+.dm-ok { color: var(--ok); }
+.dm-bad { color: var(--danger); }
+.dm-reason { color: var(--danger); }
 .dm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
-.dm-tip { color: #9ca3af; font-size: 12px; }
-.dm-file-icon { margin-right: 8px; color: #64748b; }
-.dm-file-icon.pdf { color: #dc2626; }
-.dm-file-icon.docx { color: #2563eb; }
-.dm-file-icon.md, .dm-file-icon.markdown, .dm-file-icon.txt { color: #6b7280; }
-.dm-fname { color: #374151; font-size: 13px; }
-.dm-mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: #6b7280; }
-.dm-counts { font-size: 12px; color: #6b7280; }
-.dm-done { color: #16a34a; font-size: 12px; font-weight: 600; }
-.dm-danger { color: #dc2626; }
+.dm-tip { color: var(--ink-3); font-size: 12px; }
+.dm-file-icon { margin-right: 8px; color: var(--ink-3); }
+.dm-file-icon.pdf { color: var(--danger); }
+.dm-file-icon.docx { color: var(--brand); }
+.dm-file-icon.md, .dm-file-icon.markdown, .dm-file-icon.txt { color: var(--ink-2); }
+.dm-fname { color: var(--ink); font-size: 14px; font-weight: 600; }
+/* 状态胶囊:圆角胶囊 + 状态圆点,语义色走令牌(精装稿 .cap) */
+.dm-st { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; border-radius: 999px; padding: 2px 10px; }
+.dm-st::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.dm-st.ant-tag-success { color: var(--ok); background: var(--ok-tint); border-color: transparent; }
+.dm-st.ant-tag-processing { color: var(--brand-ink); background: var(--brand-tint); border-color: transparent; }
+.dm-st.ant-tag-processing::before { animation: dm-blink 1.4s ease-in-out infinite; }
+.dm-st.ant-tag-warning { color: var(--warn); background: var(--warn-tint); border-color: transparent; }
+.dm-st.ant-tag-error { color: var(--danger); background: var(--danger-tint); border-color: transparent; }
+.dm-st.ant-tag-default, .dm-st:not([class*='ant-tag-']) { color: var(--ink-2); background: var(--bg); border-color: transparent; }
+@keyframes dm-blink { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .dm-st.ant-tag-processing::before { animation: none; } }
+/* 表内操作链接:常态次级墨、hover 品牌蓝淡底(精装稿 .link-btn;全局层未接管表内链接) */
+:deep(.ant-table a) { color: var(--ink-2); border-radius: 6px; padding: 4px 6px; transition: color .15s, background .15s; }
+:deep(.ant-table a:hover) { color: var(--brand-ink); background: var(--brand-tint); }
+.dm-danger { color: var(--danger); }
+.dm-danger:hover { color: var(--danger); background: var(--danger-tint); }
+.dm-mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; color: var(--ink-2); }
+.dm-counts { font-size: 13px; color: var(--ink-2); }
+.dm-done { color: var(--ok); font-size: 12px; font-weight: 600; }
 .dm-chunks__summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px; }
 .dm-chunks__spacer { flex: 1; }
+/* 块状态胶囊与主表同语言:圆点胶囊,语义色对齐令牌 */
+.dm-chunks__st { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; border-radius: 999px; padding: 1px 10px; }
+.dm-chunks__st::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.dm-chunks__st.ant-tag-green { color: var(--ok); background: var(--ok-tint); border-color: transparent; }
+.dm-chunks__st.ant-tag-red { color: var(--danger); background: var(--danger-tint); border-color: transparent; }
+.dm-chunks__st.ant-tag-orange { color: var(--warn); background: var(--warn-tint); border-color: transparent; }
 .dm-chunks__preview {
   display: inline-block; max-width: 340px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom;
-  color: #6b7280; font-size: 12px;
+  color: var(--ink-2); font-size: 12px;
 }
-.dm-chunks__dim { color: #d1d5db; }
-.dm-chunks__hint { color: #9ca3af; font-size: 12px; margin-top: 10px; }
-.dm-chunk-edit-warn { margin-top: 8px; color: #d97706; font-size: 12px; }
+.dm-chunks__dim { color: var(--ink-3); }
+.dm-chunks__hint { color: var(--ink-3); font-size: 12px; margin-top: 10px; }
+.dm-chunk-edit-warn { margin-top: 8px; color: var(--warn); font-size: 12px; }
 .dm-meta-tag { font-size: 12px; cursor: pointer; }
-.dm-meta-add { font-size: 12px; color: #94a3b8; }
-.dm-meta-add:hover { color: #2f54eb; }
-.dm-meta-hint { font-size: 12px; color: #94a3b8; margin-bottom: 10px; }
+.dm-meta-add { font-size: 12px; color: var(--ink-3); }
+.dm-meta-add:hover { color: var(--brand-ink); }
+.dm-meta-hint { font-size: 12px; color: var(--ink-3); margin-bottom: 10px; }
 .dm-meta-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; }
 .dm-ext__section { margin-bottom: 18px; }
-.dm-ext__title { font-weight: 600; font-size: 13px; color: #374151; margin-bottom: 8px; }
+.dm-ext__title { font-weight: 600; font-size: 13px; color: var(--ink); margin-bottom: 8px; }
 .dm-ext__row { margin-bottom: 6px; display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
-.dm-ext__name { font-weight: 600; color: #111827; }
-.dm-ext__desc { color: #9ca3af; font-size: 12px; flex-basis: 100%; }
-.dm-ext__rel { background: #f3f4f6; border-radius: 4px; padding: 2px 6px; font-size: 12px; }
-.dm-ext__evidence { color: #9ca3af; font-size: 12px; flex-basis: 100%; }
+.dm-ext__name { font-weight: 600; color: var(--ink); }
+.dm-ext__desc { color: var(--ink-3); font-size: 12px; flex-basis: 100%; }
+.dm-ext__rel { background: var(--bg); border-radius: 4px; padding: 2px 6px; font-size: 12px; }
+.dm-ext__evidence { color: var(--ink-3); font-size: 12px; flex-basis: 100%; }
 </style>

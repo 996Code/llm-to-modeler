@@ -1,0 +1,47 @@
+/* =============================================================================
+ * 设计令牌（design tokens）—— 全站唯一视觉变量源
+ * 2026-11-03 重设计（飞书式企业风）定稿，规格见 design-demos/polished-v1.html
+ *
+ * 规则：
+ *  - 品牌蓝只有一个 #3370FF；承载文字的场景（白/淡底上的文字、深底白字）
+ *    一律用深阶 --brand-ink（#2B5FE0，白底 4.9:1），禁止白字压 --brand
+ *  - 中性墨阶 ink/ink-2/ink-3 与表面 bg/card/line 配套，不要另行发明灰值
+ *  - 弱化文字必须用 --ink-3（白底与浅灰底都 ≥4.5:1），别用更浅的灰
+ *  - 圆角：控件 8px / 卡片 12px / 胶囊 999px；阴影只有 rest/lift 两档
+ *  - 正文字号基准 14px（历史遗留 13px 逐步归位，新代码一律 14px）
+ * ========================================================================== */
+:root {
+  /* 品牌色 */
+  --brand: #3370FF;        /* 唯一品牌蓝：图标 / 装饰 / 交互态 */
+  --brand-ink: #2B5FE0;    /* 品牌蓝·文字深阶：链接文字、深底白字、激活态文字 */
+  --brand-hover: #2B5FE0;
+  --brand-press: #2450C4;
+  --brand-tint: #EAF0FF;   /* 激活底 / 图标淡彩底 */
+  --brand-tint-2: #F2F6FF; /* hover 底 */
+
+  /* 中性墨阶 */
+  --ink: #1F2329;          /* 主文字 */
+  --ink-2: #4E5969;        /* 次要文字 */
+  --ink-3: #626B75;        /* 弱化文字（白/浅灰底均 ≥4.5:1） */
+
+  /* 表面与线条 */
+  --bg: #F5F6F8;           /* 页面底 */
+  --card: #FFFFFF;         /* 卡片面 */
+  --line: #E5E6EB;         /* 常规线 */
+  --line-soft: #EFF1F4;    /* 弱分隔线 */
+
+  /* 语义色（配套 10% 淡彩底） */
+  --ok: #2EA121;      --ok-tint: #E8F6EC;
+  --warn: #B26A00;    --warn-tint: #FDF0E1;
+  --danger: #D83931;  --danger-tint: #FDEBEA;
+  --violet: #7B61FF;  --violet-tint: #F0EBFF;
+  --cyan: #0A8C94;    --cyan-tint: #E4F5F7;
+  --orange: #D97A1F;  --orange-tint: #FDF0E1;
+  --pink: #C9438F;    --pink-tint: #FCE9F4;
+
+  /* 圆角 / 阴影 */
+  --radius-ctrl: 8px;
+  --radius-card: 12px;
+  --shadow-rest: 0 1px 2px rgba(31, 35, 41, .04);
+  --shadow-lift: 0 6px 16px rgba(31, 35, 41, .09);
+}

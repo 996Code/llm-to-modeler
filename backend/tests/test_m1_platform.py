@@ -324,6 +324,57 @@ class TestTaskManager:
         assert store.get_task(running["id"])["status"] == "interrupted"
         assert store.get_task(done["id"])["status"] == "succeeded"
 
+    def test_revive_reuses_interrupted_row(self, task_manager, wait_for):
+        """原位复用:interrupted 行 revive 后同一 task_id 重跑,不新增任务行。"""
+        runs = []
+        task_manager.register("demo.rev", lambda t: runs.append(1) or {"ran": len(runs)})
+        task = task_manager.submit("demo.rev", queue_key="q1")
+        assert wait_for(lambda: task_manager._store.get_task(task["id"])["status"] == "succeeded")
+        # 模拟重启遗留:手工打成 interrupted(带 error/finished_at 残留)
+        task_manager._store.update_task(task["id"], status="interrupted",
+                                        error="服务重启,任务被中断",
+                                        finished_at="2026-01-01T00:00:00+00:00")
+        revived = task_manager.revive(task["id"])
+        assert revived["id"] == task["id"]                    # 同一行
+        assert wait_for(lambda: task_manager._store.get_task(task["id"])["status"] == "succeeded")
+        assert len(runs) == 2                                 # 真的重跑了一次
+        logs = " ".join(l["message"] for l in task_manager._store.list_logs(task["id"]))
+        assert "复用本任务续跑" in logs                        # 日志里有续跑说明
+        assert task_manager._store.get_task(task["id"])["error"] == ""
+
+    def test_revive_guards(self, task_manager, wait_for):
+        """守卫:非 interrupted 拒绝;类型下线拒绝;dedupe 冲突拒绝。"""
+        from services.task_manager import DuplicateTaskError
+        task_manager.register("demo.g", lambda t: {"ok": 1})
+        task_manager.register("demo.h", lambda t: {"ok": 1})
+        # 非 interrupted(终态) → ValueError
+        done = task_manager.submit("demo.g")
+        assert wait_for(lambda: task_manager._store.get_task(done["id"])["status"] == "succeeded")
+        with pytest.raises(ValueError, match="interrupted"):
+            task_manager.revive(done["id"])
+        # 不存在 → ValueError
+        with pytest.raises(ValueError, match="不存在"):
+            task_manager.revive("no-such-task")
+        # 类型下线 → ValueError
+        gone = task_manager._store.create_task("demo.gone")
+        task_manager._store.update_task(gone["id"], status="interrupted")
+        with pytest.raises(ValueError, match="已下线"):
+            task_manager.revive(gone["id"])
+        # dedupe 冲突:活任务占着同 key → DuplicateTaskError
+        import threading
+        hold = threading.Event()
+        task_manager.register("demo.slow", lambda t: (hold.wait(3), {"ok": 1})[1])
+        live = task_manager.submit("demo.slow", dedupe_key="dk")
+        assert wait_for(lambda: task_manager._store.get_task(live["id"])["status"] == "running")
+        other = task_manager.submit("demo.g")
+        assert wait_for(lambda: task_manager._store.get_task(other["id"])["status"] == "succeeded")
+        task_manager._store.update_task(other["id"], status="interrupted")
+        try:
+            with pytest.raises(DuplicateTaskError):
+                task_manager.revive(other["id"], dedupe_key="dk")
+        finally:
+            hold.set()
+
     def test_subscribe_receives_events(self, task_manager, wait_for):
         import queue as q_mod
         task_manager.register("demo.evt", lambda task: (task.log("m1"), task.set_progress(50, "half"))[0:0] or {"ok": 1})

@@ -387,39 +387,6 @@ export async function recheckPack(name: string): Promise<{
   return data
 }
 
-// ── 平台级显示设置 ─────────────────────────────────────────
-
-/** 显示设置形状(与 GET/PUT /api/admin/settings/display 契约对齐) */
-export interface DisplaySettings {
-  /** 对话时显示链路/路径/思考信息(独立/嵌入对话页生效) */
-  showPipeline: boolean
-  /** 对话界面显示检索结果 */
-  showRetrieval: boolean
-}
-
-/** 读平台级显示设置(右上角徽标 hover 面板的初始值)。 */
-export async function fetchDisplaySettings(): Promise<DisplaySettings> {
-  const { data } = await adminApi.get<{ show_pipeline: boolean, show_retrieval: boolean }>(
-    '/settings/display')
-  return { showPipeline: data.show_pipeline, showRetrieval: data.show_retrieval }
-}
-
-/** 保存显示设置(部分更新:只提交要改的键;返回合并后的最新值)。 */
-export async function saveDisplaySettings(
-  values: Partial<DisplaySettings>,
-): Promise<DisplaySettings> {
-  // 后端契约是 snake_case(show_pipeline/show_retrieval)——前端 camelCase
-  // 转换漏了会 422"未知配置项"(实测抓出)
-  const body: Record<string, boolean> = {}
-  if (values.showPipeline !== undefined) body.show_pipeline = values.showPipeline
-  if (values.showRetrieval !== undefined) body.show_retrieval = values.showRetrieval
-  // 响应同样是 snake_case——漏映射会把两个开关都覆盖成 undefined
-  // (关 1 带 2 一起灭、开了要刷新才亮的根因),与 GET 同款转换
-  const { data } = await adminApi.put<{ show_pipeline: boolean, show_retrieval: boolean }>(
-    '/settings/display', body)
-  return { showPipeline: data.show_pipeline, showRetrieval: data.show_retrieval }
-}
-
 // ── 任务中心 ─────────────────────────────────────────────
 
 export type TaskStatus =
@@ -489,6 +456,12 @@ export async function fetchTaskLogs(taskId: string, after = 0): Promise<{ items:
 export async function cancelTask(taskId: string): Promise<TaskItem> {
   const { data } = await tasksApi.post(`/${taskId}/cancel`)
   return data
+}
+
+/** 批量取消:逐个走同一取消语义(已终态幂等跳过)。 */
+export async function batchCancelTasks(ids: string[]): Promise<Array<{ id: string; ok: boolean; status?: string; error?: string }>> {
+  const { data } = await tasksApi.post('/batch-cancel', { ids })
+  return data.items
 }
 
 /**
@@ -712,26 +685,6 @@ export async function updateKgKb(id: string, payload: { name?: string; descripti
   const { data } = await kgApi.put(`/kbs/${id}`, payload)
   return data
 }
-/** 检索数据权限(嵌入模式):每库允许的用户/角色;空=全开放。
- *  options = 宿主同步来的候选字典(下拉选择用)。 */
-export interface KgSubjectOption {
-  id: string
-  name: string
-}
-export interface KgKbAcl {
-  users: string[]
-  roles: string[]
-  options?: { users: KgSubjectOption[]; roles: KgSubjectOption[] }
-}
-export async function fetchKgKbAcl(kbId: string): Promise<KgKbAcl> {
-  const { data } = await kgApi.get(`/kbs/${kbId}/acl`)
-  return data
-}
-export async function saveKgKbAcl(kbId: string, acl: { users: string[]; roles: string[] }): Promise<KgKbAcl> {
-  const { data } = await kgApi.put(`/kbs/${kbId}/acl`, acl)
-  return data
-}
-
 /** D7 文档元数据:检索过滤维度({"部门":"销售"}扁平键值;doc_filter 匹配)。 */
 export async function setKgDocMetadata(
   kbId: string, docId: string, metadata: Record<string, string | string[]>,
@@ -804,11 +757,18 @@ export async function fetchKgDocuments(kbId: string): Promise<KgDocument[]> {
   const { data } = await kgApi.get(`/kbs/${kbId}/documents`)
   return data.items
 }
-export async function uploadKgDocuments(kbId: string, files: File[]): Promise<{ filename: string; ok: boolean; reason?: string; document?: KgDocument }[]> {
+export async function uploadKgDocuments(
+  kbId: string, files: File[],
+  onProgress?: (percent: number) => void,
+): Promise<{ filename: string; ok: boolean; reason?: string; document?: KgDocument }[]> {
   const form = new FormData()
   files.forEach((f) => form.append('files', f))
   const { data } = await kgApi.post(`/kbs/${kbId}/documents`, form, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    // 大文件上传进度(axios/XHR 原生支持;不给回调时零开销)
+    onUploadProgress: onProgress ? (e) => {
+      if (e.total) onProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)))
+    } : undefined,
   })
   return data.items
 }

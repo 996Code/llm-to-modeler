@@ -38,18 +38,12 @@ export async function refreshEmbedContext() {
   const port = getHostPort()
   if (!port.connected) return undefined
 
-  // embed 模式的 URL 身份通道:?roles=A,B → pack_params.knowledge_graph.
-  // user_roles(ACL 判定输入);?userId 由 userIdentity 层消费(X-User-Id)。
-  // 宿主 GET_CONTEXT 的 packParams 优先,URL 只补 knowledge_graph.user_roles
-  // 一项——无宿主协议的轻嵌入(如 kb-embed-test 测试页)也经此注入身份,
-  // 生产宿主不受影响。
+  // embed 模式的 URL 参数通道:?packs=knowledge_graph → 单插件直通。
   const urlQuery = new URLSearchParams(window.location.search)
-  const urlRoles = urlQuery.get('roles')?.trim()
 
   // 轻嵌入(isLightEmbed):跳过宿主握手(无宿主时 getContext 要 10s
   // 超时×2=20s,每条消息都卡),直接走轻嵌入路径
   if (isLightEmbed()) {
-    const packParams = urlRoles ? { knowledge_graph: { user_roles: urlRoles.split(',').map(r => r.trim()).filter(Boolean) } } : undefined
     // URL packs 声明:?packs=knowledge_graph → 单插件直通(嵌入测试页
     // 指定只跑知识库插件,欢迎页标题/示例跟随该插件的 display)
     const urlPacks = urlQuery.get('packs')?.trim()
@@ -57,7 +51,6 @@ export async function refreshEmbedContext() {
       context: { [CONTEXT_KEY_ARTIFACT]: null, revision: null, contextKey: localStorage.getItem('embedded_context_key') || undefined },
       services: undefined,
       packs: urlPacks ? urlPacks.split(',').map(p => p.trim()).filter(Boolean) : undefined,
-      pack_params: packParams as Record<string, unknown> | undefined,
     }
   }
 

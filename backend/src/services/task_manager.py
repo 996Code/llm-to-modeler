@@ -289,6 +289,64 @@ class TaskManager:
             self._dispatch_locked()
         return task
 
+    def revive(self, task_id: str, dedupe_key: Optional[str] = None) -> Dict[str, Any]:
+        """复用 interrupted 任务行原位续跑——不新建任务行。
+
+        重启恢复场景:进程重启把遗留 running/pending/retry_scheduled 打成
+        interrupted,恢复逻辑对仍有意义的行原位重新入队——同一 task_id
+        继续(payload/queue_key/retry_count 原样在库),日志追加续跑说明。
+        旧实现"新开任务+旧行关闭"会让任务行随重启次数线性增长,用户
+        裁决改为复用(2026-11-03)。块级 checkpoint 语义由 handler 保证,
+        续跑只跑剩余部分;progress 列不重置——展示上从断点继续。
+
+        Args:
+            dedupe_key: 与 submit 同义(占位/检查同临界区)。任务行不落
+                dedupe_key,由调用方(恢复逻辑)按原规则重算传入。
+
+        Raises:
+            ValueError: 任务不存在 / 非 interrupted 状态 / 任务类型已下线。
+            DuplicateTaskError: dedupe_key 已有活任务占位。
+        """
+        task = self._store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"任务不存在: {task_id}")
+        if task["status"] != "interrupted":
+            raise ValueError(f"仅 interrupted 任务可原位复用(当前状态 {task['status']})")
+        if not self.has_handler(task.get("taskType")):
+            raise ValueError(f"任务类型已下线: {task.get('taskType')}")
+        with self._lock:
+            if dedupe_key:
+                existing = self._dedupe_keys.get(dedupe_key)
+                if existing:
+                    raise DuplicateTaskError(
+                        f"该操作已有进行中的任务(任务 {existing[:8]}…),请等待完成")
+                self._dedupe_keys[dedupe_key] = _DEDUPE_PLACEHOLDER
+        try:
+            self._store.update_task(
+                task_id, status="pending", error="", finished_at=None,
+                auto_retry_at=None,
+                progress_message="服务重启,复用本任务续跑")
+            self._store.append_log(
+                task_id, level="info",
+                message="服务重启,复用本任务续跑(已完成部分由 checkpoint 跳过)")
+        except Exception:
+            if dedupe_key:  # 落库失败回滚占位
+                with self._lock:
+                    if self._dedupe_keys.get(dedupe_key) is _DEDUPE_PLACEHOLDER:
+                        del self._dedupe_keys[dedupe_key]
+            raise
+        with self._lock:
+            if dedupe_key:
+                self._dedupe_keys[dedupe_key] = task_id
+            self._pending.append(task_id)
+            # 无 queue_key 的任务用专属键:永不与其他任务互斥(与 submit 同口径)
+            queue_key = task.get("queueKey") or None
+            self._task_keys[task_id] = queue_key or f"__solo__{task_id}"
+            self._dispatch_locked()
+        self._publish(task_id, {"event": "status",
+                                "data": {"taskId": task_id, "status": "pending"}})
+        return self._store.get_task(task_id)
+
     def _dispatch_locked(self) -> None:
         """把等待队列头的任务尽可能派发给线程池(调用方须持锁)。
 

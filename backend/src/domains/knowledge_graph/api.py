@@ -19,14 +19,6 @@
   GET    /kbs/{id}/graph               图谱浏览(限量节点+邻接边;过滤 q/types)
   GET    /kbs/{id}/graph/expand        点击节点增量展开(1 跳)
 
-【用户/角色目录同步】(源系统经 HTTP 推送;契约见 doc/知识库用户角色同步API.md)
-  POST   /subjects/{type}              全量同步(整体替换,单次一个事务,幂等)
-  POST   /subjects/{type}/delta        增量同步(upserts 合并+deletes,重放安全)
-  GET    /subjects/{type}              列表(q/status 过滤,page/pageSize 分页可选)
-  GET    /subjects/{type}/{id}         单条详情
-  PUT    /subjects/{type}/{id}         单条 upsert(建/改合一,重试安全)
-  DELETE /subjects/{type}/{id}         删除单条
-  GET    /sync/status                  同步状态总览(计数+最近同步+流水)
 """
 import asyncio
 import hashlib
@@ -41,7 +33,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from sdk.pack_api import admin_required, admin_or_mcp_key_required
+from sdk.pack_api import admin_required
 from domains.knowledge_graph import runtime
 from sdk.doc_parser import (
     allowed_extension, chunk_text, mime_for, parse_to_text,
@@ -253,270 +245,6 @@ async def set_doc_metadata(kb_id: str, doc_id: str,
     store.set_doc_metadata(doc_id, kb_id, clean)
     logger.info(f"doc metadata set: {doc_id[:8]} ({len(clean)} 维)")
     return {"id": doc_id, "docMetadata": clean}
-
-
-# ── 检索数据权限 ACL(嵌入模式;管理端维护,检索时生效) ──────
-
-@router.get("/kbs/{kb_id}/acl", dependencies=[Depends(admin_required)])
-async def get_kb_acl(kb_id: str, request: Request):
-    """某库的检索 ACL:允许的用户/角色 + 可选字典(宿主同步来的候选)。
-
-    空 ACL = 全开放(默认);options 供前端下拉选择(不做手输)。
-    """
-    _kb_or_404(request, kb_id)
-    store = runtime.get_kg_store(request.app.state)
-    return {
-        **store.get_kb_acl(kb_id),
-        "options": {
-            "users": store.list_subjects("user"),
-            "roles": store.list_subjects("role"),
-        },
-    }
-
-
-@router.put("/kbs/{kb_id}/acl", dependencies=[Depends(admin_required)])
-async def set_kb_acl(kb_id: str, request: Request, payload: Dict[str, Any]):
-    """全量替换某库的检索 ACL。清空两个列表 = 回到全开放。
-
-    生效条件:嵌入模式下宿主传了 user_id(X-User-Id)或角色
-    (pack_params.knowledge_graph.user_roles)才过滤;未传不过滤。
-    """
-    _kb_or_404(request, kb_id)
-
-    def _subjects(key: str) -> List[str]:
-        raw = payload.get(key)
-        if raw is None:
-            return []
-        if not isinstance(raw, list):
-            raise HTTPException(422, f"{key} 必须是数组")
-        out, seen = [], set()
-        for item in raw:
-            s = str(item or "").strip()
-            if s and s not in seen:
-                seen.add(s)
-                out.append(s)
-        return out
-
-    users, roles = _subjects("users"), _subjects("roles")
-    runtime.get_kg_store(request.app.state).set_kb_acl(kb_id, users, roles)
-    logger.info(f"kb acl set: {kb_id[:8]} (users={len(users)}, roles={len(roles)})")
-    return {"users": users, "roles": roles}
-
-
-# ── 用户/角色目录:同步(全量/增量)+ CRUD + 状态 ─────────────
-# 源系统(组织/人员/角色管理方)经 HTTP 推送;完整契约与示例见
-# doc/知识库用户角色同步API.md。鉴权:管理凭证(Bearer/X-Admin-Token/
-# 开放模式)或 X-Api-Key(平台 MCP 密钥,与 /api/mcp 同一把)三选一。
-# 目录是 ACL 配置的候选字典——检索判权仍按请求身份(X-User-Id/roles)
-# +库 ACL,删除目录条目不自动改动已配置的 ACL。
-
-_SUBJECT_TYPES = ("user", "role")
-_SUBJECT_LABELS = {"user": "用户", "role": "角色"}
-# 批量上限:防误推全量组织库打挂单事务;更大的量分批推(全量后接增量)
-_FULL_SYNC_MAX_ITEMS = 20000
-_DELTA_MAX_UPSERTS = 5000
-_DELTA_MAX_DELETES = 5000
-_SUBJECT_ID_MAX = 128
-_SUBJECT_NAME_MAX = 128
-
-
-def _subject_type_or_422(subject_type: str) -> str:
-    if subject_type not in _SUBJECT_TYPES:
-        raise HTTPException(422, "subject_type 必须是 user|role")
-    return subject_type
-
-
-def _validated_subject_fields(item: Dict[str, Any], where: str) -> Dict[str, Any]:
-    """校验/归一单条的可选字段(name/status);id 由调用方处理。"""
-    out: Dict[str, Any] = {}
-    if item.get("name") is not None:
-        name = str(item["name"]).strip()
-        if len(name) > _SUBJECT_NAME_MAX:
-            raise HTTPException(
-                422, f"{where}.name 超长(上限 {_SUBJECT_NAME_MAX} 字符)")
-        out["name"] = name
-    if item.get("status") is not None:
-        if item["status"] not in ("active", "disabled"):
-            raise HTTPException(422, f"{where}.status 必须是 active|disabled")
-        out["status"] = item["status"]
-    return out
-
-
-def _validated_subject_items(raw: Any, cap: int, field: str) -> List[Dict[str, Any]]:
-    """批量条目校验:必须是数组、不超上限、逐条合法、id 不重复。"""
-    if not isinstance(raw, list):
-        raise HTTPException(422, f"{field} 必须是数组")
-    if len(raw) > cap:
-        raise HTTPException(422, f"{field} 单次上限 {cap} 条,请分批推送")
-    items: List[Dict[str, Any]] = []
-    for i, it in enumerate(raw):
-        if not isinstance(it, dict):
-            raise HTTPException(422, f"{field}[{i}] 必须是对象")
-        sid = str(it.get("id") or "").strip()
-        if not sid:
-            raise HTTPException(422, f"{field}[{i}] 缺少 id")
-        if len(sid) > _SUBJECT_ID_MAX:
-            raise HTTPException(
-                422, f"{field}[{i}].id 超长(上限 {_SUBJECT_ID_MAX} 字符)")
-        items.append({"id": sid, **_validated_subject_fields(it, f"{field}[{i}]")})
-    seen, dups = set(), set()
-    for it in items:
-        if it["id"] in seen:
-            dups.add(it["id"])
-        seen.add(it["id"])
-    if dups:
-        raise HTTPException(
-            422, f"{field} 内 id 重复: {', '.join(sorted(dups)[:10])}")
-    return items
-
-
-def _validated_delta_deletes(raw: Any) -> List[str]:
-    if not isinstance(raw, list):
-        raise HTTPException(422, "deletes 必须是数组")
-    if len(raw) > _DELTA_MAX_DELETES:
-        raise HTTPException(422, f"deletes 单次上限 {_DELTA_MAX_DELETES} 条")
-    out: List[str] = []
-    seen = set()
-    for i, d in enumerate(raw):
-        sid = str(d or "").strip()
-        if not sid:
-            raise HTTPException(422, f"deletes[{i}] 不能为空")
-        if len(sid) > _SUBJECT_ID_MAX:
-            raise HTTPException(
-                422, f"deletes[{i}] 超长(上限 {_SUBJECT_ID_MAX} 字符)")
-        if sid in seen:
-            raise HTTPException(422, f"deletes 内 id 重复: {sid}")
-        seen.add(sid)
-        out.append(sid)
-    return out
-
-
-@router.post("/subjects/{subject_type}",
-             dependencies=[Depends(admin_or_mcp_key_required)])
-async def sync_subjects(subject_type: str, request: Request,
-                        payload: Dict[str, Any]):
-    """全量同步用户/角色目录(整体替换;单次调用一个事务)。
-
-    Body: {items: [{id, name?, status?}, ...]}——源系统推送权威
-    快照;不在清单内的旧条目随之删除(源侧删人这里跟着走)。重推同清单
-    幂等:值未变的行不动(updated_at 不假跳)。
-
-    Returns: {subjectType, count, created, updated, unchanged, removed}
-    """
-    _subject_type_or_422(subject_type)
-    items = _validated_subject_items(
-        (payload or {}).get("items"), _FULL_SYNC_MAX_ITEMS, "items")
-    summary = runtime.get_kg_store(request.app.state).sync_subjects_full(
-        subject_type, items)
-    logger.info(f"subjects full sync: {subject_type} ({summary})")
-    return {"subjectType": subject_type, "count": len(items),
-            "created": summary["created"], "updated": summary["updated"],
-            "unchanged": summary["unchanged"], "removed": summary["removed"]}
-
-
-@router.post("/subjects/{subject_type}/delta",
-             dependencies=[Depends(admin_or_mcp_key_required)])
-async def sync_subjects_delta(subject_type: str, request: Request,
-                              payload: Dict[str, Any]):
-    """增量同步(upserts 合并 + deletes;单次调用一个事务,重放安全)。
-
-    Body: {upserts?: [{id, name?, status?}], deletes?: [id]}
-      - upserts 按 id 新建或合并:本次提供的字段才覆盖,缺省字段保持现值;
-      - deletes 删不存在的 id 如实进 missing(不报错——源系统重推已
-        消费过的增量不会失败)。
-    """
-    _subject_type_or_422(subject_type)
-    payload = payload or {}
-    upserts = _validated_subject_items(
-        payload.get("upserts") or [], _DELTA_MAX_UPSERTS, "upserts")
-    deletes = _validated_delta_deletes(payload.get("deletes") or [])
-    result = runtime.get_kg_store(request.app.state).sync_subjects_delta(
-        subject_type, upserts, deletes)
-    logger.info(f"subjects delta sync: {subject_type} "
-                f"(+{result['inserted']}~{result['updated']}-{result['deleted']})")
-    return {"subjectType": subject_type, **result}
-
-
-@router.get("/subjects/{subject_type}",
-            dependencies=[Depends(admin_or_mcp_key_required)])
-async def list_subjects(subject_type: str, request: Request):
-    """目录列表。Query: q(id/名称模糊)、status(active|disabled)、
-    page/pageSize(1~200;不传 page 返回全部)。"""
-    _subject_type_or_422(subject_type)
-    qp = request.query_params
-    q = (qp.get("q") or "").strip()
-    status = (qp.get("status") or "").strip()
-    if status and status not in ("active", "disabled"):
-        raise HTTPException(422, "status 必须是 active|disabled")
-    page = None
-    page_size = 50
-    if qp.get("page") is not None:
-        try:
-            page = int(qp.get("page"))
-            page_size = int(qp.get("pageSize") or 50)
-        except (TypeError, ValueError):
-            raise HTTPException(422, "page/pageSize 必须是整数")
-        if page < 1:
-            raise HTTPException(422, "page 须从 1 起")
-        if not 1 <= page_size <= 200:
-            raise HTTPException(422, "pageSize 须在 1~200")
-    return runtime.get_kg_store(request.app.state).list_subjects_page(
-        subject_type, q=q, status=status, page=page, page_size=page_size)
-
-
-@router.get("/subjects/{subject_type}/{subject_id}",
-            dependencies=[Depends(admin_or_mcp_key_required)])
-async def get_subject(subject_type: str, subject_id: str, request: Request):
-    """单条详情(name/status/创建与更新时间)。"""
-    _subject_type_or_422(subject_type)
-    rec = runtime.get_kg_store(request.app.state).get_subject(
-        subject_type, subject_id.strip())
-    if not rec:
-        raise HTTPException(
-            404, f"{_SUBJECT_LABELS[subject_type]}不存在: {subject_id}")
-    return rec
-
-
-@router.put("/subjects/{subject_type}/{subject_id}",
-            dependencies=[Depends(admin_or_mcp_key_required)])
-async def upsert_subject(subject_type: str, subject_id: str,
-                         request: Request, payload: Dict[str, Any]):
-    """新增或更新单条(建/改合一,重试安全)。
-
-    Body: {name?, status?}——新建时缺省字段用默认值(空名/active);
-    更新时缺省字段保持现值。
-    """
-    _subject_type_or_422(subject_type)
-    sid = subject_id.strip()
-    if not sid:
-        raise HTTPException(422, "subject_id 不能为空")
-    if len(sid) > _SUBJECT_ID_MAX:
-        raise HTTPException(422, f"subject_id 超长(上限 {_SUBJECT_ID_MAX} 字符)")
-    fields = _validated_subject_fields(payload or {}, "body")
-    rec = runtime.get_kg_store(request.app.state).upsert_subject(
-        subject_type, sid, fields)
-    logger.info(f"subject upsert: {subject_type}/{sid} "
-                f"(created={rec['created']})")
-    return rec
-
-
-@router.delete("/subjects/{subject_type}/{subject_id}",
-               dependencies=[Depends(admin_or_mcp_key_required)])
-async def delete_subject(subject_type: str, subject_id: str, request: Request):
-    """删除单条(不存在 404,如实区分"已删过"与"删成功")。"""
-    _subject_type_or_422(subject_type)
-    if not runtime.get_kg_store(request.app.state).delete_subject(
-            subject_type, subject_id.strip()):
-        raise HTTPException(
-            404, f"{_SUBJECT_LABELS[subject_type]}不存在: {subject_id}")
-    logger.info(f"subject deleted: {subject_type}/{subject_id}")
-    return {"success": True}
-
-
-@router.get("/sync/status", dependencies=[Depends(admin_or_mcp_key_required)])
-async def subjects_sync_status(request: Request):
-    """目录同步状态总览:各类计数(总/在用/停用)+ 最近一次同步 + 操作流水。"""
-    return runtime.get_kg_store(request.app.state).subjects_sync_status()
 
 
 # ── 标注回复 CRUD(D32:知识库标准答案;管理端维护,检索时短路) ──
@@ -898,20 +626,9 @@ async def batch_delete_documents(kb_id: str, request: Request,
 async def download_document(kb_id: str, doc_id: str, request: Request):
     """下载已上传的原始文件(存储名=doc_id+扩展名,下载名=原始文件名)。
 
-    来源 ID 不是授权令牌(设计 7.2):每次下载重验当前用户对库的访问
-    权——此前知道 doc_id 即可下任意库文件(旁路)。无 admin 后门:开放
-    模式"人人皆 admin"会吞掉整个 ACL;ACL 判定语义(无身份/无 ACL=
-    放行)已保证开放部署可用,受限库对不在白名单的身份一律拒绝
-    (管理员把自己加进白名单即可)。
+    kbId+docId 双定位 + 文件根边界防御(路径必须落在文件根内)。
     """
     _kb_or_404(request, kb_id)
-    from domains.knowledge_graph import acl as kg_acl
-    user, roles = kg_acl.request_identity(
-        request.headers.get("X-User-Id"),
-        request.headers.get("X-User-Roles"))
-    if not kg_acl.kb_allowed(
-            runtime.get_kg_store(request.app.state), kb_id, user, roles):
-        raise HTTPException(403, "无该知识库的访问权限")
     store = runtime.get_kg_store(request.app.state)
     doc = store.get_document(doc_id)
     if not doc or doc["kbId"] != kb_id:
@@ -1269,22 +986,17 @@ async def induce_schema(kb_id: str, request: Request, payload: Dict[str, Any] = 
     return task
 
 
-# ── 检索(用户级:身份由 X-User-Id 透传,不走管理口令) ──────────
+# ── 检索(用户级,不走管理口令) ─────────────────────────────────
 
 @router.post("/search")
 async def search(request: Request, payload: Dict[str, Any]):
     """混合检索问答(非流式;宿主/前端直接调用)。
 
-    Body: {kb: 知识库名/ID/数组(可选), query: 问题, top_k?: 向量条数,
-           roles?: 角色数组(嵌入模式数据权限;与 chat 的
-           pack_params.knowledge_graph.user_roles 同义)}
-      - kb 字符串:单库检索(名或 ID;不存在 404——回显的是用户自己的输入;
-        无 ACL 权限 403)
+    Body: {kb: 知识库名/ID/数组(可选), query: 问题, top_k?: 向量条数}
+      - kb 字符串:单库检索(名或 ID;不存在 404——回显的是用户自己的输入)
       - kb 数组:跨指定库检索;不存在的名字**静默跳过**(不 404 泄露探测
-        结果,防枚举口径:只回显存在的库名);无权限的库同款静默跳过;
-        全部不可用才 404
-      - kb 缺省:全部库跨库检索(N3 跨库默认;排除 folder 目录节点;
-        传了身份则只检索有权限的库)
+        结果,防枚举口径:只回显存在的库名);全部不可用才 404
+      - kb 缺省:全部库跨库检索(N3 跨库默认;排除 folder 目录节点)
     """
     query = str((payload or {}).get("query") or "").strip()
     if not query:
@@ -1293,11 +1005,6 @@ async def search(request: Request, payload: Dict[str, Any]):
     top_k = payload.get("top_k")
 
     store = runtime.get_kg_store(request.app.state)
-    # 数据权限身份:X-User-Id(头) + roles(体;嵌入模式宿主传入才生效)
-    from domains.knowledge_graph import acl as kg_acl
-    from sdk.pack_api import user_id
-    perm_user, perm_roles = kg_acl.request_identity(user_id(request), payload.get("roles"))
-    perm_on = kg_acl.has_identity(perm_user, perm_roles)
     target: List[Dict[str, Any]] = []
     if isinstance(kb_ref, list):
         refs = [str(r).strip() for r in kb_ref if str(r or "").strip()]
@@ -1306,11 +1013,8 @@ async def search(request: Request, payload: Dict[str, Any]):
         seen_ids = set()
         for ref in refs:
             kb = store.get_kb_by_name(ref) or store.get_kb(ref)
-            # folder 目录不存文档不可检索,与不存在的名字同款静默跳过;
-            # 无权限的库同款静默跳过(防枚举口径一致)
-            if (kb and kb.get("kind") != "folder" and kb["id"] not in seen_ids
-                    and (not perm_on or kg_acl.kb_allowed(
-                        store, kb["id"], perm_user, perm_roles))):
+            # folder 目录不存文档不可检索,与不存在的名字同款静默跳过
+            if kb and kb.get("kind") != "folder" and kb["id"] not in seen_ids:
                 seen_ids.add(kb["id"])
                 target.append(kb)
         if not target:
@@ -1321,16 +1025,11 @@ async def search(request: Request, payload: Dict[str, Any]):
         kb = store.get_kb_by_name(ref) or store.get_kb(ref)
         if not kb:
             raise HTTPException(404, f"知识库不存在: {ref}")
-        if perm_on and not kg_acl.kb_allowed(store, kb["id"], perm_user, perm_roles):
-            raise HTTPException(403, f"无权访问知识库: {ref}")
         target = [kb]
     else:
         target = [k for k in store.list_kbs() if k.get("kind") != "folder"]
-        if perm_on:
-            target, _denied = kg_acl.filter_kbs(store, target, perm_user, perm_roles)
         if not target:
-            raise HTTPException(
-                404, "当前没有您可访问的知识库" if perm_on else "当前没有任何知识库")
+            raise HTTPException(404, "当前没有任何知识库")
 
     from domains.knowledge_graph import retrieval
     from sdk.pack_api import user_id

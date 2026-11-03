@@ -2,17 +2,17 @@
 
 职责边界:
   - 本模块负责配置存取,revision 用于运行时缓存失效;
-  - 运行时解析与主备切换在 llm/client.py(每轮读当前生效配置);
+  - 运行时解析在 llm/client.py(每轮读当前生效配置);
   - 管理端 API 在 api/llm_providers.py。
 
 配置形状(content JSON):
-  {"primary":   {base_url, api_key, model, enabled, price_in, price_out},
-   "fallback":  {...同构,可缺省}}
+  {"primary": {base_url, api_key, model, enabled, price_in, price_out}}
   - api_key 明文存储(与 .env 同信任域:库与配置文件同机同权限;
     管理端 GET/PUT 均走 admin 门禁,GET 不回显,PUT 留空沿用旧值)。
   - price_in/out: 元/千token,可空(null)——空则调用日志不计成本。
-  - enabled=False 的角色不参与解析(留配置不删,便于临时停用);
-    fallback 缺省 = 无备用。
+  - enabled=False 不参与解析(留配置不删,便于临时停用)。
+  - 备用供应商已按用户裁决删除(2026-11-03):LLM 出问题直接抛异常。
+    存量行若带 fallback 键,保存时会被丢弃。
 """
 import json
 import logging
@@ -94,36 +94,27 @@ def validate_providers(content: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(primary, dict) or not (primary.get("base_url") or "").strip():
         raise ProviderConfigError("primary 缺少 base_url")
     out: Dict[str, Any] = {}
-    for role in ("primary", "fallback"):
-        cfg = content.get(role)
-        if cfg is None:
-            if role == "primary":
-                raise ProviderConfigError("primary 必填")
-            continue  # fallback 可缺省
-        if not isinstance(cfg, dict):
-            raise ProviderConfigError(f"{role} 必须是对象")
-        if not (cfg.get("base_url") or "").strip():
-            raise ProviderConfigError(f"{role} 缺少 base_url")
-        # 密钥更新语义(常规做法):GET 不回显;PUT 填了才换,留空=沿用旧值
-        # (_existing_key 由管理端从库中旧档并入,入库前剔除)
-        norm: Dict[str, Any] = {
-            "base_url": str(cfg["base_url"]).strip().rstrip("/"),
-            "api_key": str(cfg.get("api_key") or cfg.get("_existing_key") or ""),
-            "model": str(cfg.get("model") or "").strip(),
-            "enabled": bool(cfg.get("enabled", True)),
-        }
-        for pf in ("price_in", "price_out"):
-            v = cfg.get(pf)
-            if v in (None, "", 0, "0"):
-                norm[pf] = None
-            else:
-                try:
-                    norm[pf] = float(v)
-                except (TypeError, ValueError):
-                    raise ProviderConfigError(f"{role}.{pf} 必须是数值(元/千token)")
-        if not norm["model"] and (role == "primary" or norm["enabled"]):
-            raise ProviderConfigError(f"{role} 缺少 model")
-        out[role] = norm
+    cfg = primary
+    # 密钥更新语义(常规做法):GET 不回显;PUT 填了才换,留空=沿用旧值
+    # (_existing_key 由管理端从库中旧档并入,入库前剔除)
+    norm: Dict[str, Any] = {
+        "base_url": str(cfg["base_url"]).strip().rstrip("/"),
+        "api_key": str(cfg.get("api_key") or cfg.get("_existing_key") or ""),
+        "model": str(cfg.get("model") or "").strip(),
+        "enabled": bool(cfg.get("enabled", True)),
+    }
+    for pf in ("price_in", "price_out"):
+        v = cfg.get(pf)
+        if v in (None, "", 0, "0"):
+            norm[pf] = None
+        else:
+            try:
+                norm[pf] = float(v)
+            except (TypeError, ValueError):
+                raise ProviderConfigError(f"primary.{pf} 必须是数值(元/千token)")
+    if not norm["model"] and norm["enabled"]:
+        raise ProviderConfigError("primary 缺少 model")
+    out["primary"] = norm
     return out
 
 
@@ -162,8 +153,7 @@ _cached: Optional[Tuple[int, Dict[str, Any]]] = None
 def resolve_active() -> Dict[str, Any]:
     """当前生效的角色配置(缓存+revision 比对;DB 故障回退缓存/空)。
 
-    返回 {"primary": {...明文 key...}, "fallback": {...}|None} —
-    enabled=False 或缺省的角色不在结果里。
+    返回 {"primary": {...明文 key...}} 或 {}(未配置/停用)。
     """
     global _cached
     with _cache_lock:
@@ -172,17 +162,13 @@ def resolve_active() -> Dict[str, Any]:
             if _cached is not None and _cached[0] == rev:
                 return _cached[1]
             cfg = load_providers() or {}
-            active = {}
-            for role in ("primary", "fallback"):
-                c = cfg.get(role) or {}
-                if c and c.get("enabled", True):
-                    active[role] = c
-            if "primary" not in active:
+            c = cfg.get("primary") or {}
+            if not (c and c.get("enabled", True)):
                 # 未配置/主角色停用 → 空配置(调用方 llm/client 前置闸
                 # 报错引导去管理页配置——不回退 env,单一事实源)
                 return {}
-            _cached = (rev, active)
-            return active
+            _cached = (rev, {"primary": c})
+            return {"primary": c}
         except Exception:  # noqa: BLE001
             logger.exception("llm_providers 解析失败,沿用上次缓存(无缓存视为未配置)")
             return {} if _cached is None else _cached[1]
