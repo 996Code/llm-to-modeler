@@ -1,0 +1,43 @@
+# mihomo 配置 —— 只为 SearXNG 的 google 搜索服务
+# 订阅 URL 在部署时手工填入（凭证不入库，此文件权限 600）
+mixed-port: 7890
+allow-lan: true          # 必须开：否则 7890 绑容器内 127.0.0.1，searxng 连不进来
+bind-address: "0.0.0.0"  # 容器内监听所有口；安全靠"不发布宿主端口"
+mode: rule
+log-level: warning
+external-controller: 127.0.0.1:9090
+
+proxy-providers:
+  airport:
+    type: http
+    url: "REPLACE_WITH_SUBSCRIPTION_URL"   # 部署时手工填
+    interval: 86400        # 24h 自动更新订阅
+    path: /root/.config/mihomo/providers/airport.yaml   # 必须在 .config/mihomo 下（SAFE_PATHS）
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 600
+
+proxy-groups:
+  - name: PROXY
+    # url-test 自动测速选优；filter 过滤掉订阅里的"流量信息"假节点
+    # （select 组默认选第一个=假节点，实测踩坑）
+    type: url-test
+    use:
+      - airport
+    url: https://www.gstatic.com/generate_204
+    interval: 600
+    tolerance: 100
+    filter: "(?i)港|HK|日本|JP|荷兰|NL|美国|US|新加坡|SG|韩国|KR|英国|GB|德国|DE"
+
+rules:
+  # 最小权限：只代理谷歌系域名，其余一律直连（这个容器不充当内网翻墙跳板）
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-SUFFIX,googleapis.com,PROXY
+  - DOMAIN-SUFFIX,gstatic.com,PROXY
+  - DOMAIN-SUFFIX,googleusercontent.com,PROXY
+  - DOMAIN-SUFFIX,ggpht.com,PROXY
+  - DOMAIN-SUFFIX,google.co.jp,PROXY
+  - DOMAIN-SUFFIX,google.com.hk,PROXY
+  - DOMAIN-KEYWORD,google,PROXY
+  - MATCH,DIRECT

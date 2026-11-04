@@ -1,0 +1,45 @@
+# SearXNG + mihomo 联网搜索栈 —— 3.110 部署 compose
+# 目录约定（参照本机惯例）：配置 /data/base，运行数据 /data/data
+#   /data/base/searxng/          ← 本 compose + 两个服务的配置文件（git 可入库，无凭证）
+#   /data/data/searxng/          ← 运行数据（mihomo 订阅缓存、SearXNG 日志）
+# 凭证（订阅 URL）只存在于 /data/base/searxng/mihomo/config.yaml（服务器本地，不入库）
+#
+# 注意：mihomo 与 searxng 不发布任何宿主端口——只在本 compose 内网互通。
+# 将来 MCP pack 从 llm-modeler 网络接入时再评估（可加 expose 或共享网络）。
+
+services:
+  mihomo:
+    image: docker.io/metacubex/mihomo:Alpha
+    container_name: searxng-mihomo
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # 配置（含订阅 URL，服务器本地文件，权限 600）
+      - /data/base/searxng/mihomo/config.yaml:/root/.config/mihomo/config.yaml:ro
+      # 订阅缓存/健康检查数据
+      - /data/data/searxng/mihomo:/root/.config/mihomo
+    # 无 ports —— 不对宿主/内网暴露代理
+
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    # 镜像预编译了旧引擎的 .pyc，会盖过 volume 挂载的新 .py（实测踩坑）。
+    # entrypoint 包装：启动前删 google 引擎的 pyc 缓存再起原进程。
+    entrypoint: ["/bin/sh", "-c", "rm -f /usr/local/searxng/searx/engines/__pycache__/google*.pyc; exec /usr/local/searxng/entrypoint.sh"]
+    environment:
+      - TZ=Asia/Shanghai
+      - SEARXNG_BASE_URL=http://searxng:8080/
+    volumes:
+      # 主配置（JSON API + google/bing 引擎 + 走 mihomo 代理）
+      - /data/base/searxng/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      # google 引擎补丁（PR searxng/searxng#6892，合入官方镜像后撤掉这 5 个挂载）
+      - /data/base/searxng/searxng/engines/google.py:/usr/local/searxng/searx/engines/google.py:ro
+      - /data/base/searxng/searxng/engines/google_images.py:/usr/local/searxng/searx/engines/google_images.py:ro
+      - /data/base/searxng/searxng/engines/google_news.py:/usr/local/searxng/searx/engines/google_news.py:ro
+      - /data/base/searxng/searxng/engines/google_videos.py:/usr/local/searxng/searx/engines/google_videos.py:ro
+      - /data/base/searxng/searxng/engines/google_scholar.py:/usr/local/searxng/searx/engines/google_scholar.py:ro
+    # 无 ports —— 只服务 compose 内网；将来 MCP pack 接入时再开放
+    depends_on:
+      - mihomo

@@ -1,0 +1,37 @@
+use_default_settings: true
+
+server:
+  secret_key: "REPLACE_WITH_RANDOM_32BYTES_ON_SERVER"   # 部署时 openssl rand -hex 16 生成
+  limiter: false          # 只服务内网 MCP 调用，无公网暴露
+  image_proxy: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+# 出网走本 compose 内的 mihomo 容器（只代理谷歌系域名，见 mihomo/config.yaml）
+outgoing:
+  proxies:
+    all://:
+      - http://mihomo:7890
+
+engines:
+  - name: baidu
+    baidu_category: general
+    engine: baidu
+    shortcut: bd
+    disabled: true      # 实测机房 IP 秒撞百度安全验证，默认关
+
+  - name: google
+    engine: google
+    shortcut: go
+    disabled: false     # PR #6892 修复版引擎（engines/ 目录挂载覆盖）
+
+  - name: bing
+    engine: bing
+    base_url: https://cn.bing.com
+    shortcut: bi
+    disabled: false     # 备胎：google 挂起时兜底
