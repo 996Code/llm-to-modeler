@@ -146,6 +146,17 @@ groups:
         placeholder: '[{"title":"检定周期","desc":"...","prompt":"...","icon":"search"}]'
         help: 欢迎页示例卡(JSON 数组,字段 title/desc/prompt/icon);留空用 manifest 默认。改完即生效,无需部署
 
+  - key: web_search
+    title: 联网搜索
+    fields:
+      - key: searxng_url
+        type: string
+        label: SearXNG 地址
+        placeholder: http://searxng:8080
+        default: ""
+        env: SEARXNG_URL
+        help: 联网搜索底座(SearXNG 容器)的地址;留空=联网搜索未启用(对话与管理端调研页都不可用)。本地开发栈填 http://localhost:8888,3.110 部署填 http://searxng:8080
+
   - key: retrieval
     title: 检索与问答
     fields:

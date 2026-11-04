@@ -203,6 +203,10 @@ def classify_intent_node(state: GraphState) -> dict:
             route_kwargs = {}
             if conversation_id and _route_accepts_conv_id(router):
                 route_kwargs["conv_id"] = conversation_id
+            # pack_params(可选契约):pack 路由读用户级开关(如 KG 的
+            # web_search 联网开关)决定工具选择——照 conv_id 协商先例
+            if state.get("pack_params") and _route_accepts_param(router, "pack_params"):
+                route_kwargs["pack_params"] = state.get("pack_params")
             route_result = router.route(
                 user_input,
                 state.get(CONTEXT_ARTIFACT),  # 画布（含未保存草稿）——pack 判断"修改 vs 创建"的依据
@@ -980,10 +984,15 @@ def _route_accepts_conv_id(router: Any) -> bool:
     只判一次(相比 LLM 调用可忽略);用 id() 做缓存键反而有对象回收后
     地址复用串值的隐患。
     """
+    return _route_accepts_param(router, "conv_id")
+
+
+def _route_accepts_param(router: Any, name: str) -> bool:
+    """route() 是否声明了某可选参数(conv_id/pack_params 同一协商)。"""
     try:
         import inspect
         params = inspect.signature(router.route).parameters
-        return ("conv_id" in params) or any(
+        return (name in params) or any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
         )
     except (TypeError, ValueError):

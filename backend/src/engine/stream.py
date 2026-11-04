@@ -61,12 +61,14 @@ logger = logging.getLogger(__name__)
 def _request_context_trace(
     store, conv_id: str, user_id: str, services: dict,
     forward_headers: dict, context_artifact, answers, image_base64,
+    pack_params: dict = None,
 ) -> None:
     """请求初始化参数入链(kind=trace;管理端链路视图按轮展示)。
 
     记录本轮 chat 请求携带的:宿主服务地址表(services,原文)、透传鉴权头
     (原文落库——产品决策:内网审计需要完整凭证形态)、画布上下文规格、
-    恢复/图片标记——每轮请求"到底带了什么"事后一眼可查。
+    恢复/图片标记、pack 级参数(含用户级开关,如联网搜索 web_search)——
+    每轮请求"到底带了什么"事后一眼可查。
 
     Fail-Open:与 nodes._append_trace 同策略,写失败只记日志不影响主流程。
     """
@@ -84,6 +86,8 @@ def _request_context_trace(
                 "context_artifact_bytes": len(str(context_artifact)) if context_artifact else 0,
                 "resume_answers": bool(answers),
                 "with_image": bool(image_base64),
+                # pack 级参数原文(开关/默认值审计:联网搜索开没开、默认库是谁)
+                "pack_params": dict(pack_params or {}),
             },
         })
     except Exception as e:
@@ -324,6 +328,7 @@ async def stream_graph(
                 _request_context_trace(
                     conversation_store, conversation_id, user_id, services,
                     forward_headers or {}, context_artifact, answers, image_base64,
+                    pack_params=pack_params,
                 )
 
                 # 实时进度通道：把 StreamManager 绑给工具 emit（同线程），

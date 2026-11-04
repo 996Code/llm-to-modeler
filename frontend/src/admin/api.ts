@@ -909,6 +909,38 @@ export async function kgRetrieveTest(
   return data
 }
 
+// ── 联网搜索(管理端"联网调研"页;SearXNG→google,结果带来源链接) ──
+
+export interface KgWebSearchResultItem { title: string; url: string; content: string }
+export interface KgWebSearchResult {
+  query: string
+  results: KgWebSearchResultItem[]
+  cached: boolean
+  logId: string
+}
+export interface KgWebSearchLog {
+  id: string
+  query: string
+  results: KgWebSearchResultItem[]
+  resultCount: number
+  cached: boolean
+  operator: string
+  createdAt: string
+}
+export async function kgWebSearch(
+  query: string, topK?: number,
+): Promise<KgWebSearchResult> {
+  const { data } = await kgApi.post('/web-search', { query, top_k: topK })
+  return data
+}
+export async function kgWebSearchLogs(limit?: number): Promise<KgWebSearchLog[]> {
+  const { data } = await kgApi.get('/web-search/logs', { params: { limit } })
+  return data
+}
+export async function kgWebSearchLogsClear(): Promise<void> {
+  await kgApi.delete('/web-search/logs')
+}
+
 // ── MCP 服务管理(注册外部 MCP server + 对外接入 key) ─────────
 
 /** 外部 MCP server 注册行(与 GET /api/admin/mcp/servers 契约对齐)。 */

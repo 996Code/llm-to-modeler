@@ -46,6 +46,10 @@ artifact:
       entityCount: 命中实体
       relationCount: 命中关系
       chunkCount: 命中文档片段
+      # web_search(联网搜索)数据卡
+      query: 检索词
+      resultCount: 结果数
+      cached: 缓存命中
     # 欢迎页大图标(前端通用图标集里的名字,未知名字回退默认)
     welcome_icon: search
     # 欢迎页示例卡(点击直接发送 prompt)

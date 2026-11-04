@@ -98,6 +98,14 @@ export const useConversationStore = defineStore('conversation', () => {
     baselineConfig.value = JSON.parse(JSON.stringify(cfg))
   }
   const loading = ref(false)                            // 是否正在加载（列表/详情）
+  // 联网搜索开关(用户裁决):对话窗口可切换;开=pack_params 下发
+  // knowledge_graph.web_search=true,后端 KG 路由据此允许 web_search 工具。
+  // localStorage 持久化(跨刷新沿用用户偏好),嵌入/独立两种模式共用。
+  const webSearchEnabled = ref(localStorage.getItem('web_search_enabled') === '1')
+  function setWebSearch(on: boolean) {
+    webSearchEnabled.value = on
+    localStorage.setItem('web_search_enabled', on ? '1' : '0')
+  }
   const streaming = ref(false)                          // 是否正在流式生成中（SSE 进行中）
   const stageMessage = ref('')                          // 当前阶段的提示文案（如"正在生成..."）
   const currentStage = ref('')                          // 当前阶段标识（如 "generate"）
@@ -391,7 +399,22 @@ export const useConversationStore = defineStore('conversation', () => {
           stageMessage.value = ''
           currentStage.value = ''
         },
-      }, clarifyAnswers, imageBase64, embedCtx ?? localCtx)
+      }, clarifyAnswers, imageBase64, (() => {
+        // 联网搜索开关并入 pack_params.knowledge_graph(嵌入模式与宿主参数
+        // 合并,独立模式自建——两种模式同一通路,后端零分支)
+        const base = (embedCtx ?? localCtx) as Record<string, any> | null | undefined
+        const hostParams = (base?.pack_params ?? {}) as Record<string, any>
+        return {
+          ...base,
+          pack_params: {
+            ...hostParams,
+            knowledge_graph: {
+              ...(hostParams.knowledge_graph ?? {}),
+              web_search: webSearchEnabled.value,
+            },
+          },
+        }
+      })())
     } catch (e: any) {  // e: any —— 捕获任意异常并当作 any 处理（才能访问 .message）
       if (isStale()) return
       messages.value.push({
@@ -498,6 +521,8 @@ export const useConversationStore = defineStore('conversation', () => {
     setBaseline,
     loading,
     streaming,
+    webSearchEnabled,
+    setWebSearch,
     stageMessage,
     currentStage,
     hostLinkError,

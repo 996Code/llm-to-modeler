@@ -1147,3 +1147,57 @@ async def kb_retrieve_test(request: Request, kb_id: str, payload: Dict[str, Any]
 
 # ── 依赖状态(设置页"重新检测"用) ─────────────────────────────
 
+
+
+# ── 联网搜索(管理端调研 tab;对话链路走 WebSearchTool,不经此) ──
+
+@router.post("/web-search", dependencies=[Depends(admin_required)])
+async def web_search(request: Request, payload: Dict[str, Any]):
+    """联网调研(管理端"联网调研"页):SearXNG→google,结果必带来源链接。
+
+    每次查询落 kg_web_search_logs(操作人/结果/缓存命中),供"最近调研"
+    回看。Body: {query: 搜索词, top_k?: 条数(默认5,上限10)}
+    """
+    query = str((payload or {}).get("query") or "").strip()
+    if not query:
+        raise HTTPException(422, "query 不能为空")
+    top_k = payload.get("top_k") or 5
+    try:
+        top_k = max(1, min(int(top_k), 10))
+    except (TypeError, ValueError):
+        top_k = 5
+
+    from domains.knowledge_graph import websearch
+    # 操作人标识:X-Admin-Token 摘要前 8 位(区分操作人,不存完整凭证);
+    # 开放模式(未配置 ADMIN_TOKEN)留空
+    import hashlib as _hl
+    _tok = request.headers.get("X-Admin-Token", "")
+    operator = (_hl.sha256(_tok.encode()).hexdigest()[:8] if _tok else "")
+    try:
+        # httpx 同步调用丢线程池(事件循环不冻结,与 retrieve-test 同款)
+        out = await asyncio.to_thread(
+            websearch.search, request.app.state, query, top_k)
+    except Exception:
+        # 异常详情只进服务端日志;管理端点不回显内部地址等拓扑
+        logger.exception("web-search failed")
+        raise HTTPException(502, "联网搜索失败,请稍后重试或检查插件设置里的 SearXNG 地址")
+    log = await asyncio.to_thread(
+        websearch.log_search, request.app.state, query, out["results"],
+        bool(out.get("cached")), operator=operator)
+    return out | {"logId": log["id"]}
+
+
+@router.get("/web-search/logs", dependencies=[Depends(admin_required)])
+async def web_search_logs(request: Request, limit: int = 50):
+    """最近调研记录(新→旧,默认50条)。"""
+    from domains.knowledge_graph import websearch
+    return await asyncio.to_thread(
+        websearch.list_logs, request.app.state, max(1, min(limit, 200)))
+
+
+@router.delete("/web-search/logs", dependencies=[Depends(admin_required)])
+async def web_search_logs_clear(request: Request):
+    """清空调研记录。"""
+    from domains.knowledge_graph import websearch
+    await asyncio.to_thread(websearch.clear_logs, request.app.state)
+    return {"ok": True}

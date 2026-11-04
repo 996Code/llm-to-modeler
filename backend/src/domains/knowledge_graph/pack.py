@@ -26,13 +26,35 @@ def create_registry(app_state=None) -> ToolRegistry:
         raise PackConfigurationError(
             f"knowledge_graph 核心工具 kb_search 构造失败: {e}"
             "——拒绝加载不完整的 knowledge_graph pack") from e
+    # web_search 是可选工具(依赖 searxng_url 配置,未配置时 preflight
+    # 拦截):构造失败只跳过不拒载整个 pack——与核心工具的 fail-fast 分级
+    try:
+        from domains.knowledge_graph.tools.web_search import WebSearchTool
+        registry.register(WebSearchTool(app_state))
+    except Exception as e:
+        logger.warning(f"可选工具 web_search 构造失败(跳过): {e}")
     return registry
 
 
 class KnowledgeQuestionRouter:
-    """知识问答入口的意图解析由检索管线负责,不重复做工具分类。"""
+    """知识问答入口的意图解析由检索管线负责,不重复做工具分类。
 
-    def route(self, user_input, artifact, history="", llm_client=None, conv_id=None):
+    web_search 例外(用户裁决的对话开关):pack_params.knowledge_graph.
+    web_search=true 且用户话术明确要联网时选 web_search——开关关(默认)
+    或普通知识问题仍走 kb_search。话术判断保守(受控架构:不抢 KB 的活)。
+    """
+
+    # 明确要联网的信号词(保守:普通"查一下/最新"不触发,必须点明网/联网)
+    _WEB_HINTS = ("上网", "联网", "网上查", "网上搜", "搜索引擎",
+                  "百度一下", "谷歌一下", "搜一下网", "web上", "互联网上")
+
+    def route(self, user_input, artifact, history="", llm_client=None,
+              conv_id=None, pack_params=None):
+        params = (pack_params or {}).get("knowledge_graph") or {}
+        if params.get("web_search"):
+            text = (user_input or "")
+            if any(h in text for h in self._WEB_HINTS):
+                return "web_search", 0.9
         return "kb_search", 1.0
 
 

@@ -327,9 +327,11 @@
 
     <ChatInput
       @send="handleSend"
+      @toggle-web-search="onToggleWebSearch"
       :streaming="store.streaming"
       :pending-clarification="store.pendingClarification"
       :total-tokens="convTokens"
+      :web-search="store.webSearchEnabled"
     />
 
     <!-- 本轮链路弹窗:阶段时间线 + 耗时 + LLM 次数/token(通用能力) -->
@@ -833,6 +835,11 @@ function answerClarification(q: ClarificationQuestion, opt: ClarificationOption)
 function handleSend(text: string, imageBase64?: string) {
   // 统一入口：后端自动识别意图（create/modify/general/image）
   store.sendMessage(text, imageBase64)
+}
+
+/** 联网搜索开关切换(嵌入/独立两模式共用;状态与持久化都在 store)。 */
+function onToggleWebSearch(on: boolean) {
+  store.setWebSearch(on)
 }
 
 /** 点击配置卡片：把该配置设为当前配置（侧边 JSON 面板会同步刷新） */

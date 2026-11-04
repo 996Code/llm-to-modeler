@@ -44,6 +44,17 @@
       <div class="input-actions">
         <!-- 流式生成时显示提示 -->
         <span v-if="streaming" class="input-hint">生成中...</span>
+        <!-- 联网搜索开关(嵌入/独立两种模式共用;开=允许路由到 web_search) -->
+        <button
+          class="ws-toggle"
+          :class="{ on: webSearch }"
+          :disabled="streaming"
+          :title="webSearch ? '联网搜索已开启：说「上网查一下」等会走外部搜索' : '联网搜索已关闭：仅用知识库等内部能力'"
+          @click="$emit('toggle-web-search', !webSearch)"
+        >
+          <GlobalOutlined />
+          <span class="ws-toggle-label">联网</span>
+        </button>
         <!-- 附件（图片）按钮，点击触发隐藏的 file input -->
         <button
           class="attach-btn"
@@ -90,7 +101,7 @@
 // ref：响应式基本值；computed：派生值；watch：监听变化（类比 PropertyChangeListener）
 import { ref, computed, watch } from 'vue'
 import { message } from 'ant-design-vue'
-import { SendOutlined, LoadingOutlined, PaperClipOutlined } from '@ant-design/icons-vue'
+import { SendOutlined, LoadingOutlined, PaperClipOutlined, GlobalOutlined } from '@ant-design/icons-vue'
 
 // defineProps：声明父组件传入的属性（接口契约，类比 Java 方法入参）。
 // 泛型对象写法（<{...}>）提供类型推导。
@@ -98,12 +109,14 @@ const props = defineProps<{
   streaming: boolean                  // 是否正在流式生成（生成时禁用输入）
   pendingClarification?: boolean      // 当前是否处于追问态（影响占位文案）
   totalTokens?: number                // 当前对话累计 token(输入框角常显)
+  webSearch?: boolean                 // 联网搜索开关状态(父组件 store 持有)
 }>()
 
 // defineEmits：声明本组件会触发的事件（接口契约，类比 Java 的事件总线/回调接口）。
 // 语法 send: [text, imageBase64?] 表示事件名为 send，带两个参数。
 const emit = defineEmits<{
   send: [text: string, imageBase64?: string]
+  'toggle-web-search': [on: boolean]  // 联网搜索开关切换(状态归父组件/store)
 }>()
 
 // ---------- 本地草稿状态（响应式）----------
@@ -444,4 +457,17 @@ function onEnter(e: KeyboardEvent) {
 @media (max-width: 768px) {
   .chat-input-wrap { padding: 8px 12px 12px; }
 }
+
+/* 联网搜索开关:默认灰,开启高亮品牌色 */
+.ws-toggle {
+  display: inline-flex; align-items: center; gap: 3px;
+  border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;
+  color: #94a3b8; font-size: 12px; padding: 2px 8px; cursor: pointer;
+}
+.ws-toggle:hover { border-color: var(--brand); color: var(--brand-ink); }
+.ws-toggle.on {
+  border-color: var(--brand); background: var(--brand-ink, #eef4ff);
+  color: var(--brand);
+}
+.ws-toggle-label { line-height: 1; }
 </style>

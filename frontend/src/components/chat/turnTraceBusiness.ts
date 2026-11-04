@@ -19,6 +19,7 @@ export interface TraceItem {
 // 阶段名 → 中文标签(开发者模式用;未知原样展示)
 export const STAGE_LABELS: Record<string, string> = {
   route_pack: '意图路由', route_tool: '工具选择', compress_history: '历史压缩',
+  'web_search.search': '联网搜索', 'web_search.assemble': '整理搜索结果',
   'chatbi.embed': '问题向量化', 'chatbi.retrieve': '表结构检索',
   'chatbi.retrieve.refine': '检索精筛', 'chatbi.think': '预思考',
   'chatbi.generate_sql': 'SQL 生成', 'chatbi.execute': 'SQL 执行',
