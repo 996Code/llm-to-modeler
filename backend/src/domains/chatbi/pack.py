@@ -17,31 +17,35 @@ logger = logging.getLogger(__name__)
 class ChatBIKeywordRouter(DefaultPackRouter):
     """关键词确定性路由:三工具的 when 语义全是关键词式,不值得烧 LLM。
 
-    规则(与各工具 when 声明同源):
-      - 图表切换词(换成饼图/折线/柱状/表格/指标卡…) → switch_chart
-      - 查询质量/统计词(查询质量/慢查询/查询统计) → query_stats
-      - 其余一律 ask_data(主工具,超范围由其 clarify/兜底链路处理)
-
-    误路由代价可控:switch_chart 无 prev_sql 会引导先提问;
-    query_stats 是只读统计。对比 LLM 路由每轮 ~4s+ 延迟,收益远大于风险。
+    正确性优先的收紧规则(2026-11 功能测试加固):
+      - switch_chart:必须同时含「切换动词」(换成/切换/改用/变成/转成/改画)
+        和「图表词」(图/表格/指标卡)。"统计各城市订单画柱状图"这类首查
+        带图表诉求不含切换动词 → ask_data(它自己会生成图表),不会误切。
+        冷启动无 prev_sql 时 switch_chart 自带"请先提问"引导,无需历史判断。
+      - query_stats:元问题短语 + 输入较短(≤20 字)才命中——"查询统计
+        每个城市的订单量"这类长句是数据查询,归 ask_data。
+      - 其余一律 ask_data(主工具,超范围由其 clarify/兜底链路处理)。
     """
 
-    _SWITCH_WORDS = ("换成", "切换", "改用", "换成饼图", "饼图", "折线", "柱状",
-                     "条形", "表格", "指标卡", "散点")
-    _STATS_WORDS = ("查询质量", "查询统计", "慢查询", "查询性能", "数据源质量",
-                    "查询历史统计")
+    _SWITCH_VERBS = ("换成", "切换", "改用", "变成", "转成", "改画", "换个图")
+    _CHART_NOUNS = ("图", "表格", "指标卡")
+    _STATS_WORDS = ("查询质量", "慢查询", "查询性能", "数据源质量",
+                    "最近查询统计", "查询历史统计")
 
     def route(self, user_input: str, artifact=None, history: str = "",
               llm_client=None, conv_id: str = None) -> tuple:
         text = (user_input or "").strip()
-        if text and any(w in text for w in self._STATS_WORDS):
-            for t in self._registry.all():
-                if t.name == "query_stats":
-                    return ("query_stats", 1.0)
-        if text and any(w in text for w in self._SWITCH_WORDS):
-            for t in self._registry.all():
-                if t.name == "switch_chart":
-                    return ("switch_chart", 1.0)
+        if text:
+            if (any(w in text for w in self._STATS_WORDS)
+                    and len(text) <= 20):
+                for t in self._registry.all():
+                    if t.name == "query_stats":
+                        return ("query_stats", 1.0)
+            if (any(v in text for v in self._SWITCH_VERBS)
+                    and any(n in text for n in self._CHART_NOUNS)):
+                for t in self._registry.all():
+                    if t.name == "switch_chart":
+                        return ("switch_chart", 1.0)
         for t in self._registry.all():
             if t.name == "ask_data":
                 return ("ask_data", 1.0)
