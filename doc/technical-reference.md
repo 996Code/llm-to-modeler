@@ -121,6 +121,24 @@ START → classify_intent (LLM 选工具, 从 registry 动态生成 prompt)
   └─ route_after_result ──→ rerun (追问恢复后重跑) / done (结束)
 ```
 
+### 2.2 一次请求的 LLM 调用链（2026-11 降频后）
+
+全部小任务 temperature=0、全链路串行（标题并行后台跑）；实测数字见
+`tools/e2e_quality_regression.py`（质量回归脚本，动链路后必跑）。
+
+| 链路 | 关键路径真出站 | 说明 |
+|------|--------------|------|
+| 智能客服（强检类，有器具名） | 3 次 | assistant.select → assistant.extract → assistant.conclude；标题首轮后台并行；检索意图由槽位确定性构造（kg.query 零调用），无器具名的自由问答回退 LLM 解析 |
+| 知识库 | 3 次 | kg.query → kg.sufficiency(D17 补检，默认开) → kg.answer；标注命中时短路为 0 次检索 |
+| 问数 | 4 次 | retrieve.refine → think → generate_sql → chart；二级路由为关键词确定性（零 LLM），记忆提炼后台化不占等待 |
+| 同题复访（任意链路） | 1 次 | 仅最终生成真出站；select/extract/kg.query/sufficiency/think/chart/title 命中进程内 chat 缓存（0ms） |
+
+**降频机制五件套**（详见 git log 7740fa9/817d5d2）：标题只生成一次（已有标题守卫）+
+chatbi 确定性路由 + 记忆提炼后台线程 + D17 保持默认开（设置页不暴露，用户裁决）+
+chat 缓存按 stage 白名单默认启用。缓存只覆盖确定性小任务，键含完整 prompt/模型/
+温度/max_tokens/供应商——配置一变即失配；大生成（conclude/answer/generate_sql）
+永不缓存；`LLM_CACHE_ENABLED=0` 一键全关。内存级 LRU(4096)+TTL 24h，重启即清。
+
 ### 2.2 路由范围与意图确认
 
 - 请求声明 `packs` 时,插件选择、工具选择、兜底与最终执行均受该范围约束；
@@ -194,7 +212,7 @@ domains/
 │   ├── api.py / tasks.py / store.py / retrieval.py / probes.py …
 ├── chatbi/               ← 智能问数(NL2SQL+图表,全能力形态)
 ├── metrology_assistant/  ← 计量智能客服(场景表驱动薄编排)
-├── njmind_bpm/ njmind_list/ leave_application/ …
+├── njmind_bpm/ njmind_list/ …
 └── (新插件只需创建目录 + pack.py + tools/ → 自动发现, 零配置上线)
 ```
 
@@ -281,12 +299,7 @@ prompt——新增插件后"我能做什么"自动更新，无需修改 Engine �
 `build_catalog → plan_ops(LLM 只输出指令集) → apply_ops(确定性合并)`，锚点失败带清单
 重试≤2次；未提及字段经 `restore_untouched` 从基线逐字节还原（改 A 不动 B）。
 
-### 4.2 leave_application — 请假申请（示例插件）
-
-`submit_leave`(3步: parse_info→validate_rules→submit) / `query_status`。
-信息不足走 `ToolResult.ask` 声明式追问，不填默认值。作为多 pack 一级路由演示域。
-
-### 4.3 knowledge_graph — 知识图谱 + 向量检索（全能力插件）
+### 4.2 knowledge_graph — 知识图谱 + 向量检索（全能力插件）
 
 自然语言驱动的知识库：上传文档 → LLM 抽取实体/关系入图存储(PostgreSQL,knowledge_graph schema)、切块向量化入 PG(pgvector)
 → 对话里直接命中（`kb_search`），答案带三元组证据与原文引用。
@@ -307,7 +320,7 @@ prompt——新增插件后"我能做什么"自动更新，无需修改 Engine �
 **升级注意**:首次启动建全文索引对存量 kg_chunks 全表重写（一次性,迁移已放开 600s
 超时）;存量文档的全文索引按旧文本计算——重点 PDF 建议重导入。
 
-### 4.4 chatbi — 智能问数（NL2SQL + 图表，全能力插件）
+### 4.3 chatbi — 智能问数（NL2SQL + 图表，全能力插件）
 
 | 组成 | 说明 |
 |------|------|
@@ -319,7 +332,7 @@ prompt——新增插件后"我能做什么"自动更新，无需修改 Engine �
 
 图表卡数据来源折叠区含表 schema 卡/JOIN 路径/执行 SQL,与引用编号构成可信度双件套。
 
-### 4.5 metrology_assistant — 计量智能客服
+### 4.4 metrology_assistant — 计量智能客服
 
 场景表（DB 覆盖∪MCP 声明自动合成）驱动的薄编排：两段式提取（选能力→按声明提参数）
 → 缺槽追问（令牌防串答）→ 受控执行/知识库检索 → 带引用结论。能力路由页按 MCP 服务
@@ -477,7 +490,7 @@ llm-to-modler/
 │   │   ├── knowledge_graph/  #   知识图谱(全能力形态)
 │   │   ├── chatbi/           #   智能问数(全能力形态)
 │   │   ├── metrology_assistant/ # 计量智能客服
-│   │   ├── njmind_bpm/ njmind_list/ leave_application/
+│   │   ├── njmind_bpm/ njmind_list/
 │   ├── adapters/             # HttpAssetClient
 │   ├── api/                  # config/conversations/admin/tasks/meta/settings/health/auth
 │   ├── llm/                  # client / local_embeddings / embed_cache / rate_limit

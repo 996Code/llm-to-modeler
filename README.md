@@ -87,7 +87,6 @@ Adapters(HttpAssetClient) → 上游业务 API / LLM 推理服务
 | chatbi | NL2SQL+图表：语义层/SQL 自愈/三层校验/记忆/反馈闭环（全能力形态） |
 | metrology_assistant | 计量智能客服：场景表（DB 覆盖∪MCP 声明自动合成）路由，价目/检测时限/资质/强检判定/进度查询 |
 | njmind_bpm / njmind_list | 审批流 / 列表页配置（上游走 njmind-modeler 纯计算端点） |
-| leave_application | 请假申请（演示域，多 pack 一级路由示例） |
 
 各插件完整能力表（导入流水线/检索细节/管线步骤…）见 [技术参考 §三](doc/technical-reference.md)。
 
