@@ -66,6 +66,10 @@
 
 ## 第六部分 · 业务与工具
 
+- [LLM 调用链降频优化·通用提示词](llm-callchain-optimization-prompt.md) ——
+  复制到同架构项目即可执行的完整指令：先测量建基线→六种浪费模式排查→
+  缓存白名单设计→质量回归验证。
+
 智能客服链路图（代码级走读、插件总览）归入 [总索引 · 智能客服](index.html#metrology-assistant)。投标架构图为**独立单文件** [customer-service-bid.html](customer-service-bid.html)，不进入总索引；图源 `diagram-src/customer-service-bid.workflow.json`，与成品同名。
 
 | 文档 | 内容 |
