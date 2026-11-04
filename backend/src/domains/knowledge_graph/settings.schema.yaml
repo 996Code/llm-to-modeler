@@ -178,11 +178,6 @@ groups:
         label: 图谱零命中全文兜底
         default: true
         help: 图谱种子零命中(别名/错别字/部分匹配)时,kg_chunks 走 PG 全文检索(tsvector+GIN,2-gram 分词)补充召回原文片段;兜底失败自动降级不阻断
-      - key: auto_retrieve_loop
-        type: bool
-        label: 证据不足自动补检(D17)
-        default: true
-        help: 检索后让 LLM 判一次证据是否充分,不足则换角度补检一轮(每次问答多 1 次 LLM 调用,约 2-5 秒);关闭则首轮检索结果直接作答,省一次调用但召回不足时答案质量可能下降
       - key: rerank_enabled
         type: bool
         label: 启用 rerank 精排
