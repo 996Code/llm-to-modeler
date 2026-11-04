@@ -101,9 +101,15 @@
     <a-table
       :columns="columns" :data-source="pagedDocs" :loading="loading" row-key="id"
       :row-selection="{ selectedRowKeys: selectedIds, onChange: (k: string[]) => selectedIds = k }"
-      size="small" :scroll="{ x: 1100, y: tableScrollY }"
+      size="small" :scroll="{ x: 1300, y: tableScrollY }"
       :pagination="docPagination" @change="onTableChange"
     >
+      <template #headerCell="{ column, title }">
+        <template v-if="column.key !== 'actions'">
+          {{ title }}<span class="dm-col-resizer" :title="'拖拽调整列宽'"
+            @mousedown="onHeaderResizeStart($event, column.key)" />
+        </template>
+      </template>
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'filename'">
           <FileTextOutlined class="dm-file-icon" :class="extOf(record.filename)" />
@@ -302,7 +308,7 @@
 
 <script setup lang="ts">
 // 文档管理:拖拽上传(查重/预检) + 导入任务发起 + 行内任务进度轮询。
-import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import type { UploadChangeParam } from 'ant-design-vue'
 import {BarChartOutlined, CheckCircleOutlined, CloseCircleOutlined, CloudUploadOutlined, DeleteOutlined, DownloadOutlined, EditOutlined, EyeOutlined, FileTextOutlined, InboxOutlined, QuestionCircleOutlined, RedoOutlined, ReloadOutlined, SettingOutlined, UnorderedListOutlined} from '@ant-design/icons-vue'
@@ -405,16 +411,42 @@ async function saveChunkConfig() {
   } finally { chunkConfigSaving.value = false }
 }
 
-const columns = [
-  { title: '文件', key: 'filename', ellipsis: true },
-  { title: '元数据', key: 'metadata', width: 150 },
-  { title: '大小', key: 'size', width: 90 },
-  { title: '导入状态', key: 'importStatus', width: 110 },
-  { title: '统计', key: 'counts', width: 190 },
-  { title: '引用', key: 'usage', width: 90 },
-  { title: '任务进度', key: 'progress', width: 150 },
-  { title: '操作', key: 'actions', width: 170 },
-]
+// 列宽可拖拽(2026-11-04):文件名默认加宽至 320(此前被其余定宽列挤到
+// 显示不全);colWidths 响应式承载拖拽结果,columns 由它推导。
+const colWidths = reactive<Record<string, number>>({
+  filename: 320, metadata: 150, size: 90, importStatus: 110,
+  counts: 190, usage: 90, progress: 150, actions: 170,
+})
+const columns = computed(() => [
+  { title: '文件', key: 'filename', width: colWidths.filename, ellipsis: true },
+  { title: '元数据', key: 'metadata', width: colWidths.metadata },
+  { title: '大小', key: 'size', width: colWidths.size },
+  { title: '导入状态', key: 'importStatus', width: colWidths.importStatus },
+  { title: '统计', key: 'counts', width: colWidths.counts },
+  { title: '引用', key: 'usage', width: colWidths.usage },
+  { title: '任务进度', key: 'progress', width: colWidths.progress },
+  { title: '操作', key: 'actions', width: colWidths.actions },
+])
+// 表头拖拽调宽:mousedown 记起点,document 级 move/up 跟踪(移出表头仍有效),
+// 松手即摘监听;min 80 防拖没。最后一列(操作)不给拖柄。
+const RESIZABLE_MIN = 80
+function onHeaderResizeStart(e: MouseEvent, key: string) {
+  e.preventDefault()
+  e.stopPropagation()
+  const startX = e.clientX
+  const startW = colWidths[key]
+  const onMove = (ev: MouseEvent) => {
+    colWidths[key] = Math.max(RESIZABLE_MIN, startW + ev.clientX - startX)
+  }
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    document.body.style.cursor = ''
+  }
+  document.body.style.cursor = 'col-resize'
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
 
 const importableCount = computed(
   () => docs.value.filter((d) => d.importStatus !== 'succeeded').length)
@@ -821,6 +853,15 @@ onBeforeUnmount(() => window.clearInterval(timer))
 .dm-reason { color: var(--danger); }
 .dm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 16px 0; }
 .dm-tip { color: var(--ink-3); font-size: 12px; }
+/* 表头列宽拖柄:贴表头右缘 6px 热区,hover 高亮品牌蓝 */
+:deep(th) { position: relative; }
+.dm-col-resizer {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 6px;
+  cursor: col-resize; user-select: none;
+}
+.dm-col-resizer:hover, .dm-col-resizer:active {
+  background: var(--brand);
+}
 .dm-file-icon { margin-right: 8px; color: var(--ink-3); }
 .dm-file-icon.pdf { color: var(--danger); }
 .dm-file-icon.docx { color: var(--brand); }

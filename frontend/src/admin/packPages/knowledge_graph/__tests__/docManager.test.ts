@@ -7,7 +7,7 @@ describe('知识库文档列表 筛选与分页', () => {
   const source = readFileSync(new URL('../DocManager.vue', import.meta.url), 'utf8')
 
   it('表格带 y 限高(表体自身出滚动条)与受控分页', () => {
-    expect(source).toContain('scroll="{ x: 1100, y: tableScrollY }"')
+    expect(source).toContain('scroll="{ x: 1300, y: tableScrollY }"')
     expect(source).toContain(':pagination="docPagination"')
     expect(source).toContain('@change="onTableChange"')
     expect(source).toContain('tableScrollY = computed')
