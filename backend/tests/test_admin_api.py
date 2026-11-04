@@ -17,7 +17,7 @@ from src.services.conversation_store import ConversationStore
 from src.services.pack_state import PackState
 
 ADMIN_TOKEN = "test-admin-token"
-PACKS = ["njmind_form", "leave_application"]
+PACKS = ["njmind_form", "njmind_list"]
 
 
 @pytest.fixture()
@@ -212,15 +212,15 @@ def test_admin_pack_toggle_hot_reload(client):
     resp = client.get("/api/admin/packs", headers=_auth_headers())
     assert resp.status_code == 200
     names = {i["name"]: i["enabled"] for i in resp.json()["items"]}
-    assert names == {"njmind_form": True, "leave_application": True}
+    assert names == {"njmind_form": True, "njmind_list": True}
 
     # 禁用演示插件 → 热装配后 pack_tools 只剩 njmind_form 的工具
-    resp = client.post("/api/admin/packs/leave_application/disable", headers=_auth_headers())
+    resp = client.post("/api/admin/packs/njmind_list/disable", headers=_auth_headers())
     assert resp.status_code == 200
     assert resp.json()["loaded"] == ["njmind_form"]
     disabled = {item["name"]: item for item in resp.json()["items"]}
-    assert disabled["leave_application"]["enabled"] is False
-    assert disabled["leave_application"]["loaded"] is False
+    assert disabled["njmind_list"]["enabled"] is False
+    assert disabled["njmind_list"]["loaded"] is False
     assert set(client.app.state.pack_tools) == {"njmind_form"}
     # 状态已持久化(文件存在且只含 njmind_form)
     import json
@@ -232,16 +232,16 @@ def test_admin_pack_toggle_hot_reload(client):
     assert set(client.app.state.pack_configs) == {"njmind_form"}
 
     # 重新启用 → 工具恢复
-    resp = client.post("/api/admin/packs/leave_application/enable", headers=_auth_headers())
+    resp = client.post("/api/admin/packs/njmind_list/enable", headers=_auth_headers())
     assert resp.status_code == 200
     enabled = {item["name"]: item for item in resp.json()["items"]}
-    assert enabled["leave_application"]["enabled"] is True
-    assert enabled["leave_application"]["loaded"] is True
-    assert set(client.app.state.pack_tools) == {"njmind_form", "leave_application"}
+    assert enabled["njmind_list"]["enabled"] is True
+    assert enabled["njmind_list"]["loaded"] is True
+    assert set(client.app.state.pack_tools) == {"njmind_form", "njmind_list"}
 
 
 def test_admin_cannot_disable_last_pack(client):
-    client.post("/api/admin/packs/leave_application/disable", headers=_auth_headers())
+    client.post("/api/admin/packs/njmind_list/disable", headers=_auth_headers())
     resp = client.post("/api/admin/packs/njmind_form/disable", headers=_auth_headers())
     assert resp.status_code == 400
 
@@ -291,23 +291,23 @@ def test_admin_env_allowlist_hides_and_blocks(tmp_path, monkeypatch):
         body = c.get("/api/admin/packs", headers=_auth_headers()).json()
         assert [i["name"] for i in body["items"]] == ["njmind_form"]
         assert body["envAllowlist"] is True
-        # leave_application 文件里 enabled,但名单外 → 实际未启用
+        # njmind_list 文件里 enabled,但名单外 → 实际未启用
         assert c.app.state.pack_state.enabled_names() == {"njmind_form"}
-        resp = c.post("/api/admin/packs/leave_application/enable",
+        resp = c.post("/api/admin/packs/njmind_list/enable",
                       headers=_auth_headers())
         assert resp.status_code == 422
 
 
 def test_admin_env_allowlist_toggle_inside(tmp_path, monkeypatch):
     """env 上限:名单内插件照常启停热切换(不再整体锁定)。"""
-    app = _env_client(tmp_path, monkeypatch, "njmind_form,leave_application",
+    app = _env_client(tmp_path, monkeypatch, "njmind_form,njmind_list",
                       enabled=["njmind_form"])
     with TestClient(app) as c:
         body = c.get("/api/admin/packs", headers=_auth_headers()).json()
         assert body["envAllowlist"] is True
         assert {i["name"]: i["enabled"] for i in body["items"]} == {
-            "njmind_form": True, "leave_application": False}
-        resp = c.post("/api/admin/packs/leave_application/enable",
+            "njmind_form": True, "njmind_list": False}
+        resp = c.post("/api/admin/packs/njmind_list/enable",
                       headers=_auth_headers())
         assert resp.status_code == 200
         assert set(resp.json()["loaded"]) == set(PACKS)

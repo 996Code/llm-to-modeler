@@ -8,7 +8,7 @@ domains/ 目录,发现所有符合约定的子目录(工具包),动态导入并�
 
 【pack(工具包)约定】
 每个工具包应该:
-1. 在 domains/ 下创建独立目录(如 domains/leave_application/)
+1. 在 domains/ 下创建独立目录(如 domains/njmind_list/)
 2. 提供一个 pack.py 文件,导出两个工厂函数:
    - create_registry(): 必须提供,返回装好工具的 ToolRegistry
    - create_prompt_loader(): 可选,返回 PromptLoader 或 None
@@ -17,7 +17,7 @@ domains/ 目录,发现所有符合约定的子目录(工具包),动态导入并�
 【插件化约定(详解)】
   - create_registry() 必须提供,返回 ToolRegistry —— 这是 pack 的核心职责。
   - create_prompt_loader() 可选,返回 PromptLoader 或 None
-    (纯数据类插件如 leave_application 不需要自定义 prompt)
+    (纯数据类插件如 njmind_list 不需要自定义 prompt)
   - 至少一个 pack 需要提供 prompt_loader,否则系统无法构建意图识别 prompt
     (但不会崩溃,二级路由使用 sdk 的 DefaultPackRouter 中性框架)
 
@@ -107,11 +107,11 @@ def discover_packs() -> List[str]:
     上层配置（部署方决定加载哪些插件，未配置 = 全部加载的缺省逻辑）:
     - 环境变量 PACKS_ENABLED（逗号分隔 pack 名）：白名单过滤。
       生产部署只启用业务需要的 pack（如 "njmind_form"），演示 pack
-      （leave_application）不进生产；缺省不设 = 加载全部（向后兼容）。
+      （njmind_bpm）不进生产；缺省不设 = 加载全部（向后兼容）。
       配了但名单里的 pack 不存在 → 告警并忽略该名字（Fail-Open 到存在的）。
 
     Returns:
-        发现的 pack 名称列表(即目录名,如 ["njmind_form", "leave_application"])。
+        发现的 pack 名称列表(即目录名,如 ["njmind_form", "njmind_list"])。
         顺序由文件系统返回顺序决定,不保证固定;依赖顺序的逻辑应避免。
 
     【Java 类比】

@@ -2,7 +2,6 @@
 
 对应审查发现的修复：
 - fallback 三级优先级（声明 fallback_tool → fallback pack 首个工具 → 全局首个）；
-- leave 提交确认门槛三态（首次挂起 / 确认放行 / 取消短路）；
 - ToolResult.valid/validation_errors 显式字段的引擎消费语义。
 """
 from unittest.mock import MagicMock
@@ -10,7 +9,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from sdk.tool import Tool, ToolResult, ToolContext, ClarificationRaised
-from domains.leave_application.tools.submit_leave import SubmitLeaveTool
 
 
 def _stub_tool(name):
@@ -83,44 +81,6 @@ class TestFallbackPriority:
         assert nodes._get_fallback_tool_name() == ""
 
 
-class TestLeaveConfirmGate:
-    """提交确认门槛三态：首次挂起 / 确认放行 / 取消短路。"""
-
-    def _tool_state(self, complete_data=True, answers=None):
-        tool_state = {
-            "user_input": "帮我请假 3 天" if complete_data else "帮我请假",
-            "clarify_answers": answers or {},
-        }
-        return tool_state
-
-    def test_first_run_raises_confirmation(self):
-        """字段齐全首次执行 → confirm 步挂起追问（不再直写上游）。"""
-        tool = SubmitLeaveTool()
-        # parse_info 走 LLM——mock 掉：直接喂完整数据跳过 parse
-        state = self._tool_state()
-        state["leave_data"] = {"applicant": "张三", "leaveType": "事假",
-                               "startDate": "2026-09-03", "endDate": "2026-09-05"}
-        with pytest.raises(ClarificationRaised) as ei:
-            tool._step_confirm(state, _ctx())
-        assert "确认提交" in ei.value.questions[0]
-
-    def test_confirm_answer_proceeds(self):
-        """回答"确认"（挂起者=confirm）→ 放行（不抛、不置取消标记）。"""
-        tool = SubmitLeaveTool()
-        state = self._tool_state(answers={"text": "确认"})
-        state["_awaiting"] = "confirm"
-        tool._step_confirm(state, _ctx())
-        assert not state.get("_cancelled")
-
-    def test_cancel_answer_short_circuits(self):
-        """回答"取消"（挂起者=confirm）→ 短路标记置位。"""
-        tool = SubmitLeaveTool()
-        state = self._tool_state(answers={"text": "取消"})
-        state["_awaiting"] = "confirm"
-        tool._step_confirm(state, _ctx())
-        assert state["_cancelled"] is True
-        assert state["_need_clarify"] is True
-
 
 class TestToolResultValidationFields:
     """ToolResult 显式校验字段（引擎 is_valid 消费语义）。"""
@@ -154,12 +114,12 @@ class TestCompactFocusWiring:
              patch("engine.nodes.configure"):
             # pack_routers 含两个 pack = "都加载成功"(manifest 保留的过滤条件)
             lap.return_value = (MagicMock(), None,
-                                {"njmind_form": MagicMock(), "leave_application": MagicMock()},
+                                {"njmind_form": MagicMock(), "njmind_list": MagicMock()},
                                 {}, {})
             # njmind_form 声明了 compact_focus
             lpc.return_value = {
                 "njmind_form": {"domain": {"compact_focus": " 创建了什么表单、修改了哪些字段 "}},
-                "leave_application": {"domain": {}},
+                "njmind_list": {"domain": {}},
             }
             pm.assemble_packs(app_state)
 

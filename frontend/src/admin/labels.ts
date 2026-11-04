@@ -35,7 +35,6 @@ export const STAGE_LABELS: Record<string, string> = {
   'image_form.generate': '图片转配置',
   'clone_form.parse': '克隆解析',
   'chat.reply': '闲聊回复',
-  'submit_leave.parse': '请假信息提取',
   // 知识图谱检索链路(LLM 三步 + 图/向量库两路)
   'kg.query': 'LLM·检索意图解析',
   'kg.query_embed': 'LLM·查询向量化',

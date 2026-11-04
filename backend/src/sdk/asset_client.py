@@ -50,7 +50,7 @@ class AssetClient(ABC):
       其余方法为"未实现即抛"的钩子,不强制。
     - ConfigAssetClient(子类):配置制品业务契约——模板/schema/guide/
       校验/持久化六件事,abstractmethod 强制。配置类插件
-      (njmind_form 等)的上游实现继承它;数据类插件(如 leave_application)
+      (njmind_form 等)的上游实现继承它;数据类插件(如 njmind_list)
       只依赖本类,不必为六个用不到的方法背空壳实现。
 
     工具侧一律经 ctx.asset_client(鸭子类型)访问,标注哪个层

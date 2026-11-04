@@ -101,7 +101,6 @@ const packOptions = ref<{ label: string; value: string }[]>([])
 // 已知插件配色(与调用日志类型色系一致);未列出的插件给中性色
 const PACK_COLORS: Record<string, string> = {
   njmind_form: 'blue',
-  leave_application: 'gold',
   knowledge_graph: 'geekblue',
 }
 function packColor(p: string): string {

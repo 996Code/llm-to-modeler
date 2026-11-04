@@ -405,10 +405,10 @@ class TestLoadAllPacksDependencyGate:
         dep_bad_manifest = {"dependencies": {"x": {"required": True, "env": ["NOPE_A", "NOPE_B"]}}}
 
         def fake_load_pack_configs(pack_names=None):
-            return {"njmind_form": dep_bad_manifest, "leave_application": {}}
+            return {"njmind_form": dep_bad_manifest, "njmind_list": {}}
 
         def fake_load_pack(pack_name, app_state=None):
-            assert pack_name == "leave_application", "依赖缺失的 pack 不应被 import"
+            assert pack_name == "njmind_list", "依赖缺失的 pack 不应被 import"
             reg = ToolRegistry()
             reg.register(types.SimpleNamespace(name="tool"))
             return reg, None, MagicMock()
@@ -419,13 +419,13 @@ class TestLoadAllPacksDependencyGate:
         monkeypatch.setattr(domains_mod, "load_pack", fake_load_pack)
 
         registry, loader, routers, tools, dep_status = domains_mod.load_all_packs(
-            pack_names=["njmind_form", "leave_application"]
+            pack_names=["njmind_form", "njmind_list"]
         )
-        assert sorted(routers) == ["leave_application"]
-        assert "leave_application" in tools
+        assert sorted(routers) == ["njmind_list"]
+        assert "njmind_list" in tools
         assert dep_status["njmind_form"]["status"] == dep_mod.STATUS_MISSING
         assert sorted(dep_status["njmind_form"]["missing"]) == ["NOPE_A", "NOPE_B"]
-        assert dep_status["leave_application"]["status"] == dep_mod.STATUS_OK
+        assert dep_status["njmind_list"]["status"] == dep_mod.STATUS_OK
 
     def test_optional_tool_name_conflict_does_not_partially_merge(self, monkeypatch):
         """可选 pack 冲突时跳过整包，不污染已成功装配的工具。"""
@@ -445,9 +445,9 @@ class TestLoadAllPacksDependencyGate:
 
         errors = {}
         registry, _, routers, tools, _ = domains_mod.load_all_packs(
-            pack_names=["leave_application", "njmind_form"], errors=errors)
-        assert sorted(routers) == ["leave_application"]
-        assert tools == {"leave_application": ["same_tool"]}
+            pack_names=["njmind_list", "njmind_form"], errors=errors)
+        assert sorted(routers) == ["njmind_list"]
+        assert tools == {"njmind_list": ["same_tool"]}
         assert registry.get("same_tool") is not None
         assert "工具名 'same_tool'" in errors["njmind_form"]
 

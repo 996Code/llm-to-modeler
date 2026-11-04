@@ -76,10 +76,10 @@ def test_classify_passes_image_base64_through_tool_state():
     from domains import load_pack
     from engine import nodes
 
-    reg, _, router = load_pack("leave_application")  # 单 pack:一级路由直通,零 LLM
+    reg, _, router = load_pack("njmind_list")  # 单 pack:一级路由直通,零 LLM
     nodes.configure(
         registry=reg, llm_client=None, asset_client=None, conversation=None,
-        prompt_loader=None, pack_routers={"leave_application": router}, pack_configs={},
+        prompt_loader=None, pack_routers={"njmind_list": router}, pack_configs={},
     )
     out = nodes.classify_intent_node({
         "user_input": "看图建表单",

@@ -3610,10 +3610,10 @@ class TestCriticalFullExceptionDomain:
 
         monkeypatch.setattr(domains, "load_pack", _broken)
         _, _, routers, tools, _ = domains.load_all_packs(
-            pack_names=["chatbi", "leave_application"])
+            pack_names=["chatbi", "njmind_list"])
         assert "chatbi" not in routers
         assert "chatbi" not in tools
-        assert "leave_application" in routers
+        assert "njmind_list" in routers
 
     def test_assert_receives_requested(self):
         """断言接收 requested: requested 含 critical 而 loaded 不含
@@ -4496,7 +4496,7 @@ class TestPackStateTransactionPersistence:
 class TestToggleTransaction:
     """已有状态文件 + 重启 + 首次 toggle 的四方一致性。"""
 
-    PACKS = ["chatbi", "knowledge_graph", "leave_application", "njmind_form"]
+    PACKS = ["chatbi", "knowledge_graph", "njmind_list", "njmind_form"]
 
     def test_restart_first_disable_persists(self):
         import json
@@ -4515,14 +4515,14 @@ class TestToggleTransaction:
             b = PackState(path, self.PACKS)
             # toggle 流程: persist=False → assemble(略) → persist
             changed = b.set_enabled(
-                "leave_application", False, persist=False)
+                "njmind_list", False, persist=False)
             assert changed is True
             b.persist()
             with open(path, encoding="utf-8") as state_file:
                 disk = json.load(state_file)["enabled"]
-            assert "leave_application" not in disk, (
+            assert "njmind_list" not in disk, (
                 f"磁盘反弹: {disk}")
-            assert "leave_application" not in b.enabled_names(), (
+            assert "njmind_list" not in b.enabled_names(), (
                 "内存被磁盘覆盖反弹")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -4852,7 +4852,7 @@ class TestSnapshotRollback:
                 self._handler_meta.clear()
 
         state = SimpleNamespace(task_manager=_TM())
-        state._loaded_packs = ["chatbi", "leave_application"]
+        state._loaded_packs = ["chatbi", "njmind_list"]
         state.registry = "OLD"
         state.llm_client = object()
         # asset_client 须可 setattr(_restore_runtime 恢复 _config_api)
@@ -4875,7 +4875,7 @@ class TestSnapshotRollback:
 
         ok = pm.rollback_assembly(state, summary["_tx"])
         assert ok is True
-        assert state._loaded_packs == ["chatbi", "leave_application"], (
+        assert state._loaded_packs == ["chatbi", "njmind_list"], (
             "快照回滚未恢复 loaded")
         assert state.registry == "OLD"
         assert "old.handler" in state.task_manager._handlers
@@ -5060,8 +5060,8 @@ class TestEnhancerDetach:
         pm.assemble_packs(state, ["njmind_form"], app=None)
         assert asset._config_api is not None, "启用后应注入"
 
-        # 禁用(切到 leave_application) → config_api 撤销为 None
-        pm.assemble_packs(state, ["leave_application"], app=None)
+        # 禁用(切到 njmind_list) → config_api 撤销为 None
+        pm.assemble_packs(state, ["njmind_list"], app=None)
         assert asset._config_api is None, (
             f"禁用后 config_api 残留: {asset._config_api}")
 
@@ -5102,14 +5102,14 @@ class TestTransactionStages:
         tmpdir = tempfile.mkdtemp()
         try:
             ps = PackState(os.path.join(tmpdir, "s.json"),
-                           ["chatbi", "leave_application", "njmind_form"])
+                           ["chatbi", "njmind_list", "njmind_form"])
             state = SimpleNamespace(task_manager=_TM())
             state.llm_client = object()
             state.asset_client = None
             state.conversation_manager = object()
 
             # toggle 流程: 内存改 → assemble → persist → finalize(炸)
-            ps.set_enabled("leave_application", False, persist=False)
+            ps.set_enabled("njmind_list", False, persist=False)
             summary = pm.assemble_packs(
                 state, sorted(ps.enabled_names()), app=None)
             ps.persist()
@@ -5121,9 +5121,9 @@ class TestTransactionStages:
             except PackConfigurationError:
                 pass
             # 三方保持新状态(磁盘/内存/runtime), 不回滚
-            assert "leave_application" not in disk, f"磁盘被回滚: {disk}"
-            assert "leave_application" not in ps.enabled_names()
-            assert "leave_application" not in state._loaded_packs
+            assert "njmind_list" not in disk, f"磁盘被回滚: {disk}"
+            assert "njmind_list" not in ps.enabled_names()
+            assert "njmind_list" not in state._loaded_packs
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -5267,7 +5267,7 @@ class TestToggleMemoryRollbackFailure:
 
         tmpdir = tempfile.mkdtemp()
         ps = PackState(os.path.join(tmpdir, "s.json"),
-                       ["chatbi", "knowledge_graph", "leave_application",
+                       ["chatbi", "knowledge_graph", "njmind_list",
                         "njmind_form"])
 
         class _TM:
@@ -5286,7 +5286,7 @@ class TestToggleMemoryRollbackFailure:
         app.state.asset_client = None
         app.state.conversation_manager = object()
         app.state._loaded_packs = ["chatbi", "knowledge_graph",
-                                    "leave_application", "njmind_form"]
+                                    "njmind_list", "njmind_form"]
 
         # 注入: persist 炸 + 反向 set_enabled 炸
         def _boom_persist():
@@ -5329,7 +5329,7 @@ class TestToggleMemoryRollbackFailure:
 
         tmpdir = tempfile.mkdtemp()
         ps = PackState(os.path.join(tmpdir, "s.json"),
-                       ["chatbi", "knowledge_graph", "leave_application",
+                       ["chatbi", "knowledge_graph", "njmind_list",
                         "njmind_form"])
 
         class _TM:
@@ -5348,7 +5348,7 @@ class TestToggleMemoryRollbackFailure:
         app.state.asset_client = None
         app.state.conversation_manager = object()
         app.state._loaded_packs = ["chatbi", "knowledge_graph",
-                                    "leave_application", "njmind_form"]
+                                    "njmind_list", "njmind_form"]
 
         def _boom_persist():
             raise OSError("disk full")
@@ -5377,7 +5377,7 @@ class TestToggleMemoryRollbackFailure:
 
         pack_state = PackState(
             str(tmp_path / "state.json"),
-            ["knowledge_graph", "leave_application"])
+            ["knowledge_graph", "njmind_list"])
         original_set = pack_state.set_enabled
         toggled = False
 
@@ -5622,7 +5622,7 @@ class TestPluginHealthBoundary:
         from api import health
 
         state = SimpleNamespace(
-            _loaded_packs=["leave_application"],
+            _loaded_packs=["njmind_list"],
             _pack_assembly_errors={"chatbi": "API 路由构造失败: boom"})
         request = SimpleNamespace(app=SimpleNamespace(state=state))
         monkeypatch.delenv("PACKS_CRITICAL", raising=False)
@@ -5671,9 +5671,9 @@ class TestOptionalPackAtomicIsolation:
         monkeypatch.setattr(chatbi_pack, "register_tasks", _broken_tasks)
         state = self._state()
         summary = pm.assemble_packs(
-            state, ["chatbi", "leave_application"], app=None)
+            state, ["chatbi", "njmind_list"], app=None)
         try:
-            assert summary["loaded"] == ["leave_application"]
+            assert summary["loaded"] == ["njmind_list"]
             assert "chatbi" not in state.pack_tools
             assert "chatbi.partial" not in state.task_manager._handlers
             assert "任务注册失败" in summary["assembly_errors"]["chatbi"]
@@ -5721,9 +5721,9 @@ class TestOptionalPackAtomicIsolation:
         monkeypatch.setattr(domains, "load_pack", _broken)
         state = self._state()
         summary = pm.assemble_packs(
-            state, ["chatbi", "leave_application"], app=None)
+            state, ["chatbi", "njmind_list"], app=None)
         try:
-            assert summary["loaded"] == ["leave_application"]
+            assert summary["loaded"] == ["njmind_list"]
             assert "registry factory failure" in (
                 summary["assembly_errors"]["chatbi"])
             assert state._pack_assembly_errors == summary["assembly_errors"]
@@ -5744,9 +5744,9 @@ class TestOptionalPackAtomicIsolation:
         app = FastAPI()
         state = self._state(app.state)
         summary = pm.assemble_packs(
-            state, ["chatbi", "leave_application"], app=app)
+            state, ["chatbi", "njmind_list"], app=app)
         try:
-            assert summary["loaded"] == ["leave_application"]
+            assert summary["loaded"] == ["njmind_list"]
             assert "chatbi" not in state.pack_tools
             assert "chatbi" not in summary["api_mounted"]
             assert "API 路由构造失败" in summary["assembly_errors"]["chatbi"]
@@ -5763,12 +5763,12 @@ class TestOptionalPackAtomicIsolation:
 
         state_path = tmp_path / "pack-state.json"
         pack_state = PackState(
-            str(state_path), ["chatbi", "leave_application"])
+            str(state_path), ["chatbi", "njmind_list"])
         pack_state.set_enabled("chatbi", False, persist=False)
 
         app = FastAPI()
         app.state.pack_state = pack_state
-        app.state._loaded_packs = ["leave_application"]
+        app.state._loaded_packs = ["njmind_list"]
         request = SimpleNamespace(app=app)
         rolled_back = []
         persisted = []
@@ -5776,7 +5776,7 @@ class TestOptionalPackAtomicIsolation:
         monkeypatch.setattr(
             pm, "assemble_packs",
             lambda *args, **kwargs: {
-                "loaded": ["leave_application"],
+                "loaded": ["njmind_list"],
                 "tools": 2,
                 "assembly_errors": {"chatbi": "API 路由构造失败: boom"},
                 "_tx": {"fake": True},
@@ -5805,18 +5805,18 @@ class TestOptionalPackAtomicIsolation:
 
         pack_state = PackState(
             str(tmp_path / "pack-state.json"),
-            ["chatbi", "leave_application"])
+            ["chatbi", "njmind_list"])
         # 冷启动隔离态：期望状态为 enabled，但实际只加载了其它 pack。
         app = FastAPI()
         app.state.pack_state = pack_state
-        app.state._loaded_packs = ["leave_application"]
+        app.state._loaded_packs = ["njmind_list"]
         request = SimpleNamespace(app=app)
         rolled_back = []
 
         monkeypatch.setattr(
             pm, "assemble_packs",
             lambda *args, **kwargs: {
-                "loaded": ["leave_application"],
+                "loaded": ["njmind_list"],
                 "tools": 2,
                 "assembly_errors": {"chatbi": "API 路由构造失败: boom"},
                 "_tx": {"retry": True},
@@ -5841,16 +5841,16 @@ class TestOptionalPackAtomicIsolation:
 
         pack_state = PackState(
             str(tmp_path / "pack-state.json"),
-            ["chatbi", "leave_application"])
+            ["chatbi", "njmind_list"])
         app = FastAPI()
         app.state.pack_state = pack_state
-        app.state.pack_tools = {"leave_application": ["submit_leave"]}
-        app.state._loaded_packs = ["leave_application"]
+        app.state.pack_tools = {"njmind_list": ["submit_leave"]}
+        app.state._loaded_packs = ["njmind_list"]
         app.state._pack_assembly_errors = {"chatbi": "API 构造失败"}
         app.state._pack_lifecycle_errors = {}
         app.state.pack_dependency_status = {
             "chatbi": {"status": "ok", "missing": [], "detail": ""},
-            "leave_application": {
+            "njmind_list": {
                 "status": "ok", "missing": [], "detail": ""},
         }
 

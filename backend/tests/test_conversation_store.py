@@ -197,7 +197,7 @@ class TestCallLogsPackFilter:
             call_type="llm", endpoint="chat/completions",
             request_data={"stage": "leave.extract"},
             response_data={"usage": {"prompt_tokens": 10, "completion_tokens": 5}},
-            pack_name="leave_application")
+            pack_name="njmind_list")
         store.save_call_log(
             call_type="llm", endpoint="chat/completions",
             request_data={"stage": "route_pack"},
@@ -211,7 +211,7 @@ class TestCallLogsPackFilter:
         assert r["items"][0]["pack_name"] == "chatbi"
         assert r["items"][0]["request_data"]["stage"] == "chatbi.generate_sql"
         # 其他 pack
-        assert store.query_call_logs(pack_name="leave_application")["total"] == 1
+        assert store.query_call_logs(pack_name="njmind_list")["total"] == 1
 
     def test_stats_filters_by_pack(self, store):
         self._seed(store)

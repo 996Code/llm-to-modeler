@@ -72,7 +72,7 @@ def create_prompt_loader():
 
     PromptLoader 负责从文件系统加载意图识别/工具说明的 prompt 模板。
     本 pack 是系统内主要的(通常也是唯一的)prompt 提供方 ——
-    其他 pack(如 leave_application)的 create_prompt_loader 返回 None,
+    其他 pack(如 njmind_list)的 create_prompt_loader 返回 None,
     系统就会回退到本 pack 提供的 loader。
 
     Returns:
