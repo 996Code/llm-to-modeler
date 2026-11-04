@@ -14,10 +14,15 @@ def retrieve_evidence(app_state, kb_name: str, query: str,
                       top_k: Optional[int] = None,
                       on_stage=None,
                       metadata_filter: Optional[Dict[str, Any]] = None,
+                      intent: Optional[Dict[str, Any]] = None,
                       ) -> Dict[str, Any]:
     """显式库+范围 → 混合检索 → 依据。失败抛异常,不静默降级。
 
     metadata_filter 必须来自可信宿主上下文,不能采用模型参数。
+    intent: 调用方确定性构造的检索意图({entities,keywords,hop};
+    2026-11 降频——客服链路的 query 由槽位模板拼出,entities 直接取
+    器具名槽位即可,不必让 LLM 从拼好的字符串反向抽取)。传入即跳过
+    kg.query 意图解析;None 走 LLM 解析(自由问答场景)。
 
     返回 {kb, subgraph, chunks, diagnostics}:
       kb         {"id", "name"}
@@ -51,7 +56,7 @@ def retrieve_evidence(app_state, kb_name: str, query: str,
 
     retrieved = retrieval.hybrid_retrieve(
         app_state, kb, query, conv_id=conv_id, top_k=top_k,
-        on_stage=on_stage, doc_filter=doc_filter)
+        on_stage=on_stage, doc_filter=doc_filter, intent=intent)
     graph_omitted = (retrieved.get("diagnostics") or {}).get("graphOmitted")
     if graph_omitted == "document_scope":
         diagnostics["graphOmitted"] = graph_omitted

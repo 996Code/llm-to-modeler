@@ -456,10 +456,23 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         stage('assistant.retrieve', f'检索「{kb_name}」资料…')
         trusted = (state.get('pack_params') or {}).get('knowledge_graph') or {}
         doc_filter = trusted.get('doc_filter')
+        # 检索意图确定性构造(2026-11 降频):query 本由槽位模板拼出,
+        # entities 直接取器具名槽位即可——LLM 从拼好的字符串反向抽取
+        # 同样的词是纯浪费(实测 ~8.6s)。器具名缺席(自由问答)仍走
+        # kg.query LLM 解析。
+        intent = None
+        _instrument = (merged.get('instrument') or '').strip()
+        if _instrument:
+            intent = {
+                'entities': [_instrument],
+                'keywords': [merged['purpose'].strip()] if (merged.get('purpose') or '').strip() else [],
+                'hop': 1,
+            }
         try:
             evidence = service.retrieve_evidence(
                 self._app_state, kb_name, plan['query'], conv_id=getattr(ctx, 'conv_id', None),
-                metadata_filter=doc_filter if isinstance(doc_filter, dict) else None)
+                metadata_filter=doc_filter if isinstance(doc_filter, dict) else None,
+                intent=intent)
         except ValueError as error:
             return ToolResult(error_for_llm=str(error))
         except Exception:

@@ -40,6 +40,7 @@
 """
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional
 
 from langgraph.types import interrupt
@@ -276,10 +277,13 @@ def classify_intent_node(state: GraphState) -> dict:
     # 降频守卫(2026-11): 已有非空标题的会话不再重复生成——标题是
     # 会话级产物,第 N 轮重生成是纯浪费的 LLM 调用。守卫读库失败
     # fail-open(退化为旧行为=每轮生成)。
+    # 并行化(2026-11 第二批): 首轮标题与工具执行并行——提交到标题
+    # 线程池,handle_result_node 收尾合并(_take_title_future)。工具
+    # 执行通常 >10s,标题早已就绪,关键路径零等待;追问挂起等未消费
+    # 的 future 由下次提交覆盖/进程退出回收,量级无害。
     conversation_title = ""
     if conversation_id and not _conversation_has_title(conversation_id):
-        conversation_title = _generate_conversation_title(
-            user_input, conversation_id=conversation_id)
+        _submit_title_generation(user_input, conversation_id, pack_name)
 
     return {
         "tool_name": tool_name,
@@ -766,9 +770,12 @@ def handle_result_node(state: GraphState) -> dict:
         # (显式 ToolResult 字段,从 extra 魔法键升格——引擎不再伸手进领域扩展区)
         is_valid = (result.valid is not False and
                     not (result.validation_errors or []))
-        # 会话标题:意图识别轮 LLM 生成优先(全局统一入口),
+        # 会话标题:意图识别轮的 LLM 生成优先(全局统一入口)——
+        # 2026-11 起标题与工具执行并行(_take_title_future 收尾合并,
+        # 通常工具执行 >10s 时标题早已就绪,用户零额外等待),
         # 其次 formatted.title(工具声明),再次 title_for 钩子
-        intent_title = state.get("conversation_title", "")
+        intent_title = state.get("conversation_title", "") or _take_title_future(
+            state.get("conversation_id", ""))
         title = intent_title or formatted.get("title") or ""
         if not title and artifact_type != "data":
             tool = _registry.get(state.get("tool_name", "")) if _registry else None
@@ -894,6 +901,53 @@ def _conversation_has_title(conversation_id: str) -> bool:
         return bool(_conversation.get_title(conversation_id))
     except Exception:
         return False
+
+
+# ── 标题并行化(2026-11 第二批降频) ──────────────────────────────
+# 单工作线程串行化生成(标题低频);_TITLE_FUTURES 按 conv_id 存在途
+# future,handle_result_node 收尾 _take_title_future 合并。同会话重复
+# 提交(上轮追问挂起未消费)直接覆盖——旧 future 结果丢弃即可。
+_TITLE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="conv-title")
+_TITLE_FUTURES: dict = {}
+
+
+def _submit_title_generation(user_input: str, conversation_id: str,
+                             pack_name: str = "") -> None:
+    """提交后台标题生成(fail-open:提交失败=无标题,前端回退推导)。"""
+    if not _llm_client or not user_input.strip():
+        return
+
+    def _bg():
+        # 线程级 pack 归属:标题线程没有图工作线程的 bind,显式补上,
+        # call_logs.pack_name 口径与串行版一致
+        try:
+            from sdk.call_context import bind_pack_name
+            bind_pack_name(pack_name)
+        except Exception:
+            pass
+        return _generate_conversation_title(user_input, conversation_id)
+
+    try:
+        _TITLE_FUTURES[conversation_id] = _TITLE_EXECUTOR.submit(_bg)
+    except Exception as e:
+        logger.warning(f"title generation submit failed: {e}")
+        _TITLE_FUTURES.pop(conversation_id, None)
+
+
+def _take_title_future(conversation_id: str, timeout: float = 2.0) -> str:
+    """收尾合并:取后台标题结果(就绪即零等待;超时/缺失返回空串)。
+
+    取后即清(同一标题只消费一次);future 抛错按空处理(fail-open)。
+    """
+    if not conversation_id:
+        return ""
+    future = _TITLE_FUTURES.pop(conversation_id, None)
+    if future is None:
+        return ""
+    try:
+        return (future.result(timeout=timeout) or "").strip()[:40]
+    except Exception:
+        return ""
 
 
 def _generate_conversation_title(user_input: str, conversation_id: str) -> str:
