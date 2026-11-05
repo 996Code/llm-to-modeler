@@ -11,6 +11,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from sdk.pack_api import admin_required
+from sdk.tool import PackInvokeError
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,11 @@ async def web_search(request: Request, payload: Dict[str, Any]):
         # httpx 同步调用丢线程池(事件循环不冻结,与 retrieve-test 同款)
         out = await asyncio.to_thread(
             websearch.search, request.app.state, query, top_k)
+    except PackInvokeError as e:
+        # 结构化错误如实转达(引擎被限流/底座未配置各有其文案)——
+        # 笼统的"检查 SearXNG 地址"会把限流误导成配置问题(实测踩坑)
+        logger.warning(f"web-search failed: {e.message}")
+        raise HTTPException(502, e.message)
     except Exception:
         # 异常详情只进服务端日志;管理端点不回显内部地址等拓扑
         logger.exception("web-search failed")

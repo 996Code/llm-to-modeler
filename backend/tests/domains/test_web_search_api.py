@@ -123,17 +123,30 @@ def test_web_search_empty_query_422(env):
     assert resp.status_code == 422
 
 
-def test_web_search_upstream_error_502_without_internal_detail(env):
+def test_web_search_structured_error_passthrough(env):
+    """PackInvokeError(已脱敏的结构化文案)如实透传——限流不误导成配置错。"""
     from sdk.tool import PackInvokeError
 
     def boom(app_state, query, top_k=5):
-        raise PackInvokeError("连接 http://searxng.internal:8080 超时",
+        raise PackInvokeError("搜索引擎暂时不可用(可能被限流),请稍后重试",
                               PackInvokeError.RETRYABLE)
     env.monkeypatch.setattr(websearch, "search", boom)
     resp = env.client.post("/api/packs/web_search/web-search",
                            json={"query": "q"})
     assert resp.status_code == 502
-    # 内部地址不回显给客户端
+    assert "暂时不可用" in resp.json().get("detail", "")
+    # 脱敏契约:透传文案不含内部地址
+    assert "http" not in resp.json().get("detail", "")
+
+
+def test_web_search_generic_error_no_internal_detail(env):
+    """非结构化异常:兜底文案,不回显内部串(旧契约保留在通用路径)。"""
+    def boom(app_state, query, top_k=5):
+        raise RuntimeError("connection to http://searxng.internal:8080 refused")
+    env.monkeypatch.setattr(websearch, "search", boom)
+    resp = env.client.post("/api/packs/web_search/web-search",
+                           json={"query": "q"})
+    assert resp.status_code == 502
     assert "searxng.internal" not in resp.json().get("detail", "")
 
 

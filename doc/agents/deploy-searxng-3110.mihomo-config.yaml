@@ -5,7 +5,7 @@ allow-lan: true          # 必须开：否则 7890 绑容器内 127.0.0.1，sear
 bind-address: "0.0.0.0"  # 容器内监听所有口；安全靠"不发布宿主端口"
 mode: rule
 log-level: warning
-external-controller: 127.0.0.1:9090
+external-controller: 0.0.0.0:9090  # 容器内监听(宿主不发布端口);API 切节点用
 
 proxy-providers:
   airport:
@@ -19,7 +19,24 @@ proxy-providers:
       interval: 600
 
 proxy-groups:
+  # 双层组(实测教训):PROXY(select) 默认走 AUTO 自动选优;google 对双 UA
+  # 骗术按出口 IP 差异化限流——url-test 自动切到某节点后可能被 CAPTCHA,
+  # 此时经 controller API 手动切回已知好节点:
+  #   docker exec searxng-mihomo sh -c 'wget -qO- --header="Content-Type: application/json" --post-data="{\"name\":\"日本-FW-JP1-流量倍率:0.6\"}" http://127.0.0.1:9090/proxies/PROXY'
+  # 节点名按订阅实际成员调整
   - name: PROXY
+    type: select
+    proxies: [AUTO, MANUAL]
+  # 手动选节点组:select 不能直接引用 provider 节点名,须经 use 组转接;
+  # 被限流时两步切换:
+  #   1) docker exec searxng-mihomo sh -c 'wget -qO- --header="Content-Type: application/json" --post-data="{\"name\":\"<节点名>\"}" http://127.0.0.1:9090/proxies/MANUAL'
+  #   2) 同款 POST .../proxies/PROXY body {"name":"MANUAL"}
+  - name: MANUAL
+    type: select
+    use:
+      - airport
+    filter: "(?i)日本|JP|香港|HK|新加坡|SG|美国|US|韩国|KR"
+  - name: AUTO
     # url-test 自动测速选优；filter 过滤掉订阅里的"流量信息"假节点
     # （select 组默认选第一个=假节点，实测踩坑）
     type: url-test

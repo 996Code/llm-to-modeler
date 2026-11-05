@@ -340,7 +340,13 @@ export const useConversationStore = defineStore('conversation', () => {
     // null 边界(审查抓出):切到"新会话"(currentConversation=null)同样算
     // 切走——只允许"当前会话仍是发起会话"这一种状态通过,其余全拦
     const originConvId = currentConversation.value?.id
-    const isStale = () => currentConversation.value?.id !== originConvId
+    // 会话纪元快照:点「新建对话」selectionEpoch++——首问场景
+    // originConvId 是 undefined,新建后 null?.id 也是 undefined,id 比对
+    // 判不出切换(实测:提问后立即点新建对话,在途流式继续推进新会话的
+    // 消息区)。纪元比对补掉这个盲区,任何"新建/切换/懒创建落定"都作废在途回调。
+    const originEpoch = selectionEpoch
+    const isStale = () => selectionEpoch !== originEpoch
+      || currentConversation.value?.id !== originConvId
 
     try {
 
@@ -448,7 +454,9 @@ export const useConversationStore = defineStore('conversation', () => {
     streaming.value = true
     stageMessage.value = '正在继续生成被打断的回答...'
     const originConvId = convId
-    const isStale = () => currentConversation.value?.id !== originConvId
+    const originEpoch = selectionEpoch
+    const isStale = () => selectionEpoch !== originEpoch
+      || currentConversation.value?.id !== originConvId
     try {
       await api.chatResume(convId, {
         onStage: (stage, msg) => {

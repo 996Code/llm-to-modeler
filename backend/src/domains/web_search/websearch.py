@@ -107,11 +107,17 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
         resp.raise_for_status()
         payload = resp.json()
     except httpx.TimeoutException as e:
+        # 文案不含底层异常串(可能带内部地址,端点会透传给管理端);
+        # 细节进日志
+        logger.warning(f"searxng 请求超时: {e}")
         raise PackInvokeError(
-            f"联网搜索超时({_TIMEOUT_S}s): {e}", PackInvokeError.RETRYABLE) from e
+            f"联网搜索超时({_TIMEOUT_S}s),请稍后重试",
+            PackInvokeError.RETRYABLE) from e
     except httpx.HTTPError as e:
+        logger.warning(f"searxng 不可达: {e}")
         raise PackInvokeError(
-            f"联网搜索服务不可达: {e}", PackInvokeError.RETRYABLE) from e
+            "联网搜索服务不可达,请稍后重试或检查 SearXNG 容器状态",
+            PackInvokeError.RETRYABLE) from e
 
     # 引擎被挂起(SearXNG 200 但 google 限流/验证,unresponsive 列表点名):
     # 视为瞬时故障抛 retryable(引擎自动重试一次),不把"引擎挂了"当"没搜到"
