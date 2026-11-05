@@ -10,3 +10,10 @@ groups:
         default: ""
         env: SEARXNG_URL
         help: 联网搜索底座(SearXNG 容器)的地址;留空=联网搜索未启用(对话开关与管理端调研页都不可用)。本地开发栈填 http://localhost:8888,3.110 部署填 http://searxng:8080
+      - key: mihomo_api_url
+        type: string
+        label: mihomo 控制端口(自动切节点)
+        placeholder: http://searxng-mihomo:9090
+        default: ""
+        env: MIHOMO_API_URL
+        help: 代理容器 controller 地址;配置后 google 被限流时自动切换出口节点并重试(检测不到限流的 url-test 替代不了,限流只针对 SearXNG 的请求指纹)。留空=不自动切换。3.110 填 http://searxng-mihomo:9090,本地栈填 http://localhost:19090

@@ -125,6 +125,7 @@ def test_search_returns_trimmed_results_with_source_urls(env):
     # engines 传全名(shortcut 不生效,实测踩坑);httpx params 编码进 URL
     assert calls[0]["params"]["engines"] == "google"
     assert calls[0]["params"]["format"] == "json"
+    assert calls[0]["params"]["language"] == "zh-CN"  # 中文区结果(防日文页混入)
     assert calls[0]["params"]["q"] == "JJG 544 压力控制器"
 
 

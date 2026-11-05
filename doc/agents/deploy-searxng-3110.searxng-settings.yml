@@ -6,11 +6,18 @@ server:
   image_proxy: false
 
 search:
+  # 默认按中文区检索(结果本地化;出口节点在海外时不混入日文/英文本地页)
+  default_lang: "zh-CN"
   safe_search: 0
   autocomplete: ""
   formats:
     - html
     - json
+  # 引擎挂起时长:Captcha 默认 1h——配合应用层"限流自动切节点"调短,
+  # 切完节点 2.5s 后即可重试(websearch.rotate_mihomo_node)
+  suspended_times:
+    SearxEngineCaptcha: 2
+    SearxEngineTooManyRequests: 15
 
 # 出网走本 compose 内的 mihomo 容器（只代理谷歌系域名，见 mihomo/config.yaml）
 outgoing:

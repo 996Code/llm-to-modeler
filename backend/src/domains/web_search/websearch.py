@@ -60,14 +60,76 @@ def reset_cache() -> None:
         _CACHE.clear()
 
 
-def settings_url(app_state) -> str:
-    """读 searxng_url 设置(设置页保存值 > env > 空)。"""
+def _setting(app_state, key: str) -> str:
+    """读 web_search pack 设置(设置页保存值 > env > 空)。"""
     try:
         from sdk.pack_api import settings_reader as _sdk_reader
-        return (_sdk_reader(app_state, "web_search").get("searxng_url")
-                or "").strip()
+        return (_sdk_reader(app_state, "web_search").get(key) or "").strip()
     except Exception:
         return ""
+
+
+def settings_url(app_state) -> str:
+    return _setting(app_state, "searxng_url")
+
+
+def _mihomo_api(app_state) -> str:
+    """mihomo controller 地址(留空=不启用自动切节点)。"""
+    return _setting(app_state, "mihomo_api_url")
+
+
+_FAKE_NODE_KEYS = ("有效期", "剩余", "到期", "官网", "流量信息")
+
+
+def _google_suspended(payload: dict) -> bool:
+    """SearXNG 响应里 google 被挂起(限流/验证)——出结果为空且点名。"""
+    for u in (payload.get("unresponsive_engines") or []):
+        if isinstance(u, (list, tuple)) and u and u[0] == _ENGINE:
+            return True
+    return False
+
+
+def rotate_mihomo_node(app_state) -> Optional[str]:
+    """经 mihomo controller 把 MANUAL 组切到下一个真节点。
+
+    背景(实测):google 对双 UA 骗术按出口 IP 限流,mihomo 自带的
+    url-test 探测不出来(健康检查是普通请求,被限的只是 SearXNG 的
+    请求形态)——只能应用层在检测到限流后主动换出口。
+    返回切到的节点名;不可切(未配置/没得切/调用失败)返回 None。
+    """
+    api = _mihomo_api(app_state)
+    if not api:
+        return None
+    api = api.rstrip("/")
+    try:
+        client = _get_client()
+        r = client.get(f"{api}/proxies/MANUAL", timeout=10)
+        r.raise_for_status()
+        info = r.json()
+        now, all_nodes = info.get("now"), info.get("all") or []
+        real = [n for n in all_nodes
+                if isinstance(n, str) and n
+                and not any(k in n for k in _FAKE_NODE_KEYS)]
+        if len(real) < 2 or now not in real:
+            return None
+        # 跨区域轮换:限流常按出口 IP 段整片生效(实测新加坡整组被盯),
+        # "列表下一个"大概率还是同区域坏节点——优先选不同区域的下一候选
+        def _region(n):
+            return n.split("-", 1)[0]
+        idx = real.index(now)
+        ordered = real[idx + 1:] + real[:idx]
+        nxt = next((n for n in ordered if _region(n) != _region(now)), ordered[0])
+        if nxt == now:
+            return None
+        for path, body in ((f"{api}/proxies/MANUAL", {"name": nxt}),
+                           (f"{api}/proxies/PROXY", {"name": "MANUAL"})):
+            resp = client.put(path, json=body, timeout=10)
+            resp.raise_for_status()
+        logger.info(f"mihomo 节点自动切换: {now} -> {nxt}")
+        return nxt
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"mihomo 节点切换失败: {e}")
+        return None
 
 
 def _get_client() -> httpx.Client:
@@ -96,36 +158,44 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
     base = settings_url(app_state)
     if not base:
         raise PackInvokeError(
-            "联网搜索未启用:知识库插件设置里未配置 SearXNG 地址(searxng_url)",
+            "联网搜索未启用:插件设置里未配置 SearXNG 地址(searxng_url)",
             PackInvokeError.CREDENTIAL)
     base = base.rstrip("/")
 
-    try:
-        resp = _get_client().get(
-            f"{base}/search", params={
-                "q": query, "format": "json", "engines": _ENGINE})
-        resp.raise_for_status()
-        payload = resp.json()
-    except httpx.TimeoutException as e:
-        # 文案不含底层异常串(可能带内部地址,端点会透传给管理端);
-        # 细节进日志
-        logger.warning(f"searxng 请求超时: {e}")
-        raise PackInvokeError(
-            f"联网搜索超时({_TIMEOUT_S}s),请稍后重试",
-            PackInvokeError.RETRYABLE) from e
-    except httpx.HTTPError as e:
-        logger.warning(f"searxng 不可达: {e}")
-        raise PackInvokeError(
-            "联网搜索服务不可达,请稍后重试或检查 SearXNG 容器状态",
-            PackInvokeError.RETRYABLE) from e
-
-    # 引擎被挂起(SearXNG 200 但 google 限流/验证,unresponsive 列表点名):
-    # 视为瞬时故障抛 retryable(引擎自动重试一次),不把"引擎挂了"当"没搜到"
-    for u in (payload.get("unresponsive_engines") or []):
-        if isinstance(u, (list, tuple)) and u and u[0] == _ENGINE:
+    # 限流自愈循环:google 被挂起 → 切 mihomo 节点 → 重试(至多切 2 次)。
+    # SearXNG 侧需配短挂起(suspended_times.SearxEngineCaptcha=2s,
+    # 见部署模板),切完节点 sleep 等挂起过期即可用新出口重查
+    payload: Dict[str, Any] = {}
+    for attempt in range(4):
+        try:
+            resp = _get_client().get(
+                f"{base}/search", params={
+                    "q": query, "format": "json", "engines": _ENGINE,
+                    # 结果本地化:google 按出口 IP 国家给结果(日本节点→日文页
+                    # 混入,实测首条日本経済産業省);zh-CN 让引擎按中文区检索
+                    "language": "zh-CN"})
+            resp.raise_for_status()
+            payload = resp.json()
+        except httpx.TimeoutException as e:
+            # 文案不含底层异常串(可能带内部地址,端点会透传给管理端);
+            # 细节进日志
+            logger.warning(f"searxng 请求超时: {e}")
             raise PackInvokeError(
-                "搜索引擎暂时不可用(可能被限流),请稍后重试",
-                PackInvokeError.RETRYABLE)
+                f"联网搜索超时({_TIMEOUT_S}s),请稍后重试",
+                PackInvokeError.RETRYABLE) from e
+        except httpx.HTTPError as e:
+            logger.warning(f"searxng 不可达: {e}")
+            raise PackInvokeError(
+                "联网搜索服务不可达,请稍后重试或检查 SearXNG 容器状态",
+                PackInvokeError.RETRYABLE) from e
+        if not _google_suspended(payload):
+            break
+        if attempt < 3 and rotate_mihomo_node(app_state):
+            time.sleep(2.5)  # 等 SearXNG 短挂起(2s)过期
+            continue
+        raise PackInvokeError(
+            "搜索引擎暂时不可用(可能被限流),请稍后重试",
+            PackInvokeError.RETRYABLE)
 
     # 裁剪三字段;无结果也如实返回空列表(诚实原则,不硬凑)
     results = [
