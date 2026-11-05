@@ -1193,7 +1193,11 @@ watch(() => store.currentConversation?.id, (convId) => {
 }
 .msg-actions {
   display: inline-flex; gap: 2px;
-  position: absolute; top: calc(100% + 2px); right: 0;
+  /* 容器上移覆盖气泡底边(top 100%-4px)+内部 padding 补回视觉间距:
+     若容器从 100%+2px 起步,与气泡间留 2px 死区——鼠标离开气泡瞬间
+     hover 链断掉,按钮 visibility:hidden 后不再接收指针,永远点不到 */
+  position: absolute; top: calc(100% - 4px); right: 0;
+  padding-top: 6px;
   visibility: hidden;
 }
 .user-row:hover .msg-actions { visibility: visible; }

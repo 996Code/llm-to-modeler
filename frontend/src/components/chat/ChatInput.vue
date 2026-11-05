@@ -300,14 +300,16 @@ function onEnter(e: KeyboardEvent) {
   padding: 12px 24px 16px;
   background: var(--bg-page);
 }
-/* 输入框容器：最大宽度居中、横向排列、圆角、阴影 */
+/* 输入框容器：最大宽度居中、纵向排列(文本框全宽在上,操作按钮成行在下
+   ——DeepSeek/ChatGPT 同款;旧版按钮列固定占右侧,窄窗口时文本区被挤掉
+   近三分之一),圆角、阴影 */
 .chat-input {
   max-width: 880px;
   margin: 0 auto;
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 8px 8px 8px 16px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px 8px 16px;
   background: var(--bg-container);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-xl);
@@ -361,9 +363,9 @@ function onEnter(e: KeyboardEvent) {
   opacity: 0.5;
 }
 
-/* textarea 自身无边框，融入容器 */
+/* textarea 自身无边框，融入容器(纵向布局:占满整行宽度) */
 .input-box {
-  flex: 1;
+  width: 100%;
   border: none !important;
   box-shadow: none !important;
   padding: 6px 0 !important;
@@ -377,14 +379,17 @@ function onEnter(e: KeyboardEvent) {
   border: none !important;
   resize: none;
 }
+/* 操作行：文本框下方的按钮行(联网开关/附件/发送靠右,流式提示靠左) */
 .input-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding-top: 2px;
 }
 .input-hint {
   font-size: 12px;
   color: var(--text-secondary);
+  margin-right: auto;
 }
 /* 附件按钮 */
 .attach-btn {
