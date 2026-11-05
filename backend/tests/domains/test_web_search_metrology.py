@@ -52,23 +52,25 @@ def _app():
 
 
 def _patch_websearch(monkeypatch, configured=True, boom=False):
-    """websearch 底层替身(记调用;boom=搜索抛错)。"""
+    """websearch 底层替身(记调用;boom=搜索抛错)。mock search_multi——
+    客服直连与工具入口已升级为规划+多角度搜索。"""
     from domains.web_search import websearch
     calls = []
 
-    def fake_search(app_state, query, top_k=5):
-        calls.append(("search", query))
+    def fake_search(app_state, question, top_k=5, conv_id=None):
+        calls.append(("search", question))
         if boom:
             from sdk.tool import PackInvokeError
             raise PackInvokeError("超时", PackInvokeError.RETRYABLE)
-        return {"query": query, "cached": False, "results": [
-            {"title": "AI 资讯", "url": "https://a.test/x", "content": "摘要"}]}
+        return {"question": question, "queries": [question], "cached": False,
+                "results": [
+                    {"title": "AI 资讯", "url": "https://a.test/x", "content": "摘要"}]}
 
     def fake_synth(app_state, query, results, conv_id=None):
         calls.append(("synthesize", query))
         return "**总结**要点 [来源:1]"
 
-    monkeypatch.setattr(websearch, "search", fake_search)
+    monkeypatch.setattr(websearch, "search_multi", fake_search)
     monkeypatch.setattr(websearch, "synthesize_answer", fake_synth)
     monkeypatch.setattr(websearch, "settings_url",
                         lambda s: "http://searxng.test" if configured else "")
@@ -82,6 +84,7 @@ def test_toggle_on_with_web_hint_routes_to_websearch(env):
                               _state(True), lambda *a: None)
     assert out is not None
     assert out.artifact["type"] == "web_search_result"
+    assert out.artifact["queries"] == ["帮我在网上搜一下ai最新的消息"]  # search_multi 透传规划词(fake 以原话为词)
     assert out.artifact["pack"] == "metrology_assistant"
     assert "[来源:1]" in out.summary
 

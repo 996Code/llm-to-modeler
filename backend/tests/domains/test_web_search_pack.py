@@ -163,6 +163,9 @@ def test_search_upstream_timeout_raises_retryable(env):
 
 def test_tool_execute_returns_data_artifact_with_sources(env, monkeypatch):
     _mock_get(env)
+    # 搜索词规划替身(真实链路走 web_query.j2):保原词+引号+自然问法
+    monkeypatch.setattr(websearch, "plan_queries",
+                        lambda s, q, conv_id=None: ['"陈蔓" 重名', '陈蔓 重名 查询'])
     # LLM 综合回答替身:返回带 [来源:N] 引用的总结(真实链路走 web_answer.j2)
     monkeypatch.setattr(websearch, "synthesize_answer",
                         lambda s, q, r, conv_id=None:
@@ -173,6 +176,7 @@ def test_tool_execute_returns_data_artifact_with_sources(env, monkeypatch):
     assert result.artifact["type"] == "web_search_result"
     assert result.artifact["query"] == "JJG 544 压力控制器检定规程"
     assert len(result.artifact["results"]) == 5
+    assert result.artifact["queries"] == ['"陈蔓" 重名', '陈蔓 重名 查询']
     # card-only 展示(前端专用卡:总结+角标+来源卡)
     assert result.artifact["resultDisplay"] == "card"
     assert result.artifact["pack"] == "web_search"

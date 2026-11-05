@@ -530,7 +530,9 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
             return None  # 底座未配置:静默回落(管理员未启用的能力不拦用户)
         stage('assistant.retrieve', '联网搜索外部资料…')
         try:
-            out = websearch.search(self._app_state, user_input, top_k=5)
+            out = websearch.search_multi(
+                self._app_state, user_input, top_k=5,
+                conv_id=getattr(ctx, 'conv_id', None))
             stage('assistant.conclude', '综合归纳搜索结果…')
             answer = websearch.synthesize_answer(
                 self._app_state, user_input, out['results'],
@@ -541,7 +543,9 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         # 链路打点:与 WebSearchTool 同一 stage 命名(管理端链路统一视图)
         try:
             ctx.trace('web_search.search', '联网搜索(客服直连)', 'ok',
-                      detail={'query': user_input, 'top_k': 5,
+                      detail={'query': user_input,
+                              'plannedQueries': out.get('queries') or [user_input],
+                              'top_k': 5,
                               'cached': bool(out.get('cached')),
                               'resultCount': len(out['results']),
                               'results': [{'title': r['title'][:60], 'url': r['url']}
@@ -551,6 +555,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         artifact = {
             'type': 'web_search_result',
             'query': user_input,
+            'queries': out.get('queries') or [user_input],
             'results': out['results'],
             'cached': bool(out.get('cached')),
             'answer': answer,

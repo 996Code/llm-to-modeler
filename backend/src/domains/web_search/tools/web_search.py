@@ -85,7 +85,10 @@ class WebSearchTool(Tool):
         # message 位置传参(nodes.py 的 emit 按位置参数个数分发)
         ctx.emit("stage", "web_search.search", "正在联网搜索…")
         t0 = _time.monotonic()
-        out = websearch.search(self._app_state, query, top_k=top_k)
+        # 搜索词规划(Perplexity 式多角度改写,LLM 失败退化单词直搜):
+        # 生僻/疑似错字实体保原词+引号精确,口语问题转检索词组
+        out = websearch.search_multi(self._app_state, query, top_k=top_k,
+                                     conv_id=ctx.conv_id)
         ctx.emit("stage", "web_search.assemble", "整理结果与来源…")
 
         results = out["results"]
@@ -97,6 +100,7 @@ class WebSearchTool(Tool):
                   duration_ms=int((_time.monotonic() - t0) * 1000),
                   detail={
                       "query": query, "top_k": top_k, "cached": cached,
+                      "plannedQueries": out.get("queries") or [query],
                       "resultCount": len(results),
                       "results": [{"title": r["title"][:60], "url": r["url"]}
                                   for r in results[:5]],
@@ -111,6 +115,7 @@ class WebSearchTool(Tool):
         artifact = {
             "type": "web_search_result",
             "query": query,
+            "queries": out.get("queries") or [query],
             "results": results,
             "cached": cached,
             "answer": answer,

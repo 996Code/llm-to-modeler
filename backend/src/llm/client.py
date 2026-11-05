@@ -147,6 +147,7 @@ _CHAT_CACHE_STAGES = frozenset({
     "assistant.select", "assistant.extract",
     "kg.query", "kg.sufficiency",
     "chatbi.retrieve.refine", "chatbi.think", "chatbi.chart",
+    "web_search.query",  # 搜索词规划(temp=0 确定性,复访零调用)
 })
 
 

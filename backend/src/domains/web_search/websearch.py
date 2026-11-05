@@ -225,6 +225,63 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
         ev.set()
 
 
+def plan_queries(app_state, question: str,
+                 conv_id: Optional[str] = None) -> List[str]:
+    """LLM 搜索词规划(Perplexity/ZCode 式改写,问题→多角度搜索词)。
+
+    规则见 prompts/web_query.j2:核心实体逐字保留(引号精确匹配)、口语转
+    检索词组、指代不明给解释变体。temperature=0 + stage 缓存白名单——
+    同问题复访零额外调用(降频原则)。LLM 失败 fail-open 退化为单词直搜。
+    """
+    fallback = _clean_query(question or "")
+    if not fallback:
+        return []
+    try:
+        prompt = _prompts().render("web_search", "web_query",
+                                   question=question)
+        parsed = app_state.llm_client.chat_json(
+            [{"role": "user", "content": prompt}],
+            temperature=0.0, conv_id=conv_id, stage="web_search.query")
+        raw = parsed.get("queries") if isinstance(parsed, dict) else None
+        if not isinstance(raw, list):
+            raw = None  # 字符串等非 list 形态:迭代会逐字符拆词(审查 I1)
+        queries = []
+        for q in (raw or []):
+            q2 = _clean_query(str(q)).strip()
+            if q2 and q2 not in queries:
+                queries.append(q2)
+        if not queries:
+            return [fallback]
+        return queries[:3]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"搜索词规划失败(退化为原词直搜): {e}")
+        return [fallback]
+
+
+def search_multi(app_state, question: str, top_k: int = 5,
+                 conv_id: Optional[str] = None) -> Dict[str, Any]:
+    """规划+多角度搜索+合并(对话链路入口;管理端调研页仍是单词 search)。
+
+    返回 {question, queries, results, cached};queries 供链路记录与制品展示,
+    results 按 URL 去重合并(规划序优先,条数合计不超过 top_k*2)。
+    """
+    queries = plan_queries(app_state, question, conv_id=conv_id)
+    if not queries:
+        raise PackInvokeError("搜索词不能为空", PackInvokeError.PERMANENT)
+    merged: List[dict] = []
+    seen_urls = set()
+    any_cached = False
+    for q in queries:
+        out = search(app_state, q, top_k=top_k)
+        any_cached = any_cached or bool(out.get("cached"))
+        for r in out["results"]:
+            if r["url"] not in seen_urls:
+                seen_urls.add(r["url"])
+                merged.append(r)
+    return {"queries": queries,
+            "results": merged[:top_k * 2], "cached": any_cached}
+
+
 def _search_leader(app_state, query: str, top_k: int) -> Dict[str, Any]:
     """single-flight 领头执行:真实出站+缓存写入(仅 search() 内部使用)。"""
     base = settings_url(app_state)

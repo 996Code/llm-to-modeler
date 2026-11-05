@@ -9,6 +9,11 @@
         <span>来源 · {{ results.length }} 个网页</span>
         <a-tag v-if="artifact.cached" color="geekblue" class="ws-cached-tag">缓存命中</a-tag>
       </div>
+      <!-- 检索词规划(LLM 换角度改写,多路搜索的词) -->
+      <div v-if="plannedQueries.length" class="ws-plan-row">
+        <span class="ws-plan-label">检索词</span>
+        <span v-for="(q, i) in plannedQueries" :key="i" class="ws-plan-chip">{{ q }}</span>
+      </div>
       <div class="ws-sources-list">
         <a v-for="(r, i) in results" :key="i"
            class="ws-source-card" :href="r.url" target="_blank" rel="noopener noreferrer"
@@ -39,6 +44,10 @@ const props = defineProps<{
 const sourceRefs = ref<Record<number, Element | ComponentPublicInstance | null>>({})
 
 const results = computed<any[]>(() => props.artifact?.results ?? [])
+const plannedQueries = computed<string[]>(() => {
+  const qs = props.artifact?.queries
+  return Array.isArray(qs) ? qs.filter((q: unknown) => typeof q === 'string' && q) : []
+})
 const answer = computed<string>(() => props.artifact?.answer ?? '')
 
 // 回答里的 [来源:N] 渲染成角标徽标(与 KG [片段:N] 同款交互形态)
@@ -99,6 +108,12 @@ function onRefClick(e: MouseEvent) {
 .ws-sources-icon { font-size: 12px; }
 .ws-cached-tag { margin-left: 4px; }
 .ws-sources-list { display: flex; flex-direction: column; gap: 6px; }
+.ws-plan-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.ws-plan-label { font-size: 11px; color: #94a3b8; flex: none; }
+.ws-plan-chip {
+  font-size: 11px; color: #64748b; background: #f1f5f9;
+  border-radius: 8px; padding: 1px 8px; line-height: 18px;
+}
 .ws-source-card {
   display: flex; align-items: center; gap: 8px; padding: 7px 10px;
   border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;
