@@ -461,8 +461,9 @@ function onEnter(e: KeyboardEvent) {
   .chat-input-wrap { padding: 8px 12px 12px; }
 }
 
-/* 联网搜索开关:对齐 attach-btn 的幽灵图标钮——关=灰图标,开=品牌色点亮
-   (开态即 hover 态形态,视觉语言与附件按钮一族,不再带边框小方块) */
+/* 联网搜索开关:对齐 attach-btn 的幽灵图标钮。
+   开态用"实底品牌色"与 hover(浅底)拉开层级——开着还是关着一眼可辨:
+   关 = 灰图标;悬浮 = 浅蓝底蓝字;开启 = 品牌色实底白字(常亮状态徽标感) */
 .ws-toggle {
   width: 34px; height: 34px;
   border-radius: var(--radius-md);
@@ -473,6 +474,8 @@ function onEnter(e: KeyboardEvent) {
   transition: all 0.2s; flex-shrink: 0;
 }
 .ws-toggle:hover { color: var(--color-primary); background: var(--color-primary-bg); }
-.ws-toggle.on { color: var(--color-primary); background: var(--color-primary-bg); }
+/* 开态实底深阶(--brand-ink,白字 4.9:1 合规;设计令牌规则禁白字压 --brand) */
+.ws-toggle.on { color: #fff; background: var(--brand-ink); }
+.ws-toggle.on:hover { background: var(--brand-hover); }
 .ws-toggle:disabled { cursor: not-allowed; opacity: 0.4; }
 </style>
