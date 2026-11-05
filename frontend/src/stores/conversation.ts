@@ -164,6 +164,14 @@ export const useConversationStore = defineStore('conversation', () => {
   // 历史提示成功但页面不变——第一次能成只因当时 currentConversation
   // 还是 null)。
   let selectionEpoch = 0
+  let activeRequest: symbol | null = null
+
+  function clearActiveRequest() {
+    activeRequest = null
+    streaming.value = false
+    stageMessage.value = ''
+    currentStage.value = ''
+  }
 
   /**
    * 加载历史会话列表。
@@ -184,13 +192,9 @@ export const useConversationStore = defineStore('conversation', () => {
    */
   async function selectConversation(id: string) {
     const epoch = ++selectionEpoch
-    loading.value = true
-    // 切会话即清流式 UI 态(进度条/阶段提示):原会话若仍在流式中,其
-    // SSE 回调已被会话切换守卫拦住不串扰这里;streaming 标志留给原流
-    // finally 收尾,但 UI 上不再显示原会话的进度
-    stageMessage.value = ''
-    currentStage.value = ''
+    clearActiveRequest()
     pipelineSteps.value = []
+    loading.value = true
     try {
       const conv = await api.getConversation(id)
       // 竞态守卫:加载期间用户又切了会话/新建/删除(代际已变)——本次
@@ -241,6 +245,8 @@ export const useConversationStore = defineStore('conversation', () => {
    */
   function startNewConversation() {
     selectionEpoch++  // 作废在途的历史载入
+    clearActiveRequest()
+    pipelineSteps.value = []
     currentConversation.value = null
     messages.value = []
     currentConfig.value = null
@@ -255,6 +261,8 @@ export const useConversationStore = defineStore('conversation', () => {
     await api.deleteConversation(id)
     if (currentConversation.value?.id === id) {
       selectionEpoch++  // 清空当前选择,作废在途的历史载入
+      clearActiveRequest()
+      pipelineSteps.value = []
       currentConversation.value = null
       messages.value = []
       currentConfig.value = null
@@ -276,79 +284,58 @@ export const useConversationStore = defineStore('conversation', () => {
     // 空消息或正在流式生成中，直接忽略
     if ((!text.trim() && !imageBase64) || streaming.value) return
 
-    // 会话 ID:独立模式首聊不带 id(后端懒创建,经 result 事件回传);
-    // 嵌入模式保留预创建——contextKey 绑定/侧栏重开恢复依赖建会话时带上绑定
-    let convId = currentConversation.value?.id
-    if (!convId && isEmbedded.value) {
-      const contextKey = localStorage.getItem('embedded_context_key') || undefined
-      const conv = await api.createConversation('', contextKey)
-      convId = conv.id
-      selectionEpoch++  // 懒创建落定当前会话,作废在途的历史载入
-      currentConversation.value = conv
-      await loadConversations()
-    }
-
-    // 嵌入模式：发消息前向宿主拉最新画布（GET_CONTEXT），确保 AI 基于最新版修改。
-    // 拉取失败 = 链路异常：拦截本次发送并明确报错（不静默降级，避免 AI 基于空配置误导）
-    // 注：refreshEmbedContext 只有嵌入态才可能返回 null，此处判 null 即嵌入链路异常
-    const embedCtx = isEmbedded.value ? await refreshEmbedContext() : undefined
-    // 独立模式：把当前制品作为上下文传给后端（后端 req.context 优先于会话存储）。
-    // 场景：回滚/版本切换后 currentConfig 已变，继续修改必须基于当前生效版本
-    const localCtx = (!isEmbedded.value && currentConfig.value)
-      ? { context: { [CONTEXT_KEY_ARTIFACT]: currentConfig.value } }
-      : undefined
-    // 宿主画布即 diff 基线（每次发消息前都拉最新，基线随之刷新）
-    if (embedCtx && embedCtx.context && embedCtx.context[CONTEXT_KEY_ARTIFACT]) {
-      setBaseline(embedCtx.context[CONTEXT_KEY_ARTIFACT] as FormConfig)
-    }
-    if (embedCtx === null) {
-      hostLinkError.value = '宿主上下文获取失败：嵌入链路异常，消息未发送。请刷新页面后重试'
-      messages.value.push({
-        role: 'assistant',
-        content: `⚠️ ${hostLinkError.value}`,
-      })
-      return
-    }
-
-    // 追问态快照:必须在 push 用户消息之前读——pendingClarification 检查
-    // "最后一条是否 assistant+needsClarification",push 之后最后一条变成
-    // user,快照永远 false(真实事故:追问回答的 answers 从未发出过,
-    // 每轮都当新消息重新路由,追问死循环)
+    // 追问态必须在锁定 streaming 前读取，锁定后 computed 会隐藏追问态。
     const wasClarifying = pendingClarification.value
     const pendingQuestionId = messages.value.at(-1)?.clarificationQuestions
       ?.find(q => typeof q.question_id === 'string')?.question_id
-    // Explicit card answers belong to that card, including token-free legacy cards.
-    // Never fill their identity from the latest pending question.
     const clarifyAnswers = structuredAnswers !== undefined
       ? { ...structuredAnswers, text }
       : wasClarifying
         ? { ...(typeof pendingQuestionId === 'string' ? { __question_id: pendingQuestionId } : {}), text }
         : undefined
 
-    // Add user message
-    // 先把用户消息塞进列表（乐观更新，UI 立即显示）
-    messages.value.push({ role: 'user', content: text })
+    const request = Symbol()
+    activeRequest = request
+    const originEpoch = selectionEpoch
+    let convId = currentConversation.value?.id
+    const isStale = () => activeRequest !== request || selectionEpoch !== originEpoch
+      || currentConversation.value?.id !== convId
     streaming.value = true
     stageMessage.value = '正在理解您的意图...'
     currentStage.value = ''
-    pipelineSteps.value = []  // 重置，等待后端 pipeline_definition 事件
-
-    // 会话切换守卫(用户 10-15 报障:SSE 回调闭包不绑会话,切到会话 B 后
-    // A 的流式结果仍往 messages push——B 的界面显示 A 的回答)。
-    // 发起时快照会话 id,回调里校验:已切走则丢弃(结果已落库,切回
-    // A 时历史加载可见,不丢数据只丢串扰)。
-    // null 边界(审查抓出):切到"新会话"(currentConversation=null)同样算
-    // 切走——只允许"当前会话仍是发起会话"这一种状态通过,其余全拦
-    const originConvId = currentConversation.value?.id
-    // 会话纪元快照:点「新建对话」selectionEpoch++——首问场景
-    // originConvId 是 undefined,新建后 null?.id 也是 undefined,id 比对
-    // 判不出切换(实测:提问后立即点新建对话,在途流式继续推进新会话的
-    // 消息区)。纪元比对补掉这个盲区,任何"新建/切换/懒创建落定"都作废在途回调。
-    const originEpoch = selectionEpoch
-    const isStale = () => selectionEpoch !== originEpoch
-      || currentConversation.value?.id !== originConvId
+    pipelineSteps.value = []
 
     try {
+      // 独立模式首问由 result 回传 id；嵌入模式预创建以绑定 contextKey。
+      if (!convId && isEmbedded.value) {
+        const contextKey = localStorage.getItem('embedded_context_key') || undefined
+        const conv = await api.createConversation('', contextKey)
+        if (isStale()) return
+        convId = conv.id
+        currentConversation.value = conv
+        await loadConversations()
+        if (isStale()) return
+      }
+
+      // 宿主上下文和本地配置只能在当前请求仍拥有窗口时使用。
+      const embedCtx = isEmbedded.value ? await refreshEmbedContext() : undefined
+      if (isStale()) return
+      const localCtx = (!isEmbedded.value && currentConfig.value)
+        ? { context: { [CONTEXT_KEY_ARTIFACT]: currentConfig.value } }
+        : undefined
+      if (embedCtx && embedCtx.context && embedCtx.context[CONTEXT_KEY_ARTIFACT]) {
+        setBaseline(embedCtx.context[CONTEXT_KEY_ARTIFACT] as FormConfig)
+      }
+      if (embedCtx === null) {
+        hostLinkError.value = '宿主上下文获取失败：嵌入链路异常，消息未发送。请刷新页面后重试'
+        messages.value.push({
+          role: 'assistant',
+          content: `⚠️ ${hostLinkError.value}`,
+        })
+        return
+      }
+
+      messages.value.push({ role: 'user', content: text })
 
       // 调用 chat，注册各类 SSE 事件回调（回调内根据事件更新状态/UI）
       // 嵌入模式：附加上下文（宿主最新配置 + 服务地址表），后端据此覆盖会话旧配置
@@ -371,6 +358,7 @@ export const useConversationStore = defineStore('conversation', () => {
             // 采纳后后续轮次/刷新/恢复都基于它(见 startNewConversation 注释)。
             if (isStale()) return
             if (result.conversationId && !currentConversation.value) {
+              convId = result.conversationId
               currentConversation.value = { id: result.conversationId } as Conversation
               loadConversations()
             }
@@ -432,10 +420,7 @@ export const useConversationStore = defineStore('conversation', () => {
         errorCategory: classifyError(e.message || ''),
       })
     } finally {
-      // 无论成功失败，都结束流式状态
-      streaming.value = false
-      stageMessage.value = ''
-      currentStage.value = ''
+      if (activeRequest === request) clearActiveRequest()
     }
   }
 
@@ -451,11 +436,15 @@ export const useConversationStore = defineStore('conversation', () => {
   async function resumePendingAnswer() {
     const convId = currentConversation.value?.id
     if (!convId || streaming.value) return
+    const request = Symbol()
+    activeRequest = request
     streaming.value = true
     stageMessage.value = '正在继续生成被打断的回答...'
+    currentStage.value = ''
+    pipelineSteps.value = []
     const originConvId = convId
     const originEpoch = selectionEpoch
-    const isStale = () => selectionEpoch !== originEpoch
+    const isStale = () => activeRequest !== request || selectionEpoch !== originEpoch
       || currentConversation.value?.id !== originConvId
     try {
       await api.chatResume(convId, {
@@ -512,9 +501,7 @@ export const useConversationStore = defineStore('conversation', () => {
         errorCategory: classifyError(e.message || ''),
       })
     } finally {
-      streaming.value = false
-      stageMessage.value = ''
-      currentStage.value = ''
+      if (activeRequest === request) clearActiveRequest()
     }
   }
 

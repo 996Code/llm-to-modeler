@@ -31,6 +31,7 @@
 import { computed, ref } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import { LinkOutlined } from '@ant-design/icons-vue'
+import { renderWebSearchAnswer } from './citations'
 
 const props = defineProps<{
   artifact: Record<string, any>
@@ -50,21 +51,15 @@ const plannedQueries = computed<string[]>(() => {
 })
 const answer = computed<string>(() => props.artifact?.answer ?? '')
 
-// 回答里的 [来源:N] 渲染成角标徽标(与 KG [片段:N] 同款交互形态)
-const renderedAnswer = computed(() => {
-  let html = props.renderMarkdown(answer.value)
-  html = html.replace(
-    /\[来源[:：]?\s*(\d+)\]/g,
-    '<span class="md-ref md-ref-web" data-source-idx="$1">$1</span>')
-  return html
-})
+// 回答里的 [来源:N] 渲染成角标徽标(与 KG [片段:N] 同款交互形态)。
+// 统一走 citations.renderWebSearchAnswer:只替换正文文本节点,不误伤
+// 链接属性/锚文本/代码块;cited 即实际生效编号(非法编号不算)
+const rendered = computed(() =>
+  renderWebSearchAnswer(answer.value, results.value, props.renderMarkdown))
+const renderedAnswer = computed(() => rendered.value.html)
 
 // 被引用的来源编号(卡片序号高亮)
-const citedSet = computed(() => {
-  const s = new Set<number>()
-  for (const m of answer.value.matchAll(/\[来源[:：]?\s*(\d+)\]/g)) s.add(Number(m[1]))
-  return s
-})
+const citedSet = computed(() => rendered.value.cited)
 
 function domain(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, '') } catch { return url }

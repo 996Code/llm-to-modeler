@@ -45,9 +45,10 @@
         <!-- 流式生成时显示提示 -->
         <span v-if="streaming" class="input-hint">生成中...</span>
         <!-- 联网搜索开关(嵌入/独立两种模式共用;开=允许路由到 web_search)。
-             KG 插件禁用/未装配时隐藏(web_search 工具不存在,开关无意义)。
-             胶囊样式(DeepSeek/Kimi 同款):关=幽灵灰;开=淡彩底+品牌深蓝字+
-             常亮小圆点(状态灯,不靠颜色深浅也能分辨开/关) -->
+             窗口内无任何 pack 提供/消费 web_search 能力时隐藏(底座禁用
+             后能力广告自动消失,开关留着只会误导)。胶囊样式(DeepSeek/Kimi
+             同款):关=幽灵灰;开=淡彩底+品牌深蓝字+常亮小圆点(状态灯,
+             不靠颜色深浅也能分辨开/关) -->
         <button
           v-if="!hideWebSearch"
           class="ws-toggle"

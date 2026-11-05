@@ -14,12 +14,12 @@
       <span class="ws-tip">经 SearXNG→google(代理出网);结果必带来源链接</span>
     </div>
 
-    <!-- 最近调研记录(服务端落库,点击回填重跑) -->
+    <!-- 最近调研记录(服务端落库,点击直接回看该条已存结果,不重搜) -->
     <div v-if="logs.length" class="ws-logs">
       <span class="ws-logs-label">最近调研:</span>
       <button v-for="l in logs.slice(0, 8)" :key="l.id" class="ws-logs-chip"
               :title="`${l.query} · ${l.resultCount} 条结果`"
-              @click="query = l.query; run()">{{ l.query.slice(0, 20) }}</button>
+              @click="viewLog(l)">{{ l.query.slice(0, 20) }}</button>
       <a class="ws-logs-clear" @click="clearLogs">清空记录</a>
     </div>
 
@@ -29,12 +29,12 @@
         <div class="ws-title">总结回答
           <a-tag v-if="result.cached" color="geekblue" class="ws-sub">缓存命中</a-tag>
         </div>
-        <div class="ws-answer md-content" v-html="renderedAnswer" />
+        <div class="ws-answer md-content" v-html="renderedAnswer" @click="onRefClick" />
       </section>
       <!-- 来源卡(角标编号与总结里的 [来源:N] 对应) -->
       <section v-if="result.results.length" class="ws-card">
         <div class="ws-title">来源 · {{ result.results.length }} 个网页</div>
-        <div class="ws-items">
+        <div ref="itemsEl" class="ws-items">
           <a v-for="(r, i) in result.results" :key="i"
              class="ws-item" :href="r.url" target="_blank" rel="noopener noreferrer">
             <span class="ws-item-idx" :class="{ cited: citedSet.has(i + 1) }">{{ i + 1 }}</span>
@@ -59,8 +59,8 @@
 import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { marked } from 'marked'
-import DOMPurify from 'dompurify'
 import { kgWebSearch, kgWebSearchLogs, kgWebSearchLogsClear, KgWebSearchResult, KgWebSearchLog } from '../../api'
+import { renderWebSearchAnswer } from '../../../plugins/web_search/citations'
 import type { LoadSafely } from '../../components/loadSafely'
 
 const loadSafely = inject<LoadSafely>('loadSafely')!
@@ -70,27 +70,44 @@ const topK = ref(5)
 const loading = ref(false)
 const result = ref<KgWebSearchResult | null>(null)
 const logs = ref<KgWebSearchLog[]>([])
+const itemsEl = ref<HTMLElement | null>(null)
 
-// 总结回答渲染:[来源:N] → 角标徽标(与对话端 WebSearchResultCard 同款形态)
-const renderedAnswer = computed(() => {
-  const raw = result.value?.answer || ''
-  if (!raw) return ''
-  let html = marked.parse(raw) as string
-  html = html.replace(/\[来源[:：]?\s*(\d+)\]/g,
-    '<span class="md-ref-web">$1</span>')
-  return DOMPurify.sanitize(html, { ADD_ATTR: ['class'] })
-})
-const citedSet = computed(() => {
-  const s = new Set<number>()
-  for (const m of (result.value?.answer || '').matchAll(/\[来源[:：]?\s*(\d+)\]/g)) s.add(Number(m[1]))
-  return s
-})
+// 总结回答渲染:[来源:N] → 角标徽标(与对话端 WebSearchResultCard 同款形态)。
+// 统一走 citations.renderWebSearchAnswer:只替换正文文本节点里的 [来源:N],
+// 不误伤链接属性/锚文本/代码块,编号合法性(来源 URL 须 http/https)也在内
+const renderedAnswer = computed(() => rendered.value.html)
+const citedSet = computed(() => rendered.value.cited)
+const rendered = computed(() => renderWebSearchAnswer(
+  result.value?.answer || '',
+  result.value?.results || [],
+  raw => marked.parse(raw) as string,
+))
 function domain(url: string): string {
   try { return new URL(url).hostname.replace(/^www\./, '') } catch { return url }
 }
 
+// 角标点击:滚动到对应来源卡(纯前端定位,无跳转;与 WebSearchResultCard 同款)
+function onRefClick(e: MouseEvent) {
+  const el = e.target as HTMLElement
+  if (!el.classList.contains('md-ref-web')) return
+  const idx = Number(el.getAttribute('data-source-idx'))
+  if (!idx) return
+  itemsEl.value?.querySelectorAll('.ws-item')[idx - 1]
+    ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
+
 async function refreshLogs() {
   try { logs.value = await kgWebSearchLogs() } catch { /* 记录加载失败不阻断调研 */ }
+}
+
+// 历史回看:直接展示该条已存的 results+answer(不重搜、不耗出站;
+// 旧记录无 answer 时只展示来源卡)
+function viewLog(l: KgWebSearchLog) {
+  query.value = l.query
+  result.value = {
+    query: l.query, results: l.results, cached: l.cached,
+    answer: l.answer, logId: l.id,
+  }
 }
 
 async function run() {
@@ -100,6 +117,7 @@ async function run() {
   loading.value = true
   await loadSafely(async () => {
     result.value = await kgWebSearch(q, topK.value)
+    if (result.value.logError) message.warning(result.value.logError)
     await refreshLogs()
   })
   loading.value = false
@@ -141,7 +159,9 @@ onMounted(refreshLogs)
   padding: 0 5px; margin: 0 2px; border-radius: 9px;
   background: var(--color-primary-bg, #eef4ff); color: var(--brand, #3370FF);
   font-size: 11px; font-weight: 600; line-height: 17px; vertical-align: baseline;
+  cursor: pointer; user-select: none;
 }
+.md-ref-web:hover { background: var(--brand, #3370FF); color: #fff; }
 /* 来源卡列表(编号与角标对应,被引用高亮) */
 .ws-items { display: flex; flex-direction: column; gap: 8px; }
 .ws-item {

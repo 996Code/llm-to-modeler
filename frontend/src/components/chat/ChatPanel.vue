@@ -501,13 +501,18 @@ const packArtifactType = ref<string | undefined>(undefined)
 // 制品卡动作集（pack 声明，驱动 apply/rewind 按钮）——不同插件的制品
 // 交互不同，按钮由声明驱动而非组件硬编码
 const packActions = ref<string[]>([])
-// 联网搜索开关显隐:web_search pack 未装配/禁用时隐藏(meta/packs
-// 只返回启用集;底座插件禁用则开关留着只会误导)
+// 联网搜索开关显隐:窗口内任一 pack 提供(providers)或消费(consumers)
+// web_search 能力即显示(meta/packs 只返回启用集;能力广告的前提是
+// web_search 工具在册——底座禁用后 caps 自动消失,开关跟着隐藏)。
+// 嵌入窗口 ?packs= 过滤后仍能从消费方(kg/客服)的 capabilities 拿到广告,
+// 客服窗口(packs=metrology_assistant 单成员)由此拿到联网开关。
 const webSearchAvailable = ref(false)
 onMounted(async () => {
   try {
     const manifests = await getPackManifests()
-    webSearchAvailable.value = manifests.some((m: any) => m.name === 'web_search')
+    webSearchAvailable.value = manifests.some(
+      (m: any) => m.name === 'web_search'
+        || (m.capabilities || []).includes('web_search'))
     packDisplays.value = Object.fromEntries(manifests.map((manifest: any) => [manifest.name, manifest.artifact?.display || {}]))
     // 主交互 pack：优先声明了 artifact.display 的（制品卡标签/动作取自它）
     const primary = manifests.find((m: any) => m.artifact?.display) || manifests[0]

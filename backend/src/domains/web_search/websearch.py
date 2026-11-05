@@ -21,8 +21,9 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
@@ -49,16 +50,18 @@ _CACHE_KEEP = 10      # 缓存保存条数(读侧按 top_k 裁剪)
 _CACHE_MAX = 200      # 缓存条目上限(超量清最旧)
 # 同词并发合并(single-flight):并发同词只放一个出站——击穿会连环触发
 # google 限流+节点轮换互相打架(实测 5 并发全 miss 各自出站 23s)
-_INFLIGHT: Dict[str, threading.Event] = {}
+_INFLIGHT: Dict[tuple, Future] = {}
 _INFLIGHT_LOCK = threading.Lock()
-_CACHE: Dict[str, Dict[str, Any]] = {}
+_CACHE: Dict[tuple, Dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
 # 引擎固定 google(实测:百度机房 IP 秒撞验证、Bing 中文专业词质量差,
 # 3.110 栈上 google 修复版 20/20 全绿——见 doc/agents/deploy-searxng-3110.md)
 _ENGINE = "google"
+_LANGUAGE = "zh-CN"
 _TIMEOUT_S = 15.0
 _client: Optional[httpx.Client] = None
+_ROTATION_LOCK = threading.Lock()
 
 
 def reset_cache() -> None:
@@ -89,14 +92,32 @@ _FAKE_NODE_KEYS = ("有效期", "剩余", "到期", "官网", "流量信息")
 
 
 def _google_suspended(payload: dict) -> bool:
-    """SearXNG 响应里 google 被挂起(限流/验证)——出结果为空且点名。"""
+    """仅明确的限流/验证/拒绝访问允许触发出口轮换。"""
     for u in (payload.get("unresponsive_engines") or []):
-        if isinstance(u, (list, tuple)) and u and u[0] == _ENGINE:
-            return True
+        if isinstance(u, (list, tuple)) and len(u) > 1 and u[0] == _ENGINE:
+            reason = str(u[1]).lower()
+            if any(word in reason for word in (
+                    "captcha", "429", "too many requests", "toomanyrequests",
+                    "access denied", "accessdenied")):
+                return True
     return False
 
 
-def rotate_mihomo_node(app_state) -> Optional[str]:
+def _controller_request(client, method, url, before_request=None, **kwargs):
+    """授权异常必须向上传递;只吸收控制器实际 HTTP 故障。"""
+    if before_request is not None:
+        before_request()
+    try:
+        response = getattr(client, method)(url, **kwargs)
+        response.raise_for_status()
+        return response
+    except httpx.HTTPError:
+        logger.warning("mihomo controller 请求失败")
+        return None
+
+
+def rotate_mihomo_node(app_state, attempted_nodes: Optional[set] = None,
+                       before_request: Optional[Callable[[], None]] = None) -> Optional[str]:
     """经 mihomo controller 把 MANUAL 组切到下一个真节点。
 
     背景(实测):google 对双 UA 骗术按出口 IP 限流,mihomo 自带的
@@ -108,35 +129,50 @@ def rotate_mihomo_node(app_state) -> Optional[str]:
     if not api:
         return None
     api = api.rstrip("/")
-    try:
+    attempted_nodes = attempted_nodes if attempted_nodes is not None else set()
+    with _ROTATION_LOCK:
         client = _get_client()
-        r = client.get(f"{api}/proxies/MANUAL", timeout=3)
-        r.raise_for_status()
-        info = r.json()
+        r = _controller_request(client, "get", f"{api}/proxies/MANUAL",
+                                before_request, timeout=3)
+        if r is None:
+            return None
+        try:
+            info = r.json()
+        except ValueError:
+            logger.warning("mihomo controller 返回无效 JSON")
+            return None
+        if not isinstance(info, dict):
+            return None
         now, all_nodes = info.get("now"), info.get("all") or []
+        if not isinstance(all_nodes, list):
+            return None
         real = [n for n in all_nodes
                 if isinstance(n, str) and n
                 and not any(k in n for k in _FAKE_NODE_KEYS)]
         if len(real) < 2 or now not in real:
             return None
+        attempted_nodes.add(now)
         # 跨区域轮换:限流常按出口 IP 段整片生效(实测新加坡整组被盯),
         # "列表下一个"大概率还是同区域坏节点——优先选不同区域的下一候选
         def _region(n):
             return n.split("-", 1)[0]
         idx = real.index(now)
-        ordered = real[idx + 1:] + real[:idx]
+        ordered = [n for n in real[idx + 1:] + real[:idx]
+                   if n not in attempted_nodes]
+        if not ordered:
+            return None
         nxt = next((n for n in ordered if _region(n) != _region(now)), ordered[0])
         if nxt == now:
             return None
         for path, body in ((f"{api}/proxies/MANUAL", {"name": nxt}),
                            (f"{api}/proxies/PROXY", {"name": "MANUAL"})):
-            resp = client.put(path, json=body, timeout=3)
-            resp.raise_for_status()
+            resp = _controller_request(client, "put", path, before_request,
+                                       json=body, timeout=3)
+            if resp is None:
+                return None
+        attempted_nodes.add(nxt)
         logger.info(f"mihomo 节点自动切换: {now} -> {nxt}")
         return nxt
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"mihomo 节点切换失败: {e}")
-        return None
 
 
 def _get_client() -> httpx.Client:
@@ -177,7 +213,8 @@ def _clean_query(raw: str) -> str:
     return q3 or q
 
 
-def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
+def search(app_state, query: str, top_k: int = 5,
+           before_request: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
     """联网搜索:返回 {query, results:[{title,url,content}], cached}。
 
     未配置 searxng_url 抛 credential;上游不可达抛 retryable。
@@ -186,10 +223,16 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
     query = _clean_query(query or "")
     if not query:
         raise PackInvokeError("搜索词不能为空", PackInvokeError.PERMANENT)
+    base = settings_url(app_state).rstrip("/")
+    if not base:
+        raise PackInvokeError(
+            "联网搜索未启用:插件设置里未配置 SearXNG 地址(searxng_url)",
+            PackInvokeError.CREDENTIAL)
+    key = (base, query, _ENGINE, _LANGUAGE)
 
     def _cache_hit():
         with _CACHE_LOCK:
-            hit = _CACHE.get(query)
+            hit = _CACHE.get(key)
             if hit and time.monotonic() - hit["at"] < CACHE_TTL_S:
                 # 缓存固定存前 _CACHE_KEEP 条,读时按本次 top_k 裁剪——
                 # 首次 top_k=3 不再把后续 top_k=5 截成 3(审查 M2)
@@ -200,38 +243,45 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
     got = _cache_hit()
     if got is not None:
         return got
-    # single-flight:同词并发只放领头一个出站,跟随者等完成读缓存。
-    # 领头结果为空(空结果不缓存是既有语义)或抛错时,跟随者各自补跑一次
-    # ——空查询场景退化为无合并,可接受;非空场景(主路径)完全合并
+    # Future 共享本次结果(含空)或同一个异常,不依赖长期缓存是否写入。
     with _INFLIGHT_LOCK:
-        ev = _INFLIGHT.get(query)
-        leader = ev is None
-        if leader:
-            ev = threading.Event()
-            _INFLIGHT[query] = ev
-    if not leader:
-        ev.wait(timeout=_TIMEOUT_S * 4)
         got = _cache_hit()
         if got is not None:
             return got
-        return _search_leader(app_state, query, top_k)  # 补跑(不持锁不泄注册)
+        flight = _INFLIGHT.get(key)
+        leader = flight is None
+        if leader:
+            flight = Future()
+            _INFLIGHT[key] = flight
+    if not leader:
+        try:
+            out = flight.result(timeout=_TIMEOUT_S * 4)
+        except FutureTimeoutError:
+            raise PackInvokeError("等待联网搜索超时,请稍后重试",
+                                  PackInvokeError.RETRYABLE) from None
+        # 跟随者拿的是领头者实时抓取的结果,不是缓存命中(旧写法
+        # bool(out["results"]) 会把有结果的跟随轮全误标"缓存命中")
+        return {**out, "results": out["results"][:top_k],
+                "cached": False}
     try:
-        return _search_leader(app_state, query, top_k)
+        out = _search_leader(app_state, query, _CACHE_KEEP,
+                             before_request=before_request, cache_key=key)
+        flight.set_result(out)
+        return {**out, "results": out["results"][:top_k]}
+    except BaseException as exc:
+        flight.set_exception(exc)
+        raise
     finally:
-        # 只清自己的注册(防误 pop 接班新领头的表项)再唤醒全部跟随者
         with _INFLIGHT_LOCK:
-            if _INFLIGHT.get(query) is ev:
-                _INFLIGHT.pop(query, None)
-        ev.set()
+            if _INFLIGHT.get(key) is flight:
+                _INFLIGHT.pop(key, None)
 
 
 def plan_queries(app_state, question: str,
                  conv_id: Optional[str] = None) -> List[str]:
     """LLM 搜索词规划(Perplexity/ZCode 式改写,问题→多角度搜索词)。
 
-    规则见 prompts/web_query.j2:核心实体逐字保留(引号精确匹配)、口语转
-    检索词组、指代不明给解释变体。temperature=0 + stage 缓存白名单——
-    同问题复访零额外调用(降频原则)。LLM 失败 fail-open 退化为单词直搜。
+    首查询固定为问题本体;LLM 只补角度。失败明确报错,不退化直搜。
     """
     fallback = _clean_query(question or "")
     if not fallback:
@@ -242,24 +292,26 @@ def plan_queries(app_state, question: str,
         parsed = app_state.llm_client.chat_json(
             [{"role": "user", "content": prompt}],
             temperature=0.0, conv_id=conv_id, stage="web_search.query")
-        raw = parsed.get("queries") if isinstance(parsed, dict) else None
-        if not isinstance(raw, list):
-            raw = None  # 字符串等非 list 形态:迭代会逐字符拆词(审查 I1)
-        queries = []
-        for q in (raw or []):
-            q2 = _clean_query(str(q)).strip()
-            if q2 and q2 not in queries:
-                queries.append(q2)
-        if not queries:
-            return [fallback]
-        return queries[:3]
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"搜索词规划失败(退化为原词直搜): {e}")
-        return [fallback]
+    except Exception:
+        logger.warning("搜索词规划 LLM 调用失败")
+        raise PackInvokeError("搜索词规划失败,请稍后重试",
+                              PackInvokeError.RETRYABLE) from None
+    raw = parsed.get("queries") if isinstance(parsed, dict) else None
+    if (not isinstance(raw, list) or not raw or
+            any(not isinstance(q, str) or not q.strip() for q in raw)):
+        raise PackInvokeError("搜索词规划返回格式无效:queries 必须为非空字符串列表",
+                              PackInvokeError.PERMANENT)
+    queries = [fallback]
+    for q in raw:
+        q2 = _clean_query(q)
+        if q2 not in queries:
+            queries.append(q2)
+    return queries[:3]
 
 
 def search_multi(app_state, question: str, top_k: int = 5,
-                 conv_id: Optional[str] = None) -> Dict[str, Any]:
+                 conv_id: Optional[str] = None,
+                 before_request: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
     """规划+多角度搜索+合并(对话链路入口;管理端调研页仍是单词 search)。
 
     返回 {question, queries, results, cached};queries 供链路记录与制品展示,
@@ -272,7 +324,7 @@ def search_multi(app_state, question: str, top_k: int = 5,
     seen_urls = set()
     any_cached = False
     for q in queries:
-        out = search(app_state, q, top_k=top_k)
+        out = search(app_state, q, top_k=top_k, before_request=before_request)
         any_cached = any_cached or bool(out.get("cached"))
         for r in out["results"]:
             if r["url"] not in seen_urls:
@@ -282,14 +334,17 @@ def search_multi(app_state, question: str, top_k: int = 5,
             "results": merged[:top_k * 2], "cached": any_cached}
 
 
-def _search_leader(app_state, query: str, top_k: int) -> Dict[str, Any]:
+def _search_leader(app_state, query: str, top_k: int,
+                   before_request: Optional[Callable[[], None]] = None,
+                   *, cache_key: Optional[tuple] = None) -> Dict[str, Any]:
     """single-flight 领头执行:真实出站+缓存写入(仅 search() 内部使用)。"""
-    base = settings_url(app_state)
+    base = cache_key[0] if cache_key else settings_url(app_state)
     if not base:
         raise PackInvokeError(
             "联网搜索未启用:插件设置里未配置 SearXNG 地址(searxng_url)",
             PackInvokeError.CREDENTIAL)
     base = base.rstrip("/")
+    key = cache_key or (base, query, _ENGINE, _LANGUAGE)
 
     # 限流自愈循环:google 被挂起 → 切 mihomo 节点 → 重试(至多切 3 次)。
     # SearXNG 侧需配短挂起(suspended_times.SearxEngineCaptcha=2s,
@@ -298,14 +353,17 @@ def _search_leader(app_state, query: str, top_k: int) -> Dict[str, Any]:
     # 引擎层再同参全套重跑只是把数分钟延迟翻倍(审查 I2)
     payload: Dict[str, Any] = {}
     rotated = False
+    attempted_nodes = set()
     for attempt in range(4):
+        if before_request is not None:
+            before_request()
         try:
             resp = _get_client().get(
                 f"{base}/search", params={
-                    "q": query, "format": "json", "engines": _ENGINE,
+                    "q": query, "format": "json", "engines": key[2],
                     # 结果本地化:google 按出口 IP 国家给结果(日本节点→日文页
                     # 混入,实测首条日本経済産業省);zh-CN 让引擎按中文区检索
-                    "language": "zh-CN"})
+                    "language": key[3]})
             resp.raise_for_status()
             payload = resp.json()
         except httpx.TimeoutException as e:
@@ -320,14 +378,26 @@ def _search_leader(app_state, query: str, top_k: int) -> Dict[str, Any]:
             raise PackInvokeError(
                 "联网搜索服务不可达,请稍后重试或检查 SearXNG 容器状态",
                 PackInvokeError.RETRYABLE) from e
+        except ValueError:
+            raise PackInvokeError("联网搜索服务返回格式无效,请稍后重试",
+                                  PackInvokeError.RETRYABLE) from None
+        if not isinstance(payload, dict):
+            raise PackInvokeError("联网搜索服务返回格式无效,请稍后重试",
+                                  PackInvokeError.RETRYABLE)
         if not _google_suspended(payload):
+            if any(isinstance(u, (list, tuple)) and u and u[0] == key[2]
+                   for u in (payload.get("unresponsive_engines") or [])):
+                raise PackInvokeError("搜索引擎响应失败,请稍后重试",
+                                      PackInvokeError.RETRYABLE)
             break
-        if attempt < 3 and rotate_mihomo_node(app_state):
+        if attempt < 3 and rotate_mihomo_node(
+                app_state, attempted_nodes=attempted_nodes,
+                before_request=before_request):
             rotated = True
             time.sleep(2.5)  # 等 SearXNG 短挂起(2s)过期
             continue
         raise PackInvokeError(
-            "搜索引擎暂时不可用(所有出口节点均被限流),请稍后重试"
+            "搜索引擎仍遇到限流或验证(已尝试有限候选出口),请稍后重试"
             if rotated else
             "搜索引擎暂时不可用(可能被限流),请稍后重试",
             PackInvokeError.PERMANENT if rotated else PackInvokeError.RETRYABLE)
@@ -353,7 +423,7 @@ def _search_leader(app_state, query: str, top_k: int) -> Dict[str, Any]:
             if len(_CACHE) >= _CACHE_MAX:
                 for k in sorted(_CACHE, key=lambda k: _CACHE[k]["at"])[:len(_CACHE) - _CACHE_MAX + 1]:
                     _CACHE.pop(k, None)
-            _CACHE[query] = {"results": results_all[:_CACHE_KEEP],
+            _CACHE[key] = {"results": results_all[:_CACHE_KEEP],
                              "at": time.monotonic()}
 
     return {"query": query, "results": results, "cached": False}
@@ -364,8 +434,7 @@ def synthesize_answer(app_state, query: str, results: List[dict],
     """LLM 综合回答(DeepSeek/Perplexity 式总结,非链接列表)。
 
     搜索结果注入 web_answer.j2 模板 → LLM 归纳成连贯回答,句尾带
-    [来源:N] 引用(前端渲染成角标徽标,点击跳来源卡)。LLM 不可用时
-    降级为纯结果列表摘要(fail-open:搜索已成功,不因综合失败丢结果)。
+    [来源:N] 引用。LLM 不可用/返回空回答时明确失败,不伪装成已综合。
     """
     if not results:
         return f"联网搜索「{query}」未找到相关结果"
@@ -375,17 +444,15 @@ def synthesize_answer(app_state, query: str, results: List[dict],
         answer = app_state.llm_client.chat(
             [{"role": "user", "content": prompt}],
             temperature=0.2, conv_id=conv_id, stage="web_search.synthesize",
-        ).strip()
-        if answer:
-            return answer
-        logger.warning("web_answer LLM 返回空,降级结果列表")
-    except Exception as e:
-        logger.warning(f"web_answer 综合失败(降级结果列表): {e}")
-    # 降级:带来源的列表摘要(诚实原则:来源 URL 必带)
-    lines = [f"联网搜索「{query}」,共 {len(results)} 条结果:"]
-    for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r['title']} — {r['url']}")
-    return "\n".join(lines)
+        )
+    except Exception:
+        logger.warning("web_answer 综合 LLM 调用失败")
+        raise PackInvokeError("联网搜索回答综合失败,请稍后重试",
+                              PackInvokeError.RETRYABLE) from None
+    if not isinstance(answer, str) or not answer.strip():
+        raise PackInvokeError("联网搜索回答综合返回空或无效回答",
+                              PackInvokeError.PERMANENT)
+    return answer.strip()
 
 
 # ── 调研记录(web_search_logs;管理端调研页持久化) ─────────────
@@ -398,11 +465,13 @@ CREATE TABLE IF NOT EXISTS web_search_logs (
     result_count INTEGER NOT NULL,
     cached INTEGER NOT NULL DEFAULT 0,
     operator TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    answer TEXT NOT NULL DEFAULT ''
 )
 """
 
 _db: Optional[PackRelationalDB] = None
+_DB_LOCK = threading.Lock()
 
 
 def _conn(app_state):
@@ -415,12 +484,15 @@ def _conn(app_state):
     kg_web_search_logs 留孤儿待清。
     """
     global _db
-    if _db is None:
-        _db = PackRelationalDB("web_search")
-    if not getattr(_db, "_ws_schema_done", False):
-        _db.init_schema([_DDL])
-        _db._ws_schema_done = True   # type: ignore[attr-defined]
-    return _db.connect()
+    with _DB_LOCK:
+        if _db is None:
+            _db = PackRelationalDB("web_search")
+        if not getattr(_db, "_ws_schema_done", False):
+            _db.init_schema([_DDL,
+                "ALTER TABLE web_search_logs ADD COLUMN IF NOT EXISTS answer TEXT NOT NULL DEFAULT ''"])
+            _db._ws_schema_done = True   # type: ignore[attr-defined]
+        db = _db
+    return db.connect()
 
 
 def _ensure_table(app_state) -> None:
@@ -429,7 +501,7 @@ def _ensure_table(app_state) -> None:
 
 
 def log_search(app_state, query: str, results: List[dict], cached: bool,
-               operator: str = "") -> Dict[str, Any]:
+               operator: str = "", answer: str = "") -> Dict[str, Any]:
     """一条调研记录落库,返回 {id, query, resultCount, cached, operator}。"""
     _ensure_table(app_state)
     lid = str(uuid.uuid4())
@@ -437,10 +509,10 @@ def log_search(app_state, query: str, results: List[dict], cached: bool,
     with _conn(app_state) as conn:
         conn.execute(
             """INSERT INTO web_search_logs
-               (id, query, results_json, result_count, cached, operator, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (id, query, results_json, result_count, cached, operator, created_at, answer)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (lid, query, json.dumps(results, ensure_ascii=False),
-             len(results), 1 if cached else 0, operator, now))
+             len(results), 1 if cached else 0, operator, now, answer))
     return {"id": lid, "query": query, "resultCount": len(results),
             "cached": cached, "operator": operator}
 
@@ -451,7 +523,7 @@ def list_logs(app_state, limit: int = 50) -> List[Dict[str, Any]]:
     with _conn(app_state) as conn:
         rows = conn.execute(
             """SELECT id, query, results_json, result_count, cached,
-                      operator, created_at
+                      operator, created_at, answer
                FROM web_search_logs ORDER BY created_at DESC
                LIMIT ?""", (int(limit),)).fetchall()
     out = []
@@ -463,7 +535,8 @@ def list_logs(app_state, limit: int = 50) -> List[Dict[str, Any]]:
         out.append({
             "id": r["id"], "query": r["query"], "results": results,
             "resultCount": r["result_count"], "cached": bool(r["cached"]),
-            "operator": r["operator"], "createdAt": r["created_at"]})
+            "operator": r["operator"], "createdAt": r["created_at"],
+            "answer": r["answer"] or ""})
     return out
 
 

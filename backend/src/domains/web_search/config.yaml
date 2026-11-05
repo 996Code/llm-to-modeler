@@ -1,6 +1,10 @@
 # 联网搜索插件 manifest —— 独立公用插件(知识库/客服直连底层)
 # 依赖:仅设置项 searxng_url(SearXNG 容器地址);无 pack 级依赖。
 
+capabilities:
+  web_search:
+    tool: web_search
+
 domain:
   description: >
     联网搜索("上网查一下""网上搜""联网搜""在网上查"等明确点名

@@ -120,13 +120,31 @@ async def list_packs(request: Request):
                     display_overrides[pack_name] = d
         except Exception as e:  # noqa: BLE001  展示覆盖失败回退 manifest,不阻断
             logger.warning(f"display 覆盖读取失败(回退 manifest): {e}")
+    # Capabilities are reusable contracts, not extra routing candidates.
+    available_capabilities = set()
+    for provider, cfg in pack_configs.items():
+        if env_names is not None and provider not in env_names:
+            continue
+        declarations = cfg.get("capabilities") or {}
+        if not isinstance(declarations, dict):
+            continue
+        for name, declaration in declarations.items():
+            if (isinstance(declaration, dict)
+                    and registry.get(declaration.get("tool", "")) is not None):
+                available_capabilities.add(name)
     for pack_name, cfg in pack_configs.items():
         if allowed is not None and pack_name not in allowed:
             continue
         # manifest.tools 从空：前端 diff/历史只用 artifact/services，
         # 不需要工具列表——避免维护「工具→pack」反向表
-        result.append(_manifest_for(pack_name, cfg, [],
-                                    display_override=display_overrides.get(pack_name)))
+        manifest = _manifest_for(pack_name, cfg, [],
+                                 display_override=display_overrides.get(pack_name))
+        declared = cfg.get("capabilities") or {}
+        provided = set(declared) if isinstance(declared, dict) else set()
+        consumed = cfg.get("uses_capabilities") or []
+        consumed = set(consumed) if isinstance(consumed, list) else set()
+        manifest["capabilities"] = sorted((provided | consumed) & available_capabilities)
+        result.append(manifest)
     return result
 
 

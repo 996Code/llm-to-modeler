@@ -1,4 +1,5 @@
 # Generic customer assistant; installed scenarios and MCP declarations define capabilities.
+uses_capabilities: [web_search]
 dependencies:
   knowledge_graph:
     pack: knowledge_graph

@@ -1,7 +1,8 @@
 """客服直连 web_search 底层测试——other 分支的联网意图分流(方案 A)。
 
-覆盖:开关开+话术命中→联网总结卡;开关关/话术不中/底座未配置→回落 KB 兜底;
-联网失败 fail-open 回落。不依赖真实 SearXNG/LLM(websearch 全替身)。
+覆盖:开关开+话术命中→联网总结卡;开关关/话术不中/pack 未装配→回落 KB 兜底;
+联网失败如实报错(审查裁决:不静默回落 KB)。不依赖真实 SearXNG/LLM
+(websearch 全替身)。
 """
 from types import SimpleNamespace
 
@@ -10,10 +11,13 @@ import pytest
 from domains.metrology_assistant.tools import assistant as mta
 from domains.metrology_assistant.legacy_demo import demo_scenarios
 from domains.metrology_assistant import capability_import as ci
+from sdk.tool import PackInvokeError
 
 
 class _Ctx:
-    """ctx 替身:emit/trace 全吞。"""
+    """ctx 替身:emit/trace 全吞(conv_id 供 service.answer 走缓存键)。"""
+
+    conv_id = "mt-test"
 
     def emit(self, *args, **kwargs):
         pass
@@ -35,10 +39,13 @@ def _state(ws_enabled):
 
 
 class _Registry:
-    """装配替身:web_search 工具在册(停用语义测试单独换空 registry)。"""
+    """装配替身:web_search 工具在册且身份稳定(停用语义测试单独换空 registry)。"""
+
+    def __init__(self):
+        self._tool = object()
 
     def get(self, name):
-        return object() if name == 'web_search' else None
+        return self._tool if name == 'web_search' else None
 
 
 class _App:
@@ -51,17 +58,20 @@ def _app():
     return a
 
 
-def _patch_websearch(monkeypatch, configured=True, boom=False):
-    """websearch 底层替身(记调用;boom=搜索抛错)。mock search_multi——
+def _patch_websearch(monkeypatch, configured=True, boom=False, credential=False):
+    """websearch 底层替身(记调用;boom=搜索抛可重试错;credential=底座未配置)。mock search_multi——
     客服直连与工具入口已升级为规划+多角度搜索。"""
     from domains.web_search import websearch
     calls = []
 
-    def fake_search(app_state, question, top_k=5, conv_id=None):
+    def fake_search(app_state, question, top_k=5, conv_id=None, before_request=None):
         calls.append(("search", question))
         if boom:
-            from sdk.tool import PackInvokeError
             raise PackInvokeError("超时", PackInvokeError.RETRYABLE)
+        if credential:
+            raise PackInvokeError(
+                "联网搜索未启用:插件设置里未配置 SearXNG 地址(searxng_url)",
+                PackInvokeError.CREDENTIAL)
         return {"question": question, "queries": [question], "cached": False,
                 "results": [
                     {"title": "AI 资讯", "url": "https://a.test/x", "content": "摘要"}]}
@@ -107,28 +117,30 @@ def test_plain_phrasing_without_web_words_falls_back(env):
     assert calls == []
 
 
-def test_unconfigured_searxng_falls_back_silently(env):
-    calls = _patch_websearch(env, configured=False)
+def test_unconfigured_searxng_is_an_error_not_silent_kb(env):
+    """底座未配置:用户已明确要联网,如实报配置错误(不静默装作 KB 兜底)。"""
+    calls = _patch_websearch(env, credential=True)
     tool = mta.MetrologyAssistantTool(app_state=_app())
-    out = tool._try_websearch("上网查一下最新消息", _Ctx(),
-                              _state(True), lambda *a: None)
-    assert out is None
-    assert calls == []
+    with pytest.raises(PackInvokeError, match="SearXNG"):
+        tool._try_websearch("上网查一下最新消息", _Ctx(),
+                            _state(True), lambda *a: None)
+    assert calls and calls[0][0] == "search"  # 走到了搜索层才被拦,不是入口静默吞掉
 
 
-def test_search_failure_degrades_to_kb_fallback(env):
+def test_search_failure_is_an_error_not_silent_kb(env):
+    """联网失败如实报错上抛(审查裁决:fail-open 静默回落 KB 已废)。"""
     calls = _patch_websearch(env, boom=True)
     tool = mta.MetrologyAssistantTool(app_state=_app())
-    out = tool._try_websearch("上网查一下最新消息", _Ctx(),
-                              _state(True), lambda *a: None)
-    assert out is None  # fail-open:回落 KB 兜底链
+    with pytest.raises(PackInvokeError):
+        tool._try_websearch("上网查一下最新消息", _Ctx(),
+                            _state(True), lambda *a: None)
     assert calls and calls[0][0] == "search"
 
 
 def test_web_hint_words_coverage():
-    from domains.metrology_assistant.tools.assistant import MetrologyAssistantTool as T
+    from domains.web_search import service
     for hint in ("上网", "联网", "网上查", "网上搜", "搜索引擎", "互联网上"):
-        assert hint in T._WEB_HINTS
+        assert hint in service._WEB_HINTS
 
 
 def test_pack_disabled_falls_back(env):

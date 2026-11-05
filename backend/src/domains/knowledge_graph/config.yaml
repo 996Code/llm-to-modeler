@@ -1,6 +1,8 @@
 # 知识图谱插件 manifest
 # 依赖声明(环境变量/设置页补配均可) + 管理页/设置页注册。
 
+uses_capabilities: [web_search]
+
 domain:
   description: >
     知识库/知识图谱的检索与问答("查一下知识库里""XX 和 YY 是什么关系"
@@ -30,6 +32,9 @@ admin:
 # 向量=pgvector;走平台 DATABASE_URL),探针用平台内置
 # kind: pg_vector(实现下沉 SDK,分层治理 P0-1——换后端插件零改)。
 dependencies:
+  web_search:
+    pack: web_search
+    required: false
   pg_vector:
     required: true
     probe:

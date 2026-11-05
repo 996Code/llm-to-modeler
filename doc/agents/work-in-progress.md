@@ -1,4 +1,4 @@
-# 在途工作快照（2026-11-04）
+# 在途工作快照（2026-11-05）
 
 > 会过时。接手先核对实际状态（git log / 服务器任务队列），再决定本页还剩多少有效。
 
@@ -13,10 +13,29 @@
   插件禁用自动隐藏。对话链路/管理端/客服三入口全通。
 - **本地测试栈常驻**：searxng-test(8888)+searxng-mihomo(19090 发布 controller)双容器。
 - **3.110 部署清单**（网络恢复后）：①PACKS_ENABLED 加 web_search ②/data/base/searxng
-  两个配置模板换新(三层代理组+短挂起+default_lang，见 doc/agents/deploy-searxng-3110.*)
+  两个配置模板换新(三层代理组+短挂起+default_lang，见 doc/agents/deploy-searxng-3110.*）
   ③KG 设置页删旧 searxng_url、联网搜索设置页配 searxng_url=http://searxng:8080 +
   mihomo_api_url=http://searxng-mihomo:9090 ④deploy.sh --skip-pull。
 - 质量门：全量 1893+447 绿、e2e 回归 9/9、CI #88 绿、代码审查两轮(1C/3I/8M 全整改)。
+
+## 审查整改 + 客服窗口联网按钮（2026-11-05 晚，工作区待提交）
+
+- **终态审查 12 项缺陷(1C/3I/8M)全部修复**：C1=web_answer.j2 补 {{ query }}(答非所问
+  根因)；I=service.py 共用编排层(工具/客服/KG 三入口收拢)+失败如实报错不静默回落
+  KB+KG 委托(联网话术不落 KB 检索)；M=admin 端点停用守卫/synth 502+落库失败 logError/
+  历史回看不重搜/citations.ts 文本节点级引用转换/能力声明(capabilities)/required_only
+  语义/对话 store 竞态/日志 answer 列。独立复审 12/12 ✓ + 2 Minor(跟随者 cached 误标、
+  trace 明细裁剪)已修。
+- **客服窗口联网按钮缺失根因**：ChatPanel 显隐判据原是"窗口 packs 含 web_search"
+  (嵌入窗口 ?packs= 过滤后永远拿不到)→ 改为 manifest capabilities 广告(kg/客服
+  uses_capabilities 声明,底座禁用自动消失)。浏览器实测两测试窗口按钮均出现。
+- **验收**：后端全量 2447 绿×2 轮；前端 vue-tsc 0 错+vitest 256 绿；本地真链路三入口
+  (管理端/首页/客服直连/KG 委托)+开关关指引+trace 四打点(web_search.request/query/
+  synthesize/search)+GUI 闭环(开关→联网话术→总结角标+来源卡)全过。
+- **3.110 预检已完成**（网络恢复）：清单①②实测免做(.env 未配 PACKS_ENABLED=全量候选;
+  searxng 配置模板 11-04 已是新版)；网络互通 ✓(llm-modeler 挂 searxng_default);
+  服务器 checkout eed695e+compose 有 34 行部署侧覆盖(searxng 网络+equipment-mcp),
+  reset 前先备份还原。部署时只需 ③设置页配置 + ④deploy.sh --skip-pull。
 
 
 ## 全站视觉精装 + LLM 降频（2026-11-03/04，均已推 origin）

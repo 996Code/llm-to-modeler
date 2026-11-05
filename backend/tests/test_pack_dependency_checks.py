@@ -81,3 +81,12 @@ def test_metrology_manifest_declares_pack_dependencies():
             .get("metrology_assistant") or {}).get("dependencies") or {}
     declared = {d.get("pack") for d in deps.values() if isinstance(d, dict)}
     assert {"knowledge_graph", "chatbi"} <= declared
+
+
+def test_required_dependents_default_matches_loading_semantics():
+    manifests = {
+        "implicit": {"dependencies": {"dep": {"pack": "target"}}},
+        "required": {"dependencies": {"dep": {"pack": "target", "required": True}}},
+        "optional": {"dependencies": {"dep": {"pack": "target", "required": False}}},
+    }
+    assert pack_dependents("target", manifests, required_only=True) == ["implicit", "required"]

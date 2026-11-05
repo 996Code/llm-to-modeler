@@ -40,7 +40,7 @@ class _FakeStore:
             if sql_u.strip().startswith("SELECT"):
                 rows = [dict(zip(
                     ("id", "query", "results_json", "result_count",
-                     "cached", "operator", "created_at"), p))
+                     "cached", "operator", "created_at", "answer"), p))
                     for p in self._outer.inserted]
                 return SimpleNamespace(fetchall=lambda: rows,
                                        rowcount=len(rows))
@@ -170,8 +170,15 @@ def test_tool_execute_returns_data_artifact_with_sources(env, monkeypatch):
     monkeypatch.setattr(websearch, "synthesize_answer",
                         lambda s, q, r, conv_id=None:
                         f"**总结**:共 {len(r)} 条结果,首条为 {r[0]['title']} [来源:1]")
-    tool = WebSearchTool(env.state)
-    result = tool.execute({"query": "JJG 544 压力控制器检定规程"}, env.ctx)
+    # service.answer 走 registry 守卫:web_search 工具在册才放行
+    # (registry.get 每次须返回同一对象——守卫按对象身份比对,热禁用即拦截)
+    provider = object()
+    tool = WebSearchTool(SimpleNamespace(
+        registry=SimpleNamespace(get=lambda name: provider if name == "web_search" else None),
+        settings_store=env.state.settings_store, conversation_store=env.state.conversation_store,
+        llm_client=env.state.llm_client if hasattr(env.state, "llm_client") else None))
+    result = tool.execute({"query": "JJG 544 压力控制器检定规程",
+                           "pack_params": {"web_search": {"enabled": True}}}, env.ctx)
     assert result.artifact_type == "data"
     assert result.artifact["type"] == "web_search_result"
     assert result.artifact["query"] == "JJG 544 压力控制器检定规程"
@@ -185,16 +192,66 @@ def test_tool_execute_returns_data_artifact_with_sources(env, monkeypatch):
     assert result.formatted["resultCount"] == 5
 
 
-def test_tool_answer_llm_failure_degrades_to_source_list(env, monkeypatch):
-    """LLM 综合失败 fail-open:降级带来源 URL 的列表(不丢搜索结果)。"""
-    _mock_get(env)
-    def boom(s, q, r, conv_id=None):
-        raise RuntimeError("llm down")
-    # synthesize_answer 内部 try/except 已兜底——这里直接测它的降级路径
-    monkeypatch.setattr(websearch, "_prompts", lambda: (_ for _ in ()).throw(RuntimeError("no")))
-    answer = websearch.synthesize_answer(env.state, "q", _searxng_payload()["results"][:3])
-    assert "https://" in answer
-    assert "1." in answer
+def test_answer_llm_failure_is_sanitized(env):
+    def boom(*a, **kw):
+        raise RuntimeError("http://private.test token=secret")
+    env.state.llm_client = SimpleNamespace(chat=boom)
+    with pytest.raises(PackInvokeError) as exc:
+        websearch.synthesize_answer(env.state, "q", _searxng_payload()["results"][:3])
+    assert exc.value.error_type == PackInvokeError.RETRYABLE
+    assert "private.test" not in exc.value.message
+    assert "secret" not in exc.value.message
+
+
+@pytest.mark.parametrize("answer", ["", "  ", None, {"answer": "x"}])
+def test_answer_empty_or_invalid_fails(env, answer):
+    env.state.llm_client = SimpleNamespace(chat=lambda *a, **kw: answer)
+    with pytest.raises(PackInvokeError) as exc:
+        websearch.synthesize_answer(env.state, "q", _searxng_payload()["results"][:1])
+    assert exc.value.error_type == PackInvokeError.PERMANENT
+
+
+def test_synthesis_real_prompt_loader_receives_original_question(env, monkeypatch):
+    from pathlib import Path
+    from sdk.prompt_loader import PromptLoader
+    monkeypatch.setattr(websearch, "_prompt_loader", PromptLoader(
+        packs_root=Path(websearch.__file__).resolve().parent.parent))
+    messages = []
+    def chat(msgs, **kw):
+        messages.append(msgs)
+        return "综合回答 [来源:1]"
+    env.state.llm_client = SimpleNamespace(chat=chat)
+    questions = ["陈蔓有多少同名者", "陈曼是谁"]
+    for question in questions:
+        websearch.synthesize_answer(env.state, question, _searxng_payload()["results"][:1])
+    assert messages[0] != messages[1]
+    for question, msgs in zip(questions, messages):
+        assert question in msgs[0]["content"]
+
+
+def test_schema_initialization_is_serialized(env):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    entered, release, follower = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+    def init_schema(ddls):
+        calls.append(ddls)
+        entered.set()
+        assert release.wait(3)
+    env.db.init_schema = init_schema
+    def follow():
+        follower.set()
+        return websearch._conn(env.state)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(websearch._conn, env.state)
+        assert entered.wait(2)
+        second = pool.submit(follow)
+        assert follower.wait(2)
+        threading.Event().wait(0.05)
+        release.set()
+        first.result(2)
+        second.result(2)
+    assert len(calls) == 1
 
 
 def test_tool_preflight_blocks_when_toggle_off(env):
@@ -330,4 +387,6 @@ def test_single_flight_same_query_concurrent(env):
     ok = [r for r in results if not isinstance(r, Exception)]
     assert len(ok) == 4
     assert len(calls) == 1, f"击穿:出站 {len(calls)} 次"
-    assert sum(1 for r in ok if r.get("cached")) == 3  # 跟随者全走缓存
+    # 跟随者拿的是领头者实时抓取的共享结果,不是缓存命中(复审 M1:
+    # 旧断言"跟随者全走缓存"失真——真实缓存命中要二轮请求才成立)
+    assert all(r.get("cached") is False for r in ok)

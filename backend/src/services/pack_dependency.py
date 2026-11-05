@@ -361,7 +361,7 @@ def pack_dependents(target: str, manifests: Dict[str, Dict[str, Any]],
         for d in deps.values():
             if not (isinstance(d, dict) and d.get("pack") == target):
                 continue
-            if required_only and not d.get("required", False):
+            if required_only and d.get("required") is False:
                 continue
             result.append(name)
             break

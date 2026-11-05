@@ -101,6 +101,9 @@ class KbSearchTool(Tool):
 
     def preflight(self, state: dict, ctx: ToolContext) -> Optional[ToolResult]:
         """执行前提:插件存储可达(依赖检测在加载期已保证;这里防运行期掉线)。"""
+        from domains.web_search import service as web_service
+        if web_service.requested(state) and web_service.available(self._app_state):
+            return None
         if not self._app_state:
             return ToolResult(error_for_llm="知识库插件未正确装配(app_state 未注入)")
         from domains.knowledge_graph import runtime
@@ -114,6 +117,9 @@ class KbSearchTool(Tool):
         from domains.knowledge_graph import retrieval, runtime
 
         query = (state.get("user_input") or state.get("query") or "").strip()
+        from domains.web_search import service as web_service
+        if web_service.requested(state) and web_service.available(self._app_state):
+            return web_service.answer(self._app_state, state, ctx, owner="web_search")
         store = runtime.get_kg_store(self._app_state)
         mem = getattr(ctx, "session_state", None)
 

@@ -32,7 +32,7 @@ class _FakeStore:
             if sql_u.strip().startswith("SELECT"):
                 rows = [dict(zip(
                     ("id", "query", "results_json", "result_count",
-                     "cached", "operator", "created_at"), p))
+                     "cached", "operator", "created_at", "answer"), p))
                     for p in self._outer.inserted]
                 return _NS(fetchall=lambda: rows)
             if sql_u.strip().startswith("DELETE"):
@@ -67,15 +67,17 @@ def env(monkeypatch):
     # admin 门控:注册"永远放行"的鉴权实现(门控行为单独用例覆盖)
     async def allow(request):
         return None
-    pack_api.register_admin_auth(allow)
+    monkeypatch.setattr(pack_api, "_admin_auth_fn", allow)
 
     store = _FakeStore()  # log DAO 走 fake conn(不真连 PG)
     import domains.web_search.websearch as _ws
-    _ws._db = _FakeDB(store)
+    monkeypatch.setattr(_ws, "_db", _FakeDB(store))
     websearch.reset_cache()
 
-    # search 替身:返回固定 2 条结果
-    def fake_search(app_state, query, top_k=5):
+    # search 替身:返回固定 2 条结果(before_request=admin 端点停用守卫入参)
+    def fake_search(app_state, query, top_k=5, before_request=None):
+        if before_request is not None:
+            before_request()  # 守卫契约:出站前调用(替身 registry 恒在册→放行)
         return {"query": query, "cached": False, "results": [
             {"title": "检定规程 A", "url": "https://a.test/x",
              "content": "摘要 A"},
@@ -89,8 +91,12 @@ def env(monkeypatch):
 
     app = FastAPI()
     app.include_router(ws_api.router, prefix="/api/packs/web_search")
-    app.state = SimpleNamespace(settings_store=None, conversation_store=None)
-    with TestClient(app) as client:
+    _provider = object()  # 守卫按对象身份比对:须每次返回同一对象
+    app.state = SimpleNamespace(
+        settings_store=None, conversation_store=None,
+        registry=SimpleNamespace(
+            get=lambda name: _provider if name == "web_search" else None))
+    with TestClient(app, raise_server_exceptions=False) as client:
         yield SimpleNamespace(client=client, executed=store.executed,
                               monkeypatch=monkeypatch)
 
@@ -101,7 +107,7 @@ def test_web_search_admin_gate_blocks_without_auth(env):
 
     async def deny(request):
         raise HTTPException(401, "未授权")
-    pack_api.register_admin_auth(deny)
+    env.monkeypatch.setattr(pack_api, "_admin_auth_fn", deny)
     resp = env.client.post("/api/packs/web_search/web-search",
                            json={"query": "q"})
     assert resp.status_code in (401, 403)
@@ -131,7 +137,7 @@ def test_web_search_structured_error_passthrough(env):
     """PackInvokeError(已脱敏的结构化文案)如实透传——限流不误导成配置错。"""
     from sdk.tool import PackInvokeError
 
-    def boom(app_state, query, top_k=5):
+    def boom(app_state, query, top_k=5, before_request=None):
         raise PackInvokeError("搜索引擎暂时不可用(可能被限流),请稍后重试",
                               PackInvokeError.RETRYABLE)
     env.monkeypatch.setattr(websearch, "search", boom)
@@ -145,7 +151,7 @@ def test_web_search_structured_error_passthrough(env):
 
 def test_web_search_generic_error_no_internal_detail(env):
     """非结构化异常:兜底文案,不回显内部串(旧契约保留在通用路径)。"""
-    def boom(app_state, query, top_k=5):
+    def boom(app_state, query, top_k=5, before_request=None):
         raise RuntimeError("connection to http://searxng.internal:8080 refused")
     env.monkeypatch.setattr(websearch, "search", boom)
     resp = env.client.post("/api/packs/web_search/web-search",
@@ -167,3 +173,54 @@ def test_web_search_logs_list_and_clear(env):
     # 清空后列表为空(fake conn 的 SELECT 返回 None → 空列表)
     resp = env.client.get("/api/packs/web_search/web-search/logs")
     assert resp.json() == []
+
+
+@pytest.mark.parametrize("structured", [True, False])
+def test_web_search_synthesis_failure_is_safe_and_not_logged(env, structured):
+    from sdk.tool import PackInvokeError
+
+    def boom(*args, **kwargs):
+        if structured:
+            raise PackInvokeError("回答生成失败,请稍后重试", PackInvokeError.RETRYABLE)
+        raise RuntimeError("LLM http://internal.test:1234 secret-key")
+
+    env.monkeypatch.setattr(websearch, "synthesize_answer", boom)
+    resp = env.client.post("/api/packs/web_search/web-search", json={"query": "q"})
+    assert resp.status_code == 502
+    assert "回答" in resp.json()["detail"]
+    assert "internal.test" not in resp.json()["detail"]
+    assert "secret-key" not in resp.json()["detail"]
+    assert env.client.get("/api/packs/web_search/web-search/logs").json() == []
+
+
+def test_web_search_log_failure_keeps_answer_and_reports_unsaved(env):
+    def boom(*args, **kwargs):
+        raise RuntimeError("postgres://secret@internal.test")
+
+    env.monkeypatch.setattr(websearch, "log_search", boom)
+    resp = env.client.post("/api/packs/web_search/web-search", json={"query": "q"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["answer"] and body["results"]
+    assert "logId" not in body
+    assert "未保存" in body["logError"]
+    assert "internal.test" not in body["logError"]
+
+
+def test_web_search_persists_answer_for_history(env):
+    from sdk.relational_store import PackRelationalDB
+
+    env.monkeypatch.setattr(websearch, "_db", PackRelationalDB("web_search"))
+    websearch.clear_logs(None)
+    try:
+        resp = env.client.post("/api/packs/web_search/web-search", json={"query": "saved"})
+        assert resp.status_code == 200
+        body = resp.json()
+        rows = env.client.get("/api/packs/web_search/web-search/logs").json()
+        assert len(rows) == 1
+        assert rows[0]["id"] == body["logId"]
+        assert rows[0]["answer"] == body["answer"]
+        assert rows[0]["results"] == body["results"]
+        assert "logError" not in body
+    finally:
+        websearch.clear_logs(None)

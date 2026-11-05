@@ -918,7 +918,10 @@ export interface KgWebSearchResult {
   cached: boolean
   /** LLM 综合回答(总结式;失败时后端降级为带来源的列表文本) */
   answer: string
-  logId: string
+  /** 落库成功时的调研记录 id(失败时缺席,改带 logError) */
+  logId?: string
+  /** 落库失败提示(结果仍可查看;成功时缺席) */
+  logError?: string
 }
 export interface KgWebSearchLog {
   id: string
@@ -928,6 +931,8 @@ export interface KgWebSearchLog {
   cached: boolean
   operator: string
   createdAt: string
+  /** 落库时保存的总结回答(旧记录可能为空串,回看时只展示来源卡) */
+  answer: string
 }
 // 联网搜索已独立成 pack:端点前缀 /api/packs/web_search(鉴权头与 kgApi 同源,
 // 用同一 axios 实例仅改路径前缀)

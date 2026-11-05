@@ -13,6 +13,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sdk.pack_api import admin_required
 from sdk.tool import PackInvokeError
 
+from domains.web_search import service as _service
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -42,9 +44,11 @@ async def web_search(request: Request, payload: Dict[str, Any]):
     _tok = request.headers.get("X-Admin-Token", "")
     operator = (hashlib.sha256(_tok.encode()).hexdigest()[:8] if _tok else "")
     try:
-        # httpx 同步调用丢线程池(事件循环不冻结,与 retrieve-test 同款)
+        # httpx 同步调用丢线程池(事件循环不冻结,与 retrieve-test 同款);
+        # 出站前过停用守卫——pack 热禁用/重载时在途调研即拦(与对话链路同款)
         out = await asyncio.to_thread(
-            websearch.search, request.app.state, query, top_k)
+            websearch.search, request.app.state, query, top_k,
+            before_request=_service.request_guard(request.app.state))
     except PackInvokeError as e:
         # 结构化错误如实转达(引擎被限流/底座未配置各有其文案)——
         # 笼统的"检查 SearXNG 地址"会把限流误导成配置问题(实测踩坑)
@@ -54,20 +58,27 @@ async def web_search(request: Request, payload: Dict[str, Any]):
         # 异常详情只进服务端日志;管理端点不回显内部地址等拓扑
         logger.exception("web-search failed")
         raise HTTPException(502, "联网搜索失败,请稍后重试或检查插件设置里的 SearXNG 地址")
-    # LLM 综合回答(总结式,DeepSeek/Perplexity 式;失败降级列表摘要)
-    answer = await asyncio.to_thread(
-        websearch.synthesize_answer, request.app.state, query,
-        out["results"])
+    # 回答生成失败不伪装为成功调研,也不写入历史。
+    try:
+        answer = await asyncio.to_thread(
+            websearch.synthesize_answer, request.app.state, query,
+            out["results"])
+    except PackInvokeError as e:
+        logger.warning("web-search synthesis failed: %s", e.message)
+        raise HTTPException(502, "联网搜索回答生成失败,请稍后重试")
+    except Exception:
+        logger.exception("web-search synthesis failed")
+        raise HTTPException(502, "联网搜索回答生成失败,请稍后重试")
     # 调研记录落库失败不拖垮已成功的搜索+回答(审查 I3):降级返回,
     # logId 缺席 + 服务端日志留痕
     try:
         log = await asyncio.to_thread(
             websearch.log_search, request.app.state, query, out["results"],
-            bool(out.get("cached")), operator=operator)
+            bool(out.get("cached")), operator=operator, answer=answer)
         return out | {"answer": answer, "logId": log["id"]}
     except Exception:
         logger.exception("web-search 调研记录落库失败(结果正常返回)")
-        return out | {"answer": answer}
+        return out | {"answer": answer, "logError": "调研记录未保存,当前结果仍可查看,请稍后重试"}
 
 
 @router.get("/web-search/logs", dependencies=[Depends(admin_required)])

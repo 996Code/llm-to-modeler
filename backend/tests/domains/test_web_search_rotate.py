@@ -24,9 +24,10 @@ class _Client:
     """httpx 替身:按 URL 前缀分发(controller / searxng),记录调用。"""
 
     def __init__(self, manual_info, searxng_responses):
-        self.manual_info = manual_info
+        self.manual_info = dict(manual_info)
         self.searxng_responses = list(searxng_responses)
         self.calls = []  # (method, url)
+        self.puts = []
 
     def get(self, url, **kw):
         self.calls.append(("GET", url))
@@ -38,6 +39,9 @@ class _Client:
 
     def put(self, url, **kw):
         self.calls.append(("PUT", url))
+        self.puts.append((url, kw["json"]))
+        if url.endswith("/MANUAL"):
+            self.manual_info["now"] = kw["json"]["name"]
         return _Resp({}, status=204)
 
 
@@ -61,6 +65,7 @@ def _setup(monkeypatch, manual=_MANUAL, responses=None, api="http://mihomo.test:
     monkeypatch.setattr(websearch, "_get_client", lambda: client)
     monkeypatch.setattr(websearch, "_mihomo_api", lambda s: api)
     monkeypatch.setattr(websearch, "settings_url", lambda s: "http://searxng.test")
+    monkeypatch.setattr(websearch.time, "sleep", lambda seconds: None)
     websearch.reset_cache()
     return client
 
@@ -72,14 +77,7 @@ def test_rotate_prefers_cross_region(monkeypatch):
     puts = [u for m, u in client.calls if m == "PUT"]
     assert any("/proxies/MANUAL" in u for u in puts)
     assert any("/proxies/PROXY" in u for u in puts)
-    # 跨区域断言:切到的节点不是 新加坡-* (从 PUT body 看——替身没记 body,
-    # 用逻辑复算:ordered 从 SG-1 之后开始,首个非新加坡=中国香港-HK-1
-    real = [n for n in _MANUAL["all"] if "剩余" not in n]
-    idx = real.index("新加坡-SG-1-流量倍率:1")
-    ordered = real[idx + 1:] + real[:idx]
-    expect = next((n for n in ordered
-                   if n.split("-", 1)[0] != "新加坡"), ordered[0])
-    assert expect == "中国香港-HK-1-流量倍率:0.7"
+    assert client.puts[0][1] == {"name": "中国香港-HK-1-流量倍率:0.7"}
 
 
 def test_search_auto_rotates_and_recovers(monkeypatch):
@@ -96,7 +94,9 @@ def test_search_raises_when_all_rotations_fail(monkeypatch):
     with pytest.raises(PackInvokeError) as ei:
         websearch.search(None, "JJG 52")
     assert ei.value.error_type == PackInvokeError.PERMANENT
-    assert "均被限流" in ei.value.message
+    assert "限流" in ei.value.message
+    assert "所有" not in ei.value.message and "全部" not in ei.value.message
+    assert "均被" not in ei.value.message
 
 
 def test_search_no_rotation_configured_still_retryable(monkeypatch):
@@ -124,3 +124,78 @@ def test_rotate_skips_fake_nodes(monkeypatch):
     monkeypatch.setattr(websearch, "_get_client",
                         lambda: _Client(manual, []))
     assert websearch.rotate_mihomo_node(None) is None
+
+
+def test_rotation_never_revisits_attempted_nodes(monkeypatch):
+    client = _setup(monkeypatch, manual={"now": "A-1", "all": ["A-1", "B-1", "A-2"]},
+                    responses=[_SUSPENDED] * 5)
+    with pytest.raises(PackInvokeError):
+        websearch.search(None, "不循环")
+    nodes = [body["name"] for url, body in client.puts if url.endswith("/MANUAL")]
+    assert nodes == ["B-1", "A-2"]
+    assert len([url for method, url in client.calls if url.endswith("/search")]) == 3
+
+
+@pytest.mark.parametrize("reason", ["timeout", "TimeoutException", "parsing error", "SearxEngineResponseException"])
+def test_non_rate_limit_engine_failure_does_not_rotate(monkeypatch, reason):
+    client = _setup(monkeypatch, responses=[
+        {"results": [], "unresponsive_engines": [["google", reason]]}])
+    with pytest.raises(PackInvokeError) as exc:
+        websearch.search(None, "故障分类")
+    assert exc.value.error_type == PackInvokeError.RETRYABLE
+    assert "限流" not in exc.value.message
+    assert client.puts == []
+
+
+@pytest.mark.parametrize("reason", ["CAPTCHA", "HTTP 429", "access denied", "SearxEngineTooManyRequests"])
+def test_rate_limit_reasons_rotate(monkeypatch, reason):
+    client = _setup(monkeypatch, responses=[
+        {"results": [], "unresponsive_engines": [["google", reason]]}, _OK])
+    assert websearch.search(None, "限流分类")["results"]
+    assert len(client.puts) == 2
+
+
+def test_rotation_checks_authorization_before_every_network_call(monkeypatch):
+    client = _setup(monkeypatch)
+    checks = []
+    def authorize():
+        checks.append(len(client.calls))
+    websearch.search(None, "授权逐跳检查", before_request=authorize)
+    assert checks == list(range(len(client.calls)))
+
+
+def test_rotation_does_not_swallow_authorization_rejection(monkeypatch):
+    client = _setup(monkeypatch)
+    def authorize():
+        raise PackInvokeError("disabled", PackInvokeError.PERMANENT)
+    with pytest.raises(PackInvokeError, match="disabled"):
+        websearch.rotate_mihomo_node(None, before_request=authorize)
+    assert client.calls == []
+
+
+def test_controller_switches_are_serialized(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    client = _setup(monkeypatch)
+    entered, release, started = threading.Event(), threading.Event(), threading.Event()
+    original_get = client.get
+    def blocking_get(*args, **kwargs):
+        response = original_get(*args, **kwargs)
+        entered.set()
+        assert release.wait(3)
+        return response
+    client.get = blocking_get
+    def second():
+        started.set()
+        return websearch.rotate_mihomo_node(None)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        one = pool.submit(websearch.rotate_mihomo_node, None)
+        assert entered.wait(2)
+        two = pool.submit(second)
+        assert started.wait(2)
+        threading.Event().wait(0.05)
+        count = len(client.calls)
+        release.set()
+        assert one.result(2)
+        assert two.result(2)
+    assert count == 1
