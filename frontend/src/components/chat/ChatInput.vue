@@ -46,7 +46,8 @@
         <span v-if="streaming" class="input-hint">生成中...</span>
         <!-- 联网搜索开关(嵌入/独立两种模式共用;开=允许路由到 web_search)。
              KG 插件禁用/未装配时隐藏(web_search 工具不存在,开关无意义)。
-             样式对齐附件按钮:无边框幽灵图标钮,开=品牌色点亮 -->
+             胶囊样式(DeepSeek/Kimi 同款):关=幽灵灰;开=淡彩底+品牌深蓝字+
+             常亮小圆点(状态灯,不靠颜色深浅也能分辨开/关) -->
         <button
           v-if="!hideWebSearch"
           class="ws-toggle"
@@ -55,7 +56,9 @@
           :title="webSearch ? '联网搜索已开启：说「上网查一下」等会走外部搜索' : '联网搜索已关闭：仅用知识库等内部能力'"
           @click="$emit('toggle-web-search', !webSearch)"
         >
+          <span class="ws-dot" aria-hidden="true"></span>
           <GlobalOutlined />
+          <span class="ws-label">联网</span>
         </button>
         <!-- 附件（图片）按钮，点击触发隐藏的 file input -->
         <button
@@ -461,21 +464,29 @@ function onEnter(e: KeyboardEvent) {
   .chat-input-wrap { padding: 8px 12px 12px; }
 }
 
-/* 联网搜索开关:对齐 attach-btn 的幽灵图标钮。
-   开态用"实底品牌色"与 hover(浅底)拉开层级——开着还是关着一眼可辨:
-   关 = 灰图标;悬浮 = 浅蓝底蓝字;开启 = 品牌色实底白字(常亮状态徽标感) */
+/* 联网搜索开关:胶囊样式(DeepSeek/Kimi 联网开关联动款)。
+   关 = 幽灵灰字无边框;悬浮 = 极淡底(文字保持灰,和开态区分);
+   开 = 淡彩底 + 品牌深蓝字 + 常亮圆点状态灯——不靠饱和色块表达开关,
+   色弱用户也能靠圆点分辨 */
 .ws-toggle {
-  width: 34px; height: 34px;
-  border-radius: var(--radius-md);
-  border: none; background: transparent;
-  color: var(--text-secondary);
-  font-size: 16px; cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  transition: all 0.2s; flex-shrink: 0;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 12px 0 10px;
+  border: none; border-radius: 999px;
+  background: transparent; color: var(--text-secondary);
+  font-size: 12px; cursor: pointer; flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
 }
-.ws-toggle:hover { color: var(--color-primary); background: var(--color-primary-bg); }
-/* 开态实底深阶(--brand-ink,白字 4.9:1 合规;设计令牌规则禁白字压 --brand) */
-.ws-toggle.on { color: #fff; background: var(--brand-ink); }
-.ws-toggle.on:hover { background: var(--brand-hover); }
+.ws-toggle:hover { background: var(--color-primary-bg); }
+.ws-toggle.on { background: var(--color-primary-bg); color: var(--brand-ink, var(--color-primary)); }
+.ws-toggle.on:hover { background: var(--brand-tint, #eaf0ff); }
 .ws-toggle:disabled { cursor: not-allowed; opacity: 0.4; }
+.ws-toggle :deep(.anticon) { font-size: 13px; }
+.ws-label { line-height: 1; }
+/* 状态灯:关=隐形占位(宽度稳定不跳),开=品牌蓝常亮 */
+.ws-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: transparent; flex-shrink: 0;
+  transition: background 0.15s;
+}
+.ws-toggle.on .ws-dot { background: var(--brand, var(--color-primary)); }
 </style>
