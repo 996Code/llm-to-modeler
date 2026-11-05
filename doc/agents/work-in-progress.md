@@ -18,7 +18,7 @@
   mihomo_api_url=http://searxng-mihomo:9090 ④deploy.sh --skip-pull。
 - 质量门：全量 1893+447 绿、e2e 回归 9/9、CI #88 绿、代码审查两轮(1C/3I/8M 全整改)。
 
-## 审查整改 + 客服窗口联网按钮（2026-11-05 晚，工作区待提交）
+## 审查整改 + 客服窗口联网按钮（2026-11-05 晚，72be5c6 已推 origin 并部署 3.110）
 
 - **终态审查 12 项缺陷(1C/3I/8M)全部修复**：C1=web_answer.j2 补 {{ query }}(答非所问
   根因)；I=service.py 共用编排层(工具/客服/KG 三入口收拢)+失败如实报错不静默回落
@@ -31,11 +31,14 @@
   uses_capabilities 声明,底座禁用自动消失)。浏览器实测两测试窗口按钮均出现。
 - **验收**：后端全量 2447 绿×2 轮；前端 vue-tsc 0 错+vitest 256 绿；本地真链路三入口
   (管理端/首页/客服直连/KG 委托)+开关关指引+trace 四打点(web_search.request/query/
-  synthesize/search)+GUI 闭环(开关→联网话术→总结角标+来源卡)全过。
-- **3.110 预检已完成**（网络恢复）：清单①②实测免做(.env 未配 PACKS_ENABLED=全量候选;
-  searxng 配置模板 11-04 已是新版)；网络互通 ✓(llm-modeler 挂 searxng_default);
-  服务器 checkout eed695e+compose 有 34 行部署侧覆盖(searxng 网络+equipment-mcp),
-  reset 前先备份还原。部署时只需 ③设置页配置 + ④deploy.sh --skip-pull。
+  synthesize/search)+GUI 闭环(开关→联网话术→总结角标+来源卡)全过；CI #93 绿。
+- **3.110 已部署 72be5c6 并验收**（2026-11-05 22:20）：原清单①②实测免做(.env 未配
+  PACKS_ENABLED=全量候选;searxng 配置模板 11-04 已是新版)；③设置页已配
+  searxng_url=http://searxng:8080 + mihomo_api_url=http://searxng-mihomo:9090
+  (PUT /api/admin/packs/web_search/settings)；④deploy.sh --skip-pull(服务器 compose
+  有 34 行部署侧覆盖——searxng 网络+equipment-mcp,reset 前备份 /tmp/compose.keep-1105
+  后还原)。线上验收：管理端调研明德案例诚实规则 ✓、对话链路总结卡 ✓、浏览器两测试
+  窗口联网按钮+客服 GUI 闭环(开关→计量新闻→总结+角标+来源卡)✓。
 
 
 ## 全站视觉精装 + LLM 降频（2026-11-03/04，均已推 origin）
