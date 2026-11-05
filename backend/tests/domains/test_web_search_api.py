@@ -51,9 +51,12 @@ class _FakeStore:
 
 
 class _FakeDB:
+    """替 websearch._db(PackRelationalDB 协议:init_schema+connect)。"""
     def __init__(self, store):
         self._store = store
-
+        self.schemas = []
+    def init_schema(self, ddls):
+        self.schemas.extend(ddls)   # 记录 DDL(init_schema 走真库才建 schema)
     def connect(self):
         return self._store.connect()
 
@@ -67,7 +70,8 @@ def env(monkeypatch):
     pack_api.register_admin_auth(allow)
 
     store = _FakeStore()  # log DAO 走 fake conn(不真连 PG)
-    monkeypatch.setattr(websearch, "_db", _FakeDB(store))
+    import domains.web_search.websearch as _ws
+    _ws._db = _FakeDB(store)
     websearch.reset_cache()
 
     # search 替身:返回固定 2 条结果

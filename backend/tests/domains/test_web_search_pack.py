@@ -61,9 +61,12 @@ class _FakeStore:
 
 
 class _FakeDB:
-    """替 websearch._db(PackRelationalDB 协议:connect() 返回连接)。"""
+    """替 websearch._db(PackRelationalDB 协议:init_schema+connect)。"""
     def __init__(self, store):
         self._store = store
+        self.schemas = []
+    def init_schema(self, ddls):
+        self.schemas.extend(ddls)   # 记录 DDL(init_schema 走真库才建 schema)
     def connect(self):
         return self._store.connect()
 
@@ -82,7 +85,9 @@ def env(monkeypatch):
     websearch.reset_cache()
     ctx = ToolContext(llm_client=None, asset_client=None, conversation=None,
                       emit=lambda *args, **kwargs: None, conv_id="ws-test")
-    return SimpleNamespace(state=state, store=store, ctx=ctx,
+    db = _FakeDB(store)
+    monkeypatch.setattr(websearch, "_db", db)
+    return SimpleNamespace(state=state, store=store, ctx=ctx, db=db,
                            monkeypatch=monkeypatch)
 
 
@@ -237,7 +242,9 @@ def test_log_search_persists_query_and_results(env):
                                cached=out["cached"], operator="admin")
     assert log["id"]
     assert log["resultCount"] == 5
-    # 建表+INSERT 都走了 fake conn
+    # 建表走 init_schema(直接 connect 裸 DDL 不建 schema,表落 public——审查 C1)
+    assert env.db.schemas and "web_search_logs" in env.db.schemas[0]
+    # INSERT 走 conn
     sqls = " ".join(s for s, _ in env.store.executed)
     assert "web_search_logs" in sqls
     assert "INSERT INTO web_search_logs" in sqls
@@ -265,3 +272,23 @@ def test_search_strips_command_prefix(env):
     calls2 = _mock_get(env, calls=[])
     websearch.search(env.state, "JJG 52 检定规程", top_k=3)
     assert calls2[0]["params"]["q"] == "JJG 52 检定规程"
+
+def test_clean_query_variants():
+    """指令前缀剥离变体(审查 I1:网上查/网上搜/在网上看看 曾漏)。"""
+    from domains.web_search.websearch import _clean_query
+    for raw, exp in [("网上查一下压力表检定规程", "压力表检定规程"),
+                     ("网上搜AI最新消息", "AI最新消息"),
+                     ("在网上看看计量新规", "计量新规"),
+                     ("帮我查一下压力表", "帮我查一下压力表"),
+                     ("JJG 52 检定规程", "JJG 52 检定规程")]:
+        assert _clean_query(raw) == exp, raw
+
+
+def test_cache_topk_semantics(env):
+    """缓存存固定条数:首查 top_k=3 不截断后续 top_k=5(审查 M2)。"""
+    calls = _mock_get(env)
+    websearch.search(env.state, "JJG 52", top_k=3)
+    assert len(websearch.search(env.state, "JJG 52", top_k=3)["results"]) == 3
+    out5 = websearch.search(env.state, "JJG 52", top_k=5)
+    assert len(out5["results"]) == 5 and out5["cached"] is True
+    assert len(calls) == 1

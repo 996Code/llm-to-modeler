@@ -8,7 +8,7 @@
 ——前端通用数据卡展示,来源可点。
 
 【记录】对话链路的调用走既有会话记录+链路追踪;管理端调研 tab 的
-持久化在 websearch.log_search(kg_web_search_logs 表),不经本工具。
+持久化在 websearch.log_search(web_search_logs 表),不经本工具。
 """
 import logging
 from typing import Any, Optional

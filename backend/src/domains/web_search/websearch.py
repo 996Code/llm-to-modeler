@@ -35,7 +35,7 @@ _prompt_loader = None
 
 
 def _prompts():
-    """KG pack 提示词加载器(照 retrieval._prompt_loader 模式)。"""
+    """web_search pack 提示词加载器(照 KG retrieval._prompt_loader 模式)。"""
     global _prompt_loader
     if _prompt_loader is None:
         from sdk.prompt_loader import PromptLoader
@@ -45,6 +45,8 @@ def _prompts():
 
 # 同 query 10 分钟内直接回缓存(运营调研高频重复同一问题的场景)
 CACHE_TTL_S = 600.0
+_CACHE_KEEP = 10      # 缓存保存条数(读侧按 top_k 裁剪)
+_CACHE_MAX = 200      # 缓存条目上限(超量清最旧)
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
@@ -104,7 +106,7 @@ def rotate_mihomo_node(app_state) -> Optional[str]:
     api = api.rstrip("/")
     try:
         client = _get_client()
-        r = client.get(f"{api}/proxies/MANUAL", timeout=10)
+        r = client.get(f"{api}/proxies/MANUAL", timeout=3)
         r.raise_for_status()
         info = r.json()
         now, all_nodes = info.get("now"), info.get("all") or []
@@ -124,7 +126,7 @@ def rotate_mihomo_node(app_state) -> Optional[str]:
             return None
         for path, body in ((f"{api}/proxies/MANUAL", {"name": nxt}),
                            (f"{api}/proxies/PROXY", {"name": "MANUAL"})):
-            resp = client.put(path, json=body, timeout=10)
+            resp = client.put(path, json=body, timeout=3)
             resp.raise_for_status()
         logger.info(f"mihomo 节点自动切换: {now} -> {nxt}")
         return nxt
@@ -145,9 +147,9 @@ def _get_client() -> httpx.Client:
 # 会污染检索与关键字核对——剥离指令性前缀,保留实体问题本体)
 _CMD_PREFIX = re.compile(
     r"^(请|麻烦|帮我|帮|麻烦你)?"
-    r"(上网|联网|到网上|在网上|互联网上|用搜索引擎)"
-    r"(查一下|查询|搜一下|搜索|查查|查|搜搜|搜)"
-    r"(看|看下|看看)?[,,，。!！]?\s*")
+    r"(上网|联网|网上|到网上|在网上|互联网上|用搜索引擎)"
+    r"(查一下|查询|搜一下|搜索|查查|查|搜搜|搜)?"
+    r"(看看|看下|看|瞧瞧)?[,,，。!！]?\s*")
 
 def _clean_query(raw: str) -> str:
     """剥掉对话触发词前缀,保底剥一层"帮我查一下"类通用前缀。"""
@@ -173,6 +175,8 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
     with _CACHE_LOCK:
         hit = _CACHE.get(query)
         if hit and time.monotonic() - hit["at"] < CACHE_TTL_S:
+            # 缓存固定存前 _CACHE_KEEP 条,读时按本次 top_k 裁剪——
+            # 首次 top_k=3 不再把后续 top_k=5 截成 3(审查 M2)
             return {"query": query, "results": hit["results"][:top_k],
                     "cached": True}
 
@@ -183,10 +187,13 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
             PackInvokeError.CREDENTIAL)
     base = base.rstrip("/")
 
-    # 限流自愈循环:google 被挂起 → 切 mihomo 节点 → 重试(至多切 2 次)。
+    # 限流自愈循环:google 被挂起 → 切 mihomo 节点 → 重试(至多切 3 次)。
     # SearXNG 侧需配短挂起(suspended_times.SearxEngineCaptcha=2s,
-    # 见部署模板),切完节点 sleep 等挂起过期即可用新出口重查
+    # 见部署模板),切完节点 sleep 等挂起过期即可用新出口重查。
+    # 穷尽轮换后抛 PERMANENT(非 RETRYABLE):这里已带切换重试过 4 次,
+    # 引擎层再同参全套重跑只是把数分钟延迟翻倍(审查 I2)
     payload: Dict[str, Any] = {}
+    rotated = False
     for attempt in range(4):
         try:
             resp = _get_client().get(
@@ -212,26 +219,38 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
         if not _google_suspended(payload):
             break
         if attempt < 3 and rotate_mihomo_node(app_state):
+            rotated = True
             time.sleep(2.5)  # 等 SearXNG 短挂起(2s)过期
             continue
         raise PackInvokeError(
+            "搜索引擎暂时不可用(所有出口节点均被限流),请稍后重试"
+            if rotated else
             "搜索引擎暂时不可用(可能被限流),请稍后重试",
-            PackInvokeError.RETRYABLE)
+            PackInvokeError.PERMANENT if rotated else PackInvokeError.RETRYABLE)
 
-    # 裁剪三字段;无结果也如实返回空列表(诚实原则,不硬凑)
-    results = [
+    # 裁剪三字段;无结果也如实返回空列表(诚实原则,不硬凑)。
+    # 全量先入缓存(上限 _CACHE_KEEP 条),返回按本次 top_k 裁剪——
+    # 首查小 top_k 不截断后续大 top_k(审查 M2)
+    results_all = [
         {"title": (r.get("title") or "").strip(),
          "url": (r.get("url") or "").strip(),
          "content": (r.get("content") or "").strip()}
         for r in (payload.get("results") or [])
         if (r.get("url") or "").strip()
-    ][:top_k]
+    ]
+    results = results_all[:top_k]
 
     # 只缓存非空结果:引擎瞬时抖动产出的空结果若入缓存,10 分钟内同词
     # 全部"未找到",把瞬时故障放大成持续故障(实测踩坑)。真零命中不缓存
     if results:
         with _CACHE_LOCK:
-            _CACHE[query] = {"results": results, "at": time.monotonic()}
+            # 存前 _CACHE_KEEP 条(读侧裁剪);超量清理最旧条目(无上界
+            # 缓慢累积——读时才判 TTL 从不删的旧毛病,审查 M2)
+            if len(_CACHE) >= _CACHE_MAX:
+                for k in sorted(_CACHE, key=lambda k: _CACHE[k]["at"])[:len(_CACHE) - _CACHE_MAX + 1]:
+                    _CACHE.pop(k, None)
+            _CACHE[query] = {"results": results_all[:_CACHE_KEEP],
+                             "at": time.monotonic()}
 
     return {"query": query, "results": results, "cached": False}
 
@@ -251,7 +270,7 @@ def synthesize_answer(app_state, query: str, results: List[dict],
                                    query=query, results=results)
         answer = app_state.llm_client.chat(
             [{"role": "user", "content": prompt}],
-            temperature=0.2, conv_id=conv_id, stage="kg.web_answer",
+            temperature=0.2, conv_id=conv_id, stage="web_search.synthesize",
         ).strip()
         if answer:
             return answer
@@ -267,30 +286,42 @@ def synthesize_answer(app_state, query: str, results: List[dict],
 
 # ── 调研记录(web_search_logs;管理端调研页持久化) ─────────────
 
+_DDL = """
+CREATE TABLE IF NOT EXISTS web_search_logs (
+    id TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    results_json TEXT NOT NULL,
+    result_count INTEGER NOT NULL,
+    cached INTEGER NOT NULL DEFAULT 0,
+    operator TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+)
+"""
+
 _db: Optional[PackRelationalDB] = None
 
 
 def _conn(app_state):
-    """本 pack 关系存储(web_search schema,chatbi 同款 PackRelationalDB)。"""
+    """本 pack 关系存储(web_search schema,chatbi 同款 PackRelationalDB)。
+
+    首次使用经 init_schema 建 schema+表(幂等;直接经 connect() 跑裸 DDL
+    只设 search_path 不建 schema,新库上表会落 public——三十审 P1-A 坑,
+    照 chatbi memory.py 的 once-guard 模式)。done 旗标绑在 _db 实例上
+    (生产单例只建一次;测试换替身实例自然重建)。原 KG 时期表
+    kg_web_search_logs 留孤儿待清。
+    """
     global _db
     if _db is None:
         _db = PackRelationalDB("web_search")
+    if not getattr(_db, "_ws_schema_done", False):
+        _db.init_schema([_DDL])
+        _db._ws_schema_done = True   # type: ignore[attr-defined]
     return _db.connect()
 
 
 def _ensure_table(app_state) -> None:
-    """web_search_logs 建表(幂等懒建;原 KG 时期表 kg_web_search_logs 留孤儿)。"""
-    with _conn(app_state) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS web_search_logs (
-                id TEXT PRIMARY KEY,
-                query TEXT NOT NULL,
-                results_json TEXT NOT NULL,
-                result_count INTEGER NOT NULL,
-                cached INTEGER NOT NULL DEFAULT 0,
-                operator TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL
-            )""")
+    """兼容旧入口(log_* 经 _conn 已建表;保留签名防外部引用)。"""
+    _conn(app_state)
 
 
 def log_search(app_state, query: str, results: List[dict], cached: bool,

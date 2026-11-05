@@ -39,9 +39,8 @@ async def web_search(request: Request, payload: Dict[str, Any]):
     from domains.web_search import websearch
     # 操作人标识:X-Admin-Token 摘要前 8 位(区分操作人,不存完整凭证);
     # 开放模式(未配置 ADMIN_TOKEN)留空
-    import hashlib as _hl
     _tok = request.headers.get("X-Admin-Token", "")
-    operator = (_hl.sha256(_tok.encode()).hexdigest()[:8] if _tok else "")
+    operator = (hashlib.sha256(_tok.encode()).hexdigest()[:8] if _tok else "")
     try:
         # httpx 同步调用丢线程池(事件循环不冻结,与 retrieve-test 同款)
         out = await asyncio.to_thread(
@@ -59,10 +58,16 @@ async def web_search(request: Request, payload: Dict[str, Any]):
     answer = await asyncio.to_thread(
         websearch.synthesize_answer, request.app.state, query,
         out["results"])
-    log = await asyncio.to_thread(
-        websearch.log_search, request.app.state, query, out["results"],
-        bool(out.get("cached")), operator=operator)
-    return out | {"answer": answer, "logId": log["id"]}
+    # 调研记录落库失败不拖垮已成功的搜索+回答(审查 I3):降级返回,
+    # logId 缺席 + 服务端日志留痕
+    try:
+        log = await asyncio.to_thread(
+            websearch.log_search, request.app.state, query, out["results"],
+            bool(out.get("cached")), operator=operator)
+        return out | {"answer": answer, "logId": log["id"]}
+    except Exception:
+        logger.exception("web-search 调研记录落库失败(结果正常返回)")
+        return out | {"answer": answer}
 
 
 @router.get("/web-search/logs", dependencies=[Depends(admin_required)])

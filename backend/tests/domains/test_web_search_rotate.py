@@ -91,12 +91,20 @@ def test_search_auto_rotates_and_recovers(monkeypatch):
 
 
 def test_search_raises_when_all_rotations_fail(monkeypatch):
-    """切满仍限流:如实抛 retryable(不无限轮换)。"""
+    """切满仍限流:PERMANENT(内部已带切换重试 4 次,引擎层再重跑无意义)。"""
     _setup(monkeypatch, responses=[_SUSPENDED] * 5)
     with pytest.raises(PackInvokeError) as ei:
         websearch.search(None, "JJG 52")
+    assert ei.value.error_type == PackInvokeError.PERMANENT
+    assert "均被限流" in ei.value.message
+
+
+def test_search_no_rotation_configured_still_retryable(monkeypatch):
+    """未配置 controller:单次限流抛 RETRYABLE(引擎重试有意义)。"""
+    _setup(monkeypatch, responses=[_SUSPENDED], api="")
+    with pytest.raises(PackInvokeError) as ei:
+        websearch.search(None, "JJG 52")
     assert ei.value.error_type == PackInvokeError.RETRYABLE
-    assert "暂时不可用" in ei.value.message
 
 
 def test_no_api_configured_no_rotation(monkeypatch):

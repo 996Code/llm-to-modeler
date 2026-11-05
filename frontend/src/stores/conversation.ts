@@ -99,7 +99,7 @@ export const useConversationStore = defineStore('conversation', () => {
   }
   const loading = ref(false)                            // 是否正在加载（列表/详情）
   // 联网搜索开关(用户裁决):对话窗口可切换;开=pack_params 下发
-  // knowledge_graph.web_search=true,后端 KG 路由据此允许 web_search 工具。
+  // web_search.enabled(web_search 独立 pack 名字空间)。
   // localStorage 持久化(跨刷新沿用用户偏好),嵌入/独立两种模式共用。
   const webSearchEnabled = ref(localStorage.getItem('web_search_enabled') === '1')
   function setWebSearch(on: boolean) {
@@ -406,7 +406,7 @@ export const useConversationStore = defineStore('conversation', () => {
           currentStage.value = ''
         },
       }, clarifyAnswers, imageBase64, (() => {
-        // 联网搜索开关并入 pack_params.knowledge_graph(嵌入模式与宿主参数
+        // 联网搜索开关并入 pack_params.web_search(嵌入模式与宿主参数
         // 合并,独立模式自建——两种模式同一通路,后端零分支)
         const base = (embedCtx ?? localCtx) as Record<string, any> | null | undefined
         const hostParams = (base?.pack_params ?? {}) as Record<string, any>

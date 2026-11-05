@@ -6,6 +6,8 @@ bind-address: "0.0.0.0"  # 容器内监听所有口；安全靠"不发布宿主�
 mode: rule
 log-level: warning
 external-controller: 0.0.0.0:9090  # 容器内监听(宿主不发布端口);API 切节点用
+# 注意:未配 secret(靠"不发布宿主端口"隔离);若部署加 secret,
+# rotate_mihomo_node 不带鉴权会静默退化为"不自动切节点"(websearch 层)
 
 proxy-providers:
   airport:

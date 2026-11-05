@@ -55,6 +55,7 @@ export const STAGE_LABELS: Record<string, string> = {
   // 联网搜索(SearXNG→google)
   'web_search.search': '联网·搜索',
   'web_search.answer': '联网·LLM 综合回答',
+  'web_search.synthesize': '联网·LLM 归纳回答',
   'kg.web_answer': 'LLM·联网归纳回答',
   'web_search.assemble': '联网·整理结果',
   // 智能问数(chatbi)链路(检索两阶段 + 8 步管线的 LLM 环节)
