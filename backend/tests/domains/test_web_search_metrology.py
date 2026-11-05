@@ -34,6 +34,23 @@ def _state(ws_enabled):
     return {"pack_params": {"web_search": {"enabled": ws_enabled}}}
 
 
+class _Registry:
+    """装配替身:web_search 工具在册(停用语义测试单独换空 registry)。"""
+
+    def get(self, name):
+        return object() if name == 'web_search' else None
+
+
+class _App:
+    registry = _registry = None
+
+
+def _app():
+    a = _App()
+    a.registry = _Registry()
+    return a
+
+
 def _patch_websearch(monkeypatch, configured=True, boom=False):
     """websearch 底层替身(记调用;boom=搜索抛错)。"""
     from domains.web_search import websearch
@@ -60,7 +77,7 @@ def _patch_websearch(monkeypatch, configured=True, boom=False):
 
 def test_toggle_on_with_web_hint_routes_to_websearch(env):
     _patch_websearch(env)
-    tool = mta.MetrologyAssistantTool(app_state=object())
+    tool = mta.MetrologyAssistantTool(app_state=_app())
     out = tool._try_websearch("帮我在网上搜一下ai最新的消息", _Ctx(),
                               _state(True), lambda *a: None)
     assert out is not None
@@ -71,7 +88,7 @@ def test_toggle_on_with_web_hint_routes_to_websearch(env):
 
 def test_toggle_off_falls_back(env):
     calls = _patch_websearch(env)
-    tool = mta.MetrologyAssistantTool(app_state=object())
+    tool = mta.MetrologyAssistantTool(app_state=_app())
     out = tool._try_websearch("帮我在网上搜一下ai最新的消息", _Ctx(),
                               _state(False), lambda *a: None)
     assert out is None
@@ -80,7 +97,7 @@ def test_toggle_off_falls_back(env):
 
 def test_plain_phrasing_without_web_words_falls_back(env):
     calls = _patch_websearch(env)
-    tool = mta.MetrologyAssistantTool(app_state=object())
+    tool = mta.MetrologyAssistantTool(app_state=_app())
     out = tool._try_websearch("查一下压力表检定规程", _Ctx(),
                               _state(True), lambda *a: None)
     assert out is None
@@ -89,7 +106,7 @@ def test_plain_phrasing_without_web_words_falls_back(env):
 
 def test_unconfigured_searxng_falls_back_silently(env):
     calls = _patch_websearch(env, configured=False)
-    tool = mta.MetrologyAssistantTool(app_state=object())
+    tool = mta.MetrologyAssistantTool(app_state=_app())
     out = tool._try_websearch("上网查一下最新消息", _Ctx(),
                               _state(True), lambda *a: None)
     assert out is None
@@ -98,7 +115,7 @@ def test_unconfigured_searxng_falls_back_silently(env):
 
 def test_search_failure_degrades_to_kb_fallback(env):
     calls = _patch_websearch(env, boom=True)
-    tool = mta.MetrologyAssistantTool(app_state=object())
+    tool = mta.MetrologyAssistantTool(app_state=_app())
     out = tool._try_websearch("上网查一下最新消息", _Ctx(),
                               _state(True), lambda *a: None)
     assert out is None  # fail-open:回落 KB 兜底链
@@ -109,3 +126,18 @@ def test_web_hint_words_coverage():
     from domains.metrology_assistant.tools.assistant import MetrologyAssistantTool as T
     for hint in ("上网", "联网", "网上查", "网上搜", "搜索引擎", "互联网上"):
         assert hint in T._WEB_HINTS
+
+
+def test_pack_disabled_falls_back(env):
+    """web_search pack 停用(registry 无此工具):直连层自查回落 KB 兜底。"""
+    _patch_websearch(env)
+    tool = mta.MetrologyAssistantTool(app_state=_app())
+
+    class _EmptyRegistry:
+        def get(self, name):
+            return None
+
+    tool._app_state.registry = _EmptyRegistry()
+    out = tool._try_websearch("上网查一下最新消息", _Ctx(), _state(True),
+                              lambda *a: None)
+    assert out is None

@@ -520,6 +520,11 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
             return None
         if not any(h in user_input for h in self._WEB_HINTS):
             return None
+        # 装配检查:web_search pack 被停用后热切换会把它从 registry 摘除
+        # ——直连层必须自查(可选依赖语义:目标缺席自动回落,不拖垮客服)
+        registry = getattr(self._app_state, 'registry', None)
+        if registry is None or registry.get('web_search') is None:
+            return None
         from domains.web_search import websearch
         if not websearch.settings_url(self._app_state):
             return None  # 底座未配置:静默回落(管理员未启用的能力不拦用户)

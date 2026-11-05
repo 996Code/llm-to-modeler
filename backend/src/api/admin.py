@@ -657,7 +657,8 @@ def _toggle_pack(request: Request, name: str, enabled: bool):
     if not enabled:
         from domains import load_pack_configs
         from services.pack_dependency import pack_dependents
-        dependents = [p for p in pack_dependents(name, load_pack_configs())
+        dependents = [p for p in pack_dependents(
+                          name, load_pack_configs(), required_only=True)
                       if pack_state.is_enabled(p)]
         if dependents:
             raise HTTPException(

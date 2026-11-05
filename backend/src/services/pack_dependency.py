@@ -342,18 +342,27 @@ def evaluate_packs(
     }
 
 
-def pack_dependents(target: str, manifests: Dict[str, Dict[str, Any]]) -> List[str]:
+def pack_dependents(target: str, manifests: Dict[str, Dict[str, Any]],
+                    required_only: bool = False) -> List[str]:
     """反向依赖扫描:哪些 pack 的 manifest 声明了对 target 插件的依赖。
 
     纯函数、声明驱动(只认 dependencies.*.pack 字段),平台零插件名知识;
     是否"已启用"由调用方过滤(停用守卫只拦启用中的依赖方)。
+
+    required_only=True 只数 required:true 的依赖——停用守卫用此口径:
+    可选依赖(required:false)声明"目标缺席我可运行",不拦目标停用
+    (依赖方运行期自查目标装配状态,典型如客服对 web_search 的直连)。
     """
     result: List[str] = []
     for name, manifest in manifests.items():
         if name == target:
             continue
         deps = (manifest or {}).get("dependencies") or {}
-        if any(isinstance(d, dict) and d.get("pack") == target
-               for d in deps.values()):
+        for d in deps.values():
+            if not (isinstance(d, dict) and d.get("pack") == target):
+                continue
+            if required_only and not d.get("required", False):
+                continue
             result.append(name)
+            break
     return sorted(result)
