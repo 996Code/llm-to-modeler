@@ -254,3 +254,14 @@ def test_list_and_clear_logs(env):
     assert rows[0]["operator"] == "admin"
     websearch.clear_logs(env.state)
     assert websearch.list_logs(env.state, limit=10) == []
+
+def test_search_strips_command_prefix(env):
+    """对话原话的指令前缀不上搜索词(上网查一下XX→XX)。"""
+    calls = _mock_get(env)
+    websearch.search(env.state, "上网查一下全国有多少人叫陈蔓", top_k=3)
+    assert calls[0]["params"]["q"] == "全国有多少人叫陈蔓"
+    # 干净查询不动
+    websearch.reset_cache()
+    calls2 = _mock_get(env, calls=[])
+    websearch.search(env.state, "JJG 52 检定规程", top_k=3)
+    assert calls2[0]["params"]["q"] == "JJG 52 检定规程"

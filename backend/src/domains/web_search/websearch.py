@@ -17,6 +17,7 @@ content 三字段,来源 URL 必带——受控架构的诚实原则) → TTL �
 """
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -140,12 +141,32 @@ def _get_client() -> httpx.Client:
     return _client
 
 
+# 对话触发词前缀(引擎路由后工具拿到的是原话,"上网查一下XX"整句当搜索词
+# 会污染检索与关键字核对——剥离指令性前缀,保留实体问题本体)
+_CMD_PREFIX = re.compile(
+    r"^(请|麻烦|帮我|帮|麻烦你)?"
+    r"(上网|联网|到网上|在网上|互联网上|用搜索引擎)"
+    r"(查一下|查询|搜一下|搜索|查查|查|搜搜|搜)"
+    r"(看|看下|看看)?[,,，。!！]?\s*")
+
+def _clean_query(raw: str) -> str:
+    """剥掉对话触发词前缀,保底剥一层"帮我查一下"类通用前缀。"""
+    q = (raw or "").strip()
+    q2 = _CMD_PREFIX.sub("", q, count=1).strip()
+    if q2:
+        return q2
+    # 整句都是前缀(如"上网搜一下")——回退再剥通用查/搜指令
+    q3 = re.sub(r"^(请|麻烦|帮我|帮)?(查|搜)(一下|一查)?[,,，。!！]?\s*", "", q, count=1).strip()
+    return q3 or q
+
+
 def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
     """联网搜索:返回 {query, results:[{title,url,content}], cached}。
 
     未配置 searxng_url 抛 credential;上游不可达抛 retryable。
+    返回的 query 是剥离指令前缀后的实际搜索词(对话原话经 _clean_query)。
     """
-    query = (query or "").strip()
+    query = _clean_query(query or "")
     if not query:
         raise PackInvokeError("搜索词不能为空", PackInvokeError.PERMANENT)
 
