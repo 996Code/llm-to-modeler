@@ -310,6 +310,11 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 extracted = extract_slots(ctx.llm_client, user_input, background, getattr(ctx, 'conv_id', None), table)
                 scenario = extracted['scenario']
                 if scenario not in table:
+                    # 联网意图直连 web_search pack 底层(照 kg/chatbi 直连模式;
+                    # 开关开+话术点明联网才走,否则原样回落 KB 兜底链)
+                    ws = self._try_websearch(user_input, ctx, state, stage)
+                    if ws is not None:
+                        return ws
                     return self._fallback_answer(table, user_input, ctx, state, stage)
                 cfg = table[scenario]
                 base = background.get(scenario) or {}
@@ -497,6 +502,60 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                                          instrument=instrument, purpose=purpose)
         return ToolResult(artifact=artifact, artifact_type='data', summary=summary,
                           formatted={'kb': kb_name, 'conclusion': summary[:40], 'chunkCount': len(chunks)})
+
+    # 明确要联网的信号词(与 web_search pack 保守口径一致:普通"查一下/
+    # 最新"不触发,必须点明网/联网)
+    _WEB_HINTS = ("上网", "联网", "网上查", "网上搜", "搜索引擎",
+                  "百度一下", "谷歌一下", "互联网上")
+
+    def _try_websearch(self, user_input, ctx, state, stage):
+        """联网意图分流:开关开+话术命中+底座已配置 → 直连 websearch 底层。
+
+        返回 ToolResult(联网总结卡)或 None(不满足条件,调用方回落 KB 兜底)。
+        开关语义:pack_params.web_search.enabled(独立 pack 名字空间,
+        与对话窗口「联网」开关联动)。
+        """
+        ws_on = ((state.get('pack_params') or {}).get('web_search') or {}).get('enabled')
+        if not ws_on:
+            return None
+        if not any(h in user_input for h in self._WEB_HINTS):
+            return None
+        from domains.web_search import websearch
+        if not websearch.settings_url(self._app_state):
+            return None  # 底座未配置:静默回落(管理员未启用的能力不拦用户)
+        stage('assistant.retrieve', '联网搜索外部资料…')
+        try:
+            out = websearch.search(self._app_state, user_input, top_k=5)
+            stage('assistant.conclude', '综合归纳搜索结果…')
+            answer = websearch.synthesize_answer(
+                self._app_state, user_input, out['results'],
+                conv_id=getattr(ctx, 'conv_id', None))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f'客服联网搜索失败,回落知识库兜底: {e}')
+            return None
+        # 链路打点:与 WebSearchTool 同一 stage 命名(管理端链路统一视图)
+        try:
+            ctx.trace('web_search.search', '联网搜索(客服直连)', 'ok',
+                      detail={'query': user_input, 'top_k': 5,
+                              'cached': bool(out.get('cached')),
+                              'resultCount': len(out['results']),
+                              'results': [{'title': r['title'][:60], 'url': r['url']}
+                                          for r in out['results'][:5]]})
+        except Exception:  # noqa: BLE001
+            pass
+        artifact = {
+            'type': 'web_search_result',
+            'query': user_input,
+            'results': out['results'],
+            'cached': bool(out.get('cached')),
+            'answer': answer,
+            'pack': 'metrology_assistant',
+            'resultDisplay': 'card',
+        }
+        return ToolResult(
+            artifact=artifact, artifact_type='data', summary=answer,
+            formatted={'query': user_input, 'resultCount': len(out['results']),
+                       'cached': '是' if out.get('cached') else '否'})
 
     def _fallback_answer(self, table, user_input, ctx, state, stage):
         """未命中任何能力时的知识库链路兜底:跨库检索,有证据才答。

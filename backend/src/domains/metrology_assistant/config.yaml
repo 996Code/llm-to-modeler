@@ -6,6 +6,10 @@ dependencies:
   chatbi:
     pack: chatbi
     required: true
+  # 联网搜索底层直连(可选:禁用不拖垮客服,other 分支自动回落 KB 兜底)
+  web_search:
+    pack: web_search
+    required: false
 
 domain:
   description: >

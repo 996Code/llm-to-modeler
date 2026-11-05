@@ -1,4 +1,4 @@
-"""WebSearchTool - 前台对话工具:联网搜索(经 SearXNG→mihomo→google)。
+"""WebSearchTool - web_search pack 的对话工具:联网搜索(经 SearXNG→mihomo→google)。
 
 【路由】保守触发:用户明确要"网上的/联网/最新政策"类外部信息才选中
 ("上网查一下最新的XX规定""网上怎么说的");普通知识问题仍走 kb_search
@@ -33,7 +33,7 @@ class WebSearchTool(Tool):
                    "检索结果列表")
     when = ("用户明确要联网/网上的外部信息,如'上网查一下''网上怎么说的'"
             "'最新的XX政策/规定是什么'(知识库内的问题不走本工具)")
-    state_scope = "knowledge_graph"
+    state_scope = "web_search"
 
     def __init__(self, app_state: Any = None):
         self._app_state = app_state
@@ -54,17 +54,24 @@ class WebSearchTool(Tool):
         return None
 
     def preflight(self, state: dict, ctx: ToolContext) -> Optional[ToolResult]:
-        """执行前提:searxng_url 已配置(未配置=插件未启用,如实告知)。"""
-        from domains.knowledge_graph import websearch
+        """执行前提:联网开关已点亮 + searxng_url 已配置(两项都给可操作指引)。"""
+        from domains.web_search import websearch
+        # 开关门(独立 pack 名字空间 pack_params.web_search.enabled;路由选中
+        # 但开关没开时,给点亮开关的指引而不是笼统失败)
+        ws_params = ((state.get("pack_params") or {}).get("web_search") or {})
+        if ws_params.get("enabled") is False:
+            return ToolResult(error_for_llm=(
+                "联网搜索未开启:请点亮输入框左侧的「联网」开关后重试,"
+                "或去掉消息里的联网字样改用内部知识"))
         if not websearch.settings_url(self._app_state):
             return ToolResult(error_for_llm=(
-                "联网搜索未启用:管理员未在知识库插件设置里配置 SearXNG 地址,"
-                "请改用知识库检索或联系管理员"))
+                "联网搜索未启用:管理员未在「联网搜索」插件设置里配置 SearXNG 地址,"
+                "请联系管理员"))
         return None
 
     def execute(self, state: dict, ctx: ToolContext) -> ToolResult:
         import time as _time
-        from domains.knowledge_graph import websearch
+        from domains.web_search import websearch
 
         query = (state.get("query") or state.get("user_input") or "").strip()
         top_k = state.get("top_k") or 5
@@ -110,7 +117,7 @@ class WebSearchTool(Tool):
         }
         # card-only 展示(前端 WebSearchResultCard 专用卡:总结+角标+来源卡)
         if isinstance(answer, str) and answer.strip():
-            artifact.update(pack="knowledge_graph", resultDisplay="card")
+            artifact.update(pack="web_search", resultDisplay="card")
         # summary=综合回答本体(进历史与 LLM 上下文;引用编号随卡渲染)
         summary = answer if results else (
             f"联网搜索「{query}」未找到相关结果")

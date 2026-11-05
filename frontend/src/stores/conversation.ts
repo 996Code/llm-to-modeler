@@ -408,9 +408,11 @@ export const useConversationStore = defineStore('conversation', () => {
           ...base,
           pack_params: {
             ...hostParams,
-            knowledge_graph: {
-              ...(hostParams.knowledge_graph ?? {}),
-              web_search: webSearchEnabled.value,
+            // 联网搜索独立 pack 名字空间(web_search.enabled);客服直连
+            // 与 web_search pack 工具的 preflight 都读这一键
+            web_search: {
+              ...(hostParams.web_search ?? {}),
+              enabled: webSearchEnabled.value,
             },
           },
         }

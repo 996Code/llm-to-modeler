@@ -1,4 +1,6 @@
-"""web_search 领域客户端 —— SearXNG 联网搜索(对话工具与管理端调研共用)。
+"""web_search pack 底层 —— SearXNG 联网搜索(工具/管理端调研/客服直连共用)。
+
+独立公用插件(用户裁决):知识库/客服直连本模块(照客服直连 kg/chatbi 底层模式)。
 
 【链路】settings_reader 读 searxng_url(设置页/env;空=未启用 credential)
 → httpx GET {url}/search?q=..&format=json&engines=google(engines 必须传
@@ -6,7 +8,7 @@
 content 三字段,来源 URL 必带——受控架构的诚实原则) → TTL 缓存 10 分钟
 (同 query 不重复出站,LLM 降频同款思路)。
 
-【调研记录】kg_web_search_logs 表(幂等懒建,照 annotations 模式):
+【调研记录】web_search_logs 表(PackRelationalDB 独立 schema,幂等懒建):
 管理端"联网调研"每次查询落库,对话链路的记录走既有会话+链路追踪,
 不经此表。
 
@@ -23,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from domains.knowledge_graph import runtime
+from sdk.relational_store import PackRelationalDB
 from sdk.tool import PackInvokeError
 
 logger = logging.getLogger(__name__)
@@ -61,7 +63,8 @@ def reset_cache() -> None:
 def settings_url(app_state) -> str:
     """读 searxng_url 设置(设置页保存值 > env > 空)。"""
     try:
-        return (runtime.settings_reader(app_state).get("searxng_url")
+        from sdk.pack_api import settings_reader as _sdk_reader
+        return (_sdk_reader(app_state, "web_search").get("searxng_url")
                 or "").strip()
     except Exception:
         return ""
@@ -110,6 +113,14 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
         raise PackInvokeError(
             f"联网搜索服务不可达: {e}", PackInvokeError.RETRYABLE) from e
 
+    # 引擎被挂起(SearXNG 200 但 google 限流/验证,unresponsive 列表点名):
+    # 视为瞬时故障抛 retryable(引擎自动重试一次),不把"引擎挂了"当"没搜到"
+    for u in (payload.get("unresponsive_engines") or []):
+        if isinstance(u, (list, tuple)) and u and u[0] == _ENGINE:
+            raise PackInvokeError(
+                "搜索引擎暂时不可用(可能被限流),请稍后重试",
+                PackInvokeError.RETRYABLE)
+
     # 裁剪三字段;无结果也如实返回空列表(诚实原则,不硬凑)
     results = [
         {"title": (r.get("title") or "").strip(),
@@ -119,8 +130,11 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
         if (r.get("url") or "").strip()
     ][:top_k]
 
-    with _CACHE_LOCK:
-        _CACHE[query] = {"results": results, "at": time.monotonic()}
+    # 只缓存非空结果:引擎瞬时抖动产出的空结果若入缓存,10 分钟内同词
+    # 全部"未找到",把瞬时故障放大成持续故障(实测踩坑)。真零命中不缓存
+    if results:
+        with _CACHE_LOCK:
+            _CACHE[query] = {"results": results, "at": time.monotonic()}
 
     return {"query": query, "results": results, "cached": False}
 
@@ -136,7 +150,7 @@ def synthesize_answer(app_state, query: str, results: List[dict],
     if not results:
         return f"联网搜索「{query}」未找到相关结果"
     try:
-        prompt = _prompts().render("knowledge_graph", "web_answer",
+        prompt = _prompts().render("web_search", "web_answer",
                                    query=query, results=results)
         answer = app_state.llm_client.chat(
             [{"role": "user", "content": prompt}],
@@ -154,14 +168,24 @@ def synthesize_answer(app_state, query: str, results: List[dict],
     return "\n".join(lines)
 
 
-# ── 调研记录(kg_web_search_logs;管理端调研 tab 持久化) ────────
+# ── 调研记录(web_search_logs;管理端调研页持久化) ─────────────
+
+_db: Optional[PackRelationalDB] = None
+
+
+def _conn(app_state):
+    """本 pack 关系存储(web_search schema,chatbi 同款 PackRelationalDB)。"""
+    global _db
+    if _db is None:
+        _db = PackRelationalDB("web_search")
+    return _db.connect()
+
 
 def _ensure_table(app_state) -> None:
-    """kg_web_search_logs 建表(幂等懒建,照 annotations._ensure_table)。"""
-    store = runtime.get_kg_store(app_state)
-    with store._get_conn() as conn:
+    """web_search_logs 建表(幂等懒建;原 KG 时期表 kg_web_search_logs 留孤儿)。"""
+    with _conn(app_state) as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS kg_web_search_logs (
+            CREATE TABLE IF NOT EXISTS web_search_logs (
                 id TEXT PRIMARY KEY,
                 query TEXT NOT NULL,
                 results_json TEXT NOT NULL,
@@ -178,10 +202,9 @@ def log_search(app_state, query: str, results: List[dict], cached: bool,
     _ensure_table(app_state)
     lid = str(uuid.uuid4())
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    store = runtime.get_kg_store(app_state)
-    with store._get_conn() as conn:
+    with _conn(app_state) as conn:
         conn.execute(
-            """INSERT INTO kg_web_search_logs
+            """INSERT INTO web_search_logs
                (id, query, results_json, result_count, cached, operator, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (lid, query, json.dumps(results, ensure_ascii=False),
@@ -193,12 +216,11 @@ def log_search(app_state, query: str, results: List[dict], cached: bool,
 def list_logs(app_state, limit: int = 50) -> List[Dict[str, Any]]:
     """最近调研记录(新→旧)。"""
     _ensure_table(app_state)
-    store = runtime.get_kg_store(app_state)
-    with store._get_conn() as conn:
+    with _conn(app_state) as conn:
         rows = conn.execute(
             """SELECT id, query, results_json, result_count, cached,
                       operator, created_at
-               FROM kg_web_search_logs ORDER BY created_at DESC
+               FROM web_search_logs ORDER BY created_at DESC
                LIMIT ?""", (int(limit),)).fetchall()
     out = []
     for r in rows:
@@ -216,7 +238,6 @@ def list_logs(app_state, limit: int = 50) -> List[Dict[str, Any]]:
 def clear_logs(app_state) -> int:
     """清空调研记录,返回删除条数。"""
     _ensure_table(app_state)
-    store = runtime.get_kg_store(app_state)
-    with store._get_conn() as conn:
-        cur = conn.execute("DELETE FROM kg_web_search_logs")
+    with _conn(app_state) as conn:
+        cur = conn.execute("DELETE FROM web_search_logs")
         return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0

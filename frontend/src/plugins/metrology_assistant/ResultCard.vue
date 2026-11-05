@@ -1,5 +1,10 @@
 <template>
   <div v-if="view" class="metrology-result">
+    <!-- 联网搜索直连卡:总结+角标+来源列表(专用卡自带完整版式) -->
+    <WebSearchResultCard v-if="view.kind === 'websearch' && view.webArtifact"
+      :artifact="view.webArtifact" :summary="summary" :labels="labels"
+      :render-markdown="renderMarkdown" :compact="compact" :cited-chunks="citedChunks" />
+    <template v-else>
     <header class="result-heading"><strong>{{ view.title }}</strong><a-tag :color="view.kind === 'notice' ? 'warning' : 'processing'">{{ view.kind === 'notice' ? '业务提示' : view.status || '已完成' }}</a-tag></header>
     <div v-if="view.answer" class="md-content" v-html="renderMarkdown(view.answer)" />
     <dl v-if="view.fields" class="result-fields"><div v-for="field in view.fields" :key="field.label"><dt>{{ field.label }}</dt><dd>{{ field.value }}</dd></div></dl>
@@ -24,11 +29,13 @@
       </p>
     </section>
     <KgGraphCard v-if="view.kind === 'knowledge'" :result="artifact" :cited-chunks="citedChunks" :compact="compact" />
+    </template>
   </div>
 </template>
 <script setup lang="ts">
 import { computed } from 'vue'
 import KgGraphCard from '../../components/chat/KgGraphCard.vue'
+import WebSearchResultCard from '../web_search/WebSearchResultCard.vue'
 import { metrologyPresentation } from './presentation'
 const props = defineProps<{
   artifact: Record<string, any>; summary: string; labels: Record<string, string>

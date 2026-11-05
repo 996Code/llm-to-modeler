@@ -929,18 +929,32 @@ export interface KgWebSearchLog {
   operator: string
   createdAt: string
 }
+// 联网搜索已独立成 pack:端点前缀 /api/packs/web_search(鉴权头与 kgApi 同源,
+// 用同一 axios 实例仅改路径前缀)
+// 联网搜索独立 pack 的 API 实例(baseURL=api/packs/web_search;token 拦截器与 kgApi 同款)
+export const wsApi = axios.create({
+  baseURL: (import.meta.env.BASE_URL || '/') + 'api/packs/web_search',
+  headers: { 'Content-Type': 'application/json' },
+})
+wsApi.interceptors.request.use((config) => {
+  const token = getAdminToken()
+  if (token) config.headers['X-Admin-Token'] = token
+  const authToken = localStorage.getItem('auth_token')
+  if (authToken) config.headers['Authorization'] = `Bearer ${authToken}`
+  return config
+})
 export async function kgWebSearch(
   query: string, topK?: number,
 ): Promise<KgWebSearchResult> {
-  const { data } = await kgApi.post('/web-search', { query, top_k: topK })
+  const { data } = await wsApi.post('/web-search', { query, top_k: topK })
   return data
 }
 export async function kgWebSearchLogs(limit?: number): Promise<KgWebSearchLog[]> {
-  const { data } = await kgApi.get('/web-search/logs', { params: { limit } })
+  const { data } = await wsApi.get('/web-search/logs', { params: { limit } })
   return data
 }
 export async function kgWebSearchLogsClear(): Promise<void> {
-  await kgApi.delete('/web-search/logs')
+  await wsApi.delete('/web-search/logs')
 }
 
 // ── MCP 服务管理(注册外部 MCP server + 对外接入 key) ─────────

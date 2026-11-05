@@ -1,0 +1,25 @@
+# 联网搜索插件 manifest —— 独立公用插件(知识库/客服直连底层)
+# 依赖:仅设置项 searxng_url(SearXNG 容器地址);无 pack 级依赖。
+
+domain:
+  description: >
+    联网搜索("上网查一下""网上搜""帮我搜一下 XX 最新消息/新闻"等需要
+    互联网外部信息的请求)。对话窗口「联网」开关点亮时执行外部搜索并
+    综合归纳回答(带来源引用);开关关闭或普通内部知识问题不走本域。
+  compact_focus: 搜索词、命中的结果与归纳结论
+
+admin:
+  settings: settings.schema.yaml
+  page: web_search
+  title: 联网搜索
+
+# 数据制品(总结回答+来源列表;前端专用卡 WebSearchResultCard)
+artifact:
+  type: data
+  actions: [view_json]
+  display:
+    data_labels:
+      query: 检索词
+      resultCount: 结果数
+      cached: 缓存命中
+    welcome_icon: global

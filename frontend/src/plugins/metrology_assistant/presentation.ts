@@ -1,7 +1,9 @@
 export interface MetrologyView {
-  kind: 'knowledge' | 'progress' | 'notice' | 'instrument' | 'table'
+  kind: 'knowledge' | 'progress' | 'notice' | 'instrument' | 'table' | 'websearch'
   title: string
   answer?: string
+  /** websearch 卡:原始制品(结果列表/角标),ResultCard 透传给 WebSearchResultCard */
+  webArtifact?: Record<string, any>
   decision?: string
   status?: string
   fields?: { label: string; value: string }[]
@@ -51,6 +53,13 @@ export function metrologyPresentation(msg: any, labels: Record<string, string> =
       .map((record: any) => instrumentFields(record, labels))
       .filter((fields: { label: string; value: string }[]) => fields.length)
     return records.length ? { kind: 'instrument', title: '器具价目信息', records } : null
+  }
+  // 联网搜索直连产物(借类型模式,照 kg_search_result 先例):
+  // 客服 other 分支直连 web_search pack 底层产出的总结卡
+  if (art.type === 'web_search_result' && art.pack === 'metrology_assistant'
+      && typeof art.answer === 'string' && art.answer.trim()
+      && Array.isArray(art.results)) {
+    return { kind: 'websearch', title: '联网搜索', webArtifact: art }
   }
   // pack 协议前的历史制品无 pack 字段,但有 scenario 标识同样放行
   if (art.type !== 'kg_search_result'

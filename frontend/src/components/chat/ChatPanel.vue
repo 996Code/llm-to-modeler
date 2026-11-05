@@ -332,7 +332,7 @@
       :pending-clarification="store.pendingClarification"
       :total-tokens="convTokens"
       :web-search="store.webSearchEnabled"
-      :hide-web-search="!kgAvailable"
+      :hide-web-search="!webSearchAvailable"
     />
 
     <!-- 本轮链路弹窗:阶段时间线 + 耗时 + LLM 次数/token(通用能力) -->
@@ -501,13 +501,13 @@ const packArtifactType = ref<string | undefined>(undefined)
 // 制品卡动作集（pack 声明，驱动 apply/rewind 按钮）——不同插件的制品
 // 交互不同，按钮由声明驱动而非组件硬编码
 const packActions = ref<string[]>([])
-// 联网搜索开关显隐:knowledge_graph pack 未装配/禁用时隐藏(meta/packs
-// 只返回启用集;KG 禁用则 web_search 工具不存在,开关留着只会误导)
-const kgAvailable = ref(false)
+// 联网搜索开关显隐:web_search pack 未装配/禁用时隐藏(meta/packs
+// 只返回启用集;底座插件禁用则开关留着只会误导)
+const webSearchAvailable = ref(false)
 onMounted(async () => {
   try {
     const manifests = await getPackManifests()
-    kgAvailable.value = manifests.some((m: any) => m.name === 'knowledge_graph')
+    webSearchAvailable.value = manifests.some((m: any) => m.name === 'web_search')
     packDisplays.value = Object.fromEntries(manifests.map((manifest: any) => [manifest.name, manifest.artifact?.display || {}]))
     // 主交互 pack：优先声明了 artifact.display 的（制品卡标签/动作取自它）
     const primary = manifests.find((m: any) => m.artifact?.display) || manifests[0]

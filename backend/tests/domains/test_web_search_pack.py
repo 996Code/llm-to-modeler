@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from domains.knowledge_graph import runtime, websearch
-from domains.knowledge_graph.tools.web_search import WebSearchTool
+from domains.web_search import websearch
+from domains.web_search.tools.web_search import WebSearchTool
 from sdk.tool import PackInvokeError, ToolContext
 
 
@@ -21,7 +21,7 @@ def _searxng_payload(n=8):
 
 
 class _FakeStore:
-    """kg store 替身:_get_conn 上下文记录 SQL;SELECT/DELETE 模拟回读。"""
+    """web_search logs 连接替身:websearch._conn 返回记录 SQL 的假连接。"""
 
     def __init__(self):
         self.executed = []
@@ -34,7 +34,7 @@ class _FakeStore:
         def execute(self, sql, params=()):
             self._outer.executed.append((sql, params))
             sql_u = sql.upper()
-            if "INSERT INTO KG_WEB_SEARCH_LOGS" in sql_u:
+            if "INSERT INTO WEB_SEARCH_LOGS" in sql_u:
                 self._outer.inserted.append(params)
                 return None
             if sql_u.strip().startswith("SELECT"):
@@ -56,8 +56,16 @@ class _FakeStore:
         def __exit__(self, *exc):
             return False
 
-    def _get_conn(self):
+    def connect(self):
         return self._Conn(self)
+
+
+class _FakeDB:
+    """替 websearch._db(PackRelationalDB 协议:connect() 返回连接)。"""
+    def __init__(self, store):
+        self._store = store
+    def connect(self):
+        return self._store.connect()
 
 
 @pytest.fixture
@@ -68,7 +76,7 @@ def env(monkeypatch):
         settings_store=None,
         conversation_store=None,
     )
-    monkeypatch.setattr(runtime, "get_kg_store", lambda s: store)
+    monkeypatch.setattr(websearch, "_db", _FakeDB(store))
     monkeypatch.setattr(websearch, "settings_url",
                         lambda s: "http://searxng.test:8080")
     websearch.reset_cache()
@@ -161,7 +169,7 @@ def test_tool_execute_returns_data_artifact_with_sources(env, monkeypatch):
     assert len(result.artifact["results"]) == 5
     # card-only 展示(前端专用卡:总结+角标+来源卡)
     assert result.artifact["resultDisplay"] == "card"
-    assert result.artifact["pack"] == "knowledge_graph"
+    assert result.artifact["pack"] == "web_search"
     # summary=LLM 综合回答(带引用编号)
     assert "[来源:1]" in result.summary
     assert result.formatted["resultCount"] == 5
@@ -177,6 +185,22 @@ def test_tool_answer_llm_failure_degrades_to_source_list(env, monkeypatch):
     answer = websearch.synthesize_answer(env.state, "q", _searxng_payload()["results"][:3])
     assert "https://" in answer
     assert "1." in answer
+
+
+def test_tool_preflight_blocks_when_toggle_off(env):
+    """路由选中但开关没开:给点亮开关的指引(独立 pack 语义)。"""
+    tool = WebSearchTool(env.state)
+    result = tool.preflight(
+        {"query": "q", "pack_params": {"web_search": {"enabled": False}}}, env.ctx)
+    assert result is not None
+    assert "「联网」开关" in result.error_for_llm
+
+
+def test_tool_preflight_passes_when_toggle_on(env):
+    tool = WebSearchTool(env.state)
+    result = tool.preflight(
+        {"query": "q", "pack_params": {"web_search": {"enabled": True}}}, env.ctx)
+    assert result is None
 
 
 def test_tool_preflight_blocks_when_unconfigured(env, monkeypatch):
@@ -214,8 +238,8 @@ def test_log_search_persists_query_and_results(env):
     assert log["resultCount"] == 5
     # 建表+INSERT 都走了 fake conn
     sqls = " ".join(s for s, _ in env.store.executed)
-    assert "kg_web_search_logs" in sqls
-    assert "INSERT INTO kg_web_search_logs" in sqls
+    assert "web_search_logs" in sqls
+    assert "INSERT INTO web_search_logs" in sqls
 
 
 def test_list_and_clear_logs(env):

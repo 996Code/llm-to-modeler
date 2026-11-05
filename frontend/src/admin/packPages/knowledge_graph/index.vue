@@ -129,10 +129,6 @@
               <template #tab><BookOutlined /> 标注回复</template>
               <AnnotationManager :kb-id="currentKbId" />
             </a-tab-pane>
-            <a-tab-pane key="web-search">
-              <template #tab><GlobalOutlined /> 联网调研</template>
-              <WebSearchTester />
-            </a-tab-pane>
             <template #rightExtra>
               <a-popover :key="tab" placement="bottomRight" trigger="click">
                 <template #content>
@@ -226,7 +222,7 @@ import type { TreeDataItem } from 'ant-design-vue/es/tree'
 import {
   ApartmentOutlined, DeleteOutlined, EditOutlined, ExperimentOutlined,
   FileTextOutlined, FolderAddOutlined, FolderOpenOutlined, FolderOutlined,
-  GlobalOutlined, NodeIndexOutlined, BookOutlined, PartitionOutlined,
+  NodeIndexOutlined, BookOutlined, PartitionOutlined,
   PlusOutlined, QuestionCircleOutlined, SwapOutlined, SyncOutlined,
 } from '@ant-design/icons-vue'
 import {
@@ -243,7 +239,6 @@ import SchemaEditor from './SchemaEditor.vue'
 import GraphView from './GraphView.vue'
 import RetrievalTest from './RetrievalTester.vue'
 import AnnotationManager from './AnnotationManager.vue'
-import WebSearchTester from './WebSearchTester.vue'
 import KbWizard from './KbWizard.vue'
 
 const loadSafely = inject<LoadSafely>('loadSafely')!
@@ -286,14 +281,6 @@ const helpHtmlMap: Record<string, { title: string; html: string }> = {
     title: '标注回复说明',
     html: rules([
       '录入问题和标准答案;相似提问达到匹配阈值时,直接返回<b>已启用</b>的答案。',
-    ]),
-  },
-  'web-search': {
-    title: '联网调研说明',
-    html: rules([
-      '经 SearXNG(google,代理出网)检索外部信息,<b>结果必带来源链接</b>,可点开核对原文。',
-      '每次调研自动落库记录(最近调研可回看);同词 10 分钟内走缓存不重复出站。',
-      '需在插件设置里配置 SearXNG 地址;对话窗口里说"上网查一下"也会走同一搜索底座。',
     ]),
   },
 }
