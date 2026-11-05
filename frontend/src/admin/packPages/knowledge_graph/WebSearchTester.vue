@@ -24,24 +24,29 @@
     </div>
 
     <template v-if="result">
-      <section class="ws-card">
-        <div class="ws-title">
-          搜索结果
-          <span class="ws-sub">「{{ result.query }}」共 {{ result.results.length }} 条</span>
+      <!-- 总结回答(LLM 综合归纳,DeepSeek/Perplexity 式) -->
+      <section v-if="result.answer" class="ws-card">
+        <div class="ws-title">总结回答
           <a-tag v-if="result.cached" color="geekblue" class="ws-sub">缓存命中</a-tag>
         </div>
-        <div v-if="result.results.length">
-          <div v-for="(r, i) in result.results" :key="i" class="ws-item">
-            <div class="ws-item-head">
-              <span class="ws-item-idx">{{ i + 1 }}</span>
-              <a :href="r.url" target="_blank" rel="noopener noreferrer" class="ws-item-title">{{ r.title || r.url }}</a>
-            </div>
-            <div v-if="r.content" class="ws-item-content">{{ r.content }}</div>
-            <div class="ws-item-url">{{ r.url }}</div>
-          </div>
-        </div>
-        <a-empty v-else description="未找到相关结果——换个搜索词试试" style="padding: 40px 0" />
+        <div class="ws-answer md-content" v-html="renderedAnswer" />
       </section>
+      <!-- 来源卡(角标编号与总结里的 [来源:N] 对应) -->
+      <section v-if="result.results.length" class="ws-card">
+        <div class="ws-title">来源 · {{ result.results.length }} 个网页</div>
+        <div class="ws-items">
+          <a v-for="(r, i) in result.results" :key="i"
+             class="ws-item" :href="r.url" target="_blank" rel="noopener noreferrer">
+            <span class="ws-item-idx" :class="{ cited: citedSet.has(i + 1) }">{{ i + 1 }}</span>
+            <div class="ws-item-main">
+              <div class="ws-item-title">{{ r.title || r.url }}</div>
+              <div v-if="r.content" class="ws-item-content">{{ r.content }}</div>
+              <div class="ws-item-url">{{ domain(r.url) }}</div>
+            </div>
+          </a>
+        </div>
+      </section>
+      <a-empty v-else-if="!result.answer" description="未找到相关结果——换个搜索词试试" style="padding: 40px 0" />
     </template>
     <a-empty
       v-else-if="!loading" description="输入问题调研外部信息;结果带来源链接,可点开核对"
@@ -51,8 +56,10 @@
 </template>
 
 <script setup lang="ts">
-import { inject, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { kgWebSearch, kgWebSearchLogs, kgWebSearchLogsClear, KgWebSearchResult, KgWebSearchLog } from '../../api'
 import type { LoadSafely } from '../../components/loadSafely'
 
@@ -63,6 +70,24 @@ const topK = ref(5)
 const loading = ref(false)
 const result = ref<KgWebSearchResult | null>(null)
 const logs = ref<KgWebSearchLog[]>([])
+
+// 总结回答渲染:[来源:N] → 角标徽标(与对话端 WebSearchResultCard 同款形态)
+const renderedAnswer = computed(() => {
+  const raw = result.value?.answer || ''
+  if (!raw) return ''
+  let html = marked.parse(raw) as string
+  html = html.replace(/\[来源[:：]?\s*(\d+)\]/g,
+    '<span class="md-ref-web">$1</span>')
+  return DOMPurify.sanitize(html, { ADD_ATTR: ['class'] })
+})
+const citedSet = computed(() => {
+  const s = new Set<number>()
+  for (const m of (result.value?.answer || '').matchAll(/\[来源[:：]?\s*(\d+)\]/g)) s.add(Number(m[1]))
+  return s
+})
+function domain(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, '') } catch { return url }
+}
 
 async function refreshLogs() {
   try { logs.value = await kgWebSearchLogs() } catch { /* 记录加载失败不阻断调研 */ }
@@ -107,12 +132,33 @@ onMounted(refreshLogs)
 .ws-card { border-top: 1px solid #eef1f7; padding: 16px 0 0; margin-top: 16px; background: #fff; }
 .ws-title { font-weight: 600; font-size: 16px; color: #1f2937; margin-bottom: 12px; }
 .ws-sub { color: #94a3b8; font-size: 12px; font-weight: 400; margin-left: 8px; }
-.ws-item { padding: 10px 0; border-bottom: 1px dashed #eef1f7; }
-.ws-item:last-child { border-bottom: none; }
-.ws-item-head { display: flex; align-items: baseline; gap: 8px; }
-.ws-item-idx { color: #cbd5e1; font-size: 12px; flex: none; }
-.ws-item-title { color: #1f2937; font-weight: 500; text-decoration: none; }
-.ws-item-title:hover { color: var(--brand); }
-.ws-item-content { color: #6b7280; font-size: 13px; margin: 4px 0 0 20px; line-height: 1.6; }
-.ws-item-url { color: #94a3b8; font-size: 12px; margin: 2px 0 0 20px; word-break: break-all; }
+/* 总结回答(markdown)+角标徽标 */
+.ws-answer { font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.ws-answer :deep(p) { margin: 0 0 8px; }
+.ws-answer :deep(ul), .ws-answer :deep(ol) { padding-left: 20px; margin: 6px 0 12px; }
+.md-ref-web {
+  display: inline-block; min-width: 18px; text-align: center;
+  padding: 0 5px; margin: 0 2px; border-radius: 9px;
+  background: var(--color-primary-bg, #eef4ff); color: var(--brand, #3370FF);
+  font-size: 11px; font-weight: 600; line-height: 17px; vertical-align: baseline;
+}
+/* 来源卡列表(编号与角标对应,被引用高亮) */
+.ws-items { display: flex; flex-direction: column; gap: 8px; }
+.ws-item {
+  display: flex; gap: 10px; padding: 10px 12px;
+  border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;
+  text-decoration: none; transition: all .15s;
+}
+.ws-item:hover { border-color: var(--brand); box-shadow: 0 2px 6px rgba(51,112,255,.12); }
+.ws-item-idx {
+  flex: none; min-width: 18px; text-align: center; margin-top: 2px;
+  padding: 0 4px; border-radius: 8px; font-size: 11px; font-weight: 600;
+  line-height: 16px; background: #f1f5f9; color: #64748b;
+}
+.ws-item-idx.cited { background: var(--brand, #3370FF); color: #fff; }
+.ws-item-main { min-width: 0; flex: 1; }
+.ws-item-title { color: #1f2937; font-weight: 500; font-size: 13px; line-height: 1.4; }
+.ws-item-content { color: #6b7280; font-size: 12px; margin-top: 3px; line-height: 1.6;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ws-item-url { color: #94a3b8; font-size: 11px; margin-top: 3px; }
 </style>

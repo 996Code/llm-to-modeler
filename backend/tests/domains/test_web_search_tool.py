@@ -147,17 +147,36 @@ def test_search_upstream_timeout_raises_retryable(env):
 
 # ── 工具层 WebSearchTool ───────────────────────────────────
 
-def test_tool_execute_returns_data_artifact_with_sources(env):
+def test_tool_execute_returns_data_artifact_with_sources(env, monkeypatch):
     _mock_get(env)
+    # LLM 综合回答替身:返回带 [来源:N] 引用的总结(真实链路走 web_answer.j2)
+    monkeypatch.setattr(websearch, "synthesize_answer",
+                        lambda s, q, r, conv_id=None:
+                        f"**总结**:共 {len(r)} 条结果,首条为 {r[0]['title']} [来源:1]")
     tool = WebSearchTool(env.state)
     result = tool.execute({"query": "JJG 544 压力控制器检定规程"}, env.ctx)
     assert result.artifact_type == "data"
     assert result.artifact["type"] == "web_search_result"
     assert result.artifact["query"] == "JJG 544 压力控制器检定规程"
     assert len(result.artifact["results"]) == 5
-    # summary 带来源 URL(受控架构:联网结果必须可追溯)
-    assert "https://" in result.summary
+    # card-only 展示(前端专用卡:总结+角标+来源卡)
+    assert result.artifact["resultDisplay"] == "card"
+    assert result.artifact["pack"] == "knowledge_graph"
+    # summary=LLM 综合回答(带引用编号)
+    assert "[来源:1]" in result.summary
     assert result.formatted["resultCount"] == 5
+
+
+def test_tool_answer_llm_failure_degrades_to_source_list(env, monkeypatch):
+    """LLM 综合失败 fail-open:降级带来源 URL 的列表(不丢搜索结果)。"""
+    _mock_get(env)
+    def boom(s, q, r, conv_id=None):
+        raise RuntimeError("llm down")
+    # synthesize_answer 内部 try/except 已兜底——这里直接测它的降级路径
+    monkeypatch.setattr(websearch, "_prompts", lambda: (_ for _ in ()).throw(RuntimeError("no")))
+    answer = websearch.synthesize_answer(env.state, "q", _searxng_payload()["results"][:3])
+    assert "https://" in answer
+    assert "1." in answer
 
 
 def test_tool_preflight_blocks_when_unconfigured(env, monkeypatch):

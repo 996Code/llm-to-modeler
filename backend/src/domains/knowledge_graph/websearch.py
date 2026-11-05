@@ -18,6 +18,7 @@ import logging
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -26,6 +27,18 @@ from domains.knowledge_graph import runtime
 from sdk.tool import PackInvokeError
 
 logger = logging.getLogger(__name__)
+
+_prompt_loader = None
+
+
+def _prompts():
+    """KG pack 提示词加载器(照 retrieval._prompt_loader 模式)。"""
+    global _prompt_loader
+    if _prompt_loader is None:
+        from sdk.prompt_loader import PromptLoader
+        _prompt_loader = PromptLoader(
+            packs_root=Path(__file__).resolve().parent.parent)
+    return _prompt_loader
 
 # 同 query 10 分钟内直接回缓存(运营调研高频重复同一问题的场景)
 CACHE_TTL_S = 600.0
@@ -110,6 +123,35 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
         _CACHE[query] = {"results": results, "at": time.monotonic()}
 
     return {"query": query, "results": results, "cached": False}
+
+
+def synthesize_answer(app_state, query: str, results: List[dict],
+                      conv_id: Optional[str] = None) -> str:
+    """LLM 综合回答(DeepSeek/Perplexity 式总结,非链接列表)。
+
+    搜索结果注入 web_answer.j2 模板 → LLM 归纳成连贯回答,句尾带
+    [来源:N] 引用(前端渲染成角标徽标,点击跳来源卡)。LLM 不可用时
+    降级为纯结果列表摘要(fail-open:搜索已成功,不因综合失败丢结果)。
+    """
+    if not results:
+        return f"联网搜索「{query}」未找到相关结果"
+    try:
+        prompt = _prompts().render("knowledge_graph", "web_answer",
+                                   query=query, results=results)
+        answer = app_state.llm_client.chat(
+            [{"role": "user", "content": prompt}],
+            temperature=0.2, conv_id=conv_id, stage="kg.web_answer",
+        ).strip()
+        if answer:
+            return answer
+        logger.warning("web_answer LLM 返回空,降级结果列表")
+    except Exception as e:
+        logger.warning(f"web_answer 综合失败(降级结果列表): {e}")
+    # 降级:带来源的列表摘要(诚实原则:来源 URL 必带)
+    lines = [f"联网搜索「{query}」,共 {len(results)} 条结果:"]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r['title']} — {r['url']}")
+    return "\n".join(lines)
 
 
 # ── 调研记录(kg_web_search_logs;管理端调研 tab 持久化) ────────

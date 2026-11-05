@@ -916,6 +916,8 @@ export interface KgWebSearchResult {
   query: string
   results: KgWebSearchResultItem[]
   cached: boolean
+  /** LLM 综合回答(总结式;失败时后端降级为带来源的列表文本) */
+  answer: string
   logId: string
 }
 export interface KgWebSearchLog {

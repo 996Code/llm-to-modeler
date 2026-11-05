@@ -61,6 +61,10 @@ def env(monkeypatch):
             {"title": "检定规程 B", "url": "https://b.test/y",
              "content": "摘要 B"}][:top_k]}
     monkeypatch.setattr(websearch, "search", fake_search)
+    # 综合回答替身(真实链路走 LLM+web_answer.j2)
+    monkeypatch.setattr(websearch, "synthesize_answer",
+                        lambda s, q, r, conv_id=None:
+                        f"**总结**:命中 {len(r)} 条 [来源:1]")
 
     app = FastAPI()
     app.include_router(kg_api.router, prefix="/api/packs/knowledge_graph")
@@ -89,6 +93,7 @@ def test_web_search_returns_results_and_logs(env):
     body = resp.json()
     assert len(body["results"]) == 2
     assert body["results"][0]["url"] == "https://a.test/x"
+    assert "[来源:1]" in body["answer"]
     assert body["logId"]
     # 调研记录已 INSERT(fake conn 捕获)
     sqls = " ".join(s for s, _ in env.executed)

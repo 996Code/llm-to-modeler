@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _PIPELINE_STEPS = [
     {"key": "web_search.search", "label": "联网搜索"},
     {"key": "web_search.assemble", "label": "整理结果与来源"},
+    {"key": "web_search.answer", "label": "综合归纳回答"},
 ]
 
 
@@ -94,19 +95,24 @@ class WebSearchTool(Tool):
                                   for r in results[:5]],
                   })
 
+        # LLM 综合回答(DeepSeek/Perplexity 式总结):搜索结果归纳成连贯
+        # 回答,句尾 [来源:N] 引用;LLM 失败降级带来源的列表摘要
+        ctx.emit("stage", "web_search.answer", "综合归纳搜索结果…")
+        answer = websearch.synthesize_answer(
+            self._app_state, query, results, conv_id=ctx.conv_id)
+
         artifact = {
             "type": "web_search_result",
             "query": query,
             "results": results,
             "cached": cached,
+            "answer": answer,
         }
-        # summary 进历史与 LLM 上下文:结果条数 + 每条标题与来源 URL
-        # (受控架构:联网内容必须可追溯,不裸给结论)
-        lines = [f"联网搜索「{query}」{'(缓存)' if cached else ''},"
-                 f"共 {len(results)} 条结果:"]
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r['title']} — {r['url']}")
-        summary = "\n".join(lines) if results else (
+        # card-only 展示(前端 WebSearchResultCard 专用卡:总结+角标+来源卡)
+        if isinstance(answer, str) and answer.strip():
+            artifact.update(pack="knowledge_graph", resultDisplay="card")
+        # summary=综合回答本体(进历史与 LLM 上下文;引用编号随卡渲染)
+        summary = answer if results else (
             f"联网搜索「{query}」未找到相关结果")
 
         return ToolResult(

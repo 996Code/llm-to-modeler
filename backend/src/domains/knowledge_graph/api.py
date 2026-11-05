@@ -1181,10 +1181,14 @@ async def web_search(request: Request, payload: Dict[str, Any]):
         # 异常详情只进服务端日志;管理端点不回显内部地址等拓扑
         logger.exception("web-search failed")
         raise HTTPException(502, "联网搜索失败,请稍后重试或检查插件设置里的 SearXNG 地址")
+    # LLM 综合回答(总结式,DeepSeek/Perplexity 式;失败降级列表摘要)
+    answer = await asyncio.to_thread(
+        websearch.synthesize_answer, request.app.state, query,
+        out["results"])
     log = await asyncio.to_thread(
         websearch.log_search, request.app.state, query, out["results"],
         bool(out.get("cached")), operator=operator)
-    return out | {"logId": log["id"]}
+    return out | {"answer": answer, "logId": log["id"]}
 
 
 @router.get("/web-search/logs", dependencies=[Depends(admin_required)])

@@ -1,5 +1,10 @@
 <template>
-  <div class="kg-result">
+  <!-- web_search 联网搜索结果:总结+角标+来源卡(专用卡) -->
+  <WebSearchResultCard v-if="artifact.type === 'web_search_result'"
+    :artifact="artifact" :summary="summary" :labels="labels"
+    :render-markdown="renderMarkdown" :compact="compact" :cited-chunks="citedChunks" />
+  <!-- KG 检索结果:回答+子图卡(原卡) -->
+  <div v-else class="kg-result">
     <div class="md-content" v-html="renderMarkdown(artifact.answer)" />
     <KgGraphCard :result="artifact" :compact="compact" :cited-chunks="citedChunks" />
   </div>
@@ -7,6 +12,7 @@
 
 <script setup lang="ts">
 import KgGraphCard from '../../components/chat/KgGraphCard.vue'
+import WebSearchResultCard from './WebSearchResultCard.vue'
 
 defineProps<{
   artifact: Record<string, any>
