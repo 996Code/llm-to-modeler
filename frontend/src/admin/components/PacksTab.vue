@@ -56,7 +56,7 @@
         <div v-if="!depOk(pack)" class="pk-dep-detail">{{ pack.dependency?.detail }}</div>
         <div class="pk-foot">
           <span class="pk-meta">
-            <a-tooltip v-if="pack.tools.length" :title="pack.tools.join('、')">
+            <a-tooltip v-if="pack.tools.length" :title="pack.tools.map((t: string) => TOOL_LABELS[t] || t).join('、')">
               <a-tag color="purple">{{ pack.tools.length }} 个工具</a-tag>
             </a-tooltip>
             <a-tooltip v-else title="插件当前未加载,启用后可见工具清单">
@@ -98,6 +98,7 @@
 </template>
 
 <script setup lang="ts">
+import { TOOL_LABELS } from '../labels'
 // 插件管理:卡片式布局 + 启停开关(热生效) + 依赖检测徽标 + 声明式设置抽屉。
 import { computed, inject, onMounted, ref } from 'vue'
 import { message } from 'ant-design-vue'

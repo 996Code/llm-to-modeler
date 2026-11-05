@@ -23,6 +23,15 @@ export const CALL_TYPE_CLS: Record<string, string> = {
   fulltext: 'tg-fulltext',
 }
 
+/** 工具名 → 中文名(插件列表工具清单悬浮展示;未映射按原名) */
+export const TOOL_LABELS: Record<string, string> = {
+  kb_search: '知识库检索',
+  web_search: '联网搜索',
+  ask_data: '智能问数',
+  switch_chart: '图表切换',
+  query_stats: '查询统计',
+}
+
 /** stage → 中文环节名(管理端链路/调用日志据此区分调用环节) */
 export const STAGE_LABELS: Record<string, string> = {
   route_pack: '意图路由·选领域',

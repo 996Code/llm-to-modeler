@@ -9,7 +9,7 @@
         <span>来源 · {{ results.length }} 个网页</span>
         <a-tag v-if="artifact.cached" color="geekblue" class="ws-cached-tag">缓存命中</a-tag>
       </div>
-      <div class="ws-sources-scroll">
+      <div class="ws-sources-list">
         <a v-for="(r, i) in results" :key="i"
            class="ws-source-card" :href="r.url" target="_blank" rel="noopener noreferrer"
            :ref="el => sourceRefs[i] = el">
@@ -90,7 +90,7 @@ function onRefClick(e: MouseEvent) {
 }
 .md-content :deep(.md-ref-web:hover) { background: var(--brand, #3370FF); color: #fff; }
 
-/* 来源卡横滚区(照 Perplexity Sources:小卡片+域名) */
+/* 来源卡纵向列表(编号+标题+域名一行式,与总结角标对应) */
 .ws-sources { margin-top: 4px; }
 .ws-sources-head {
   display: flex; align-items: center; gap: 6px;
@@ -98,26 +98,23 @@ function onRefClick(e: MouseEvent) {
 }
 .ws-sources-icon { font-size: 12px; }
 .ws-cached-tag { margin-left: 4px; }
-.ws-sources-scroll {
-  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px;
-  scrollbar-width: thin;
-}
+.ws-sources-list { display: flex; flex-direction: column; gap: 6px; }
 .ws-source-card {
-  flex: 0 0 auto; width: 220px; display: flex; flex-direction: column; gap: 4px;
-  padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 8px;
-  background: #fff; text-decoration: none; transition: all .15s;
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;
+  text-decoration: none; transition: all .15s;
 }
-.ws-source-card:hover { border-color: var(--brand, #3370FF); box-shadow: 0 2px 6px rgba(51,112,255,.12); }
+.ws-source-card:hover { border-color: var(--brand, #3370FF); background: #fafbff; }
 .ws-source-card.flash { border-color: var(--brand, #3370FF); background: var(--color-primary-bg, #eef4ff); }
 .ws-source-idx {
-  align-self: flex-start; min-width: 16px; text-align: center;
-  padding: 0 4px; border-radius: 8px; font-size: 10px; font-weight: 600;
-  line-height: 15px; background: #f1f5f9; color: #64748b;
+  flex: none; min-width: 18px; text-align: center;
+  padding: 0 4px; border-radius: 8px; font-size: 11px; font-weight: 600;
+  line-height: 16px; background: #f1f5f9; color: #64748b;
 }
 .ws-source-idx.cited { background: var(--brand, #3370FF); color: #fff; }
 .ws-source-title {
-  font-size: 12px; font-weight: 500; color: #1f2937; line-height: 1.4;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  flex: 1; min-width: 0; font-size: 12px; font-weight: 500; color: #1f2937;
+  line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.ws-source-domain { font-size: 11px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-source-domain { flex: none; font-size: 11px; color: #94a3b8; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

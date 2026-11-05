@@ -44,8 +44,11 @@
       <div class="input-actions">
         <!-- 流式生成时显示提示 -->
         <span v-if="streaming" class="input-hint">生成中...</span>
-        <!-- 联网搜索开关(嵌入/独立两种模式共用;开=允许路由到 web_search) -->
+        <!-- 联网搜索开关(嵌入/独立两种模式共用;开=允许路由到 web_search)。
+             KG 插件禁用/未装配时隐藏(web_search 工具不存在,开关无意义)。
+             样式对齐附件按钮:无边框幽灵图标钮,开=品牌色点亮 -->
         <button
+          v-if="!hideWebSearch"
           class="ws-toggle"
           :class="{ on: webSearch }"
           :disabled="streaming"
@@ -53,7 +56,6 @@
           @click="$emit('toggle-web-search', !webSearch)"
         >
           <GlobalOutlined />
-          <span class="ws-toggle-label">联网</span>
         </button>
         <!-- 附件（图片）按钮，点击触发隐藏的 file input -->
         <button
@@ -110,6 +112,7 @@ const props = defineProps<{
   pendingClarification?: boolean      // 当前是否处于追问态（影响占位文案）
   totalTokens?: number                // 当前对话累计 token(输入框角常显)
   webSearch?: boolean                 // 联网搜索开关状态(父组件 store 持有)
+  hideWebSearch?: boolean             // true=隐藏开关(KG 插件未装配/禁用)
 }>()
 
 // defineEmits：声明本组件会触发的事件（接口契约，类比 Java 的事件总线/回调接口）。
@@ -458,16 +461,18 @@ function onEnter(e: KeyboardEvent) {
   .chat-input-wrap { padding: 8px 12px 12px; }
 }
 
-/* 联网搜索开关:默认灰,开启高亮品牌色 */
+/* 联网搜索开关:对齐 attach-btn 的幽灵图标钮——关=灰图标,开=品牌色点亮
+   (开态即 hover 态形态,视觉语言与附件按钮一族,不再带边框小方块) */
 .ws-toggle {
-  display: inline-flex; align-items: center; gap: 3px;
-  border: 1px solid #e2e8f0; border-radius: 8px; background: #fff;
-  color: #94a3b8; font-size: 12px; padding: 2px 8px; cursor: pointer;
+  width: 34px; height: 34px;
+  border-radius: var(--radius-md);
+  border: none; background: transparent;
+  color: var(--text-secondary);
+  font-size: 16px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s; flex-shrink: 0;
 }
-.ws-toggle:hover { border-color: var(--brand); color: var(--brand-ink); }
-.ws-toggle.on {
-  border-color: var(--brand); background: var(--brand-ink, #eef4ff);
-  color: var(--brand);
-}
-.ws-toggle-label { line-height: 1; }
+.ws-toggle:hover { color: var(--color-primary); background: var(--color-primary-bg); }
+.ws-toggle.on { color: var(--color-primary); background: var(--color-primary-bg); }
+.ws-toggle:disabled { cursor: not-allowed; opacity: 0.4; }
 </style>
