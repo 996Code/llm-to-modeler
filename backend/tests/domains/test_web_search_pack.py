@@ -292,3 +292,38 @@ def test_cache_topk_semantics(env):
     out5 = websearch.search(env.state, "JJG 52", top_k=5)
     assert len(out5["results"]) == 5 and out5["cached"] is True
     assert len(calls) == 1
+
+def test_single_flight_same_query_concurrent(env):
+    """同词并发只放一个出站(缓存击穿防护)。"""
+    import threading
+    calls = []
+    gate = threading.Event()
+
+    def slow_get(self, url, **kw):
+        calls.append(url)
+        gate.wait(5)  # 领头在途时跟随者已到齐
+        return _FakeRespLocal()
+
+    class _FakeRespLocal:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"results": [{"title": "t", "url": "https://a.test/x", "content": "c"}] * 5}
+
+    env.monkeypatch.setattr(websearch.httpx.Client, "get", slow_get)
+    results = []
+    def run():
+        try:
+            results.append(websearch.search(env.state, "并发同词", top_k=3))
+        except Exception as e:  # noqa: BLE001
+            results.append(e)
+    threads = [threading.Thread(target=run) for _ in range(4)]
+    [t.start() for t in threads]
+    import time as _t
+    _t.sleep(0.5)  # 跟随者集结
+    gate.set()      # 放行领头
+    [t.join(3) for t in threads]
+    ok = [r for r in results if not isinstance(r, Exception)]
+    assert len(ok) == 4
+    assert len(calls) == 1, f"击穿:出站 {len(calls)} 次"
+    assert sum(1 for r in ok if r.get("cached")) == 3  # 跟随者全走缓存

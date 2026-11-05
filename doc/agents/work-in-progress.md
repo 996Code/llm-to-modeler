@@ -2,6 +2,23 @@
 
 > 会过时。接手先核对实际状态（git log / 服务器任务队列），再决定本页还剩多少有效。
 
+## 联网搜索全链路（2026-11-05，94919d4..d3f1e89 已推 origin，3.110 未部署）
+
+- **web_search 独立公用 pack**（用户方案 A）：自有设置页(searxng_url/mihomo_api_url)+
+  联网调研管理页；KG 摘除内嵌工具；客服 other 分支直连 websearch 底层(可选依赖)。
+- **能力**：LLM 总结式回答(DeepSeek 式[来源:N]角标+来源卡纵列)、限流自动切节点
+  (跨区域轮换+single-flight 防击穿)、zh-CN 结果本地化、指令前缀剥离、
+  关键字核对诚实规则(问陈蔓答陈曼→开头声明不一致)、空结果不缓存。
+- **对话开关**：输入区胶囊按钮(嵌入/独立共用)，pack_params.web_search.enabled 通路；
+  插件禁用自动隐藏。对话链路/管理端/客服三入口全通。
+- **本地测试栈常驻**：searxng-test(8888)+searxng-mihomo(19090 发布 controller)双容器。
+- **3.110 部署清单**（网络恢复后）：①PACKS_ENABLED 加 web_search ②/data/base/searxng
+  两个配置模板换新(三层代理组+短挂起+default_lang，见 doc/agents/deploy-searxng-3110.*)
+  ③KG 设置页删旧 searxng_url、联网搜索设置页配 searxng_url=http://searxng:8080 +
+  mihomo_api_url=http://searxng-mihomo:9090 ④deploy.sh --skip-pull。
+- 质量门：全量 1893+447 绿、e2e 回归 9/9、CI #88 绿、代码审查两轮(1C/3I/8M 全整改)。
+
+
 ## 全站视觉精装 + LLM 降频（2026-11-03/04，均已推 origin）
 
 - **UI 精装（4ab721a，已部署 3.110）**：设计令牌唯一源

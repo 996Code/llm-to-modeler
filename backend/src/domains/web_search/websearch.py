@@ -47,6 +47,10 @@ def _prompts():
 CACHE_TTL_S = 600.0
 _CACHE_KEEP = 10      # 缓存保存条数(读侧按 top_k 裁剪)
 _CACHE_MAX = 200      # 缓存条目上限(超量清最旧)
+# 同词并发合并(single-flight):并发同词只放一个出站——击穿会连环触发
+# google 限流+节点轮换互相打架(实测 5 并发全 miss 各自出站 23s)
+_INFLIGHT: Dict[str, threading.Event] = {}
+_INFLIGHT_LOCK = threading.Lock()
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
@@ -172,14 +176,46 @@ def search(app_state, query: str, top_k: int = 5) -> Dict[str, Any]:
     if not query:
         raise PackInvokeError("搜索词不能为空", PackInvokeError.PERMANENT)
 
-    with _CACHE_LOCK:
-        hit = _CACHE.get(query)
-        if hit and time.monotonic() - hit["at"] < CACHE_TTL_S:
-            # 缓存固定存前 _CACHE_KEEP 条,读时按本次 top_k 裁剪——
-            # 首次 top_k=3 不再把后续 top_k=5 截成 3(审查 M2)
-            return {"query": query, "results": hit["results"][:top_k],
-                    "cached": True}
+    def _cache_hit():
+        with _CACHE_LOCK:
+            hit = _CACHE.get(query)
+            if hit and time.monotonic() - hit["at"] < CACHE_TTL_S:
+                # 缓存固定存前 _CACHE_KEEP 条,读时按本次 top_k 裁剪——
+                # 首次 top_k=3 不再把后续 top_k=5 截成 3(审查 M2)
+                return {"query": query, "results": hit["results"][:top_k],
+                        "cached": True}
+        return None
 
+    got = _cache_hit()
+    if got is not None:
+        return got
+    # single-flight:同词并发只放领头一个出站,跟随者等完成读缓存。
+    # 领头结果为空(空结果不缓存是既有语义)或抛错时,跟随者各自补跑一次
+    # ——空查询场景退化为无合并,可接受;非空场景(主路径)完全合并
+    with _INFLIGHT_LOCK:
+        ev = _INFLIGHT.get(query)
+        leader = ev is None
+        if leader:
+            ev = threading.Event()
+            _INFLIGHT[query] = ev
+    if not leader:
+        ev.wait(timeout=_TIMEOUT_S * 4)
+        got = _cache_hit()
+        if got is not None:
+            return got
+        return _search_leader(app_state, query, top_k)  # 补跑(不持锁不泄注册)
+    try:
+        return _search_leader(app_state, query, top_k)
+    finally:
+        # 只清自己的注册(防误 pop 接班新领头的表项)再唤醒全部跟随者
+        with _INFLIGHT_LOCK:
+            if _INFLIGHT.get(query) is ev:
+                _INFLIGHT.pop(query, None)
+        ev.set()
+
+
+def _search_leader(app_state, query: str, top_k: int) -> Dict[str, Any]:
+    """single-flight 领头执行:真实出站+缓存写入(仅 search() 内部使用)。"""
     base = settings_url(app_state)
     if not base:
         raise PackInvokeError(
