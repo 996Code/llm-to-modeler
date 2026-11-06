@@ -92,6 +92,9 @@ backend/debs/
 backend/dist/
 frontend/dist/
 
+# 服务器部署侧 compose 覆盖（searxng 网络/equipment-mcp 等本地差异，勿提交）
+docker-compose.override.yml
+
 # 部署运行时数据（compose 相对路径挂载的落盘内容，勿提交）
 data/
 

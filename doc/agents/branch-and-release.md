@@ -11,12 +11,28 @@
 |---|---|
 | origin | git@github.com:996Code/llm-to-modeler.git |
 
-## 部署出包纪律
+## 部署纪律
 
-从**最新 main** 的干净提交构建，不带任何工作区的在途文件。现行发布方式为
-开发机本地构建 linux/amd64 业务镜像，传至服务器后仅切换业务容器；不推源码树，
-不在服务器构建，不重建 PostgreSQL/Neo4j。完整命令及清理规则见
-[99.22 部署手册](deploy-99-22.md)。
+**常规发布 = 服务器源码一键**（2026-11-06 恢复；此前 10-27~11-05 因 99.22
+内存/磁盘受限临时改为本地出包，99.22 已冻结）：服务器上源码树直接
+
+```bash
+cd <服务器源码树> && ./deploy.sh
+```
+
+一条命令完成：git pull → 容器内构建（前端/依赖/deb，缓存卷复用）→ 打镜像 →
+compose 切换（停旧启新）→ 四层健康验证 → 失败自动回滚；另有
+`--status/--logs/--down/--rollback N`。
+
+- **服务器本地差异**（searxng 网络、equipment-mcp 等）一律放
+  `docker-compose.override.yml`（不入库，deploy.sh 自动附加）——
+  **绝不直接改 tracked 的 docker-compose.yml**：改了 git 树变脏、pull 卡死，
+  一键就断（10 月至 11-05 期间的手改 compose + 备份还原舞蹈即此教训）。
+- 99.22 时期的完整部署细节见 [99.22 部署手册](deploy-99-22.md)（历史存档，
+  99.22 已停更）。
+
+**应急通道 = 本地出包推镜像**（`deploy/local-build.sh`，服务器无力构建/离线时用）：
+从**最新 main** 的干净提交构建，不带任何工作区的在途文件。
 
 ```bash
 git fetch origin

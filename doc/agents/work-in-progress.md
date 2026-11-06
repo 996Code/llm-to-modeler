@@ -1,6 +1,20 @@
-# 在途工作快照（2026-11-05）
+# 在途工作快照（2026-11-06）
 
 > 会过时。接手先核对实际状态（git log / 服务器任务队列），再决定本页还剩多少有效。
+
+## 部署方式回归源码一键（2026-11-06，仓库侧已改，服务器侧待 3.110 可达）
+
+- **用户裁决（11-06）**：以后更新一律"服务器源码一键"——服务器源码树 `./deploy.sh`
+  一条命令（git pull → 容器内构建 → 打镜像 → compose 切换 → 四层健康验证 →
+  失败回滚）；本地出包 local-build.sh 降为应急通道。branch-and-release.md / AGENTS.md 已翻转。
+- deploy.sh 新增：同目录存在 `docker-compose.override.yml` 自动附加（显式 -f 会禁用
+  compose 自动合并）；.gitignore 已忽略该文件。服务器本地差异（searxng 网络、
+  equipment-mcp 等 34 行）一律进 override 文件，**不改 tracked 的 docker-compose.yml**。
+- **待 3.110 可达执行（一次性迁移）**：①`git diff docker-compose.yml` 摘出服务器侧
+  差异 → 存为 `docker-compose.override.yml` → `git checkout -- docker-compose.yml`
+  （git 树从此保持干净，pull 畅通）②验证服务器 git 拉 origin 连通（不通走服务器上
+  mihomo 7890 做 git 代理）③完整 `./deploy.sh`（含 pull）试跑 → 健康验证绿 →
+  浏览器冒烟。
 
 ## 联网搜索全链路（2026-11-05，94919d4..d3f1e89 已推 origin，3.110 未部署）
 

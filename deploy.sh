@@ -17,6 +17,8 @@
 #
 # 容器管理：docker compose（仓库根 docker-compose.yml）——版本经 TAG 切换，
 # 数据卷/健康检查声明式维护；回滚 = 旧 TAG 再 up。
+#   服务器本地差异（searxng 网络/equipment-mcp 等）放同目录
+#   docker-compose.override.yml：不入库、git pull 不碰；存在即自动附加。
 #
 # =============================================================================
 set -euo pipefail
@@ -30,6 +32,13 @@ NODE_IMAGE="${NODE_IMAGE:-node:20-alpine}"
 PY_IMAGE="${PY_IMAGE:-python:3.12-slim-trixie}"
 
 COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
+# 部署侧覆盖文件（服务器本地差异，git 不跟踪）：显式 -f 会禁用 compose 的
+# override 自动合并，存在时必须手工附加，否则 up/回滚会丢掉 searxng 网络等差异。
+OVERRIDE_FILE="$(dirname "$COMPOSE_FILE")/docker-compose.override.yml"
+COMPOSE_FILES=( -f "$COMPOSE_FILE" )
+if [ -f "$OVERRIDE_FILE" ]; then
+  COMPOSE_FILES+=( -f "$OVERRIDE_FILE" )
+fi
 
 # 工作目录 = 仓库根（.env 所在处）：脚本位于仓库根目录
 WORKDIR="$(cd "$(dirname "$0")" && pwd)"
@@ -42,7 +51,7 @@ log()  { printf '\033[32m[%s]\033[0m %s\n' "$(date '+%H:%M:%S')" "$*"; }
 err()  { printf '\033[31m[%s] ERROR\033[0m %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 cd "$WORKDIR"
 
-dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
+dc() { docker compose "${COMPOSE_FILES[@]}" "$@"; }
 # Compose owns dotenv parsing; never execute .env or print rendered secrets.
 command -v docker >/dev/null || { err "docker 未安装"; exit 1; }
 command -v python3 >/dev/null || { err "需要 python3 解析 Compose JSON"; exit 1; }
