@@ -38,12 +38,9 @@ jobs:
         working-directory: backend
         env:
           DATABASE_URL: postgresql://root:root@localhost:15432/matrix15
-          FERNET_KEY: NG6ewZrFKK1Is3v4IGClrakyBGYcjnfKSRfbqzllkwk=
           PACK_STATE_PATH: /tmp/m15.json
           PACKS_ENABLED: chatbi,njmind_list
           PACK_DEPENDENCY_PROBE: "0"
-          LLM_BASE_URL: http://127.0.0.1:9/v1
-          LLM_API_KEY: x
         run: |
           cleanup() { kill ${UVPID:-0} 2>/dev/null || true; }
           trap cleanup EXIT
@@ -104,12 +101,9 @@ jobs:
         working-directory: backend
         env:
           DATABASE_URL: postgresql://root:root@localhost:15433/matrix16
-          FERNET_KEY: NG6ewZrFKK1Is3v4IGClrakyBGYcjnfKSRfbqzllkwk=
           PACK_STATE_PATH: /tmp/m16.json
           PACKS_ENABLED: chatbi,njmind_list
           PACK_DEPENDENCY_PROBE: "0"
-          LLM_BASE_URL: http://127.0.0.1:9/v1
-          LLM_API_KEY: x
         run: |
           cleanup() { kill ${UVPID:-0} 2>/dev/null || true; }
           trap cleanup EXIT
