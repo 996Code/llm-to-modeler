@@ -30,6 +30,9 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-60}"
 MIRROR="${MIRROR:-docker.m.daocloud.io/library}"
 NODE_IMAGE="${NODE_IMAGE:-node:20-alpine}"
 PY_IMAGE="${PY_IMAGE:-python:3.12-slim-trixie}"
+# npm 源（11-09 实录：npmmirror 服务端故障 ER_NO_SUCH_TABLE 持续 500，
+# 服务器上 NPM_REGISTRY=https://registry.npmjs.org 应急切换）
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
 
 COMPOSE_FILE="$(cd "$(dirname "$0")" && pwd)/docker-compose.yml"
 # 部署侧覆盖文件（服务器本地差异，git 不跟踪）：显式 -f 会禁用 compose 的
@@ -179,13 +182,13 @@ mkdir -p frontend/dist
 find frontend/src \( -name '*.js' -o -name '*.js.map' \) -delete
 docker run --rm -v "$PWD/frontend:/app" -v llm_pnpm_store:/root/.pnpm-store \
   --memory 4g --cpus 2 -w /app \
-  -e npm_config_registry=https://registry.npmmirror.com \
+  -e npm_config_registry="$NPM_REGISTRY" \
   "$NODE_IMAGE" sh -c "
     export CI=true &&
-    npm config set registry https://registry.npmmirror.com &&
+    npm config set registry $NPM_REGISTRY &&
     npm install -g pnpm@9 &&
     pnpm config set store-dir /root/.pnpm-store &&
-    pnpm config set registry https://registry.npmmirror.com &&
+    pnpm config set registry $NPM_REGISTRY &&
     pnpm install --frozen-lockfile &&
     pnpm run build
   " 2>&1 | tail -3
