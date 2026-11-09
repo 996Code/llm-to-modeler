@@ -11,7 +11,7 @@ cd frontend && npx vue-tsc --noEmit                        # 前端类型检查
 ## 关键事实
 
 - **必须用 `backend/.venv`（uv 管理）**；旧的 `backend/venv` 是 7 月遗物，starlette/httpx2 不齐会在收集期报错。
-- 测试库需要本机 Docker（chatbi-postgres 容器）；5432 拒连先 `open -a Docker`。
+- 测试库需要本机 Docker（postgres 容器）；5432 拒连先 `open -a Docker`。
 - 测试库并发互踩已根治（advisory lock fail-fast）；僵尸 mock 进程是慢测隐形元凶。
 - 后端测试用真 PG（conftest 每测试 TRUNCATE 业务表）；专用 pytest 库与运行库分离（见 backend/.env 注释）。
 

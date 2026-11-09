@@ -15,11 +15,11 @@
   5. 每个测试前 TRUNCATE 全部业务表(等价于旧 SQLite 时代的
      "每个 tmp 文件一个新库"隔离语义;pytest 串行执行下安全)
 
-快速起测试库(本地,用常驻 chatbi-postgres 建独立测试库+vector 扩展;
-不要另起纯 postgres 镜像——无 vector 扩展,向量用例会整片失败):
-  docker exec chatbi-postgres psql -U root -d postgres \\
+快速起测试库(本地,用常驻 postgres 容器建独立测试库+vector 扩展;
+不要另起官方 postgres 镜像——无 vector 扩展,向量用例会整片失败):
+  docker exec postgres psql -U root -d postgres \\
       -c "CREATE DATABASE llm_modeler_test_run"
-  docker exec chatbi-postgres psql -U root -d llm_modeler_test_run \\
+  docker exec postgres psql -U root -d llm_modeler_test_run \\
       -c "CREATE EXTENSION IF NOT EXISTS vector"
   export TEST_DATABASE_URL=postgresql://root:root@localhost:5432/llm_modeler_test_run
 """
@@ -51,11 +51,11 @@ def _resolve_test_url() -> str:
         pass
     pytest.exit(
         "未配置 TEST_DATABASE_URL:测试需要专用的 PostgreSQL 测试库"
-        "(会被清表,绝不指向业务库)。本地约定:直接用常驻的 chatbi-postgres"
+        "(会被清表,绝不指向业务库)。本地约定:直接用常驻的 postgres 容器"
         "(pgvector 镜像,root:root@localhost:5432)建测试库,名字必须含 test:\n"
-        "  docker exec chatbi-postgres psql -U root -d postgres -c "
+        "  docker exec postgres psql -U root -d postgres -c "
         "'CREATE DATABASE llm_modeler_test_run'\n"
-        "  docker exec chatbi-postgres psql -U root -d llm_modeler_test_run -c "
+        "  docker exec postgres psql -U root -d llm_modeler_test_run -c "
         "'CREATE EXTENSION IF NOT EXISTS vector'\n"
         "  export TEST_DATABASE_URL=postgresql://root:root@localhost:5432/llm_modeler_test_run\n"
         "也可写入 backend/.env 或项目根 .env(.gitignore 已覆盖)。详见 .env.example 存储段。",
@@ -138,7 +138,7 @@ if _runtime_db and _runtime_db == _dbname:
     pytest.exit(
         f"TEST_DATABASE_URL 与运行库 DATABASE_URL 同库('{_dbname}')——"
         "测试会 TRUNCATE 运行数据。请为 pytest 建专用库,如:\n"
-        "  docker exec chatbi-postgres psql -U root -d postgres "
+        "  docker exec postgres psql -U root -d postgres "
         "-c 'CREATE DATABASE llm_modeler_test_run OWNER root;'\n"
         "并把 backend/.env 的 TEST_DATABASE_URL 指向它。",
         returncode=4,

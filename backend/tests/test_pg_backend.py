@@ -8,8 +8,8 @@
   - PackSettingsStore: 合并保存/显式清除
   - PostgresSaver: setup + checkpoint 读写往返(追问现场落 PG)
 
-本地跑法(在 chatbi-postgres 容器里建独立测试库,不动业务库):
-  docker exec chatbi-postgres psql -U root -d postgres -c \\
+本地跑法(在 postgres 容器里建独立测试库,不动业务库):
+  docker exec postgres psql -U root -d postgres -c \\
       "DROP DATABASE IF EXISTS llm_modeler_test; CREATE DATABASE llm_modeler_test;"
   TEST_DATABASE_URL=postgresql://root:root@localhost:5432/llm_modeler_test \\
       ./venv/bin/python -m pytest tests/test_pg_backend.py -v
