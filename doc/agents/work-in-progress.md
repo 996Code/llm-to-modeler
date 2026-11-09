@@ -1,20 +1,37 @@
-# 在途工作快照（2026-11-06）
+# 在途工作快照（2026-11-09）
 
 > 会过时。接手先核对实际状态（git log / 服务器任务队列），再决定本页还剩多少有效。
 
-## 部署方式回归源码一键（2026-11-06，仓库侧已改，服务器侧待 3.110 可达）
+## 部署方式回归源码一键（2026-11-09 **已完成全流程落地**）
 
-- **用户裁决（11-06）**：以后更新一律"服务器源码一键"——服务器源码树 `./deploy.sh`
+- **用户裁决（11-06）**：常规发布=服务器源码一键——3.110 源码树 `./deploy.sh`
   一条命令（git pull → 容器内构建 → 打镜像 → compose 切换 → 四层健康验证 →
-  失败回滚）；本地出包 local-build.sh 降为应急通道。branch-and-release.md / AGENTS.md 已翻转。
-- deploy.sh 新增：同目录存在 `docker-compose.override.yml` 自动附加（显式 -f 会禁用
-  compose 自动合并）；.gitignore 已忽略该文件。服务器本地差异（searxng 网络、
-  equipment-mcp 等 34 行）一律进 override 文件，**不改 tracked 的 docker-compose.yml**。
-- **待 3.110 可达执行（一次性迁移）**：①`git diff docker-compose.yml` 摘出服务器侧
-  差异 → 存为 `docker-compose.override.yml` → `git checkout -- docker-compose.yml`
-  （git 树从此保持干净，pull 畅通）②验证服务器 git 拉 origin 连通（不通走服务器上
-  mihomo 7890 做 git 代理）③完整 `./deploy.sh`（含 pull）试跑 → 健康验证绿 →
-  浏览器冒烟。
+  失败回滚）；本地出包 local-build.sh 降为应急通道。
+- **11-09 一次性迁移完成并实测**：34 行服务器差异（app 挂 searxng_net 外部网络 +
+  equipment-mcp 服务）迁入 `/data/llm-modeler/docker-compose.override.yml`（不入库，
+  deploy.sh 自动附加），tracked compose 已还原，**git 树从此干净 pull 畅通**；
+  迁移前后合并配置语义 diff 零差异。全流程 `NPM_REGISTRY=https://registry.npmjs.org
+  ./deploy.sh` 实测：488c842 构建+切换+四容器全 healthy ~5min（pnpm/pip/deb 缓存全命中），
+  冒烟过（health/鉴权 packs API/双 MCP 406/SearXNG JSON 通/前端 200）。
+  旧版镜像 11f716a 保留可 `./deploy.sh --rollback`。
+- **部署侧踩坑（已修 488c842）**：npmmirror 服务端故障（ER_NO_SUCH_TABLE 持续 500）
+  卡死构建 ②a——deploy.sh 的 npm 源已暴露为 `NPM_REGISTRY` 可配置（默认仍
+  npmmirror），故障时服务器上 `NPM_REGISTRY=https://registry.npmjs.org ./deploy.sh`。
+- google 引擎持续 CAPTCHA（换节点无效，机场 IP 段被盯）——上游问题非部署回归：
+  bing 正常（JJG 544 首条命中），web_search pack 自带 CAPTCHA 自动切节点。
+
+## 本地 PG 切公共服务（2026-11-09，已实测验收）
+
+- 本地唯一 PG 容器 **postgres**（root:root@5432，卷 postgres_data，**承载全部项目
+  8 库**：llm_modeler_test/_run、kaoyan*、chatbi、accounting_assistant、llm_modeler、
+  llm_modeler_9922）——原 chatbi-postgres/llm-modeler-postgres 已删，**任何项目用
+  PG 都走它建库**，回滚=数据目录/dump（~/pg-migration-1109/）。
+- 对账全过：8 库表数一致、9922 行数一致（call_logs=73894）、API×SQL 会话 128=128、
+  验收库 8节点/8边/2向量逐项复现；test_pg_backend 11 绿。
+- 坑：Docker Desktop 偶发自己退出（socket 消失 5432 拒连）——`open -a Docker` 拉起，
+  postgres 容器凭 restart=unless-stopped 自动复活（实测过）。
+
+## 联网搜索全链路（2026-11-05，94919d4..d3f1e89 已推 origin，3.110 未部署）
 
 ## 联网搜索全链路（2026-11-05，94919d4..d3f1e89 已推 origin，3.110 未部署）
 
