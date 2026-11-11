@@ -213,7 +213,10 @@ function stageDots(turn: TraceTurn): StageDot[] {
 .dur-red { color: #dc2626; }
 
 .ov-l2 { display: flex; align-items: center; gap: 6px; margin-top: 3px; min-width: 0; flex-wrap: wrap; }
-.ov-pack { font-size: 11px; line-height: 18px; margin-inline-end: 0; flex-shrink: 0; }
+.ov-pack {
+  font-size: 11px; line-height: 18px; margin-inline-end: 0; flex-shrink: 0;
+  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ov-nopack { font-size: 11px; color: #9ca3af; }
 .ov-tool {
   font-size: 11px; color: var(--brand-ink); background: var(--brand-tint);

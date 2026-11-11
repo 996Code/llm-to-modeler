@@ -204,7 +204,13 @@ onMounted(() => { loadPackOptions(); load() })
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--ink); font-size: 14px;
 }
-.cv-pack { font-size: 12px; font-weight: 500; max-width: 100%; }
+/* 插件徽章:未注册到中文名的长 key(如 knowledge_graph)会被 110px 列宽溢出,
+   省略号防盖到相邻的用户列 */
+.cv-pack {
+  font-size: 12px; font-weight: 500;
+  display: inline-block; max-width: 92px; vertical-align: bottom;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .cv-pack-other { color: var(--ink-3); font-size: 13px; }
 .cv-count-tag { min-width: 32px; text-align: center; font-weight: 600; }
 .cv-time { font-size: 14px; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
