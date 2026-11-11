@@ -4,8 +4,9 @@
 #   metrology-mcp  mock 计量业务平台（南京院客服 Demo；复用 app 镜像，
 #                  entrypoint 覆盖；app 启动依赖 service_started，
 #                  deploy.sh 还要求其健康，不能只删此服务块）
-#   postgres       PostgreSQL 16 + pgvector（平台存储 + 图谱 + 向量，同库；
-#                  图谱=knowledge_graph schema，无独立图数据库）
+# PostgreSQL 不在本栈内:平台 PG-only(存储+图谱+向量同库),DATABASE_URL
+# 指向外部/公共 postgres 容器(2026-11-11 起移除内置 llm-modeler-postgres,
+# 线上与本地均改用共享 PG;旧数据卷 ./data/postgres 保留待人工清理)。
 # 向量存储仅使用 PG(pgvector)，不注入向量后端选择变量。
 #
 # app 镜像由根 deploy.sh 预构建（预装依赖、离线打包），compose 负责
@@ -14,7 +15,6 @@
 # （deploy.sh 已自动带 TAG；手工操作时缺省 latest）
 #
 # 每个服务都带 healthcheck（deploy.sh ⑤ 段另有发布期主动探测+回滚）：
-#   postgres  pg_isready          app 依赖(service_healthy)
 #   app       /ai-modeler/api/health
 #   metrology-mcp  /mcp 端点可达（streamable HTTP 对普通 GET 返回
 #                406=协议协商拒绝——这正是"服务活着"的证据,200/406 均算健康）
@@ -45,11 +45,10 @@ services:
       - .env
     environment:
       - TZ=Asia/Shanghai
-      # 存储为 PG-only，向量使用同库 pgvector；默认指向 postgres 服务。
-      # DATABASE_URL 可指向外部 PG，但本完整栈仍启动 postgres，
-      # POSTGRES_PASSWORD 仍必填，app 仍依赖本地 postgres service_healthy。
+      # 存储为 PG-only，向量使用同库 pgvector；本栈不内置 postgres 服务，
+      # DATABASE_URL 必填，指向外部/公共 PG（容器内不要填 localhost）。
       # 存量 SQLite 迁移脚本：backend/scripts/migrate_sqlite_to_pg.py。
-      - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-llm}:${POSTGRES_PASSWORD:?请在 .env 配置 POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-llm_modeler}}
+      - DATABASE_URL=${DATABASE_URL:?请在 .env 配置 DATABASE_URL（本栈不再内置 postgres）}
       # PG 连接池(services/db.py 读取;默认 2/8)
       - PG_POOL_MIN=${PG_POOL_MIN:-2}
       - PG_POOL_MAX=${PG_POOL_MAX:-8}
@@ -61,9 +60,8 @@ services:
       # embedding 模型：deploy.sh 首次部署时下载到 data/models/embedding/
       - ./data/models/embedding:/app/models/embedding
     depends_on:
-      postgres:
-        condition: service_healthy
       # app 等待 mock 启动，但不等待其健康；deploy.sh 发布验证另查健康。
+      # PG 在栈外(公共 postgres 容器),启动顺序不归本栈管。
       metrology-mcp:
         condition: service_started
     healthcheck:
@@ -98,29 +96,4 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
-
-  # ── PostgreSQL（存储后端：承载会话/调用日志/任务/插件设置/KG 元数据/
-#    LangGraph checkpoint + 向量存储(pgvector HNSW);平台 PG-only,
-#    DATABASE_URL 必填) ──
-  # 镜像用 pgvector/pgvector:pg16(官方 postgres:16 + pgvector 扩展,
-  # 数据卷与 postgres:16 兼容;向量表建表时自动 CREATE EXTENSION vector)。
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: llm-modeler-postgres
-    restart: unless-stopped
-    environment:
-      - TZ=Asia/Shanghai
-      - POSTGRES_USER=${POSTGRES_USER:-llm}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?请在 .env 配置 POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB:-llm_modeler}
-    ports:
-      - "${POSTGRES_PORT:-15432}:5432"
-    volumes:
-      - ./data/postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-llm} -d ${POSTGRES_DB:-llm_modeler}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
       start_period: 10s

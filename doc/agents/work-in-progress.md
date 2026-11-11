@@ -30,6 +30,12 @@
   验收库 8节点/8边/2向量逐项复现；test_pg_backend 11 绿。
 - 坑：Docker Desktop 偶发自己退出（socket 消失 5432 拒连）——`open -a Docker` 拉起，
   postgres 容器凭 restart=unless-stopped 自动复活（实测过）。
+- **compose 内置 postgres 服务已删（2026-11-11，fbe54d7 之后）**：docker-compose.yml
+  不再带 postgres 块（原 llm-modeler-postgres/15432），app 的 DATABASE_URL 改为
+  **必填**（缺失时 compose 报错并提示），depends_on 去掉 postgres；deploy.sh 健康
+  探测 3 服务→2（metrology-mcp/app）。服务器下次部署前确认 .env 已配 DATABASE_URL
+  指向公共 PG；旧容器 llm-modeler-postgres 与数据卷 ./data/postgres 由部署方决定
+  是否清理。
 
 ## 联网搜索全链路（2026-11-05，94919d4..d3f1e89 已推 origin，3.110 未部署）
 

@@ -419,7 +419,7 @@ Compose 从根 `.env` 读取插值参数并注入容器；前端 `VITE_*` 使用
 | 插件与任务 | `PACKS_ENABLED` 是部署上限，名单内可热启停；`PACKS_CRITICAL` 指定加载失败阻断启动的插件；`TASK_WORKERS` 控制任务池 |
 | 管理与嵌入 | `ADMIN_TOKEN` 未配置为开放访问；配置后支持 Bearer token / `X-Admin-Token`。`CORS_ALLOWED_ORIGINS` 配置宿主来源 |
 | 外置重排 | 独立 `RERANK_BASE_URL` / `RERANK_MODEL` / `RERANK_API_KEY` / `RERANK_TIMEOUT`，与本地向量模型无关 |
-| Compose | `HOST_PORT` / `IMAGE_NAME` / `POSTGRES_*` / 应用及 MCP 资源限制，详见部署指南 |
+| Compose | `HOST_PORT` / `IMAGE_NAME` / `DATABASE_URL`(必填,栈外 PG) / 应用及 MCP 资源限制，详见部署指南 |
 
 离线 SQLite 迁移必须用 `backend/scripts/migrate_sqlite_to_pg.py --sqlite <文件>`
 显式选择源文件。当前运行与测试均使用 PostgreSQL，测试必须使用独立 `TEST_DATABASE_URL`。

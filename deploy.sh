@@ -337,23 +337,17 @@ rollback_to_old_tag() {  # 回滚 = 旧 TAG 重新 up(app 与 metrology-mcp 同�
   fi
 }
 
-log "⑤ 健康探测（pg → metrology-mcp → app,各最长 ${HEALTH_TIMEOUT}s）..."
+log "⑤ 健康探测（metrology-mcp → app,各最长 ${HEALTH_TIMEOUT}s）..."
 DEPLOY_FAILED=0
 
-# ⑤a PostgreSQL(平台存储+图谱+pgvector):pg_isready 健康检查收敛
-log "   [1/3] postgres..."
-wait_container_healthy postgres || DEPLOY_FAILED=1
-
-# ⑤b mock 计量业务平台(客服 Demo):/mcp 端点可达(200/406 均算活——
+# ⑤a mock 计量业务平台(客服 Demo):/mcp 端点可达(200/406 均算活——
 #    streamable HTTP 对无协议头 GET 返回 406 是协商拒绝,证明服务在)
-if [ "$DEPLOY_FAILED" -eq 0 ]; then
-  log "   [2/3] metrology-mcp..."
-  wait_container_healthy metrology-mcp || DEPLOY_FAILED=1
-fi
+log "   [1/2] metrology-mcp..."
+wait_container_healthy metrology-mcp || DEPLOY_FAILED=1
 
-# ⑤c 应用:容器 healthcheck(容器内 curl)+ 宿主端口端到端(穿 nginx)
+# ⑤b 应用:容器 healthcheck(容器内 curl)+ 宿主端口端到端(穿 nginx)
 if [ "$DEPLOY_FAILED" -eq 0 ]; then
-  log "   [3/3] app（容器健康 + 端到端 ${HOST_PORT}）..."
+  log "   [2/2] app（容器健康 + 端到端 ${HOST_PORT}）..."
   if wait_container_healthy app; then
     elapsed=0
     until curl -sf --max-time 3 "http://127.0.0.1:${HOST_PORT}/ai-modeler/api/health" | grep -q '"status": *"healthy"'; do
@@ -373,7 +367,7 @@ if [ "$DEPLOY_FAILED" -ne 0 ]; then
   rollback_to_old_tag
   exit 1
 fi
-log "   全栈健康就绪 ✓（postgres / metrology-mcp / app）"
+log "   全栈健康就绪 ✓（metrology-mcp / app；PG 在栈外,由 DATABASE_URL 指向公共 postgres）"
 
 # Probe the gateway without copying credentials. Admin-gated responses are
 # expected; reuse its storage service inside app and emit only configured.
