@@ -33,9 +33,11 @@
 - **compose 内置 postgres 服务已删（2026-11-11，fbe54d7 之后）**：docker-compose.yml
   不再带 postgres 块（原 llm-modeler-postgres/15432），app 的 DATABASE_URL 改为
   **必填**（缺失时 compose 报错并提示），depends_on 去掉 postgres；deploy.sh 健康
-  探测 3 服务→2（metrology-mcp/app）。服务器下次部署前确认 .env 已配 DATABASE_URL
-  指向公共 PG；旧容器 llm-modeler-postgres 与数据卷 ./data/postgres 由部署方决定
-  是否清理。
+  探测 3 服务→2（metrology-mcp/app）。**3.110 同日完成切换并部署验收**（e998df2
+  全绿）：切前逐项对账共享库（59 会话/events 554/call_logs 5501/五 schema/pgvector），
+  停内置 → .env 补 DATABASE_URL（备份 .env.bak-pgswitch-1111）→ deploy 通过
+  （app 解析共享容器 .3、管理端 total=59、连接池 4 连入）。内置容器已停未删，
+  数据卷 ./data/postgres 留作回滚（回滚=起容器+撤 DATABASE_URL+--rollback）。
 
 ## 联网搜索全链路（2026-11-05，94919d4..d3f1e89 已推 origin，3.110 未部署）
 
