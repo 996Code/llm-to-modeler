@@ -33,7 +33,7 @@ const vector: TraceCallLike = {
   requestData: { query: '压力表 贸易结算 强制检定', topK: 5 },
   responseData: {
     hits: 5, topScore: 0.7988, meanScore: 0.7411,
-    results: [{ doc: '目录_演示版_.md', score: 0.7988, text: '用于贸易结算的压力表列入强制检定目录…' }],
+    results: [{ doc: '目录_演示版_.md', seq: 5, score: 0.7988, text: '用于贸易结算的压力表列入强制检定目录…' }],
   },
 }
 const unknown: TraceCallLike = {
@@ -57,6 +57,16 @@ describe('链路明细格式化(共享格式化器)', () => {
     expect(flat).toContain('压力表')
     expect(flat).toContain('压力表 → 压力表（product）')
   })
+  it('图谱零命中:matched/type 为 null 不输出字面 null', () => {
+    const secs = formatDetail({
+      callType: 'graph', stage: 'kg.find_entities',
+      requestData: { terms: ['超声波流量计'] },
+      responseData: { hits: 0, termDetail: [{ term: '超声波流量计', matched: null, type: null }] },
+    })
+    const flat = JSON.stringify(secs)
+    expect(flat).toContain('超声波流量计 → （未命中）')
+    expect(flat).not.toContain('null')
+  })
   it('图谱子图:种子/子图规模+关系三元组列表', () => {
     const secs = formatDetail(subgraph)
     const flat = JSON.stringify(secs)
@@ -64,12 +74,14 @@ describe('链路明细格式化(共享格式化器)', () => {
     expect(flat).toContain('压力表 -[相关]-> 强制检定')
     expect(flat).not.toContain('已截断')
   })
-  it('向量检索:检索词/命中数/相似度百分比+匹配片段', () => {
+  it('向量检索:检索词/命中数/相似度百分比+匹配片段(全量带块序号)', () => {
     const secs = formatDetail(vector)
     const flat = JSON.stringify(secs)
-    expect(flat).toContain('5 段')
+    expect(flat).toContain('匹配片段(1 段)')
     expect(flat).toContain('最高 80% · 平均 74%')
     expect(flat).toContain('目录_演示版_.md')
+    expect(flat).toContain('#5')
+    expect(flat).toContain('用于贸易结算的压力表列入强制检定目录')
   })
   it('向量化:输入 N 条 M 字 → 输出 N 条 D 维(本地模型)', () => {
     const secs = formatDetail({
@@ -80,6 +92,16 @@ describe('链路明细格式化(共享格式化器)', () => {
     const flat = JSON.stringify(secs)
     expect(flat).toContain('1 条 · 18 字 · 本地模型')
     expect(flat).toContain('1 条 · 1024 维向量')
+  })
+  it('向量化(缓存命中):缺 chars/dim 只跳过该段,不输出字面问号', () => {
+    const secs = formatDetail({
+      callType: 'llm', stage: 'kg.query_embed',
+      requestData: { stage: 'kg.query_embed', count: 2, mode: 'query', cache_hit: true },
+      responseData: { count: 2 },
+    })
+    const flat = JSON.stringify(secs)
+    expect(flat).toContain('2 条')
+    expect(flat).not.toContain('?')
   })
   it('空数据:兜底返回空数组,不输出废话占位', () => {
     expect(formatDetail({ callType: 'upstream', requestData: null, responseData: null })).toEqual([])

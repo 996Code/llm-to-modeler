@@ -1005,8 +1005,10 @@ class LLMClient:
                 endpoint="embeddings:cache",
                 request_data={
                     "stage": stage or "embeddings", "count": len(texts),
+                    "chars": sum(len(t) for t in texts),
                     "mode": mode, "cache_hit": True},
-                response_data={"count": len(hit)},
+                response_data={"count": len(hit),
+                               "dim": len(hit[0]) if hit else 0},
                 status_code=None, duration_ms=0, conv_id=conv_id)
             return hit
         result = self._embeddings_local(

@@ -464,15 +464,15 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             _log_retrieval_call(
                 app_state, CT_FULLTEXT, "pg:search_chunks_fulltext",
                 request_data={"stage": "kg.fulltext_fallback", "kbId": kb["id"],
-                              "kb": kb.get("name"), "query": query[:200],
+                              "kb": kb.get("name"), "query": query[:500],
                               "limit": 10},
                 response_data={
                     "hits": len(fulltext_hits),
                     "results": [
-                        {"doc": h.get("docName") or h.get("docId") or "?",
+                        {"doc": h.get("docName") or h.get("docId") or "(未知文档)",
                          "seq": h.get("seq"),
                          "score": round(float(h.get("score") or 0.0), 4),
-                         "text": (h.get("text") or "").strip()[:120]}
+                         "text": (h.get("text") or "").strip()[:400]}
                         for h in fulltext_hits
                     ],
                 },
@@ -528,7 +528,7 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                     app_state, CT_VECTOR, f"{_vector_backend()}:search",
                     request_data={"stage": "kg.vector_search", "kbId": kb["id"],
                                   "kb": kb.get("name"), "topK": k,
-                                  "query": query[:200], "metric": "COSINE"},
+                                  "query": query[:500], "metric": "COSINE"},
                     response_data={
                         "hits": len(hits),
                         # COSINE 相似度:越高越相似。top/mean 给"这轮召回质量"一眼结论,
@@ -536,9 +536,9 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                         "topScore": round(max(_scores), 4) if _scores else None,
                         "meanScore": round(sum(_scores) / len(_scores), 4) if _scores else None,
                         "results": [
-                            {"doc": h.get("docName") or h.get("docId") or "?",
+                            {"doc": h.get("docName") or h.get("docId") or "(未知文档)",
                              "seq": h.get("seq"), "score": round(float(h.get("score") or 0.0), 4),
-                             "text": (h.get("text") or "").strip()[:120]}
+                             "text": (h.get("text") or "").strip()[:400]}
                             for h in hits
                         ],
                     },
@@ -623,12 +623,13 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
                 app_state, CT_VECTOR, f"{_vector_backend()}:search",
                 request_data={"stage": "kg.vector_search", "kbId": kb["id"],
                               "kb": kb.get("name"), "topK": k,
-                              "query": query[:200], "docScopeRelaxed": True},
+                              "query": query[:500], "docScopeRelaxed": True},
                 response_data={"hits": len(chunks),
                                "results": [
-                                   {"doc": h.get("docName") or h.get("docId") or "?",
+                                   {"doc": h.get("docName") or h.get("docId") or "(未知文档)",
                                     "seq": h.get("seq"),
-                                    "score": round(float(h.get("score") or 0.0), 4)}
+                                    "score": round(float(h.get("score") or 0.0), 4),
+                                    "text": (h.get("text") or "").strip()[:400]}
                                    for h in chunks]},
                 duration_ms=int((time.monotonic() - _t0) * 1000),
                 error=_err, conv_id=conv_id)

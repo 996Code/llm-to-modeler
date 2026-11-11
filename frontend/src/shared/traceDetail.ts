@@ -33,9 +33,9 @@ function fmtLlm(item: TraceCallLike): DetailSection[] {
   const lastUser = [...msgs].reverse().find(m => m && m.role === 'user')
   const rows: [string, string][] = []
   if (req.model) rows.push(['模型', String(req.model)])
-  if (lastUser) rows.push(['指令摘要', clip(lastUser.content, 160)])
+  if (lastUser) rows.push(['指令摘要', clip(lastUser.content, 300)])
   if (rows.length) out.push({ rows })
-  const content = clip(resp.content, 500)
+  const content = clip(resp.content, 1000)
   if (content) out.push({ title: '输出', text: content })
   const usage = resp.usage || {}
   const toks: [string, string][] = []
@@ -56,8 +56,8 @@ function fmtFindEntities(item: TraceCallLike): DetailSection[] {
   if (rows.length) out.push({ rows })
   const detail: any[] = Array.isArray(resp.termDetail) ? resp.termDetail : []
   if (detail.length) {
-    out.push({ title: '命中明细', list: detail.slice(0, 10).map((t) =>
-      `${t.term} → ${t.matched}（${t.type}）`) })
+    out.push({ title: '命中明细', list: detail.slice(0, 20).map((t) =>
+      `${t.term} → ${t.matched ?? '（未命中）'}${t.type ? `（${t.type}）` : ''}`) })
   }
   return out
 }
@@ -75,7 +75,7 @@ function fmtSubgraph(item: TraceCallLike): DetailSection[] {
   }
   if (rows.length) out.push({ rows })
   const triples: string[] = Array.isArray(resp.triples) ? resp.triples : []
-  if (triples.length) out.push({ title: '关系', list: triples.slice(0, 10) })
+  if (triples.length) out.push({ title: '关系', list: triples.slice(0, 20) })
   return out
 }
 
@@ -85,7 +85,7 @@ function fmtVector(item: TraceCallLike): DetailSection[] {
   const resp = item.responseData || {} as any
   const out: DetailSection[] = []
   const rows: [string, string][] = []
-  if (req.query) rows.push(['检索词', clip(req.query, 120)])
+  if (req.query) rows.push(['检索词', clip(req.query, 300)])
   if (resp.hits != null) {
     rows.push(['命中', `${resp.hits} 段`])
     if (resp.topScore != null) rows.push(['相似度', `最高 ${pct(resp.topScore)} · 平均 ${pct(resp.meanScore)}`])
@@ -93,8 +93,10 @@ function fmtVector(item: TraceCallLike): DetailSection[] {
   if (rows.length) out.push({ rows })
   const results: any[] = Array.isArray(resp.results) ? resp.results : []
   if (results.length) {
-    out.push({ title: '匹配片段', list: results.slice(0, 5).map((r) =>
-      `${pct(r.score)} · ${r.doc}：${clip(r.text, 80)}`) })
+    // 全量命中带块序号,文本放宽——排障要看的是"召回了哪块、内容对不对",
+    // 截 5 条×80 字会误判成"检索结果不全"(后端落库文本上限 400)
+    out.push({ title: `匹配片段(${results.length} 段)`, list: results.slice(0, 20).map((r) =>
+      `${pct(r.score)} · ${r.doc}${r.seq != null ? ` #${r.seq}` : ''}：${clip(r.text, 200)}`) })
   }
   return out
 }
@@ -130,13 +132,17 @@ function fmtQueryEmbed(item: TraceCallLike): DetailSection[] {
   const req = item.requestData || {} as any
   const resp = item.responseData || {} as any
   const rows: [string, string][] = []
-  if (req.count != null || req.chars != null) {
-    rows.push(['输入', `${req.count ?? '?'} 条 · ${req.chars ?? '?'} 字`
-      + (req.backend ? ` · ${req.backend === 'local' ? '本地模型' : req.backend}` : '')])
-  }
-  if (resp.count != null || resp.dim != null) {
-    rows.push(['输出', `${resp.count ?? '?'} 条 · ${resp.dim ?? '?'} 维向量`])
-  }
+  // 有啥字段拼啥段,缺的跳过——缓存命中路径曾缺 chars/dim,渲染出
+  // "输入 ? 条 · ? 字"被当成乱码(后端已补齐字段,此处兜底不再输出问号)
+  const inParts: string[] = []
+  if (req.count != null) inParts.push(`${req.count} 条`)
+  if (req.chars != null) inParts.push(`${req.chars} 字`)
+  if (req.backend) inParts.push(req.backend === 'local' ? '本地模型' : String(req.backend))
+  if (inParts.length) rows.push(['输入', inParts.join(' · ')])
+  const outParts: string[] = []
+  if (resp.count != null) outParts.push(`${resp.count} 条`)
+  if (resp.dim != null) outParts.push(`${resp.dim} 维向量`)
+  if (outParts.length) rows.push(['输出', outParts.join(' · ')])
   return rows.length ? [{ rows }] : []
 }
 
