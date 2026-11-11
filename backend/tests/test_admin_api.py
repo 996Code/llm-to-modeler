@@ -373,6 +373,66 @@ def test_admin_conversation_trace(client):
     assert t["wallMs"] >= 0
 
 
+def test_admin_trace_materializes_turn_overview_fields(client):
+    """总览图物化字段:每轮 pack/tool/fallback/status/token 由 _accumulate 聚合。"""
+    store = client.app.state.conversation_store
+    conv = store.create_conversation("alice", "物化字段")
+    cid = conv["id"]
+
+    # 第 1 轮:正常工具轮(路由 ok + 工具 ok + 带 usage 的 llm 调用)
+    store.append_event(cid, "trace", {
+        "stage": "intent_route", "title": "意图路由", "status": "ok",
+        "detail": {"pack": "knowledge_graph", "tool": "kg_query",
+                   "reason": "matched", "fallback": False},
+    })
+    store.save_call_log("llm", "http://llm/c", {"messages_count": 2},
+                        {"content": "x", "usage": {"prompt_tokens": 120, "completion_tokens": 30}},
+                        200, 60, conv_id=cid)
+    store.append_event(cid, "trace", {
+        "stage": "tool_execute", "title": "执行工具 kg_query", "status": "ok",
+        "duration_ms": 800, "detail": {"summary": "完成"},
+    })
+    store.add_message(cid, "user", "查一下计量标准")
+    store.add_message(cid, "assistant", "结果如下")
+
+    # 第 2 轮:失败轮(路由落兜底 error + 4xx 上游调用)——任何一处失败都要抬到轮级
+    store.append_event(cid, "trace", {
+        "stage": "intent_route", "title": "意图路由", "status": "error",
+        "detail": {"pack": None, "tool": None, "reason": "fallback", "fallback": True},
+    })
+    store.save_call_log("upstream", "http://up/x", {}, {"error": "boom"},
+                        502, 30, conv_id=cid, error_message="bad gateway")
+    store.add_message(cid, "user", "再来一次")
+    store.add_message(cid, "assistant", "出错了")
+
+    body = client.get(f"/api/admin/conversations/{cid}/trace", headers=_auth_headers()).json()
+    t1, t2 = body["turns"]
+    assert t1["pack"] == "knowledge_graph" and t1["tool"] == "kg_query"
+    assert t1["fallback"] is False and t1["status"] == "ok"
+    assert t1["promptTokens"] == 120 and t1["completionTokens"] == 30
+    assert t2["status"] == "error" and t2["fallback"] is True
+    assert t2["pack"] is None and t2["promptTokens"] == 0
+
+    # 第 3 轮:纯兜底轮(路由未命中但无任何调用失败)——兜底是设计内降级,
+    # 不算失败轮;只有真失败(4xx/工具 error)才标 error
+    store.append_event(cid, "trace", {
+        "stage": "intent_route", "title": "意图路由", "status": "error",
+        "detail": {"pack": "", "tool": None, "reason": "fallback", "fallback": True},
+    })
+    store.add_message(cid, "user", "随便聊聊")
+    store.add_message(cid, "assistant", "来自知识库兜底")
+
+    body = client.get(f"/api/admin/conversations/{cid}/trace", headers=_auth_headers()).json()
+    _, _, t3 = body["turns"]
+    assert t3["fallback"] is True and t3["status"] == "ok"
+
+    # 用户侧端点同源:llmCallCount 别名与 token 契约保持不变
+    user = client.get(f"/api/conversations/{cid}/trace", headers={"X-User-Id": "alice"}).json()
+    ut1, ut2 = user["turns"][:2]
+    assert ut1["llmCallCount"] == 1 and ut1["promptTokens"] == 120
+    assert ut2["llmCallCount"] == 0 and ut2["promptTokens"] == 0
+
+
 def test_admin_conversation_trace_404(client):
     assert client.get("/api/admin/conversations/no-such/trace", headers=_auth_headers()).status_code == 404
 

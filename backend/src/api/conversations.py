@@ -202,16 +202,8 @@ async def get_conversation_trace(
     turns = trace.get("turns") or []
     if turn is not None and 0 <= turn < len(turns):
         turns = [turns[turn]]
-    # 每轮汇总: LLM 调用次数 + token 用量(responseData.usage 落库于 call_logs)
+    # 每轮汇总(LLM 次数/token)已由 _build_trace 聚合产出;这里仅补
+    # llmCallCount 别名,保持用户侧响应契约不变(turnTraceBusiness 依赖)。
     for t in turns:
-        llm_calls = [i for i in t.get("items", [])
-                     if i.get("type") == "call" and i.get("callType") == "llm"]
-        prompt_tokens = completion_tokens = 0
-        for c in llm_calls:
-            usage = (c.get("responseData") or {}).get("usage") or {}
-            prompt_tokens += int(usage.get("prompt_tokens") or 0)
-            completion_tokens += int(usage.get("completion_tokens") or 0)
-        t["llmCallCount"] = len(llm_calls)
-        t["promptTokens"] = prompt_tokens
-        t["completionTokens"] = completion_tokens
+        t["llmCallCount"] = t.get("llmCount", 0)
     return {"conversationId": conv_id, "turns": turns}

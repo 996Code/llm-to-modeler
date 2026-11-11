@@ -9,9 +9,12 @@
       <div class="tr-chip time" v-if="trace.summary.firstAt">{{ fmtTime(trace.summary.firstAt) }} ~ {{ fmtTime(trace.summary.lastAt) }}</div>
     </div>
 
+    <!-- 链路总览:每轮一节点,点击定位下方该轮明细 -->
+    <TurnChainOverview :turns="trace.turns" @locate="locateTurn" />
+
     <!-- 轮次卡片 -->
     <div class="tr-turns">
-      <div v-for="turn in trace.turns" :key="turn.index" class="tr-turn">
+      <div v-for="turn in trace.turns" :key="turn.index" :id="turnAnchor(turn.index)" class="tr-turn">
         <button class="tr-turn-head" @click="toggleTurn(turn.index)">
           <span class="tr-caret" :class="{ open: openTurns.includes(turn.index) }">▸</span>
           <span v-if="turn.userContent === null" class="tr-turn-name">会话初始化</span>
@@ -102,9 +105,10 @@
 </template>
 
 <script setup lang="ts">
-// 会话链路追踪视图:轮次卡片 + 时间线。行头点击展开该条明细(call 默认
-// 格式化展示,一键切原始 JSON),收起时一行一标签,时间线一眼可读。
-import { inject, onMounted, ref, watch } from 'vue'
+// 会话链路追踪视图:链路总览 + 轮次卡片 + 时间线。总览节点点击定位到该轮;
+// 行头点击展开该条明细(call 默认格式化展示,一键切原始 JSON),收起时
+// 一行一标签,时间线一眼可读。
+import { inject, nextTick, onMounted, ref, watch } from 'vue'
 import {
   MessageOutlined, RobotOutlined, CloudServerOutlined, NodeIndexOutlined, FileTextOutlined,
   DownOutlined,
@@ -112,6 +116,7 @@ import {
 import { ConversationTrace as TraceType, fetchConversationTrace, fmtTime } from '../api'
 import type { LoadSafely } from './loadSafely'
 import JsonViewer from './JsonViewer.vue'
+import TurnChainOverview from './TurnChainOverview.vue'
 import { formatDetail } from '../../shared/traceDetail'
 import TraceDetailSections from '../../shared/TraceDetailSections.vue'
 import { CALL_TYPE_META, CALL_TYPE_CLS, stageLabel } from '../labels'
@@ -205,6 +210,20 @@ function toggleTurn(index: number) {
   const i = openTurns.value.indexOf(index)
   if (i >= 0) openTurns.value.splice(i, 1)
   else openTurns.value.push(index)
+}
+
+/** 轮卡片锚点(带 convId 防多实例撞 id);总览节点点击定位用 */
+function turnAnchor(index: number): string {
+  return `tr-turn-${props.convId}-${index}`
+}
+
+/** 总览定位:确保该轮展开,再平滑滚动到轮卡片 */
+function locateTurn(index: number) {
+  if (!openTurns.value.includes(index)) openTurns.value.push(index)
+  nextTick(() => {
+    document.getElementById(turnAnchor(index))
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
 }
 
 async function load() {

@@ -355,6 +355,9 @@ def _build_trace(conv: Dict[str, Any], events: List[Dict[str, Any]], calls: List
         current["wallMs"] = (
             int((end - start).total_seconds() * 1000) if start and end and end >= start else 0
         )
+        # 全程无失败/追问打点的轮 → 正常(总览图状态三态完备,前端不用判空)
+        if current["status"] is None:
+            current["status"] = "ok"
         turns.append(current)
 
     for item in timeline:
@@ -409,7 +412,11 @@ def _build_trace(conv: Dict[str, Any], events: List[Dict[str, Any]], calls: List
 
 
 def _new_turn() -> Dict[str, Any]:
-    """创建一轮的聚合容器(userContent/时间戳由 _close_turn 收尾时统一填充)。"""
+    """创建一轮的聚合容器(userContent/时间戳由 _close_turn 收尾时统一填充)。
+
+    除调用计数外还物化总览图字段(路由结论/轮状态/token,见 _accumulate)
+    ——管理端"链路总览"不用再逐条翻 items 找 intent_route/tool_execute。
+    """
     return {
         "index": 0,
         "userContent": None,
@@ -422,23 +429,63 @@ def _new_turn() -> Dict[str, Any]:
         "upstreamMs": 0,
         "graphCount": 0,
         "vectorCount": 0,
+        "pack": None,
+        "tool": None,
+        "fallback": None,
+        "status": None,
+        "promptTokens": 0,
+        "completionTokens": 0,
         "items": [],
     }
 
 
+# 轮状态优先级:失败 > 追问 > 正常(info 等其他值不参与抬升)
+_STATUS_RANK = {"ok": 0, "ask": 1, "error": 2}
+
+
+def _raise_status(turn: Dict[str, Any], status: Optional[str]) -> None:
+    """轮状态只升不降——时间线上任何一处失败/追问都该在总览图露出。"""
+    if status and _STATUS_RANK.get(status, -1) > _STATUS_RANK.get(turn["status"], -1):
+        turn["status"] = status
+
+
 def _accumulate(turn: Dict[str, Any], item: Dict[str, Any]) -> None:
-    """把时间线项累加进轮次聚合(调用次数/耗时)。"""
+    """把时间线项累加进轮次聚合(调用次数/耗时/路由结论/状态/token)。"""
     if item["type"] != "call":
+        # trace 打点:路由结论物化 + 状态抬升(intent_route 自带 error=路由失败,
+        # tool_execute 带 ok/ask/error;结构见 engine/nodes.py 的 _append_trace)
+        if item.get("kind") == "trace":
+            payload = item.get("payload") or {}
+            stage = payload.get("stage")
+            detail = payload.get("detail") or {}
+            # 兜底是设计内降级(未命中→KB 链路,不是失败),不因 intent_route
+            # 的 error 状态抬升;真失败(call 4xx/tool_execute error)仍会露出来
+            if not (stage == "intent_route" and detail.get("fallback")):
+                _raise_status(turn, payload.get("status"))
+            if stage == "intent_route":
+                if detail.get("pack"):
+                    turn["pack"] = detail["pack"]
+                if detail.get("tool"):
+                    turn["tool"] = detail["tool"]
+                if detail.get("fallback") is not None:
+                    turn["fallback"] = detail["fallback"]
         return
-    if item["callType"] == "llm":
+    if item.get("statusCode") is not None and item["statusCode"] >= 400 or item.get("errorMessage"):
+        _raise_status(turn, "error")
+    call_type = item["callType"]
+    if call_type == "llm":
         turn["llmCount"] += 1
         turn["llmMs"] += item["durationMs"] or 0
-    elif item["callType"] == "upstream":
+        # token 用量自 responseData.usage 累加(原用户侧端点的口径,收口到聚合层)
+        usage = ((item.get("responseData") or {}).get("usage")) or {}
+        turn["promptTokens"] += int(usage.get("prompt_tokens") or 0)
+        turn["completionTokens"] += int(usage.get("completion_tokens") or 0)
+    elif call_type == "upstream":
         turn["upstreamCount"] += 1
         turn["upstreamMs"] += item["durationMs"] or 0
-    elif item["callType"] == "graph":
+    elif call_type == "graph":
         turn["graphCount"] += 1
-    elif item["callType"] == "vector":
+    elif call_type == "vector":
         turn["vectorCount"] += 1
 
 

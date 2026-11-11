@@ -5,6 +5,17 @@ import type { AdminPack } from './api'
 
 const titles = new Map<string, string>()
 
+/** 已知插件配色(与调用日志类型色系一致);未列出的插件给中性色 */
+const PACK_COLORS: Record<string, string> = {
+  njmind_form: 'blue',
+  knowledge_graph: 'geekblue',
+}
+
+/** 插件徽章/标签配色:会话列表与链路总览共用 */
+export function packColor(p: string): string {
+  return PACK_COLORS[p] || 'default'
+}
+
 export function rememberPacks(items: AdminPack[]): void {
   for (const p of items || []) {
     if (p?.name && p.adminTitle) titles.set(p.name, p.adminTitle)

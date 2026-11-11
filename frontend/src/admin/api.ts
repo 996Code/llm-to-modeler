@@ -146,6 +146,13 @@ export interface TraceTurn {
   llmMs: number
   upstreamCount: number
   upstreamMs: number
+  /** 链路总览物化字段(后端 _build_trace 聚合;无路由打点的轮为空) */
+  pack?: string | null
+  tool?: string | null
+  fallback?: boolean | null
+  status?: 'ok' | 'ask' | 'error' | null
+  promptTokens?: number
+  completionTokens?: number
   items: TraceItem[]
 }
 

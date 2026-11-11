@@ -83,7 +83,7 @@ import { computed, inject, onMounted, reactive, ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { UserOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { AdminConversation, deleteConversation, fetchConversations, fetchPacks, fmtTime } from '../api'
-import { packOptionsFrom, packLabel, packTitle } from '../packDisplay'
+import { packOptionsFrom, packLabel, packTitle, packColor } from '../packDisplay'
 import type { LoadSafely } from './loadSafely'
 import ConversationTrace from './ConversationTrace.vue'
 
@@ -97,15 +97,6 @@ const filterQ = ref('')
 const filterPacks = ref<string[]>([])
 // 筛选选项:已发现插件 + 「其他」(__other__ 占位,请求时转空串元素)
 const packOptions = ref<{ label: string; value: string }[]>([])
-
-// 已知插件配色(与调用日志类型色系一致);未列出的插件给中性色
-const PACK_COLORS: Record<string, string> = {
-  njmind_form: 'blue',
-  knowledge_graph: 'geekblue',
-}
-function packColor(p: string): string {
-  return PACK_COLORS[p] || 'default'
-}
 
 async function loadPackOptions() {
   try {
