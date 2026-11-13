@@ -1343,9 +1343,21 @@ def _anchor_filter(entities: List[Dict], chunk_text: str) -> Tuple[List[Dict], i
             continue
         if name in chunk_text:
             kept.append(e)
+        elif _compact_anchor(name, chunk_text):
+            kept.append(e)
         else:
             dropped += 1
     return kept, dropped
+
+
+def _compact_anchor(name: str, chunk_text: str) -> bool:
+    """空白/全角/连字符宽容锚定(计量标准实测事故:PDF 解析文本大量
+    "国 家 质 量 监 督 检 疫 总 局"式字间空白、JJF1446—2014 全角连接号,
+    LLM 抽出的规范名逐字匹配恒 False——实体被删,引用它的关系连带悬空,
+    JJF_0023 单批 61 条关系 dangling 52)。
+    归一化后比对仍满足防幻觉初衷:杜撰名不可能恰好只差空白/全角。
+    """
+    return normalize_name(name) in normalize_name(chunk_text)
 
 
 def _glossary_touch(glossary: Dict[str, str], entities: List[Dict]) -> None:
@@ -1416,6 +1428,21 @@ def _normalize_extraction(data: Dict) -> Tuple[List[Dict], List[Dict]]:
     return entities, relations
 
 
+def _resolve_ontology_type(raw, keys) -> str:
+    """类型宽容归一:LLM 偶发照抄 prompt 里"key|label"展示格式(实测事故:
+    计量标准本体 184 实体全为 composite,端点约束全挂、关系近乎全灭)。
+    "key|label" 且 key 命中本体 → 归一为 key;其余原样返回走正常提案/丢弃路径。
+    """
+    t = (raw or "").strip()
+    if t in keys:
+        return t
+    if "|" in t:
+        left = t.split("|", 1)[0].strip()
+        if left in keys:
+            return left
+    return t
+
+
 def _enforce_schema(kb: Dict, entities: List[Dict], relations: List[Dict]):
     """本体约束过滤:strict 丢弃类型外数据;semi_open 保留并生成待审提案。"""
     schema = kb.get("schema") or {}
@@ -1424,6 +1451,8 @@ def _enforce_schema(kb: Dict, entities: List[Dict], relations: List[Dict]):
     relation_keys = {t.get("key") for t in (schema.get("relation_types") or []) if t.get("key")}
 
     kept_e, dropped, proposals = [], 0, []
+    for e in entities:
+        e["type"] = _resolve_ontology_type(e["type"], entity_keys)
     for e in entities:
         if e["type"] in entity_keys:
             e["type_status"] = "approved"
@@ -1437,6 +1466,7 @@ def _enforce_schema(kb: Dict, entities: List[Dict], relations: List[Dict]):
 
     kept_r = []
     for r in relations:
+        r["type"] = _resolve_ontology_type(r["type"], relation_keys)
         if r["type"] in relation_keys:
             kept_r.append(r)
         elif strict:
