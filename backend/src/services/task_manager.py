@@ -103,7 +103,7 @@ class TaskManager:
     def __init__(self, store: TaskStore, max_workers: Optional[int] = None):
         self._store = store
         # 实例身份:多实例共库部署时任务归属隔离的锚点(启动恢复只清自己的任务)
-        self._instance_id = (os.getenv("TASK_INSTANCE_ID") or socket.gethostname()).strip()
+        self._instance_id = socket.gethostname().strip()
         if max_workers is None:
             try:
                 max_workers = max(1, int(os.getenv("TASK_WORKERS", "2")))
