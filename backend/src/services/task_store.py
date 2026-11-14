@@ -20,6 +20,7 @@ task_logs ≈ STEP_EXECUTION 的日志表。同 ConversationStore 一样每次�
 """
 import json
 import logging
+import socket
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -70,6 +71,7 @@ def _row_to_log(row) -> Dict[str, Any]:
         "level": d["level"] or "info",
         "message": d["message"] or "",
         "data": json.loads(d["data"]) if d.get("data") else None,
+        "hostName": d.get("host_name") or "",
         "createdAt": d["created_at"],
     }
 
@@ -123,6 +125,8 @@ class TaskStore:
                     created_at TEXT NOT NULL
                 )""",
                 "CREATE INDEX IF NOT EXISTS idx_task_logs_task ON task_logs(task_id, id)",
+                # 多实例部署(2026-11-14):日志记录执行机器名——共库抢任务时定位实际执行位置
+                "ALTER TABLE task_logs ADD COLUMN IF NOT EXISTS host_name TEXT NOT NULL DEFAULT ''",
             ]:
                 conn.execute(stmt)
 
@@ -250,16 +254,20 @@ class TaskStore:
         """追加一条日志,返回 (自增 id, created_at)。
 
         id 是前端 SSE 断线补齐的游标;created_at 随事件一起发布,前端
-        增量日志行的时间列不再依赖轮询补齐。
+        增量日志行的时间列不再依赖轮询补齐。host_name 记录写入进程的
+        机器名——多实例共库部署时定位任务实际在哪台机器上执行
+        (实测事故:本地测试服务与部署实例共库抢任务,"原始文件已不存在"
+        实为文件在部署机上、任务被测试机认领)。
         """
         now = _now()
         with self._get_conn() as conn:
             cur = conn.execute(
-                """INSERT INTO task_logs (task_id, level, message, data, created_at)
-                   VALUES (?, ?, ?, ?, ?) RETURNING id""",
+                """INSERT INTO task_logs (task_id, level, message, data, host_name, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?) RETURNING id""",
                 (
                     task_id, level, message,
                     json.dumps(data, ensure_ascii=False) if data else None,
+                    socket.gethostname(),
                     now,
                 ),
             )
