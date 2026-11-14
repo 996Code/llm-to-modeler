@@ -21,6 +21,7 @@ runtime_contract:
   required_tools: [metrology_assistant]
 
 admin:
+  settings: settings.schema.yaml   # 声明式配置页(展示配置:欢迎页标题/副标题/常用问题)
   page: metrology_assistant
   title: 智能客服
 
