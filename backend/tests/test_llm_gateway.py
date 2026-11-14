@@ -276,3 +276,64 @@ class TestChatCache:
                               stage="assistant.select")
         assert r1 == r2 == {"pack": "x"}
         assert len(n) == 1, "chat_json 白名单 stage 二次应命中"
+
+    def test_chat_json_cache_hit_and_put_are_copies(self, monkeypatch):
+        """dict 毒化防护:命中返回与回填存储都是浅拷贝——调用方对返回
+        dict 的写操作不得反写进缓存(毒化后同键命中把脏值带给所有人)。"""
+        from llm.client import LLMConfig
+        client = LLMClient(config=LLMConfig(base_url="http://test/v1", model="test-chat"),
+                           conversation_store=_FakeStore())
+        n = []
+
+        class FakeChat:
+            def create(self, **kw):
+                n.append(1)
+                m = SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content='{"a": 1}', reasoning_content=None))],
+                    usage=None)
+                return m
+        fake = FakeChat()
+        monkeypatch.setattr(type(client.client.chat.completions),
+                            "create", lambda self, **kw: fake.create(**kw))
+        r1 = client.chat_json([{"role": "user", "content": "q"}], stage="route_tool")
+        r1["poison"] = True                      # 改首发返回值:不反写进缓存(put 拷贝)
+        r2 = client.chat_json([{"role": "user", "content": "q"}], stage="route_tool")
+        assert "poison" not in r2 and r2 == {"a": 1}
+        r2["poison2"] = True                     # 改命中返回值:同样不反写(hit 拷贝)
+        r3 = client.chat_json([{"role": "user", "content": "q"}], stage="route_tool")
+        assert "poison2" not in r3 and r3 == {"a": 1}
+        assert len(n) == 1, "三次调用仅首发出站"
+
+    def test_chat_and_chatjson_keyspaces_isolated(self, monkeypatch):
+        """键空间隔离:同 stage 同 messages,chat(str)与 chat_json(dict)
+        互不命中(mode 段 chat| vs chatjson|)——混用键空间会把 str 喂给
+        chat_json 的调用方(dict 期望),下游 AttributeError 远离现场。"""
+        from llm.client import LLMConfig
+        client = LLMClient(config=LLMConfig(base_url="http://test/v1", model="test-chat"),
+                           conversation_store=_FakeStore())
+        n = []
+
+        class FakeChat:
+            def create(self, **kw):
+                n.append(1)
+                m = SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content='{"x": 1}', reasoning_content=None))],
+                    usage=None)
+                return m
+        fake = FakeChat()
+        monkeypatch.setattr(type(client.client.chat.completions),
+                            "create", lambda self, **kw: fake.create(**kw))
+        msgs = [{"role": "user", "content": "同一段输入"}]
+        s1 = client.chat(msgs, stage="route_tool")          # chat 首发 → 出站
+        d1 = client.chat_json(msgs, stage="route_tool")     # chatjson 键不同 → 出站
+        assert isinstance(s1, str) and d1 == {"x": 1}
+        assert len(n) == 2, "chat 与 chat_json 不得互相命中"
+        client.chat(msgs, stage="route_tool")               # chat 命中
+        client.chat_json(msgs, stage="route_tool")          # chatjson 命中
+        assert len(n) == 2, "各自键空间内二次应命中"

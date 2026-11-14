@@ -256,10 +256,29 @@ class ConversationManager:
         return self._store.get_messages(conv_id)
 
     def get_title(self, conv_id: str) -> str:
-        """读会话标题(标题生成降频守卫用;无 store 返回空)。"""
+        """读会话裸标题(标题守卫读侧;无 store/读库失败返回空串)。
+
+        空串=无标题/会话不存在/读库失败——fail-open 语义收敛在此:
+        引擎守卫拿到空串即回到生成行为,不感知存储异常细节(与
+        store.get_title 内层 try/except 双保险)。
+        """
         if not self._store:
             return ""
-        return self._store.get_title(conv_id)
+        try:
+            return str(self._store.get_title(conv_id) or "")
+        except Exception:
+            return ""
+
+    def set_title_if_empty(self, conv_id: str, title: str) -> bool:
+        """仅空时写标题(标题守卫落库半边;无 store 返回 False)。
+
+        标题后台线程生成完直接经此持久化——落库不再依赖结果收尾的
+        _take_title_future 窗口(快轮工具 < 标题 LLM 时窗 future 被丢弃,
+        标题永不落库,次轮守卫误判"无标题"再生成,实测每轮一次浪费)。
+        """
+        if not self._store:
+            return False
+        return self._store.set_title_if_empty(conv_id, title)
 
     # ── 会话级插件状态(工具跨轮记忆;委托 store,SessionStateHandle 消费) ──
 

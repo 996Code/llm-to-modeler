@@ -600,17 +600,22 @@ def _save_result_conversation(store, conv_id, user_id, user_input, result_data, 
                 store.update_conversation_config(conv_id, config)
             else:
                 # 创建场景:首次产出配置,用 format_result 输出的通用 title 键起标题
-                # (不读领域字段——制品标题之类的键属于 pack,引擎只认钩子产出)
-                title = result_data.get("title", "新对话")
+                # (不读领域字段——制品标题之类的键属于 pack,引擎只认钩子产出)。
+                # 无 title 就不写——占位"新对话"一旦落库会永久堵死
+                # if-empty 写入,真实标题再也进不来(守卫读非空即跳过)
+                title = result_data.get("title") or None
                 store.update_conversation_config(conv_id, config, title=title)
 
         # 会话标题落库(意图识别轮 LLM 生成, 全局统一入口)。
         # 覆盖三种结果形态:config / data / 闲聊都可能带 title——
         # 数据/闲聊轮没有 config 分支, 这里单独写一次;空标题跳过。
+        # 仅空时写(P0-1 标题守卫):标题首轮定稿,后续轮不覆盖——
+        # 同一轮内 classify 生成(后台线程已自落库)与工具 title_for
+        # 钩子都经此收口,首个非空标题定稿。
         title = result_data.get("title", "")
         if title:
             try:
-                store.set_title(conv_id, title)
+                store.set_title_if_empty(conv_id, title)
             except Exception as e:
                 logger.warning(f"Failed to set conversation title: {e}")
     except Exception as e:

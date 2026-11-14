@@ -917,7 +917,15 @@ _TITLE_FUTURES: dict = {}
 
 def _submit_title_generation(user_input: str, conversation_id: str,
                              pack_name: str = "") -> None:
-    """提交后台标题生成(fail-open:提交失败=无标题,前端回退推导)。"""
+    """提交后台标题生成(fail-open:提交失败=无标题,前端回退推导)。
+
+    生成完直接落库(set_title_if_empty):持久化不再依赖结果收尾的
+    _take_title_future 窗口——快轮工具(标准问答秒回/缓存命中)先于
+    标题 LLM 完成时,收尾 2s 等待超时会把 future 丢弃,标题永不落库,
+    次轮守卫读到空标题又生成一次(实测:标题调用 2670ms > 窗口 2000ms,
+    每轮一次浪费)。线程内自落库后,丢弃的 future 也不再丢标题;
+    _take_title_future 退化为"当轮响应顺带带出标题"的增强项。
+    """
     if not _llm_client or not user_input.strip():
         return
 
@@ -929,7 +937,13 @@ def _submit_title_generation(user_input: str, conversation_id: str,
             bind_pack_name(pack_name)
         except Exception:
             pass
-        return _generate_conversation_title(user_input, conversation_id)
+        title = _generate_conversation_title(user_input, conversation_id)
+        if title and _conversation is not None:
+            try:
+                _conversation.set_title_if_empty(conversation_id, title)
+            except Exception as e:
+                logger.warning(f"title background persist failed: {e}")
+        return title
 
     try:
         _TITLE_FUTURES[conversation_id] = _TITLE_EXECUTOR.submit(_bg)
@@ -938,10 +952,13 @@ def _submit_title_generation(user_input: str, conversation_id: str,
         _TITLE_FUTURES.pop(conversation_id, None)
 
 
-def _take_title_future(conversation_id: str, timeout: float = 2.0) -> str:
+def _take_title_future(conversation_id: str, timeout: float = 1.0) -> str:
     """收尾合并:取后台标题结果(就绪即零等待;超时/缺失返回空串)。
 
     取后即清(同一标题只消费一次);future 抛错按空处理(fail-open)。
+    超时不再丢标题——后台线程已自行 set_title_if_empty 落库,这里只
+    影响当轮响应是否顺带带出标题。窗口 2s→1s:快轮工具(标准问答
+    秒回)不该为标题再等满 2s,本地小模型标题多在 1s 内就绪。
     """
     if not conversation_id:
         return ""

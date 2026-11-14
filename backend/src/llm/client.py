@@ -836,7 +836,9 @@ class LLMClient:
         # chat 缓存(2026-11 降频):chat_json 是小任务主力出口(路由/抽取/
         # 判定全走这里),白名单 stage 在出站前查缓存——命中零出站零等待。
         # 键构造与 chat() 同源(guided_messages+model+temperature+max_tokens
-        # 全同才命中;guided 追加的 JSON 指令对同 prompt 恒定,不影响命中)。
+        # 全同才命中;guided 追加的 JSON 指令对同 prompt 恒定,不影响命中),
+        # 但 mode 段用 chatjson| 与 chat 键空间隔离——两路返回类型不同
+        # (str vs dict),混用键空间会把 str 喂给 chat_json 的调用方。
         # 命中记 chat:cache 日志(与 chat() 口径一致)。
         _cache_key_json = None
         if _stage_cacheable(stage) and messages:
@@ -850,7 +852,7 @@ class LLMClient:
                     if endpoint_cfg else [], ensure_ascii=False)
                 _ck = embed_cache_key(
                     provider_key,
-                    "chat|model{}|t{}|m{}".format(
+                    "chatjson|model{}|t{}|m{}".format(
                         model or "", temp, self.config.max_tokens),
                     [sig])
                 _hit = self._chat_cache.get(_ck)
@@ -862,7 +864,8 @@ class LLMClient:
                             "count": len(guided_messages)},
                         response_data={}, status_code=None, duration_ms=0,
                         conv_id=conv_id)
-                    return _hit
+                    # dict 按引用外借会被调用方写操作毒化缓存——命中返回浅拷贝
+                    return {**_hit}
                 _cache_key_json = _ck
             except (TypeError, ValueError):
                 _cache_key_json = None
@@ -947,9 +950,11 @@ class LLMClient:
                 stage=stage,
             )
 
-            # 白名单 stage 成功回填缓存(异常路径不缓存坏值)
+            # 白名单 stage 成功回填缓存(异常路径不缓存坏值);存浅拷贝——
+            # result 的引用即将交给调用方,其写操作不得反写进缓存
+            # (毒化后同键命中把脏值带给所有调用方)
             if _cache_key_json is not None:
-                self._chat_cache.put(_cache_key_json, result)
+                self._chat_cache.put(_cache_key_json, {**result})
 
             return result
         except Exception as _e:

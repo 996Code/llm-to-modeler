@@ -714,21 +714,22 @@ class ConversationStore:
         Args:
             conv_id: 会话 ID
             config:  新配置字典,会被序列化为 JSON 存储
-            title:   非空时同时更新标题
+            title:   非空时写入标题——仅当会话尚无标题时(标题是会话级
+                     产物,首轮生成/用户创建后不再被后续轮覆盖)
         """
         now = _now()
         # ensure_ascii=False:保留中文,避免被转义成 \uXXXX(便于人读)
         config_json = json.dumps(config, ensure_ascii=False)
         with self._get_conn() as conn:
+            conn.execute(
+                "UPDATE session_meta SET current_config = ?, updated_at = ? WHERE conv_id = ?",
+                (config_json, now, conv_id),
+            )
             if title:
                 conn.execute(
-                    "UPDATE session_meta SET current_config = ?, title = ?, updated_at = ? WHERE conv_id = ?",
-                    (config_json, title, now, conv_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE session_meta SET current_config = ?, updated_at = ? WHERE conv_id = ?",
-                    (config_json, now, conv_id),
+                    "UPDATE session_meta SET title = ? "
+                    "WHERE conv_id = ? AND (title IS NULL OR title = '')",
+                    (title, conv_id),
                 )
 
     def touch_conversation(self, conv_id: str):
@@ -756,6 +757,25 @@ class ConversationStore:
                 "UPDATE session_meta SET title = ? WHERE conv_id = ?",
                 (title, conv_id),
             )
+
+    def set_title_if_empty(self, conv_id: str, title: str) -> bool:
+        """仅当会话尚无标题时写入(原子条件 UPDATE),返回是否实际写入。
+
+        标题守卫(P0-1)的落库半边:标题是会话级产物——首轮 LLM 生成或
+        用户创建会话时写入一次,后续轮(含工具 title_for 钩子产物)不再
+        覆盖。多写源(标题后台线程/结果落库/config 分支)并发时由条件
+        UPDATE 保证首个非空标题定稿。无条件覆盖版 set_title 保留给
+        显式改名语义(当前无调用方)。
+        """
+        if not title:
+            return False
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE session_meta SET title = ? "
+                "WHERE conv_id = ? AND (title IS NULL OR title = '')",
+                (title, conv_id),
+            )
+            return cur.rowcount > 0
 
     def get_title(self, conv_id: str) -> str:
         """读会话标题(单列 SELECT,标题生成守卫用)。
