@@ -271,6 +271,20 @@ class TaskManager:
                     raise DuplicateTaskError(
                         f"该操作已有进行中的任务(任务 {existing[:8]}…),请等待完成")
                 self._dedupe_keys[dedupe_key] = _DEDUPE_PLACEHOLDER
+        # DB 层全局去重(2026-11-14 事故):内存表各实例独立,多实例共库时
+        # 并发提交同一文档导入会双双执行——部分唯一索引兜底,冲突时查出
+        # 现存任务 id 一并报错(fail-closed)
+        if dedupe_key:
+            dup_id = ""
+            try:
+                dup_id = self._store.find_active_by_dedupe(dedupe_key)
+            except Exception:
+                logger.warning("DB 层 dedupe 检查失败(降级内存表语义)", exc_info=True)
+            if dup_id:
+                with self._lock:
+                    self._dedupe_keys.pop(dedupe_key, None)
+                raise DuplicateTaskError(
+                    f"该操作已有进行中的任务(任务 {dup_id[:8]}…),请等待完成")
         try:
             task = self._store.create_task(
                 task_type, pack_name=pack_name, title=title,

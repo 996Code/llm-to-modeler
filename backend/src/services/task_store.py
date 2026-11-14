@@ -281,6 +281,15 @@ class TaskStore:
             )
             return int(cur.fetchone()["id"]), now
 
+    def find_active_by_dedupe(self, dedupe_key: str) -> str:
+        """DB 层查询 dedupe_key 的活任务 id(跨实例全局可见;无则空串)。"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT id FROM tasks WHERE dedupe_key = ? AND status IN ('pending', 'running', 'retry_scheduled') LIMIT 1",
+                (dedupe_key,),
+            ).fetchone()
+        return row["id"] if row else ""
+
     def list_logs(self, task_id: str, after_id: int = 0, limit: int = 500) -> List[Dict[str, Any]]:
         """读日志(id > after_id,升序)——订阅时回放 + 断线重连补齐共用。"""
         with self._get_conn() as conn:
