@@ -397,7 +397,8 @@ export async function recheckPack(name: string): Promise<{
 // ── 任务中心 ─────────────────────────────────────────────
 
 export type TaskStatus =
-  | 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
+  | 'pending' | 'running' | 'retry_scheduled' | 'resumed'
+  | 'succeeded' | 'failed' | 'cancelled' | 'interrupted'
 
 export interface TaskItem {
   id: string

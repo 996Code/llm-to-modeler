@@ -274,10 +274,12 @@ const columns = [
 
 const _statusColor: Record<TaskStatus, string> = {
   pending: 'default', running: 'processing', succeeded: 'success',
+  retry_scheduled: 'warning', resumed: 'processing',
   failed: 'error', cancelled: 'warning', interrupted: 'warning',
 }
 const _statusLabel: Record<TaskStatus, string> = {
   pending: '等待中', running: '运行中', succeeded: '已成功',
+  retry_scheduled: '待重试', resumed: '已恢复',
   failed: '已失败', cancelled: '已取消', interrupted: '已中断',
 }
 function statusColor(s: TaskStatus): string {
