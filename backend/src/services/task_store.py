@@ -101,6 +101,7 @@ class TaskStore:
                     progress INTEGER DEFAULT 0,     -- 0-100
                     progress_message TEXT DEFAULT '',
                     queue_key TEXT,                 -- 串行键:同 key 的任务 FIFO 串行
+                    instance_id TEXT DEFAULT '',    -- 认领实例(多实例共库隔离;''=旧版遗留)
                     payload TEXT,                   -- 输入参数 JSON
                     result TEXT,                    -- 成功产物 JSON
                     error TEXT,                     -- 失败原因
@@ -114,6 +115,8 @@ class TaskStore:
                 "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type, created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_tasks_queue ON tasks(queue_key, created_at)",
+                # 多实例部署(2026-11-14):任务归属实例——启动恢复只清理本实例任务
+                "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS instance_id TEXT DEFAULT ''",
                 """CREATE TABLE IF NOT EXISTS task_logs (
                     -- BY DEFAULT AS IDENTITY:迁移脚本要原样搬历史 id(断线补齐
                     -- 游标不能漂移),显式插 id 后 setval 校准序列
@@ -140,20 +143,25 @@ class TaskStore:
         payload: Optional[Dict[str, Any]] = None,
         queue_key: Optional[str] = None,
         max_auto_retry: int = 0,
+        instance_id: str = "",
     ) -> Dict[str, Any]:
-        """创建 pending 任务并返回任务 dict(submit 落库 + 调度入队用)。"""
+        """创建 pending 任务并返回任务 dict(submit 落库 + 调度入队用)。
+
+        instance_id: 认领实例(多实例共库部署时启动恢复只清自己的任务)。
+        """
         task_id = str(uuid.uuid4())
         now = _now()
         with self._get_conn() as conn:
             conn.execute(
                 """INSERT INTO tasks
                    (id, task_type, pack_name, title, status, progress, progress_message,
-                    queue_key, payload, created_at, retry_count, max_auto_retry)
-                   VALUES (?, ?, ?, ?, 'pending', 0, '', ?, ?, ?, 0, ?)""",
+                    queue_key, payload, instance_id, created_at, retry_count, max_auto_retry)
+                   VALUES (?, ?, ?, ?, 'pending', 0, '', ?, ?, ?, ?, 0, ?)""",
                 (
                     task_id, task_type, pack_name, title,
                     queue_key,
                     json.dumps(payload, ensure_ascii=False) if payload else None,
+                    instance_id or "",
                     now, max(0, int(max_auto_retry)),
                 ),
             )
@@ -285,26 +293,31 @@ class TaskStore:
 
     # ── 重启恢复 ────────────────────────────────────────────
 
-    def mark_interrupted_on_startup(self) -> List[str]:
+    def mark_interrupted_on_startup(self, instance_id: str = "") -> List[str]:
         """把上次进程遗留的 pending/running/retry_scheduled 任务标记为 interrupted。
 
         框架层不自动续跑(handler 的进程内状态已丢失);续跑由各 pack 的
         启动恢复实现——知识图谱导入按 chunk checkpoint 幂等重提中断文档
         (见 kg tasks._recover_stale_importing)。retry_scheduled 一并收敛:
         它的续跑定时器是进程内线程,重启即失,不收敛会永远卡在中间态。
+        instance_id 非空时只清理本实例(及旧版遗留 instance_id='')的任务——
+        多实例共库部署时不得误杀其他实例的在途任务。
         返回被打断的任务 id 列表(日志可见)。
         """
+        scope = "AND (instance_id = ? OR instance_id = '')" if instance_id else ""
+        params = (instance_id,) if instance_id else ()
         with self._get_conn() as conn:
             rows = conn.execute(
-                "SELECT id FROM tasks WHERE status IN ('pending', 'running', 'retry_scheduled')",
+                f"SELECT id FROM tasks WHERE status IN ('pending', 'running', 'retry_scheduled') {scope}",
+                params,
             ).fetchall()
             ids = [r["id"] for r in rows]
             if ids:
                 conn.execute(
                     "UPDATE tasks SET status = 'interrupted',"
                     " error = COALESCE(NULLIF(error, ''), '服务重启,任务被中断'),"
-                    " finished_at = ? WHERE status IN ('pending', 'running', 'retry_scheduled')",
-                    (_now(),),
+                    f" finished_at = ? WHERE status IN ('pending', 'running', 'retry_scheduled') {scope}",
+                    (_now(), *params),
                 )
         if ids:
             logger.warning(f"启动恢复: {len(ids)} 个遗留任务标记为 interrupted")

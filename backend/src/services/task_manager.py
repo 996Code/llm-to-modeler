@@ -24,6 +24,7 @@ JobExecutionContext(handler 通过它回写进度/日志/检查取消)。
 import logging
 import os
 import queue
+import socket
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -101,6 +102,8 @@ class TaskManager:
 
     def __init__(self, store: TaskStore, max_workers: Optional[int] = None):
         self._store = store
+        # 实例身份:多实例共库部署时任务归属隔离的锚点(启动恢复只清自己的任务)
+        self._instance_id = (os.getenv("TASK_INSTANCE_ID") or socket.gethostname()).strip()
         if max_workers is None:
             try:
                 max_workers = max(1, int(os.getenv("TASK_WORKERS", "2")))
@@ -273,6 +276,7 @@ class TaskManager:
                 task_type, pack_name=pack_name, title=title,
                 payload=payload, queue_key=queue_key,
                 max_auto_retry=max_auto_retry,
+                instance_id=self._instance_id,
             )
         except Exception:
             if dedupe_key:  # 落库失败回滚占位
@@ -661,8 +665,8 @@ class TaskManager:
     # ── 生命周期 ───────────────────────────────────────────
 
     def recover_on_startup(self) -> List[str]:
-        """启动恢复:遗留 active 任务标记 interrupted。"""
-        return self._store.mark_interrupted_on_startup()
+        """启动恢复:遗留 active 任务标记 interrupted(仅本实例+旧版遗留)。"""
+        return self._store.mark_interrupted_on_startup(instance_id=self._instance_id)
 
     def close(self) -> None:
         """停机:请求取消全部 running/pending 任务后关闭线程池。
