@@ -702,12 +702,15 @@ export async function setKgDocMetadata(
   return data
 }
 
-/** D32 标注回复:问题→标准答案(相似≥0.90 命中直接返回不走检索)。 */
+/** D32 标注回复:问题→标准答案(相似≥0.90 命中直接返回不走检索)。
+ * triggers=触发问法(固定问答):原样问出即确定命中,零模型调用;
+ * 未命中仍走语义相似(并集,triggers 只增加命中面)。 */
 export interface KgAnnotation {
   id: string
   kbId: string
   question: string
   answer: string
+  triggers?: string[]
   enabled: boolean
   source: string
   createdAt?: string
@@ -719,10 +722,12 @@ export async function fetchKgAnnotations(kbId: string): Promise<KgAnnotation[]> 
 }
 export async function saveKgAnnotation(
   kbId: string, annotationId: string | null, question: string, answer: string,
+  triggers?: string[],
 ): Promise<KgAnnotation> {
+  const body = triggers === undefined ? { question, answer } : { question, answer, triggers }
   const { data } = annotationId
-    ? await kgApi.put(`/kbs/${kbId}/annotations/${annotationId}`, { question, answer })
-    : await kgApi.post(`/kbs/${kbId}/annotations`, { question, answer })
+    ? await kgApi.put(`/kbs/${kbId}/annotations/${annotationId}`, body)
+    : await kgApi.post(`/kbs/${kbId}/annotations`, body)
   return data
 }
 export async function setKgAnnotationEnabled(

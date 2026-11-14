@@ -229,9 +229,17 @@ class KbSearchTool(Tool):
                         hit_kb = k
                         break
             if hit and isinstance(hit.get("answer"), str) and hit["answer"].strip():
-                ctx.trace("kb_search.annotation", "标注命中(标准答案短路)", "ok", detail={
-                    "kb": hit_kb["name"], "question": hit["question"][:60],
-                    "score": hit["score"]})
+                match_type = hit.get("matchType") or "semantic"
+                ctx.trace("kb_search.annotation",
+                          "标准问答命中(语义相似短路)"
+                          if match_type == "semantic"
+                          else "标准问答命中(触发问法短路)",
+                          "ok", detail={
+                              "kb": hit_kb["name"],
+                              "question": hit["question"][:60],
+                              "score": hit["score"],
+                              "matchType": match_type,
+                          })
                 return ToolResult(
                     summary=hit["answer"],
                     artifact={
@@ -243,6 +251,8 @@ class KbSearchTool(Tool):
                         "annotationHit": True,
                         "annotationQuestion": hit["question"],
                         "annotationScore": hit["score"],
+                        # exact=触发问法精确命中(零模型调用)/semantic=语义相似
+                        "matchType": match_type,
                         "subgraph": {"nodes": [], "edges": []},
                         "sources": {"entities": [], "chunks": []},
                     },

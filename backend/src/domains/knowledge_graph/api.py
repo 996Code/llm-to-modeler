@@ -257,23 +257,41 @@ async def list_kb_annotations(kb_id: str, request: Request):
     return {"items": kg_annotations.list_annotations(request.app.state, kb_id)}
 
 
+def _parse_annotation_triggers(payload: Dict[str, Any]) -> Optional[List[str]]:
+    """Body 里的 triggers 校验:必须是字符串数组(可为空数组=清空触发问法);
+    缺省(None)=不改动该字段(更新场景沿用原值)。"""
+    triggers = (payload or {}).get("triggers")
+    if triggers is None:
+        return None
+    if not (isinstance(triggers, list) and all(isinstance(t, str) for t in triggers)):
+        raise HTTPException(422, "triggers 必须是字符串数组")
+    return triggers
+
+
 @router.post("/kbs/{kb_id}/annotations", dependencies=[Depends(admin_required)])
 async def create_kb_annotation(kb_id: str, request: Request, payload: Dict[str, Any]):
     """新增标注:问题向量化入库;下次相似提问(≥0.90)直接返回标准答案。
 
-    Body: {question, answer, source?}(source 记来源如"点踩转化",纯溯源)
+    Body: {question, answer, triggers?, source?}(source 记来源如"点踩转化",
+    纯溯源;triggers 触发问法数组——原样问出即确定命中,零模型调用)
     """
     _kb_or_404(request, kb_id)
     question = str((payload or {}).get("question") or "").strip()
     answer = str((payload or {}).get("answer") or "").strip()
     if not question or not answer:
         raise HTTPException(422, "question 和 answer 不能为空")
+    triggers = _parse_annotation_triggers(payload)
     from domains.knowledge_graph import annotations as kg_annotations
     import asyncio
-    item = await asyncio.to_thread(
-        kg_annotations.upsert_annotation, request.app.state,
-        kb_id, question, answer, None,
-        str((payload or {}).get("source") or "").strip())
+    try:
+        item = await asyncio.to_thread(
+            kg_annotations.upsert_annotation, request.app.state,
+            kb_id, question, answer, None,
+            str((payload or {}).get("source") or "").strip(),
+            triggers)
+    except ValueError as e:
+        # 触发问法冲突/超限:管理端可修正后重试的输入错误
+        raise HTTPException(422, str(e)) from e
     logger.info(f"annotation created: {item['id'][:8]} (kb={kb_id[:8]})")
     return item
 
@@ -282,7 +300,7 @@ async def create_kb_annotation(kb_id: str, request: Request, payload: Dict[str, 
             dependencies=[Depends(admin_required)])
 async def update_kb_annotation(kb_id: str, annotation_id: str,
                                request: Request, payload: Dict[str, Any]):
-    """更新标注(问题重打向量)/启停。Body: {question?, answer?, enabled?}。"""
+    """更新标注(问题重打向量)/启停。Body: {question?, answer?, triggers?, enabled?}。"""
     _kb_or_404(request, kb_id)
     from domains.knowledge_graph import annotations as kg_annotations
     import asyncio
@@ -290,8 +308,10 @@ async def update_kb_annotation(kb_id: str, annotation_id: str,
         request.app.state, kb_id) if a["id"] == annotation_id), None)
     if not existing:
         raise HTTPException(404, "标注不存在")
+    triggers = _parse_annotation_triggers(payload)
     enabled = payload.get("enabled")
-    if enabled is not None and "question" not in payload and "answer" not in payload:
+    if (enabled is not None and "question" not in payload
+            and "answer" not in payload and triggers is None):
         # 纯启停:不重打向量
         ok = await asyncio.to_thread(
             kg_annotations.set_enabled, request.app.state,
@@ -303,10 +323,16 @@ async def update_kb_annotation(kb_id: str, annotation_id: str,
     answer = str(payload.get("answer") or existing["answer"]).strip()
     if not question or not answer:
         raise HTTPException(422, "question 和 answer 不能为空")
-    item = await asyncio.to_thread(
-        kg_annotations.upsert_annotation, request.app.state,
-        kb_id, question, answer, annotation_id,
-        existing.get("source") or "")
+    # triggers 缺省沿用原值;显式传数组(含空数组)则替换
+    if triggers is None:
+        triggers = existing.get("triggers") or []
+    try:
+        item = await asyncio.to_thread(
+            kg_annotations.upsert_annotation, request.app.state,
+            kb_id, question, answer, annotation_id,
+            existing.get("source") or "", triggers)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
     if enabled is not None:
         await asyncio.to_thread(
             kg_annotations.set_enabled, request.app.state,
@@ -1062,13 +1088,16 @@ async def search(request: Request, payload: Dict[str, Any]):
                 hit_kb = k
                 break
         if hit:
+            # exact=触发问法精确命中(零模型调用)/semantic=语义相似
+            match_type = hit.get("matchType") or "semantic"
             logger.info(f"annotation hit: kb={hit_kb['name']}, "
-                        f"score={hit['score']}, q={query[:40]}")
+                        f"score={hit['score']}, matchType={match_type}, q={query[:40]}")
             return {
                 "answer": hit["answer"],
                 "annotationHit": True,
                 "annotationQuestion": hit["question"],
                 "annotationScore": hit["score"],
+                "matchType": match_type,
                 "cited_chunks": [],
                 "kb": {"id": hit_kb["id"], "name": hit_kb.get("name") or ""},
                 "kbs": [{"id": hit_kb["id"], "name": hit_kb.get("name") or ""}],

@@ -3,7 +3,8 @@
 覆盖:upsert 重打向量、命中短路(kb_search 工具答案制品标注
 标记)、REST /search 短路、阈值语义(相似但低于 0.90 不短路)、
 启停(禁用的标注不参与匹配)、删除、跨库逐库试、短路层故障降级
-常规检索。
+常规检索;固定问答(触发问法)归一化精确命中(零模型调用)、
+并集语义、triggers CRUD 校验与同库冲突 422、无表首访零 DDL。
 """
 from types import SimpleNamespace
 
@@ -65,6 +66,34 @@ def _mk_kb(env, name):
     return kb
 
 class TestAnnotationCrud:
+
+    @pytest.mark.parametrize("method", ["GET", "PUT", "DELETE"])
+    def test_first_access_without_annotation_table(self, client, monkeypatch, method):
+        """全新安装首访:标注表未懒建时,读/启停/删除按空集合处理,
+        不跑 DDL 也不得触发 embeddings。"""
+        c, env = client
+        kb = _mk_kb(env, "首次访问标注库")
+        # 专用测试库逐用例清表,但 kg_annotations 是首用懒建——
+        # 显式 DROP 复现"从未建过表"的真实全新安装
+        with env.store._get_conn() as conn:
+            conn.execute("DROP TABLE IF EXISTS kg_annotations")
+
+        def unexpected_embedding(*args, **kwargs):
+            pytest.fail("Reading an empty annotation collection must not invoke embeddings")
+
+        monkeypatch.setattr(env.llm, "embeddings", unexpected_embedding)
+        path = f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations"
+        if method == "GET":
+            response = c.get(path)
+            assert response.status_code == 200
+            assert response.json() == {"items": []}
+            assert c.get(path).json() == {"items": []}
+        elif method == "PUT":
+            response = c.put(path + "/missing", json={"enabled": False})
+            assert response.status_code == 404
+        else:
+            response = c.delete(path + "/missing")
+            assert response.status_code == 404
 
     def test_create_list_update_delete(self, client):
         c, env = client
@@ -191,3 +220,238 @@ class TestShortCircuit:
         result = tool.execute({"user_input": "任何问题"}, _ctx(env))
         assert result.artifact_type == "data"       # 常规检索照常
         assert not (result.artifact or {}).get("annotationHit")
+
+
+class TestTriggerExactMatch:
+    """固定问答(触发问法)——归一化纯文本精确命中,先于 embedding。
+
+    并集语义:triggers 只增加命中面;未命中(含带 triggers 条目的
+    paraphrase)仍走语义路,所有 enabled 条目照常参与。
+    """
+
+    @staticmethod
+    def _forbid_embeddings(env, monkeypatch):
+        """建标注(upsert 需向量化)完成后启用:此后任何 embeddings
+        调用直接失败——证明精确命中路径零模型调用。"""
+
+        def fail(*args, **kwargs):
+            pytest.fail("触发问法精确命中不得调用 embeddings")
+
+        monkeypatch.setattr(env.llm, "embeddings", fail)
+
+    def test_trigger_hit_zero_embeddings(self, env, monkeypatch):
+        """触发问法原样命中:零 embedding 调用,matchType=exact。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        kb = _mk_kb(env, "固定问答库")
+        kg_annotations.upsert_annotation(
+            env.app_state, kb["id"], "如何下载证书", "证书在「我的-证书」页下载",
+            triggers=["怎么下载证书", "证书怎么下载"])
+        self._forbid_embeddings(env, monkeypatch)
+        tool = KbSearchTool(env.app_state)
+        result = tool.execute({"user_input": "怎么下载证书"}, _ctx(env))
+        assert result.summary == "证书在「我的-证书」页下载"
+        assert result.artifact["annotationHit"] is True
+        assert result.artifact["matchType"] == "exact"
+        assert result.artifact["answer"] == "证书在「我的-证书」页下载"
+
+    def test_question_itself_exact_hits_without_triggers(self, env, monkeypatch):
+        """未配 triggers 的条目:question 原样问出也走精确段(升级旧行为)。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        kb = _mk_kb(env, "问题本身精确库")
+        kg_annotations.upsert_annotation(
+            env.app_state, kb["id"], "营业时间", "9:00-18:00")
+        self._forbid_embeddings(env, monkeypatch)
+        tool = KbSearchTool(env.app_state)
+        result = tool.execute({"user_input": "营业时间"}, _ctx(env))
+        assert result.artifact["annotationHit"] is True
+        assert result.artifact["matchType"] == "exact"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "怎么下载证书?",   # 半角问号
+            "怎么下载证书？",   # 全角问号(NFKC 折半角)
+            "怎么下载证书。",   # 句读结尾
+            "怎么 下载 证书",   # 内部空白
+            "  怎么下载证书  ",  # 首尾空白
+        ],
+    )
+    def test_normalization_variants_hit(self, env, monkeypatch, query):
+        """归一化变体全部命中:NFKC/casefold/去空白/去尾部问句标点。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        kb = _mk_kb(env, "归一化库")
+        kg_annotations.upsert_annotation(
+            env.app_state, kb["id"], "如何下载证书", "标准答案", triggers=["怎么下载证书"])
+        self._forbid_embeddings(env, monkeypatch)
+        tool = KbSearchTool(env.app_state)
+        result = tool.execute({"user_input": query}, _ctx(env))
+        assert result.artifact["annotationHit"] is True
+        assert result.artifact["matchType"] == "exact"
+
+    def test_casefold_hit_for_ascii(self, env, monkeypatch):
+        """英文问法大小写不敏感。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        kb = _mk_kb(env, "英文问法库")
+        kg_annotations.upsert_annotation(
+            env.app_state, kb["id"], "How to export", "点右上角导出", triggers=[])
+        self._forbid_embeddings(env, monkeypatch)
+        tool = KbSearchTool(env.app_state)
+        result = tool.execute({"user_input": "HOW TO EXPORT"}, _ctx(env))
+        assert result.artifact["matchType"] == "exact"
+
+    def test_miss_falls_back_to_semantic_for_entry_with_triggers(self, env, scripted_embed):
+        """并集回归:带 triggers 条目的其他问法仍可语义命中(≥0.90)。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        kb = _mk_kb(env, "并集库")
+        q = "证书下载的标准入口"
+        scripted_embed[q] = [1.0, 0.0, 0.0]        # 标注问题向量
+        scripted_embed["证书从哪里下载"] = [0.98, 0.0, 0.0]  # paraphrase 高度相似
+        kg_annotations.upsert_annotation(
+            env.app_state, kb["id"], q, "语义标准答案",
+            triggers=["完全无关的触发问法"])
+        tool = KbSearchTool(env.app_state)
+        result = tool.execute({"user_input": "证书从哪里下载"}, _ctx(env))
+        assert result.artifact["annotationHit"] is True
+        assert result.artifact["matchType"] == "semantic"
+        assert result.artifact["answer"] == "语义标准答案"
+
+    def test_disabled_trigger_not_matched(self, env):
+        """禁用条目的触发问法不参与精确匹配(走常规检索)。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        kb = _mk_kb(env, "停用触发库")
+        item = kg_annotations.upsert_annotation(
+            env.app_state, kb["id"], "q", "a", triggers=["触发问法"])
+        kg_annotations.set_enabled(env.app_state, kb["id"], item["id"], False)
+        tool = KbSearchTool(env.app_state)
+        result = tool.execute({"user_input": "触发问法"}, _ctx(env))
+        assert not (result.artifact or {}).get("annotationHit")
+
+    def test_cross_kb_trigger_hit(self, env, scripted_embed):
+        """跨库:逐库试,触发问法在第二个库命中(第一个库语义不命中)。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        kb1 = _mk_kb(env, "跨库触发1")
+        kb2 = _mk_kb(env, "跨库触发2")
+        # scripted_embed 的回退路径会递归:所有会走到 embeddings 的文本
+        # (两条标注问题 + 查询)都必须显式映射
+        scripted_embed["固定触发问法"] = [0.0, 1.0, 0.0]  # 与 kb1 标注正交,语义不命中
+        scripted_embed["q1"] = [1.0, 0.0, 0.0]
+        scripted_embed["q2"] = [1.0, 0.0, 0.0]
+        kg_annotations.upsert_annotation(env.app_state, kb1["id"], "q1", "a1")
+        kg_annotations.upsert_annotation(
+            env.app_state, kb2["id"], "q2", "跨库固定答案", triggers=["固定触发问法"])
+        tool = KbSearchTool(env.app_state)
+        result = tool.execute({"user_input": "固定触发问法"}, _ctx(env))
+        assert result.artifact["answer"] == "跨库固定答案"
+        assert result.artifact["kb"]["name"] == "跨库触发2"
+        assert result.artifact["matchType"] == "exact"
+
+    def test_rest_search_trigger_hit(self, client, monkeypatch):
+        """REST /search 同层:触发问法精确命中。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        c, env = client
+        kb = _mk_kb(env, "REST触发库")
+        kg_annotations.upsert_annotation(
+            env.app_state, kb["id"], "如何联系客服", "电话 12345",
+            triggers=["客服电话多少"])
+        self._forbid_embeddings(env, monkeypatch)
+        r = c.post("/api/packs/knowledge_graph/search",
+                   json={"query": "客服电话多少", "kb": kb["name"]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["annotationHit"] is True
+        assert body["matchType"] == "exact"
+        assert body["answer"] == "电话 12345"
+
+    def test_match_annotation_no_table_no_model(self, env, monkeypatch):
+        """表未懒建:match 直接 None,不建表不调 embeddings。"""
+        from domains.knowledge_graph import annotations as kg_annotations
+        kb = _mk_kb(env, "无表短路库")
+        with env.store._get_conn() as conn:
+            conn.execute("DROP TABLE IF EXISTS kg_annotations")
+        self._forbid_embeddings(env, monkeypatch)
+        assert kg_annotations.match_annotation(env.app_state, kb["id"], "任何问法") is None
+
+
+class TestTriggerCrud:
+    """触发问法 CRUD:落库/替换/清空/校验/同库冲突。"""
+
+    def test_create_with_triggers_and_list(self, client):
+        c, env = client
+        kb = _mk_kb(env, "触发CRUD库")
+        r = c.post(f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations",
+                   json={"question": "如何下载证书", "answer": "标准答案",
+                         "triggers": ["怎么下载证书", "  怎么下载证书?  ", "",
+                                      "怎么下载证书"]})
+        assert r.status_code == 200, r.text
+        # 空/归一化重复项被剔除(与 question 重复的也会被剔)
+        assert r.json()["triggers"] == ["怎么下载证书"]
+        items = c.get(f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations").json()["items"]
+        assert items[0]["triggers"] == ["怎么下载证书"]
+
+    def test_update_replaces_and_clears_triggers(self, client):
+        c, env = client
+        kb = _mk_kb(env, "触发更新库")
+        aid = c.post(f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations",
+                     json={"question": "q", "answer": "a",
+                           "triggers": ["旧问法"]}).json()["id"]
+        # 缺省不改动
+        r = c.put(f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations/{aid}",
+                  json={"answer": "a2"})
+        assert r.json()["triggers"] == ["旧问法"]
+        # 显式数组替换
+        r = c.put(f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations/{aid}",
+                  json={"triggers": ["新问法"]})
+        assert r.json()["triggers"] == ["新问法"]
+        # 空数组清空
+        r = c.put(f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations/{aid}",
+                  json={"triggers": []})
+        assert r.json()["triggers"] == []
+
+    def test_triggers_validation(self, client):
+        c, env = client
+        kb = _mk_kb(env, "触发校验库")
+        base = f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations"
+        # 非数组 422
+        assert c.post(base, json={"question": "q", "answer": "a",
+                                  "triggers": "x"}).status_code == 422
+        # 元素非字符串 422
+        assert c.post(base, json={"question": "q", "answer": "a",
+                                  "triggers": [1]}).status_code == 422
+        # 单条超长 422
+        assert c.post(base, json={"question": "q", "answer": "a",
+                                  "triggers": ["x" * 201]}).status_code == 422
+        # 超条数上限 422
+        assert c.post(base, json={"question": "q", "answer": "a",
+                                  "triggers": [f"t{i}" for i in range(21)]}
+                      ).status_code == 422
+
+    def test_conflict_within_kb_rejected(self, client):
+        """同库精确键冲突:触发问法撞他条触发问法/撞他条 question → 422。"""
+        c, env = client
+        kb = _mk_kb(env, "触发冲突库")
+        base = f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations"
+        c.post(base, json={"question": "如何下载证书", "answer": "a1",
+                           "triggers": ["怎么下载证书"]})
+        # 撞已有触发问法(带全角问号变体)
+        r = c.post(base, json={"question": "另一个问题", "answer": "a2",
+                               "triggers": ["怎么下载证书？"]})
+        assert r.status_code == 422 and "冲突" in r.json()["detail"]
+        # 撞已有条目的 question 本身
+        r = c.post(base, json={"question": "再一个问题", "answer": "a3",
+                               "triggers": ["如何下载证书?"]})
+        assert r.status_code == 422
+        # 自身更新(问法不变)不算冲突
+        items = c.get(base).json()["items"]
+        aid = items[0]["id"]
+        r = c.put(f"{base}/{aid}", json={"triggers": ["怎么下载证书"]})
+        assert r.status_code == 200
+
+    def test_same_trigger_across_kbs_allowed(self, client):
+        """跨库同问法允许(跨库逐库试,先到先得)。"""
+        c, env = client
+        kb1 = _mk_kb(env, "冲突跨库1")
+        kb2 = _mk_kb(env, "冲突跨库2")
+        for kb in (kb1, kb2):
+            r = c.post(f"/api/packs/knowledge_graph/kbs/{kb['id']}/annotations",
+                       json={"question": "q", "answer": "a", "triggers": ["同一问法"]})
+            assert r.status_code == 200

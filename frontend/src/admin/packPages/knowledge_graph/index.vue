@@ -126,7 +126,7 @@
               <RetrievalTest :kb-id="currentKbId" />
             </a-tab-pane>
             <a-tab-pane key="annotations">
-              <template #tab><BookOutlined /> 标注回复</template>
+              <template #tab><BookOutlined /> 标准问答</template>
               <AnnotationManager :kb-id="currentKbId" />
             </a-tab-pane>
             <template #rightExtra>
@@ -278,9 +278,10 @@ const helpHtmlMap: Record<string, { title: string; html: string }> = {
     ]),
   },
   annotations: {
-    title: '标注回复说明',
+    title: '标准问答说明',
     html: rules([
       '录入问题和标准答案;相似提问达到匹配阈值时,直接返回<b>已启用</b>的答案。',
+      '触发问法:用户<b>原样问出</b>即立即返回答案(忽略大小写、空格与尾部标点),不经过模型与检索。',
     ]),
   },
 }
