@@ -150,7 +150,10 @@ def _recover_stale_importing(manager) -> bool:
                 queued.add(doc_id)
                 continue
             try:
-                submit_import(_app_state, kb_id, doc_id, force=False)
+                # force 语义保留(2026-11-14 事故):换本体 force 全量重导被中断后
+                # 重提不得退化 force=False——那会复用旧块秒完成,假成功留旧数据
+                old_force = bool((old.get("payload") or {}).get("force")) if old else False
+                submit_import(_app_state, kb_id, doc_id, force=old_force)
                 queued.add(doc_id)
             except Exception as e:  # noqa: BLE001
                 # 入队失败(如文档已删/重复任务):文档保持 failed,人工仍可重排
