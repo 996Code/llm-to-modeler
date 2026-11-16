@@ -317,3 +317,167 @@ def test_annotation_shortcut_failure_falls_through(monkeypatch):
     result = tool.execute({'user_input': '送检要几个工作日'}, ctx)
     assert result.artifact['fallback'] is True
     assert seen['kbs']
+
+
+class _StageLLM:
+    """按 stage 分流并记录 prompt 的桩(与筑基侧同源测试形态)。"""
+
+    def __init__(self, select=None, extract=None):
+        self._select, self._extract = select, extract
+        self.prompts = []
+
+    def chat_json(self, messages=None, temperature=None, stage=None, conv_id=None, **kw):
+        self.prompts.append((stage, (messages or [{}])[0].get('content', '')))
+        if stage == 'assistant.select':
+            return deepcopy(self._select)
+        if stage == 'assistant.extract':
+            return deepcopy(self._extract or {})
+        raise AssertionError(f'非预期 stage: {stage}')
+
+
+def test_select_condenses_anaphoric_followup(monkeypatch):
+    """选择器顺手改写(2026-11-16,condense 零新增调用形态,与筑基侧同源):
+    指代式追问→选择调用输出 standalone,抽槽与兜底检索全用独立问句。"""
+    seen = {}
+
+    def multi(app, kbs, query, **kwargs):
+        seen.update(query=query)
+        return multi_result()
+
+    tool, _ = setup_tool(monkeypatch, multi=multi)
+    llm = _StageLLM(select={'scenario': 'other',
+                            'standalone': '数字压力表的检测费用是多少'})
+    ctx = context(llm)
+    traced = []
+    ctx.trace = lambda key, title, status, detail=None: traced.append((key, title))
+    ctx.session_state.set('capability_slots',
+                          {'_context': {'instrument': '数字压力表'}})
+    result = tool.execute({'user_input': '那这单上的器具检测费是多少'}, ctx)
+    assert not any('rewrite' == s for s, _ in llm.prompts), '不应有独立改写调用'
+    select_prompt = next(p for s, p in llm.prompts if s == 'assistant.select')
+    assert 'standalone' in select_prompt and '会话背景' in select_prompt
+    assert '数字压力表' in select_prompt
+    assert seen['query'] == '数字压力表的检测费用是多少', '兜底检索应使用改写句'
+    assert traced and traced[0][0] == 'metrology.rewrite'
+    assert result.artifact['fallback'] is True
+
+
+def test_select_without_standalone_uses_original(monkeypatch):
+    """选择器未给 standalone → 原句直通,行为不变。"""
+    seen = {}
+
+    def multi(app, kbs, query, **kwargs):
+        seen.update(query=query)
+        return multi_result()
+
+    tool, _ = setup_tool(monkeypatch, multi=multi)
+    llm = _StageLLM(select={'scenario': 'other'})
+    ctx = context(llm)
+    tool.execute({'user_input': '查一下数字压力表的检测费用是多少'}, ctx)
+    assert seen['query'] == '查一下数字压力表的检测费用是多少'
+
+
+def test_result_context_backfill_for_anaphora(monkeypatch):
+    """业务结果器具名回填:"名称"列(进度表)与"器具名称"列(证书表)进
+    capability_slots._context;"单位名称"列不碰。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    tool, _ = setup_tool(monkeypatch)
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+
+    def _ok_result(columns, rows):
+        monkeypatch.setattr(
+            'domains.chatbi.controlled.execute_controlled',
+            lambda *a, **kw: ControlledResult(
+                ok=True, status='ok', data={'columns': columns, 'rows': rows}))
+
+    _ok_result(['业务类别', '名称', '状态'], [['计量检定', '数字压力表', '检测中']])
+    ctx = context(LLM(extract={'scenario': 'warehouse::stock'}))
+    tool.execute({'user_input': '查一下委托单 CZ2024-001 的办理进度'}, ctx)
+    assert ctx.session_state.get('capability_slots')['_context']['instrument'] == '数字压力表'
+
+    _ok_result(['证书编号', '单位名称', '器具名称'],
+               [['ZS2024-0001', '常州示例机械有限公司', '数字压力表']])
+    ctx2 = context(LLM(extract={'scenario': 'warehouse::stock'}))
+    tool.execute({'user_input': '核对证书 ZS2024-0001'}, ctx2)
+    assert ctx2.session_state.get('capability_slots')['_context']['instrument'] == '数字压力表'
+
+
+def _identifier_table():
+    order_cap = {
+        'label': '委托单进度查询', 'intent': '按委托单号查进度',
+        'required': {'slot': 'order_no', 'header': '委托单号'},
+        'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'progress',
+                   'datasource_id': 'ds-stock', 'params': {}, 'card': '_table_card'},
+    }
+    return {'warehouse::order': order_cap, 'warehouse::stock': capability()}
+
+
+def test_identifier_not_found_returns_business_notice(monkeypatch):
+    """标识符查询查无即终态(2026-11-16,与筑基侧同源):凭委托单号查
+    MCP not_found 后不转知识库兜底——弱召回的无关规范片段会顶掉业务
+    通知;价目/能力类(无标识符槽位)保留兜底。"""
+    called = []
+
+    def multi(app, kbs, query, **kwargs):
+        called.append(query)
+        return multi_result()
+
+    monkeypatch.setattr(mta, '_runtime_scenarios', lambda *a, **k: _identifier_table())
+    monkeypatch.setattr(
+        'domains.knowledge_graph.runtime.get_kg_store', lambda state: StubKgStore(_kbs()))
+    monkeypatch.setattr(
+        'domains.knowledge_graph.retrieval.answer_question_multi', multi)
+    tool = mta.MetrologyAssistantTool(object())
+    _datasource_ok(monkeypatch)
+    _controlled('not_found', monkeypatch)
+    ctx = context(LLM(extract={'scenario': 'warehouse::order', 'order_no': 'CZ9999-000'}))
+    result = tool.execute({'user_input': '查一下委托单 CZ9999-000 的办理进度'}, ctx)
+    assert called == [], '标识符查询查无不应转知识库兜底'
+    assert result.artifact and result.artifact.get('type') == 'metrology_notice'
+    assert result.artifact.get('status') == 'not_found'
+    assert '未找到' in result.artifact.get('title', '') + result.artifact.get('message', '')
+
+
+def test_identifier_gate_reads_header_and_slot():
+    tool = mta.MetrologyAssistantTool(object())
+    cert_cap = {'label': '证书防伪',
+                'required': {'slot': 'cert_no', 'header': '证书编号'},
+                'action': {'kind': 'chatbi', 'server': 's', 'tool': 't',
+                           'datasource_id': 'd', 'params': {}}}
+    assert tool._is_identifier_query(cert_cap, {'cert_no': 'ZS1'}) is True
+    assert tool._is_identifier_query(cert_cap, {}) is False
+    name_cap = {'label': '价目',
+                'required': {'slot': 'name', 'header': '器具名称'},
+                'action': {'kind': 'chatbi', 'server': 's', 'tool': 't',
+                           'datasource_id': 'd', 'params': {}}}
+    assert tool._is_identifier_query(name_cap, {'name': '压力表'}) is False
+
+
+def test_standalone_does_not_leak_into_slots(monkeypatch):
+    """standalone 只当问句用,不得进业务槽位(2026-11-16,与筑基侧同源)。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    tool, _ = setup_tool(monkeypatch)
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr(
+        'domains.chatbi.controlled.execute_controlled',
+        lambda *a, **kw: ControlledResult(
+            ok=True, status='ok', data={'columns': ['库存'], 'rows': [['10']]}))
+    llm = _StageLLM(select={'scenario': 'warehouse::stock',
+                            'standalone': '数字压力表的检测费用是多少'},
+                    extract={})
+    ctx = context(llm)
+    ctx.trace = lambda *a, **k: None
+    tool.execute({'user_input': '那这单上的器具检测费是多少'}, ctx)
+    slots = ctx.session_state.get('capability_slots') or {}
+    assert 'standalone' not in slots.get('warehouse::stock', {}), 'standalone 泄漏进业务槽位'
+    assert 'standalone' not in ctx.session_state.get('slots', {})

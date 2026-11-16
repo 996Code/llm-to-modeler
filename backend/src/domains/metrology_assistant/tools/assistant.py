@@ -63,29 +63,50 @@ def extract_slots(llm, user_input, background, conv_id, scenarios=None):
     if not table:
         return {'scenario': 'other'}
     choices = {k: {'label': c.get('label'), 'intent': c.get('intent')} for k, c in table.items()}
+    # 会话背景行(2026-11-16,与筑基侧同源):选择器拿到槽位/最近器具背景,
+    # 指代式追问("那这单上的器具检测费是多少")不再纯字面匹配判 other;
+    # 同时顺手输出改写后的独立问句(standalone,condense question 零新增
+    # 调用形态:改写合并进本就每轮发生的选择调用)
+    bg_line = (f'会话背景(追问指代解析用): {json.dumps(background, ensure_ascii=False)}\n'
+               if isinstance(background, dict) and background else '')
     selected = llm.chat_json([{'role': 'user', 'content': (
-        '选择一个能力,仅输出 JSON {"scenario":"能力key或other"}。\n'
-        f'能力: {json.dumps(choices, ensure_ascii=False)}\n用户消息: {user_input}')}],
+        '选择一个能力,仅输出 JSON {"scenario":"能力key或other"'
+        ',"standalone":"独立问题"(可选)}。\n'
+        f'{bg_line}能力: {json.dumps(choices, ensure_ascii=False)}\n用户消息: {user_input}\n'
+        'standalone 仅当用户消息含指代/省略(如"这单上的器具")需结合会话背景'
+        '才能理解时给出:用背景中的具体值替换指代,写成不依赖上下文的独立'
+        '问题;无需改写时省略该字段。')}],
         temperature=0.0, conv_id=conv_id, stage='assistant.select')
     if not isinstance(selected, dict):
         raise ValueError('能力选择返回非对象')
+    standalone = selected.get('standalone')
+    standalone = standalone.strip() if isinstance(standalone, str) else ''
+    if standalone and len(standalone) > max(len(user_input) * 4, 200):
+        standalone = ''  # 异常膨胀视为改写失败,防跑偏
     scenario = selected.get('scenario')
     if not isinstance(scenario, str) or scenario not in table:
-        return {'scenario': 'other'}
+        return {'scenario': 'other', **({'standalone': standalone} if standalone else {})}
     specs = parameter_specs(table[scenario])
     if not specs:
-        return {'scenario': scenario}
+        return {'scenario': scenario, **({'standalone': standalone} if standalone else {})}
     allowed = {s['slot'] for s in specs}
     scoped = background.get(scenario, {}) if isinstance(background, dict) else {}
     scoped = {k: v for k, v in scoped.items() if k in allowed}
-    prompt = _build_extract_prompt(json.dumps(scoped, ensure_ascii=False), user_input,
+    # 抽槽上下文行:"这单上的器具"用最近查到的器具名填参
+    bg_payload = json.dumps(scoped, ensure_ascii=False)
+    context = background.get('_context') if isinstance(background, dict) else None
+    if isinstance(context, dict) and context:
+        bg_payload += ('\n会话上下文(指代解析,如\'这单上的器具\'即这里的值): '
+                       + json.dumps(context, ensure_ascii=False))
+    prompt = _build_extract_prompt(bg_payload, standalone or user_input,
                                    {scenario: table[scenario]})
     data = llm.chat_json([{'role': 'user', 'content': prompt}], temperature=0.0,
                          conv_id=conv_id, stage='assistant.extract')
     if not isinstance(data, dict):
         raise ValueError('槽位提取返回非对象')
-    return {'scenario': scenario, **{k: v.strip() if isinstance(v, str) else v
-                                    for k, v in data.items() if k in allowed and present(v)}}
+    return {'scenario': scenario, **({'standalone': standalone} if standalone else {}),
+            **{k: v.strip() if isinstance(v, str) else v
+               for k, v in data.items() if k in allowed and present(v)}}
 
 
 def merge_slots(extracted, mem_slots):
@@ -355,6 +376,16 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                         )
                 extracted = extract_slots(ctx.llm_client, user_input, background, getattr(ctx, 'conv_id', None), table)
                 scenario = extracted['scenario']
+                # 选择器顺手输出的独立问句(condense,零新增调用):本轮后续
+                # (兜底检索/业务参数)全部使用改写后的干净问句。pop 摘出——
+                # 不能留在 extracted 里,否则经 merge_slots 泄漏进业务槽位
+                standalone = extracted.pop('standalone', None)
+                if isinstance(standalone, str) and standalone.strip():
+                    standalone = standalone.strip()
+                    ctx.trace('metrology.rewrite', '追问改写为独立问题', 'ok',
+                              detail={'original': user_input[:60],
+                                      'standalone': standalone[:80]})
+                    user_input = standalone
                 if scenario not in table:
                     # 联网意图直连 web_search pack 底层(照 kg/chatbi 直连模式;
                     # 开关开+话术点明联网才走,否则原样回落 KB 兜底链)
@@ -479,11 +510,16 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 # 原问题继续检索;知识库也无依据时回业务通知卡。
                 # 拒权/参数错误不降级——那是权限与契约问题,查库答非所问。
                 # 有片段被回答引用才算兜底成立(证据红线):弱召回 0 引用的
-                # 合成"未找到"不顶掉业务查无事实——委托单查无仍出业务通知。
-                kb = self._fallback_answer(table, user_input, ctx, state, stage)
-                if (kb.artifact and kb.artifact.get('type') == 'kg_search_result'
-                        and kb.artifact.get('cited_chunks')):
-                    return kb
+                # 合成"未找到"不顶掉业务查无事实。
+                # 例外(2026-11-16,与筑基侧同源):标识符定位类查询(凭委托
+                # 单号/证书编号取业务数据)查无即终态,不转兜底——弱召回的
+                # 无关规范片段引用非空会顶掉业务通知。凭标识符查无本身
+                # 就是有效答案。
+                if not self._is_identifier_query(cfg, merged):
+                    kb = self._fallback_answer(table, user_input, ctx, state, stage)
+                    if (kb.artifact and kb.artifact.get('type') == 'kg_search_result'
+                            and kb.artifact.get('cited_chunks')):
+                        return kb
             if result.status in ('forbidden', 'not_found'):
                 notice = (action.get('notices') or {}).get(result.status) or {}
                 title = notice.get('title') or ('无权查询' if result.status == 'forbidden' else '未找到数据')
@@ -499,7 +535,76 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                                notice.get('order', '').format_map(safe))
             message = result.error.message if result.error else result.status
             return ToolResult(error_for_llm=f'{noun}查询失败({result.status}): {message}。已如实上报,请稍后重试。')
+        # 业务查询成功 → 结果中的名称类字段回填会话上下文(指代解析原料,
+        # 2026-11-16:查过委托单后问"这单上的器具检测费",改写与抽槽都需要)
+        self._remember_result_context(getattr(ctx, 'session_state', None), result)
         return getattr(self, action.get('card') or '_table_card')(result, merged, stage)
+
+    # 标识符槽位特征(header/slot 来自 MCP 工具声明,中文标签稳定):凭
+    # 单号/编号/号码定位业务数据的查询。此类查无即终态,不做知识库兜底。
+    _IDENTIFIER_SLOT_MARKS = ('单号', '编号', '号码')
+
+    def _is_identifier_query(self, cfg, merged):
+        """标识符定位类查询判定(2026-11-16,与筑基侧同源)。
+
+        场景的参数声明里有标识符槽位(委托单号/证书编号等)且本轮带值——
+        凭标识符取业务数据,查无是确定性事实,知识库不可能提供"这个单号
+        的进度";兜底反而让弱召回的无关规范片段顶掉业务通知。
+        价目/能力类按器具名称查询无标识符槽位,不受影响(保留兜底)。
+        """
+        try:
+            for spec in parameter_specs(cfg):
+                text = f"{spec.get('header') or ''}{spec.get('slot') or ''}{spec.get('name') or ''}"
+                if any(mark in str(text) for mark in self._IDENTIFIER_SLOT_MARKS):
+                    if present(merged.get(spec.get('slot') or '')):
+                        return True
+        except Exception:  # noqa: BLE001
+            logger.debug('标识符查询判定失败(按非标识符处理)', exc_info=True)
+        return False
+
+    # 器具/样品名称列匹配优先级:证书表用 器具名称/样品名称;进度合并表
+    # 的器具列是纯"名称";含"单位"的列(送检单位)明确不碰
+    _INSTRUMENT_COL_PRIORITY = (('器具名称', '样品名称'), ('名称',))
+
+    def _remember_result_context(self, mem, result):
+        """业务结果里的器具/样品名称回填会话上下文(capability_slots._context)。
+
+        供追问改写与抽槽做指代解析:"这单上的器具"= 这里的 instrument。
+        只记首个非空值;_context 以下划线开头,不在任何场景槽位白名单内,
+        不参与澄清与落库。任何失败静默(不影响主流程)。
+        """
+        try:
+            data = getattr(result, 'data', None)
+            if not isinstance(data, dict):
+                return
+            found = None
+            columns, rows = data.get('columns') or [], data.get('rows') or []
+            for hints in self._INSTRUMENT_COL_PRIORITY:
+                for idx, col in enumerate(map(str, columns)):
+                    if any(h in col for h in hints) and '单位' not in col:
+                        for row in rows:
+                            if idx < len(row) and present(row[idx]):
+                                found = str(row[idx]).strip()
+                                break
+                    if found:
+                        break
+                if found:
+                    break
+            if not found:
+                record = data.get('record')
+                if isinstance(record, dict):
+                    for key, value in record.items():
+                        if (any(h in str(key) for h in ('器具名称', '样品名称'))
+                                and present(value)):
+                            found = str(value).strip()
+                            break
+            if not found or mem is None:
+                return
+            slots = dict(mem.get('capability_slots') or {})
+            slots['_context'] = {**(slots.get('_context') or {}), 'instrument': found}
+            mem.set('capability_slots', slots)
+        except Exception:  # noqa: BLE001
+            logger.debug('结果上下文回填失败(不影响主流程)', exc_info=True)
 
     def _run_kg(self, scenario, cfg, ctx, merged, stage, plan, state, user_input):
         from domains.knowledge_graph import service
