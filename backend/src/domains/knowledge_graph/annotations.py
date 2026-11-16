@@ -294,3 +294,23 @@ def match_annotation(app_state, kb_id: str, query: str
         # 短路层故障不拖垮检索:记日志返回 None,回答走常规链路
         logger.warning(f"标注短路匹配失败(降级常规检索): {e}")
         return None
+
+
+def try_shortcut(app_state, kbs, query):
+    """跨库标注短路(D32 共享前置层,2026-11-16 抽出)。
+
+    逐库 match_annotation(触发问法精确→语义高阈值),首个命中即返回
+    {'kb': 库行, 'hit': match_annotation 结果};全未命中返回 None。
+    kb_search 主链与 metrology 路由前置层共用——调用方负责库清单的
+    可见性边界,本函数只管匹配。短路层故障返回 None(调用方降级
+    常规链路,不阻塞主流程)。与筑基侧同源同步移植。
+    """
+    for kb in kbs or []:
+        try:
+            hit = match_annotation(app_state, kb['id'], query)
+        except Exception as e:
+            logger.warning(f'跨库标注短路异常(降级常规链路): {e}')
+            return None
+        if hit and isinstance(hit.get('answer'), str) and hit['answer'].strip():
+            return {'kb': kb, 'hit': hit}
+    return None

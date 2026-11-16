@@ -307,6 +307,52 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                     mem.pop('pending', None)
             else:
                 background = dict(mem.get('capability_slots') or {}) if mem else {}
+                # ── D32 标注短路(2026-11-16 提升到路由之前,与筑基侧同源) ──
+                # 固定问答(管理侧维护的标准答案)高阈值命中即作答:零模型、
+                # 零检索、先于场景路由——此前短路只在 kb_search 主链,
+                # metrology 的场景问答与兜底均未接。短路层故障静默降级
+                # 常规链路(路由→场景→兜底)。
+                if user_input:
+                    try:
+                        from domains.knowledge_graph import annotations as kg_annotations
+                        from domains.knowledge_graph import runtime as kg_runtime
+                        visible = [k for k in kg_runtime.get_kg_store(
+                            self._app_state).list_kbs() if k.get('kind') != 'folder']
+                        shortcut = kg_annotations.try_shortcut(
+                            self._app_state, visible, user_input)
+                    except Exception:  # noqa: BLE001
+                        shortcut = None
+                    if shortcut:
+                        hit, hit_kb = shortcut['hit'], shortcut['kb']
+                        match_type = hit.get('matchType') or 'semantic'
+                        ctx.trace('metrology.annotation',
+                                  '标准问答命中(触发问法短路)'
+                                  if match_type == 'exact'
+                                  else '标准问答命中(语义相似短路)',
+                                  'ok', detail={
+                                      'kb': hit_kb['name'],
+                                      'question': hit['question'][:60],
+                                      'score': hit.get('score'),
+                                      'matchType': match_type,
+                                  })
+                        return ToolResult(
+                            summary=hit['answer'],
+                            artifact={
+                                'pack': 'metrology_assistant',
+                                'resultDisplay': 'card',
+                                'answer': hit['answer'],
+                                'type': 'kg_search_result',
+                                'kb': {'id': hit_kb['id'], 'name': hit_kb['name']},
+                                'annotationHit': True,
+                                'annotationQuestion': hit['question'],
+                                'annotationScore': hit.get('score'),
+                                'matchType': match_type,
+                                'subgraph': {'nodes': [], 'edges': []},
+                                'sources': {'entities': [], 'chunks': []},
+                                'scenario': '标准问答',
+                            },
+                            artifact_type='data',
+                        )
                 extracted = extract_slots(ctx.llm_client, user_input, background, getattr(ctx, 'conv_id', None), table)
                 scenario = extracted['scenario']
                 if scenario not in table:

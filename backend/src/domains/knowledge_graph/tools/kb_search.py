@@ -217,18 +217,15 @@ class KbSearchTool(Tool):
         # 降级常规检索(match_annotation 内消化)
         try:
             from domains.knowledge_graph import annotations as kg_annotations
-            hit = None
-            hit_kb = None
-            if kb is not None and not scoped:
-                hit = kg_annotations.match_annotation(self._app_state, kb["id"], query)
-                hit_kb = kb
-            elif not scoped:
-                for k in kbs:
-                    hit = kg_annotations.match_annotation(self._app_state, k["id"], query)
-                    if hit:
-                        hit_kb = k
-                        break
-            if hit and isinstance(hit.get("answer"), str) and hit["answer"].strip():
+            shortcut = None
+            if not scoped:
+                shortcut = kg_annotations.try_shortcut(
+                    self._app_state, [kb] if kb is not None else kbs, query)
+            if shortcut:
+                hit, hit_kb = shortcut['hit'], shortcut['kb']
+            else:
+                hit, hit_kb = None, None
+            if hit and hit_kb:
                 match_type = hit.get("matchType") or "semantic"
                 ctx.trace("kb_search.annotation",
                           "标准问答命中(语义相似短路)"

@@ -18,6 +18,7 @@
   - SSE 流式：StreamingResponse + text/event-stream，实时推送管线进度。
     响应头 no-transform 防 rsbuild 等代理的 gzip 缓冲（见 stream.py 模块注释）。
 """
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -240,10 +241,11 @@ async def chat(req: ChatRequest, request: Request):
     async def stream():
         # stream_graph 是 async generator，yield 出 SSE 格式的事件字符串
         # async for：异步迭代，类比 Java 的 Flux/Reactor 流
-        async for event in stream_graph(
-            graph=graph,
-            user_input=req.message,
-            conversation_id=req.conversation_id,
+        try:
+            async for event in stream_graph(
+                graph=graph,
+                user_input=req.message,
+                conversation_id=req.conversation_id,
             user_id=user_id,  # 与 conversations API 缺省一致
             answers=req.answers,  # ← 追问回答（非空表示追问恢复）
             image_base64=req.image_base64,  # ← 图片 base64（图片识别）
@@ -255,8 +257,14 @@ async def chat(req: ChatRequest, request: Request):
             services=req.services,  # ← 宿主服务地址表（工作线程内绑定）
             packs=req.packs,               # ← 宿主插件链路声明（INIT packs 同义，路由子集）
             pack_params=req.pack_params,  # ← 插件默认参数（宿主注入,tool_state 透传给工具）
-        ):
-            yield event  # 把每个事件推给前端（SSE）
+            ):
+                yield event  # 把每个事件推给前端（SSE）
+        except Exception as e:
+            # 开流后抛错若直接冒泡 = 连接无声关闭,前端只能等看门狗超时。
+            # 转成 error 事件让客户端立即收到可展示的失败原因(完整堆栈进
+            # 服务端日志)。与筑基侧同源同步。
+            logger.error('chat stream aborted', exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'error': f'对话执行中断({type(e).__name__})，请重试'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         stream(),  # 传入 async generator 作为响应体
@@ -312,24 +320,29 @@ async def chat_resume(req: ChatRequest, request: Request):
     from engine.stream import stream_graph
 
     async def stream():
-        async for event in stream_graph(
-            graph=graph,
-            user_input="",
-            conversation_id=conv_id,
-            user_id=conv["userId"] or user_id,   # 会话归属人落库(作者一致)
-            answers=None,
-            image_base64=None,
-            conversation_store=store,
-            conversation_history=None,    # 历史/上下文在 checkpoint state 里已有
-            compressed_summary="",
-            context_artifact=None,
-            forward_headers=_extract_forward_headers(request),
-            services=req.services,
-            packs=req.packs,
-            pack_params=req.pack_params,
-            resume_pending=True,          # 新参:None 输入续跑(见 stream_graph)
-        ):
-            yield event
+        try:
+            async for event in stream_graph(
+                graph=graph,
+                user_input="",
+                conversation_id=conv_id,
+                user_id=conv["userId"] or user_id,   # 会话归属人落库(作者一致)
+                answers=None,
+                image_base64=None,
+                conversation_store=store,
+                conversation_history=None,    # 历史/上下文在 checkpoint state 里已有
+                compressed_summary="",
+                context_artifact=None,
+                forward_headers=_extract_forward_headers(request),
+                services=req.services,
+                packs=req.packs,
+                pack_params=req.pack_params,
+                resume_pending=True,          # 新参:None 输入续跑(见 stream_graph)
+            ):
+                yield event
+        except Exception as e:
+            # 与 /chat 同律(2026-11-16):开流后异常转 error 事件,不做无声断流
+            logger.error('chat resume stream aborted', exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'error': f'续答执行中断({type(e).__name__})，请重试'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         stream(),

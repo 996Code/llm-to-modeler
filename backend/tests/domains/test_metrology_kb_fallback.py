@@ -263,3 +263,57 @@ def test_validate_config_without_fallback_kb():
     assert validate_config({'scenarios': {}})
     # fallback_kb 已废除:存量配置里残留该键不再校验(忽略即可)
     assert validate_config({'scenarios': {}, 'fallback_kb': '历史残留'})
+
+
+def test_annotation_shortcut_before_routing(monkeypatch):
+    """D32 标注短路提升到路由之前(2026-11-16,与筑基侧同源):固定问答
+    命中零模型秒回,路由/抽槽/检索全跳过;artifact 带 annotationHit。"""
+    from domains.knowledge_graph import annotations as kg_annotations
+
+    def fake_shortcut(app_state, kbs, query):
+        assert query == '计量检定业务流程是怎样的'
+        return {'kb': {'id': 'kb-bm', 'name': '常州院便民问答'},
+                'hit': {'question': '计量检定/校准业务流程是怎样的',
+                        'answer': '三种办理入口:窗口送检、邮寄送检、上门取送。',
+                        'score': 1.0, 'matchType': 'exact'}}
+
+    monkeypatch.setattr(kg_annotations, 'try_shortcut', fake_shortcut)
+
+    def multi(*a, **k):
+        raise AssertionError('短路命中不应走检索')
+
+    tool, _ = setup_tool(monkeypatch, multi=multi)
+
+    class NoModel:
+        def chat_json(self, *a, **k):
+            raise AssertionError('短路命中不应调用任何模型')
+
+    ctx = context(NoModel())
+    traced = []
+    ctx.trace = lambda key, title, status, detail=None: traced.append((key, title))
+    result = tool.execute({'user_input': '计量检定业务流程是怎样的'}, ctx)
+    assert result.artifact['annotationHit'] is True
+    assert result.artifact['scenario'] == '标准问答'
+    assert result.artifact['answer'].startswith('三种办理入口')
+    assert traced and traced[0][0] == 'metrology.annotation'
+
+
+def test_annotation_shortcut_failure_falls_through(monkeypatch):
+    """短路层故障静默降级:照常走场景路由→兜底检索。"""
+    from domains.knowledge_graph import annotations as kg_annotations
+
+    def boom(*a, **k):
+        raise RuntimeError('store down')
+
+    monkeypatch.setattr(kg_annotations, 'try_shortcut', boom)
+    seen = {}
+
+    def multi(app, kbs, query, **kwargs):
+        seen.update(kbs=kbs)
+        return multi_result()
+
+    tool, _ = setup_tool(monkeypatch, multi=multi)
+    ctx = context(LLM(extract={'scenario': 'other'}))
+    result = tool.execute({'user_input': '送检要几个工作日'}, ctx)
+    assert result.artifact['fallback'] is True
+    assert seen['kbs']
