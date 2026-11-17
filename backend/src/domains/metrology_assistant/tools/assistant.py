@@ -75,11 +75,20 @@ def _chat_json_retry(llm, messages, *, conv_id, stage, retries=1):
     raise last_error
 
 
-def extract_slots(llm, user_input, background, conv_id, scenarios=None):
-    table = scenarios if scenarios is not None else _runtime_scenarios()
-    if not table:
-        return {'scenario': 'other'}
+def _select_capability(llm, user_input, background, conv_id, table):
+    """能力选择调用(select):抽出供 extract_slots 与追问话题判定复用
+    (2026-11-17 追问话题切换,与筑基侧同源)。返回选择器原始 JSON dict。"""
     choices = {k: {'label': c.get('label'), 'intent': c.get('intent')} for k, c in table.items()}
+    # 必填参数清单进候选声明(2026-11-17 缺参引导,与筑基侧同源):改写器
+    # 不知道哪些槽位缺了要追问,会把背景旧值当"省略补全"塞进 standalone;
+    # 显式告知必填项后,用户原话没给必填值时不补全(下游按声明追问)。
+    for key, cfg in table.items():
+        try:
+            required = [s['slot'] for s in parameter_specs(cfg) if s.get('required')]
+        except Exception:  # noqa: BLE001
+            required = []
+        if required:
+            choices[key]['required'] = required
     # 会话背景行(2026-11-16,与筑基侧同源):选择器拿到槽位/最近器具背景,
     # 指代式追问("那这单上的器具检测费是多少")不再纯字面匹配判 other;
     # 同时顺手输出改写后的独立问句(standalone,condense question 零新增
@@ -88,24 +97,41 @@ def extract_slots(llm, user_input, background, conv_id, scenarios=None):
                if isinstance(background, dict) and background else '')
     selected = _chat_json_retry(llm, [{'role': 'user', 'content': (
         '选择一个能力,仅输出 JSON {"scenario":"能力key或other"'
-        ',"standalone":"独立问题"(可选)}。\n'
+        ',"standalone":"独立问题"(可选),"focus":"关注属性词"(可选)}。\n'
         f'{bg_line}能力: {json.dumps(choices, ensure_ascii=False)}\n用户消息: {user_input}\n'
         'standalone 仅当用户消息含指代/省略、需结合会话背景才能理解时给出'
         '——两种形态:代词指代(如"这单上的某物")与省略对象只问属性'
         '(如"某属性是多久"="某对象的该属性是多久")。用背景中的具体值'
         '补全指代与省略,写成不依赖上下文的独立问题;实体保真:用户消息'
         '中已出现的实体必须原样保留,补全只用于指代与省略处,不得把用户'
-        '实体与背景值拼接或合并成组合;无需改写时省略该字段。\n'
+        '实体与背景值拼接或合并成组合;能力声明里的 required 参数是必填项:'
+        '用户消息本身没给出必填值时不补全、不把背景值塞进独立问题(留空'
+        '由下游追问);无需改写时省略该字段。同时可给 focus:用户问句明确'
+        '关注的单个属性/字段词,从问句原样摘取(如问句问某属性是多久/'
+        '是什么时 focus=该属性词);不明确时省略 focus。\n'
         '判定规则:问句表达的意图(各能力 label/intent 已声明其管辖的意图)'
         '优先于句中名词匹配;判 other 前,先确认问句意图不落在任何已声明'
         '能力的 label/intent 范围内。')}],
         conv_id=conv_id, stage='assistant.select')
     if not isinstance(selected, dict):
         raise ValueError('能力选择返回非对象')
+    return selected
+
+
+def extract_slots(llm, user_input, background, conv_id, scenarios=None, preselected=None):
+    table = scenarios if scenarios is not None else _runtime_scenarios()
+    if not table:
+        return {'scenario': 'other'}
+    # preselected(2026-11-17 追问话题切换):调用方已跑过同表同背景的选择
+    # 调用时直接复用结果,不烧第二次 select
+    selected = preselected if isinstance(preselected, dict) else _select_capability(
+        llm, user_input, background, conv_id, table)
     standalone = selected.get('standalone')
     standalone = standalone.strip() if isinstance(standalone, str) else ''
     if standalone and len(standalone) > max(len(user_input) * 4, 200):
         standalone = ''  # 异常膨胀视为改写失败,防跑偏
+    focus = selected.get('focus')
+    focus = focus.strip() if isinstance(focus, str) and 1 < len(focus.strip()) <= 24 else ''
     # 拼接防御(2026-11-17,与筑基侧同源,纯值级零词表):改写句中出现
     # ≥2 个互不为子串的背景候选实体 = 改写器把背景旧值与问句实体拼接,
     # 弃用改写以原句走抽槽;合法补全(只引入一个背景实体)不受影响。
@@ -115,16 +141,29 @@ def extract_slots(llm, user_input, background, conv_id, scenarios=None):
                        if isinstance(group, dict)
                        for v in group.values()
                        if isinstance(v, str) and len(v.strip()) >= 2]
+        # 去重(2026-11-17 审查发现,与筑基同源):器具名称与 _context.instrument
+        # 常为同值(结果回填的常态),重复值让"互为子串去重"后的 distinct 仍
+        # ≥2,拼接防御误杀忠实改写——改写自此一直被静默弃用
+        bg_entities = list(dict.fromkeys(bg_entities))
         hits = [e for e in bg_entities if e in standalone]
         distinct = [e for e in hits if not any(e != o and e in o for o in hits)]
         if len(distinct) >= 2:
             standalone = ''
+        else:
+            # 实体保真守卫(2026-11-17 复合长句实测,与筑基同源):改写器会把
+            # 用户原话里的实体替换成变体("压力表"→"压力真空表"),抽槽在改写
+            # 句上抽到错器具。用户原话中出现的背景实体在改写句里必须还在;
+            # 丢实体=被替换,弃用改写以原句走抽槽。纯指代补全不受影响。
+            user_hits = [e for e in bg_entities if e in user_input]
+            if user_hits and not all(e in standalone for e in user_hits):
+                standalone = ''
     scenario = selected.get('scenario')
+    extra = {k: v for k, v in (('standalone', standalone), ('focus', focus)) if v}
     if not isinstance(scenario, str) or scenario not in table:
-        return {'scenario': 'other', **({'standalone': standalone} if standalone else {})}
+        return {'scenario': 'other', **extra}
     specs = parameter_specs(table[scenario])
     if not specs:
-        return {'scenario': scenario, **({'standalone': standalone} if standalone else {})}
+        return {'scenario': scenario, **extra}
     allowed = {s['slot'] for s in specs}
     scoped = background.get(scenario, {}) if isinstance(background, dict) else {}
     scoped = {k: v for k, v in scoped.items() if k in allowed}
@@ -152,7 +191,28 @@ def extract_slots(llm, user_input, background, conv_id, scenarios=None):
             data = retry
     if not isinstance(data, dict):
         raise ValueError('槽位提取返回非对象')
-    return {'scenario': scenario, **({'standalone': standalone} if standalone else {}),
+    # 必填槽位不得由改写句从背景搬入(2026-11-17 缺参引导,与筑基侧同源):
+    # standalone 改写会把背景旧值补进省略句,抽槽再当本轮用户提供值——用户
+    # 没给单号却拿旧单号查了别人的单。纯声明+值级判定:必填槽位的值既不在
+    # 用户原话、又等于背景该槽位值 → 判背景搬入,丢弃并弃用改写句。
+    required_slots = {s['slot'] for s in specs if s.get('required')}
+    if required_slots and isinstance(scoped, dict):
+        injected = False
+        for slot in list(required_slots & set(data)):
+            value = data.get(slot)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            norm = value.strip()
+            if norm.lower() in user_input.lower():
+                continue
+            bg_value = scoped.get(slot)
+            if isinstance(bg_value, str) and bg_value.strip() == norm:
+                data.pop(slot)
+                injected = True
+        if injected:
+            standalone = ''
+    extra = {k: v for k, v in (('standalone', standalone), ('focus', focus)) if v}
+    return {'scenario': scenario, **extra,
             **{k: v.strip() if isinstance(v, str) else v
                for k, v in data.items() if k in allowed and present(v)}}
 
@@ -177,6 +237,54 @@ def parse_clarify_answers(answers, scenarios=None, pending=None):
             if spec.get('header') in answers:
                 out[spec['slot']] = answers[spec['header']]
     return out
+
+
+def answer_fits_declaration(spec, text):
+    """打字回答与所问槽位声明的契合判定(追问话题切换第1层,零调用,
+    与筑基侧同源)。
+
+    True = 声明可验且通过(是答案,直接填槽);None = 声明判不了/校验
+    不过(自由文本槽、或格式不符可能是新问题),交给第2层选择器判切换。
+    判据全部来自槽位声明(pattern/枚举/数字/日期),零词表。
+    """
+    if not isinstance(text, str) or not text.strip():
+        return True  # 空文本不当切换,维持既有空答语义
+    value = text.strip()
+    schema = spec.get('schema') if isinstance(spec, dict) else None
+    pattern = schema.get('pattern') if isinstance(schema, dict) else None
+    if isinstance(pattern, str) and pattern.strip():
+        try:
+            regex = re.compile(pattern)
+        except re.error:
+            return None
+        return regex.search(value) is not None
+    options = [str(o.get('label') if isinstance(o, dict) else o) for o in (spec.get('options') or [])]
+    if options:
+        return any(value == o or value in o or o in value for o in options)
+    if spec.get('slot_type') in ('number', 'date', 'boolean', 'enum'):
+        _, error = normalize_slot(value, spec['slot_type'], spec.get('enum_options'))
+        return error is None
+    return None
+
+
+def typed_looks_like_question(text):
+    """打字输入是否疑问句/复合句形态(2026-11-17 pending×超纲输入,与筑基同源)。
+
+    选择器判 other(无场景意图)时区分"答案形态"与"新问题形态":裸值答案
+    (编号/名称)照旧填槽;疑问句式(疑问标记/问号)或长复合句(多子句)不是
+    答案,取消追问按新问题路由(落知识库兜底如实回答/拒答)。
+    只认通用语言形态,零行业词——语言层标记,不是领域关键词门控。
+    """
+    value = text.strip()
+    if not value:
+        return False
+    if any(marker in value for marker in ('？', '?', '吗', '呢', '怎么', '怎样', '如何',
+                                          '为什么', '为啥', '啥', '什么', '哪', '多少',
+                                          '多久', '能不能', '是不是', '有没有', '请问',
+                                          '帮我', '查一下')):
+        return True
+    clauses = sum(value.count(ch) for ch in '，。；、,;')
+    return clauses >= 1 and len(value) >= 12
 
 
 def normalize_slot(value, slot_type='text', enum_options=None):
@@ -344,9 +452,44 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         stage = _make_monotonic_stage(lambda k, m: ctx.emit('stage', k, m), _PIPELINE_STEPS)
         stage('assistant.extract', '识别问题类型与关键条件…')
         user_input = (state.get('user_input') or '').strip()
+        focus = ''  # 问句关注属性词(select 顺手输出;answers 恢复路径无)
         answers = state.get('clarify_answers') or {}
         flow = self._load_flow(ctx)
         pending = flow.get('pendingQuestion') if flow else mem.get('pending') if mem else None
+        preselected = None  # 话题切换判定已跑过的选择结果,重路由时复用(不烧第二次)
+        # ── 追问态打字输入的话题切换判定(2026-11-17 回归,与筑基侧同源)──
+        # 前端把追问态下所有打字原样回传 answers.text,新问题会被整句填进
+        # 所问槽位吞掉(实测:追问"请提供名称"时问"帮我查一下办理进度" →
+        # 名称=整句 → not_found)。三层判定,判据全声明驱动零词表:
+        #   ① 结构化答案(带 header 键)= 追问卡点选,永远是答案;
+        #   ② 打字先按所问槽位声明校验(pattern/枚举/数字/日期),通过=答案
+        #     (编号类追问零调用增量);
+        #   ③ 自由文本槽/校验不过 → 复用能力选择判意图:选中其他场景=切换,
+        #     取消 pending 按新问题完整重路由;同场景/other=答案填槽(现状)。
+        #     选择结果经 preselected 复用,切换路径只比新问题多花这一次判定。
+        typed = answers.get('text') if isinstance(answers, dict) else None
+        if (isinstance(typed, str) and typed.strip() and pending
+                and not (set(answers) - {'text', '__question_id'})):
+            spec = {k: pending.get(k) for k in ('slot', 'schema', 'options', 'slot_type', 'enum_options')}
+            if answer_fits_declaration(spec, typed) is not True:
+                background = dict(mem.get('capability_slots') or {}) if mem else {}
+                selected = _select_capability(ctx.llm_client, typed.strip(), background,
+                                              getattr(ctx, 'conv_id', None), table)
+                switched = selected.get('scenario')
+                pending_scenario = pending.get('scenario') or (flow or {}).get('scenario')
+                reroute = isinstance(switched, str) and switched in table and switched != pending_scenario
+                if not reroute and typed_looks_like_question(typed):
+                    reroute = True
+                if reroute:
+                    ctx.trace('metrology.pending_cancel', '追问中话题切换,取消追问按新问题路由',
+                              'ok', detail={'typed': typed[:60], 'scenario': switched})
+                    self._finish_flow(flow, (flow or {}).get('scenario'), {}, 'cancelled')
+                    flow = None
+                    if mem:
+                        mem.pop('pending', None)
+                    pending = None
+                    answers = {}
+                    preselected = selected
         try:
             if answers:
                 if not pending:
@@ -422,12 +565,14 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                             },
                             artifact_type='data',
                         )
-                extracted = extract_slots(ctx.llm_client, user_input, background, getattr(ctx, 'conv_id', None), table)
+                extracted = extract_slots(ctx.llm_client, user_input, background, getattr(ctx, 'conv_id', None), table, preselected=preselected)
                 scenario = extracted['scenario']
                 # 选择器顺手输出的独立问句(condense,零新增调用):本轮后续
                 # (兜底检索/业务参数)全部使用改写后的干净问句。pop 摘出——
                 # 不能留在 extracted 里,否则经 merge_slots 泄漏进业务槽位
                 standalone = extracted.pop('standalone', None)
+                focus = extracted.pop('focus', None)
+                focus = focus.strip() if isinstance(focus, str) else ''
                 if isinstance(standalone, str) and standalone.strip():
                     standalone = standalone.strip()
                     ctx.trace('metrology.rewrite', '追问改写为独立问题', 'ok',
@@ -451,6 +596,18 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 # 形态统一覆盖);仅空抽取时沿用背景(漏抽/指代兜底)。
                 if any(k != 'scenario' and present(v) for k, v in extracted.items()):
                     base = {}
+                else:
+                    # 必填槽位不许零槽沿用(2026-11-17 缺参引导回归,与筑基
+                    # 侧同源):「帮我查一下办理进度」(无单号)曾默默沿用上轮
+                    # 单号直查——用户以为查自己的单,实际查了别人的单。必填
+                    # 判定纯声明驱动(参数声明的 required 标记),缺失走追问;
+                    # 可选槽(器具名称)零槽沿用照旧。
+                    try:
+                        required_slots = {spec.get('slot') for spec in parameter_specs(cfg)
+                                          if spec.get('required')}
+                    except Exception:  # noqa: BLE001
+                        required_slots = set()
+                    base = {k: v for k, v in base.items() if k not in required_slots}
                 merged = merge_slots(extracted, base)
                 # 槽位值按声明 pattern 清洗(纯声明驱动,平台不猜)
                 merged = self._sanitize_identifier_slots(cfg, merged)
@@ -485,7 +642,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 elif plan['kind'] == 'kg':
                     result = self._run_kg(scenario, cfg, ctx, merged, stage, plan, state, user_input)
                 else:
-                    result = self._run_chatbi(cfg, merged, stage, plan, ctx, state, user_input, table)
+                    result = self._run_chatbi(cfg, merged, stage, plan, ctx, state, user_input, table, focus=focus)
             except Exception:
                 self._finish_flow(flow, scenario, merged, 'failed')
                 raise
@@ -543,7 +700,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                                                             options=required.get('options') or [])]),
                           summary=f"需要{required['header']}")
 
-    def _run_chatbi(self, cfg, merged, stage, plan, ctx, state, user_input, table):
+    def _run_chatbi(self, cfg, merged, stage, plan, ctx, state, user_input, table, focus=''):
         from domains.chatbi.controlled import execute_controlled
         action = cfg['action']
         noun = action.get('error_noun') or cfg.get('label') or '业务接口'
@@ -578,14 +735,76 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                                notice.get('order', '').format_map(safe))
             message = result.error.message if result.error else result.status
             return ToolResult(error_for_llm=f'{noun}查询失败({result.status}): {message}。已如实上报,请稍后重试。')
+        # 焦点未覆盖 → 自动二跳详情(2026-11-17 字段聚焦,与筑基侧同源):
+        # 列表接口按工具契约只回摘要("完整明细用条目编号再查一次"),用户
+        # 问"检测周期是多久"而列表周期列全空 → 用本轮槽位值精确匹配的行
+        # 二跳,返回详情卡。判定全运行时数据,宁可列表不猜错行。
+        if focus:
+            detail = self._focus_detail_followup(cfg, result, merged, focus, ds_id, plan['tool'])
+            if detail is not None:
+                self._remember_result_context(getattr(ctx, 'session_state', None), detail)
+                return getattr(self, action.get('card') or '_table_card')(detail, merged, stage)
         # 业务查询成功 → 结果中的名称类字段回填会话上下文(指代解析原料,
         # 2026-11-16:查过委托单后问"这单上的器具检测费",改写与抽槽都需要)
         self._remember_result_context(getattr(ctx, 'session_state', None), result)
         return getattr(self, action.get('card') or '_table_card')(result, merged, stage)
 
-    # 标识符槽位特征(header/slot 来自 MCP 工具声明,中文标签稳定):凭
-    # 单号/编号/号码定位业务数据的查询。此类查无即终态,不做知识库兜底。
-    _IDENTIFIER_SLOT_MARKS = ('单号', '编号', '号码')
+    def _focus_detail_followup(self, cfg, result, merged, focus, ds_id, tool):
+        """焦点字段未覆盖时二跳详情(纯声明/数据驱动,失败返回 None 走原列表)。
+
+        覆盖判定:结果列名与 focus 双向子串匹配的列,任一行有值即已覆盖。
+        二跳参数:场景参数声明 ∩ 结果列名(偏好行内取值唯一的列)。
+        选行:任一列值与本轮槽位值(去空白)精确相等的首行——无精确匹配
+        不跳(宁可列表不猜错条目)。
+        """
+        from domains.chatbi.controlled import execute_controlled
+        try:
+            data = getattr(result, 'data', None)
+            if not isinstance(data, dict):
+                return None
+            columns = [str(c) for c in (data.get('columns') or [])]
+            rows = data.get('rows') or []
+            if not columns or not rows:
+                return None
+            # ① 覆盖检查
+            focus_cols = [i for i, col in enumerate(columns) if focus in col or col in focus]
+            if focus_cols and any(present(row[i]) for row in rows
+                                  for i in focus_cols if i < len(row)):
+                return None  # 列表已有焦点值,无需二跳
+            # ② 二跳参数:参数声明 ∩ 列名
+            names = set()
+            for spec in parameter_specs(cfg):
+                names.update(str(x) for x in (spec.get('name'), spec.get('slot'), spec.get('header')) if x)
+            candidates = [col for col in columns if col in names]
+            if not candidates:
+                return None  # 工具不支持编号二跳(声明与列无交集)
+            # ③ 选行:任一列值与本轮槽位值精确相等(去空白)的首行;无匹配不跳
+            slot_values = {str(v).strip() for v in merged.values()
+                           if isinstance(v, str) and v.strip()}
+            target = next((r for r in rows
+                           if any(str(c).strip() in slot_values for c in r if present(c))), None)
+            if target is None:
+                return None
+            # ④ 选二跳列:目标行取值不在本轮槽位值里的列优先——那才是这一行
+            # 的键;把用户已给的筛选条件再传一遍,MCP 回的仍是列表(白跳)。
+            # 同档按行内唯一性降序(标识性)。
+            def _rank(col):
+                idx = columns.index(col)
+                cell = str(target[idx]).strip() if idx < len(target) else ''
+                uniq = len({str(r[idx]) for r in rows if idx < len(r)})
+                return (cell in slot_values, -uniq)
+
+            id_col = sorted(candidates, key=_rank)[0]
+            idx = columns.index(id_col)
+            if not present(target[idx]):
+                return None
+            # ④ 二跳同一工具(参数名=交集列名,声明侧中文同名)
+            detail = execute_controlled(self._app_state, ds_id, tool, {id_col: target[idx]})
+            if detail is None or not detail.ok or not isinstance(getattr(detail, 'data', None), dict):
+                return None
+            return detail
+        except Exception:  # noqa: BLE001
+            return None
 
     def _sanitize_identifier_slots(self, cfg, merged):
         """按参数声明的 pattern 清洗槽位值(2026-11-17,纯声明驱动,与筑基同源)。

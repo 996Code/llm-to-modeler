@@ -151,7 +151,7 @@
                 </template>
               </div>
               <div class="clarification-hint">
-                点击选项，或直接输入回答
+                {{ hasClarifyOptions(msg) ? '点击选项，或直接输入回答' : '请直接输入回答' }}
               </div>
             </div>
             
@@ -830,6 +830,14 @@ const pipelineSteps = computed(() => {
 /** 点击欢迎页示例卡片：把示例 prompt 直接作为消息发送 */
 function quickFill(text: string) {
   store.sendMessage(text)
+}
+
+/** 追问卡是否有可点选项(2026-11-17 文案对齐,与筑基侧同源):无选项时提示
+ * 只留"直接输入",不再显示"点击选项"误导 */
+function hasClarifyOptions(msg: any): boolean {
+  return (msg.clarificationQuestions || []).some(
+    (q: any) => typeof q !== 'string' && q.options?.length,
+  )
 }
 
 /**

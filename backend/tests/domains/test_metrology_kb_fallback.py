@@ -616,3 +616,462 @@ def test_background_kept_when_extract_empty(monkeypatch):
     ctx.session_state.set('capability_slots', {'warehouse::fee': {'name': '压力表'}})
     tool.execute({'user_input': '那检定周期呢'}, ctx)
     assert seen['params'].get('name') == '压力表', '空抽取时背景应沿用(兜底)'
+
+
+def test_required_slot_injected_by_standalone_rewrite_is_dropped():
+    """必填槽位不得经改写句从背景搬入(2026-11-17 缺参引导,与筑基侧同源)。
+
+    选择器 standalone 改写会把背景旧值补进省略句("帮我查一下办理进度"
+    →"帮我查一下委托单号CZ2023-777的办理进度"),抽槽再当本轮用户提供值
+    ——用户没给单号却拿旧单号查了别人的单。判定=必填声明+值级:值不在
+    用户原话且等于背景该槽位值 → 丢弃,改写句一并弃用。
+    """
+    order_cap = {'label': '委托单进度查询', 'intent': '按委托单号查进度',
+                 'required': {},
+                 'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'progress',
+                            'datasource_id': 'ds-stock', 'card': '_table_card',
+                            'input_schema': {'type': 'object', 'required': ['order_no'],
+                                             'properties': {'order_no': {
+                                                 'type': 'string', 'title': '委托单号'}}}}}
+    llm = _StageLLM(select={'scenario': 'warehouse::order',
+                            'standalone': '帮我查一下委托单号CZ2023-777的办理进度'},
+                    extract={'order_no': 'CZ2023-777'})
+    extracted = mta.extract_slots(llm, '帮我查一下办理进度',
+                                  {'warehouse::order': {'order_no': 'CZ2023-777'}},
+                                  'conv-inject', {'warehouse::order': order_cap})
+    assert 'order_no' not in extracted, '背景搬入的必填值不得当本轮用户提供'
+    assert not extracted.get('standalone'), '搬运旧值的改写句须一并弃用'
+
+
+def test_required_slot_stated_in_user_message_survives_rewrite():
+    """反向守卫:用户原话给了单号 → 保留(不得误杀)。"""
+    order_cap = {'label': '委托单进度查询', 'intent': '按委托单号查进度',
+                 'required': {},
+                 'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'progress',
+                            'datasource_id': 'ds-stock', 'card': '_table_card',
+                            'input_schema': {'type': 'object', 'required': ['order_no'],
+                                             'properties': {'order_no': {
+                                                 'type': 'string', 'title': '委托单号'}}}}}
+    llm = _StageLLM(select={'scenario': 'warehouse::order'},
+                    extract={'order_no': 'CZ2024-001'})
+    extracted = mta.extract_slots(llm, '查一下委托单 CZ2024-001 的进度',
+                                  {'warehouse::order': {'order_no': 'CZ2023-777'}},
+                                  'conv-keep', {'warehouse::order': order_cap})
+    assert extracted.get('order_no') == 'CZ2024-001'
+
+
+def test_required_slot_not_carried_on_zero_extract(monkeypatch):
+    """必填槽位零槽不沿用(2026-11-17 缺参引导回归,与筑基同源):
+    「帮我查一下办理进度」(无单号)不得默默沿用上轮单号直查。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    called = []
+    order_cap = {'label': '委托单进度查询', 'intent': '按委托单号查进度',
+                 'required': {},
+                 'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'progress',
+                            'datasource_id': 'ds-stock', 'card': '_table_card',
+                            'input_schema': {'type': 'object', 'required': ['order_no'],
+                                             'properties': {'order_no': {
+                                                 'type': 'string', 'title': '委托单号',
+                                                 'pattern': r'^[A-Z]{2,}\d{0,4}-\d+$'}}}}}
+    monkeypatch.setattr(mta, '_runtime_scenarios',
+                        lambda *a, **k: {'warehouse::order': order_cap})
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled',
+                        lambda *a, **kw: called.append(1)
+                        or ControlledResult(ok=True, status='ok',
+                                            data={'columns': ['状态'], 'rows': [['检测中']]}))
+    tool = mta.MetrologyAssistantTool(object())
+    ctx = context(_StageLLM(select={'scenario': 'warehouse::order'}))  # extract {}
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('capability_slots', {'warehouse::order': {'order_no': 'CZ2023-777'}})
+    result = tool.execute({'user_input': '帮我查一下办理进度'}, ctx)
+    assert result.ask is not None, '必填单号缺失应追问而非沿用旧值直查'
+    assert called == [], '不得发起业务查询'
+    assert '委托单号' in str(result.ask.questions[0].question)
+
+
+def test_optional_slot_still_carried_on_zero_extract(monkeypatch):
+    """可选槽位零槽沿用照旧(2026-11-17 C 序列不回归,与筑基同源)。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    seen = {}
+    fee_cap = {'label': '价目查询', 'intent': '查检测费与周期', 'required': {},
+               'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'fee',
+                          'datasource_id': 'ds-stock', 'card': '_table_card',
+                          'input_schema': {'type': 'object', 'properties': {
+                              'name': {'type': 'string', 'title': '器具名称'}}}}}
+    monkeypatch.setattr(mta, '_runtime_scenarios',
+                        lambda *a, **k: {'warehouse::fee': fee_cap})
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled',
+                        lambda app, ds, tool, params, **kw: seen.update(params=params)
+                        or ControlledResult(ok=True, status='ok',
+                                            data={'columns': ['周期'], 'rows': [['半年']]}))
+    tool = mta.MetrologyAssistantTool(object())
+    ctx = context(_StageLLM(select={'scenario': 'warehouse::fee',
+                                    'standalone': '压力表的检测周期是多久'}))
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('capability_slots', {'warehouse::fee': {'name': '压力表'}})
+    result = tool.execute({'user_input': '检测周期是多久'}, ctx)
+    assert seen['params'].get('name') == '压力表', '可选槽零槽沿用不得回归'
+    assert result.artifact and result.artifact.get('type') == 'metrology_table'
+
+
+def test_focus_uncovered_triggers_detail_followup(monkeypatch):
+    """字段聚焦(2026-11-17 D/E/F,与筑基同源):问"检测周期"而列表周期列
+    全空 → 用槽位值精确匹配行二跳详情,返回含周期值的详情卡。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    calls = []
+
+    def controlled(app, ds, tool, params, **kw):
+        calls.append(dict(params))
+        if '条目编号' in params:
+            return ControlledResult(ok=True, status='ok', data={
+                'columns': ['样品名称', '测量范围', '检测周期', '收费标准', '收费说明'],
+                'rows': [['压力表', '(0～60)MPa', '半年', 20, '省标']]})
+        return ControlledResult(ok=True, status='ok', data={
+            'columns': ['条目编号', '样品名称', '测量范围', '检测周期'],
+            'rows': [[170, '压力表', '(0～60)MPa', None]]})
+
+    fee_cap = {'label': '检测能力查询', 'intent': '查检测能力与周期', 'required': {},
+               'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'capability',
+                          'datasource_id': 'ds-stock', 'card': '_table_card',
+                          'input_schema': {'type': 'object', 'properties': {
+                              'name': {'type': 'string', 'title': '样品名称'},
+                              '条目编号': {'type': 'string', 'title': '条目编号'}}}}}
+    monkeypatch.setattr(mta, '_runtime_scenarios',
+                        lambda *a, **k: {'warehouse::fee': fee_cap})
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled', controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    ctx = context(_StageLLM(select={'scenario': 'warehouse::fee', 'focus': '检测周期'},
+                            extract={'name': '压力表'}))
+    ctx.trace = lambda *a, **k: None
+    result = tool.execute({'user_input': '压力表的检测周期是多久'}, ctx)
+    assert len(calls) == 2, '应发生二跳详情查询'
+    assert calls[1] == {'条目编号': 170}, '二跳参数=条目编号声明∩列名,取匹配行'
+    assert '检测周期' in result.artifact['columns'], '详情卡应含焦点列'
+    assert result.artifact['rows'][0][2] == '半年', '详情卡应含焦点值'
+
+
+def test_focus_covered_keeps_list(monkeypatch):
+    """焦点列列表里已有值 → 不二跳,原列表返回(不猜行)。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    calls = []
+
+    def controlled(app, ds, tool, params, **kw):
+        calls.append(dict(params))
+        return ControlledResult(ok=True, status='ok', data={
+            'columns': ['样品名称', '检测周期'], 'rows': [['压力表', '半年']]})
+
+    fee_cap = {'label': '检测能力查询', 'intent': '查检测能力与周期', 'required': {},
+               'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'capability',
+                          'datasource_id': 'ds-stock', 'card': '_table_card',
+                          'input_schema': {'type': 'object', 'properties': {
+                              'name': {'type': 'string', 'title': '样品名称'}}}}}
+    monkeypatch.setattr(mta, '_runtime_scenarios',
+                        lambda *a, **k: {'warehouse::fee': fee_cap})
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled', controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    ctx = context(_StageLLM(select={'scenario': 'warehouse::fee', 'focus': '检测周期'},
+                            extract={'name': '压力表'}))
+    ctx.trace = lambda *a, **k: None
+    tool.execute({'user_input': '压力表的检测周期是多久'}, ctx)
+    assert len(calls) == 1, '列表已覆盖焦点不得二跳'
+
+
+def _pending_cert_caps():
+    cert_cap = {'label': '证书报告防伪查询', 'intent': '核对证书报告真伪', 'required': {},
+                'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'cert',
+                           'datasource_id': 'ds-stock', 'card': '_table_card',
+                           'input_schema': {'type': 'object', 'required': ['编号', '名称'],
+                                            'properties': {'编号': {'type': 'string', 'title': '编号',
+                                                                   'pattern': r'^ZS\d+$'},
+                                                           '名称': {'type': 'string', 'title': '名称'}}}}}
+    order_cap = {'label': '委托单进度查询', 'intent': '按委托单号查进度', 'required': {},
+                 'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'progress',
+                            'datasource_id': 'ds-stock', 'card': '_table_card',
+                            'input_schema': {'type': 'object', 'required': ['委托单号'],
+                                             'properties': {'委托单号': {
+                                                 'type': 'string', 'title': '委托单号',
+                                                 'pattern': r'^[A-Z]{2,}\d{0,4}-\d+$'}}}}}
+    return {'warehouse::cert': cert_cap, 'warehouse::order': order_cap}
+
+
+def _pending_fixture(monkeypatch, table, controlled):
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.metrology_assistant.capability_plan import declaration_snapshot
+    monkeypatch.setattr(mta, '_runtime_scenarios', lambda *a, **k: table)
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled', controlled)
+    return declaration_snapshot(table['warehouse::cert'])
+
+
+def test_pending_typed_topic_switch_reroutes(monkeypatch):
+    """追问态打字换话题(2026-11-17 回归,与筑基同源):追问"请提供名称"时问
+    "帮我查一下办理进度"——新问题不得被整句填进所问槽位吞掉;判切换后取消
+    pending 按新问题重路由,选择结果经 preselected 复用(整轮一次 select)。"""
+    from domains.chatbi.controlled import ControlledResult
+    called = []
+
+    def controlled(app, ds, tool, params, **kwargs):
+        called.append(dict(params))
+        return ControlledResult(ok=True, status='ok', data={'columns': ['状态'], 'rows': [['检测中']]})
+
+    table = _pending_cert_caps()
+    snapshot = _pending_fixture(monkeypatch, table, controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    llm = _StageLLM(select={'scenario': 'warehouse::order'}, extract={})
+    ctx = context(llm, conv='conv-switch')
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('pending', {
+        'slot': '名称', 'header': '名称', 'schema': None, 'options': [],
+        'question': '请提供名称', 'question_id': 'q1', 'scenario': 'warehouse::cert',
+        'slots': {'编号': 'ZS88880001'}, 'snapshot': snapshot,
+        'user_input': '帮我核对一下证书，编号 ZS88880001'})
+    result = tool.execute({'user_input': '帮我查一下办理进度',
+                           'clarify_answers': {'text': '帮我查一下办理进度', '__question_id': 'q1'}}, ctx)
+    assert result.ask is not None, '切换后应按新问题走缺参追问'
+    assert '委托单号' in str(result.ask.questions[0].question)
+    assert called == [], '不得拿旧证书参数发起业务查询'
+    selects = [s for s, _ in llm.prompts if s == 'assistant.select']
+    assert len(selects) == 1, '切换判定与重路由须复用同一次选择调用'
+
+
+def test_pending_typed_fits_declaration_answers_without_select(monkeypatch):
+    """打字回答按所问槽位声明校验通过(编号 pattern 命中)→ 直接当答案,
+    话题判定零 LLM 调用。"""
+    from domains.chatbi.controlled import ControlledResult
+    seen = {}
+
+    def controlled(app, ds, tool, params, **kwargs):
+        seen.update(params=params)
+        return ControlledResult(ok=True, status='ok', data={'columns': ['结论'], 'rows': [['有效']]})
+
+    table = _pending_cert_caps()
+    snapshot = _pending_fixture(monkeypatch, table, controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    llm = _StageLLM(select={'scenario': 'warehouse::order'})  # 不应被调用
+    ctx = context(llm, conv='conv-fit')
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('pending', {
+        'slot': '编号', 'header': '编号', 'schema': {'type': 'string', 'pattern': r'^ZS\d+$'},
+        'options': [], 'question': '请提供编号', 'question_id': 'q2',
+        'scenario': 'warehouse::cert', 'slots': {'名称': '常州示例机械有限公司'},
+        'snapshot': snapshot, 'user_input': '帮我核对证书'})
+    tool.execute({'user_input': 'ZS88880001',
+                  'clarify_answers': {'text': 'ZS88880001', '__question_id': 'q2'}}, ctx)
+    assert seen.get('params', {}).get('编号') == 'ZS88880001', seen
+    assert seen['params'].get('名称') == '常州示例机械有限公司'
+    assert not [s for s, _ in llm.prompts if s == 'assistant.select'], '声明可验不得烧选择调用'
+
+
+def test_pending_typed_same_scenario_still_answer(monkeypatch):
+    """打字内容被判为同场景(裸名词答案/同能力追问)→ 维持答案语义,不误取消追问。"""
+    from domains.chatbi.controlled import ControlledResult
+    seen = {}
+
+    def controlled(app, ds, tool, params, **kwargs):
+        seen.update(params=params)
+        return ControlledResult(ok=True, status='ok', data={'columns': ['结论'], 'rows': [['有效']]})
+
+    table = _pending_cert_caps()
+    snapshot = _pending_fixture(monkeypatch, table, controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    llm = _StageLLM(select={'scenario': 'warehouse::cert'})
+    ctx = context(llm, conv='conv-same')
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('pending', {
+        'slot': '名称', 'header': '名称', 'schema': None, 'options': [],
+        'question': '请提供名称', 'question_id': 'q3', 'scenario': 'warehouse::cert',
+        'slots': {'编号': 'ZS88880001'}, 'snapshot': snapshot,
+        'user_input': '帮我核对一下证书，编号 ZS88880001'})
+    tool.execute({'user_input': '常州示例机械有限公司',
+                  'clarify_answers': {'text': '常州示例机械有限公司', '__question_id': 'q3'}}, ctx)
+    assert seen.get('params', {}).get('名称') == '常州示例机械有限公司', seen
+
+
+def test_pending_card_answer_never_switches(monkeypatch):
+    """追问卡点选(结构化 answers 带 header 键)= 用户点了选项,永不判切换、零调用。"""
+    from domains.chatbi.controlled import ControlledResult
+    seen = {}
+
+    def controlled(app, ds, tool, params, **kwargs):
+        seen.update(params=params)
+        return ControlledResult(ok=True, status='ok', data={'columns': ['结论'], 'rows': [['有效']]})
+
+    table = _pending_cert_caps()
+    snapshot = _pending_fixture(monkeypatch, table, controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    llm = _StageLLM(select={'scenario': 'warehouse::order'})  # 不应被调用
+    ctx = context(llm, conv='conv-card')
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('pending', {
+        'slot': '名称', 'header': '名称', 'schema': None, 'options': [],
+        'question': '请提供名称', 'question_id': 'q4', 'scenario': 'warehouse::cert',
+        'slots': {'编号': 'ZS88880001'}, 'snapshot': snapshot,
+        'user_input': '帮我核对一下证书，编号 ZS88880001'})
+    tool.execute({'user_input': '常州示例机械有限公司',
+                  'clarify_answers': {'名称': '常州示例机械有限公司',
+                                      'text': '常州示例机械有限公司',
+                                      '__question_id': 'q4'}}, ctx)
+    assert seen.get('params', {}).get('名称') == '常州示例机械有限公司', seen
+    assert not [s for s, _ in llm.prompts if s == 'assistant.select'], '点卡答案零调用'
+
+
+def test_pending_typed_question_shaped_reroutes_to_kb(monkeypatch):
+    """pending×超纲输入(2026-11-17 回归,与筑基同源):追问时问"今天天气怎么样"
+    ——无场景意图且疑问句形态,不得整句填槽;取消追问按新问题路由落知识库。"""
+    from domains.chatbi.controlled import ControlledResult
+    called = []
+
+    def controlled(app, ds, tool, params, **kwargs):
+        called.append(dict(params))
+        return ControlledResult(ok=True, status='ok', data={'columns': ['x'], 'rows': [['y']]})
+
+    tool, _ = setup_tool(
+        monkeypatch, multi=lambda *a, **kw: {'sources': {'chunks': []}, 'answer': ''})
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled', controlled)
+    llm = _StageLLM(select={'scenario': 'other'})
+    ctx = context(llm, conv='conv-weather')
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('pending', {
+        'slot': '名称', 'header': '名称', 'schema': None, 'options': [],
+        'question': '请提供名称', 'question_id': 'q5', 'scenario': 'warehouse::stock',
+        'slots': {}, 'user_input': '帮我核对一下证书'})
+    result = tool.execute({'user_input': '今天天气怎么样',
+                           'clarify_answers': {'text': '今天天气怎么样', '__question_id': 'q5'}}, ctx)
+    assert called == [], '超纲输入不得当答案填槽发起业务查询'
+    assert result.artifact['type'] == 'metrology_notice', '应落知识库兜底引导'
+    assert '已检索知识库' in result.artifact['message']
+    assert ctx.session_state.get('pending') is None, '追问须取消'
+
+
+def test_pending_typed_bare_value_with_other_select_still_answer(monkeypatch):
+    """反向守卫:select=other 但输入是裸值形态(公司名)→ 仍是答案,不误判切换。"""
+    from domains.chatbi.controlled import ControlledResult
+    seen = {}
+
+    def controlled(app, ds, tool, params, **kwargs):
+        seen.update(params=params)
+        return ControlledResult(ok=True, status='ok', data={'columns': ['结论'], 'rows': [['有效']]})
+
+    table = _pending_cert_caps()
+    snapshot = _pending_fixture(monkeypatch, table, controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    llm = _StageLLM(select={'scenario': 'other'})
+    ctx = context(llm, conv='conv-bare')
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('pending', {
+        'slot': '名称', 'header': '名称', 'schema': None, 'options': [],
+        'question': '请提供名称', 'question_id': 'q6', 'scenario': 'warehouse::cert',
+        'slots': {'编号': 'ZS88880001'}, 'snapshot': snapshot,
+        'user_input': '帮我核对一下证书，编号 ZS88880001'})
+    tool.execute({'user_input': '常州示例机械有限公司',
+                  'clarify_answers': {'text': '常州示例机械有限公司', '__question_id': 'q6'}}, ctx)
+    assert seen.get('params', {}).get('名称') == '常州示例机械有限公司', seen
+
+
+def test_pending_typed_question_shaped_same_scenario_reroutes(monkeypatch):
+    """同场景但疑问句形态("这个证书的编号是多少")→ 不当答案填名称,按新问题重路由。"""
+    from domains.chatbi.controlled import ControlledResult
+    called = []
+
+    def controlled(app, ds, tool, params, **kwargs):
+        called.append(dict(params))
+        return ControlledResult(ok=True, status='ok', data={'columns': ['x'], 'rows': [['y']]})
+
+    table = _pending_cert_caps()
+    snapshot = _pending_fixture(monkeypatch, table, controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    llm = _StageLLM(select={'scenario': 'warehouse::cert'}, extract={})
+    ctx = context(llm, conv='conv-qsame')
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('pending', {
+        'slot': '名称', 'header': '名称', 'schema': None, 'options': [],
+        'question': '请提供名称', 'question_id': 'q7', 'scenario': 'warehouse::cert',
+        'slots': {'编号': 'ZS88880001'}, 'snapshot': snapshot,
+        'user_input': '帮我核对一下证书，编号 ZS88880001'})
+    result = tool.execute({'user_input': '这个证书的编号是多少',
+                           'clarify_answers': {'text': '这个证书的编号是多少',
+                                               '__question_id': 'q7'}}, ctx)
+    assert called == [], '疑问句形态不得整句填槽'
+    assert result.ask is not None, '重路由后按声明缺参追问'
+
+
+def test_standalone_replaced_entity_is_dropped():
+    """实体保真守卫(2026-11-17 复合长句实测,与筑基同源):改写器把用户原话
+    实体替换成变体("压力表"→"压力真空表")→ 弃用改写以原句抽槽。"""
+    fee_cap = {'label': '价目查询', 'intent': '查检测费', 'required': {},
+               'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'fee',
+                          'datasource_id': 'ds-stock', 'card': '_table_card',
+                          'input_schema': {'type': 'object', 'properties': {
+                              'name': {'type': 'string', 'title': '器具名称'}}}}}
+    llm = _StageLLM(select={'scenario': 'warehouse::fee',
+                            'standalone': '压力真空表检测费多少钱，检定要多久'},
+                    extract={'name': '压力表'})
+    extracted = mta.extract_slots(llm, '压力表检测费多少钱来着，顺便问下检定要多久',
+                                  {'warehouse::fee': {'name': '压力表'}},
+                                  'conv-ef', {'warehouse::fee': fee_cap})
+    extract_prompts = [p for s, p in llm.prompts if s == 'assistant.extract']
+    assert '压力表检测费多少钱来着' in extract_prompts[0], '抽槽须用用户原句'
+    assert '压力真空表' not in extract_prompts[0], '被替换的实体不得进抽槽'
+    assert not extracted.get('standalone'), '实体被替换的改写句须弃用'
+
+
+def test_standalone_entity_kept_passes():
+    """反向守卫:改写保留了用户原话实体(只去口语词)→ 改写照常使用。"""
+    fee_cap = {'label': '价目查询', 'intent': '查检测费', 'required': {},
+               'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'fee',
+                          'datasource_id': 'ds-stock', 'card': '_table_card',
+                          'input_schema': {'type': 'object', 'properties': {
+                              'name': {'type': 'string', 'title': '器具名称'}}}}}
+    llm = _StageLLM(select={'scenario': 'warehouse::fee',
+                            'standalone': '压力表检测费多少钱，检定要多久'},
+                    extract={'name': '压力表'})
+    extracted = mta.extract_slots(llm, '压力表检测费多少钱来着，顺便问下检定要多久',
+                                  {'warehouse::fee': {'name': '压力表'}},
+                                  'conv-ef2', {'warehouse::fee': fee_cap})
+    assert extracted.get('standalone') == '压力表检测费多少钱，检定要多久'
+
+
+def test_standalone_kept_when_context_duplicates_slot_value():
+    """拼接防御去重(2026-11-17 审查发现,与筑基同源):器具名称与
+    _context.instrument 同值(结果回填常态)时,重复实体不得让 distinct ≥2
+    误杀忠实改写。"""
+    fee_cap = {'label': '价目查询', 'intent': '查检测费', 'required': {},
+               'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'fee',
+                          'datasource_id': 'ds-stock', 'card': '_table_card',
+                          'input_schema': {'type': 'object', 'properties': {
+                              'name': {'type': 'string', 'title': '器具名称'}}}}}
+    llm = _StageLLM(select={'scenario': 'warehouse::fee',
+                            'standalone': '压力表检测费多少钱，检定要多久'},
+                    extract={'name': '压力表'})
+    extracted = mta.extract_slots(llm, '压力表检测费多少钱来着，顺便问下检定要多久',
+                                  {'warehouse::fee': {'name': '压力表'},
+                                   '_context': {'instrument': '压力表'}},
+                                  'conv-dup', {'warehouse::fee': fee_cap})
+    assert extracted.get('standalone') == '压力表检测费多少钱，检定要多久', '同值重复不得误判拼接'
