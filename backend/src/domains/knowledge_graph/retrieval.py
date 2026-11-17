@@ -876,7 +876,11 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
                                f"{len(ctx['chunk_texts'])} 个文档片段)…")
     prompt = _prompt_loader().render(
         "knowledge_graph", "answer",
-        kb_name=kb.get("name") or "", query=query,
+        kb_name=kb.get("name") or "",
+        # 库收录范围声明(管理页库描述):进回答 prompt 供模型判定范围外→干净
+        # 拒答不罗列资料;空=不注入,行为同前(声明驱动,声明方维护)
+        kb_scope=(kb.get("description") or "").strip(),
+        query=query,
         triples=ctx["triples"], node_details=ctx["node_details"],
         chunk_texts=ctx["chunk_texts"],
     )
@@ -1080,7 +1084,12 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
                                f"{len(ctx['chunk_texts'])} 个文档片段)…")
     prompt = _prompt_loader().render(
         "knowledge_graph", "answer",
-        kb_name="、".join(kb.get("name") or "" for kb in kbs), query=query,
+        kb_name="、".join(kb.get("name") or "" for kb in kbs),
+        # 多库同款:各库声明拼接注入(空库描述不占位)
+        kb_scope="；".join(
+            scoped for scoped in ((kb.get("description") or "").strip() for kb in kbs) if scoped
+        ),
+        query=query,
         triples=ctx["triples"], node_details=ctx["node_details"],
         chunk_texts=ctx["chunk_texts"],
     )
