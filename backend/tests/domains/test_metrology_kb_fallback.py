@@ -187,51 +187,24 @@ def _datasource_ok(monkeypatch):
         host='warehouse', database='', is_active=True, db_type='mcp'))
 
 
-def test_chatbi_not_found_falls_back_to_kb(monkeypatch):
-    """业务表未收录(如价目表外器具)→ 原问题走知识库,有据出证据卡。"""
-    seen = {}
+def test_chatbi_not_found_returns_business_notice_no_kb(monkeypatch):
+    """业务查无一律直出业务通知(2026-11-17 产品定案,与筑基侧同源):
+    不再降级知识库——检索完全不发起。"""
+    called = []
 
     def multi(app, kbs, query, **kwargs):
-        seen.update(query=query)
+        called.append(query)
         return multi_result(answer='检定周期为 1 年')
 
     tool, _ = setup_tool(monkeypatch, multi=multi)
     _datasource_ok(monkeypatch)
     _controlled('not_found', monkeypatch)
     ctx = context(LLM(extract={'scenario': 'warehouse::stock'}))
-    result = tool.execute({'user_input': '血压计的检定周期是多久'}, ctx)
-    assert seen['query'] == '血压计的检定周期是多久'   # 原问题检索
-    assert result.artifact['type'] == 'kg_search_result'
-    assert result.artifact.get('fallback') is True
-    assert result.artifact['answer'] == '检定周期为 1 年'
-
-
-def test_chatbi_not_found_kb_empty_keeps_business_notice(monkeypatch):
-    """知识库也无依据 → 回业务查无通知(业务事实仍在,不吞进引导卡)。"""
-    tool, _ = setup_tool(
-        monkeypatch, multi=lambda *a, **kw: {'sources': {'chunks': []}, 'answer': ''})
-    _datasource_ok(monkeypatch)
-    _controlled('not_found', monkeypatch)
-    ctx = context(LLM(extract={'scenario': 'warehouse::stock'}))
-    result = tool.execute({'user_input': '查一个不存在的东西'}, ctx)
+    result = tool.execute({'user_input': '血压计的检测费用是多少'}, ctx)
+    assert called == [], '业务查无不得发起知识库检索'
     assert result.artifact['type'] == 'metrology_notice'
     assert result.artifact['status'] == 'not_found'
     assert '未找到符合条件的数据' in result.artifact['message']
-
-
-def test_chatbi_not_found_zero_citation_keeps_business_notice(monkeypatch):
-    """弱召回 0 引用的合成"未找到"不顶业务查无事实(委托单查无仍出业务通知)。"""
-    weak = {'answer': '知识库中未找到相关内容,建议联系业务窗口确认',
-            'kb': {'id': 'kb-1', 'name': '检定规程'},
-            'sources': {'chunks': [{'docId': 'd1', 'docName': '弱相关.md', 'text': 'x', 'score': 0.5}]},
-            'cited_chunks': []}
-    tool, _ = setup_tool(monkeypatch, multi=lambda *a, **kw: weak)
-    _datasource_ok(monkeypatch)
-    _controlled('not_found', monkeypatch)
-    ctx = context(LLM(extract={'scenario': 'warehouse::stock'}))
-    result = tool.execute({'user_input': '查一下 BJ9000 的进度'}, ctx)
-    assert result.artifact['type'] == 'metrology_notice'
-    assert result.artifact['status'] == 'not_found'
 
 
 def test_chatbi_forbidden_does_not_fall_back(monkeypatch):
@@ -443,21 +416,6 @@ def test_identifier_not_found_returns_business_notice(monkeypatch):
     assert '未找到' in result.artifact.get('title', '') + result.artifact.get('message', '')
 
 
-def test_identifier_gate_reads_header_and_slot():
-    tool = mta.MetrologyAssistantTool(object())
-    cert_cap = {'label': '证书防伪',
-                'required': {'slot': 'cert_no', 'header': '证书编号'},
-                'action': {'kind': 'chatbi', 'server': 's', 'tool': 't',
-                           'datasource_id': 'd', 'params': {}}}
-    assert tool._is_identifier_query(cert_cap, {'cert_no': 'ZS1'}) is True
-    assert tool._is_identifier_query(cert_cap, {}) is False
-    name_cap = {'label': '价目',
-                'required': {'slot': 'name', 'header': '器具名称'},
-                'action': {'kind': 'chatbi', 'server': 's', 'tool': 't',
-                           'datasource_id': 'd', 'params': {}}}
-    assert tool._is_identifier_query(name_cap, {'name': '压力表'}) is False
-
-
 def test_standalone_does_not_leak_into_slots(monkeypatch):
     """standalone 只当问句用,不得进业务槽位(2026-11-16,与筑基侧同源)。"""
     from domains.chatbi import datasources, runtime as bi_runtime
@@ -481,3 +439,180 @@ def test_standalone_does_not_leak_into_slots(monkeypatch):
     slots = ctx.session_state.get('capability_slots') or {}
     assert 'standalone' not in slots.get('warehouse::stock', {}), 'standalone 泄漏进业务槽位'
     assert 'standalone' not in ctx.session_state.get('slots', {})
+
+
+def test_identifier_slot_sanitization(monkeypatch):
+    """按声明 pattern 清洗槽位值(2026-11-17,纯声明驱动,与筑基同源):
+    值内含编号模式→取匹配值;不符声明形态→清空交追问;无 pattern 不清洗。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    seen = {}
+
+    def controlled(app, ds, tool, params, **kwargs):
+        seen.update(params=params)
+        return ControlledResult(
+            ok=True, status='ok', data={'columns': ['状态'], 'rows': [['检测中']]})
+
+    order_cap = {
+        'label': '委托单进度查询', 'intent': '按委托单号查进度', 'required': {},
+        'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'progress',
+                   'datasource_id': 'ds-stock', 'card': '_table_card',
+                   'input_schema': {'type': 'object', 'required': ['order_no'],
+                                   'properties': {'order_no': {
+                                       'type': 'string', 'title': '委托单号',
+                                       'pattern': r'^[A-Z]{2,}\d{0,4}-\d+$'}}}}}
+    monkeypatch.setattr(mta, '_runtime_scenarios',
+                        lambda *a, **k: {'warehouse::order': order_cap})
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled', controlled)
+    tool = mta.MetrologyAssistantTool(object())
+
+    ctx = context(LLM(extract={'scenario': 'warehouse::order',
+                               'order_no': '查一下委托单 CZ2024-001 的办理进度'}))
+    ctx.trace = lambda *a, **k: None
+    tool.execute({'user_input': '查一下委托单 CZ2024-001 的办理进度'}, ctx)
+    assert seen.get('params', {}).get('order_no') == 'CZ2024-001', seen.get('params')
+
+    ctx2 = context(LLM(extract={'scenario': 'warehouse::order', 'order_no': '那个单子'}))
+    ctx2.trace = lambda *a, **k: None
+    result2 = tool.execute({'user_input': '那个单子的进度'}, ctx2)
+    assert result2.ask is not None, '不符声明形态应触发必填追问而非直传'
+
+    ctx3 = context(LLM(extract={'scenario': 'warehouse::order', 'order_no': 'CZ2024-001'}))
+    ctx3.trace = lambda *a, **k: None
+    tool.execute({'user_input': '查 CZ2024-001 进度'}, ctx3)
+    assert seen['params'].get('order_no') == 'CZ2024-001'
+
+
+def test_chat_json_retry_on_empty_response():
+    """网关空响应重试一次(2026-11-17,与筑基侧同源)。"""
+    from domains.metrology_assistant.tools.assistant import _chat_json_retry
+
+    calls = {'n': 0}
+
+    class FlakyLLM:
+        def chat_json(self, messages=None, temperature=None, stage=None, conv_id=None, **kw):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return None
+            return {'scenario': 'other'}
+
+    data = _chat_json_retry(FlakyLLM(), [{'role': 'user', 'content': 'x'}],
+                            conv_id=None, stage='assistant.select')
+    assert data == {'scenario': 'other'} and calls['n'] == 2
+
+    class DeadLLM:
+        def chat_json(self, *a, **kw):
+            raise RuntimeError('gateway down')
+
+    try:
+        _chat_json_retry(DeadLLM(), [{'role': 'user', 'content': 'x'}],
+                         conv_id=None, stage='assistant.select')
+        raise AssertionError('连续失败应抛')
+    except RuntimeError:
+        pass
+
+
+def test_select_prompt_intent_priority_and_extract_override():
+    """④⑤ 判据强化 + ③ 抽槽覆盖指令落进 prompt(与筑基侧同源)。"""
+    captured = []
+
+    class CapLLM:
+        def chat_json(self, messages=None, temperature=None, stage=None, conv_id=None, **kw):
+            captured.append((stage, (messages or [{}])[0]['content']))
+            if stage == 'assistant.select':
+                return {'scenario': 'warehouse::order'}
+            return {'order_no': 'CZ2024-001'}
+
+    order_cap = {
+        'label': '委托单进度查询', 'intent': '按委托单号查进度',
+        'required': {'slot': 'order_no', 'header': '委托单号',
+                     'question': '请提供委托单号'},
+        'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'progress',
+                   'datasource_id': 'ds-stock', 'card': '_table_card'}}
+    extracted = mta.extract_slots(
+        CapLLM(), '那这单上的器具检测费是多少',
+        {'warehouse::order': {'order_no': 'CZ0000-000'},
+         '_context': {'instrument': '压力表'}},
+        'conv-x', {'warehouse::order': order_cap})
+    assert extracted['scenario'] == 'warehouse::order'
+    assert extracted.get('order_no') == 'CZ2024-001'
+    sel = next(p for st, p in captured if st == 'assistant.select')
+    assert 'label/intent' in sel and '判 other' in sel
+    ext = next(p for st, p in captured if st == 'assistant.extract')
+    assert '以用户消息为准' in ext
+
+
+def test_sticky_slots_reset_on_value_change(monkeypatch):
+    """槽位粘滞治理(2026-11-17,与筑基侧同源):换条件即重置,旧条目
+    编号不得压过本轮新器具名;无同名键冲突时背景合法累积保留。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    seen = {}
+
+    def controlled(app, ds, tool, params, **kwargs):
+        seen.update(params=params)
+        return ControlledResult(
+            ok=True, status='ok', data={'columns': ['样品名称'], 'rows': [['电子秤']]})
+
+    fee_cap = {
+        'label': '价目查询', 'intent': '查检测费', 'required': {},
+        'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'fee',
+                   'datasource_id': 'ds-stock', 'card': '_table_card',
+                   'input_schema': {'type': 'object', 'properties': {
+                       'name': {'type': 'string', 'title': '器具名称'},
+                       'item': {'type': 'string', 'title': '条目编号'}}},
+                   'params': {'name': 'name', 'item': 'item'}}}
+    monkeypatch.setattr(mta, '_runtime_scenarios',
+                        lambda *a, **k: {'warehouse::fee': fee_cap})
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled', controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    ctx = context(LLM(extract={'scenario': 'warehouse::fee', 'name': '电子秤'}))
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('capability_slots',
+                          {'warehouse::fee': {'name': '压力表', 'item': '170'}})
+    tool.execute({'user_input': '电子秤的检测费是多少'}, ctx)
+    assert seen['params'].get('name') == '电子秤', seen['params']
+    assert 'item' not in seen['params'], f'旧条目编号不得粘滞: {seen["params"]}'
+
+
+def test_background_kept_when_extract_empty(monkeypatch):
+    """本轮一个槽都没抽到 → 沿用背景(2026-11-17 定案,与筑基同源)。"""
+    from domains.chatbi import datasources, runtime as bi_runtime
+    from domains.chatbi.controlled import ControlledResult
+
+    seen = {}
+
+    def controlled(app, ds, tool, params, **kwargs):
+        seen.update(params=params)
+        return ControlledResult(
+            ok=True, status='ok', data={'columns': ['收费'], 'rows': [['80']]})
+
+    fee_cap = {'label': '价目查询', 'intent': '查检测费', 'required': {},
+               'action': {'kind': 'chatbi', 'server': 'warehouse', 'tool': 'fee',
+                          'datasource_id': 'ds-stock', 'card': '_table_card',
+                          'input_schema': {'type': 'object', 'properties': {
+                              'name': {'type': 'string', 'title': '器具名称'}}},
+                          'params': {'name': 'name'}}}
+    monkeypatch.setattr(mta, '_runtime_scenarios',
+                        lambda *a, **k: {'warehouse::fee': fee_cap})
+    monkeypatch.setattr(bi_runtime, 'get_pack_db', lambda: object())
+    monkeypatch.setattr(datasources, 'get_datasource',
+                        lambda db, ds: SimpleNamespace(host='warehouse', database='',
+                                                       is_active=True, db_type='mcp'))
+    monkeypatch.setattr('domains.chatbi.controlled.execute_controlled', controlled)
+    tool = mta.MetrologyAssistantTool(object())
+    ctx = context(LLM(extract={'scenario': 'warehouse::fee'}))
+    ctx.trace = lambda *a, **k: None
+    ctx.session_state.set('capability_slots', {'warehouse::fee': {'name': '压力表'}})
+    tool.execute({'user_input': '那检定周期呢'}, ctx)
+    assert seen['params'].get('name') == '压力表', '空抽取时背景应沿用(兜底)'

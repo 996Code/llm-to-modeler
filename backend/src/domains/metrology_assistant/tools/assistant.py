@@ -1,6 +1,7 @@
 """Capability-scoped assistant: schema plans, evidence-bound answers and CAS flows."""
 import json
 import logging
+import re
 import uuid
 from sdk.tool import AskQuestion, AskSpec, Tool, ToolResult
 from domains.metrology_assistant.capability_plan import (
@@ -53,9 +54,25 @@ def _build_extract_prompt(background, user_input, scenarios=None):
                      'hint': s.get('extract_hint') or ''}
                     for cfg in table.values() for s in parameter_specs(cfg)]
     return ('只提取已选择能力的参数,只输出 JSON 对象。未提及的参数省略,'
-            '保留原生 JSON 类型,包括 0 和 false。\n'
+            '保留原生 JSON 类型,包括 0 和 false。'
+            '用户消息中出现过的参数值必须提取输出——即使与会话背景不同,'
+            '一律以用户消息为准;会话背景仅在用户消息未提及时参考。\n'
             f'参数声明: {json.dumps(declarations, ensure_ascii=False)}\n'
             f'本能力会话背景: {background}\n用户消息: {user_input}')
+
+
+def _chat_json_retry(llm, messages, *, conv_id, stage, retries=1):
+    """LLM JSON 调用空响应/解析失败重试一次(2026-11-17,与筑基侧同源)。"""
+    last_error: Exception = ValueError(f'{stage} 未返回有效 JSON')
+    for _ in range(retries + 1):
+        try:
+            data = llm.chat_json(messages, temperature=0.0, conv_id=conv_id, stage=stage)
+            if isinstance(data, dict):
+                return data
+            last_error = ValueError(f'{stage} 返回非对象')
+        except Exception as error:  # noqa: BLE001
+            last_error = error
+    raise last_error
 
 
 def extract_slots(llm, user_input, background, conv_id, scenarios=None):
@@ -69,20 +86,39 @@ def extract_slots(llm, user_input, background, conv_id, scenarios=None):
     # 调用形态:改写合并进本就每轮发生的选择调用)
     bg_line = (f'会话背景(追问指代解析用): {json.dumps(background, ensure_ascii=False)}\n'
                if isinstance(background, dict) and background else '')
-    selected = llm.chat_json([{'role': 'user', 'content': (
+    selected = _chat_json_retry(llm, [{'role': 'user', 'content': (
         '选择一个能力,仅输出 JSON {"scenario":"能力key或other"'
         ',"standalone":"独立问题"(可选)}。\n'
         f'{bg_line}能力: {json.dumps(choices, ensure_ascii=False)}\n用户消息: {user_input}\n'
-        'standalone 仅当用户消息含指代/省略(如"这单上的器具")需结合会话背景'
-        '才能理解时给出:用背景中的具体值替换指代,写成不依赖上下文的独立'
-        '问题;无需改写时省略该字段。')}],
-        temperature=0.0, conv_id=conv_id, stage='assistant.select')
+        'standalone 仅当用户消息含指代/省略、需结合会话背景才能理解时给出'
+        '——两种形态:代词指代(如"这单上的某物")与省略对象只问属性'
+        '(如"某属性是多久"="某对象的该属性是多久")。用背景中的具体值'
+        '补全指代与省略,写成不依赖上下文的独立问题;实体保真:用户消息'
+        '中已出现的实体必须原样保留,补全只用于指代与省略处,不得把用户'
+        '实体与背景值拼接或合并成组合;无需改写时省略该字段。\n'
+        '判定规则:问句表达的意图(各能力 label/intent 已声明其管辖的意图)'
+        '优先于句中名词匹配;判 other 前,先确认问句意图不落在任何已声明'
+        '能力的 label/intent 范围内。')}],
+        conv_id=conv_id, stage='assistant.select')
     if not isinstance(selected, dict):
         raise ValueError('能力选择返回非对象')
     standalone = selected.get('standalone')
     standalone = standalone.strip() if isinstance(standalone, str) else ''
     if standalone and len(standalone) > max(len(user_input) * 4, 200):
         standalone = ''  # 异常膨胀视为改写失败,防跑偏
+    # 拼接防御(2026-11-17,与筑基侧同源,纯值级零词表):改写句中出现
+    # ≥2 个互不为子串的背景候选实体 = 改写器把背景旧值与问句实体拼接,
+    # 弃用改写以原句走抽槽;合法补全(只引入一个背景实体)不受影响。
+    if standalone and isinstance(background, dict):
+        bg_entities = [str(v).strip()
+                       for group in background.values()
+                       if isinstance(group, dict)
+                       for v in group.values()
+                       if isinstance(v, str) and len(v.strip()) >= 2]
+        hits = [e for e in bg_entities if e in standalone]
+        distinct = [e for e in hits if not any(e != o and e in o for o in hits)]
+        if len(distinct) >= 2:
+            standalone = ''
     scenario = selected.get('scenario')
     if not isinstance(scenario, str) or scenario not in table:
         return {'scenario': 'other', **({'standalone': standalone} if standalone else {})}
@@ -96,12 +132,24 @@ def extract_slots(llm, user_input, background, conv_id, scenarios=None):
     bg_payload = json.dumps(scoped, ensure_ascii=False)
     context = background.get('_context') if isinstance(background, dict) else None
     if isinstance(context, dict) and context:
-        bg_payload += ('\n会话上下文(指代解析,如\'这单上的器具\'即这里的值): '
+        bg_payload += ('\n会话上下文(指代解析,如\'这单上的某物\'即这里的值): '
                        + json.dumps(context, ensure_ascii=False))
-    prompt = _build_extract_prompt(bg_payload, standalone or user_input,
-                                   {scenario: table[scenario]})
-    data = llm.chat_json([{'role': 'user', 'content': prompt}], temperature=0.0,
-                         conv_id=conv_id, stage='assistant.extract')
+
+    def _extract_once(bg_text: str) -> dict:
+        prompt = _build_extract_prompt(bg_text, standalone or user_input,
+                                       {scenario: table[scenario]})
+        return _chat_json_retry(llm, [{'role': 'user', 'content': prompt}],
+                                conv_id=conv_id, stage='assistant.extract')
+
+    data = _extract_once(bg_payload)
+    # 零槽防御(2026-11-17,与筑基侧同源):带背景抽取零槽(背景锚定吞掉
+    # 问句显式实体)→ 去背景干净 prompt 再抽一次,非空才采用。
+    if background and not any(k in allowed and present(v)
+                              for k, v in (data or {}).items()):
+        retry = _extract_once('{}')
+        if isinstance(retry, dict) and any(k in allowed and present(v)
+                                           for k, v in retry.items()):
+            data = retry
     if not isinstance(data, dict):
         raise ValueError('槽位提取返回非对象')
     return {'scenario': scenario, **({'standalone': standalone} if standalone else {}),
@@ -397,7 +445,15 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
                 base = background.get(scenario) or {}
                 if flow and flow.get('scenario') == scenario:
                     base = flow.get('slots') or base
+                # 槽位粘滞治理(2026-11-17 两轮回归定案,与筑基侧同源):
+                # 本轮 extracted 提供了任意槽位 = 用户明确给出查询条件,
+                # 背景整体不再参与(同名换值/新增键+旧筛选留存两种粘滞
+                # 形态统一覆盖);仅空抽取时沿用背景(漏抽/指代兜底)。
+                if any(k != 'scenario' and present(v) for k, v in extracted.items()):
+                    base = {}
                 merged = merge_slots(extracted, base)
+                # 槽位值按声明 pattern 清洗(纯声明驱动,平台不猜)
+                merged = self._sanitize_identifier_slots(cfg, merged)
                 if flow and (flow.get('scenario') != scenario or self._slots_conflict(flow, extracted)):
                     self._finish_flow(flow, flow.get('scenario'), flow.get('slots') or {}, 'cancelled')
                     flow = None
@@ -504,22 +560,9 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
             logger.exception('%s查询失败', noun)
             return ToolResult(error_for_llm=f'{noun}查询失败,已如实上报,请稍后重试。')
         if not result.ok:
-            if result.status == 'not_found':
-                # 业务数据查无 → 知识库链路兜底(与能力未命中同一条链):
-                # 业务表未收录的对象(如价目表外的器具),知识可能在库里,
-                # 原问题继续检索;知识库也无依据时回业务通知卡。
-                # 拒权/参数错误不降级——那是权限与契约问题,查库答非所问。
-                # 有片段被回答引用才算兜底成立(证据红线):弱召回 0 引用的
-                # 合成"未找到"不顶掉业务查无事实。
-                # 例外(2026-11-16,与筑基侧同源):标识符定位类查询(凭委托
-                # 单号/证书编号取业务数据)查无即终态,不转兜底——弱召回的
-                # 无关规范片段引用非空会顶掉业务通知。凭标识符查无本身
-                # 就是有效答案。
-                if not self._is_identifier_query(cfg, merged):
-                    kb = self._fallback_answer(table, user_input, ctx, state, stage)
-                    if (kb.artifact and kb.artifact.get('type') == 'kg_search_result'
-                            and kb.artifact.get('cited_chunks')):
-                        return kb
+            # 业务查无(2026-11-17 产品定案,与筑基侧同源):已路由到业务
+            # 工具的查询一律直出业务通知卡,不再降级知识库检索;知识库
+            # 兜底仅保留给"能力未命中"(select 判 other)的场景。
             if result.status in ('forbidden', 'not_found'):
                 notice = (action.get('notices') or {}).get(result.status) or {}
                 title = notice.get('title') or ('无权查询' if result.status == 'forbidden' else '未找到数据')
@@ -544,23 +587,47 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
     # 单号/编号/号码定位业务数据的查询。此类查无即终态,不做知识库兜底。
     _IDENTIFIER_SLOT_MARKS = ('单号', '编号', '号码')
 
-    def _is_identifier_query(self, cfg, merged):
-        """标识符定位类查询判定(2026-11-16,与筑基侧同源)。
+    def _sanitize_identifier_slots(self, cfg, merged):
+        """按参数声明的 pattern 清洗槽位值(2026-11-17,纯声明驱动,与筑基同源)。
 
-        场景的参数声明里有标识符槽位(委托单号/证书编号等)且本轮带值——
-        凭标识符取业务数据,查无是确定性事实,知识库不可能提供"这个单号
-        的进度";兜底反而让弱召回的无关规范片段顶掉业务通知。
-        价目/能力类按器具名称查询无标识符槽位,不受影响(保留兜底)。
+        编号形态由声明方定义(MCP inputSchema 参数的 JSON Schema pattern,
+        平台不硬编码业务语义):声明带 pattern 的参数,值完全符合→原样;
+        不完全符合→去锚提取首个匹配;提取不到→视为抽槽污染清掉,交必填
+        追问。未声明 pattern 的参数不清洗。
         """
         try:
-            for spec in parameter_specs(cfg):
-                text = f"{spec.get('header') or ''}{spec.get('slot') or ''}{spec.get('name') or ''}"
-                if any(mark in str(text) for mark in self._IDENTIFIER_SLOT_MARKS):
-                    if present(merged.get(spec.get('slot') or '')):
-                        return True
+            specs = parameter_specs(cfg)
         except Exception:  # noqa: BLE001
-            logger.debug('标识符查询判定失败(按非标识符处理)', exc_info=True)
-        return False
+            return merged
+        for spec in specs:
+            schema = spec.get('schema')
+            pattern = schema.get('pattern') if isinstance(schema, dict) else None
+            if not isinstance(pattern, str) or not pattern.strip():
+                continue
+            try:
+                regex = re.compile(pattern)
+            except re.error:
+                continue
+            slot = spec.get('slot') or ''
+            value = merged.get(slot)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            value = value.strip()
+            match = regex.search(value)
+            if match and match.group(0) == value:
+                continue
+            loose = pattern.strip()
+            for lead, tail in (('^', '$'), ('\\A', '\\z'), ('\\A', '\\Z')):
+                if loose.startswith(lead):
+                    loose = loose[len(lead):]
+                if loose.endswith(tail):
+                    loose = loose[:-len(tail)]
+            extracted = re.compile(loose).search(value) if loose else None
+            if extracted:
+                merged[slot] = extracted.group(0)
+            else:
+                merged.pop(slot, None)
+        return merged
 
     # 器具/样品名称列匹配优先级:证书表用 器具名称/样品名称;进度合并表
     # 的器具列是纯"名称";含"单位"的列(送检单位)明确不碰
