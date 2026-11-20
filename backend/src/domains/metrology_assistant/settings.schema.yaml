@@ -7,6 +7,11 @@ groups:
   - key: display
     title: 展示配置
     fields:
+      - key: no_evidence_notice
+        type: string
+        label: 无依据引导话术
+        placeholder: 已检索{tried_kb}，未找到相关资料。当前可咨询{labels}。请换个问法，或联系业务窗口人工确认。
+        help: 知识库检索无依据时的统一引导话术;占位符 {labels}=当前能力清单、{tried_kb}=已检索来源、{prefix}=检索前缀(无可用库时为空);留空用内置默认。改完即生效
       - key: welcome_title
         type: string
         label: 欢迎页标题

@@ -136,7 +136,10 @@ def typed_value(value, schema):
 
 def kb_from_rules(action, slots):
     for rule in action.get('kb_rules') or []:
-        if slots.get(rule.get('slot')) in (rule.get('in') or []):
+        # 槽位缺失按空串参与匹配(2026-11-20 同步自筑基AI):配置可用
+        # in:[""] 声明"缺省兜底规则"(如用途未指明→默认查强检目录)。
+        # 存量规则不含 "",行为不变。
+        if slots.get(rule.get('slot'), '') in (rule.get('in') or []):
             return rule.get('kb')
     return None
 

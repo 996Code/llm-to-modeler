@@ -167,9 +167,10 @@ def test_save_hot_reloads_runtime_scenarios(client, legacy_demo_config):
         "content": content})
     table = load_scenarios()
     assert table["progress"]["required"]["question"] == "热生效文案?"
-    # AskOption 复原:执行器消费 SDK 类型
+    # AskOption 复原:执行器消费 SDK 类型(强检 purpose 已降可选,
+    # 复原断言改用仍保留追问的 progress 场景)
     from sdk.tool import AskOption
-    assert isinstance(table["mandatory_check"]["required"]["options"][0],
+    assert isinstance(table["progress"]["required"]["options"][0],
                       AskOption)
 
 

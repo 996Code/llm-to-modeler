@@ -65,6 +65,12 @@ def extract_slots(llm, user_input, background, conv_id, scenarios=None):
     choices = {k: {'label': c.get('label'), 'intent': c.get('intent')} for k, c in table.items()}
     selected = llm.chat_json([{'role': 'user', 'content': (
         '选择一个能力,仅输出 JSON {"scenario":"能力key或other"}。\n'
+        # 裸编号直判+实体替换省略(2026-11-20 同步自筑基AI 3fa1b524):
+        # 裸单号被误判 other 落知识库;"那X呢"需沿用最近话题能力
+        '判定规则:用户消息仅由一个编号组成(纯数字串,或字母前缀+数字的'
+        '组合,两端无其他词语)时,判进度查询能力;'
+        '用户消息是仅替换了对象的省略问法(如"那X呢")且会话背景存在话题时,'
+        'scenario 沿用背景中最近话题的能力。\n'
         f'能力: {json.dumps(choices, ensure_ascii=False)}\n用户消息: {user_input}')}],
         temperature=0.0, conv_id=conv_id, stage='assistant.select')
     if not isinstance(selected, dict):
@@ -243,13 +249,23 @@ def resolve_kb_for_purpose(purpose):
 _kb_from_rules = kb_from_rules
 
 
-def _unsupported_notice(table=None, tried_kb=''):
+def _unsupported_notice(table=None, tried_kb='', app_state=None):
+    """无证据统一兜底(2026-11-20 同步自筑基AI):文案可配置(设置页>
+    no_evidence_notice),占位符 {labels}/{tried_kb}/{prefix};留空用默认。"""
+    from sdk.pack_api import settings_reader
+
     table = _runtime_scenarios() if table is None else table
     labels = [c.get('label', k) for k, c in table.items()]
-    text = ('当前尚无已接入能力,请联系管理员配置。' if not labels else
-            f"当前可咨询{len(labels)}类问题:{';'.join(labels[:10])}。请换个问法,或联系业务窗口人工确认。")
-    if tried_kb:
-        text = f"已检索{tried_kb},未找到相关资料。{text}"
+    labels_text = ('当前尚无已接入能力,请联系管理员配置。' if not labels else
+                   f"{len(labels)}类问题:{';'.join(labels[:10])}")
+    configured = (settings_reader(app_state, 'metrology_assistant')
+                  .get('no_evidence_notice', '').strip())
+    prefix = f"已检索{tried_kb},未找到相关资料。" if tried_kb else ''
+    template = configured or '{prefix}当前可咨询{labels}。请换个问法,或联系业务窗口人工确认。'
+    try:
+        text = template.format(labels=labels_text, tried_kb=tried_kb, prefix=prefix)
+    except (KeyError, IndexError, ValueError):
+        text = template
     return _notice('unsupported', '暂不支持此问题', text)
 
 
@@ -532,7 +548,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
             logger.exception('兜底:知识库目录读取失败')
             return ToolResult(error_for_llm='知识库检索失败,请稍后重试。')
         if not kbs:
-            return _unsupported_notice(table)
+            return _unsupported_notice(table, app_state=self._app_state)
         doc_filter = None
         if isinstance(doc_filter_raw, dict) and doc_filter_raw:
             doc_filter = set()
@@ -551,7 +567,7 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         answer = (result.get('answer') or '').strip()
         if not chunks or not answer:
             # 无召回或无回答:如实引导,不编造(证据红线与场景问答同款)
-            return _unsupported_notice(table, tried_kb='知识库')
+            return _unsupported_notice(table, tried_kb='知识库', app_state=self._app_state)
         artifact = {'type': 'kg_search_result', 'pack': 'metrology_assistant',
                     'resultDisplay': 'card', 'answer': answer,
                     'kb': result.get('kb') or {},

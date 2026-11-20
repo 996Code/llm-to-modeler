@@ -114,8 +114,9 @@ def test_merge_slots_current_turn_wins():
 
 
 def test_parse_clarify_answers_structured_and_text():
-    assert mta.parse_clarify_answers({"器具用途": "安全防护"}) == {
-        "purpose": "安全防护"}
+    # 强检 purpose 已降可选(2026-11-20 同步自筑基AI 免追问):header
+    # 不再注册,"器具用途"补答映射消失;progress/order_no 仍走 header 映射
+    assert mta.parse_clarify_answers({"器具用途": "安全防护"}) == {}
     assert mta.parse_clarify_answers({"委托单号": "BJ2026"}) == {
         "order_no": "BJ2026"}
     assert mta.parse_clarify_answers({'text': 'BJ2027'}, pending={
@@ -198,15 +199,34 @@ def _run(tool, ctx, user_input, clarify=None, mem=None):
     return tool.execute(state, ctx)
 
 
-def test_missing_purpose_asks_only_necessary_condition(tool):
+def test_missing_purpose_concludes_conditionally_without_asking(tool, monkeypatch):
+    """免追问(2026-11-20 同步自筑基AI):用途未指明不再追问,直接按器具查
+    强检目录出条件式结论(decision=mandatory,结论"用于XX领域时…")。"""
+    monkeypatch.setattr(
+        "domains.knowledge_graph.service.retrieve_evidence",
+        lambda *a, **kw: {
+            "kb": {"id": "kb1", "name": "强检计量器具目录"},
+            "subgraph": {"nodes": [{"name": "压力表"}], "edges": []},
+            "chunks": [{"docId": "d1", "docName": "强检计量器具目录.md",
+                        "seq": 1, "score": 0.9,
+                        "text": "压力仪表 用于安全防护:电站锅炉主气包和给水压力的测量"}],
+            "diagnostics": {}})
+    conclusion = {
+        "decision": "mandatory",
+        "conclusion": "该器具用于安全防护领域时属于强制检定计量器具",
+        "evidence": [{"text": "压力仪表 用于安全防护:电站锅炉主气包和给水压力的测量",
+                      "chunk_refs": [1]}],
+        "suggestion": "按目录适用情形确认使用场景,属则周期检定",
+    }
     ctx = FakeCtx(FakeLLM(extract={"scenario": "mandatory_check",
                                    "instrument": "压力表",
-                                   "purpose": "", "order_no": ""}))
+                                   "purpose": "", "order_no": ""},
+                          conclusion=conclusion))
     r = _run(tool, ctx, "压力表要强检吗")
-    assert r.ask is not None
-    q = r.ask.questions[0]
-    assert q.header == "器具用途"
-    assert ctx.session_state.get("pending")["scenario"] == "mandatory_check"
+    assert r.ask is None, "用途未指明不再追问(免追问同步)"
+    a = r.artifact["answer"]
+    assert a["decision"] == "mandatory"
+    assert "安全防护" in a["conclusion"]
 
 
 def test_purpose_routes_kb_and_concludes_with_citation(tool, monkeypatch):
