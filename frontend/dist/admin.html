@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM Form Modeler · 管理端</title>
+  <script type="module" crossorigin src="/ai-modeler/assets/admin-Cps1XX-T.js"></script>
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/_plugin-vue_export-helper-BuBgmSRk.js">
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/EmbedTestApp-jCjvRRmA.js">
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/design-tokens-eqRwXl0p.js">
+  <link rel="stylesheet" crossorigin href="/ai-modeler/assets/_plugin-vue_export-helper-B6snAd4S.css">
+  <link rel="stylesheet" crossorigin href="/ai-modeler/assets/EmbedTestApp-CLw1j_gp.css">
+  <link rel="stylesheet" crossorigin href="/ai-modeler/assets/design-tokens-BsVhz2-0.css">
+  <link rel="stylesheet" crossorigin href="/ai-modeler/assets/admin-8DW7WbxV.css">
+</head>
+<body>
+  <div id="admin-app"></div>
+  <script>
+    // 门禁:本地无 token 时,先探测后端是否启用了口令(ADMIN_TOKEN)。
+    // 未配置 = 开放模式(后端中间件全放行),前端也不拦截——否则会卡死在
+    // 认证页(开放模式 token 签发 503,换不到 token)。探测失败按需认证处理。
+    document.body.style.visibility = 'hidden'
+    ;(async () => {
+      let needAuth = true
+      if (!localStorage.getItem('auth_token')) {
+        try {
+          const resp = await fetch('/ai-modeler/api/auth/config')
+          const cfg = await resp.json()
+          if (cfg && cfg.secret_configured === false) needAuth = false
+        } catch (e) { /* 探测失败维持需要认证 */ }
+      } else {
+        needAuth = false
+      }
+      if (needAuth) window.location.replace('/ai-modeler/auth.html?page=admin')
+      else document.body.style.visibility = ''
+    })()
+  </script>
+</body>
+</html>

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM Form Modeler</title>
+  <script type="module" crossorigin src="/ai-modeler/assets/main-BX7jG7r5.js"></script>
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/_plugin-vue_export-helper-BuBgmSRk.js">
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/design-tokens-eqRwXl0p.js">
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/exportExcel-C69-Gyac.js">
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/marked.esm-BMpBQyD8.js">
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/RollbackOutlined-CHSZF54c.js">
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/RedoOutlined-DKNf-l7R.js">
+  <link rel="modulepreload" crossorigin href="/ai-modeler/assets/index-D_smxTpy.js">
+  <link rel="stylesheet" crossorigin href="/ai-modeler/assets/_plugin-vue_export-helper-B6snAd4S.css">
+  <link rel="stylesheet" crossorigin href="/ai-modeler/assets/design-tokens-BsVhz2-0.css">
+  <link rel="stylesheet" crossorigin href="/ai-modeler/assets/main-m2cZxDiM.css">
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    // 门禁:本地无 token 时,先探测后端是否启用了口令(ADMIN_TOKEN)。
+    // 未配置 = 开放模式(后端中间件全放行),前端也不拦截——否则会卡死在
+    // 认证页(开放模式 token 签发 503,换不到 token)。探测失败按需认证处理。
+    document.body.style.visibility = 'hidden'
+    ;(async () => {
+      let needAuth = true
+      if (!localStorage.getItem('auth_token')) {
+        try {
+          const resp = await fetch('/ai-modeler/api/auth/config')
+          const cfg = await resp.json()
+          if (cfg && cfg.secret_configured === false) needAuth = false
+        } catch (e) { /* 探测失败维持需要认证 */ }
+      } else {
+        needAuth = false
+      }
+      if (needAuth) window.location.replace('/ai-modeler/auth.html?page=index')
+      else document.body.style.visibility = ''
+    })()
+  </script>
+</body>
+</html>

@@ -365,6 +365,22 @@ app.include_router(tasks_router)
 # LLM 供应商管理(设计 8.6/C8:主备在线维护;同 admin 口令守门)
 app.include_router(llm_providers_router)
 
+# ── 单容器部署：可选同源托管前端构建产物（env 门控，默认关闭） ──────
+# Abasthan 等 PaaS 没有 nginx 反代层。设置 FRONTEND_DIST_DIR 指向 vite
+# 构建产物目录（frontend/dist，base=/ai-modeler/）后，由 FastAPI 直接
+# 同源服务 /ai-modeler/* 静态页与 /api/*，省去独立前端站点与 CORS。
+# 不设置该变量时行为与原版完全一致（nginx 同源托管或独立部署）。
+_frontend_dist = Path(os.environ.get("FRONTEND_DIST_DIR", "") or "")
+if _frontend_dist.is_dir():
+    from fastapi.responses import RedirectResponse
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/ai-modeler", StaticFiles(directory=str(_frontend_dist), html=True),
+              name="frontend")
+
+    @app.get("/", include_in_schema=False)
+    async def _root_redirect() -> RedirectResponse:
+        return RedirectResponse("/ai-modeler/")
 
 
 if __name__ == "__main__":

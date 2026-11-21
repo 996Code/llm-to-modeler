@@ -1,0 +1,25 @@
+var d=Object.defineProperty;var p=(r,t,i)=>t in r?d(r,t,{enumerable:!0,configurable:!0,writable:!0,value:i}):r[t]=i;var o=(r,t,i)=>p(r,typeof t!="symbol"?t+"":t,i);class f{constructor(t){o(this,"options");o(this,"container",null);o(this,"iframe",null);o(this,"floatBtn",null);o(this,"isOpen",!1);o(this,"_initSent",!1);this.options={position:"bottom-right",theme:"light",...t},this.init()}init(){this.floatBtn=document.createElement("div"),this.floatBtn.style.cssText=`
+      position: fixed;
+      ${this.options.position==="bottom-left"?"left":"right"}: 24px;
+      bottom: 24px;
+      width: 56px; height: 56px;
+      border-radius: 50%;
+      background: #3370ff;
+      color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 24px; cursor: pointer;
+      box-shadow: 0 4px 12px rgba(51,112,255,0.4);
+      z-index: 99999;
+      transition: transform 0.2s;
+    `,this.floatBtn.innerHTML="💬",this.floatBtn.onmouseenter=()=>this.floatBtn.style.transform="scale(1.1)",this.floatBtn.onmouseleave=()=>this.floatBtn.style.transform="scale(1)",this.floatBtn.onclick=()=>this.toggle(),document.body.appendChild(this.floatBtn),window.addEventListener("message",t=>this.handleMessage(t))}updateFloatBtn(){this.floatBtn&&(this.floatBtn.innerHTML="💬",this.floatBtn.style.background="#3370ff",this.floatBtn.style.boxShadow="0 4px 12px rgba(51,112,255,0.4)",this.floatBtn.style.display=this.isOpen?"none":"flex")}trySendInit(){this._initSent||!this.iframe||(this._initSent=!0,this.postToChild("INIT",{userId:this.options.userId,headers:this.options.headers||{},capabilities:["context","apply","auth","resize",...this.options.services?["services"]:[]],...this.options.services?{services:this.options.services}:{},artifact:this.currentArtifact(),revision:this.currentRevision()}))}postToChild(t,i,e){var s,n;(n=(s=this.iframe)==null?void 0:s.contentWindow)==null||n.postMessage({v:1,src:"host",...e!==void 0?{id:e}:{},type:t,payload:i},this.iframeOrigin())}iframeOrigin(){try{return new URL(this.options.baseUrl,window.location.origin).origin}catch{return"*"}}currentArtifact(){var t,i;try{return((i=(t=this.options).getArtifact)==null?void 0:i.call(t))??null}catch{return null}}currentRevision(){const t=this.currentArtifact();if(t==null)return null;const i=JSON.stringify(t);let e=0;for(let s=0;s<i.length;s++)e=(e<<5)-e+i.charCodeAt(s)|0;return`r${i.length}_${Math.abs(e)}`}handleMessage(t){var h,l;const{type:i,payload:e,src:s,id:n}=t.data||{};if(s==="child")switch(i){case"READY":this.trySendInit();break;case"GET_CONTEXT":this.postToChild("GET_CONTEXT_RESULT",{artifact:this.currentArtifact(),revision:this.currentRevision()},n);break;case"APPLY":{const a=e==null?void 0:e.artifact;try{(l=(h=this.options).onConfigApply)==null||l.call(h,a),this.postToChild("APPLY_RESULT",{ok:!0,artifact:a,revision:this.currentRevision()},n)}catch(c){this.postToChild("APPLY_RESULT",{ok:!1,code:"HOST_ERROR",message:String(c)},n)}break}case"GET_AUTH":this.postToChild("GET_AUTH_RESULT",{userId:this.options.userId,headers:this.options.headers||{}},n);break;case"CLOSE":this.close();break;case"RESIZE":{const a=(e==null?void 0:e.mode)==="expanded";this.container&&(this.container.style.width=a?"min(1100px, calc(100vw - 64px))":"400px",this.container.style.height=a?"min(820px, calc(100vh - 120px))":"600px",this.container.style.transition="width 0.25s ease, height 0.25s ease");break}}}createIframe(){this.container=document.createElement("div"),this.container.style.cssText=`
+      position: fixed;
+      ${this.options.position==="bottom-left"?"left":"right"}: 24px;
+      bottom: 24px;
+      width: 400px; height: 600px;
+      max-width: calc(100vw - 48px); max-height: calc(100vh - 120px);
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+      overflow: hidden;
+      z-index: 99999;
+      background: #fff;
+    `,this.iframe=document.createElement("iframe");const t=new URLSearchParams({embed:"true",...this.options.userId?{userId:this.options.userId}:{}});this.iframe.src=`${this.options.baseUrl}/?${t}`,this.iframe.style.cssText="width: 100%; height: 100%; border: none;",this.iframe.allow="clipboard-write",this.iframe.onload=()=>{this.trySendInit()},this.container.appendChild(this.iframe),document.body.appendChild(this.container)}open(){this.isOpen||(this.container||this.createIframe(),this.container.style.display="block",this.isOpen=!0,this.updateFloatBtn())}close(){var t,i;this.isOpen&&(this.container&&(this.container.style.display="none"),this.isOpen=!1,this.updateFloatBtn(),(i=(t=this.options).onClose)==null||i.call(t))}toggle(){this.isOpen?this.close():this.open()}destroy(){var t;this.close(),(t=this.floatBtn)==null||t.remove(),this.floatBtn=null,window.removeEventListener("message",this.handleMessage)}setContext(t){var i;t.userId&&(this.options.userId=t.userId),this.iframe&&((i=this.iframe.contentWindow)==null||i.postMessage({v:1,src:"host",type:"AUTH_UPDATE",payload:{userId:t.userId||this.options.userId}},this.iframeOrigin()))}}typeof window<"u"&&(window.LLMFormModeler=f);
