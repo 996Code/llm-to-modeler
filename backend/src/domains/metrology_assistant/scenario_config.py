@@ -196,11 +196,24 @@ def load_scenarios() -> Dict[str, Any]:
             rev = store.seed_config_if_absent(db, default)
             config = {**default, "_revision": rev}
         content = {k: v for k, v in config.items() if not k.startswith("_")}
-        # 仅识别历史演示的原始声明；不覆盖已定制的配置，不写回数据库。
-        from domains.metrology_assistant.legacy_demo import upgrade_legacy_scenario
-        content = {**content, FACTORY_SCENARIOS_KEY: {
-            key: upgrade_legacy_scenario(key, cfg)
-            for key, cfg in content.get(FACTORY_SCENARIOS_KEY, {}).items()}}
+        # 存量兜底提示(2026-11-21 随升级层下线):初版演示形态的场景行
+        # 不再被原位升级——行为会静默回落通用回答。识别到时告警提示
+        # 人工在管理页整档重存;不改变装载行为。
+        for key, cfg in (content.get(FACTORY_SCENARIOS_KEY) or {}).items():
+            action = (cfg or {}).get('action') or {}
+            legacy_shape = (
+                key in ('turnaround', 'qualification')
+                and action.get('kind') == 'kg'
+                and action.get('conclusion') == key
+            ) or (
+                key == 'mandatory_check'
+                and action.get('kind') == 'kg'
+                and not action.get('conclusion')
+            )
+            if legacy_shape:
+                logger.warning(
+                    "场景 %s 仍是初版演示形态(升级层已下线):请在管理页"
+                    "整档保存一次以固化现行形态,否则按通用回答降级", key)
         valid = validate_config(content)
         table = _rehydrate(valid[FACTORY_SCENARIOS_KEY])
         runtime.set_cached_config(table, int(config.get("_revision", rev)))

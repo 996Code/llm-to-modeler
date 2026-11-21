@@ -60,8 +60,16 @@ def capability():
 
 
 def context(llm, conv='kb-fallback'):
-    return SimpleNamespace(llm_client=llm, session_state=Mem(), conv_id=conv,
-                           user_id='alice', emit=lambda *a: None)
+    traces = []
+
+    def _trace(stage, title='', status='info', duration_ms=None, detail=None):
+        traces.append({'stage': stage, 'title': title, 'status': status,
+                       'duration_ms': duration_ms, 'detail': detail})
+
+    ctx = SimpleNamespace(llm_client=llm, session_state=Mem(), conv_id=conv,
+                          user_id='alice', emit=lambda *a: None, trace=_trace)
+    ctx.traces = traces
+    return ctx
 
 
 def _kbs():
@@ -236,6 +244,31 @@ def test_validate_config_without_fallback_kb():
     assert validate_config({'scenarios': {}})
     # fallback_kb 已废除:存量配置里残留该键不再校验(忽略即可)
     assert validate_config({'scenarios': {}, 'fallback_kb': '历史残留'})
+
+
+def test_stage_bridge_persists_per_stage_trace(monkeypatch):
+    """阶段拆步落库(P3):每阶段一条 metrology.<key> trace 事件,
+    duration_ms=上一阶段至此墙钟,detail.prev_stage 标归属(首段为 None)。"""
+    def multi(app, kbs, query, **kwargs):
+        on_stage = kwargs.get('on_stage')
+        if on_stage:
+            on_stage('kb_search.intent', '解析检索意图…')
+        return multi_result()
+
+    tool, _ = setup_tool(monkeypatch, multi=multi)
+    ctx = context(LLM(extract={'scenario': 'other'}))
+    result = tool.execute({'user_input': '压力表'}, ctx)
+    assert result.artifact is not None
+    stages = [t['stage'] for t in ctx.traces]
+    assert 'metrology.assistant.extract' in stages
+    first = next(t for t in ctx.traces if t['stage'] == 'metrology.assistant.extract')
+    assert first['duration_ms'] >= 0 and first['detail'] == {'prev_stage': None}
+    if 'metrology.kb_search.intent' in stages:
+        second = next(t for t in ctx.traces if t['stage'] == 'metrology.kb_search.intent')
+        # 兜底路径先发 assistant.retrieve 再进检索(intent 的耗时归属它)
+        assert second['detail'] == {'prev_stage': 'assistant.retrieve'}
+        assert second['duration_ms'] >= 0
+
 
 
 def test_annotation_shortcut_before_routing(monkeypatch):

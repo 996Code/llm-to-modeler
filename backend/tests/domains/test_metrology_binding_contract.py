@@ -37,7 +37,9 @@ def test_plan_rejects_env_instead_of_projecting_it():
 
 
 def test_default_demo_has_only_explicit_server_tool_bindings():
-    from domains.metrology_assistant.legacy_demo import demo_scenarios
+    from tests.domains.metrology_fixtures import (
+        configured_scenarios as demo_scenarios,
+    )
     for cfg in demo_scenarios().values():
         action = cfg['action']
         assert 'env' not in action

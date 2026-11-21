@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from domains.metrology_assistant.tools import assistant as mta
-from domains.metrology_assistant.legacy_demo import demo_scenarios
+from tests.domains.metrology_fixtures import (
+    configured_scenarios as demo_scenarios,
+)
 from domains.metrology_assistant import capability_import as ci
 from sdk.tool import PackInvokeError
 

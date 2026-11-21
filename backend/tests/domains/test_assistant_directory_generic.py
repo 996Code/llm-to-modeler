@@ -149,23 +149,6 @@ def test_empty_overrides_and_schema_driven_zero_parameter_tool_validate():
     assert config.validate_config(doc) == doc
 
 
-def test_loaded_legacy_demo_keeps_its_explicit_business_semantics(monkeypatch):
-    from domains.metrology_assistant import runtime, store
-    from domains.metrology_assistant.legacy_demo import SCENARIOS
-    runtime.reset_runtime_cache()
-    original = config._jsonable({"scenarios": SCENARIOS})
-    monkeypatch.setattr(runtime, "get_pack_db", lambda: None)
-    monkeypatch.setattr(store, "current_revision", lambda db: 1)
-    monkeypatch.setattr(store, "load_config", lambda db: {**original, "_revision": 1})
-    try:
-        loaded = config.load_scenarios()
-        assert loaded["mandatory_check"]["action"]["conclusion"] == "mandatory"
-        assert loaded["mandatory_check"]["_param_hints"]["instrument"] == "所问器具名称"
-        assert "conclusion" not in original["scenarios"]["mandatory_check"]["action"]
-    finally:
-        runtime.reset_runtime_cache()
-
-
 def test_database_outage_does_not_restore_demo(monkeypatch):
     from domains.metrology_assistant import runtime
     runtime.reset_runtime_cache()
@@ -217,42 +200,3 @@ def test_legacy_mode_without_template_queries_user_input_not_domain_words():
     assert plan["query"] == "设备校准要多久"
     assert "强制检定" not in plan["query"]
 
-
-def test_stored_turnaround_demo_gets_legacy_query_template(monkeypatch):
-    from domains.metrology_assistant import runtime, store
-    from domains.metrology_assistant.legacy_demo import (
-        SCENARIOS, _TURNAROUND_ACTION_V1,
-    )
-    runtime.reset_runtime_cache()
-    original = config._jsonable({"scenarios": SCENARIOS})
-    # 存量 DB 里的检测耗时/资质能力还是初版 kg 问答(库里无对应数据,
-    # 可能带历史上落库的 query_template)——装载时原位升级为业务查询
-    v1 = {"label": "x", "intent": SCENARIOS["turnaround"]["intent"],
-          "required": {"slot": "instrument", "header": "器具名称",
-                       "question": "请提供器具名称", "options": []},
-          "action": {**_TURNAROUND_ACTION_V1,
-                     "query_template": "{instrument} 检测 耗时 工作日"}}
-    v1_q = {"label": "y", "intent": SCENARIOS["qualification"]["intent"],
-            "required": {"slot": "instrument", "header": "器具名称",
-                         "question": "请提供器具名称", "options": []},
-            "action": {"kind": "kg", "kb": "检定规程",
-                       "conclusion": "qualification",
-                       "query_template": "{instrument} 检测 资质 承接范围"}}
-    # 人工改过 intent 的 kg 存量:不命中识别,保持原样
-    v1_custom = {**v1_q, "intent": "人工定制的意图"}
-    stored = {**original, "scenarios": {
-        **original["scenarios"], "turnaround": v1, "qualification": v1_q,
-        "qualification_custom": v1_custom}}
-    monkeypatch.setattr(runtime, "get_pack_db", lambda: None)
-    monkeypatch.setattr(store, "current_revision", lambda db: 1)
-    monkeypatch.setattr(store, "load_config", lambda db: {**stored, "_revision": 1})
-    try:
-        loaded = config.load_scenarios()
-        up = loaded["turnaround"]["action"]
-        assert up["kind"] == "chatbi" and up["tool"] == "query_turnaround"
-        assert up["server"] == "metrology"
-        upq = loaded["qualification"]["action"]
-        assert upq["kind"] == "chatbi" and upq["tool"] == "query_qualification"
-        assert loaded["qualification_custom"]["action"]["kind"] == "kg"
-    finally:
-        runtime.reset_runtime_cache()

@@ -12,6 +12,7 @@ export const CALL_TYPE_META: Record<string, { label: string; color: string }> = 
   graph: { label: '图谱', color: 'geekblue' },
   vector: { label: '向量', color: 'green' },
   fulltext: { label: '全文', color: 'orange' },
+  mcp: { label: 'MCP', color: 'volcano' },
 }
 
 /** 调用类型在链路时间线的样式类(轨道色 + 标签底色) */
@@ -21,6 +22,7 @@ export const CALL_TYPE_CLS: Record<string, string> = {
   graph: 'tg-graph',
   vector: 'tg-vector',
   fulltext: 'tg-fulltext',
+  mcp: 'tg-mcp',
 }
 
 /** 工具名 → 中文名(插件列表工具清单悬浮展示;未映射按原名) */

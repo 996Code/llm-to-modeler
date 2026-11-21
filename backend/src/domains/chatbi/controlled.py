@@ -156,7 +156,7 @@ def _normalize_tabular(payload: Any) -> Optional[dict]:
 
 
 def _invoke_mcp_core(info, tool: str, args: dict, started: float,
-                     source: Optional[dict] = None) -> "ControlledResult":
+                     source: Optional[dict] = None, app_state=None) -> "ControlledResult":
     """共享执行内核:Schema 验参 → SDK 传输 → 信封判定 → 归一。
 
     execute_controlled(客服受控入口)与 datasources.execute_mcp_tool
@@ -191,9 +191,31 @@ def _invoke_mcp_core(info, tool: str, args: dict, started: float,
 
     # ── SDK 调用(隔离性铁律: 只 import sdk;错误类型保留) ──
     from sdk import mcp_client
+    from sdk.observability import CALL_TYPE_MCP, log_pack_call
+
+    _mcp_started = time.monotonic()
+
+    def _obs_mcp(payload=None, error=None):
+        """MCP 调用落 call_logs(此前为观测盲区,慢查无法归因到建连/
+        握手/调用哪一段)。观测失败不影响业务(log_pack_call 自吞);
+        app_state 未传(旧调用方)时静默跳过。"""
+        if app_state is None:
+            return
+        log_pack_call(
+            app_state,
+            CALL_TYPE_MCP,
+            f"mcp://{info.host}/{tool}",
+            {"tool": tool, "args": {k: str(v)[:80] for k, v in (args or {}).items()}},
+            payload if isinstance(payload, dict) else {"text": str(payload)[:200]},
+            int((time.monotonic() - _mcp_started) * 1000),
+            error=error,
+        )
+
     try:
         payload = mcp_client.call_tool(info.host, tool, args)
+        _obs_mcp(payload=payload)
     except PackInvokeError as e:
+        _obs_mcp(error=e.message[:300])
         status = {"credential": "credential",
                   "retryable": "unavailable"}.get(e.error_type, "transport")
         return ControlledResult(
@@ -205,6 +227,7 @@ def _invoke_mcp_core(info, tool: str, args: dict, started: float,
             duration_ms=int((time.monotonic() - started) * 1000),
             source=source)
     except Exception as e:  # 兜底: mcp_client 理论上已包装
+        _obs_mcp(error=str(e)[:300])
         return _err("transport", f"MCP 调用失败: {e}", started, source)
 
     # ── 信封判定(先于任何形状归一) ──
@@ -281,4 +304,4 @@ def execute_controlled(app_state, datasource_id: str, tool: str,
         return _err("invalid_input",
                     f"工具 {tool} 不在数据源限定范围内(仅允许 {info.database})",
                     started, source)
-    return _invoke_mcp_core(info, tool, args, started, source)
+    return _invoke_mcp_core(info, tool, args, started, source, app_state=app_state)

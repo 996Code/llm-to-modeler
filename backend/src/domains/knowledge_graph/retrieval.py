@@ -61,6 +61,12 @@ def parse_cited_chunks(answer: str) -> List[int]:
     return sorted({int(m) for m in _CITED_CHUNK_RE.findall(answer or "")})
 
 
+# 无答案话术默认值(2026-11-20 同步自筑基AI 8c75a7f6):检索层只回
+# 状态(answer 空/无标记),对外文案由 pack 工具层经 settings
+# no_answer_text 覆盖;此常量仅作配置缺省与模板渲染默认。
+_NO_ANSWER_TEXT = "知识库中未找到相关内容,请联系相关业务人员人工确认"
+
+
 def _cfg(app_state, key, default):
     return runtime.settings_reader(app_state).get(key, default)
 
@@ -638,6 +644,31 @@ def hybrid_retrieve(app_state, kb: Dict[str, Any], query: str,
             "chunks": chunks, "diagnostics": diagnostics}
 
 
+def allocate_evidence_caps(chunks: List[Dict[str, Any]]) -> List[int]:
+    """证据块进 prompt 的逐块截断上限(单一事实源,两路共用)。
+
+    KG 回答路(linearize_context)与 metrology 场景判定路
+    (_linearize_chunks)共用同一预算口径——600 是演示时代小块的旧
+    口径,常规库块 target 1200 字、结构块(整表)可达 2700+ 字,600 会
+    把依据腰斩(2026-11-19 线上实测:强检目录整表块 2735 字,"压力表"
+    在 1136 位,判定路永远看不到 → uncertain)。同步自筑基AI
+    (mindatlas develop 293860aa 同源修复)。
+    """
+    caps = [600] * len(chunks)
+    remaining = _CHUNK_TOTAL_BUDGET_CHARS
+    priority = sorted(
+        range(len(chunks)),
+        key=lambda i: (not chunks[i].get("parentContext"),
+                       -float(chunks[i].get("score") or 0.0)))
+    for i in priority:
+        if remaining <= 600:
+            break
+        cap = min(_PARENT_CONTEXT_MAX_CHARS, remaining)
+        caps[i] = cap
+        remaining -= min(len((chunks[i].get("text") or "").strip()), cap)
+    return caps
+
+
 def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
     """检索结果 → answer.j2 需要的三段上下文(三元组/实体详情/片段)。"""
     sub = retrieved.get("subgraph") or {}
@@ -690,18 +721,7 @@ def linearize_context(retrieved: Dict[str, Any]) -> Dict[str, List[str]]:
     # 零命中时全文兜底的整章块先入列先吃光预算,更精准的向量回带窗口
     # 反被挤到 600 保底(顺序倒挂)。同优先级按分数降序;预算耗尽的
     # 块退 600 保底(条目保留不静默丢)。
-    caps = [600] * len(raw_chunks)
-    remaining = _CHUNK_TOTAL_BUDGET_CHARS
-    priority = sorted(
-        range(len(raw_chunks)),
-        key=lambda i: (not raw_chunks[i].get("parentContext"),
-                       -float(raw_chunks[i].get("score") or 0.0)))
-    for i in priority:
-        if remaining <= 600:
-            break
-        cap = min(_PARENT_CONTEXT_MAX_CHARS, remaining)
-        caps[i] = cap
-        remaining -= min(len(texts[i]), cap)
+    caps = allocate_evidence_caps(raw_chunks)
     # 单块上限 5000:回带窗口整段进——600 的旧口径会把窗口腰斩,回带等于白做
     chunk_texts = [f"〔{srcs[i]}〕{texts[i][:caps[i]]}"
                    for i in range(len(raw_chunks))]
@@ -726,13 +746,16 @@ def _judge_evidence(app_state, kb, query: str, retrieved: Dict[str, Any],
     preview = "\n".join(
         f"- 〔{c.get('docName') or '?'}〕{(c.get('text') or '')[:150]}"
         for c in chunks[:6])
-    prompt = (
-        f"问题:{query}\n知识库「{kb.get('name') or ''}」检索到以下片段:\n{preview}\n\n"
-        "判断这些片段是否足以回答问题。只输出 JSON:"
-        '{"sufficient": true/false, "better_query": "不足时给出的更优检索词'
-        '(换角度,同义改写或拆解子问题;sufficient=true 时留空)"}'
-    )
     try:
+        # render 在 try 内(评审 P2-1):模板缺失/损坏按"判定失败"处理,
+        # 维持本函数 fail-open 契约(异常 → None → 按原行为直接回答)
+        prompt = _prompt_loader().render(
+            "knowledge_graph",
+            "sufficiency",
+            query=query,
+            kb_name=kb.get("name") or "",
+            preview=preview,
+        )
         data = app_state.llm_client.chat_json(
             [{"role": "user", "content": prompt}],
             temperature=0.0, conv_id=conv_id, stage="kg.sufficiency")
@@ -876,6 +899,7 @@ def answer_question(app_state, kb: Dict[str, Any], query: str,
                                f"{len(ctx['chunk_texts'])} 个文档片段)…")
     prompt = _prompt_loader().render(
         "knowledge_graph", "answer",
+        no_answer_text=_cfg(app_state, "no_answer_text", _NO_ANSWER_TEXT),
         kb_name=kb.get("name") or "",
         # 库收录范围声明(管理页库描述):进回答 prompt 供模型判定范围外→干净
         # 拒答不罗列资料;空=不注入,行为同前(声明驱动,声明方维护)
@@ -1084,6 +1108,7 @@ def answer_question_multi(app_state, kbs: List[Dict[str, Any]], query: str,
                                f"{len(ctx['chunk_texts'])} 个文档片段)…")
     prompt = _prompt_loader().render(
         "knowledge_graph", "answer",
+        no_answer_text=_cfg(app_state, "no_answer_text", _NO_ANSWER_TEXT),
         kb_name="、".join(kb.get("name") or "" for kb in kbs),
         # 多库同款:各库声明拼接注入(空库描述不占位)
         kb_scope="；".join(

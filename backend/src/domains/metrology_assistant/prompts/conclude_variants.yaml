@@ -1,0 +1,12 @@
+# 结论变体注册表(kind → JSON 契约变体)。
+# kind 来自场景表 action.conclusion 白名单;mandatory 走 conclude_mandatory.j2,
+# 其余走 conclude_variant.j2(task/enum_desc 注入模板)。
+turnaround:
+  enum: answered|uncertain
+  enum_desc: "answered(资料能给出耗时/工作日) 或 uncertain(资料不足以回答)"
+  task: >-
+    根据资料片段回答该器具的检测耗时/出证工作日。资料只支撑区间/条件性结论时,结论句如实说明条件。
+qualification:
+  enum: supported|not_supported|uncertain
+  enum_desc: "supported(资料表明可检/在承接范围) / not_supported(资料明确不在范围) / uncertain(资料不足以判断)"
+  task: 根据资料片段判断本机构是否有该器具的检测资质/是否在承接能力范围内。
