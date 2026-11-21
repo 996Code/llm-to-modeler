@@ -56,11 +56,7 @@ async def get_config() -> dict:
         return {"revision": 0, "content": default,
                 "factory": True}
     revision = config.pop("_revision")
-    from domains.metrology_assistant.legacy_demo import upgrade_legacy_scenario
     content = {k: v for k, v in config.items() if not k.startswith("_")}
-    content = {**content, "scenarios": {
-        key: upgrade_legacy_scenario(key, cfg)
-        for key, cfg in content.get("scenarios", {}).items()}}
     return {"revision": revision, "content": content, "factory": False}
 
 

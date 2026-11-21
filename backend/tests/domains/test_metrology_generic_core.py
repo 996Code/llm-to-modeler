@@ -186,16 +186,6 @@ def test_kg_generic_question_and_trusted_identity(monkeypatch):
 
 
 
-def test_demo_export_is_explicit_pure_json_and_independent():
-    import json
-    from domains.metrology_assistant.legacy_demo import demo_scenarios
-    first = demo_scenarios()
-    assert first['mandatory_check']['action']['conclusion'] == 'mandatory'
-    assert json.loads(json.dumps(first)) == first
-    first['progress']['required']['question'] = 'changed'
-    assert demo_scenarios()['progress']['required']['question'] != 'changed'
-
-
 def test_missing_and_old_question_tokens_do_not_consume_pending(monkeypatch):
     tool, _, _ = setup_tool(monkeypatch, capability({'count': {'type': 'integer'}}, ['count']))
     ctx = context({'scenario': 'warehouse::stock'})
@@ -224,41 +214,6 @@ def test_explicit_datasource_cannot_cross_server_or_fixed_tool(monkeypatch):
     info.host, info.database = 'sales', 'another_tool'
     with pytest.raises(ValueError, match='工具'):
         resolve_datasource(plan)
-
-
-def test_only_exact_stored_legacy_configuration_is_upgraded():
-    from domains.metrology_assistant.legacy_demo import SCENARIOS, upgrade_legacy_scenario
-    original = deepcopy(SCENARIOS['mandatory_check'])
-    got = upgrade_legacy_scenario('mandatory_check', original)
-    assert got['action']['conclusion'] == 'mandatory'
-    assert 'conclusion' not in original['action']
-    generic = {'label': 'HR', 'intent': 'HR', 'required': {}, 'action': {'kind': 'kg', 'kb': 'HR'}}
-    assert upgrade_legacy_scenario('mandatory_check', generic) == generic
-    assert upgrade_legacy_scenario('custom', original) == original
-
-
-def test_stored_v1_instrument_intent_is_upgraded_to_current_wording():
-    """存量未改写配置的价目意图原文 → 装载时原位升级为含测量范围/准确度的现行文本。
-
-    路由 LLM 只读 label/intent 选能力,初版未列"测量范围",字段级提问
-    (查 X 的测量范围)选不中能力而落知识库兜底——升级后无需改 DB 即命中。
-    """
-    from domains.metrology_assistant.legacy_demo import (
-        SCENARIOS, upgrade_legacy_scenario, _INSTRUMENT_INFO_INTENT_V1,
-    )
-    stored = {**deepcopy(SCENARIOS['instrument_info']),
-              'intent': _INSTRUMENT_INFO_INTENT_V1}
-    got = upgrade_legacy_scenario('instrument_info', stored)
-    assert got['intent'] == SCENARIOS['instrument_info']['intent']
-    assert '测量范围' in got['intent'] and '准确度' in got['intent']
-    assert got['label'] == SCENARIOS['instrument_info']['label']
-    assert stored['intent'] == _INSTRUMENT_INFO_INTENT_V1  # 原对象不被改写
-    # 人工润色过的 intent 不匹配原文,保持不动
-    polished = {**deepcopy(SCENARIOS['instrument_info']), 'intent': '人工改过的意图'}
-    assert upgrade_legacy_scenario('instrument_info', polished) == polished
-    # 现行种子文本(已是新版)不触发重复改写
-    current = deepcopy(SCENARIOS['instrument_info'])
-    assert upgrade_legacy_scenario('instrument_info', current) == current
 
 
 def test_subject_slot_query_alias_and_normalization():

@@ -1,4 +1,4 @@
-"""metrology_assistant 装配入口(南京院竞标 Demo 薄编排插件)。
+"""metrology_assistant 装配入口(计量行业客服编排插件)。
 
 提供工具注册、确定性路由及测试页和配置管理 API。
 create_router:确定性直达主工具——场景识别在工具内做,不为单工具

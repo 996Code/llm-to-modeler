@@ -72,7 +72,9 @@ class FakeCtx:
 
 @pytest.fixture(autouse=True)
 def explicit_legacy_demo(monkeypatch):
-    from domains.metrology_assistant.legacy_demo import demo_scenarios
+    from tests.domains.metrology_fixtures import (
+        configured_scenarios as demo_scenarios,
+    )
     from domains.metrology_assistant import capability_import as ci
     monkeypatch.setattr(mta, '_current_scenarios', demo_scenarios)
     monkeypatch.setattr(ci, 'resolve_scenarios', lambda table: table)
@@ -124,13 +126,6 @@ def test_parse_clarify_answers_structured_and_text():
     assert mta.parse_clarify_answers({'text': '安全防护'}, pending={
         'slot': 'purpose', 'header': '器具用途'}) == {'purpose': '安全防护'}
     assert mta.parse_clarify_answers({'text': '帮我查 BJ2027 这个单'}) == {}
-
-
-def test_resolve_kb_for_purpose():
-    assert mta.resolve_kb_for_purpose("贸易结算") == "强检目录"
-    assert mta.resolve_kb_for_purpose("医疗卫生") == "强检目录"
-    assert mta.resolve_kb_for_purpose("内部使用") == "检定规程"
-    assert mta.resolve_kb_for_purpose("") == "检定规程"
 
 
 def test_format_progress_reply():
@@ -911,3 +906,38 @@ def test_auto_tool_asks_then_executes_with_runtime_ds(tool, monkeypatch):
     assert r2.artifact["type"] == "metrology_table"
     assert r2.artifact["rows"] == [["K", "十月检定活动"]]
     assert r2.artifact["source"]["tool"] == "query_fresh"
+
+
+def test_conclude_prompts_render_golden():
+    """prompt 模板 golden 快照(P3):固定输入渲染,锁关键片段防后人改
+    模板无声漂移(外置时的等价性契约)。"""
+    from domains.metrology_assistant.tools.assistant import (
+        _conclude_variants, _prompt_loader,
+    )
+
+    p = _prompt_loader().render(
+        'metrology_assistant', 'conclude_mandatory',
+        instrument='压力表', purpose='贸易结算',
+        chunks='- 〔doc〕片段一', chunk_count=1)
+    assert p.startswith('你是计量检定业务专家。根据资料片段判断:"压力表"用于"贸易结算"是否属于强制检定。')
+    assert '在 chunk_refs 中填写片段编号(1 到 1)' in p
+    assert '"decision": "mandatory|not_mandatory|uncertain"' in p
+    assert p.rstrip().endswith('资料无关或不足时用 uncertain,可返回空 evidence。')
+
+    v = _conclude_variants()['turnaround']
+    assert v['enum'] == 'answered|uncertain'
+    p2 = _prompt_loader().render(
+        'metrology_assistant', 'conclude_variant',
+        task=v['task'], enum_desc=v['enum_desc'],
+        instrument='压力表', purpose='',
+        chunks='- 〔doc〕片段一', chunk_count=1)
+    assert p2.startswith('你是计量业务专家。任务:根据资料片段回答该器具的检测耗时/出证工作日。')
+    assert '器具:压力表;用途:未说明' in p2
+    assert 'decision 必须是 answered(资料能给出耗时/工作日) 或 uncertain(资料不足以回答) 之一' in p2
+
+    from domains.knowledge_graph.retrieval import _prompt_loader as kg_loader
+    p3 = kg_loader().render(
+        'knowledge_graph', 'sufficiency',
+        query='压力表', kb_name='强检目录', preview='- 〔doc〕片段')
+    expected_head = chr(10).join(["问题:压力表", "知识库「强检目录」检索到以下片段:", "- 〔doc〕片段"])
+    assert '"sufficient": true/false' in p3

@@ -1,16 +1,12 @@
 """Capability-scoped assistant: schema plans, evidence-bound answers and CAS flows."""
 import json
 import logging
+import time
 import uuid
+from typing import Optional
 from sdk.tool import AskQuestion, AskSpec, Tool, ToolResult
 from domains.metrology_assistant.capability_plan import (
     present, parameter_specs, prepare_plan, declaration_snapshot, kb_from_rules, resolve_datasource,
-)
-from domains.metrology_assistant.legacy_demo import (
-    SCENARIOS, PURPOSE_HEADER, ORDER_HEADER, INSTRUMENT_HEADER, PURPOSE_OPTIONS,
-    DEMO_ORDER_OPTIONS, STRONG_INSPECTION_PURPOSES, MANDATORY_CHECK_KB, REGULATION_KB,
-    LegacyCardsMixin,
-    _format_progress_reply, _format_instrument_reply,
 )
 
 logger = logging.getLogger(__name__)
@@ -18,6 +14,16 @@ _PIPELINE_STEPS = [
     {'key': 'assistant.extract', 'label': '识别问题与关键条件'},
     {'key': 'assistant.clarify', 'label': '补全必要条件'},
     {'key': 'assistant.retrieve', 'label': '检索资料/查询业务'},
+    {'key': 'kb_search.intent', 'label': '解析检索意图'},
+    {'key': 'kb_search.out_of_scope', 'label': '判断收录范围'},
+    {'key': 'kb_search.graph', 'label': '图谱实体匹配'},
+    {'key': 'kb_search.subgraph', 'label': '扩展关联子图'},
+    {'key': 'kb_search.vector', 'label': '向量检索片段'},
+    {'key': 'kb_search.fulltext', 'label': '全文检索兜底'},
+    {'key': 'kb_search.requery', 'label': '核查证据充分性'},
+    {'key': 'kb_search.rerank', 'label': '重排片段'},
+    {'key': 'kb_search.assemble', 'label': '整理证据'},
+    {'key': 'kb_search.answer', 'label': '综合回答生成'},
     {'key': 'assistant.answer', 'label': '生成业务结论'},
 ]
 
@@ -33,13 +39,32 @@ def _runtime_scenarios():
     return {**auto_scenarios(table), **table}
 
 
-def _make_monotonic_stage(emit_fn, steps):
+def _make_monotonic_stage(emit_fn, steps, ctx=None):
     order, shown = {s['key']: i for i, s in enumerate(steps)}, [0]
+    last = [time.time()]
+    prev = [None]
     def on_stage(key, message):
         index = order.get(key)
         if index is not None and index >= shown[0]:
             shown[0] = index
             emit_fn(key, message)
+            # 阶段切换落 trace+日志(2026-11-20 同步自筑基AI):stage 事件原本
+            # 只进 SSE,对话记录/服务端日志均不可见。每阶段补一条 kind=trace
+            # 事件(墙钟=上一阶段至此),管理端链路逐段可见;fail-open 不拖垮主流程。
+            now = time.time()
+            ms = int((now - last[0]) * 1000)
+            last[0] = now
+            logger.info("[tool-stage] %s %s (%dms)", key, message, ms)
+            trace = getattr(ctx, "trace", None) if ctx is not None else None
+            if callable(trace):
+                try:
+                    # duration_ms 语义=上一阶段至此的墙钟(阶段开始时打点),
+                    # detail.prev_stage 标明耗时归属,防管理端时间线误读
+                    trace(f"metrology.{key}", message, "ok", duration_ms=ms,
+                          detail={"prev_stage": prev[0]})
+                except Exception:
+                    pass
+            prev[0] = key
     return on_stage
 
 
@@ -179,9 +204,78 @@ def _conclude_call(llm, prompt, conv_id):
                          temperature=0.0, conv_id=conv_id, stage='assistant.conclude')
 
 
-def compose_conclusion(llm, instrument, purpose, chunks, conv_id, kind='mandatory'):
-    from domains.metrology_assistant.legacy_demo import compose_conclusion as legacy
-    return legacy(llm, instrument, purpose, chunks, conv_id, kind)
+# ── 结论生成(2026-11-20 自 legacy_demo 迁入,消除 tools↔legacy 循环委托) ──
+
+# ── 结论生成(2026-11-21 prompt 外置:文案在 pack prompts/ 目录,机制走
+# PromptLoader;代码只留装配,不再内联业务 prompt) ──
+
+_prompt_loader_instance = None
+
+
+def _prompt_loader():
+    global _prompt_loader_instance
+    if _prompt_loader_instance is None:
+        from pathlib import Path
+
+        from sdk.prompt_loader import PromptLoader
+
+        # tools/ 下要多上一层:packs_root 指 pack 父目录(domains)
+        _prompt_loader_instance = PromptLoader(
+            packs_root=Path(__file__).resolve().parents[2])
+    return _prompt_loader_instance
+
+
+_conclude_variants_cache = None
+
+
+def _conclude_variants() -> dict:
+    """结论变体注册表(prompts/conclude_variants.yaml,进程内缓存)。
+
+    注意:缓存进程生命周期不失效——改 yaml 需重启生效(与 .j2 的
+    mtime 热更新不同,yaml 属代码伴生注册表,非租户可改文案)。"""
+    global _conclude_variants_cache
+    if _conclude_variants_cache is None:
+        from pathlib import Path
+
+        import yaml
+
+        path = (Path(__file__).resolve().parents[1]
+                / "prompts" / "conclude_variants.yaml")
+        with open(path, encoding="utf-8") as f:
+            _conclude_variants_cache = yaml.safe_load(f) or {}
+    return _conclude_variants_cache
+
+
+def compose_conclusion(llm, instrument: str, purpose: str,
+                       chunks: list, conv_id: Optional[str],
+                       kind: str = "mandatory") -> dict:
+    """模型直接返回业务结果;结构或引用非法时上抛,不生成伪结论。
+
+    kind 来自场景表 action.conclusion:mandatory(强检三态,默认,走
+    conclude_mandatory.j2)/turnaround(检测耗时)/qualification(资质
+    能力,走 conclude_variant.j2 + conclude_variants.yaml 变体)——
+    同一 JSON 契约,decision 枚举随变体。
+    """
+    if kind == "mandatory":
+        prompt = _prompt_loader().render(
+            "metrology_assistant", "conclude_mandatory",
+            instrument=instrument or "该器具", purpose=purpose,
+            chunks=_linearize_chunks(chunks), chunk_count=len(chunks))
+        answer = _conclude_call(llm, prompt, conv_id)
+        return _validate_conclusion(
+            answer, chunks, ("mandatory", "not_mandatory", "uncertain"))
+
+    variant = _conclude_variants().get(kind)
+    if variant is None:
+        raise ValueError(f"未知结论变体: {kind}")
+    prompt = _prompt_loader().render(
+        "metrology_assistant", "conclude_variant",
+        task=variant["task"], enum_desc=variant["enum_desc"],
+        instrument=instrument, purpose=purpose,
+        chunks=_linearize_chunks(chunks), chunk_count=len(chunks))
+    answer = _conclude_call(llm, prompt, conv_id)
+    _validate_conclusion(answer, chunks, tuple(variant["enum"].split("|")))
+    return answer
 
 
 def compose_answer(llm, question, chunks, conv_id, instructions=''):
@@ -242,13 +336,6 @@ def _kg_evidence_artifact(evidence, chunks, answer, label, kind, **extra):
             'scenario': label, 'answer_kind': kind, **extra}
 
 
-def resolve_kb_for_purpose(purpose):
-    return MANDATORY_CHECK_KB if purpose in STRONG_INSPECTION_PURPOSES else REGULATION_KB
-
-
-_kb_from_rules = kb_from_rules
-
-
 def _unsupported_notice(table=None, tried_kb='', app_state=None):
     """无证据统一兜底(2026-11-20 同步自筑基AI):文案可配置(设置页>
     no_evidence_notice),占位符 {labels}/{tried_kb}/{prefix};留空用默认。"""
@@ -269,7 +356,110 @@ def _unsupported_notice(table=None, tried_kb='', app_state=None):
     return _notice('unsupported', '暂不支持此问题', text)
 
 
-class MetrologyAssistantTool(LegacyCardsMixin, Tool):
+# ── 结果卡与确定性摘要(2026-11-20 自 legacy_demo 迁入) ──
+
+# 价目记录字段(上游契约)与制品驼峰键映射(与进度卡/前端 data_labels 同风格)
+_INSTRUMENT_FIELDS = ("name", "model", "measure_range", "accuracy", "fee_yuan",
+                      "mandatory_l1", "mandatory_l2", "period_months", "regulation")
+_INSTRUMENT_CAMEL = {"measure_range": "measureRange", "fee_yuan": "feeYuan",
+                     "mandatory_l1": "mandatoryL1", "mandatory_l2": "mandatoryL2",
+                     "period_months": "periodMonths"}
+
+
+class CardsMixin:
+    def _progress_card(self, result, merged: dict, stage) -> ToolResult:
+        record = (result.data or {}).get("record") or {}
+        if not record.get("order_no"):
+            # 空记录不装成功(信封 ok 但无有效业务数据=契约异常)
+            return ToolResult(
+                error_for_llm=f"业务平台未返回委托单 "
+                              f"{merged.get('order_no', '')} 的有效数据,请稍后重试。")
+        stage("assistant.answer", "整理查询结果…")
+        artifact = {
+            "type": "metrology_progress",
+            "pack": "metrology_assistant",
+            "resultDisplay": "card",
+            "orderNo": record.get("order_no"),
+            "instrument": record.get("instrument") or "",
+            "status": record.get("status") or "",
+            "progress": record.get("progress") or "",
+            "currentStep": record.get("current_step") or "",
+            "eta": record.get("eta") or "",
+            "reportNo": record.get("report_no") or "",
+            "finishedAt": record.get("finished_at") or "",
+            "validUntil": record.get("valid_until") or "",
+            "queriedAt": record.get("queried_at") or "",
+            "source": {"datasource": result.source.get("datasource"),
+                       "tool": result.source.get("tool")},
+        }
+        return ToolResult(artifact=artifact, artifact_type="data",
+                          summary=_format_progress_reply(record),
+                          formatted=self.format_result(artifact))
+
+    def _instrument_card(self, result, merged: dict, stage) -> ToolResult:
+        instrument = merged.get("instrument") or ""
+        data = result.data or {}
+        columns = [str(c) for c in (data.get("columns") or [])]
+        records = [dict(zip(columns, row)) for row in (data.get("rows") or [])]
+        records = [r for r in records if r.get("name")]
+        if not records:
+            return ToolResult(
+                error_for_llm=f"价目表未返回「{instrument}」的有效数据,请稍后重试。")
+        stage("assistant.answer", "整理价目信息…")
+        instruments = [{_INSTRUMENT_CAMEL.get(key, key): rec.get(key)
+                        for key in _INSTRUMENT_FIELDS} for rec in records]
+        artifact = {"type": "metrology_instrument",
+                    "pack": "metrology_assistant",
+                    "resultDisplay": "card",
+                    "query": instrument, "instruments": instruments}
+        return ToolResult(artifact=artifact, artifact_type="data",
+                          summary=_format_instrument_reply(instruments),
+                          formatted=self.format_result(artifact))
+
+
+def _format_instrument_reply(instruments: list) -> str:
+    """价目记录 → 确定性摘要(驼峰键;多行同名记录逐条列出,不丢行)。"""
+    parts = []
+    for rec in instruments:
+        name = rec.get("name") or "该器具"
+        bits = []
+        if rec.get("periodMonths") is not None:
+            bits.append(f"检校周期 {rec['periodMonths']} 个月")
+        if rec.get("feeYuan") is not None:
+            bits.append(f"检测费 {rec['feeYuan']} 元")
+        if rec.get("mandatoryL1"):
+            catalog = rec["mandatoryL1"] + (
+                f"/{rec['mandatoryL2']}" if rec.get("mandatoryL2") else "")
+            bits.append(f"强检目录 {catalog}")
+        if rec.get("regulation"):
+            bits.append(f"技术规程 {rec['regulation']}")
+        parts.append(f"{name}: " + ";".join(bits) if bits else f"{name}: 暂无价目信息")
+    return "\n".join(parts)
+
+
+def _format_progress_reply(record: dict) -> str:
+    order = record.get("order_no") or ""
+    instrument = record.get("instrument") or ""
+    head = f"委托单 {order}" + (f"({instrument})" if instrument else "")
+    head += f"当前状态: {record.get('status') or '未知'}"
+    details = []
+    if record.get("progress"):
+        details.append(f"进度 {record['progress']}")
+    if record.get("current_step"):
+        details.append(f"当前环节 {record['current_step']}")
+    if record.get("eta"):
+        details.append(f"预计完成 {record['eta']}")
+    if record.get("report_no"):
+        details.append(f"报告号 {record['report_no']}")
+    if record.get("finished_at"):
+        details.append(f"完成时间 {record['finished_at']}")
+    if record.get("valid_until"):
+        details.append(f"证书有效期至 {record['valid_until']}")
+    tail = f"(查询时间 {record['queried_at']})" if record.get("queried_at") else ""
+    return head + (";" + ",".join(details) if details else "") + tail
+
+
+class MetrologyAssistantTool(CardsMixin, Tool):
     name = 'metrology_assistant'
     description = '智能客服:按已接入能力进行知识问答与业务查询,结论遵守证据与权限约束'
     when = '用户咨询已接入业务能力,查询业务数据或知识资料'
@@ -288,7 +478,8 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         from domains.metrology_assistant import runtime, store
         table, mem = _runtime_scenarios(), getattr(ctx, 'session_state', None)
         ctx.emit('pipeline_definition', {'tool': self.name, 'steps': _PIPELINE_STEPS})
-        stage = _make_monotonic_stage(lambda k, m: ctx.emit('stage', k, m), _PIPELINE_STEPS)
+        stage = _make_monotonic_stage(
+            lambda k, m: ctx.emit('stage', k, m), _PIPELINE_STEPS, ctx=ctx)
         stage('assistant.extract', '识别问题类型与关键条件…')
         user_input = (state.get('user_input') or '').strip()
         answers = state.get('clarify_answers') or {}
@@ -559,7 +750,8 @@ class MetrologyAssistantTool(LegacyCardsMixin, Tool):
         try:
             result = kg_retrieval.answer_question_multi(
                 self._app_state, kbs, user_input,
-                conv_id=getattr(ctx, 'conv_id', None), doc_filter=doc_filter)
+                conv_id=getattr(ctx, 'conv_id', None), doc_filter=doc_filter,
+                on_stage=stage)
         except Exception:  # noqa: BLE001
             logger.exception('知识库兜底检索失败')
             return ToolResult(error_for_llm='知识库检索失败,请稍后重试。')

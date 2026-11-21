@@ -10,7 +10,7 @@ import pytest
 
 def load_fake_servers():
     path = Path(__file__).resolve().parents[2] / "tools/mcp-e2e/fake_servers.py"
-    spec = importlib.util.spec_from_file_location("bid_demo_fake_servers", path)
+    spec = importlib.util.spec_from_file_location("mcp_fake_servers", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

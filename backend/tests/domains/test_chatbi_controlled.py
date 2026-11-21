@@ -228,3 +228,54 @@ def test_snapshot_missing_tool_reports_refresh(wiring, monkeypatch):
     r2 = controlled.execute_controlled(None, "ds-1", "query_instrument",
                                        {"name": "压力表"})
     assert r2.ok is True
+
+
+def test_mcp_call_logged_to_call_logs(wiring, monkeypatch):
+    """MCP 观测(2026-11-21 补全):execute_controlled 传 app_state 时,
+    成功/失败路径各落一条 call_type=mcp 的 call_log(endpoint/args 截断
+    /耗时/错误文案);app_state=None(无会话重放路径)静默跳过零调用。"""
+    from types import SimpleNamespace
+
+    logged = []
+    monkeypatch.setattr("sdk.observability.log_pack_call",
+                        lambda app_state, ct, ep, req, resp, ms, error=None,
+                        conv_id=None: logged.append(
+                            {"app": app_state, "type": ct, "endpoint": ep,
+                             "req": req, "ms": ms, "error": error}))
+    app_state = SimpleNamespace()
+
+    # 成功路径:ok 信封也记为无错误的调用(传输成功)
+    wiring.payload = {"status": "ok", "data": {"order_no": "BJ2026"}}
+    controlled.execute_controlled(app_state, "ds-1", "query_progress",
+                                  {"order_no": "BJ2026"})
+    assert len(logged) == 1
+    row = logged[0]
+    assert row["type"] == "mcp"
+    assert row["endpoint"] == "mcp://metrology/query_progress"
+    assert row["req"]["args"] == {"order_no": "BJ2026"}
+    assert row["error"] is None and row["ms"] >= 0
+
+    # 失败路径:PackInvokeError → error 文案入日志
+    from sdk.tool import PackInvokeError
+
+    def boom(code, tool, args):
+        raise PackInvokeError("connection refused", "retryable")
+
+    monkeypatch.setattr("sdk.mcp_client.call_tool", boom)
+    wiring.payload = None
+    controlled.execute_controlled(app_state, "ds-1", "query_progress",
+                                  {"order_no": "BJ0000"})
+    assert len(logged) == 2
+    assert logged[1]["error"] == "connection refused"
+
+    # app_state=None(重放路径)静默跳过
+    n = len(logged)
+    wiring.payload = {"status": "ok", "data": {"order_no": "BJ2027"}}
+
+    def ok_call(code, tool, args):
+        return wiring.payload
+
+    monkeypatch.setattr("sdk.mcp_client.call_tool", ok_call)
+    controlled.execute_controlled(None, "ds-1", "query_progress",
+                                  {"order_no": "BJ2027"})
+    assert len(logged) == n

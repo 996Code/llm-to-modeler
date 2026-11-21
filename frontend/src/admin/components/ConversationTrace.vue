@@ -315,6 +315,7 @@ watch(() => props.convId, load)
 .tg-graph { background: var(--brand-tint); color: var(--brand-ink); }
 .tg-vector { background: #f0fdf4; color: #15803d; }
 .tg-fulltext { background: #fff7ed; color: #c2410c; }
+.tg-mcp { background: #fff1f0; color: #cf1322; }
 .tr-recall {
   font-size: 11px; color: var(--brand-ink); background: var(--brand-tint);
   border-radius: 6px; padding: 1px 8px; font-variant-numeric: tabular-nums;

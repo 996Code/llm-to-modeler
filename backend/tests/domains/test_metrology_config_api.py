@@ -41,8 +41,8 @@ def _db():
 def legacy_demo_config(_fresh_pack, monkeypatch):
     """Opt in to stored demo configuration; empty installations stay empty."""
     from domains.metrology_assistant import store
-    from domains.metrology_assistant.legacy_demo import SCENARIOS
-    from domains.metrology_assistant.scenario_config import _jsonable
+    from tests.domains.metrology_fixtures import configured_scenarios
+    SCENARIOS = configured_scenarios()
     from services.mcp_registry import McpServerStore
 
     declarations = [
@@ -56,7 +56,7 @@ def legacy_demo_config(_fresh_pack, monkeypatch):
     monkeypatch.setattr("sdk.mcp_client.list_remote_tools", lambda config: declarations)
     McpServerStore().create_server("计量演示平台", "metrology", "http://demo.invalid/mcp", {})
 
-    content = _jsonable({"scenarios": SCENARIOS})
+    content = {"scenarios": SCENARIOS}
     for key in ("progress", "instrument_info"):
         content["scenarios"][key]["action"]["server"] = "metrology"
     store.seed_config_if_absent(_db(), content)

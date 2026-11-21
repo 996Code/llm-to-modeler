@@ -10,6 +10,7 @@ flow 转 done、无 DB 兜底(KV 路径不回归)。
 import pytest
 
 import domains.metrology_assistant.tools.assistant as mta
+from domains.metrology_assistant.capability_plan import kb_from_rules
 from domains.metrology_assistant import runtime, store
 
 
@@ -52,7 +53,9 @@ class FakeCtx:
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     runtime.reset_runtime_cache()
-    from domains.metrology_assistant.legacy_demo import demo_scenarios
+    from tests.domains.metrology_fixtures import (
+        configured_scenarios as demo_scenarios,
+    )
     from domains.metrology_assistant import capability_import as ci
     monkeypatch.setattr(mta, '_current_scenarios', demo_scenarios)
     monkeypatch.setattr(ci, 'resolve_scenarios', lambda table: table)
@@ -355,7 +358,9 @@ def test_explicit_datasource_binding_executes(monkeypatch):
 
     monkeypatch.setattr("domains.chatbi.controlled.execute_controlled",
                         fake_exec)
-    table = dict(mta.SCENARIOS)
+    from tests.domains.metrology_fixtures import configured_scenarios
+
+    table = configured_scenarios()
     table["progress"] = {
         **table["progress"],
         "action": {**table["progress"]["action"],
@@ -375,7 +380,7 @@ def test_kb_rules_route_by_slot_value():
         {"slot": "purpose", "in": ["贸易结算", "安全防护"], "kb": "强检目录"},
         {"slot": "purpose", "in": ["内部使用"], "kb": "内部指引"},
     ]}
-    assert mta._kb_from_rules(action, {"purpose": "安全防护"}) == "强检目录"
-    assert mta._kb_from_rules(action, {"purpose": "内部使用"}) == "内部指引"
-    assert mta._kb_from_rules(action, {"purpose": "医疗卫生"}) is None
-    assert mta._kb_from_rules(action, {}) is None
+    assert kb_from_rules(action, {"purpose": "安全防护"}) == "强检目录"
+    assert kb_from_rules(action, {"purpose": "内部使用"}) == "内部指引"
+    assert kb_from_rules(action, {"purpose": "医疗卫生"}) is None
+    assert kb_from_rules(action, {}) is None

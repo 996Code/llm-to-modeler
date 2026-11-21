@@ -916,7 +916,8 @@ class AskDataTool(CompositeTool):
         started = time.monotonic()
         # 首版校验已在 generate 步完成(工具∈语义层); 此处直接执行
         result = datasources.execute_mcp_tool(ds, tool_call_json,
-                                              max_rows=max_rows)
+                                              max_rows=max_rows,
+                                              app_state=self._app_state)
         last_error = result.error if not result.ok else None
 
         # 自愈循环(与 SQL 版同构): 执行失败 → mcp 变体 heal → 重校验 + 重执行
@@ -953,7 +954,8 @@ class AskDataTool(CompositeTool):
                 break
             tool_call_json = candidate
             result = datasources.execute_mcp_tool(ds, tool_call_json,
-                                                  max_rows=max_rows)
+                                                  max_rows=max_rows,
+                                                  app_state=self._app_state)
             last_error = result.error if not result.ok else None
 
         _mcp_heal_breaker.record_success() if last_error is None \

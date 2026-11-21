@@ -285,7 +285,7 @@ def _clean_db_error(e: Exception, password: str = "") -> str:
 # ── MCP 执行器(工具调用 JSON → ExecuteResult; ask_data execute 步消费) ──
 
 def execute_mcp_tool(info: DataSourceInfo, tool_call: dict,
-                     max_rows: int = 10000) -> ExecuteResult:
+                     max_rows: int = 10000, app_state=None) -> ExecuteResult:
     """执行 MCP 工具调用并映射为 ExecuteResult(与 execute_readonly 同契约)。
 
     tool_call: {"tool": str, "args": dict}(也容忍 JSON 字符串——解析失败
@@ -331,7 +331,8 @@ def execute_mcp_tool(info: DataSourceInfo, tool_call: dict,
     # 一处实现——此前 {status: forbidden} 会被当成功数据行,现按业务
     # 状态如实分类;ask_data/switch_chart 的自愈回环等交互副作用在外层不变)
     from domains.chatbi.controlled import _invoke_mcp_core
-    core = _invoke_mcp_core(info, tool, args, started, source=None)
+    core = _invoke_mcp_core(info, tool, args, started, source=None,
+                             app_state=app_state)
     duration = int((time.monotonic() - started) * 1000)
     if not core.ok:
         msg = core.error.message if core.error else core.status

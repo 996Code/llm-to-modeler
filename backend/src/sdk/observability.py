@@ -21,6 +21,7 @@ CALL_TYPE_UPSTREAM = "upstream"
 CALL_TYPE_GRAPH = "graph"
 CALL_TYPE_VECTOR = "vector"
 CALL_TYPE_FULLTEXT = "fulltext"
+CALL_TYPE_MCP = "mcp"
 
 
 def log_pack_call(app_state, call_type: str, endpoint: str,

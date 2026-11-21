@@ -746,13 +746,16 @@ def _judge_evidence(app_state, kb, query: str, retrieved: Dict[str, Any],
     preview = "\n".join(
         f"- 〔{c.get('docName') or '?'}〕{(c.get('text') or '')[:150]}"
         for c in chunks[:6])
-    prompt = (
-        f"问题:{query}\n知识库「{kb.get('name') or ''}」检索到以下片段:\n{preview}\n\n"
-        "判断这些片段是否足以回答问题。只输出 JSON:"
-        '{"sufficient": true/false, "better_query": "不足时给出的更优检索词'
-        '(换角度,同义改写或拆解子问题;sufficient=true 时留空)"}'
-    )
     try:
+        # render 在 try 内(评审 P2-1):模板缺失/损坏按"判定失败"处理,
+        # 维持本函数 fail-open 契约(异常 → None → 按原行为直接回答)
+        prompt = _prompt_loader().render(
+            "knowledge_graph",
+            "sufficiency",
+            query=query,
+            kb_name=kb.get("name") or "",
+            preview=preview,
+        )
         data = app_state.llm_client.chat_json(
             [{"role": "user", "content": prompt}],
             temperature=0.0, conv_id=conv_id, stage="kg.sufficiency")

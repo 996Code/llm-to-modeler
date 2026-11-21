@@ -94,7 +94,8 @@ class SwitchChartTool(Tool):
             ctx.emit("stage", "switch_chart", "正在重跑查询并切换图表...")
             result = datasources.execute_mcp_tool(
                 ds, tool_call,
-                max_rows=int(settings.get("sql_max_rows", 10000)))
+                max_rows=int(settings.get("sql_max_rows", 10000)),
+                app_state=self._app_state)
             if not result.ok:
                 return ToolResult(artifact_type="data",
                                   error_for_llm=f"重跑查询失败: {result.error}",
