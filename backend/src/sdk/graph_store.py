@@ -194,24 +194,31 @@ class PgGraphStore:
 
     @staticmethod
     def _migrate_legacy_aliases(conn) -> None:
-        """旧迁移遗留:aliases 列曾被建成 TEXT 而非 TEXT[]。
+        """旧迁移遗留:数组列曾被建成 TEXT 而非 TEXT[]。
 
-        症状(线上实锤):prune_aliases 的 unnest(aliases) 在 TEXT 列上
-        报 function unnest(text) does not exist——收尾别名去争议整步静默
-        失败,泛称清理降级为只告警。TEXT 里存的是 JSON 数组字面量
-        '["a","b"]'(psycopg 对 TEXT 参数不做 list 编解码,Python 侧
-        list 参数直接 str 化落库)。
+        症状(线上实锤,连环两处):prune_aliases 的 unnest(aliases) 在
+        TEXT 列上报 function unnest(text) does not exist;document_counts
+        的 ? = ANY(source_docs) 报 op ANY/ALL (array) requires array——
+        前者此前把收尾别名去争议整步打静默,后者在流水线首次跑通收尾
+        后才暴露。TEXT 里存的是 JSON 数组字面量 '["a","b"]'(psycopg
+        对 TEXT 参数不做 list 编解码,Python 侧 list 参数直接 str 化
+        落库)。
         修复:bracket 置换成 PG 数组字面量 '{"a","b"}' 后 ALTER TYPE
         TEXT[]。JSON 字面量与 PG 数组字面量在这层置换后语法兼容(元素
         引号/逗号结构相同);非数组形态(空串/脏数据)统一回 '{}'。
         幂等:列已是 TEXT[] 时 data_type 检查直接跳过,零成本。
         """
-        for table in ("graph_nodes", "graph_entity_refs"):
+        for table, column in (
+            ("graph_nodes", "aliases"),
+            ("graph_nodes", "source_docs"),
+            ("graph_nodes", "source_chunks"),
+            ("graph_entity_refs", "aliases"),
+        ):
             rows = conn.execute(
                 "SELECT data_type FROM information_schema.columns "
                 "WHERE table_schema = current_schema() "
-                "AND table_name = ? AND column_name = 'aliases'",
-                (table,)).fetchall()
+                "AND table_name = ? AND column_name = ?",
+                (table, column)).fetchall()
             if not rows or rows[0]["data_type"] != "text":
                 continue
             # 先摘默认值再 ALTER:旧库列带 DEFAULT '[]'(TEXT 语义),PG 拒绝
@@ -219,19 +226,21 @@ class PgGraphStore:
             # cannot be cast automatically to type text[])。改完后补回数组
             # 默认 '{}'(与 _GRAPH_DDL 对齐)。
             conn.execute(
-                f"ALTER TABLE {table} ALTER COLUMN aliases DROP DEFAULT")
+                f"ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT")
             conn.execute(
-                f"UPDATE {table} SET aliases = "
-                "replace(replace(aliases, '[', '{'), ']', '}') "
-                "WHERE aliases LIKE '[%]'")
+                f"UPDATE {table} SET {column} = "
+                f"replace(replace({column}, '[', '{{'), ']', '}}') "
+                f"WHERE {column} LIKE '[%]'")
             conn.execute(
-                f"ALTER TABLE {table} ALTER COLUMN aliases TYPE TEXT[] "
-                "USING CASE WHEN aliases IS NULL OR aliases = '' "
-                "OR aliases !~ '^\\{.*\\}$' THEN '{}' ELSE aliases::TEXT[] END")
+                f"ALTER TABLE {table} ALTER COLUMN {column} TYPE TEXT[] "
+                "USING CASE WHEN " + column + " IS NULL OR " + column
+                + " = '' OR " + column + " !~ '^\\{.*\\}$' THEN '{}' "
+                f"ELSE {column}::TEXT[] END")
             conn.execute(
-                f"ALTER TABLE {table} ALTER COLUMN aliases "
+                f"ALTER TABLE {table} ALTER COLUMN {column} "
                 "SET DEFAULT '{}'")
-            logger.warning("graph_store: %s.aliases 旧 TEXT 列已归一为 TEXT[]", table)
+            logger.warning("graph_store: %s.%s 旧 TEXT 列已归一为 TEXT[]",
+                           table, column)
 
     def _check_scope(self, scope: str) -> None:
         check_scope_id(scope)
