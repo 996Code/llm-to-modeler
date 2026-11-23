@@ -214,6 +214,12 @@ class PgGraphStore:
                 (table,)).fetchall()
             if not rows or rows[0]["data_type"] != "text":
                 continue
+            # 先摘默认值再 ALTER:旧库列带 DEFAULT '[]'(TEXT 语义),PG 拒绝
+            # 自动转换到 text[](线上实锤:default for column "aliases"
+            # cannot be cast automatically to type text[])。改完后补回数组
+            # 默认 '{}'(与 _GRAPH_DDL 对齐)。
+            conn.execute(
+                f"ALTER TABLE {table} ALTER COLUMN aliases DROP DEFAULT")
             conn.execute(
                 f"UPDATE {table} SET aliases = "
                 "replace(replace(aliases, '[', '{'), ']', '}') "
@@ -222,6 +228,9 @@ class PgGraphStore:
                 f"ALTER TABLE {table} ALTER COLUMN aliases TYPE TEXT[] "
                 "USING CASE WHEN aliases IS NULL OR aliases = '' "
                 "OR aliases !~ '^\\{.*\\}$' THEN '{}' ELSE aliases::TEXT[] END")
+            conn.execute(
+                f"ALTER TABLE {table} ALTER COLUMN aliases "
+                "SET DEFAULT '{}'")
             logger.warning("graph_store: %s.aliases 旧 TEXT 列已归一为 TEXT[]", table)
 
     def _check_scope(self, scope: str) -> None:
