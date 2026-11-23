@@ -182,13 +182,47 @@ class PgGraphStore:
         self.schema = schema
         self._db = PackRelationalDB(schema)
         lock_key = 0x67726170 + (zlib.crc32(f"graph:{schema}".encode()) & 0xFFFFFFFF)
-        self._db.migrate_locked(lock_key, self._run_ddl)
+        self._db.migrate_locked(lock_key, self._migrate)
         logger.info("PgGraphStore[%s]: graph tables ready", schema)
 
     @staticmethod
-    def _run_ddl(conn) -> None:
+    def _migrate(conn) -> None:
+        """DDL + 旧 TEXT 列归一(发现即修,幂等)。"""
         for stmt in _GRAPH_DDL:
             conn.execute(stmt)
+        PgGraphStore._migrate_legacy_aliases(conn)
+
+    @staticmethod
+    def _migrate_legacy_aliases(conn) -> None:
+        """旧迁移遗留:aliases 列曾被建成 TEXT 而非 TEXT[]。
+
+        症状(线上实锤):prune_aliases 的 unnest(aliases) 在 TEXT 列上
+        报 function unnest(text) does not exist——收尾别名去争议整步静默
+        失败,泛称清理降级为只告警。TEXT 里存的是 JSON 数组字面量
+        '["a","b"]'(psycopg 对 TEXT 参数不做 list 编解码,Python 侧
+        list 参数直接 str 化落库)。
+        修复:bracket 置换成 PG 数组字面量 '{"a","b"}' 后 ALTER TYPE
+        TEXT[]。JSON 字面量与 PG 数组字面量在这层置换后语法兼容(元素
+        引号/逗号结构相同);非数组形态(空串/脏数据)统一回 '{}'。
+        幂等:列已是 TEXT[] 时 data_type 检查直接跳过,零成本。
+        """
+        for table in ("graph_nodes", "graph_entity_refs"):
+            rows = conn.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = ? AND column_name = 'aliases'",
+                (table,)).fetchall()
+            if not rows or rows[0]["data_type"] != "text":
+                continue
+            conn.execute(
+                f"UPDATE {table} SET aliases = "
+                "replace(replace(aliases, '[', '{'), ']', '}') "
+                "WHERE aliases LIKE '[%]'")
+            conn.execute(
+                f"ALTER TABLE {table} ALTER COLUMN aliases TYPE TEXT[] "
+                "USING CASE WHEN aliases IS NULL OR aliases = '' "
+                "OR aliases !~ '^\\{.*\\}$' THEN '{}' ELSE aliases::TEXT[] END")
+            logger.warning("graph_store: %s.aliases 旧 TEXT 列已归一为 TEXT[]", table)
 
     def _check_scope(self, scope: str) -> None:
         check_scope_id(scope)
@@ -513,6 +547,10 @@ class PgGraphStore:
 
         同步清理 graph_entity_refs 里的别名声称,防止下次合并聚合时
         争议别名从贡献记录复活。
+
+        前置条件:aliases 列为 TEXT[](建库 DDL 保证;旧 TEXT 列由
+        _migrate_legacy_aliases 在 store 初始化时归一)——本方法的
+        unnest 路径在 TEXT 列上直接报错(线上实锤,见该迁移注释)。
 
         Returns: 实际移除的别名声称条数(节点级)。
         """
