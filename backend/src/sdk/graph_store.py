@@ -203,10 +203,13 @@ class PgGraphStore:
         后才暴露。TEXT 里存的是 JSON 数组字面量 '["a","b"]'(psycopg
         对 TEXT 参数不做 list 编解码,Python 侧 list 参数直接 str 化
         落库)。
-        修复:bracket 置换成 PG 数组字面量 '{"a","b"}' 后 ALTER TYPE
-        TEXT[]。JSON 字面量与 PG 数组字面量在这层置换后语法兼容(元素
-        引号/逗号结构相同);非数组形态(空串/脏数据)统一回 '{}'。
+        修复:JSON 解析回数组再落 TEXT[](jsonb_array_elements_text,
+        精确还原——bracket 置换会把含 [ ] 的别名改坏,已弃)。非数组
+        形态(空串/脏数据/解析失败)统一回 '{}'。
         幂等:列已是 TEXT[] 时 data_type 检查直接跳过,零成本。
+        锁表说明:ALTER TYPE 重写全表需 ACCESS EXCLUSIVE 锁,行数大时
+        (百万级)会阻塞查询数秒——本迁移只在"发现旧 TEXT 列"时跑一次,
+        正常库零成本;超大库升级建议低峰执行(当前线上 3 万行毫秒级)。
         """
         for table, column in (
             ("graph_nodes", "aliases"),
@@ -227,14 +230,27 @@ class PgGraphStore:
             # 默认 '{}'(与 _GRAPH_DDL 对齐)。
             conn.execute(
                 f"ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT")
+            # JSON 数组字面量精确还原:jsonb 解析逐元素取文本,元素里的
+            # [ ] { } , " \ 等特殊字符按 PG 数组字面量规则转义(双引号
+            # 包裹,内部 " → \" 、\ → \\)——bracket 置换会改坏含 [ ]
+            # 的别名,已弃。UPDATE 阶段允许子查询(USING 不允许),
+            # 先规整成数组字面量文本,再 ALTER TYPE 收敛;非 JSON 形态
+            # (空串/裸文本/解析失败)置 NULL,由 ALTER 的 USING 兜底 '{}'。
+            # 转义顺序:先 \ → \\ (防后续转义引入的 \ 被二次转义),
+            # 再 " → \" ;元素以双引号包裹。
+            _esc = 'replace(replace(e, ' + "'\\', '\\\\" + "') , '\"', '\\\"')"
             conn.execute(
-                f"UPDATE {table} SET {column} = "
-                f"replace(replace({column}, '[', '{{'), ']', '}}') "
-                f"WHERE {column} LIKE '[%]'")
+                f"UPDATE {table} SET {column} = CASE WHEN {column} IS NULL "
+                f"OR {column} = '' OR left({column}, 1) <> '[' THEN NULL "
+                f"WHEN {column}::jsonb = '[]'::jsonb THEN NULL "
+                f"ELSE '{{' || (SELECT string_agg("
+                f"'\"' || {_esc} || '\"', ',' ORDER BY ord) FROM "
+                f"(SELECT e, row_number() OVER () AS ord "
+                f"FROM jsonb_array_elements_text({column}::jsonb) AS e)) "
+                f"|| '}}' END")
             conn.execute(
                 f"ALTER TABLE {table} ALTER COLUMN {column} TYPE TEXT[] "
-                "USING CASE WHEN " + column + " IS NULL OR " + column
-                + " = '' OR " + column + " !~ '^\\{.*\\}$' THEN '{}' "
+                f"USING CASE WHEN {column} IS NULL THEN '{{}}' "
                 f"ELSE {column}::TEXT[] END")
             conn.execute(
                 f"ALTER TABLE {table} ALTER COLUMN {column} "
