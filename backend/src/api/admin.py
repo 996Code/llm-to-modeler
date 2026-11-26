@@ -66,7 +66,14 @@ def is_admin_authorized(request: Request) -> bool:
 
 
 async def require_admin(request: Request):
-    """路由级依赖：token 有效时等同于管理员；否则回退 ADMIN_TOKEN 模式。"""
+    """路由级依赖：token 有效时等同于管理员；否则回退 ADMIN_TOKEN 模式。
+
+    2026-11-26 对齐说明:筑基 AI(源仓)同日裁决管理面"全开"——任意登录
+    角色读写同权,仅插件设置写拒其他机构覆盖行(其 StudioBoundary 盖章
+    assistant_authenticated/assistant_admin 旗标)。本仓独立部署无
+    boundary/角色/机构维度,控制台登录即全权,语义上本就等价于全开,
+    无需旗标分支;此处记录口径,防止后续函数级同步时误引入角色收口。
+    """
     from api.auth import is_token_authorized
     if is_token_authorized(request):
         return  # 新 token 认证通过
