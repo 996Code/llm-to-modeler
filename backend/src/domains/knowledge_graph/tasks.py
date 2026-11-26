@@ -1994,37 +1994,72 @@ def _merge_alias_pass(graph, kb_id: str, doc_id: str) -> int:
             for a2 in al2:
                 adj.setdefault(nm2, set()).add(a2)
                 adj.setdefault(a2, set()).add(nm2)
+        # O(1) 锚定判定材料:u 有非 x 邻居 ⟺ 度>1,或度=1 且唯一邻居≠x
+        # (逐邻居 any() 是 O(度),稠密图上是被乘到 O(H·E) 的常数放大器)
+        deg: Dict[str, int] = {u: len(s) for u, s in adj.items()}
 
         hubs: Set[str] = set()
         for x, al in claimed.items():
             if len(al) < 2:
                 continue
-            parent: Dict[str, str] = {}
+            # 局部连通判定,与原"每 x 全量并查集"数学等价:连通分量是图的
+            # 性质,从 x 的别名出发泛洪得到同一组分量。原实现对每个 x 把
+            # 全库指认边重建一遍并查集,O(N²) 纯 Python——29710 实体 ≈
+            # 8.8 亿次循环,单核磨小时级且无任何日志,表现即"导入收尾
+            # 卡死"(线上实锤,py-spy 栈帧定位在本函数)。
+            # 去边必须按"声称者身份"而非端点对:边对 {x,a} 仅当 a 不反向
+            # 声称 x 时才死(互指时该边由 a 侧生成,必须保留)——与原
+            # nm2==x 跳过的语义严格对齐;BFS 也允许经保留边穿过 x 节点
+            # (别的实体声称 x 的边从来不断)。
+            x_claims = set(al)
 
-            def _root(v: str) -> str:
-                parent.setdefault(v, v)
-                while parent[v] != v:
-                    parent[v] = parent[parent[v]]
-                    v = parent[v]
-                return v
+            def _dead(u: str, v: str) -> bool:
+                """边 {u,v} 是否属于"x 作为声称者"且无互指豁免(该去)。"""
+                if u == x and v in x_claims:
+                    return x not in claimed.get(v, set())
+                if v == x and u in x_claims:
+                    return x not in claimed.get(u, set())
+                return False
 
-            for nm2, al2 in claimed.items():
-                if nm2 == x:
-                    continue
-                for a2 in al2:
-                    ra, rb = _root(nm2), _root(a2)
-                    if ra != rb:
-                        parent[rb] = ra
-            comps: Dict[str, List[str]] = {}
+            # 分量锚定 ⟺ 分量里存在不经过 x 的边 ⟺ 分量里有节点在完整
+            # 邻接表中持有非 x 邻居(该邻居必然同分量——两端都不是 x 的
+            # 边永远存活)。
+            # 早停(稠密图 O(H·E) 的解药,语义零变化——终判条件不变,
+            # 3000 次随机图对拍与全量 BFS 逐图同结果):
+            #   ① 当前分量已锚定 且 此前已有 ≥1 个锚定分量 → ≥2,是桥;
+            #   ② 当前分量已锚定 且 全部别名已归入已探分量 → 锚定分量数
+            #      封顶为已有数(+当前),若 <2 则不是桥;
+            #   ③ 外层 anchored_comps>=2 兜底。
+            # 未锚定分量是互指星形(存活边全过 x,否则两端互为非 x 邻居
+            # 早锚定了),天然极小,探索成本可忽略——早停只放过已锚定的
+            # 大分量,而大锚定分量正是稠密图的成本主体。
+            visited: Set[str] = set()
+            remaining: Set[str] = set(al)   # 尚未归入已探分量的别名
+            anchored_comps = 0
             for a in al:
-                comps.setdefault(_root(a), []).append(a)
-            if len(comps) < 2:
-                continue
-
-            def _anchored(members: List[str]) -> bool:
-                return any(any(m != x for m in adj.get(c, ())) for c in members)
-
-            if sum(1 for ms in comps.values() if _anchored(ms)) >= 2:
+                if anchored_comps >= 2:
+                    break
+                if a not in remaining:
+                    continue
+                anchored = False
+                stack = [a]
+                visited.add(a)
+                while stack:
+                    u = stack.pop()
+                    if u != x:
+                        d = deg.get(u, 0)
+                        if d > 1 or (d == 1 and x not in adj[u]):
+                            anchored = True
+                    remaining.discard(u)
+                    if anchored and (anchored_comps >= 1 or not remaining):
+                        break
+                    for v in adj.get(u, ()):
+                        if v not in visited and not _dead(u, v):
+                            visited.add(v)
+                            stack.append(v)
+                if anchored:
+                    anchored_comps += 1
+            if anchored_comps >= 2:
                 hubs.add(x)
         return hubs
 

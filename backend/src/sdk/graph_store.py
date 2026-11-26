@@ -182,13 +182,81 @@ class PgGraphStore:
         self.schema = schema
         self._db = PackRelationalDB(schema)
         lock_key = 0x67726170 + (zlib.crc32(f"graph:{schema}".encode()) & 0xFFFFFFFF)
-        self._db.migrate_locked(lock_key, self._run_ddl)
+        self._db.migrate_locked(lock_key, self._migrate)
         logger.info("PgGraphStore[%s]: graph tables ready", schema)
 
     @staticmethod
-    def _run_ddl(conn) -> None:
+    def _migrate(conn) -> None:
+        """DDL + 旧 TEXT 列归一(发现即修,幂等)。"""
         for stmt in _GRAPH_DDL:
             conn.execute(stmt)
+        PgGraphStore._migrate_legacy_aliases(conn)
+
+    @staticmethod
+    def _migrate_legacy_aliases(conn) -> None:
+        """旧迁移遗留:数组列曾被建成 TEXT 而非 TEXT[]。
+
+        症状(线上实锤,连环两处):prune_aliases 的 unnest(aliases) 在
+        TEXT 列上报 function unnest(text) does not exist;document_counts
+        的 ? = ANY(source_docs) 报 op ANY/ALL (array) requires array——
+        前者此前把收尾别名去争议整步打静默,后者在流水线首次跑通收尾
+        后才暴露。TEXT 里存的是 JSON 数组字面量 '["a","b"]'(psycopg
+        对 TEXT 参数不做 list 编解码,Python 侧 list 参数直接 str 化
+        落库)。
+        修复:JSON 解析回数组再落 TEXT[](jsonb_array_elements_text,
+        精确还原——bracket 置换会把含 [ ] 的别名改坏,已弃)。非数组
+        形态(空串/脏数据/解析失败)统一回 '{}'。
+        幂等:列已是 TEXT[] 时 data_type 检查直接跳过,零成本。
+        锁表说明:ALTER TYPE 重写全表需 ACCESS EXCLUSIVE 锁,行数大时
+        (百万级)会阻塞查询数秒——本迁移只在"发现旧 TEXT 列"时跑一次,
+        正常库零成本;超大库升级建议低峰执行(当前线上 3 万行毫秒级)。
+        """
+        for table, column in (
+            ("graph_nodes", "aliases"),
+            ("graph_nodes", "source_docs"),
+            ("graph_nodes", "source_chunks"),
+            ("graph_entity_refs", "aliases"),
+        ):
+            rows = conn.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = ? AND column_name = ?",
+                (table, column)).fetchall()
+            if not rows or rows[0]["data_type"] != "text":
+                continue
+            # 先摘默认值再 ALTER:旧库列带 DEFAULT '[]'(TEXT 语义),PG 拒绝
+            # 自动转换到 text[](线上实锤:default for column "aliases"
+            # cannot be cast automatically to type text[])。改完后补回数组
+            # 默认 '{}'(与 _GRAPH_DDL 对齐)。
+            conn.execute(
+                f"ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT")
+            # JSON 数组字面量精确还原:jsonb 解析逐元素取文本,元素里的
+            # [ ] { } , " \ 等特殊字符按 PG 数组字面量规则转义(双引号
+            # 包裹,内部 " → \" 、\ → \\)——bracket 置换会改坏含 [ ]
+            # 的别名,已弃。UPDATE 阶段允许子查询(USING 不允许),
+            # 先规整成数组字面量文本,再 ALTER TYPE 收敛;非 JSON 形态
+            # (空串/裸文本/解析失败)置 NULL,由 ALTER 的 USING 兜底 '{}'。
+            # 转义顺序:先 \ → \\ (防后续转义引入的 \ 被二次转义),
+            # 再 " → \" ;元素以双引号包裹。
+            _esc = 'replace(replace(e, ' + "'\\', '\\\\" + "') , '\"', '\\\"')"
+            conn.execute(
+                f"UPDATE {table} SET {column} = CASE WHEN {column} IS NULL "
+                f"OR {column} = '' OR left({column}, 1) <> '[' THEN NULL "
+                f"WHEN {column}::jsonb = '[]'::jsonb THEN NULL "
+                f"ELSE '{{' || (SELECT string_agg("
+                f"'\"' || {_esc} || '\"', ',' ORDER BY ord) FROM "
+                f"(SELECT e, row_number() OVER () AS ord "
+                f"FROM jsonb_array_elements_text({column}::jsonb) AS e)) "
+                f"|| '}}' END")
+            conn.execute(
+                f"ALTER TABLE {table} ALTER COLUMN {column} TYPE TEXT[] "
+                f"USING CASE WHEN {column} IS NULL THEN '{{}}' "
+                f"ELSE {column}::TEXT[] END")
+            conn.execute(
+                f"ALTER TABLE {table} ALTER COLUMN {column} "
+                "SET DEFAULT '{}'")
+            logger.warning("graph_store: %s.%s 旧 TEXT 列已归一为 TEXT[]",
+                           table, column)
 
     def _check_scope(self, scope: str) -> None:
         check_scope_id(scope)
@@ -513,6 +581,10 @@ class PgGraphStore:
 
         同步清理 graph_entity_refs 里的别名声称,防止下次合并聚合时
         争议别名从贡献记录复活。
+
+        前置条件:aliases 列为 TEXT[](建库 DDL 保证;旧 TEXT 列由
+        _migrate_legacy_aliases 在 store 初始化时归一)——本方法的
+        unnest 路径在 TEXT 列上直接报错(线上实锤,见该迁移注释)。
 
         Returns: 实际移除的别名声称条数(节点级)。
         """

@@ -1438,6 +1438,23 @@ class TestBridgeHubGuard:
         assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 4
         assert set(g.nodes) == {"孙悟空"}
 
+    def test_mutual_claim_edge_survives(self):
+        """互指豁免:别名反向声称 x 时,该指认边必须保留——老妖 与
+        黄风怪/黄袍怪 双向互指,经两条存活边连成单一锚定分量,不是桥,
+        正常合并。按"端点对"去边的退化实现会切断互指边,把老妖误判成
+        桥而拒绝合并(0 组)——本用例锁死按"声称者身份"去边的语义。"""
+        g = self._mini()
+        g.nodes = {
+            "老妖": {"type": "person", "aliases": ["黄风怪", "黄袍怪"],
+                     "created_at": "t1", "source_chunks": ["c20"]},
+            "黄风怪": {"type": "person", "aliases": ["老妖", "貂鼠"],
+                       "created_at": "t2", "source_chunks": ["c20"]},
+            "黄袍怪": {"type": "person", "aliases": ["老妖", "奎木狼"],
+                       "created_at": "t3", "source_chunks": ["c28"]},
+        }
+        assert tasks._merge_same_type_alias_pairs(g, "kb", "d1") == 2
+        assert set(g.nodes) == {"老妖"}
+
 
 
 # ── 锚定收紧:别名不参与接地(_anchor_filter) ───────────────────

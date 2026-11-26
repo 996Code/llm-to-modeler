@@ -55,9 +55,13 @@ _INFLIGHT_LOCK = threading.Lock()
 _CACHE: Dict[tuple, Dict[str, Any]] = {}
 _CACHE_LOCK = threading.Lock()
 
-# 引擎固定 google(实测:百度机房 IP 秒撞验证、Bing 中文专业词质量差,
-# 3.110 栈上 google 修复版 20/20 全绿——见 doc/agents/deploy-searxng-3110.md)
-_ENGINE = "google"
+# 引擎默认 google(实测:百度机房 IP 秒撞验证、Bing 中文专业词质量差,
+# 3.110 栈上 google 修复版 20/20 全绿——见 doc/agents/deploy-searxng-3110.md)。
+# 可经 env WEB_SEARCH_ENGINE 覆盖:instabox(2026-11-23)实测该出口 IP 上
+# google 引擎 403(裸 curl 同 UA 也 403,非 SearXNG 指纹问题,双 UA 补丁
+# 无效),而 google cse 引擎 20 条精准命中——cse 无需任何引擎补丁。
+import os as _os
+_ENGINE = (_os.getenv("WEB_SEARCH_ENGINE") or "google").strip() or "google"
 _LANGUAGE = "zh-CN"
 _TIMEOUT_S = 15.0
 _client: Optional[httpx.Client] = None
