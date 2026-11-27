@@ -759,9 +759,9 @@ def test_optional_slot_still_carried_on_zero_extract(monkeypatch):
     assert result.artifact and result.artifact.get('type') == 'metrology_table'
 
 
-def test_focus_uncovered_triggers_detail_followup(monkeypatch):
-    """字段聚焦(2026-11-17 D/E/F,与筑基同源):问"检测周期"而列表周期列
-    全空 → 用槽位值精确匹配行二跳详情,返回含周期值的详情卡。"""
+def test_focus_removed_always_single_hop_list(monkeypatch):
+    """二跳已移除(2026-11-27 用户裁决,与筑基同源):select 即便输出 focus
+    也被无视,业务查询永远单跳列表;全空列(检测周期整列 null)剔除。"""
     from domains.chatbi import datasources, runtime as bi_runtime
     from domains.chatbi.controlled import ControlledResult
 
@@ -769,10 +769,6 @@ def test_focus_uncovered_triggers_detail_followup(monkeypatch):
 
     def controlled(app, ds, tool, params, **kw):
         calls.append(dict(params))
-        if '条目编号' in params:
-            return ControlledResult(ok=True, status='ok', data={
-                'columns': ['样品名称', '测量范围', '检测周期', '收费标准', '收费说明'],
-                'rows': [['压力表', '(0～60)MPa', '半年', 20, '省标']]})
         return ControlledResult(ok=True, status='ok', data={
             'columns': ['条目编号', '样品名称', '测量范围', '检测周期'],
             'rows': [[170, '压力表', '(0～60)MPa', None]]})
@@ -795,14 +791,14 @@ def test_focus_uncovered_triggers_detail_followup(monkeypatch):
                             extract={'name': '压力表'}))
     ctx.trace = lambda *a, **k: None
     result = tool.execute({'user_input': '压力表的检测周期是多久'}, ctx)
-    assert len(calls) == 2, '应发生二跳详情查询'
-    assert calls[1] == {'条目编号': 170}, '二跳参数=条目编号声明∩列名,取匹配行'
-    assert '检测周期' in result.artifact['columns'], '详情卡应含焦点列'
-    assert result.artifact['rows'][0][2] == '半年', '详情卡应含焦点值'
+    assert len(calls) == 1, '二跳已移除:必须单跳列表'
+    cols = result.artifact['columns']
+    assert '检测周期' not in cols, f'全空列应剔除: {cols}'
+    assert cols == ['条目编号', '样品名称', '测量范围'], f'剔除后列序不变: {cols}'
 
 
-def test_focus_covered_keeps_list(monkeypatch):
-    """焦点列列表里已有值 → 不二跳,原列表返回(不猜行)。"""
+def test_focus_field_ignored_keeps_list(monkeypatch):
+    """select 输出 focus(模型惯性)→ 字段被无视,列表照常返回。"""
     from domains.chatbi import datasources, runtime as bi_runtime
     from domains.chatbi.controlled import ControlledResult
 
@@ -829,8 +825,9 @@ def test_focus_covered_keeps_list(monkeypatch):
     ctx = context(_StageLLM(select={'scenario': 'warehouse::fee', 'focus': '检测周期'},
                             extract={'name': '压力表'}))
     ctx.trace = lambda *a, **k: None
-    tool.execute({'user_input': '压力表的检测周期是多久'}, ctx)
-    assert len(calls) == 1, '列表已覆盖焦点不得二跳'
+    result = tool.execute({'user_input': '压力表的检测周期是多久'}, ctx)
+    assert len(calls) == 1, 'focus 被无视:单跳'
+    assert result.artifact['type'] == 'metrology_table'
 
 
 def _pending_cert_caps():
