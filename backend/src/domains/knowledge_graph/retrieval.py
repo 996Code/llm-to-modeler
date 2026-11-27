@@ -829,11 +829,19 @@ def _requery_once(app_state, kbs, query: str, retrieved: Dict[str, Any],
         # kb_search.intent 让前端进度条倒退
         bq_intent = parse_query_intent(
             app_state, bq, _merged_relation_types(kbs), conv_id=conv_id)
-        per_extra = [hybrid_retrieve(app_state, kb, bq, conv_id=conv_id,
-                                     top_k=top_k, on_stage=_stage,
-                                     intent=bq_intent, doc_filter=doc_filter,
-                                     auto_doc_scope_enabled=False)
-                     for kb in kbs]
+        # 补检 chunks 必须带库标注(kbId/kbName,与筑基侧同源 2026-11-27):
+        # 跨库补检经 _merge_retrieved 整体替换 merged_chunks,不标注则
+        # sources.kbId 全 None,前端参考文档清单缺 kbId 不亮下载按钮
+        per_extra = []
+        for kb in kbs:
+            _r = hybrid_retrieve(app_state, kb, bq, conv_id=conv_id,
+                                 top_k=top_k, on_stage=_stage,
+                                 intent=bq_intent, doc_filter=doc_filter,
+                                 auto_doc_scope_enabled=False)
+            for _c in _r.get('chunks') or []:
+                _c['kbName'] = kb.get('name') or ''
+                _c['kbId'] = kb['id']
+            per_extra.append(_r)
         extra = per_extra[0]
         for r in per_extra[1:]:
             extra = _merge_retrieved(extra, r)
