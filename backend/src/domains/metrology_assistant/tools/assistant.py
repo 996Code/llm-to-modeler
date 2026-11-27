@@ -1158,6 +1158,13 @@ class MetrologyAssistantTool(CardsMixin, Tool):
             if filled and len(filled) < len(columns):
                 columns = [columns[i] for i in filled]
                 rows = [[r[i] for i in filled] for r in rows]
+        # 内部 id 列不出示(2026-11-27 用户裁决,与筑基侧同源):条目编号是
+        # 上游库内主键,对最终用户无意义;二跳移除后平台也不再消费该列
+        if rows and columns:
+            kept = [i for i, col in enumerate(columns) if str(col).strip() != '条目编号']
+            if kept and len(kept) < len(columns):
+                columns = [columns[i] for i in kept]
+                rows = [[r[i] for i in kept] for r in rows]
         artifact = {'type': 'metrology_table', 'pack': 'metrology_assistant', 'resultDisplay': 'card',
                     'columns': columns, 'rows': rows[:50], 'rowTotal': len(rows), 'source': result.source}
         stage('assistant.answer', '整理查询结果…')

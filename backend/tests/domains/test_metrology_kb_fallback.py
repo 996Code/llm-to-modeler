@@ -794,7 +794,8 @@ def test_focus_removed_always_single_hop_list(monkeypatch):
     assert len(calls) == 1, '二跳已移除:必须单跳列表'
     cols = result.artifact['columns']
     assert '检测周期' not in cols, f'全空列应剔除: {cols}'
-    assert cols == ['条目编号', '样品名称', '测量范围'], f'剔除后列序不变: {cols}'
+    assert '条目编号' not in cols, f'内部 id 列应剔除: {cols}'
+    assert cols == ['样品名称', '测量范围'], f'剔除后列序不变: {cols}'
 
 
 def test_focus_field_ignored_keeps_list(monkeypatch):
